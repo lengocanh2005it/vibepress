@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { mkdir, writeFile, cp, readFile } from 'fs/promises';
 import { join, resolve } from 'path';
+import { spawn } from 'child_process';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
@@ -9,9 +10,14 @@ export interface PreviewBuilderResult {
   jobId: string;
   previewDir: string;
   entryPath: string;
+  frontendPid?: number;
+  serverPid?: number;
 }
 
 const TEMPLATE_DIR = resolve('templates/react-preview');
+
+const PARTIAL_PATTERNS =
+  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
 
 @Injectable()
 export class PreviewBuilderService {
@@ -30,11 +36,13 @@ export class PreviewBuilderService {
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
     const componentsDir = join(srcDir, 'components');
+    const pagesDir = join(srcDir, 'pages');
 
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
     await cp(TEMPLATE_DIR, frontendDir, { recursive: true });
     await mkdir(componentsDir, { recursive: true });
+    await mkdir(pagesDir, { recursive: true });
 
     // 2. Copy theme assets vào frontend/public/assets/ (ảnh tĩnh của theme)
     if (themeDir) {
@@ -50,11 +58,10 @@ export class PreviewBuilderService {
 
     // 3. Write generated components từ AI (code in memory)
     for (const comp of components.components) {
-      await writeFile(
-        join(componentsDir, `${comp.name}.tsx`),
-        comp.code,
-        'utf-8',
-      );
+      const isPartial =
+        PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+      const targetDir = isPartial ? componentsDir : pagesDir;
+      await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
 
     // 3. Generate App.tsx với routes từ components
@@ -65,9 +72,6 @@ export class PreviewBuilderService {
     const routeableComponents = allComponents.filter((c) => !c.isSubComponent);
 
     // Partials: không tạo route (header, footer, sidebar, nav, meta, search form, comments, widgets...)
-    const PARTIAL_PATTERNS =
-      /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
     const pageComponents = routeableComponents.filter(
       (c) => !PARTIAL_PATTERNS.test(c.name),
     );
@@ -92,7 +96,13 @@ export class PreviewBuilderService {
     };
 
     const routeImports = allComponents
-      .map((c) => `import ${c.name} from './components/${c.name}';`)
+      .map((c) => {
+        const folder =
+          PARTIAL_PATTERNS.test(c.name) || c.isSubComponent
+            ? 'components'
+            : 'pages';
+        return `import ${c.name} from './${folder}/${c.name}';`;
+      })
       .join('\n');
 
     // Tạo routes chỉ cho page components, tránh duplicate paths
@@ -152,8 +162,25 @@ ${routes}
       `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n`,
     );
 
+    // 6. npm install cho cả 2 folder song song, rồi spawn dev servers
+    const serverDir = join(rootDir, 'server');
+    this.logger.log('Installing dependencies...');
+    await Promise.all([
+      this.runNpmInstall(frontendDir),
+      this.runNpmInstall(serverDir),
+    ]);
+    this.logger.log('Starting dev servers...');
+    const frontendProc = this.spawnDevServer(frontendDir);
+    const serverProc = this.spawnDevServer(serverDir);
+
     this.logger.log(`Preview ready at: ${rootDir}`);
-    return { jobId, previewDir: rootDir, entryPath: join(srcDir, 'main.tsx') };
+    return {
+      jobId,
+      previewDir: rootDir,
+      entryPath: join(srcDir, 'main.tsx'),
+      frontendPid: frontendProc.pid,
+      serverPid: serverProc.pid,
+    };
   }
 
   private async applyThemeTokens(
@@ -211,6 +238,28 @@ ${fontEntries}
       indexPath,
       indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
     );
+  }
+
+  private runNpmInstall(dir: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('npm', ['install'], { cwd: dir, shell: true, stdio: 'pipe' });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`npm install failed in ${dir} with exit code ${code}`));
+      });
+    });
+  }
+
+  private spawnDevServer(dir: string) {
+    const proc = spawn('npm', ['run', 'dev'], {
+      cwd: dir,
+      shell: true,
+      stdio: 'ignore',
+      detached: true,
+    });
+    proc.unref();
+    this.logger.log(`Dev server started (pid=${proc.pid}) in ${dir}`);
+    return proc;
   }
 
   private pickApiPort(jobId: string): number {

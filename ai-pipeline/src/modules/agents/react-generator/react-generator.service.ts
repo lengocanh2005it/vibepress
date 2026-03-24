@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import OpenAI from 'openai';
 import { ConfigService } from '@nestjs/config';
+import { appendFile } from 'fs/promises';
 import { MISTRAL_CLIENT } from '../../../common/providers/mistral/mistral.provider.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -32,6 +33,10 @@ export interface ReactGenerateResult {
   outDir: string;
 }
 
+// Keep in sync with PARTIAL_PATTERNS in preview-builder.service.ts
+const PARTIAL_PATTERNS =
+  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
+
 // Threshold: if serialised template JSON exceeds this, use section chunking.
 const CHUNK_THRESHOLD_CHARS = 12_000;
 
@@ -53,8 +58,9 @@ export class ReactGeneratorService {
     theme: PhpParseResult | BlockParseResult;
     content: DbContentResult;
     jobId?: string;
+    logPath?: string;
   }): Promise<ReactGenerateResult> {
-    const { theme, content, jobId = 'unknown' } = input;
+    const { theme, content, jobId = 'unknown', logPath } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
@@ -62,17 +68,28 @@ export class ReactGeneratorService {
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = theme.type === 'fse' ? theme.tokens : undefined;
 
+    const pagesCount = theme.templates.length;
+    const partialsCount = theme.type === 'fse' ? theme.parts.length : 0;
+
     const templates =
       theme.type === 'classic'
         ? theme.templates
         : [...theme.templates, ...theme.parts];
 
+    const total = templates.length;
     const components: GeneratedComponent[] = [];
 
-    for (const tpl of templates) {
+    for (let i = 0; i < templates.length; i++) {
+      const tpl = templates[i];
       const componentName = this.toComponentName(tpl.name);
       const rawSource = 'markup' in tpl ? tpl.markup : tpl.html;
+      const counter = `[${i + 1}/${total}]`;
+      const folder = PARTIAL_PATTERNS.test(componentName) ? 'src/components' : 'src/pages';
 
+      this.logger.log(`${counter} Generating "${componentName}.tsx" → ${folder}/`);
+      await this.logToFile(logPath, `${counter} Generating "${componentName}.tsx" → ${folder}/`);
+
+      const t0 = Date.now();
       const produced = await this.generateForTemplate({
         componentName,
         rawSource,
@@ -81,18 +98,33 @@ export class ReactGeneratorService {
         content,
         tokens,
         themeType: theme.type,
+        logPath,
       });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
+
+      this.logger.log(`${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`);
+      await this.logToFile(logPath, `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`);
 
       components.push(...produced);
 
-      const delay =
-        this.configService.get<number>(
-          'reactGenerator.delayBetweenComponents',
-        ) ?? 5000;
-      await new Promise((res) => setTimeout(res, delay));
+      if (i < templates.length - 1) {
+        const delay =
+          this.configService.get<number>(
+            'reactGenerator.delayBetweenComponents',
+          ) ?? 5000;
+        await this.logToFile(logPath, `Rate-limit delay: ${delay / 1000}s`);
+        await new Promise((res) => setTimeout(res, delay));
+      }
     }
 
-    this.logger.log(`Generated ${components.length} components`);
+    const breakdown = partialsCount > 0
+      ? `${pagesCount} pages, ${partialsCount} partials`
+      : `${pagesCount} templates`;
+    const summary = `All ${total} done — ${components.length} components (${breakdown})`;
+    this.logger.log(summary);
+    await this.logToFile(logPath, summary);
+
     return { jobId, components, outDir: '' };
   }
 
@@ -106,6 +138,7 @@ export class ReactGeneratorService {
     content: DbContentResult;
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
+    logPath?: string;
   }): Promise<GeneratedComponent[]> {
     const {
       componentName,
@@ -115,16 +148,13 @@ export class ReactGeneratorService {
       content,
       tokens,
       themeType,
+      logPath,
     } = input;
 
     // Classic PHP themes: use raw stripped HTML — wpBlocksToJson only understands wp: block comments
     const isClassic = themeType === 'classic';
     const nodes = isClassic ? [] : wpBlocksToJson(rawSource);
     const templateSource = isClassic ? rawSource : wpJsonToString(nodes);
-
-    this.logger.log(
-      `Template ${componentName}: ${templateSource.length} chars`,
-    );
 
     if (isClassic || templateSource.length <= CHUNK_THRESHOLD_CHARS) {
       const comp = await this.generateSingle({
@@ -134,6 +164,7 @@ export class ReactGeneratorService {
         systemPrompt,
         content,
         tokens,
+        logPath,
       });
       return [comp];
     }
@@ -142,6 +173,7 @@ export class ReactGeneratorService {
     this.logger.warn(
       `Template ${componentName}: ${templateSource.length} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
     );
+    await this.logToFile(logPath, `WARN "${componentName}" too large (${templateSource.length} chars) → splitting into ${this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS).length} sections`);
 
     const chunks = this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS);
     this.logger.log(`Template ${componentName}: ${chunks.length} sections`);
@@ -166,6 +198,7 @@ export class ReactGeneratorService {
         menus: content.menus,
         tokens,
         content,
+        logPath,
       });
 
       subComponents.push(section);
@@ -191,6 +224,7 @@ export class ReactGeneratorService {
     systemPrompt: string;
     content: DbContentResult;
     tokens?: ThemeTokens;
+    logPath?: string;
   }): Promise<GeneratedComponent> {
     const {
       componentName,
@@ -199,6 +233,7 @@ export class ReactGeneratorService {
       systemPrompt,
       content,
       tokens,
+      logPath,
     } = input;
 
     let code = '';
@@ -213,12 +248,15 @@ export class ReactGeneratorService {
           content,
           tokens,
         ),
+        5,
+        logPath,
       );
       code = this.stripMarkdownFences(raw);
       if (this.isBraceBalanced(code)) break;
       this.logger.warn(
         `Component ${componentName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
       );
+      await this.logToFile(logPath, `WARN "${componentName}" unbalanced braces — retry ${attempt}/3`);
     }
 
     return { name: componentName, filePath: '', code };
@@ -237,6 +275,7 @@ export class ReactGeneratorService {
     menus: DbContentResult['menus'];
     tokens?: ThemeTokens;
     content?: DbContentResult;
+    logPath?: string;
   }): Promise<GeneratedComponent> {
     const {
       sectionName,
@@ -249,6 +288,7 @@ export class ReactGeneratorService {
       menus,
       tokens,
       content,
+      logPath,
     } = input;
 
     const userPrompt = buildSectionPrompt({
@@ -266,12 +306,13 @@ export class ReactGeneratorService {
     let code = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       // No system prompt for sections — the user prompt is fully self-contained
-      const raw = await this.generateWithRetry(modelName, '', userPrompt);
+      const raw = await this.generateWithRetry(modelName, '', userPrompt, 5, logPath);
       code = this.stripMarkdownFences(raw);
       if (this.isBraceBalanced(code)) break;
       this.logger.warn(
         `Section ${sectionName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
       );
+      await this.logToFile(logPath, `WARN "${sectionName}" unbalanced braces — retry ${attempt}/3`);
     }
 
     return { name: sectionName, filePath: '', code, isSubComponent: true };
@@ -342,6 +383,17 @@ ${renders}
 `;
   }
 
+  // ── File logger ────────────────────────────────────────────────────────────
+
+  private async logToFile(logPath: string | undefined, message: string): Promise<void> {
+    if (!logPath) return;
+    try {
+      await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
+    } catch {
+      // don't crash pipeline if logging fails
+    }
+  }
+
   // ── Shared helpers ─────────────────────────────────────────────────────────
 
   private async generateWithRetry(
@@ -349,6 +401,7 @@ ${renders}
     systemPrompt: string,
     userPrompt: string,
     maxRetries = 5,
+    logPath?: string,
   ): Promise<string> {
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
     if (systemPrompt) {
@@ -368,9 +421,9 @@ ${renders}
         return result.choices[0]?.message?.content ?? '';
       } catch (err: any) {
         if (err?.status === 429 && attempt < maxRetries) {
-          this.logger.warn(
-            `Rate limit hit, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`,
-          );
+          const msg = `Rate limit hit, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
+          this.logger.warn(msg);
+          await this.logToFile(logPath, `WARN ${msg}`);
           await new Promise((res) => setTimeout(res, delay));
           delay = Math.min(delay * 2, 120000);
         } else {

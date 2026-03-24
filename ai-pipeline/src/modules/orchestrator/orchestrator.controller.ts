@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Sse } from '@nestjs/common';
 import { OrchestratorService } from './orchestrator.service.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 
@@ -6,7 +6,6 @@ export interface RunPipelineDto {
   // ── Theme source (chọn 1) ──────────────────────────────────────
   // Mode D (chính): GitHub repo chứa WP theme source
   themeGithubUrl?: string;
-  themeGithubToken?: string;
   themeGithubBranch?: string;
   // Fallback: path đến thư mục theme đã extract (từ POST /import/github hoặc /import/theme)
   themeDir?: string;
@@ -19,7 +18,6 @@ export interface RunPipelineDto {
 
   // ── Output ────────────────────────────────────────────────────
   githubRepoB?: string;
-  githubTokenB?: string;
 }
 
 @Controller('pipeline')

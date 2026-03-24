@@ -129,10 +129,8 @@ async function createProject(req, res) {
     const suffix = slugify(req.body?.projectName || "") || "theme";
     const projectId = generateProjectId();
     const wpRepoName = `wp-source-${suffix}-${projectId}`;
-    
 
     const wpRepo = await createGithubRepo(wpRepoName);
-
 
     const db = readDb();
     db.projects[projectId] = {
@@ -188,7 +186,7 @@ async function VPGetDbInfo() {
       },
     );
     if (result.status === 200 && result.data) {
-	  console.log("Received DB info from Vibepress API:", result);
+      console.log("Received DB info from Vibepress API:", result);
       return result.data;
     } else {
       throw new Error("Failed to get DB info from Vibepress API");
@@ -311,7 +309,9 @@ async function registerWpSite(req, res) {
   const { siteUrl, siteName, wpVersion, adminEmail, dbInfo } = req.body ?? {};
 
   if (!siteUrl) {
-    return res.status(400).json({ success: false, error: "siteUrl is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteUrl is required" });
   }
 
   const apiKey = crypto.randomBytes(32).toString("hex");
@@ -323,10 +323,10 @@ async function registerWpSite(req, res) {
   db.wpSites[siteId] = {
     siteId,
     siteUrl,
-    siteName:     siteName     ?? null,
-    wpVersion:    wpVersion    ?? null,
-    adminEmail:   adminEmail   ?? null,
-    dbInfo:       dbInfo       ?? null,
+    siteName: siteName ?? null,
+    wpVersion: wpVersion ?? null,
+    adminEmail: adminEmail ?? null,
+    dbInfo: dbInfo ?? null,
     apiKey,
     registeredAt: new Date().toISOString(),
   };

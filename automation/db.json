@@ -1,3 +1,16 @@
 {
-  "projects": {}
+  "projects": {
+    "proj-1774321227268-t6pp09": {
+      "projectId": "proj-1774321227268-t6pp09",
+      "wpRepoName": "wp-source-theme-proj-1774321227268-t6pp09",
+      "wpRepoUrl": "https://github.com/KeriaKH/wp-source-theme-proj-1774321227268-t6pp09",
+      "owner": null,
+      "status": "completed",
+      "createdAt": "2026-03-24T03:00:29.029Z",
+      "updatedAt": "2026-03-24T03:00:51.504Z",
+      "dbInfo": {
+        "error": "Failed to fetch DB info"
+      }
+    }
+  }
 }

@@ -27,7 +27,6 @@ export interface ImportDirectDbDto {
 
 export interface ImportGithubDto {
   repoUrl: string;
-  accessToken?: string;
   branch?: string;
 }
 
@@ -76,11 +75,7 @@ export class ImportController {
   @Post('github')
   async importGithub(@Body() dto: ImportGithubDto) {
     if (!dto.repoUrl) throw new BadRequestException('repoUrl is required');
-    return this.importService.handleGithubImport(
-      dto.repoUrl,
-      dto.accessToken,
-      dto.branch,
-    );
+    return this.importService.handleGithubImport(dto.repoUrl, dto.branch);
   }
 
   // Mode Full: upload SQL + theme zip cùng lúc → auto detect active theme

@@ -8,6 +8,7 @@ import type { ImportResult } from '@/common/types/import.type.js';
 import { SqlService } from '../sql/sql.service.js';
 import { ThemeService } from '../theme/theme.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class ImportService {
@@ -17,6 +18,7 @@ export class ImportService {
     private readonly sqlService: SqlService,
     private readonly themeService: ThemeService,
     private readonly wpQuery: WpQueryService,
+    private readonly configService: ConfigService,
   ) {}
 
   // Mode A: Upload file .sql → import vào shared DB
@@ -46,7 +48,6 @@ export class ImportService {
   // Mode D: Clone GitHub repo (nguồn theme chính)
   async handleGithubImport(
     repoUrl: string,
-    accessToken?: string,
     branch = 'main',
   ): Promise<ImportResult> {
     const jobId = uuidv4();
@@ -59,9 +60,9 @@ export class ImportService {
     const destDir = join('./temp/repos', jobId);
     await mkdir(destDir, { recursive: true });
 
-    // Inject token vào URL nếu có (https://<token>@github.com/...)
-    const cloneUrl = accessToken
-      ? repoUrl.replace('https://', `https://${accessToken}@`)
+    const token = this.configService.get<string>('github.wpRepoToken', '');
+    const cloneUrl = token
+      ? repoUrl.replace('https://', `https://${token}@`)
       : repoUrl;
 
     const git = simpleGit();

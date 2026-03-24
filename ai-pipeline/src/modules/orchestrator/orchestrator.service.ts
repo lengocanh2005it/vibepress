@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import simpleGit from 'simple-git';
-import { mkdir } from 'fs/promises';
+import { appendFile, mkdir, readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { SqlService } from '../sql/sql.service.js';
+import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
@@ -13,8 +14,8 @@ import { DbContentService } from '../agents/db-content/db-content.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
-import { DeployAgentService } from '../agents/deploy-agent/deploy-agent.service.js';
 import { RunPipelineDto } from './orchestrator.controller.js';
+import { ConfigService } from '@nestjs/config';
 
 export type PipelineStepStatus =
   | 'pending'
@@ -44,6 +45,7 @@ export class OrchestratorService {
 
   constructor(
     private readonly sqlService: SqlService,
+    private readonly wpQuery: WpQueryService,
     private readonly themeDetector: ThemeDetectorService,
     private readonly repoAnalyzer: RepoAnalyzerService,
     private readonly phpParser: PhpParserService,
@@ -52,7 +54,7 @@ export class OrchestratorService {
     private readonly reactGenerator: ReactGeneratorService,
     private readonly apiBuilder: ApiBuilderService,
     private readonly previewBuilder: PreviewBuilderService,
-    private readonly deployAgent: DeployAgentService,
+    private readonly configService: ConfigService,
   ) {}
 
   async run(dto: RunPipelineDto): Promise<{ jobId: string }> {
@@ -69,7 +71,6 @@ export class OrchestratorService {
         { name: '4_react_generator', status: 'pending' },
         { name: '5_api_builder', status: 'pending' },
         { name: '6_preview_builder', status: 'pending' },
-        { name: '7_deploy', status: 'pending' },
       ],
     };
     this.jobs.set(jobId, state);
@@ -94,24 +95,24 @@ export class OrchestratorService {
     );
   }
 
+  private async logToFile(logPath: string, message: string): Promise<void> {
+    try {
+      await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
+    } catch {
+      // don't crash pipeline if logging fails
+    }
+  }
+
   private async executePipeline(
     jobId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
   ): Promise<void> {
-    // ── Resolve theme directory ───────────────────────────────────────────
-    let themeDir = dto.themeDir;
-
-    if (!themeDir && dto.themeGithubUrl) {
-      themeDir = await this.cloneThemeRepo(
-        dto.themeGithubUrl,
-        dto.themeGithubToken,
-        dto.themeGithubBranch ?? 'main',
-        jobId,
-      );
-    }
-
-    if (!themeDir) throw new BadRequestException('No theme source provided');
+    // ── Init log file ─────────────────────────────────────────────────────
+    await mkdir('./temp/logs', { recursive: true });
+    const logPath = join('./temp/logs', `${jobId}.log`);
+    const pipelineStart = Date.now();
+    await this.logToFile(logPath, `Pipeline ${jobId} started`);
 
     // ── Resolve DB credentials ────────────────────────────────────────────
     let dbCreds: WpDbCredentials;
@@ -129,10 +130,30 @@ export class OrchestratorService {
       );
     }
 
+    // ── Resolve theme directory ───────────────────────────────────────────
+    let themeDir = dto.themeDir;
+
+    const themeGithubToken = this.configService.get<string>(
+      'github.wpRepoToken',
+      '',
+    );
+
+    if (!themeDir && dto.themeGithubUrl) {
+      const repoRoot = await this.cloneThemeRepo(
+        dto.themeGithubUrl,
+        themeGithubToken,
+        dto.themeGithubBranch ?? 'main',
+        jobId,
+      );
+      themeDir = await this.resolveThemeDir(repoRoot, dbCreds);
+    }
+
+    if (!themeDir) throw new BadRequestException('No theme source provided');
+
     // ── Pipeline steps ────────────────────────────────────────────────────
 
     // Bước 1: Analyze repo structure
-    await this.runStep(state, '1_repo_analyzer', () =>
+    await this.runStep(state, '1_repo_analyzer', logPath, () =>
       this.repoAnalyzer.analyze(themeDir!),
     );
 
@@ -140,6 +161,7 @@ export class OrchestratorService {
     const parsedTheme = await this.runStep(
       state,
       '2_theme_parser',
+      logPath,
       async () => {
         const detection = await this.themeDetector.detect(themeDir!);
         return detection.type === 'fse'
@@ -149,73 +171,103 @@ export class OrchestratorService {
     );
 
     // Bước 3: Extract content từ shared WP DB
-    const content = await this.runStep(state, '3_db_content', () =>
+    const content = await this.runStep(state, '3_db_content', logPath, () =>
       this.dbContent.extract(dbCreds),
     );
 
     // Bước 4: Generate React components + Tailwind
-    const components = await this.runStep(state, '4_react_generator', () =>
-      this.reactGenerator.generate({ theme: parsedTheme, content, jobId }),
+    const components = await this.runStep(
+      state,
+      '4_react_generator',
+      logPath,
+      () =>
+        this.reactGenerator.generate({
+          theme: parsedTheme,
+          content,
+          jobId,
+          logPath,
+        }),
     );
 
     // Bước 5: Generate Express API server
-    await this.runStep(state, '5_api_builder', () =>
+    await this.runStep(state, '5_api_builder', logPath, () =>
       this.apiBuilder.build({ jobId }),
     );
 
-    // Clone repo B trước bước 6 để build preview thẳng vào đó (Option 2)
-    let repoBCloneDir: string | undefined;
-    if (dto.githubRepoB) {
-      repoBCloneDir = await this.deployAgent.cloneRepoB({
-        jobId,
-        repoUrl: dto.githubRepoB,
-        accessToken: dto.githubTokenB,
-      });
-    }
-
     // Bước 6: Scaffold Vite + React Router preview
-    // Nếu có repo B → build thẳng vào clone dir, không tạo temp/generated
-    const previewOutputDir = repoBCloneDir
-      ? join(repoBCloneDir, 'src', 'generated', 'preview')
-      : undefined;
-
-    const preview = await this.runStep(state, '6_preview_builder', () =>
-      this.previewBuilder.build({
-        jobId,
-        components,
-        dbCreds,
-        themeDir,
-        tokens:
-          'tokens' in parsedTheme ? (parsedTheme as any).tokens : undefined,
-        outputDir: previewOutputDir,
-      }),
+    const preview = await this.runStep(
+      state,
+      '6_preview_builder',
+      logPath,
+      () =>
+        this.previewBuilder.build({
+          jobId,
+          components,
+          dbCreds,
+          themeDir,
+          tokens:
+            'tokens' in parsedTheme ? (parsedTheme as any).tokens : undefined,
+        }),
     );
 
-    // Bước 7: Commit + push + start dev server
-    const deployResult = await this.runStep(state, '7_deploy', async () => {
-      if (!repoBCloneDir) {
-        state.steps.find((s) => s.name === '7_deploy')!.status = 'skipped';
-        return null;
-      }
-      return this.deployAgent.commitAndPush({
-        jobId,
-        repoUrl: dto.githubRepoB!,
-        cloneDir: repoBCloneDir,
-        previewDir: preview.previewDir,
-      });
-    });
-
+    const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
     state.status = 'done';
     state.result = {
       previewDir: preview.previewDir,
       dbCreds,
-      ...(deployResult && {
-        commitSha: deployResult.commitSha,
-        devUrl: deployResult.devUrl,
-        repoUrl: deployResult.repoUrl,
-      }),
     };
-    this.logger.log(`Pipeline ${jobId} completed`);
+    this.logger.log(`Pipeline ${jobId} completed in ${totalElapsed}s`);
+    await this.logToFile(
+      logPath,
+      `Pipeline completed — total ${totalElapsed}s`,
+    );
+  }
+
+  private async resolveThemeDir(
+    repoRoot: string,
+    dbCreds: WpDbCredentials,
+  ): Promise<string> {
+    const themesDir = join(repoRoot, 'themes');
+
+    // Không có thư mục themes/ → dùng root như cũ
+    try {
+      await stat(themesDir);
+    } catch {
+      return repoRoot;
+    }
+
+    // Query active theme slug từ WP DB (wp_options.stylesheet)
+    let activeSlug: string | undefined;
+    try {
+      activeSlug = await this.wpQuery.getActiveTheme(dbCreds);
+    } catch (err: any) {
+      this.logger.warn(`Could not query active theme from DB: ${err.message}`);
+    }
+
+    if (activeSlug) {
+      const themeDir = join(themesDir, activeSlug);
+      try {
+        await stat(themeDir);
+        this.logger.log(`Active theme from DB: ${activeSlug}`);
+        return themeDir;
+      } catch {
+        this.logger.warn(
+          `Theme folder not found for slug "${activeSlug}", falling back`,
+        );
+      }
+    }
+
+    // Fallback: lấy theme đầu tiên trong themes/
+    const entries = await readdir(themesDir);
+    const firstTheme = entries[0];
+    if (firstTheme) {
+      this.logger.warn(
+        `No active theme detected, using first theme: ${firstTheme}`,
+      );
+      return join(themesDir, firstTheme);
+    }
+
+    return repoRoot;
   }
 
   private async cloneThemeRepo(
@@ -244,6 +296,7 @@ export class OrchestratorService {
   private async runStep<T>(
     state: PipelineStatus,
     name: string,
+    logPath: string,
     fn: () => Promise<T>,
   ): Promise<T> {
     const step = state.steps.find((s) => s.name === name)!;
@@ -251,15 +304,24 @@ export class OrchestratorService {
 
     step.status = 'running';
     this.logger.log(`[${state.jobId}] Step ${name} started`);
+    await this.logToFile(logPath, `Step ${name} started`);
+    const t0 = Date.now();
     try {
       const result = await fn();
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       step.status = 'done';
-      this.logger.log(`[${state.jobId}] Step ${name} done`);
+      this.logger.log(`[${state.jobId}] Step ${name} done (${elapsed}s)`);
+      await this.logToFile(logPath, `Step ${name} done (${elapsed}s)`);
       return result;
     } catch (err: any) {
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       step.status = 'error';
       step.error = err.message;
       state.status = 'error';
+      await this.logToFile(
+        logPath,
+        `Step ${name} ERROR (${elapsed}s): ${err.message}`,
+      );
       throw err;
     }
   }

@@ -28,4 +28,8 @@ export default () => ({
       10,
     ),
   },
+  github: {
+    wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
+    reactRepoToken: process.env.GITHUB_REACT_REPO_TOKEN,
+  },
 });
