@@ -1,0 +1,27 @@
+{
+  "name": "vibress",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:ai-pipeline": "cd ai-pipeline && npm run start:prod",
+    "start:automation": "cd automation && npm run start",
+    "start:all": "concurrently --names ai-pipeline,automation --prefix-colors blue,green \"npm run start:ai-pipeline\" \"npm run start:automation\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lengocanh2005it/vibress.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/lengocanh2005it/vibress/issues"
+  },
+  "homepage": "https://github.com/lengocanh2005it/vibress#readme",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

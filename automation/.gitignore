@@ -1,0 +1,4 @@
+/node_modules
+/uploads
+/temp_workspaces
+/.env

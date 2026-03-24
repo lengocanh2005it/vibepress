@@ -1,0 +1,29 @@
+import envConfig from '@/config/env.config';
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { GroqModule } from './common/providers/groq/groq.module';
+import { GeminiModule } from './common/providers/gemini/gemini.module';
+import { CerebrasModule } from './common/providers/cerebras/cerebras.module.js';
+import { MistralModule } from './common/providers/mistral/mistral.module.js';
+import { ImportModule } from './modules/import/import.module.js';
+import { ThemeModule } from './modules/theme/theme.module.js';
+import { SqlModule } from './modules/sql/sql.module.js';
+import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.js';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [envConfig],
+    }),
+    GroqModule,
+    GeminiModule,
+    CerebrasModule,
+    MistralModule,
+    ImportModule,
+    ThemeModule,
+    SqlModule,
+    OrchestratorModule,
+  ],
+})
+export class AppModule {}

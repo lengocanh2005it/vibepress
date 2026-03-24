@@ -1,0 +1,346 @@
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const axios = require("axios");
+const fse = require("fs-extra");
+const { simpleGit } = require("simple-git");
+const { extractWpress } = require("../utils/wpressExtractor");
+const { extractDbInfo } = require("../utils/dbInfoExtractor");
+const {
+  GITHUB_TOKEN,
+  GITHUB_OWNER,
+  GIT_AUTHOR_NAME,
+  GIT_AUTHOR_EMAIL,
+  DB_FILE,
+  TEMP_ROOT,
+  UPLOAD_ROOT,
+} = require("../config/constants");
+
+function ensureFileSystemState() {
+  fse.ensureDirSync(TEMP_ROOT);
+  fse.ensureDirSync(UPLOAD_ROOT);
+  if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(
+      DB_FILE,
+      JSON.stringify({ projects: {} }, null, 2),
+      "utf8",
+    );
+  }
+}
+
+function readDb() {
+  const raw = fs.readFileSync(DB_FILE, "utf8");
+  return JSON.parse(raw);
+}
+
+function writeDb(db) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
+}
+
+function updateProject(projectId, updater) {
+  const db = readDb();
+  const project = db.projects[projectId];
+  if (!project) {
+    return null;
+  }
+  updater(project);
+  writeDb(db);
+  return project;
+}
+
+function generateProjectId() {
+  return `proj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function slugify(input) {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 30);
+}
+
+function assertGithubConfigured() {
+  if (!GITHUB_TOKEN) {
+    throw new Error("Missing GITHUB_TOKEN in environment variables");
+  }
+}
+
+function buildAuthenticatedRepoUrl(htmlUrl) {
+  return htmlUrl.replace(
+    "https://",
+    `https://x-access-token:${encodeURIComponent(GITHUB_TOKEN)}@`,
+  );
+}
+
+async function createGithubRepo(name) {
+  const url = "https://api.github.com/user/repos";
+  const payload = {
+    name,
+    private: true,
+    auto_init: false,
+  };
+
+  const response = await axios.post(url, payload, {
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    timeout: 15000,
+  });
+
+  return {
+    name: response.data.name,
+    htmlUrl: response.data.html_url,
+  };
+}
+
+async function pushDirectoryToRepo(localDir, repoHtmlUrl, commitMessage) {
+  const git = simpleGit(localDir);
+
+  await git.init();
+  await git.addConfig("user.name", GIT_AUTHOR_NAME);
+  await git.addConfig("user.email", GIT_AUTHOR_EMAIL);
+  await git.checkoutLocalBranch("main");
+  await git.add(".");
+  await git.commit(commitMessage);
+  await git.addRemote("origin", buildAuthenticatedRepoUrl(repoHtmlUrl));
+  await git.push(["-u", "origin", "main"]);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cleanupWorkspace(workspaceRoot, uploadedZipPath) {
+  if (workspaceRoot && fs.existsSync(workspaceRoot)) {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+  if (uploadedZipPath && fs.existsSync(uploadedZipPath)) {
+    fs.rmSync(uploadedZipPath, { force: true });
+  }
+}
+
+async function createProject(req, res) {
+  try {
+    assertGithubConfigured();
+    const suffix = slugify(req.body?.projectName || "") || "theme";
+    const projectId = generateProjectId();
+    const wpRepoName = `wp-source-${suffix}-${projectId}`;
+    
+
+    const wpRepo = await createGithubRepo(wpRepoName);
+
+
+    const db = readDb();
+    db.projects[projectId] = {
+      projectId,
+      wpRepoName: wpRepo.name,
+      wpRepoUrl: wpRepo.htmlUrl,
+      owner: GITHUB_OWNER,
+      status: "created",
+      createdAt: new Date().toISOString(),
+    };
+    writeDb(db);
+
+    return res.status(201).json({
+      success: true,
+      projectId,
+      status: "created",
+      wpRepoUrl: wpRepo.htmlUrl,
+    });
+  } catch (error) {
+    const status = error.response?.status || 500;
+    const message =
+      error.response?.data?.message || error.message || "CREATE_REPO_FAILED";
+    return res.status(status).json({
+      success: false,
+      code: "CREATE_REPO_FAILED",
+      message,
+    });
+  }
+}
+
+function getProjectById(req, res) {
+  const db = readDb();
+  const project = db.projects[req.params.projectId];
+  if (!project) {
+    return res.status(404).json({
+      success: false,
+      code: "PROJECT_NOT_FOUND",
+      message: "Project not found",
+    });
+  }
+
+  return res.json({ success: true, project });
+}
+
+async function VPGetDbInfo() {
+  try {
+    const result = await axios.get(
+      "http://localhost:8000/wp-json/vibepress/v1/db-info",
+      {
+        headers: {
+          "X-Vibepress-Key": "vibepress2026",
+        },
+      },
+    );
+    if (result.status === 200 && result.data) {
+	  console.log("Received DB info from Vibepress API:", result);
+      return result.data;
+    } else {
+      throw new Error("Failed to get DB info from Vibepress API");
+    }
+  } catch (error) {
+    console.error("Error fetching DB info from Vibepress API:", error);
+    return { error: "Failed to fetch DB info" };
+  }
+}
+
+async function uploadTheme(req, res) {
+  const projectId = req.body?.projectId;
+  const uploadedZipPath = req.file?.path;
+  const originalName = req.file?.originalname || "";
+  const workspaceRoot = projectId ? path.join(TEMP_ROOT, projectId) : null;
+
+  if (!projectId) {
+    cleanupWorkspace(workspaceRoot, uploadedZipPath);
+    return res.status(400).json({
+      success: false,
+      code: "PROJECT_ID_REQUIRED",
+      message: "projectId is required",
+    });
+  }
+
+  if (!req.file || !originalName.toLowerCase().endsWith(".wpress")) {
+    cleanupWorkspace(workspaceRoot, uploadedZipPath);
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_WPRESS",
+      message: "Please upload a valid .wpress file",
+    });
+  }
+
+  const db = readDb();
+  const project = db.projects[projectId];
+  if (!project) {
+    cleanupWorkspace(workspaceRoot, uploadedZipPath);
+    return res.status(404).json({
+      success: false,
+      code: "PROJECT_NOT_FOUND",
+      message: "Project not found",
+    });
+  }
+
+  const wpSourceDir = path.join(workspaceRoot, "wp-source");
+
+  try {
+    updateProject(projectId, (p) => {
+      p.status = "uploading";
+      p.updatedAt = new Date().toISOString();
+    });
+
+    await fse.ensureDir(wpSourceDir);
+
+    await extractWpress(uploadedZipPath, wpSourceDir);
+
+    const dbInfo = await VPGetDbInfo();
+
+    updateProject(projectId, (p) => {
+      p.status = "pushing_wp_repo";
+      p.dbInfo = dbInfo;
+      p.updatedAt = new Date().toISOString();
+    });
+    await pushDirectoryToRepo(
+      wpSourceDir,
+      project.wpRepoUrl,
+      `Upload WP source for ${projectId}`,
+    );
+
+    // updateProject(projectId, (p) => {
+    // 	p.status = 'running_mock_ai';
+    // 	p.updatedAt = new Date().toISOString();
+    // });
+    // await simulateAIConversion(projectId, reactOutputDir);
+
+    // updateProject(projectId, (p) => {
+    // 	p.status = 'pushing_react_repo';
+    // 	p.updatedAt = new Date().toISOString();
+    // });
+    // await pushDirectoryToRepo(reactOutputDir, project.reactRepoUrl, `Mock AI output for ${projectId}`);
+
+    updateProject(projectId, (p) => {
+      p.status = "completed";
+      p.updatedAt = new Date().toISOString();
+    });
+
+    return res.status(200).json({
+      success: true,
+      projectId,
+      message: "Bien doi thanh cong! Nguon WP da duoc upload len GitHub.",
+      wpRepoUrl: project.wpRepoUrl,
+      dbInfo,
+    });
+  } catch (error) {
+    console.error("[uploadTheme] error:", error);
+    updateProject(projectId, (p) => {
+      p.status = "failed";
+      p.updatedAt = new Date().toISOString();
+      p.errorCode = error.message || "UNKNOWN_ERROR";
+    });
+
+    return res.status(500).json({
+      success: false,
+      projectId,
+      code: "UPLOAD_PROCESS_FAILED",
+      message: error.message || "Xu ly that bai",
+    });
+  } finally {
+    cleanupWorkspace(workspaceRoot, uploadedZipPath);
+  }
+}
+
+// -------------------------------------------------------
+// POST /api/wp/register
+// Nhận từ WP plugin: siteUrl, siteName, wpVersion, adminEmail, dbInfo
+// Trả về: { apiKey }
+// -------------------------------------------------------
+async function registerWpSite(req, res) {
+  const { siteUrl, siteName, wpVersion, adminEmail, dbInfo } = req.body ?? {};
+
+  if (!siteUrl) {
+    return res.status(400).json({ success: false, error: "siteUrl is required" });
+  }
+
+  const apiKey = crypto.randomBytes(32).toString("hex");
+  const siteId = `wp-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+
+  const db = readDb();
+  if (!db.wpSites) db.wpSites = {};
+
+  db.wpSites[siteId] = {
+    siteId,
+    siteUrl,
+    siteName:     siteName     ?? null,
+    wpVersion:    wpVersion    ?? null,
+    adminEmail:   adminEmail   ?? null,
+    dbInfo:       dbInfo       ?? null,
+    apiKey,
+    registeredAt: new Date().toISOString(),
+  };
+  writeDb(db);
+
+  console.log(`[registerWpSite] registered site ${siteUrl} → siteId=${siteId}`);
+
+  return res.status(200).json({ apiKey });
+}
+
+module.exports = {
+  ensureFileSystemState,
+  createProject,
+  getProjectById,
+  uploadTheme,
+  registerWpSite,
+};
