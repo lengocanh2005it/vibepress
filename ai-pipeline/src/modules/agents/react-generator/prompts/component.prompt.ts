@@ -94,10 +94,12 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.colors.length > 0) {
     lines.push(
-      '**Colors** (use `text-[slug]`, `bg-[slug]`, `border-[slug]` classes):',
-    );
+      '**Colors** — when a block uses a color slug, use Tailwind arbitrary value with the exact hex:',
+    )
     for (const c of tokens.colors) {
-      lines.push(`- \`${c.slug}\` → ${c.value}`);
+      lines.push(
+        `- slug \`${c.slug}\` → use \`bg-[${c.value}]\` / \`text-[${c.value}]\` / \`border-[${c.value}]\``,
+      );
     }
   }
 
@@ -336,9 +338,11 @@ Convert the partial WordPress template section below into a clean React function
 - Do NOT add routing logic (\`useParams\`, \`<Route>\`, navigation to detail pages).
 - Do NOT fetch a single post/page by slug — this section is not a detail view.
 - DO fetch lists if the template structure calls for it (e.g. \`block: "query"\` → \`GET /api/posts\`).
-- DO fetch menus if the section has a \`block: "navigation"\` with NO children (\`GET /api/menus\`).
-- \`block: "navigation"\` with **no children** → fetch \`GET /api/menus\`, render \`menus[0]?.items?.filter(i => i.parentId === 0).map(...)\`. NEVER skip or write "no menus available".
-- \`block: "navigation"\` with **\`block: "navigation-link"\` children** → render those children as static \`<a href={item.href}>{item.text}</a>\`. Do NOT fetch from API.
+- DO fetch menus whenever the section has any \`block: "navigation"\` node (\`GET /api/menus\`).
+- \`block: "navigation"\` → **ALWAYS fetch \`GET /api/menus\`**. NEVER render navigation-link children as static \`<a>\` tags.
+  - If the navigation node has \`navigation-link\` children, use their \`text\` values as hints to pick the right menu: find the menu whose name/items best match (e.g. children "Team","History" → menu named "About"). Render items from that API menu, filtered by \`parentId === 0\`.
+  - If no match found or no children, fall back to \`menus.find(m => m.slug === 'primary') ?? menus[0]\`.
+  - NEVER skip or write "no menus available".
 - \`block: "site-logo"\` → **skip entirely** — do not render image, fallback text, or siteName here.
 - **Footer navigation**: Only render menus that actually exist in the API response. Do NOT invent sections with hardcoded links.
 - Export the component as default: \`export default ${sectionName};\`
@@ -370,7 +374,7 @@ ${groundingNote}
 - \`block: "columns"\` → render children side by side (CSS grid/flex)
 - \`block: "query"\` → fetch \`/api/posts\` and map over results; text inside query blocks comes from fetched data, NOT hardcoded
 - \`html\` field → render with \`dangerouslySetInnerHTML\` in \`<div className="prose max-w-none">\`
-- \`bgColor\` / \`textColor\` → look up in theme tokens and apply via Tailwind classes
+- \`bgColor\` / \`textColor\` → look up the slug in the theme tokens table above and apply the corresponding hex using Tailwind arbitrary classes: \`bg-[#hex]\` / \`text-[#hex]\`. NEVER use \`bg-[slug]\` — always use the actual hex value.
 - Replace ALL original CSS with Tailwind utility classes; no inline styles
 
 ## GOLDEN RULE — Two sources only

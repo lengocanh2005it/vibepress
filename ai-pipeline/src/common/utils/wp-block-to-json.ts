@@ -110,11 +110,13 @@ function parseBlocks(markup: string): WpNode[] {
       if (blockName === 'site-logo') continue;
       // navigation-link: lift label/url to semantic fields so AI can use them as static links
       if (blockName === 'navigation-link' && params?.label) {
-        nodes.push(compact({
-          block: 'navigation-link',
-          text: params.label as string,
-          href: (params.url as string) || '#',
-        }));
+        nodes.push(
+          compact({
+            block: 'navigation-link',
+            text: params.label as string,
+            href: (params.url as string) || '#',
+          }),
+        );
       } else {
         nodes.push(compact({ block: blockName, params }));
       }
@@ -208,6 +210,10 @@ function buildNode(
 
   if (hasNestedBlocks) {
     const children = parseBlocks(innerMarkup);
+    // For navigation blocks: keep navigation-link children as HINTS so the AI can
+    // identify which WP menu corresponds to this navigation block (by matching item
+    // labels/slugs). The AI must still ALWAYS fetch from GET /api/menus and render
+    // dynamic content — never render navigation-link children as static <a> tags.
     return compact({ block: blockName, params, children });
   }
 

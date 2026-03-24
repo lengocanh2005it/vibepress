@@ -5,6 +5,7 @@ import { GroqModule } from './common/providers/groq/groq.module';
 import { GeminiModule } from './common/providers/gemini/gemini.module';
 import { CerebrasModule } from './common/providers/cerebras/cerebras.module.js';
 import { MistralModule } from './common/providers/mistral/mistral.module.js';
+import { AnthropicModule } from './common/providers/anthropic/anthropic.module.js';
 import { ImportModule } from './modules/import/import.module.js';
 import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
@@ -20,6 +21,7 @@ import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.j
     GeminiModule,
     CerebrasModule,
     MistralModule,
+    AnthropicModule,
     ImportModule,
     ThemeModule,
     SqlModule,
