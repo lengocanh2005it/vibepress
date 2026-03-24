@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
 import { MISTRAL_CLIENT } from '../../../common/providers/mistral/mistral.provider.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
@@ -47,8 +48,10 @@ const CHUNK_TARGET_CHARS = 6_000;
 export class ReactGeneratorService {
   private readonly logger = new Logger(ReactGeneratorService.name);
 
+  private readonly tokenTracker = new TokenTracker();
+
   constructor(
-    @Inject(MISTRAL_CLIENT) private readonly cerebras: OpenAI,
+    @Inject(MISTRAL_CLIENT) private readonly mistral: OpenAI,
     private readonly configService: ConfigService,
   ) {}
 
@@ -64,7 +67,16 @@ export class ReactGeneratorService {
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
-    const modelName = this.configService.get<string>('mistral.model')!;
+    if (logPath) {
+      const tokenLogPath = logPath.replace(/\.log$/, '.tokens.log');
+      await this.tokenTracker.init(tokenLogPath);
+    }
+
+    const modelName = this.configService.get<string>(
+      'mistral.model',
+      'mistral-small-latest',
+    );
+
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = theme.type === 'fse' ? theme.tokens : undefined;
 
@@ -84,10 +96,17 @@ export class ReactGeneratorService {
       const componentName = this.toComponentName(tpl.name);
       const rawSource = 'markup' in tpl ? tpl.markup : tpl.html;
       const counter = `[${i + 1}/${total}]`;
-      const folder = PARTIAL_PATTERNS.test(componentName) ? 'src/components' : 'src/pages';
+      const folder = PARTIAL_PATTERNS.test(componentName)
+        ? 'src/components'
+        : 'src/pages';
 
-      this.logger.log(`${counter} Generating "${componentName}.tsx" → ${folder}/`);
-      await this.logToFile(logPath, `${counter} Generating "${componentName}.tsx" → ${folder}/`);
+      this.logger.log(
+        `${counter} Generating "${componentName}.tsx" → ${folder}/`,
+      );
+      await this.logToFile(
+        logPath,
+        `${counter} Generating "${componentName}.tsx" → ${folder}/`,
+      );
 
       const t0 = Date.now();
       const produced = await this.generateForTemplate({
@@ -103,8 +122,13 @@ export class ReactGeneratorService {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
 
-      this.logger.log(`${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`);
-      await this.logToFile(logPath, `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`);
+      this.logger.log(
+        `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
+      );
+      await this.logToFile(
+        logPath,
+        `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
+      );
 
       components.push(...produced);
 
@@ -118,12 +142,15 @@ export class ReactGeneratorService {
       }
     }
 
-    const breakdown = partialsCount > 0
-      ? `${pagesCount} pages, ${partialsCount} partials`
-      : `${pagesCount} templates`;
+    const breakdown =
+      partialsCount > 0
+        ? `${pagesCount} pages, ${partialsCount} partials`
+        : `${pagesCount} templates`;
     const summary = `All ${total} done — ${components.length} components (${breakdown})`;
     this.logger.log(summary);
     await this.logToFile(logPath, summary);
+
+    await this.tokenTracker.writeSummary();
 
     return { jobId, components, outDir: '' };
   }
@@ -173,7 +200,10 @@ export class ReactGeneratorService {
     this.logger.warn(
       `Template ${componentName}: ${templateSource.length} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
     );
-    await this.logToFile(logPath, `WARN "${componentName}" too large (${templateSource.length} chars) → splitting into ${this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS).length} sections`);
+    await this.logToFile(
+      logPath,
+      `WARN "${componentName}" too large (${templateSource.length} chars) → splitting into ${this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS).length} sections`,
+    );
 
     const chunks = this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS);
     this.logger.log(`Template ${componentName}: ${chunks.length} sections`);
@@ -250,13 +280,17 @@ export class ReactGeneratorService {
         ),
         5,
         logPath,
+        componentName,
       );
       code = this.stripMarkdownFences(raw);
       if (this.isBraceBalanced(code)) break;
       this.logger.warn(
         `Component ${componentName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
       );
-      await this.logToFile(logPath, `WARN "${componentName}" unbalanced braces — retry ${attempt}/3`);
+      await this.logToFile(
+        logPath,
+        `WARN "${componentName}" unbalanced braces — retry ${attempt}/3`,
+      );
     }
 
     return { name: componentName, filePath: '', code };
@@ -306,13 +340,23 @@ export class ReactGeneratorService {
     let code = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       // No system prompt for sections — the user prompt is fully self-contained
-      const raw = await this.generateWithRetry(modelName, '', userPrompt, 5, logPath);
+      const raw = await this.generateWithRetry(
+        modelName,
+        '',
+        userPrompt,
+        5,
+        logPath,
+        sectionName,
+      );
       code = this.stripMarkdownFences(raw);
       if (this.isBraceBalanced(code)) break;
       this.logger.warn(
         `Section ${sectionName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
       );
-      await this.logToFile(logPath, `WARN "${sectionName}" unbalanced braces — retry ${attempt}/3`);
+      await this.logToFile(
+        logPath,
+        `WARN "${sectionName}" unbalanced braces — retry ${attempt}/3`,
+      );
     }
 
     return { name: sectionName, filePath: '', code, isSubComponent: true };
@@ -385,7 +429,10 @@ ${renders}
 
   // ── File logger ────────────────────────────────────────────────────────────
 
-  private async logToFile(logPath: string | undefined, message: string): Promise<void> {
+  private async logToFile(
+    logPath: string | undefined,
+    message: string,
+  ): Promise<void> {
     if (!logPath) return;
     try {
       await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
@@ -402,26 +449,40 @@ ${renders}
     userPrompt: string,
     maxRetries = 5,
     logPath?: string,
+    label?: string,
   ): Promise<string> {
-    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-    if (systemPrompt) {
-      messages.push({ role: 'system', content: systemPrompt });
-    }
-    messages.push({ role: 'user', content: userPrompt });
-
     let delay = 30000;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await this.cerebras.chat.completions.create({
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+        if (systemPrompt)
+          messages.push({ role: 'system', content: systemPrompt });
+        messages.push({ role: 'user', content: userPrompt });
+
+        const response = await this.mistral.chat.completions.create({
           model,
-          temperature: 0.3,
           max_tokens: 8192,
+          temperature: 0.3,
           messages,
         });
-        return result.choices[0]?.message?.content ?? '';
+
+        const usage = response.usage;
+        await this.tokenTracker.track(
+          model,
+          usage?.prompt_tokens ?? 0,
+          usage?.completion_tokens ?? 0,
+          label,
+        );
+
+        return response.choices[0]?.message?.content ?? '';
       } catch (err: any) {
-        if (err?.status === 429 && attempt < maxRetries) {
-          const msg = `Rate limit hit, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
+        const isRateLimit = err?.status === 429;
+        const isTimeout =
+          err?.name === 'APIConnectionTimeoutError' ||
+          err?.name === 'APIConnectionError';
+        if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+          const reason = isTimeout ? 'Timeout' : 'Rate limit';
+          const msg = `${reason}, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
           this.logger.warn(msg);
           await this.logToFile(logPath, `WARN ${msg}`);
           await new Promise((res) => setTimeout(res, delay));

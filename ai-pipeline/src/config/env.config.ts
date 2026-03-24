@@ -22,6 +22,10 @@ export default () => ({
     apiKey: process.env.MISTRAL_API_KEY,
     model: process.env.MISTRAL_MODEL || 'mistral-small-latest',
   },
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+  },
   reactGenerator: {
     delayBetweenComponents: parseInt(
       process.env.REACT_GEN_DELAY_MS ?? '5000',

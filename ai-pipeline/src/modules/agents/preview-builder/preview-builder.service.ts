@@ -58,8 +58,7 @@ export class PreviewBuilderService {
 
     // 3. Write generated components từ AI (code in memory)
     for (const comp of components.components) {
-      const isPartial =
-        PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+      const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
@@ -242,10 +241,17 @@ ${fontEntries}
 
   private runNpmInstall(dir: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const proc = spawn('npm', ['install'], { cwd: dir, shell: true, stdio: 'pipe' });
+      const proc = spawn('npm', ['install'], {
+        cwd: dir,
+        shell: true,
+        stdio: 'pipe',
+      });
       proc.on('close', (code) => {
         if (code === 0) resolve();
-        else reject(new Error(`npm install failed in ${dir} with exit code ${code}`));
+        else
+          reject(
+            new Error(`npm install failed in ${dir} with exit code ${code}`),
+          );
       });
     });
   }
