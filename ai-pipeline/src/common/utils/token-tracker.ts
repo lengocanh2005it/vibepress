@@ -32,7 +32,7 @@ export class TokenTracker {
       `${'─'.repeat(80)}\n` +
         `TOKEN USAGE LOG  ${new Date().toISOString()}\n` +
         `${'─'.repeat(80)}\n` +
-        `${'COMPONENT'.padEnd(36)} ${'IN'.padStart(7)} ${'OUT'.padStart(7)}  ${'COST (USD)'.padStart(12)}\n` +
+        `${'TIMESTAMP'.padEnd(26)}${'COMPONENT'.padEnd(36)} ${'IN'.padStart(7)} ${'OUT'.padStart(7)}  ${'COST (USD)'.padStart(12)}\n` +
         `${'─'.repeat(80)}\n`,
     );
   }
@@ -71,7 +71,7 @@ export class TokenTracker {
   async writeSummary(): Promise<void> {
     const line =
       `${'─'.repeat(80)}\n` +
-      `${'TOTAL'.padEnd(36)} ` +
+      `${''.padEnd(26)}${'TOTAL'.padEnd(36)} ` +
       `${String(this.totalInput).padStart(7)} ` +
       `${String(this.totalOutput).padStart(7)}  ` +
       `$${this.totalCost.toFixed(6).padStart(11)}\n` +

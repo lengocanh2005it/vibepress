@@ -19,6 +19,14 @@ export interface WpNode {
   // Styling hints extracted from params
   bgColor?: string; // slug or hex — from params.backgroundColor or params.style.color.background
   textColor?: string; // slug or hex — from params.textColor or params.style.color.text
+  // Inline typography from params.style.typography
+  typography?: {
+    letterSpacing?: string;
+    textTransform?: string;
+    lineHeight?: string;
+    fontSize?: string;
+    fontWeight?: string;
+  };
   children?: WpNode[];
 }
 
@@ -152,6 +160,17 @@ function parseBlocks(markup: string): WpNode[] {
       node.bgColor = params.style.color.background as string;
     if (params?.style?.color?.text && !node.textColor)
       node.textColor = params.style.color.text as string;
+    // Lift inline typography from params.style.typography
+    const typo = params?.style?.typography;
+    if (typo) {
+      const t: WpNode['typography'] = {};
+      if (typo.letterSpacing) t.letterSpacing = typo.letterSpacing as string;
+      if (typo.textTransform) t.textTransform = typo.textTransform as string;
+      if (typo.lineHeight) t.lineHeight = typo.lineHeight as string;
+      if (typo.fontSize) t.fontSize = typo.fontSize as string;
+      if (typo.fontWeight) t.fontWeight = typo.fontWeight as string;
+      if (Object.keys(t).length > 0) node.typography = t;
+    }
     nodes.push(node);
   }
 

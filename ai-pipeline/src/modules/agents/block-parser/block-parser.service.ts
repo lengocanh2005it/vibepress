@@ -2,10 +2,45 @@ import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 
+export interface ThemeDefaults {
+  textColor?: string;
+  bgColor?: string;
+  headingColor?: string;
+  linkColor?: string;
+  captionColor?: string;
+  buttonBgColor?: string;
+  buttonTextColor?: string;
+  fontSize?: string;
+  fontFamily?: string;
+  lineHeight?: string;
+  contentWidth?: string;
+  wideWidth?: string;
+  buttonBorderRadius?: string;
+  buttonPadding?: string;
+  headings?: {
+    h1?: { fontSize?: string; fontWeight?: string };
+    h2?: { fontSize?: string; fontWeight?: string };
+    h3?: { fontSize?: string; fontWeight?: string };
+    h4?: { fontSize?: string; fontWeight?: string };
+    h5?: { fontSize?: string; fontWeight?: string };
+    h6?: { fontSize?: string; fontWeight?: string };
+  };
+}
+
+export interface ThemeBlockStyle {
+  color?: { text?: string; background?: string };
+  typography?: { fontSize?: string; fontWeight?: string; letterSpacing?: string; lineHeight?: string };
+  border?: { radius?: string };
+  spacing?: { padding?: string };
+}
+
 export interface ThemeTokens {
   colors: { slug: string; value: string }[];
   fonts: { slug: string; family: string; name: string }[];
+  fontSizes: { slug: string; size: string }[];
   spacing: { slug: string; size: string }[];
+  defaults?: ThemeDefaults;
+  blockStyles?: Record<string, ThemeBlockStyle>;
 }
 
 export interface BlockParseResult {
@@ -57,7 +92,8 @@ export class BlockParserService {
   }
 
   private extractTokens(themeJson: Record<string, any> | null): ThemeTokens {
-    if (!themeJson) return { colors: [], fonts: [], spacing: [] };
+    if (!themeJson)
+      return { colors: [], fonts: [], fontSizes: [], spacing: [] };
     const settings = themeJson.settings ?? {};
 
     const colors: ThemeTokens['colors'] = (settings.color?.palette ?? []).map(
@@ -68,11 +104,196 @@ export class BlockParserService {
       settings.typography?.fontFamilies ?? []
     ).map((f: any) => ({ slug: f.slug, family: f.fontFamily, name: f.name }));
 
+    const fontSizes: ThemeTokens['fontSizes'] = (
+      settings.typography?.fontSizes ?? []
+    ).map((s: any) => ({ slug: s.slug, size: s.size }));
+
     const spacing: ThemeTokens['spacing'] = (
       settings.spacing?.spacingSizes ?? []
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
-    return { colors, fonts, spacing };
+    const defaults = this.extractDefaults(themeJson, colors, fonts, fontSizes);
+    const blockStyles = this.extractBlockStyles(
+      themeJson.styles?.blocks ?? {},
+      colors,
+      fontSizes,
+    );
+
+    return { colors, fonts, fontSizes, spacing, defaults, blockStyles };
+  }
+
+  /**
+   * Resolve a WordPress CSS var like `var(--wp--preset--color--contrast)`
+   * to its hex value using the extracted color palette.
+   */
+  private resolveCssVar(
+    value: string | undefined,
+    colors: ThemeTokens['colors'],
+  ): string | undefined {
+    if (!value) return undefined;
+    // Already a hex value
+    if (value.startsWith('#')) return value;
+    // Extract slug from var(--wp--preset--color--<slug>)
+    const match = value.match(/var\(--wp--preset--color--([^)]+)\)/);
+    if (!match) return undefined;
+    const slug = match[1];
+    return colors.find((c) => c.slug === slug)?.value;
+  }
+
+  private resolveFontFamily(
+    value: string | undefined,
+    fonts: ThemeTokens['fonts'],
+  ): string | undefined {
+    if (!value) return undefined;
+    // Already a plain font family string (no CSS var)
+    if (!value.includes('var(')) return value;
+    // Extract slug from var(--wp--preset--font-family--<slug>)
+    const match = value.match(/var\(--wp--preset--font-family--([^)]+)\)/);
+    if (!match) return undefined;
+    const slug = match[1];
+    return fonts.find((f) => f.slug === slug)?.family;
+  }
+
+  private resolveFontSize(
+    value: string | undefined,
+    fontSizes: ThemeTokens['fontSizes'],
+  ): string | undefined {
+    if (!value) return undefined;
+    if (!value.includes('var(')) return value;
+    const match = value.match(/var\(--wp--preset--font-size--([^)]+)\)/);
+    if (!match) return undefined;
+    return fontSizes.find((s) => s.slug === match[1])?.size;
+  }
+
+  private extractDefaults(
+    themeJson: Record<string, any>,
+    colors: ThemeTokens['colors'],
+    fonts: ThemeTokens['fonts'],
+    fontSizes: ThemeTokens['fontSizes'],
+  ): ThemeDefaults | undefined {
+    const styles = themeJson.styles ?? {};
+    const settings = themeJson.settings ?? {};
+    const resolve = (v: string | undefined) => this.resolveCssVar(v, colors);
+    const resolveFs = (v: string | undefined) => this.resolveFontSize(v, fontSizes);
+
+    const textColor = resolve(styles.color?.text);
+    const bgColor = resolve(styles.color?.background);
+    const headingColor = resolve(styles.elements?.heading?.color?.text);
+    const linkColor = resolve(styles.elements?.link?.color?.text);
+    const captionColor = resolve(styles.elements?.caption?.color?.text);
+    const buttonBgColor = resolve(styles.elements?.button?.color?.background);
+    const buttonTextColor = resolve(styles.elements?.button?.color?.text);
+    const fontSize = resolveFs(styles.typography?.fontSize);
+    const fontFamily = this.resolveFontFamily(styles.typography?.fontFamily, fonts);
+    const lineHeight = styles.typography?.lineHeight as string | undefined;
+    const contentWidth = settings.layout?.contentSize as string | undefined;
+    const wideWidth = settings.layout?.wideSize as string | undefined;
+    const buttonBorderRadius = styles.elements?.button?.border?.radius as string | undefined;
+
+    const rawPadding = styles.elements?.button?.spacing?.padding;
+    let buttonPadding: string | undefined;
+    if (rawPadding && typeof rawPadding === 'object') {
+      const { top = '0', right = '0', bottom = '0', left = '0' } = rawPadding as any;
+      buttonPadding = `${top} ${right} ${bottom} ${left}`;
+    } else if (typeof rawPadding === 'string') {
+      buttonPadding = rawPadding;
+    }
+
+    // Per-heading typography
+    const headingLevels = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const;
+    const headings: ThemeDefaults['headings'] = {};
+    let hasHeadings = false;
+    for (const level of headingLevels) {
+      const typo = styles.elements?.heading?.[level]?.typography;
+      if (!typo) continue;
+      const hFontSize = resolveFs(typo.fontSize);
+      const hFontWeight = typo.fontWeight as string | undefined;
+      if (hFontSize || hFontWeight) {
+        headings[level] = {
+          ...(hFontSize && { fontSize: hFontSize }),
+          ...(hFontWeight && { fontWeight: hFontWeight }),
+        };
+        hasHeadings = true;
+      }
+    }
+
+    if (
+      !textColor && !bgColor && !headingColor && !linkColor && !captionColor &&
+      !buttonBgColor && !buttonTextColor && !fontSize && !fontFamily &&
+      !lineHeight && !contentWidth && !wideWidth && !buttonBorderRadius &&
+      !buttonPadding && !hasHeadings
+    )
+      return undefined;
+
+    return {
+      ...(textColor && { textColor }),
+      ...(bgColor && { bgColor }),
+      ...(headingColor && { headingColor }),
+      ...(linkColor && { linkColor }),
+      ...(captionColor && { captionColor }),
+      ...(buttonBgColor && { buttonBgColor }),
+      ...(buttonTextColor && { buttonTextColor }),
+      ...(fontSize && { fontSize }),
+      ...(fontFamily && { fontFamily }),
+      ...(lineHeight && { lineHeight }),
+      ...(contentWidth && { contentWidth }),
+      ...(wideWidth && { wideWidth }),
+      ...(buttonBorderRadius && { buttonBorderRadius }),
+      ...(buttonPadding && { buttonPadding }),
+      ...(hasHeadings && { headings }),
+    };
+  }
+
+  private extractBlockStyles(
+    blocksStyles: Record<string, any>,
+    colors: ThemeTokens['colors'],
+    fontSizes: ThemeTokens['fontSizes'],
+  ): ThemeTokens['blockStyles'] {
+    if (!blocksStyles || Object.keys(blocksStyles).length === 0) return undefined;
+    const result: NonNullable<ThemeTokens['blockStyles']> = {};
+
+    for (const [blockType, style] of Object.entries(blocksStyles)) {
+      const resolved: ThemeBlockStyle = {};
+
+      const textColor = this.resolveCssVar(style.color?.text, colors);
+      const bgColor = this.resolveCssVar(style.color?.background, colors);
+      if (textColor || bgColor)
+        resolved.color = {
+          ...(textColor && { text: textColor }),
+          ...(bgColor && { background: bgColor }),
+        };
+
+      const fontSize = this.resolveFontSize(style.typography?.fontSize, fontSizes);
+      const fontWeight = style.typography?.fontWeight as string | undefined;
+      const letterSpacing = style.typography?.letterSpacing as string | undefined;
+      const lineHeight = style.typography?.lineHeight as string | undefined;
+      if (fontSize || fontWeight || letterSpacing || lineHeight)
+        resolved.typography = {
+          ...(fontSize && { fontSize }),
+          ...(fontWeight && { fontWeight }),
+          ...(letterSpacing && { letterSpacing }),
+          ...(lineHeight && { lineHeight }),
+        };
+
+      if (style.border?.radius) resolved.border = { radius: style.border.radius as string };
+
+      const rawPad = style.spacing?.padding;
+      if (rawPad) {
+        if (typeof rawPad === 'object') {
+          const { top = '0', right = '0', bottom = '0', left = '0' } = rawPad as any;
+          resolved.spacing = { padding: `${top} ${right} ${bottom} ${left}` };
+        } else {
+          resolved.spacing = { padding: rawPad as string };
+        }
+      }
+
+      if (Object.keys(resolved).length > 0) {
+        const shortName = blockType.replace('core/', '');
+        result[shortName] = resolved;
+      }
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
   }
 
   /**

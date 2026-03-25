@@ -76,8 +76,10 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
   if (
     !tokens ||
     (tokens.fonts.length === 0 &&
+      tokens.fontSizes.length === 0 &&
       tokens.colors.length === 0 &&
-      tokens.spacing.length === 0)
+      tokens.spacing.length === 0 &&
+      !tokens.defaults)
   )
     return '';
 
@@ -85,17 +87,69 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     '## Theme design tokens — use these Tailwind classes',
   ];
 
+  if (tokens.defaults) {
+    const d = tokens.defaults;
+    lines.push(
+      '**Default colors** — apply these when a block has NO explicit `bgColor`/`textColor` attribute:',
+    );
+    if (d.bgColor) lines.push(`- Page/root background: \`bg-[${d.bgColor}]\``);
+    if (d.textColor)
+      lines.push(`- Body text (default): \`text-[${d.textColor}]\``);
+    if (d.headingColor)
+      lines.push(`- All headings (h1–h6): \`text-[${d.headingColor}]\``);
+    if (d.linkColor) lines.push(`- Links (\`<a>\`): \`text-[${d.linkColor}]\``);
+    if (d.captionColor)
+      lines.push(`- Captions / secondary text: \`text-[${d.captionColor}]\``);
+    if (d.buttonBgColor)
+      lines.push(`- Button background: \`bg-[${d.buttonBgColor}]\``);
+    if (d.buttonTextColor)
+      lines.push(`- Button text: \`text-[${d.buttonTextColor}]\``);
+    if (d.fontSize) lines.push(`- Default font size: \`text-[${d.fontSize}]\``);
+    if (d.fontFamily)
+      lines.push(`- Default font family: use \`style={{fontFamily:"${d.fontFamily}"}}\` on root wrapper`);
+    if (d.lineHeight)
+      lines.push(`- Default line height: use \`style={{lineHeight:"${d.lineHeight}"}}\` on root wrapper`);
+    if (d.contentWidth)
+      lines.push(`- Content max-width: \`max-w-[${d.contentWidth}]\` on content wrappers`);
+    if (d.wideWidth)
+      lines.push(`- Wide content max-width: \`max-w-[${d.wideWidth}]\` on wide/full-width blocks`);
+    if (d.buttonBorderRadius)
+      lines.push(`- Button border radius: \`rounded-[${d.buttonBorderRadius}]\``);
+    if (d.buttonPadding)
+      lines.push(`- Button padding: use \`style={{padding:"${d.buttonPadding}"}}\``);
+    if (d.headings && Object.keys(d.headings).length > 0) {
+      lines.push('**Heading typography** — apply per heading level (in addition to heading color above):');
+      for (const [level, style] of Object.entries(d.headings)) {
+        const parts: string[] = [];
+        if (style.fontSize) parts.push(`size: \`text-[${style.fontSize}]\``);
+        if (style.fontWeight) parts.push(`weight: \`font-[${style.fontWeight}]\``);
+        if (parts.length > 0) lines.push(`- \`<${level}>\`: ${parts.join(', ')}`);
+      }
+    }
+  }
+
   if (tokens.fonts.length > 0) {
-    lines.push('**Fonts** (use `font-[slug]` class):');
+    lines.push(
+      '**Font families** — use `style={{fontFamily:"..."}}` (Tailwind arbitrary font-family is unreliable):',
+    );
     for (const f of tokens.fonts) {
-      lines.push(`- \`font-${f.slug}\` → ${f.name} (\`${f.family}\`)`);
+      lines.push(`- slug \`${f.slug}\` → \`${f.family}\` (${f.name})`);
+    }
+  }
+
+  if (tokens.fontSizes.length > 0) {
+    lines.push(
+      '**Font sizes** — when a block has a `fontSize` slug, use Tailwind arbitrary value `text-[size]`:',
+    );
+    for (const s of tokens.fontSizes) {
+      lines.push(`- slug \`${s.slug}\` → \`text-[${s.size}]\``);
     }
   }
 
   if (tokens.colors.length > 0) {
     lines.push(
       '**Colors** — when a block uses a color slug, use Tailwind arbitrary value with the exact hex:',
-    )
+    );
     for (const c of tokens.colors) {
       lines.push(
         `- slug \`${c.slug}\` → use \`bg-[${c.value}]\` / \`text-[${c.value}]\` / \`border-[${c.value}]\``,
@@ -109,6 +163,24 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     );
     for (const s of tokens.spacing) {
       lines.push(`- slug \`${s.slug}\` → \`${s.size}\``);
+    }
+  }
+
+  if (tokens.blockStyles && Object.keys(tokens.blockStyles).length > 0) {
+    lines.push(
+      '**Per-block-type styles** — apply these to ALL elements of that block type unless the block has an explicit override:',
+    );
+    for (const [blockType, style] of Object.entries(tokens.blockStyles)) {
+      const parts: string[] = [];
+      if (style.color?.text) parts.push(`text \`text-[${style.color.text}]\``);
+      if (style.color?.background) parts.push(`bg \`bg-[${style.color.background}]\``);
+      if (style.typography?.fontSize) parts.push(`size \`text-[${style.typography.fontSize}]\``);
+      if (style.typography?.fontWeight) parts.push(`weight \`font-[${style.typography.fontWeight}]\``);
+      if (style.typography?.letterSpacing) parts.push(`tracking \`tracking-[${style.typography.letterSpacing}]\``);
+      if (style.typography?.lineHeight) parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
+      if (style.border?.radius) parts.push(`rounded \`rounded-[${style.border.radius}]\``);
+      if (style.spacing?.padding) parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
+      if (parts.length > 0) lines.push(`- \`${blockType}\`: ${parts.join(', ')}`);
     }
   }
 
@@ -375,6 +447,7 @@ ${groundingNote}
 - \`block: "query"\` → fetch \`/api/posts\` and map over results; text inside query blocks comes from fetched data, NOT hardcoded
 - \`html\` field → render with \`dangerouslySetInnerHTML\` in \`<div className="prose max-w-none">\`
 - \`bgColor\` / \`textColor\` → look up the slug in the theme tokens table above and apply the corresponding hex using Tailwind arbitrary classes: \`bg-[#hex]\` / \`text-[#hex]\`. NEVER use \`bg-[slug]\` — always use the actual hex value.
+- **Default colors**: when a block has NO explicit \`bgColor\`/\`textColor\`, apply the **Default colors** from the theme tokens table. Root wrapper must use page bg/text defaults; all \`<h1>\`–\`<h6>\` use heading default; all \`<a>\` use link default; buttons without explicit color use button defaults. Do NOT use generic Tailwind colors like \`text-gray-700\` — always use the exact hex from theme tokens.
 - Replace ALL original CSS with Tailwind utility classes; no inline styles
 
 ## GOLDEN RULE — Two sources only

@@ -215,7 +215,25 @@ ${fontEntries}
 `,
     );
 
-    // 2. Inject Google Fonts vào index.html
+    // 2. Inject CSS variables (contentWidth, wideWidth) vào index.css
+    if (tokens.defaults?.contentWidth || tokens.defaults?.wideWidth) {
+      const cssPath = join(frontendDir, 'src', 'index.css');
+      const cssContent = await readFile(cssPath, 'utf-8');
+      const vars: string[] = [];
+      if (tokens.defaults.contentWidth)
+        vars.push(`  --wp-content-width: ${tokens.defaults.contentWidth};`);
+      if (tokens.defaults.wideWidth)
+        vars.push(`  --wp-wide-width: ${tokens.defaults.wideWidth};`);
+      await writeFile(
+        cssPath,
+        cssContent.replace(
+          /:root \{[\s\S]*?\}/,
+          `:root {\n${vars.join('\n')}\n}`,
+        ),
+      );
+    }
+
+    // 3. Inject Google Fonts vào index.html
     const googleFonts = tokens.fonts
       .map((f) => f.name)
       .filter(

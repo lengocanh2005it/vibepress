@@ -1,8 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
-import { MISTRAL_CLIENT } from '../../../common/providers/mistral/mistral.provider.js';
+import { ANTHROPIC_CLIENT } from '../../../common/providers/anthropic/anthropic.provider.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -51,7 +51,7 @@ export class ReactGeneratorService {
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
-    @Inject(MISTRAL_CLIENT) private readonly mistral: OpenAI,
+    @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
     private readonly configService: ConfigService,
   ) {}
 
@@ -73,8 +73,8 @@ export class ReactGeneratorService {
     }
 
     const modelName = this.configService.get<string>(
-      'mistral.model',
-      'mistral-small-latest',
+      'anthropic.model',
+      'claude-opus-4-6',
     );
 
     const systemPrompt = buildPlanPrompt(theme, content);
@@ -454,34 +454,31 @@ ${renders}
     let delay = 30000;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-        if (systemPrompt)
-          messages.push({ role: 'system', content: systemPrompt });
-        messages.push({ role: 'user', content: userPrompt });
-
-        const response = await this.mistral.chat.completions.create({
+        const response = await this.anthropic.messages.create({
           model,
           max_tokens: 8192,
-          temperature: 0.3,
-          messages,
+          ...(systemPrompt ? { system: systemPrompt } : {}),
+          messages: [{ role: 'user', content: userPrompt }],
         });
 
         const usage = response.usage;
         await this.tokenTracker.track(
           model,
-          usage?.prompt_tokens ?? 0,
-          usage?.completion_tokens ?? 0,
+          usage?.input_tokens ?? 0,
+          usage?.output_tokens ?? 0,
           label,
         );
 
-        return response.choices[0]?.message?.content ?? '';
+        const firstBlock = response.content[0];
+        return firstBlock?.type === 'text' ? firstBlock.text : '';
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
+        const isServerError = err?.status === 500 || err?.status === 529;
         const isTimeout =
           err?.name === 'APIConnectionTimeoutError' ||
           err?.name === 'APIConnectionError';
-        if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-          const reason = isTimeout ? 'Timeout' : 'Rate limit';
+        if ((isRateLimit || isTimeout || isServerError) && attempt < maxRetries) {
+          const reason = isTimeout ? 'Timeout' : isServerError ? 'Server error' : 'Rate limit';
           const msg = `${reason}, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
           this.logger.warn(msg);
           await this.logToFile(logPath, `WARN ${msg}`);

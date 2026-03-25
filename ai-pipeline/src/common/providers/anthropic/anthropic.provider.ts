@@ -9,6 +9,6 @@ export const AnthropicProvider: Provider = {
   inject: [ConfigService],
   useFactory: (configService: ConfigService) => {
     const apiKey = configService.get<string>('anthropic.apiKey', '');
-    return new Anthropic({ apiKey, timeout: 5 * 60 * 1000 });
+    return new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
   },
 };
