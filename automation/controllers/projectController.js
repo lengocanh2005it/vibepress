@@ -5,7 +5,6 @@ const axios = require("axios");
 const fse = require("fs-extra");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
-const { extractDbInfo } = require("../utils/dbInfoExtractor");
 const {
   GITHUB_TOKEN,
   GITHUB_OWNER,
@@ -110,9 +109,6 @@ async function pushDirectoryToRepo(localDir, repoHtmlUrl, commitMessage) {
   await git.push(["-u", "origin", "main"]);
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function cleanupWorkspace(workspaceRoot, uploadedZipPath) {
   if (workspaceRoot && fs.existsSync(workspaceRoot)) {
@@ -129,8 +125,10 @@ async function createProject(req, res) {
     const suffix = slugify(req.body?.projectName || "") || "theme";
     const projectId = generateProjectId();
     const wpRepoName = `wp-source-${suffix}-${projectId}`;
+    
 
     const wpRepo = await createGithubRepo(wpRepoName);
+
 
     const db = readDb();
     db.projects[projectId] = {
@@ -175,27 +173,6 @@ function getProjectById(req, res) {
   return res.json({ success: true, project });
 }
 
-async function VPGetDbInfo() {
-  try {
-    const result = await axios.get(
-      "http://localhost:8000/wp-json/vibepress/v1/db-info",
-      {
-        headers: {
-          "X-Vibepress-Key": "vibepress2026",
-        },
-      },
-    );
-    if (result.status === 200 && result.data) {
-      console.log("Received DB info from Vibepress API:", result);
-      return result.data;
-    } else {
-      throw new Error("Failed to get DB info from Vibepress API");
-    }
-  } catch (error) {
-    console.error("Error fetching DB info from Vibepress API:", error);
-    return { error: "Failed to fetch DB info" };
-  }
-}
 
 async function uploadTheme(req, res) {
   const projectId = req.body?.projectId;
@@ -244,11 +221,11 @@ async function uploadTheme(req, res) {
 
     await extractWpress(uploadedZipPath, wpSourceDir);
 
-    const dbInfo = await VPGetDbInfo();
+    // const dbInfo = await VPGetDbInfo();
 
     updateProject(projectId, (p) => {
       p.status = "pushing_wp_repo";
-      p.dbInfo = dbInfo;
+      // p.dbInfo = dbInfo;
       p.updatedAt = new Date().toISOString();
     });
     await pushDirectoryToRepo(
@@ -279,7 +256,7 @@ async function uploadTheme(req, res) {
       projectId,
       message: "Bien doi thanh cong! Nguon WP da duoc upload len GitHub.",
       wpRepoUrl: project.wpRepoUrl,
-      dbInfo,
+      // dbInfo,
     });
   } catch (error) {
     console.error("[uploadTheme] error:", error);
@@ -301,21 +278,78 @@ async function uploadTheme(req, res) {
 }
 
 // -------------------------------------------------------
+// HELPERS cho wpSites
+// -------------------------------------------------------
+function findSiteByApiKey(apiKey) {
+  const db = readDb();
+  return Object.values(db.wpSites ?? {}).find((s) => s.apiKey === apiKey) ?? null;
+}
+
+function findSiteBySiteUrl(siteUrl) {
+  const db = readDb();
+  return Object.values(db.wpSites ?? {}).find((s) => s.siteUrl === siteUrl) ?? null;
+}
+
+// -------------------------------------------------------
 // POST /api/wp/register
 // Nhận từ WP plugin: siteUrl, siteName, wpVersion, adminEmail, dbInfo
-// Trả về: { apiKey }
+// Trả về: { apiKey, githubToken, githubRepo }
 // -------------------------------------------------------
 async function registerWpSite(req, res) {
+  console.log(`[WP] POST /wp/register — body:`, {
+    siteUrl:    req.body?.siteUrl,
+    siteName:   req.body?.siteName,
+    wpVersion:  req.body?.wpVersion,
+    adminEmail: req.body?.adminEmail,
+    hasDbInfo:  !!req.body?.dbInfo,
+  });
+
   const { siteUrl, siteName, wpVersion, adminEmail, dbInfo } = req.body ?? {};
 
   if (!siteUrl) {
-    return res
-      .status(400)
-      .json({ success: false, error: "siteUrl is required" });
+    console.warn(`[WP] register FAILED — siteUrl missing`);
+    return res.status(400).json({ success: false, error: "siteUrl is required" });
+  }
+
+  try {
+    assertGithubConfigured();
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
   }
 
   const apiKey = crypto.randomBytes(32).toString("hex");
+
+  // Kiểm tra site đã tồn tại chưa (reconnect vs first connect)
+  const existingSite = findSiteBySiteUrl(siteUrl);
+
+  if (existingSite) {
+    // RECONNECT — giữ nguyên repo, chỉ cấp apiKey mới
+    const db = readDb();
+    db.wpSites[existingSite.siteId].apiKey     = apiKey;
+    db.wpSites[existingSite.siteId].siteName   = siteName   ?? existingSite.siteName;
+    db.wpSites[existingSite.siteId].wpVersion  = wpVersion  ?? existingSite.wpVersion;
+    db.wpSites[existingSite.siteId].adminEmail = adminEmail ?? existingSite.adminEmail;
+    db.wpSites[existingSite.siteId].dbInfo     = dbInfo     ?? existingSite.dbInfo;
+    db.wpSites[existingSite.siteId].updatedAt  = new Date().toISOString();
+    writeDb(db);
+
+    const githubRepo = existingSite.wpRepoUrl.replace("https://github.com/", "");
+    console.log(`[WP] register (reconnect) OK — siteUrl=${siteUrl} repo=${existingSite.wpRepoUrl}`);
+    return res.status(200).json({ apiKey, githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: false });
+  }
+
+  // FIRST CONNECT — tạo GitHub repo mới
   const siteId = `wp-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const repoSuffix = slugify(siteName || siteUrl).slice(0, 20) || "site";
+  const repoName = `wp-site-${repoSuffix}-${siteId.slice(-8)}`;
+  let wpRepo;
+  try {
+    wpRepo = await createGithubRepo(repoName);
+    console.log(`[WP] register — created GitHub repo: ${wpRepo.htmlUrl}`);
+  } catch (e) {
+    console.error(`[WP] register FAILED — could not create GitHub repo:`, e.message);
+    return res.status(500).json({ success: false, error: `Failed to create GitHub repo: ${e.response?.data?.message || e.message}` });
+  }
 
   const db = readDb();
   if (!db.wpSites) db.wpSites = {};
@@ -323,18 +357,81 @@ async function registerWpSite(req, res) {
   db.wpSites[siteId] = {
     siteId,
     siteUrl,
-    siteName: siteName ?? null,
-    wpVersion: wpVersion ?? null,
-    adminEmail: adminEmail ?? null,
-    dbInfo: dbInfo ?? null,
+    siteName:     siteName     ?? null,
+    wpVersion:    wpVersion    ?? null,
+    adminEmail:   adminEmail   ?? null,
+    dbInfo:       dbInfo       ?? null,
     apiKey,
+    wpRepoName:   wpRepo.name,
+    wpRepoUrl:    wpRepo.htmlUrl,
     registeredAt: new Date().toISOString(),
   };
   writeDb(db);
 
-  console.log(`[registerWpSite] registered site ${siteUrl} → siteId=${siteId}`);
+  console.log(`[WP] register (first connect) OK — siteUrl=${siteUrl} siteId=${siteId} repo=${wpRepo.htmlUrl}`);
 
-  return res.status(200).json({ apiKey });
+  const githubRepo = wpRepo.htmlUrl.replace("https://github.com/", "");
+  return res.status(200).json({ apiKey, githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: true });
+}
+
+// -------------------------------------------------------
+// POST /api/wp/get-token
+// Header: X-Vibepress-Key
+// Body: { siteUrl }
+// Trả về: { githubToken } — plugin cache 55 phút rồi gọi lại endpoint này
+// -------------------------------------------------------
+function getToken(req, res) {
+  const apiKey = req.headers["x-vibepress-key"];
+
+  if (!apiKey) {
+    return res.status(401).json({ success: false, error: "Missing X-Vibepress-Key header" });
+  }
+
+  const site = findSiteByApiKey(apiKey);
+  if (!site) {
+    console.warn(`[WP] get-token FAILED — invalid API key ${apiKey.slice(0, 8)}…`);
+    return res.status(401).json({ success: false, error: "Invalid API key" });
+  }
+
+  console.log(`[WP] get-token OK — site=${site.siteUrl}`);
+  return res.status(200).json({ githubToken: GITHUB_TOKEN });
+}
+
+// -------------------------------------------------------
+// POST /api/wp/sync-complete
+// Plugin gọi sau khi vpdb_sync_theme_bg() hoàn tất
+// Header: X-Vibepress-Key
+// Body: { siteUrl, repoName, themeName, synced, failed, success, syncedAt }
+// -------------------------------------------------------
+function syncComplete(req, res) {
+  const apiKey = req.headers["x-vibepress-key"];
+  if (!apiKey) {
+    return res.status(401).json({ success: false, error: "Missing X-Vibepress-Key header" });
+  }
+
+  const site = findSiteByApiKey(apiKey);
+  if (!site) {
+    console.warn(`[WP] sync-complete FAILED — invalid API key ${apiKey.slice(0, 8)}…`);
+    return res.status(401).json({ success: false, error: "Invalid API key" });
+  }
+
+  const { themeName, synced, failed, success: syncSuccess, syncedAt } = req.body ?? {};
+
+  const db = readDb();
+  const record = (db.wpSites ?? {})[site.siteId];
+  if (record) {
+    record.lastSync = {
+      themeName: themeName ?? null,
+      synced:    synced    ?? 0,
+      failed:    failed    ?? 0,
+      success:   syncSuccess ?? false,
+      syncedAt:  syncedAt ?? new Date().toISOString(),
+    };
+    writeDb(db);
+  }
+
+  console.log(`[WP] sync-complete OK — site=${site.siteUrl} synced=${synced} failed=${failed}`);
+  return res.status(200).json({ success: true });
 }
 
 module.exports = {
@@ -343,4 +440,6 @@ module.exports = {
   getProjectById,
   uploadTheme,
   registerWpSite,
+  getToken,
+  syncComplete,
 };
