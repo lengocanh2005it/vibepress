@@ -21,6 +21,8 @@ All endpoints are relative to `/api` — **ALWAYS use relative paths like `/api/
 
 {{menuContext}}
 
+{{planContext}}
+
 {{slugFetchingNote}}
 
 ## Data fetching rules
@@ -84,14 +86,25 @@ There are two kinds of text in a WordPress template:
 - Component name: `{{componentName}}`
 - Use functional component, no props needed (data comes from API)
 - Replace ALL original CSS class names with Tailwind CSS utility classes
-- Do NOT use inline styles or external CSS imports EXCEPT for `style={{fontFamily:"..."}}` on the root wrapper when a default font family is specified in the theme tokens
+- Do NOT use inline styles or external CSS imports EXCEPT for `style={{fontFamily:"...", lineHeight:"..."}}` when applying theme font/line-height values
 - Do NOT use any WordPress-specific APIs or PHP logic
 - Import React, useState, useEffect at the top
 - Export the component as default
-- Layout: `flex`, `grid`, `container`, `mx-auto`, `px-4`
-- Typography: `text-xl`, `font-bold`, `text-gray-700`
-- Spacing: `p-4`, `mt-6`, `gap-4`
 - Responsive: add `md:` and `lg:` prefixes where appropriate
+
+### ⛔ NEVER use generic Tailwind size/color/spacing classes
+
+The following are **strictly forbidden** — they produce layouts that don't match the original WordPress theme:
+
+| Forbidden category | Examples of forbidden classes | Use instead |
+|---|---|---|
+| Generic font sizes | `text-xs` `text-sm` `text-base` `text-lg` `text-xl` `text-2xl` `text-3xl` `text-4xl` `text-5xl` | `text-[exact-value]` from theme font sizes table |
+| Generic colors | `text-gray-*` `text-slate-*` `bg-gray-*` `bg-white` `bg-black` `text-white` `text-black` | `text-[#hex]` `bg-[#hex]` from theme tokens |
+| Generic spacing | `p-4` `px-6` `py-8` `mt-4` `mb-6` `gap-4` `gap-8` | `p-[value]` `gap-[value]` from block `padding`/`gap` fields or theme spacing table |
+| Generic font weights | `font-bold` `font-semibold` `font-medium` | `font-[weight]` from theme heading/typography tokens |
+| Generic border radius | `rounded` `rounded-md` `rounded-lg` `rounded-full` | `rounded-[value]` from block `borderRadius` field or theme button tokens |
+
+**Only exception:** structural layout classes with no theme equivalent are fine — `flex`, `grid`, `grid-cols-3`, `items-center`, `justify-between`, `w-full`, `mx-auto`, `overflow-hidden`, `relative`, `absolute`, `inset-0`, `z-10`, `max-w-[value]`.
 - **HTML content from API** (post_content, page content): always render with `dangerouslySetInnerHTML` and wrap in a `<div className="prose max-w-none">` to get proper typography styling for headings, paragraphs, lists, etc.
 - **Images from theme template**: paths like `get_template_directory_uri() . '/assets/...'` or PHP echo of asset URLs → convert to `/assets/...` (relative to public folder). Only use image paths that explicitly appear in the template source — do NOT invent paths like `/assets/images/logo.png` if they are not in the source
 - **Header background**: Do NOT set a background color on the `<header>` element — leave it transparent so it blends with the page background
@@ -112,6 +125,10 @@ There are two kinds of text in a WordPress template:
 - **Per-block-type styles**: the theme tokens table may include a **Per-block-type styles** section. Apply those styles to every element of that block type (e.g. all `button` elements get the specified tracking/weight/radius). These are theme-wide defaults — only override them when a specific block has an explicit `bgColor`/`textColor`/`fontSize` attribute.
 - **Inline block typography** (`typography` field on a node): if a JSON node has a `typography` field, apply it directly to that element: `letterSpacing` → `tracking-[value]`, `textTransform` → `uppercase`/`lowercase`/`capitalize`, `lineHeight` → `leading-[value]`, `fontSize` → `text-[value]`, `fontWeight` → `font-[value]`. These override the per-block-type defaults for that specific element.
 - **Cover block overlay** (`dimRatio`): if a `block: "cover"` node has `params.dimRatio` (0–100), render an absolutely-positioned overlay div inside the cover: `<div className="absolute inset-0 bg-black/[{dimRatio}]" />`. If `dimRatio` is 0 or absent, omit the overlay.
+- **Border radius** (`borderRadius`): if a node has a `borderRadius` field (e.g. `"24px"`, `"12px"`), apply it to the outermost element of that block using `rounded-[{value}]` (e.g. `rounded-[24px]`). This commonly appears on `media-text`, `image`, `cover`, and `group` blocks.
+- **Gap between children** (`gap`): if a node has a `gap` field, it defines the spacing between its children. Apply it as `gap-[{value}]` on the flex/grid container. If the value is a CSS variable like `var:preset|spacing|40`, look up the value in the **Spacing** table in the theme tokens and use the resolved px/rem value.
+- **Block padding** (`padding`): if a node has a `padding` field with `top`/`right`/`bottom`/`left` values, apply them to the outermost element using Tailwind arbitrary values: `pt-[top] pr-[right] pb-[bottom] pl-[left]`. If a value is a CSS variable like `var:preset|spacing|50`, resolve it from the **Spacing** table. This is critical for hero/cover/group sections — missing padding causes sections to appear too cramped compared to the original.
+- **Min height** (`minHeight`): if a node has a `minHeight` field (e.g. `"600px"`, `"100vh"`), apply `min-h-[{value}]` to that block's outermost element.
 - **Images from WordPress media library**: URLs containing `/wp-content/uploads/` → keep as-is, they point to the running WP instance
 
 ## Site context

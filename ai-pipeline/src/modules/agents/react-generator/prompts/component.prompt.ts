@@ -106,24 +106,40 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       lines.push(`- Button text: \`text-[${d.buttonTextColor}]\``);
     if (d.fontSize) lines.push(`- Default font size: \`text-[${d.fontSize}]\``);
     if (d.fontFamily)
-      lines.push(`- Default font family: use \`style={{fontFamily:"${d.fontFamily}"}}\` on root wrapper`);
+      lines.push(
+        `- Default font family: use \`style={{fontFamily:"${d.fontFamily}"}}\` on root wrapper`,
+      );
     if (d.lineHeight)
-      lines.push(`- Default line height: use \`style={{lineHeight:"${d.lineHeight}"}}\` on root wrapper`);
+      lines.push(
+        `- Default line height: use \`style={{lineHeight:"${d.lineHeight}"}}\` on root wrapper`,
+      );
     if (d.contentWidth)
-      lines.push(`- Content max-width: \`max-w-[${d.contentWidth}]\` on content wrappers`);
+      lines.push(
+        `- Content max-width: \`max-w-[${d.contentWidth}]\` on content wrappers`,
+      );
     if (d.wideWidth)
-      lines.push(`- Wide content max-width: \`max-w-[${d.wideWidth}]\` on wide/full-width blocks`);
+      lines.push(
+        `- Wide content max-width: \`max-w-[${d.wideWidth}]\` on wide/full-width blocks`,
+      );
     if (d.buttonBorderRadius)
-      lines.push(`- Button border radius: \`rounded-[${d.buttonBorderRadius}]\``);
+      lines.push(
+        `- Button border radius: \`rounded-[${d.buttonBorderRadius}]\``,
+      );
     if (d.buttonPadding)
-      lines.push(`- Button padding: use \`style={{padding:"${d.buttonPadding}"}}\``);
+      lines.push(
+        `- Button padding: use \`style={{padding:"${d.buttonPadding}"}}\``,
+      );
     if (d.headings && Object.keys(d.headings).length > 0) {
-      lines.push('**Heading typography** — apply per heading level (in addition to heading color above):');
+      lines.push(
+        '**Heading typography** — apply per heading level (in addition to heading color above):',
+      );
       for (const [level, style] of Object.entries(d.headings)) {
         const parts: string[] = [];
         if (style.fontSize) parts.push(`size: \`text-[${style.fontSize}]\``);
-        if (style.fontWeight) parts.push(`weight: \`font-[${style.fontWeight}]\``);
-        if (parts.length > 0) lines.push(`- \`<${level}>\`: ${parts.join(', ')}`);
+        if (style.fontWeight)
+          parts.push(`weight: \`font-[${style.fontWeight}]\``);
+        if (parts.length > 0)
+          lines.push(`- \`<${level}>\`: ${parts.join(', ')}`);
       }
     }
   }
@@ -173,14 +189,22 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     for (const [blockType, style] of Object.entries(tokens.blockStyles)) {
       const parts: string[] = [];
       if (style.color?.text) parts.push(`text \`text-[${style.color.text}]\``);
-      if (style.color?.background) parts.push(`bg \`bg-[${style.color.background}]\``);
-      if (style.typography?.fontSize) parts.push(`size \`text-[${style.typography.fontSize}]\``);
-      if (style.typography?.fontWeight) parts.push(`weight \`font-[${style.typography.fontWeight}]\``);
-      if (style.typography?.letterSpacing) parts.push(`tracking \`tracking-[${style.typography.letterSpacing}]\``);
-      if (style.typography?.lineHeight) parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
-      if (style.border?.radius) parts.push(`rounded \`rounded-[${style.border.radius}]\``);
-      if (style.spacing?.padding) parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
-      if (parts.length > 0) lines.push(`- \`${blockType}\`: ${parts.join(', ')}`);
+      if (style.color?.background)
+        parts.push(`bg \`bg-[${style.color.background}]\``);
+      if (style.typography?.fontSize)
+        parts.push(`size \`text-[${style.typography.fontSize}]\``);
+      if (style.typography?.fontWeight)
+        parts.push(`weight \`font-[${style.typography.fontWeight}]\``);
+      if (style.typography?.letterSpacing)
+        parts.push(`tracking \`tracking-[${style.typography.letterSpacing}]\``);
+      if (style.typography?.lineHeight)
+        parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
+      if (style.border?.radius)
+        parts.push(`rounded \`rounded-[${style.border.radius}]\``);
+      if (style.spacing?.padding)
+        parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
+      if (parts.length > 0)
+        lines.push(`- \`${blockType}\`: ${parts.join(', ')}`);
     }
   }
 
@@ -321,20 +345,47 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   return parts.join('\n');
 }
 
+export function buildPlanContextNote(plan?: {
+  description?: string;
+  dataNeeds?: string[];
+  route?: string | null;
+}): string {
+  if (!plan) return '';
+  const lines: string[] = ['## Component plan'];
+  if (plan.description) lines.push(`Purpose: ${plan.description}`);
+  if (plan.route) lines.push(`Route: \`${plan.route}\``);
+  if (plan.dataNeeds && plan.dataNeeds.length > 0)
+    lines.push(`Data needed: ${plan.dataNeeds.join(', ')}`);
+  return lines.join('\n');
+}
+
 export function buildComponentPrompt(
   componentName: string,
   templateSource: string,
   siteInfo: WpSiteInfo,
   content?: DbContentResult,
   tokens?: ThemeTokens,
+  componentPlan?: {
+    description?: string;
+    dataNeeds?: string[];
+    route?: string | null;
+    isDetail?: boolean;
+  },
 ): string {
-  const isSingle = SINGLE_TEMPLATES.has(componentName);
-  const isPage = PAGE_TEMPLATES.has(componentName);
+  const isSingle =
+    SINGLE_TEMPLATES.has(componentName) ||
+    (componentPlan?.isDetail === true &&
+      componentPlan?.dataNeeds?.includes('post-detail'));
+  const isPage =
+    PAGE_TEMPLATES.has(componentName) ||
+    (componentPlan?.isDetail === true &&
+      componentPlan?.dataNeeds?.includes('page-detail'));
 
   const menuContextNote = buildMenusNote(content?.menus ?? []);
   const dataGrounding = content ? buildDataGroundingNote(content) : '';
   const templateTexts = buildTemplateTextsNote(templateSource);
   const classicThemeNote = buildClassicThemeNote(templateSource);
+  const planContext = buildPlanContextNote(componentPlan);
 
   const slugFetchingNote =
     isSingle || isPage
@@ -350,6 +401,7 @@ export function buildComponentPrompt(
 
   return TEMPLATE.replace('{{componentName}}', componentName)
     .replace('{{menuContext}}', menuContextNote)
+    .replace('{{planContext}}', planContext)
     .replace('{{slugFetchingNote}}', slugFetchingNote)
     .replace('{{classicThemeNote}}', classicThemeNote)
     .replace('{{themeTokens}}', buildThemeTokensNote(tokens))

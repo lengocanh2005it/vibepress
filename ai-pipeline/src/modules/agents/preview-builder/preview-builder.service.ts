@@ -5,11 +5,13 @@ import { spawn } from 'child_process';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type { PlanResult } from '../planner/planner.service.js';
 
 export interface PreviewBuilderResult {
   jobId: string;
   previewDir: string;
   entryPath: string;
+  previewUrl: string;
   frontendPid?: number;
   serverPid?: number;
 }
@@ -29,9 +31,10 @@ export class PreviewBuilderService {
     dbCreds: WpDbCredentials;
     themeDir?: string;
     tokens?: ThemeTokens;
+    plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, tokens } = input;
+    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -75,8 +78,8 @@ export class PreviewBuilderService {
       (c) => !PARTIAL_PATTERNS.test(c.name),
     );
 
-    // Map tên component → route path
-    const PAGE_ROUTE_MAP: Record<string, string> = {
+    // Build route map từ plan (primary) — fallback sang convention nếu plan thiếu
+    const FALLBACK_ROUTE_MAP: Record<string, string> = {
       Home: '/',
       Index: '/',
       FrontPage: '/',
@@ -94,6 +97,13 @@ export class PreviewBuilderService {
       Page404: '*',
     };
 
+    const planRouteMap = new Map<string, string>();
+    if (plan) {
+      for (const p of plan) {
+        if (p.route) planRouteMap.set(p.componentName, p.route);
+      }
+    }
+
     const routeImports = allComponents
       .map((c) => {
         const folder =
@@ -109,7 +119,7 @@ export class PreviewBuilderService {
     const routeLines: string[] = [];
 
     for (const c of pageComponents) {
-      const path = PAGE_ROUTE_MAP[c.name] ?? `/${c.name.toLowerCase()}`;
+      const path = planRouteMap.get(c.name) ?? FALLBACK_ROUTE_MAP[c.name] ?? `/${c.name.toLowerCase()}`;
       if (usedPaths.has(path)) continue;
       usedPaths.add(path);
       routeLines.push(
@@ -148,11 +158,12 @@ ${routes}
 
     // 5. Generate .env cho từng folder
     const apiPort = this.pickApiPort(jobId);
+    const vitePort = this.pickVitePort(jobId);
 
     // frontend/.env — chỉ cần biết API chạy ở đâu
     await writeFile(
       join(frontendDir, '.env'),
-      `VITE_API_PORT=${apiPort}\nVITE_API_BASE=http://localhost:${apiPort}/api\n`,
+      `VITE_PORT=${vitePort}\nVITE_API_PORT=${apiPort}\nVITE_API_BASE=http://localhost:${apiPort}/api\n`,
     );
 
     // server/.env — DB credentials + port
@@ -172,11 +183,13 @@ ${routes}
     const frontendProc = this.spawnDevServer(frontendDir);
     const serverProc = this.spawnDevServer(serverDir);
 
-    this.logger.log(`Preview ready at: ${rootDir}`);
+    const previewUrl = `http://localhost:${vitePort}`;
+    this.logger.log(`Preview ready at: ${previewUrl}`);
     return {
       jobId,
       previewDir: rootDir,
       entryPath: join(srcDir, 'main.tsx'),
+      previewUrl,
       frontendPid: frontendProc.pid,
       serverPid: serverProc.pid,
     };
@@ -215,22 +228,60 @@ ${fontEntries}
 `,
     );
 
-    // 2. Inject CSS variables (contentWidth, wideWidth) vào index.css
-    if (tokens.defaults?.contentWidth || tokens.defaults?.wideWidth) {
+    // 2. Inject CSS variables + body font + heading sizes vào index.css
+    {
       const cssPath = join(frontendDir, 'src', 'index.css');
-      const cssContent = await readFile(cssPath, 'utf-8');
+      let cssContent = await readFile(cssPath, 'utf-8');
+
+      // :root — content/wide widths + block gap
       const vars: string[] = [];
-      if (tokens.defaults.contentWidth)
+      if (tokens.defaults?.contentWidth)
         vars.push(`  --wp-content-width: ${tokens.defaults.contentWidth};`);
-      if (tokens.defaults.wideWidth)
+      if (tokens.defaults?.wideWidth)
         vars.push(`  --wp-wide-width: ${tokens.defaults.wideWidth};`);
-      await writeFile(
-        cssPath,
-        cssContent.replace(
-          /:root \{[\s\S]*?\}/,
-          `:root {\n${vars.join('\n')}\n}`,
-        ),
+      if (tokens.defaults?.blockGap)
+        vars.push(`  --wp-block-gap: ${tokens.defaults.blockGap};`);
+      cssContent = cssContent.replace(
+        /:root \{[\s\S]*?\}/,
+        `:root {\n${vars.length ? vars.join('\n') : '  --wp-content-width: 650px;\n  --wp-wide-width: 1200px;'}\n}`,
       );
+
+      // body — default font-family, font-size, color từ theme
+      const bodyRules: string[] = [];
+      if (tokens.defaults?.fontFamily)
+        bodyRules.push(`  font-family: ${tokens.defaults.fontFamily};`);
+      if (tokens.defaults?.fontSize)
+        bodyRules.push(`  font-size: ${tokens.defaults.fontSize};`);
+      if (tokens.defaults?.textColor)
+        bodyRules.push(`  color: ${tokens.defaults.textColor};`);
+      if (tokens.defaults?.bgColor)
+        bodyRules.push(`  background-color: ${tokens.defaults.bgColor};`);
+      if (bodyRules.length > 0)
+        cssContent += `\nbody {\n${bodyRules.join('\n')}\n}\n`;
+
+      // Global block gap — mirrors WP's --wp--style--block-gap behavior
+      if (tokens.defaults?.blockGap)
+        cssContent += `\n.wp-block-group > * + *,\n.wp-block-cover__inner-container > * + *,\n[class*="wp-block"] > * + * {\n  margin-top: var(--wp-block-gap);\n}\n`;
+
+      // h1–h6 — heading sizes + weights từ theme tokens (chính xác hơn Tailwind generic)
+      const headings = tokens.defaults?.headings;
+      if (headings) {
+        const headingColor = tokens.defaults?.headingColor
+          ? `  color: ${tokens.defaults.headingColor};`
+          : '';
+        for (const level of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const) {
+          const h = headings[level];
+          if (!h) continue;
+          const rules: string[] = [];
+          if (h.fontSize) rules.push(`  font-size: ${h.fontSize};`);
+          if (h.fontWeight) rules.push(`  font-weight: ${h.fontWeight};`);
+          if (headingColor) rules.push(headingColor);
+          if (rules.length > 0)
+            cssContent += `\n${level} {\n${rules.join('\n')}\n}\n`;
+        }
+      }
+
+      await writeFile(cssPath, cssContent);
     }
 
     // 3. Inject Google Fonts vào index.html
@@ -289,5 +340,10 @@ ${fontEntries}
   private pickApiPort(jobId: string): number {
     const hash = jobId.replace(/-/g, '').slice(0, 6);
     return 3200 + (parseInt(hash, 16) % 800);
+  }
+
+  private pickVitePort(jobId: string): number {
+    const hash = jobId.replace(/-/g, '').slice(6, 12);
+    return 5200 + (parseInt(hash, 16) % 800);
   }
 }

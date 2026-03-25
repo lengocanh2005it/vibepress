@@ -19,6 +19,10 @@ export interface WpNode {
   // Styling hints extracted from params
   bgColor?: string; // slug or hex — from params.backgroundColor or params.style.color.background
   textColor?: string; // slug or hex — from params.textColor or params.style.color.text
+  borderRadius?: string; // from params.style.border.radius
+  gap?: string; // from params.style.spacing.blockGap or params.gap — spacing preset or px value
+  padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
+  minHeight?: string; // from params.minHeight (cover/group blocks)
   // Inline typography from params.style.typography
   typography?: {
     letterSpacing?: string;
@@ -160,6 +164,24 @@ function parseBlocks(markup: string): WpNode[] {
       node.bgColor = params.style.color.background as string;
     if (params?.style?.color?.text && !node.textColor)
       node.textColor = params.style.color.text as string;
+    // Lift border radius from params.style.border.radius
+    const borderRadius = params?.style?.border?.radius;
+    if (borderRadius) node.borderRadius = borderRadius as string;
+    // Lift gap from params.style.spacing.blockGap or params.gap
+    const gap = params?.style?.spacing?.blockGap ?? params?.gap;
+    if (gap) node.gap = gap as string;
+    // Lift padding from params.style.spacing.padding
+    const pad = params?.style?.spacing?.padding;
+    if (pad && typeof pad === 'object') {
+      node.padding = {
+        top: pad.top as string | undefined,
+        right: pad.right as string | undefined,
+        bottom: pad.bottom as string | undefined,
+        left: pad.left as string | undefined,
+      };
+    }
+    // Lift minHeight (cover/group blocks)
+    if (params?.minHeight) node.minHeight = String(params.minHeight);
     // Lift inline typography from params.style.typography
     const typo = params?.style?.typography;
     if (typo) {

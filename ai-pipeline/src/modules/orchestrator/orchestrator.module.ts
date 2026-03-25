@@ -6,10 +6,13 @@ import { RepoAnalyzerModule } from '../agents/repo-analyzer/repo-analyzer.module
 import { PhpParserModule } from '../agents/php-parser/php-parser.module.js';
 import { BlockParserModule } from '../agents/block-parser/block-parser.module.js';
 import { DbContentModule } from '../agents/db-content/db-content.module.js';
+import { PlannerModule } from '../agents/planner/planner.module.js';
 import { ReactGeneratorModule } from '../agents/react-generator/react-generator.module.js';
 import { ApiBuilderModule } from '../agents/api-builder/api-builder.module.js';
 import { PreviewBuilderModule } from '../agents/preview-builder/preview-builder.module.js';
 import { DeployAgentModule } from '../agents/deploy-agent/deploy-agent.module.js';
+import { ValidatorModule } from '../agents/validator/validator.module.js';
+import { CleanupModule } from '../agents/cleanup/cleanup.module.js';
 import { ThemeModule } from '../theme/theme.module.js';
 
 @Module({
@@ -20,10 +23,13 @@ import { ThemeModule } from '../theme/theme.module.js';
     PhpParserModule,
     BlockParserModule,
     DbContentModule,
+    PlannerModule,
     ReactGeneratorModule,
     ApiBuilderModule,
     PreviewBuilderModule,
     DeployAgentModule,
+    ValidatorModule,
+    CleanupModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService],

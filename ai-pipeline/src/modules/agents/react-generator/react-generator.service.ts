@@ -12,6 +12,7 @@ import {
   buildSectionPrompt,
 } from './prompts/component.prompt.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
+import type { PlanResult } from '../planner/planner.service.js';
 import {
   wpBlocksToJson,
   wpJsonToString,
@@ -39,10 +40,10 @@ const PARTIAL_PATTERNS =
   /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
 
 // Threshold: if serialised template JSON exceeds this, use section chunking.
-const CHUNK_THRESHOLD_CHARS = 12_000;
+const CHUNK_THRESHOLD_CHARS = Infinity;
 
 // Target size per chunk in chars (serialised JSON of WpNode[]).
-const CHUNK_TARGET_CHARS = 6_000;
+const CHUNK_TARGET_CHARS = Infinity;
 
 @Injectable()
 export class ReactGeneratorService {
@@ -60,10 +61,11 @@ export class ReactGeneratorService {
   async generate(input: {
     theme: PhpParseResult | BlockParseResult;
     content: DbContentResult;
+    plan?: PlanResult;
     jobId?: string;
     logPath?: string;
   }): Promise<ReactGenerateResult> {
-    const { theme, content, jobId = 'unknown', logPath } = input;
+    const { theme, content, plan, jobId = 'unknown', logPath } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
@@ -108,6 +110,10 @@ export class ReactGeneratorService {
         `${counter} Generating "${componentName}.tsx" → ${folder}/`,
       );
 
+      const componentPlan = plan?.find(
+        (p) => p.templateName === tpl.name || p.componentName === componentName,
+      );
+
       const t0 = Date.now();
       const produced = await this.generateForTemplate({
         componentName,
@@ -117,6 +123,7 @@ export class ReactGeneratorService {
         content,
         tokens,
         themeType: theme.type,
+        componentPlan,
         logPath,
       });
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
@@ -165,6 +172,7 @@ export class ReactGeneratorService {
     content: DbContentResult;
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
+    componentPlan?: PlanResult[number];
     logPath?: string;
   }): Promise<GeneratedComponent[]> {
     const {
@@ -175,6 +183,7 @@ export class ReactGeneratorService {
       content,
       tokens,
       themeType,
+      componentPlan,
       logPath,
     } = input;
 
@@ -191,6 +200,7 @@ export class ReactGeneratorService {
         systemPrompt,
         content,
         tokens,
+        componentPlan,
         logPath,
       });
       return [comp];
@@ -254,6 +264,7 @@ export class ReactGeneratorService {
     systemPrompt: string;
     content: DbContentResult;
     tokens?: ThemeTokens;
+    componentPlan?: PlanResult[number];
     logPath?: string;
   }): Promise<GeneratedComponent> {
     const {
@@ -263,6 +274,7 @@ export class ReactGeneratorService {
       systemPrompt,
       content,
       tokens,
+      componentPlan,
       logPath,
     } = input;
 
@@ -277,6 +289,7 @@ export class ReactGeneratorService {
           content.siteInfo,
           content,
           tokens,
+          componentPlan,
         ),
         5,
         logPath,
@@ -477,8 +490,15 @@ ${renders}
         const isTimeout =
           err?.name === 'APIConnectionTimeoutError' ||
           err?.name === 'APIConnectionError';
-        if ((isRateLimit || isTimeout || isServerError) && attempt < maxRetries) {
-          const reason = isTimeout ? 'Timeout' : isServerError ? 'Server error' : 'Rate limit';
+        if (
+          (isRateLimit || isTimeout || isServerError) &&
+          attempt < maxRetries
+        ) {
+          const reason = isTimeout
+            ? 'Timeout'
+            : isServerError
+              ? 'Server error'
+              : 'Rate limit';
           const msg = `${reason}, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
           this.logger.warn(msg);
           await this.logToFile(logPath, `WARN ${msg}`);
