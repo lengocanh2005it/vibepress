@@ -44,6 +44,11 @@ export class PreviewBuilderService {
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
     await cp(TEMPLATE_DIR, frontendDir, { recursive: true });
+    
+    // Inject base.css
+    const baseCssPath = resolve('src/modules/agents/preview-builder/templates/base.css');
+    await cp(baseCssPath, join(srcDir, 'base.css'));
+
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
@@ -119,7 +124,10 @@ export class PreviewBuilderService {
     const routeLines: string[] = [];
 
     for (const c of pageComponents) {
-      const path = planRouteMap.get(c.name) ?? FALLBACK_ROUTE_MAP[c.name] ?? `/${c.name.toLowerCase()}`;
+      const path =
+        planRouteMap.get(c.name) ??
+        FALLBACK_ROUTE_MAP[c.name] ??
+        `/${c.name.toLowerCase()}`;
       if (usedPaths.has(path)) continue;
       usedPaths.add(path);
       routeLines.push(
@@ -139,6 +147,7 @@ export class PreviewBuilderService {
     await writeFile(
       join(srcDir, 'App.tsx'),
       `import { Routes, Route } from 'react-router-dom';
+import './base.css';
 ${routeImports}
 
 export default function App() {

@@ -214,7 +214,8 @@ function parseBlocks(markup: string): WpNode[] {
     // Lift overlayColor for cover blocks (will be resolved to hex later)
     if (params?.overlayColor) node.overlayColor = params.overlayColor as string;
     // Lift column width percentage
-    if (blockName === 'column' && params?.width) node.columnWidth = params.width as string;
+    if (blockName === 'column' && params?.width)
+      node.columnWidth = params.width as string;
     // Lift textAlign
     if (params?.textAlign) node.textAlign = params.textAlign as string;
     // Lift align (full/wide/center)
@@ -373,7 +374,6 @@ export function stripTags(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
-
 
 /** Remove undefined fields to keep JSON compact */
 function compact(node: WpNode): WpNode {

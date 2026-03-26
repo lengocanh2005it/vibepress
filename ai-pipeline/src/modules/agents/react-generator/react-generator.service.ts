@@ -18,7 +18,16 @@ import {
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../style-resolver/style-resolver.service.js';
+import { ValidatorService } from '../validator/validator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+
+// Templates larger than this threshold are split into section sub-components (FSE only)
+const CHUNK_THRESHOLD_CHARS = 40_000;
+// Target size per section chunk
+const CHUNK_TARGET_CHARS = 15_000;
+// Component names matching these patterns are placed in src/components (partials), not src/pages
+const PARTIAL_PATTERNS =
+  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Search|Part|Archive|Comments|Template)/i;
 
 export interface GeneratedComponent {
   name: string;
@@ -35,26 +44,16 @@ export interface ReactGenerateResult {
   outDir: string;
 }
 
-// Keep in sync with PARTIAL_PATTERNS in preview-builder.service.ts
-const PARTIAL_PATTERNS =
-  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
-// Threshold: if serialised template JSON exceeds this, use section chunking.
-const CHUNK_THRESHOLD_CHARS = Infinity;
-
-// Target size per chunk in chars (serialised JSON of WpNode[]).
-const CHUNK_TARGET_CHARS = Infinity;
-
 @Injectable()
 export class ReactGeneratorService {
   private readonly logger = new Logger(ReactGeneratorService.name);
-
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
+    private readonly validator: ValidatorService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -185,17 +184,12 @@ export class ReactGeneratorService {
       logPath,
     } = input;
 
-    // Classic PHP themes: use raw stripped HTML — wpBlocksToJson only understands wp: block comments
-    const isClassic = themeType === 'classic';
-    const nodes = isClassic ? [] : wpBlocksToJson(rawSource);
-    const resolvedNodes = isClassic
-      ? nodes
-      : this.styleResolver.resolve(nodes, tokens);
-    const templateSource = isClassic
-      ? rawSource
-      : wpJsonToString(resolvedNodes);
+    const templateSource = rawSource;
 
-    if (isClassic || templateSource.length <= CHUNK_THRESHOLD_CHARS) {
+    if (
+      themeType === 'classic' ||
+      templateSource.length <= CHUNK_THRESHOLD_CHARS
+    ) {
       const comp = await this.generateSingle({
         componentName,
         templateSource,
@@ -208,6 +202,8 @@ export class ReactGeneratorService {
       });
       return [comp];
     }
+
+    const nodes = wpBlocksToJson(templateSource);
 
     // Too large → split into sections (FSE only)
     this.logger.warn(
@@ -282,6 +278,7 @@ export class ReactGeneratorService {
     } = input;
 
     let code = '';
+    let lastValidationError: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
         modelName,
@@ -293,23 +290,42 @@ export class ReactGeneratorService {
           content,
           tokens,
           componentPlan,
+          attempt > 1
+            ? `Previous attempt failed structural validation: ${lastValidationError}`
+            : undefined,
         ),
         5,
         logPath,
         componentName,
       );
       code = this.stripMarkdownFences(raw);
-      if (this.isBraceBalanced(code)) break;
+      code = this.mergeClassNames(code);
+
+      const check = this.validator.checkCodeStructure(code);
+      if (check.isValid) break;
+
+      lastValidationError = check.error;
       this.logger.warn(
-        `Component ${componentName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
+        `Component ${componentName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
       );
       await this.logToFile(
         logPath,
-        `WARN "${componentName}" unbalanced braces — retry ${attempt}/3`,
+        `WARN "${componentName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
       );
     }
 
     return { name: componentName, filePath: '', code };
+  }
+
+  private mergeClassNames(code: string): string {
+    // Simple regex-based approach to merge duplicate className attributes
+    // e.g. <div className="a" className="b"> -> <div className="a b">
+    return code.replace(
+      /(<[a-zA-Z0-9]+[^>]*?)\s+className=["']([^"']*)["']([^>]*?)\s+className=["']([^"']*)["']([^>]*>)/g,
+      (match, tagStart, class1, mid, class2, tagEnd) => {
+        return `${tagStart} className="${class1} ${class2}"${mid}${tagEnd}`;
+      },
+    );
   }
 
   // ── Section generation — one AI call per chunk ────────────────────────────
@@ -354,8 +370,8 @@ export class ReactGeneratorService {
     });
 
     let code = '';
+    let lastValidationError: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      // No system prompt for sections — the user prompt is fully self-contained
       const raw = await this.generateWithRetry(
         modelName,
         '',
@@ -365,13 +381,18 @@ export class ReactGeneratorService {
         sectionName,
       );
       code = this.stripMarkdownFences(raw);
-      if (this.isBraceBalanced(code)) break;
+      code = this.mergeClassNames(code);
+
+      const check = this.validator.checkCodeStructure(code);
+      if (check.isValid) break;
+
+      lastValidationError = check.error;
       this.logger.warn(
-        `Section ${sectionName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
+        `Section ${sectionName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
       );
       await this.logToFile(
         logPath,
-        `WARN "${sectionName}" unbalanced braces — retry ${attempt}/3`,
+        `WARN "${sectionName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
       );
     }
 

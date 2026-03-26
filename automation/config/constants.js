@@ -7,6 +7,8 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER || null;
 const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'MVP Bot';
 const GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'mvp-bot@example.com';
+const AI_PIPELINE_PORT = process.env.AI_PIPELINE_PORT || '3001';
+const AI_PIPELINE_URL = `http://localhost:${AI_PIPELINE_PORT}`;
 
 const BASE_DIR = __dirname + '/..';
 const DB_FILE = path.join(BASE_DIR, 'db.json');
@@ -27,6 +29,7 @@ module.exports = {
 	GITHUB_OWNER,
 	GIT_AUTHOR_NAME,
 	GIT_AUTHOR_EMAIL,
+	AI_PIPELINE_URL,
 	DB_FILE,
 	TEMP_ROOT,
 	UPLOAD_ROOT,

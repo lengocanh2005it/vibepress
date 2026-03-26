@@ -239,10 +239,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
   private extractTemplateHints(source: string): string {
     const hints: string[] = [];
-    if (source.includes('wp:navigation') || source.includes('wp_nav_menu')) hints.push('navigation');
-    if (source.includes('wp:query') || source.includes('have_posts')) hints.push('query/posts');
-    if (source.includes('wp:post-content') || source.includes('the_content')) hints.push('post-content');
-    if (source.includes('wp:site-title') || source.includes('bloginfo')) hints.push('site-title');
+    if (source.includes('wp:navigation') || source.includes('wp_nav_menu'))
+      hints.push('navigation');
+    if (source.includes('wp:query') || source.includes('have_posts'))
+      hints.push('query/posts');
+    if (source.includes('wp:post-content') || source.includes('the_content'))
+      hints.push('post-content');
+    if (source.includes('wp:site-title') || source.includes('bloginfo'))
+      hints.push('site-title');
     if (source.includes('wp:site-tagline')) hints.push('site-tagline');
     if (source.includes('wp:cover')) hints.push('cover');
     if (source.includes('wp:columns')) hints.push('columns');

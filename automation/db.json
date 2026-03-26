@@ -1,7 +1,7 @@
 {
   "wpSites": {
-    "wp-1774498977230-3b20fd50": {
-      "siteId": "wp-1774498977230-3b20fd50",
+    "wp-1774509923672-26c80c14": {
+      "siteId": "wp-1774509923672-26c80c14",
       "siteUrl": "http://localhost:8000",
       "siteName": "Vibepress",
       "wpVersion": "6.6.2",
@@ -15,18 +15,17 @@
         "db_prefix": "wp_",
         "db_port": 3306
       },
-      "apiKey": "2f8117f9ee2a67ed6052a2456dc4fa6029e21f479d5bd88f569b6c487b67bf97",
-      "wpRepoName": "wp-site-vibepress-3b20fd50",
-      "wpRepoUrl": "https://github.com/lengocanh2005it/wp-site-vibepress-3b20fd50",
-      "registeredAt": "2026-03-26T04:22:58.422Z",
+      "apiKey": "79bb1e675538bcabc3d642ba827b300c779ab720168c78b2003dd0594c8d10a4",
+      "wpRepoName": "wp-site-vibepress-26c80c14",
+      "wpRepoUrl": "https://github.com/lengocanh2005it/wp-site-vibepress-26c80c14",
+      "registeredAt": "2026-03-26T07:25:25.439Z",
       "lastSync": {
         "themeName": null,
         "synced": 252,
         "failed": 0,
         "success": true,
-        "syncedAt": "2026-03-26T06:56:49+00:00"
-      },
-      "updatedAt": "2026-03-26T06:53:22.834Z"
+        "syncedAt": "2026-03-26T07:28:02+00:00"
+      }
     }
   }
 }

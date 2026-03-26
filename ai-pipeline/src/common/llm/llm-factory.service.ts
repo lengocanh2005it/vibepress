@@ -54,10 +54,7 @@ export class LlmFactoryService {
       case 'gemini':
         return this.chatGemini(params);
       case 'groq':
-        return this.chatOpenAICompat(
-          this.groq as unknown as OpenAI,
-          params,
-        );
+        return this.chatOpenAICompat(this.groq as unknown as OpenAI, params);
       case 'cerebras':
         return this.chatOpenAICompat(this.cerebras, params);
       case 'mistral':
@@ -71,6 +68,7 @@ export class LlmFactoryService {
     params: LlmChatParams,
   ): Promise<LlmChatResult> {
     const { model, systemPrompt, userPrompt, maxTokens = 8192 } = params;
+
     const response = await client.chat.completions.create({
       model,
       max_tokens: maxTokens,

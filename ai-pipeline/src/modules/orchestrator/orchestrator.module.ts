@@ -14,6 +14,7 @@ import { DeployAgentModule } from '../agents/deploy-agent/deploy-agent.module.js
 import { ValidatorModule } from '../agents/validator/validator.module.js';
 import { CleanupModule } from '../agents/cleanup/cleanup.module.js';
 import { ThemeModule } from '../theme/theme.module.js';
+import { CotEvidenceModule } from '../cot-evidence/cot-evidence.module.js';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { ThemeModule } from '../theme/theme.module.js';
     DeployAgentModule,
     ValidatorModule,
     CleanupModule,
+    CotEvidenceModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService],

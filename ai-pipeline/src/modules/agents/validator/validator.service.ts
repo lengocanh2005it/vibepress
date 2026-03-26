@@ -16,6 +16,39 @@ export class ValidatorService {
     }));
   }
 
+  /**
+   * Basic structural validation to detect obvious layout-breaking code
+   */
+  checkCodeStructure(code: string): { isValid: boolean; error?: string } {
+    if (!code.trim()) return { isValid: false, error: 'Empty code' };
+
+    // Check for obvious duplicate classNames
+    // Looks for a tag that contains 'className=' at least twice
+    const classNameMatches = (code.match(/className=["'][^"']*["']/g) || [])
+      .length;
+    // This is still a bit naive, but let's count className occurrences per tag if possible.
+    // Given the complexity of parsing JSX, let's use a simpler heuristic for now.
+    if (
+      /(<[a-zA-Z0-9]+[^>]*?className=["'][^"']*["'][^>]*?className=["'][^"']*["'][^>]*?>)/s.test(
+        code,
+      )
+    ) {
+      return { isValid: false, error: 'Duplicate className attributes found.' };
+    }
+
+    // Check for unbalanced braces (safety catch)
+    let depth = 0;
+    for (const char of code) {
+      if (char === '{') depth++;
+      else if (char === '}') depth--;
+    }
+    if (depth !== 0) {
+      return { isValid: false, error: `Unbalanced braces (depth: ${depth})` };
+    }
+
+    return { isValid: true };
+  }
+
   // ── Core: strip unused imports ──────────────────────────────────────────────
 
   removeUnusedImports(code: string): string {

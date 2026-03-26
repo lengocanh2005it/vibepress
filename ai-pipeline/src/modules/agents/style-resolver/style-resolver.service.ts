@@ -20,15 +20,13 @@ export class StyleResolverService {
    * Returns a new tree — does not mutate the input.
    */
   resolve(nodes: WpNode[], tokens?: ThemeTokens): WpNode[] {
-    const spacingMap =
-      tokens?.spacing?.length
-        ? new Map(tokens.spacing.map((s) => [s.slug, s.size]))
-        : null;
+    const spacingMap = tokens?.spacing?.length
+      ? new Map(tokens.spacing.map((s) => [s.slug, s.size]))
+      : null;
 
-    const colorMap =
-      tokens?.colors?.length
-        ? new Map(tokens.colors.map((c) => [c.slug, c.value]))
-        : null;
+    const colorMap = tokens?.colors?.length
+      ? new Map(tokens.colors.map((c) => [c.slug, c.value]))
+      : null;
 
     let result = nodes;
     if (spacingMap) result = this.resolveSpacing(result, spacingMap);
@@ -42,23 +40,40 @@ export class StyleResolverService {
     return nodes.map((node) => {
       const out: WpNode = { ...node };
 
-      if (out.gap != null) out.gap = this.resolveSpacingVar(out.gap as string, map);
+      if (out.gap != null)
+        out.gap = this.resolveSpacingVar(out.gap as string, map);
 
       if (out.padding) {
         out.padding = {
-          top: out.padding.top ? this.resolveSpacingVar(out.padding.top, map) : undefined,
-          right: out.padding.right ? this.resolveSpacingVar(out.padding.right, map) : undefined,
-          bottom: out.padding.bottom ? this.resolveSpacingVar(out.padding.bottom, map) : undefined,
-          left: out.padding.left ? this.resolveSpacingVar(out.padding.left, map) : undefined,
+          top: out.padding.top
+            ? this.resolveSpacingVar(out.padding.top, map)
+            : undefined,
+          right: out.padding.right
+            ? this.resolveSpacingVar(out.padding.right, map)
+            : undefined,
+          bottom: out.padding.bottom
+            ? this.resolveSpacingVar(out.padding.bottom, map)
+            : undefined,
+          left: out.padding.left
+            ? this.resolveSpacingVar(out.padding.left, map)
+            : undefined,
         };
       }
 
       if (out.margin) {
         out.margin = {
-          top: out.margin.top ? this.resolveSpacingVar(out.margin.top, map) : undefined,
-          right: out.margin.right ? this.resolveSpacingVar(out.margin.right, map) : undefined,
-          bottom: out.margin.bottom ? this.resolveSpacingVar(out.margin.bottom, map) : undefined,
-          left: out.margin.left ? this.resolveSpacingVar(out.margin.left, map) : undefined,
+          top: out.margin.top
+            ? this.resolveSpacingVar(out.margin.top, map)
+            : undefined,
+          right: out.margin.right
+            ? this.resolveSpacingVar(out.margin.right, map)
+            : undefined,
+          bottom: out.margin.bottom
+            ? this.resolveSpacingVar(out.margin.bottom, map)
+            : undefined,
+          left: out.margin.left
+            ? this.resolveSpacingVar(out.margin.left, map)
+            : undefined,
         };
       }
 

@@ -46,6 +46,7 @@ All endpoints are relative to `/api` — **ALWAYS use relative paths like `/api/
 - If the template has a text/hero section BEFORE an image section, render text first then image — never swap them
 - Each `<!-- wp:group -->`, `<!-- wp:cover -->`, `<!-- wp:columns -->` block in the template corresponds to a distinct section — keep them all in the same order
 - Do NOT combine two separate sections into one just because they look similar
+- **STRICT DOM HIERARCHY**: You must preserve the nested DOM structure of the source template exactly. DO NOT flatten the DOM (e.g., do not remove wrapper <div> elements that have class names). These wrappers are essential for CSS layout selectors to match correctly. If a block has a wrapper in the source, keep the wrapper in the React output.
 
 {{dataGrounding}}
 
@@ -182,13 +183,14 @@ style={{paddingTop: 'var(--wp--preset--spacing--50)'}} // spacing preset
   ```tsx
   <div className="relative w-full flex items-center justify-center"
        style={{backgroundImage:`url('${src}')`, backgroundSize:'cover', backgroundPosition:'center', minHeight: minHeight ?? '500px'}}>
-    {(dimRatio ?? 0) > 0 && <div className="absolute inset-0 bg-black" style={{opacity:(dimRatio??0)/100}} />}
+    {/* overlay when dimRatio > 0 */}
+    <div className="absolute inset-0 bg-black" style={{opacity: (dimRatio ?? 0) / 100}} />
     <div className="relative z-10 flex flex-col items-center text-center px-6 py-16">
-      {/* children */}
+      {/* children rendered here */}
     </div>
   </div>
   ```
-  ⛔ **NEVER use `<img src={src}>` for a cover block** — the photo must be a CSS background, not a figure element.
+  ⛔ **NEVER use `<img src={src}>` for a cover block.** The image is a CSS background — rendering it as `<img>` will push it below the text content, breaking the layout entirely.
 - **Border radius** (`borderRadius`): if a node has a `borderRadius` field (e.g. `"24px"`, `"12px"`), apply it to the outermost element of that block using `rounded-[{value}]` (e.g. `rounded-[24px]`). This commonly appears on `media-text`, `image`, `cover`, and `group` blocks.
 - **Gap between children** (`gap`): if a node has a `gap` field, it defines the spacing between its children. Apply it as `gap-[{value}]` on the flex/grid container. If the value is a CSS variable like `var:preset|spacing|40`, look up the value in the **Spacing** table in the theme tokens and use the resolved px/rem value.
 - **Block padding** (`padding`): if a node has a `padding` field with `top`/`right`/`bottom`/`left` values, apply them to the outermost element using Tailwind arbitrary values: `pt-[top] pr-[right] pb-[bottom] pl-[left]`. Values are already resolved to `px`/`rem` — use as-is. This is critical for hero/cover/group sections — missing padding causes sections to appear too cramped.
@@ -243,7 +245,7 @@ Text content is in the `text` field, images in `src`, links in `href`, nested bl
     </div>
   </div>
   ```
-  **⛔ NEVER use `<img src={src}>` for a cover block.** The image is a CSS background — rendering it as `<img>` will push it below the text content, breaking the layout entirely.
+  ⛔ **NEVER use `<img src={src}>` for a cover block.** The image is a CSS background — rendering it as `<img>` will push it below the text content, breaking the layout entirely.
 - `block: "columns"` → render children side by side using CSS grid/flex
 - `block: "query"` → fetch posts from `/api/posts` and map over results. Inner block types:
   - `block: "post-title"` → `<a href={'/post/'+post.slug}>{post.title}</a>` — always wrap in an `<a>` tag, not a heading
@@ -272,6 +274,8 @@ Text content is in the `text` field, images in `src`, links in `href`, nested bl
 Output ONLY the raw TypeScript/TSX component code.
 
 - Do NOT write any explanation, description, or notes before or after the code
-- Do NOT wrap the code in markdown code fences (no \`\`\`tsx or \`\`\`)
+- Do NOT wrap the code in markdown code fences (no ```tsx or ```)
 - Do NOT output a migration plan, JSON, or any other content
 - Start directly with `import React` and end with `export default {{componentName}};`
+
+{{retryError}}

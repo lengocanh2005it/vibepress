@@ -1,0 +1,23 @@
+/* WP-React Base Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Base WP typography defaults if missing */
+body {
+  font-family: var(--wp--preset--font-family--body, sans-serif);
+  line-height: 1.6;
+  color: var(--wp--preset--color--contrast, #000);
+  background-color: var(--wp--preset--color--base, #fff);
+}

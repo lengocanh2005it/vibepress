@@ -55,6 +55,7 @@ export interface BlockParseResult {
   tokens: ThemeTokens;
   templates: { name: string; markup: string }[];
   parts: { name: string; markup: string }[];
+  themeName?: string;
 }
 
 @Injectable()
@@ -63,6 +64,15 @@ export class BlockParserService {
 
   async parse(themeDir: string): Promise<BlockParseResult> {
     this.logger.log(`Parsing FSE/Block theme: ${themeDir}`);
+
+    let themeName = 'Unknown';
+    try {
+      const styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+      const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
+      if (nameMatch) themeName = nameMatch[1].trim();
+    } catch {
+      // style.css might not exist or be readable
+    }
 
     const themeJson = await this.readJson(join(themeDir, 'theme.json'));
     const tokens = this.extractTokens(themeJson);
@@ -94,7 +104,7 @@ export class BlockParserService {
       markup: partMap.get(p.name) ?? p.markup,
     }));
 
-    return { type: 'fse', themeJson, tokens, templates, parts };
+    return { type: 'fse', themeJson, tokens, templates, parts, themeName };
   }
 
   private extractTokens(themeJson: Record<string, any> | null): ThemeTokens {
@@ -118,7 +128,13 @@ export class BlockParserService {
       settings.spacing?.spacingSizes ?? []
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
-    const defaults = this.extractDefaults(themeJson, colors, fonts, fontSizes, spacing);
+    const defaults = this.extractDefaults(
+      themeJson,
+      colors,
+      fonts,
+      fontSizes,
+      spacing,
+    );
     const blockStyles = this.extractBlockStyles(
       themeJson.styles?.blocks ?? {},
       colors,
