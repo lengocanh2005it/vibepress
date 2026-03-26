@@ -2,3 +2,4 @@
 /uploads
 /temp_workspaces
 /.env
+/db.json
