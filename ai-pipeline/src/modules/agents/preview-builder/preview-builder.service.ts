@@ -5,11 +5,13 @@ import { spawn } from 'child_process';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type { PlanResult } from '../planner/planner.service.js';
 
 export interface PreviewBuilderResult {
   jobId: string;
   previewDir: string;
   entryPath: string;
+  previewUrl: string;
   frontendPid?: number;
   serverPid?: number;
 }
@@ -29,9 +31,10 @@ export class PreviewBuilderService {
     dbCreds: WpDbCredentials;
     themeDir?: string;
     tokens?: ThemeTokens;
+    plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, tokens } = input;
+    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -41,6 +44,11 @@ export class PreviewBuilderService {
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
     await cp(TEMPLATE_DIR, frontendDir, { recursive: true });
+    
+    // Inject base.css
+    const baseCssPath = resolve('src/modules/agents/preview-builder/templates/base.css');
+    await cp(baseCssPath, join(srcDir, 'base.css'));
+
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
@@ -75,8 +83,8 @@ export class PreviewBuilderService {
       (c) => !PARTIAL_PATTERNS.test(c.name),
     );
 
-    // Map tên component → route path
-    const PAGE_ROUTE_MAP: Record<string, string> = {
+    // Build route map từ plan (primary) — fallback sang convention nếu plan thiếu
+    const FALLBACK_ROUTE_MAP: Record<string, string> = {
       Home: '/',
       Index: '/',
       FrontPage: '/',
@@ -94,6 +102,13 @@ export class PreviewBuilderService {
       Page404: '*',
     };
 
+    const planRouteMap = new Map<string, string>();
+    if (plan) {
+      for (const p of plan) {
+        if (p.route) planRouteMap.set(p.componentName, p.route);
+      }
+    }
+
     const routeImports = allComponents
       .map((c) => {
         const folder =
@@ -109,7 +124,10 @@ export class PreviewBuilderService {
     const routeLines: string[] = [];
 
     for (const c of pageComponents) {
-      const path = PAGE_ROUTE_MAP[c.name] ?? `/${c.name.toLowerCase()}`;
+      const path =
+        planRouteMap.get(c.name) ??
+        FALLBACK_ROUTE_MAP[c.name] ??
+        `/${c.name.toLowerCase()}`;
       if (usedPaths.has(path)) continue;
       usedPaths.add(path);
       routeLines.push(
@@ -129,6 +147,7 @@ export class PreviewBuilderService {
     await writeFile(
       join(srcDir, 'App.tsx'),
       `import { Routes, Route } from 'react-router-dom';
+import './base.css';
 ${routeImports}
 
 export default function App() {
@@ -148,11 +167,12 @@ ${routes}
 
     // 5. Generate .env cho từng folder
     const apiPort = this.pickApiPort(jobId);
+    const vitePort = this.pickVitePort(jobId);
 
     // frontend/.env — chỉ cần biết API chạy ở đâu
     await writeFile(
       join(frontendDir, '.env'),
-      `VITE_API_PORT=${apiPort}\nVITE_API_BASE=http://localhost:${apiPort}/api\n`,
+      `VITE_PORT=${vitePort}\nVITE_API_PORT=${apiPort}\nVITE_API_BASE=http://localhost:${apiPort}/api\n`,
     );
 
     // server/.env — DB credentials + port
@@ -172,11 +192,13 @@ ${routes}
     const frontendProc = this.spawnDevServer(frontendDir);
     const serverProc = this.spawnDevServer(serverDir);
 
-    this.logger.log(`Preview ready at: ${rootDir}`);
+    const previewUrl = `http://localhost:${vitePort}`;
+    this.logger.log(`Preview ready at: ${previewUrl}`);
     return {
       jobId,
       previewDir: rootDir,
       entryPath: join(srcDir, 'main.tsx'),
+      previewUrl,
       frontendPid: frontendProc.pid,
       serverPid: serverProc.pid,
     };
@@ -215,22 +237,108 @@ ${fontEntries}
 `,
     );
 
-    // 2. Inject CSS variables (contentWidth, wideWidth) vào index.css
-    if (tokens.defaults?.contentWidth || tokens.defaults?.wideWidth) {
+    // 2. Inject CSS variables + body font + heading sizes vào index.css
+    {
       const cssPath = join(frontendDir, 'src', 'index.css');
-      const cssContent = await readFile(cssPath, 'utf-8');
+      let cssContent = await readFile(cssPath, 'utf-8');
+
+      // :root — inject ALL WP preset CSS variables so AI-generated components
+      // can reference var(--wp--preset--color--slug) etc. without guessing hex values.
       const vars: string[] = [];
-      if (tokens.defaults.contentWidth)
-        vars.push(`  --wp-content-width: ${tokens.defaults.contentWidth};`);
-      if (tokens.defaults.wideWidth)
-        vars.push(`  --wp-wide-width: ${tokens.defaults.wideWidth};`);
-      await writeFile(
-        cssPath,
-        cssContent.replace(
-          /:root \{[\s\S]*?\}/,
-          `:root {\n${vars.join('\n')}\n}`,
-        ),
+
+      // Layout & gap (legacy aliases + WP standard names)
+      const cw = tokens.defaults?.contentWidth ?? '650px';
+      const ww = tokens.defaults?.wideWidth ?? '1200px';
+      const bg = tokens.defaults?.blockGap ?? '1.5rem';
+      vars.push(`  --wp-content-width: ${cw};`);
+      vars.push(`  --wp-wide-width: ${ww};`);
+      vars.push(`  --wp-block-gap: ${bg};`);
+      vars.push(`  --wp--style--global--content-size: ${cw};`);
+      vars.push(`  --wp--style--global--wide-size: ${ww};`);
+      vars.push(`  --wp--style--block-gap: ${bg};`);
+
+      // Color preset variables
+      for (const c of tokens.colors)
+        vars.push(`  --wp--preset--color--${c.slug}: ${c.value};`);
+
+      // Font-size preset variables
+      for (const s of tokens.fontSizes)
+        vars.push(`  --wp--preset--font-size--${s.slug}: ${s.size};`);
+
+      // Font-family preset variables
+      for (const f of tokens.fonts)
+        vars.push(`  --wp--preset--font-family--${f.slug}: ${f.family};`);
+
+      // Spacing preset variables
+      for (const s of tokens.spacing)
+        vars.push(`  --wp--preset--spacing--${s.slug}: ${s.size};`);
+
+      cssContent = cssContent.replace(
+        /:root \{[\s\S]*?\}/,
+        `:root {\n${vars.join('\n')}\n}`,
       );
+
+      // body — default font-family, font-size, color từ theme
+      const bodyRules: string[] = [];
+      if (tokens.defaults?.fontFamily)
+        bodyRules.push(`  font-family: ${tokens.defaults.fontFamily};`);
+      if (tokens.defaults?.fontSize)
+        bodyRules.push(`  font-size: ${tokens.defaults.fontSize};`);
+      if (tokens.defaults?.textColor)
+        bodyRules.push(`  color: ${tokens.defaults.textColor};`);
+      if (tokens.defaults?.bgColor)
+        bodyRules.push(`  background-color: ${tokens.defaults.bgColor};`);
+      if (bodyRules.length > 0)
+        cssContent += `\nbody {\n${bodyRules.join('\n')}\n}\n`;
+
+      // Global block gap — mirrors WP's --wp--style--block-gap behavior
+      // .is-layout-flow uses margin-top; .is-layout-flex uses gap (handled by CSS class in index.css)
+      cssContent += `\n.wp-block-group.is-layout-flow > * + *,\n.wp-block-cover__inner-container > * + * {\n  margin-top: var(--wp--style--block-gap, 1.5rem);\n}\n`;
+
+      // Restore browser-default-like vertical spacing stripped by Tailwind Preflight.
+      // WordPress themes rely on these margins; without them elements appear crammed.
+      cssContent += `
+/* Prose spacing — restore browser defaults removed by Tailwind Preflight */
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0.75em;
+  margin-bottom: 0.4em;
+}
+p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+ul, ol {
+  margin-top: 0;
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+li + li {
+  margin-top: 0.25em;
+}
+figure {
+  margin: 0 0 1em;
+}
+`;
+
+      // h1–h6 — heading sizes + weights từ theme tokens (chính xác hơn Tailwind generic)
+      const headings = tokens.defaults?.headings;
+      if (headings) {
+        const headingColor = tokens.defaults?.headingColor
+          ? `  color: ${tokens.defaults.headingColor};`
+          : '';
+        for (const level of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const) {
+          const h = headings[level];
+          if (!h) continue;
+          const rules: string[] = [];
+          if (h.fontSize) rules.push(`  font-size: ${h.fontSize};`);
+          if (h.fontWeight) rules.push(`  font-weight: ${h.fontWeight};`);
+          if (headingColor) rules.push(headingColor);
+          if (rules.length > 0)
+            cssContent += `\n${level} {\n${rules.join('\n')}\n}\n`;
+        }
+      }
+
+      await writeFile(cssPath, cssContent);
     }
 
     // 3. Inject Google Fonts vào index.html
@@ -289,5 +397,10 @@ ${fontEntries}
   private pickApiPort(jobId: string): number {
     const hash = jobId.replace(/-/g, '').slice(0, 6);
     return 3200 + (parseInt(hash, 16) % 800);
+  }
+
+  private pickVitePort(jobId: string): number {
+    const hash = jobId.replace(/-/g, '').slice(6, 12);
+    return 5200 + (parseInt(hash, 16) % 800);
   }
 }

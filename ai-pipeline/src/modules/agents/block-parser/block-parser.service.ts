@@ -17,6 +17,7 @@ export interface ThemeDefaults {
   wideWidth?: string;
   buttonBorderRadius?: string;
   buttonPadding?: string;
+  blockGap?: string;
   headings?: {
     h1?: { fontSize?: string; fontWeight?: string };
     h2?: { fontSize?: string; fontWeight?: string };
@@ -29,7 +30,12 @@ export interface ThemeDefaults {
 
 export interface ThemeBlockStyle {
   color?: { text?: string; background?: string };
-  typography?: { fontSize?: string; fontWeight?: string; letterSpacing?: string; lineHeight?: string };
+  typography?: {
+    fontSize?: string;
+    fontWeight?: string;
+    letterSpacing?: string;
+    lineHeight?: string;
+  };
   border?: { radius?: string };
   spacing?: { padding?: string };
 }
@@ -49,6 +55,7 @@ export interface BlockParseResult {
   tokens: ThemeTokens;
   templates: { name: string; markup: string }[];
   parts: { name: string; markup: string }[];
+  themeName?: string;
 }
 
 @Injectable()
@@ -57,6 +64,15 @@ export class BlockParserService {
 
   async parse(themeDir: string): Promise<BlockParseResult> {
     this.logger.log(`Parsing FSE/Block theme: ${themeDir}`);
+
+    let themeName = 'Unknown';
+    try {
+      const styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+      const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
+      if (nameMatch) themeName = nameMatch[1].trim();
+    } catch {
+      // style.css might not exist or be readable
+    }
 
     const themeJson = await this.readJson(join(themeDir, 'theme.json'));
     const tokens = this.extractTokens(themeJson);
@@ -88,7 +104,7 @@ export class BlockParserService {
       markup: partMap.get(p.name) ?? p.markup,
     }));
 
-    return { type: 'fse', themeJson, tokens, templates, parts };
+    return { type: 'fse', themeJson, tokens, templates, parts, themeName };
   }
 
   private extractTokens(themeJson: Record<string, any> | null): ThemeTokens {
@@ -112,7 +128,13 @@ export class BlockParserService {
       settings.spacing?.spacingSizes ?? []
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
-    const defaults = this.extractDefaults(themeJson, colors, fonts, fontSizes);
+    const defaults = this.extractDefaults(
+      themeJson,
+      colors,
+      fonts,
+      fontSizes,
+      spacing,
+    );
     const blockStyles = this.extractBlockStyles(
       themeJson.styles?.blocks ?? {},
       colors,
@@ -165,16 +187,36 @@ export class BlockParserService {
     return fontSizes.find((s) => s.slug === match[1])?.size;
   }
 
+  private resolveSpacingVar(
+    value: string | undefined,
+    spacing: ThemeTokens['spacing'],
+  ): string | undefined {
+    if (!value) return undefined;
+    // Direct value (e.g. "1.5rem")
+    if (!value.includes('var')) return value;
+    // "var:preset|spacing|50" (theme.json shorthand)
+    const shorthand = value.match(/var:preset\|spacing\|([^|)\s]+)/);
+    if (shorthand) return spacing.find((s) => s.slug === shorthand[1])?.size;
+    // "var(--wp--preset--spacing--50)"
+    const cssVar = value.match(/var\(--wp--preset--spacing--([^)]+)\)/);
+    if (cssVar) return spacing.find((s) => s.slug === cssVar[1])?.size;
+    return undefined;
+  }
+
   private extractDefaults(
     themeJson: Record<string, any>,
     colors: ThemeTokens['colors'],
     fonts: ThemeTokens['fonts'],
     fontSizes: ThemeTokens['fontSizes'],
+    spacing: ThemeTokens['spacing'],
   ): ThemeDefaults | undefined {
     const styles = themeJson.styles ?? {};
     const settings = themeJson.settings ?? {};
     const resolve = (v: string | undefined) => this.resolveCssVar(v, colors);
-    const resolveFs = (v: string | undefined) => this.resolveFontSize(v, fontSizes);
+    const resolveFs = (v: string | undefined) =>
+      this.resolveFontSize(v, fontSizes);
+    const resolveSp = (v: string | undefined) =>
+      this.resolveSpacingVar(v, spacing);
 
     const textColor = resolve(styles.color?.text);
     const bgColor = resolve(styles.color?.background);
@@ -184,16 +226,27 @@ export class BlockParserService {
     const buttonBgColor = resolve(styles.elements?.button?.color?.background);
     const buttonTextColor = resolve(styles.elements?.button?.color?.text);
     const fontSize = resolveFs(styles.typography?.fontSize);
-    const fontFamily = this.resolveFontFamily(styles.typography?.fontFamily, fonts);
+    const fontFamily = this.resolveFontFamily(
+      styles.typography?.fontFamily,
+      fonts,
+    );
     const lineHeight = styles.typography?.lineHeight as string | undefined;
+    const blockGap = resolveSp(styles.spacing?.blockGap);
     const contentWidth = settings.layout?.contentSize as string | undefined;
     const wideWidth = settings.layout?.wideSize as string | undefined;
-    const buttonBorderRadius = styles.elements?.button?.border?.radius as string | undefined;
+    const buttonBorderRadius = styles.elements?.button?.border?.radius as
+      | string
+      | undefined;
 
     const rawPadding = styles.elements?.button?.spacing?.padding;
     let buttonPadding: string | undefined;
     if (rawPadding && typeof rawPadding === 'object') {
-      const { top = '0', right = '0', bottom = '0', left = '0' } = rawPadding as any;
+      const {
+        top = '0',
+        right = '0',
+        bottom = '0',
+        left = '0',
+      } = rawPadding as any;
       buttonPadding = `${top} ${right} ${bottom} ${left}`;
     } else if (typeof rawPadding === 'string') {
       buttonPadding = rawPadding;
@@ -218,10 +271,22 @@ export class BlockParserService {
     }
 
     if (
-      !textColor && !bgColor && !headingColor && !linkColor && !captionColor &&
-      !buttonBgColor && !buttonTextColor && !fontSize && !fontFamily &&
-      !lineHeight && !contentWidth && !wideWidth && !buttonBorderRadius &&
-      !buttonPadding && !hasHeadings
+      !textColor &&
+      !bgColor &&
+      !headingColor &&
+      !linkColor &&
+      !captionColor &&
+      !buttonBgColor &&
+      !buttonTextColor &&
+      !fontSize &&
+      !fontFamily &&
+      !lineHeight &&
+      !contentWidth &&
+      !wideWidth &&
+      !buttonBorderRadius &&
+      !buttonPadding &&
+      !blockGap &&
+      !hasHeadings
     )
       return undefined;
 
@@ -240,6 +305,7 @@ export class BlockParserService {
       ...(wideWidth && { wideWidth }),
       ...(buttonBorderRadius && { buttonBorderRadius }),
       ...(buttonPadding && { buttonPadding }),
+      ...(blockGap && { blockGap }),
       ...(hasHeadings && { headings }),
     };
   }
@@ -249,7 +315,8 @@ export class BlockParserService {
     colors: ThemeTokens['colors'],
     fontSizes: ThemeTokens['fontSizes'],
   ): ThemeTokens['blockStyles'] {
-    if (!blocksStyles || Object.keys(blocksStyles).length === 0) return undefined;
+    if (!blocksStyles || Object.keys(blocksStyles).length === 0)
+      return undefined;
     const result: NonNullable<ThemeTokens['blockStyles']> = {};
 
     for (const [blockType, style] of Object.entries(blocksStyles)) {
@@ -263,9 +330,14 @@ export class BlockParserService {
           ...(bgColor && { background: bgColor }),
         };
 
-      const fontSize = this.resolveFontSize(style.typography?.fontSize, fontSizes);
+      const fontSize = this.resolveFontSize(
+        style.typography?.fontSize,
+        fontSizes,
+      );
       const fontWeight = style.typography?.fontWeight as string | undefined;
-      const letterSpacing = style.typography?.letterSpacing as string | undefined;
+      const letterSpacing = style.typography?.letterSpacing as
+        | string
+        | undefined;
       const lineHeight = style.typography?.lineHeight as string | undefined;
       if (fontSize || fontWeight || letterSpacing || lineHeight)
         resolved.typography = {
@@ -275,12 +347,18 @@ export class BlockParserService {
           ...(lineHeight && { lineHeight }),
         };
 
-      if (style.border?.radius) resolved.border = { radius: style.border.radius as string };
+      if (style.border?.radius)
+        resolved.border = { radius: style.border.radius as string };
 
       const rawPad = style.spacing?.padding;
       if (rawPad) {
         if (typeof rawPad === 'object') {
-          const { top = '0', right = '0', bottom = '0', left = '0' } = rawPad as any;
+          const {
+            top = '0',
+            right = '0',
+            bottom = '0',
+            left = '0',
+          } = rawPad as any;
           resolved.spacing = { padding: `${top} ${right} ${bottom} ${left}` };
         } else {
           resolved.spacing = { padding: rawPad as string };

@@ -1,8 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import Anthropic from '@anthropic-ai/sdk';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
-import { ANTHROPIC_CLIENT } from '../../../common/providers/anthropic/anthropic.provider.js';
+import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -12,12 +11,23 @@ import {
   buildSectionPrompt,
 } from './prompts/component.prompt.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
+import type { PlanResult } from '../planner/planner.service.js';
 import {
   wpBlocksToJson,
   wpJsonToString,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
+import { StyleResolverService } from '../style-resolver/style-resolver.service.js';
+import { ValidatorService } from '../validator/validator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+
+// Templates larger than this threshold are split into section sub-components (FSE only)
+const CHUNK_THRESHOLD_CHARS = 40_000;
+// Target size per section chunk
+const CHUNK_TARGET_CHARS = 15_000;
+// Component names matching these patterns are placed in src/components (partials), not src/pages
+const PARTIAL_PATTERNS =
+  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Search|Part|Archive|Comments|Template)/i;
 
 export interface GeneratedComponent {
   name: string;
@@ -34,25 +44,16 @@ export interface ReactGenerateResult {
   outDir: string;
 }
 
-// Keep in sync with PARTIAL_PATTERNS in preview-builder.service.ts
-const PARTIAL_PATTERNS =
-  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
-// Threshold: if serialised template JSON exceeds this, use section chunking.
-const CHUNK_THRESHOLD_CHARS = 12_000;
-
-// Target size per chunk in chars (serialised JSON of WpNode[]).
-const CHUNK_TARGET_CHARS = 6_000;
-
 @Injectable()
 export class ReactGeneratorService {
   private readonly logger = new Logger(ReactGeneratorService.name);
-
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
-    @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
+    private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
+    private readonly styleResolver: StyleResolverService,
+    private readonly validator: ValidatorService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -60,10 +61,11 @@ export class ReactGeneratorService {
   async generate(input: {
     theme: PhpParseResult | BlockParseResult;
     content: DbContentResult;
+    plan?: PlanResult;
     jobId?: string;
     logPath?: string;
   }): Promise<ReactGenerateResult> {
-    const { theme, content, jobId = 'unknown', logPath } = input;
+    const { theme, content, plan, jobId = 'unknown', logPath } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
@@ -72,10 +74,7 @@ export class ReactGeneratorService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    const modelName = this.configService.get<string>(
-      'anthropic.model',
-      'claude-opus-4-6',
-    );
+    const modelName = this.llmFactory.getModel();
 
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = theme.type === 'fse' ? theme.tokens : undefined;
@@ -108,6 +107,10 @@ export class ReactGeneratorService {
         `${counter} Generating "${componentName}.tsx" → ${folder}/`,
       );
 
+      const componentPlan = plan?.find(
+        (p) => p.templateName === tpl.name || p.componentName === componentName,
+      );
+
       const t0 = Date.now();
       const produced = await this.generateForTemplate({
         componentName,
@@ -117,6 +120,7 @@ export class ReactGeneratorService {
         content,
         tokens,
         themeType: theme.type,
+        componentPlan,
         logPath,
       });
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
@@ -165,6 +169,7 @@ export class ReactGeneratorService {
     content: DbContentResult;
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
+    componentPlan?: PlanResult[number];
     logPath?: string;
   }): Promise<GeneratedComponent[]> {
     const {
@@ -175,15 +180,16 @@ export class ReactGeneratorService {
       content,
       tokens,
       themeType,
+      componentPlan,
       logPath,
     } = input;
 
-    // Classic PHP themes: use raw stripped HTML — wpBlocksToJson only understands wp: block comments
-    const isClassic = themeType === 'classic';
-    const nodes = isClassic ? [] : wpBlocksToJson(rawSource);
-    const templateSource = isClassic ? rawSource : wpJsonToString(nodes);
+    const templateSource = rawSource;
 
-    if (isClassic || templateSource.length <= CHUNK_THRESHOLD_CHARS) {
+    if (
+      themeType === 'classic' ||
+      templateSource.length <= CHUNK_THRESHOLD_CHARS
+    ) {
       const comp = await this.generateSingle({
         componentName,
         templateSource,
@@ -191,10 +197,13 @@ export class ReactGeneratorService {
         systemPrompt,
         content,
         tokens,
+        componentPlan,
         logPath,
       });
       return [comp];
     }
+
+    const nodes = wpBlocksToJson(templateSource);
 
     // Too large → split into sections (FSE only)
     this.logger.warn(
@@ -254,6 +263,7 @@ export class ReactGeneratorService {
     systemPrompt: string;
     content: DbContentResult;
     tokens?: ThemeTokens;
+    componentPlan?: PlanResult[number];
     logPath?: string;
   }): Promise<GeneratedComponent> {
     const {
@@ -263,10 +273,12 @@ export class ReactGeneratorService {
       systemPrompt,
       content,
       tokens,
+      componentPlan,
       logPath,
     } = input;
 
     let code = '';
+    let lastValidationError: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
         modelName,
@@ -277,23 +289,43 @@ export class ReactGeneratorService {
           content.siteInfo,
           content,
           tokens,
+          componentPlan,
+          attempt > 1
+            ? `Previous attempt failed structural validation: ${lastValidationError}`
+            : undefined,
         ),
         5,
         logPath,
         componentName,
       );
       code = this.stripMarkdownFences(raw);
-      if (this.isBraceBalanced(code)) break;
+      code = this.mergeClassNames(code);
+
+      const check = this.validator.checkCodeStructure(code);
+      if (check.isValid) break;
+
+      lastValidationError = check.error;
       this.logger.warn(
-        `Component ${componentName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
+        `Component ${componentName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
       );
       await this.logToFile(
         logPath,
-        `WARN "${componentName}" unbalanced braces — retry ${attempt}/3`,
+        `WARN "${componentName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
       );
     }
 
     return { name: componentName, filePath: '', code };
+  }
+
+  private mergeClassNames(code: string): string {
+    // Simple regex-based approach to merge duplicate className attributes
+    // e.g. <div className="a" className="b"> -> <div className="a b">
+    return code.replace(
+      /(<[a-zA-Z0-9]+[^>]*?)\s+className=["']([^"']*)["']([^>]*?)\s+className=["']([^"']*)["']([^>]*>)/g,
+      (match, tagStart, class1, mid, class2, tagEnd) => {
+        return `${tagStart} className="${class1} ${class2}"${mid}${tagEnd}`;
+      },
+    );
   }
 
   // ── Section generation — one AI call per chunk ────────────────────────────
@@ -338,8 +370,8 @@ export class ReactGeneratorService {
     });
 
     let code = '';
+    let lastValidationError: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      // No system prompt for sections — the user prompt is fully self-contained
       const raw = await this.generateWithRetry(
         modelName,
         '',
@@ -349,13 +381,18 @@ export class ReactGeneratorService {
         sectionName,
       );
       code = this.stripMarkdownFences(raw);
-      if (this.isBraceBalanced(code)) break;
+      code = this.mergeClassNames(code);
+
+      const check = this.validator.checkCodeStructure(code);
+      if (check.isValid) break;
+
+      lastValidationError = check.error;
       this.logger.warn(
-        `Section ${sectionName} has unbalanced braces (attempt ${attempt}/3), retrying...`,
+        `Section ${sectionName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
       );
       await this.logToFile(
         logPath,
-        `WARN "${sectionName}" unbalanced braces — retry ${attempt}/3`,
+        `WARN "${sectionName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
       );
     }
 
@@ -454,31 +491,35 @@ ${renders}
     let delay = 30000;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const response = await this.anthropic.messages.create({
+        const result = await this.llmFactory.chat({
           model,
-          max_tokens: 8192,
-          ...(systemPrompt ? { system: systemPrompt } : {}),
-          messages: [{ role: 'user', content: userPrompt }],
+          systemPrompt,
+          userPrompt,
         });
 
-        const usage = response.usage;
         await this.tokenTracker.track(
           model,
-          usage?.input_tokens ?? 0,
-          usage?.output_tokens ?? 0,
+          result.inputTokens,
+          result.outputTokens,
           label,
         );
 
-        const firstBlock = response.content[0];
-        return firstBlock?.type === 'text' ? firstBlock.text : '';
+        return result.text;
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
         const isServerError = err?.status === 500 || err?.status === 529;
         const isTimeout =
           err?.name === 'APIConnectionTimeoutError' ||
           err?.name === 'APIConnectionError';
-        if ((isRateLimit || isTimeout || isServerError) && attempt < maxRetries) {
-          const reason = isTimeout ? 'Timeout' : isServerError ? 'Server error' : 'Rate limit';
+        if (
+          (isRateLimit || isTimeout || isServerError) &&
+          attempt < maxRetries
+        ) {
+          const reason = isTimeout
+            ? 'Timeout'
+            : isServerError
+              ? 'Server error'
+              : 'Rate limit';
           const msg = `${reason}, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
           this.logger.warn(msg);
           await this.logToFile(logPath, `WARN ${msg}`);

@@ -1,5 +1,6 @@
 export default () => ({
   port: process.env.PORT || '3001',
+  aiProvider: process.env.AI_PROVIDER || 'mistral',
   db: {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT ?? '3306', 10),

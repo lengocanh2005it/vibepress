@@ -5,6 +5,7 @@ import { join, extname } from 'path';
 export interface PhpParseResult {
   type: 'classic';
   templates: { name: string; html: string }[];
+  themeName?: string;
 }
 
 @Injectable()
@@ -16,6 +17,15 @@ export class PhpParserService {
     const entries = await readdir(themeDir);
     const phpFiles = entries.filter((f) => extname(f) === '.php');
 
+    let themeName = 'Unknown';
+    try {
+      const styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+      const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
+      if (nameMatch) themeName = nameMatch[1].trim();
+    } catch {
+      // style.css might not exist or be readable
+    }
+
     const templates = await Promise.all(
       phpFiles.map(async (file) => {
         const raw = await readFile(join(themeDir, file), 'utf-8');
@@ -23,7 +33,7 @@ export class PhpParserService {
       }),
     );
 
-    return { type: 'classic', templates };
+    return { type: 'classic', templates, themeName };
   }
 
   // Chuyển PHP tags thành comments có nghĩa để AI hiểu cấu trúc

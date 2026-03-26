@@ -19,6 +19,16 @@ export interface WpNode {
   // Styling hints extracted from params
   bgColor?: string; // slug or hex — from params.backgroundColor or params.style.color.background
   textColor?: string; // slug or hex — from params.textColor or params.style.color.text
+  borderRadius?: string; // from params.style.border.radius
+  gap?: string; // from params.style.spacing.blockGap or params.gap — spacing preset or px value
+  padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
+  margin?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.margin
+  minHeight?: string; // from params.minHeight (cover/group blocks)
+  overlayColor?: string; // cover block overlay color hex (pre-resolved)
+  columnWidth?: string; // wp:column percentage width (e.g. "33.33%")
+  textAlign?: string; // from params.textAlign
+  align?: string; // "full" | "wide" | "center" — section width hint
+  fontFamily?: string; // slug from params.fontFamily
   // Inline typography from params.style.typography
   typography?: {
     letterSpacing?: string;
@@ -26,6 +36,7 @@ export interface WpNode {
     lineHeight?: string;
     fontSize?: string;
     fontWeight?: string;
+    fontFamily?: string;
   };
   children?: WpNode[];
 }
@@ -160,6 +171,24 @@ function parseBlocks(markup: string): WpNode[] {
       node.bgColor = params.style.color.background as string;
     if (params?.style?.color?.text && !node.textColor)
       node.textColor = params.style.color.text as string;
+    // Lift border radius from params.style.border.radius
+    const borderRadius = params?.style?.border?.radius;
+    if (borderRadius) node.borderRadius = borderRadius as string;
+    // Lift gap from params.style.spacing.blockGap or params.gap
+    const gap = params?.style?.spacing?.blockGap ?? params?.gap;
+    if (gap) node.gap = gap as string;
+    // Lift padding from params.style.spacing.padding
+    const pad = params?.style?.spacing?.padding;
+    if (pad && typeof pad === 'object') {
+      node.padding = {
+        top: pad.top as string | undefined,
+        right: pad.right as string | undefined,
+        bottom: pad.bottom as string | undefined,
+        left: pad.left as string | undefined,
+      };
+    }
+    // Lift minHeight (cover/group blocks)
+    if (params?.minHeight) node.minHeight = String(params.minHeight);
     // Lift inline typography from params.style.typography
     const typo = params?.style?.typography;
     if (typo) {
@@ -169,8 +198,30 @@ function parseBlocks(markup: string): WpNode[] {
       if (typo.lineHeight) t.lineHeight = typo.lineHeight as string;
       if (typo.fontSize) t.fontSize = typo.fontSize as string;
       if (typo.fontWeight) t.fontWeight = typo.fontWeight as string;
+      if (typo.fontFamily) t.fontFamily = typo.fontFamily as string;
       if (Object.keys(t).length > 0) node.typography = t;
     }
+    // Lift margin from params.style.spacing.margin
+    const mar = params?.style?.spacing?.margin;
+    if (mar && typeof mar === 'object') {
+      node.margin = {
+        top: mar.top as string | undefined,
+        right: mar.right as string | undefined,
+        bottom: mar.bottom as string | undefined,
+        left: mar.left as string | undefined,
+      };
+    }
+    // Lift overlayColor for cover blocks (will be resolved to hex later)
+    if (params?.overlayColor) node.overlayColor = params.overlayColor as string;
+    // Lift column width percentage
+    if (blockName === 'column' && params?.width)
+      node.columnWidth = params.width as string;
+    // Lift textAlign
+    if (params?.textAlign) node.textAlign = params.textAlign as string;
+    // Lift align (full/wide/center)
+    if (params?.align) node.align = params.align as string;
+    // Lift fontFamily slug
+    if (params?.fontFamily) node.fontFamily = params.fontFamily as string;
     nodes.push(node);
   }
 
