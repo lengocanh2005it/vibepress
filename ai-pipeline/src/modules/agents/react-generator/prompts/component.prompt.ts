@@ -164,12 +164,17 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.colors.length > 0) {
     lines.push(
-      '**Colors** — when a block uses a color slug, use Tailwind arbitrary value with the exact hex:',
+      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Apply them directly:',
+    );
+    lines.push(
+      '- `bgColor` → `style={{backgroundColor:"#hex"}}` (use the value as-is)',
+    );
+    lines.push('- `textColor` → `style={{color:"#hex"}}` (use the value as-is)');
+    lines.push(
+      '- If you need a color by CSS var (e.g. for root defaults), the palette is:',
     );
     for (const c of tokens.colors) {
-      lines.push(
-        `- slug \`${c.slug}\` → use \`bg-[${c.value}]\` / \`text-[${c.value}]\` / \`border-[${c.value}]\``,
-      );
+      lines.push(`  - slug \`${c.slug}\` → \`${c.value}\``);
     }
   }
 
@@ -494,13 +499,23 @@ ${groundingNote}
 ## Layout + content rules
 - **Preserve the exact order of blocks** in the JSON
 - \`src\` fields → use as image \`src\`; paths like \`/wp-content/uploads/...\` keep as-is
-- \`block: "cover"\` → full-width section with background image from \`src\` field
+- \`block: "cover"\` → **CRITICAL**: render as a \`<div>\` with CSS \`backgroundImage\` — the \`src\` field is a background photo, NOT a figure/img. Use \`style={{backgroundImage:"url('"+src+"')", backgroundSize:'cover', backgroundPosition:'center', minHeight: minHeight ?? '500px'}}\` on the outer div. Content goes on top inside a \`relative z-10\` child. Add \`<div className="absolute inset-0 bg-black" style={{opacity:(dimRatio??0)/100}} />\` overlay when dimRatio > 0. **⛔ NEVER use \`<img src={src}>\` for a cover block.**
 - \`block: "columns"\` → render children side by side (CSS grid/flex)
-- \`block: "query"\` → fetch \`/api/posts\` and map over results; text inside query blocks comes from fetched data, NOT hardcoded
+- \`block: "query"\` → fetch \`/api/posts\` and map over results. Inner blocks: \`post-title\` → \`<a href={'/post/'+post.slug}>{post.title}</a>\`; \`post-date\` → \`<time className="whitespace-nowrap">{post.date}</time>\` (always \`whitespace-nowrap\` — never let the date break across lines); \`post-author\` → \`<span>by {post.author}</span>\`; \`post-excerpt\` → \`<p>{post.excerpt}</p>\`; \`post-featured-image\` → conditional \`<img src={post.featuredImage} />\`. If the post row shows columns (title | date | meta), use \`flex items-baseline gap-4\` with \`flex-1\` on title and \`whitespace-nowrap shrink-0\` on date/meta to prevent narrow cells.
 - \`html\` field → render with \`dangerouslySetInnerHTML\` in \`<div className="prose max-w-none">\`
-- \`bgColor\` / \`textColor\` → look up the slug in the theme tokens table above and apply the corresponding hex using Tailwind arbitrary classes: \`bg-[#hex]\` / \`text-[#hex]\`. NEVER use \`bg-[slug]\` — always use the actual hex value.
-- **Default colors**: when a block has NO explicit \`bgColor\`/\`textColor\`, apply the **Default colors** from the theme tokens table. Root wrapper must use page bg/text defaults; all \`<h1>\`–\`<h6>\` use heading default; all \`<a>\` use link default; buttons without explicit color use button defaults. Do NOT use generic Tailwind colors like \`text-gray-700\` — always use the exact hex from theme tokens.
-- Replace ALL original CSS with Tailwind utility classes; no inline styles
+- \`bgColor\` / \`textColor\` fields in the JSON are already resolved hex values — apply directly: \`style={{backgroundColor:'#hex'}}\` / \`style={{color:'#hex'}}\`. NEVER use generic Tailwind colors like \`text-gray-700\`, \`bg-white\`.
+- \`overlayColor\` on a cover node is already a hex value — use \`style={{backgroundColor:'#hex'}}\` for the overlay div. If absent, fall back to \`bg-black\`.
+- **Default colors**: root wrapper uses \`style={{backgroundColor:'var(--wp--preset--color--base,#fff)',color:'var(--wp--preset--color--contrast,#000)'}}\`.
+- **Block padding** (\`padding\`): values already in px/rem — apply as \`pt-[top] pr-[right] pb-[bottom] pl-[left]\`.
+- **Block margin** (\`margin\`): apply as \`mt-[top] mr-[right] mb-[bottom] ml-[left]\`. Never skip.
+- **Column width** (\`columnWidth\`): apply \`style={{flexBasis:'XX%',flexGrow:0,flexShrink:0}}\` on \`block:"column"\` elements.
+- **Text alignment** (\`textAlign\`): apply \`text-left\` / \`text-center\` / \`text-right\` directly.
+- **Section width** (\`align\`): \`"full"\` → \`w-full\`; \`"wide"\` → \`style={{maxWidth:'var(--wp--style--global--wide-size)'}} className="mx-auto w-full"\`; absent → content max-width.
+- **Font family on block** (\`fontFamily\` slug): \`style={{fontFamily:'var(--wp--preset--font-family--{slug})'}}\`.
+- **Font sizes** slug → \`style={{fontSize:'var(--wp--preset--font-size--{slug})'}}\`. NEVER use \`text-sm\`, \`text-xl\`, etc.
+- **Gap / spacing** → \`style={{gap:'var(--wp--style--block-gap)'}}\` for block-level gap; spacing values in JSON are already resolved to px/rem.
+- **WP block class names**: add \`wp-block-{type}\` to each block's outermost element (e.g. \`wp-block-cover\`, \`wp-block-columns\`, \`wp-block-group is-layout-flex\`, \`wp-block-query\`). These classes have layout CSS pre-defined — you get flex/grid/cover layout for free.
+- Use Tailwind ONLY for fine-grained layout utilities: \`flex\`, \`grid\`, \`items-center\`, \`justify-between\`, \`w-full\`, \`mx-auto\`, \`relative\`, \`absolute\`, \`z-10\`, \`overflow-hidden\`, \`min-h-[value]\`.
 
 ## GOLDEN RULE — Two sources only
 Every piece of content must come from EXACTLY one of:

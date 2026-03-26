@@ -1,8 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import Anthropic from '@anthropic-ai/sdk';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
-import { ANTHROPIC_CLIENT } from '../../../common/providers/anthropic/anthropic.provider.js';
+import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -18,6 +17,7 @@ import {
   wpJsonToString,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
+import { StyleResolverService } from '../style-resolver/style-resolver.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 
 export interface GeneratedComponent {
@@ -52,8 +52,9 @@ export class ReactGeneratorService {
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
-    @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
+    private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
+    private readonly styleResolver: StyleResolverService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -74,10 +75,7 @@ export class ReactGeneratorService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    const modelName = this.configService.get<string>(
-      'anthropic.model',
-      'claude-opus-4-6',
-    );
+    const modelName = this.llmFactory.getModel();
 
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = theme.type === 'fse' ? theme.tokens : undefined;
@@ -190,7 +188,12 @@ export class ReactGeneratorService {
     // Classic PHP themes: use raw stripped HTML — wpBlocksToJson only understands wp: block comments
     const isClassic = themeType === 'classic';
     const nodes = isClassic ? [] : wpBlocksToJson(rawSource);
-    const templateSource = isClassic ? rawSource : wpJsonToString(nodes);
+    const resolvedNodes = isClassic
+      ? nodes
+      : this.styleResolver.resolve(nodes, tokens);
+    const templateSource = isClassic
+      ? rawSource
+      : wpJsonToString(resolvedNodes);
 
     if (isClassic || templateSource.length <= CHUNK_THRESHOLD_CHARS) {
       const comp = await this.generateSingle({
@@ -467,23 +470,20 @@ ${renders}
     let delay = 30000;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const response = await this.anthropic.messages.create({
+        const result = await this.llmFactory.chat({
           model,
-          max_tokens: 8192,
-          ...(systemPrompt ? { system: systemPrompt } : {}),
-          messages: [{ role: 'user', content: userPrompt }],
+          systemPrompt,
+          userPrompt,
         });
 
-        const usage = response.usage;
         await this.tokenTracker.track(
           model,
-          usage?.input_tokens ?? 0,
-          usage?.output_tokens ?? 0,
+          result.inputTokens,
+          result.outputTokens,
           label,
         );
 
-        const firstBlock = response.content[0];
-        return firstBlock?.type === 'text' ? firstBlock.text : '';
+        return result.text;
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
         const isServerError = err?.status === 500 || err?.status === 529;

@@ -22,7 +22,13 @@ export interface WpNode {
   borderRadius?: string; // from params.style.border.radius
   gap?: string; // from params.style.spacing.blockGap or params.gap — spacing preset or px value
   padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
+  margin?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.margin
   minHeight?: string; // from params.minHeight (cover/group blocks)
+  overlayColor?: string; // cover block overlay color hex (pre-resolved)
+  columnWidth?: string; // wp:column percentage width (e.g. "33.33%")
+  textAlign?: string; // from params.textAlign
+  align?: string; // "full" | "wide" | "center" — section width hint
+  fontFamily?: string; // slug from params.fontFamily
   // Inline typography from params.style.typography
   typography?: {
     letterSpacing?: string;
@@ -30,6 +36,7 @@ export interface WpNode {
     lineHeight?: string;
     fontSize?: string;
     fontWeight?: string;
+    fontFamily?: string;
   };
   children?: WpNode[];
 }
@@ -191,8 +198,29 @@ function parseBlocks(markup: string): WpNode[] {
       if (typo.lineHeight) t.lineHeight = typo.lineHeight as string;
       if (typo.fontSize) t.fontSize = typo.fontSize as string;
       if (typo.fontWeight) t.fontWeight = typo.fontWeight as string;
+      if (typo.fontFamily) t.fontFamily = typo.fontFamily as string;
       if (Object.keys(t).length > 0) node.typography = t;
     }
+    // Lift margin from params.style.spacing.margin
+    const mar = params?.style?.spacing?.margin;
+    if (mar && typeof mar === 'object') {
+      node.margin = {
+        top: mar.top as string | undefined,
+        right: mar.right as string | undefined,
+        bottom: mar.bottom as string | undefined,
+        left: mar.left as string | undefined,
+      };
+    }
+    // Lift overlayColor for cover blocks (will be resolved to hex later)
+    if (params?.overlayColor) node.overlayColor = params.overlayColor as string;
+    // Lift column width percentage
+    if (blockName === 'column' && params?.width) node.columnWidth = params.width as string;
+    // Lift textAlign
+    if (params?.textAlign) node.textAlign = params.textAlign as string;
+    // Lift align (full/wide/center)
+    if (params?.align) node.align = params.align as string;
+    // Lift fontFamily slug
+    if (params?.fontFamily) node.fontFamily = params.fontFamily as string;
     nodes.push(node);
   }
 
@@ -345,6 +373,7 @@ export function stripTags(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
 
 /** Remove undefined fields to keep JSON compact */
 function compact(node: WpNode): WpNode {

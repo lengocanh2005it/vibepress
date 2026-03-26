@@ -10,6 +10,7 @@ import { ImportModule } from './modules/import/import.module.js';
 import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
 import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.js';
+import { LlmModule } from './common/llm/llm.module.js';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.j
     CerebrasModule,
     MistralModule,
     AnthropicModule,
+    LlmModule,
     ImportModule,
     ThemeModule,
     SqlModule,
