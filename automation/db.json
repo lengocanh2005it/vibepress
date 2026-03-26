@@ -1,11 +1,11 @@
 {
   "wpSites": {
-    "wp-1774417758532-1ce3d3b4": {
-      "siteId": "wp-1774417758532-1ce3d3b4",
+    "wp-1774498977230-3b20fd50": {
+      "siteId": "wp-1774498977230-3b20fd50",
       "siteUrl": "http://localhost:8000",
-      "siteName": "test",
-      "wpVersion": "6.9.4",
-      "adminEmail": "luuvinh909@gmail.com",
+      "siteName": "Vibepress",
+      "wpVersion": "6.6.2",
+      "adminEmail": "lengocanhpyne363@gmail.com",
       "dbInfo": {
         "db_host": "db:3306",
         "db_name": "wordpress",
@@ -15,18 +15,18 @@
         "db_prefix": "wp_",
         "db_port": 3306
       },
-      "apiKey": "87676dd66dcf742cc2be30cc31cf3502ab26ebaa1035f85f18c7941673f0584a",
-      "wpRepoName": "wp-site-test-1ce3d3b4",
-      "wpRepoUrl": "https://github.com/KeriaKH/wp-site-test-1ce3d3b4",
-      "registeredAt": "2026-03-25T05:49:20.013Z",
+      "apiKey": "2f8117f9ee2a67ed6052a2456dc4fa6029e21f479d5bd88f569b6c487b67bf97",
+      "wpRepoName": "wp-site-vibepress-3b20fd50",
+      "wpRepoUrl": "https://github.com/lengocanh2005it/wp-site-vibepress-3b20fd50",
+      "registeredAt": "2026-03-26T04:22:58.422Z",
       "lastSync": {
-        "themeName": "twentytwentyfour",
-        "synced": 74,
+        "themeName": null,
+        "synced": 252,
         "failed": 0,
         "success": true,
-        "syncedAt": "2026-03-25T05:51:06+00:00"
+        "syncedAt": "2026-03-26T06:56:49+00:00"
       },
-      "updatedAt": "2026-03-25T07:58:33.057Z"
+      "updatedAt": "2026-03-26T06:53:22.834Z"
     }
   }
 }
