@@ -1,7 +1,5 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import Anthropic from '@anthropic-ai/sdk';
-import { ConfigService } from '@nestjs/config';
-import { ANTHROPIC_CLIENT } from '../../../common/providers/anthropic/anthropic.provider.js';
+import { Injectable, Logger } from '@nestjs/common';
+import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
@@ -22,10 +20,7 @@ export type PlanResult = ComponentPlan[];
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
 
-  constructor(
-    @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
-    private readonly configService: ConfigService,
-  ) {}
+  constructor(private readonly llmFactory: LlmFactoryService) {}
 
   async plan(
     theme: PhpParseResult | BlockParseResult,
@@ -40,10 +35,7 @@ export class PlannerService {
     for (const t of allTemplates) {
       sourceMap.set(t.name, 'markup' in t ? t.markup : t.html);
     }
-    const modelName = this.configService.get<string>(
-      'anthropic.model',
-      'claude-opus-4-6',
-    );
+    const modelName = this.llmFactory.getModel();
 
     const templateNames =
       theme.type === 'classic'
@@ -57,15 +49,12 @@ export class PlannerService {
       `Planning ${templateNames.length} components for "${content.siteInfo.siteName}"`,
     );
 
-    const response = await this.anthropic.messages.create({
+    const { text: raw } = await this.llmFactory.chat({
       model: modelName,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      systemPrompt,
+      userPrompt,
+      maxTokens: 4096,
     });
-
-    const raw =
-      response.content[0]?.type === 'text' ? response.content[0].text : '';
     const plan = this.parseResponse(raw, templateNames);
     return this.enrichPlan(plan, sourceMap);
   }

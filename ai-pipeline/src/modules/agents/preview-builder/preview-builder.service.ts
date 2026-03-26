@@ -233,17 +233,40 @@ ${fontEntries}
       const cssPath = join(frontendDir, 'src', 'index.css');
       let cssContent = await readFile(cssPath, 'utf-8');
 
-      // :root — content/wide widths + block gap
+      // :root — inject ALL WP preset CSS variables so AI-generated components
+      // can reference var(--wp--preset--color--slug) etc. without guessing hex values.
       const vars: string[] = [];
-      if (tokens.defaults?.contentWidth)
-        vars.push(`  --wp-content-width: ${tokens.defaults.contentWidth};`);
-      if (tokens.defaults?.wideWidth)
-        vars.push(`  --wp-wide-width: ${tokens.defaults.wideWidth};`);
-      if (tokens.defaults?.blockGap)
-        vars.push(`  --wp-block-gap: ${tokens.defaults.blockGap};`);
+
+      // Layout & gap (legacy aliases + WP standard names)
+      const cw = tokens.defaults?.contentWidth ?? '650px';
+      const ww = tokens.defaults?.wideWidth ?? '1200px';
+      const bg = tokens.defaults?.blockGap ?? '1.5rem';
+      vars.push(`  --wp-content-width: ${cw};`);
+      vars.push(`  --wp-wide-width: ${ww};`);
+      vars.push(`  --wp-block-gap: ${bg};`);
+      vars.push(`  --wp--style--global--content-size: ${cw};`);
+      vars.push(`  --wp--style--global--wide-size: ${ww};`);
+      vars.push(`  --wp--style--block-gap: ${bg};`);
+
+      // Color preset variables
+      for (const c of tokens.colors)
+        vars.push(`  --wp--preset--color--${c.slug}: ${c.value};`);
+
+      // Font-size preset variables
+      for (const s of tokens.fontSizes)
+        vars.push(`  --wp--preset--font-size--${s.slug}: ${s.size};`);
+
+      // Font-family preset variables
+      for (const f of tokens.fonts)
+        vars.push(`  --wp--preset--font-family--${f.slug}: ${f.family};`);
+
+      // Spacing preset variables
+      for (const s of tokens.spacing)
+        vars.push(`  --wp--preset--spacing--${s.slug}: ${s.size};`);
+
       cssContent = cssContent.replace(
         /:root \{[\s\S]*?\}/,
-        `:root {\n${vars.length ? vars.join('\n') : '  --wp-content-width: 650px;\n  --wp-wide-width: 1200px;'}\n}`,
+        `:root {\n${vars.join('\n')}\n}`,
       );
 
       // body — default font-family, font-size, color từ theme
@@ -260,8 +283,33 @@ ${fontEntries}
         cssContent += `\nbody {\n${bodyRules.join('\n')}\n}\n`;
 
       // Global block gap — mirrors WP's --wp--style--block-gap behavior
-      if (tokens.defaults?.blockGap)
-        cssContent += `\n.wp-block-group > * + *,\n.wp-block-cover__inner-container > * + *,\n[class*="wp-block"] > * + * {\n  margin-top: var(--wp-block-gap);\n}\n`;
+      // .is-layout-flow uses margin-top; .is-layout-flex uses gap (handled by CSS class in index.css)
+      cssContent += `\n.wp-block-group.is-layout-flow > * + *,\n.wp-block-cover__inner-container > * + * {\n  margin-top: var(--wp--style--block-gap, 1.5rem);\n}\n`;
+
+      // Restore browser-default-like vertical spacing stripped by Tailwind Preflight.
+      // WordPress themes rely on these margins; without them elements appear crammed.
+      cssContent += `
+/* Prose spacing — restore browser defaults removed by Tailwind Preflight */
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0.75em;
+  margin-bottom: 0.4em;
+}
+p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+ul, ol {
+  margin-top: 0;
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+li + li {
+  margin-top: 0.25em;
+}
+figure {
+  margin: 0 0 1em;
+}
+`;
 
       // h1–h6 — heading sizes + weights từ theme tokens (chính xác hơn Tailwind generic)
       const headings = tokens.defaults?.headings;
