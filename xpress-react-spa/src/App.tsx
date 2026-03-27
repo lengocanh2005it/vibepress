@@ -7,9 +7,11 @@ import SplitView from "./pages/SplitView";
 import VisualEditor from "./pages/VisualEditor";
 import DeployDashboard from "./pages/DeployDashboard";
 import SharedLayout from "./components/SharedLayout";
+import { UserProvider } from "./context/UserContext";
 
 function App() {
   return (
+    <UserProvider>
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingPage />} />
@@ -27,6 +29,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
+    </UserProvider>
   );
 }
 

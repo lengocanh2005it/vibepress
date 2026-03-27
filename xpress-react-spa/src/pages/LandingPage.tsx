@@ -1,8 +1,21 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUser } from '../context/UserContext';
 
 const LandingPage: React.FC = () => {
   const navigate = useNavigate();
+  const { email, setEmail } = useUser();
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [inputEmail, setInputEmail] = useState('');
+
+  const handleLogin = (e: React.SyntheticEvent) => {
+    e.preventDefault();
+    if (inputEmail.trim()) {
+      setEmail(inputEmail.trim());
+      setShowLoginModal(false);
+      setInputEmail('');
+    }
+  };
 
   return (
     <div className="antialiased overflow-x-hidden font-body bg-[#faf6f0] text-[#2e3230] leading-[1.6]">
@@ -19,7 +32,14 @@ const LandingPage: React.FC = () => {
                   </div>
               </div>
               <div className="flex items-center gap-4">
-                  <button className="text-stone-600 font-semibold text-sm hover:opacity-80 transition-opacity">Login</button>
+                  <div className="flex items-center gap-4">
+                  {email ? (
+                    <span className="text-stone-600 font-semibold text-sm">Xin chào, {email}</span>
+                  ) : (
+                    <button onClick={() => setShowLoginModal(true)} className="text-stone-600 font-semibold text-sm hover:opacity-80 transition-opacity">
+                      Login
+                    </button>
+                  )}
                   <button 
                     onClick={() => navigate('/app/onboarding')}
                     className="bg-[#4a7c59] text-white px-5 py-2 rounded-lg font-semibold text-sm hover:opacity-90 transition-opacity active:scale-95 duration-150"
@@ -28,6 +48,7 @@ const LandingPage: React.FC = () => {
                   </button>
               </div>
           </div>
+      </div>
       </nav>
 
       {/* Hero Section */}
@@ -289,6 +310,34 @@ const LandingPage: React.FC = () => {
           </div>
       </section>
 
+      {/* Login Modal */}
+      {showLoginModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowLoginModal(false)}>
+          <div className="bg-[#faf6f0] rounded-2xl shadow-2xl p-8 w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+            <h2 className="font-headline text-2xl font-bold text-[#2e3230] mb-2">Đăng nhập</h2>
+            <p className="text-sm text-[#4a4e4a] mb-6">Nhập email của bạn để tiếp tục.</p>
+            <form onSubmit={handleLogin} className="space-y-4">
+              <input
+                type="email"
+                required
+                autoFocus
+                placeholder="email@example.com"
+                value={inputEmail}
+                onChange={e => setInputEmail(e.target.value)}
+                className="w-full border border-[#c4c8bc] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#4a7c59] transition-colors bg-white"
+              />
+              <button
+                type="submit"
+                className="w-full bg-[#4a7c59] text-white py-3 rounded-xl font-semibold text-sm hover:opacity-90 transition-opacity"
+              >
+                Xác nhận
+              </button>
+            </form>
+            <button onClick={() => setShowLoginModal(false)} className="mt-4 w-full text-center text-xs text-stone-400 hover:text-stone-600 transition-colors">Huỷ</button>
+          </div>
+        </div>
+      )}
+
       {/* Footer */}
       <footer className="bg-stone-100 w-full py-12 px-6 border-t border-[#4a7c59]/10">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 max-w-7xl mx-auto">
@@ -321,5 +370,6 @@ const LandingPage: React.FC = () => {
     </div>
   );
 };
+
 
 export default LandingPage;
