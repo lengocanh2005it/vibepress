@@ -110,15 +110,7 @@ export function useSse(
             progress: data.percent,
           }));
 
-          // Auto-close khi pipeline done
-          if (data.status === "done") {
-            eventSource.close();
-            setState((prev) => ({
-              ...prev,
-              isConnected: false,
-            }));
-            eventSourceRef.current = null;
-          }
+          // Don't auto-close - let component unmount handle cleanup
         } catch (err) {
           console.error("Failed to parse SSE message:", err);
         }

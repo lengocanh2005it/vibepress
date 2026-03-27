@@ -85,7 +85,90 @@ function stripParams(nodes: WpNode[]): WpNode[] {
   }));
 }
 
-// ---------------------------------------------------------------------------
+// ----------------------d--------------------------------------------------
+
+function normalizeBoxSpacing(
+  value: unknown,
+): WpNode['padding'] | WpNode['margin'] | undefined {
+  if (!value) return undefined;
+
+  if (typeof value === 'object') {
+    const box = value as Record<string, unknown>;
+    return compactBoxSpacing({
+      top: box.top as string | undefined,
+      right: box.right as string | undefined,
+      bottom: box.bottom as string | undefined,
+      left: box.left as string | undefined,
+    });
+  }
+
+  if (typeof value !== 'string') return undefined;
+
+  const parts = splitCssShorthand(value);
+  if (parts.length === 0) return undefined;
+
+  if (parts.length === 1) {
+    const [all] = parts;
+    return { top: all, right: all, bottom: all, left: all };
+  }
+
+  if (parts.length === 2) {
+    const [vertical, horizontal] = parts;
+    return {
+      top: vertical,
+      right: horizontal,
+      bottom: vertical,
+      left: horizontal,
+    };
+  }
+
+  if (parts.length === 3) {
+    const [top, horizontal, bottom] = parts;
+    return {
+      top,
+      right: horizontal,
+      bottom,
+      left: horizontal,
+    };
+  }
+
+  const [top, right, bottom, left] = parts;
+  return { top, right, bottom, left };
+}
+
+function splitCssShorthand(value: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+
+  for (const ch of value.trim()) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+
+    if (/\s/.test(ch) && depth === 0) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current) parts.push(current);
+  return parts;
+}
+
+function compactBoxSpacing(
+  box: NonNullable<WpNode['padding']>,
+): NonNullable<WpNode['padding']> | undefined {
+  const compacted = Object.fromEntries(
+    Object.entries(box).filter(([, v]) => v !== undefined && v !== ''),
+  ) as NonNullable<WpNode['padding']>;
+
+  return Object.keys(compacted).length > 0 ? compacted : undefined;
+}
 
 function parseBlocks(markup: string): WpNode[] {
   const nodes: WpNode[] = [];
@@ -179,14 +262,8 @@ function parseBlocks(markup: string): WpNode[] {
     if (gap) node.gap = gap as string;
     // Lift padding from params.style.spacing.padding
     const pad = params?.style?.spacing?.padding;
-    if (pad && typeof pad === 'object') {
-      node.padding = {
-        top: pad.top as string | undefined,
-        right: pad.right as string | undefined,
-        bottom: pad.bottom as string | undefined,
-        left: pad.left as string | undefined,
-      };
-    }
+    const normalizedPadding = normalizeBoxSpacing(pad);
+    if (normalizedPadding) node.padding = normalizedPadding;
     // Lift minHeight (cover/group blocks)
     if (params?.minHeight) node.minHeight = String(params.minHeight);
     // Lift inline typography from params.style.typography
@@ -203,14 +280,8 @@ function parseBlocks(markup: string): WpNode[] {
     }
     // Lift margin from params.style.spacing.margin
     const mar = params?.style?.spacing?.margin;
-    if (mar && typeof mar === 'object') {
-      node.margin = {
-        top: mar.top as string | undefined,
-        right: mar.right as string | undefined,
-        bottom: mar.bottom as string | undefined,
-        left: mar.left as string | undefined,
-      };
-    }
+    const normalizedMargin = normalizeBoxSpacing(mar);
+    if (normalizedMargin) node.margin = normalizedMargin;
     // Lift overlayColor for cover blocks (will be resolved to hex later)
     if (params?.overlayColor) node.overlayColor = params.overlayColor as string;
     // Lift column width percentage

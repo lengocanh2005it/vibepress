@@ -36,6 +36,28 @@ const SplitView: React.FC = () => {
     }
   };
 
+  // Check if pipeline is complete by looking for any done event with previewUrl
+  const getCompletionEvent = () => {
+    return sse.allEvents.find(
+      (event) => event.status === "done" && event.data?.previewUrl,
+    );
+  };
+
+  const completionEvent = getCompletionEvent();
+
+  // Group events by step and get the latest status for each step
+  const getLatestStepStatuses = () => {
+    const stepMap = new Map<string, PipelineProgressEvent>();
+    sse.allEvents.forEach((event) => {
+      stepMap.set(event.step, event);
+    });
+    return Array.from(stepMap.values()).sort((a, b) => {
+      const stepA = parseInt(a.step.split("_")[0]) || 0;
+      const stepB = parseInt(b.step.split("_")[0]) || 0;
+      return stepA - stepB;
+    });
+  };
+
   if (!jobId) {
     return (
       <div className="flex h-[calc(100vh-64px)] items-center justify-center bg-background">
@@ -93,11 +115,8 @@ const SplitView: React.FC = () => {
             <p className="text-black/50">Waiting for pipeline events...</p>
           ) : null}
 
-          {sse.allEvents.map((event) => (
-            <div
-              key={`${event.step}-${sse.allEvents.indexOf(event)}`}
-              className="flex gap-3 items-start"
-            >
+          {getLatestStepStatuses().map((event) => (
+            <div key={event.step} className="flex gap-3 items-start">
               <span
                 className={`material-symbols-outlined text-lg ${getStatusColor(event.status)}`}
                 style={{ fontVariationSettings: "'FILL' 1" }}
@@ -105,9 +124,9 @@ const SplitView: React.FC = () => {
                 {getStatusIcon(event.status)}
               </span>
               <div className="space-y-1 flex-1">
-                <p className="text-inverse-primary">{event.label}</p>
+                <p className="text-green-700">{event.label}</p>
                 {event.message && (
-                  <p className="text-black/40 text-xs">{event.message}</p>
+                  <p className="text-black/50 text-xs">{event.message}</p>
                 )}
                 <div className="flex items-center gap-2 mt-2">
                   <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
@@ -124,23 +143,22 @@ const SplitView: React.FC = () => {
             </div>
           ))}
 
-          {sse.currentEvent?.status === "done" &&
-            sse.currentEvent.data?.previewUrl && (
-              <div className="mt-8 p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400 text-xs">
-                <div className="font-bold mb-2">✅ Pipeline Complete!</div>
-                <p className="text-green-400/80">
-                  Preview URL: {sse.currentEvent.data.previewUrl}
-                </p>
-                <button
-                  onClick={() =>
-                    window.open(sse.currentEvent?.data?.previewUrl, "_blank")
-                  }
-                  className="mt-2 px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
-                >
-                  Open Preview
-                </button>
-              </div>
-            )}
+          {completionEvent && (
+            <div className="mt-8 p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400 text-xs">
+              <div className="font-bold mb-2">✅ Pipeline Complete!</div>
+              <p className="text-green-400/80">
+                Preview URL: {completionEvent.data?.previewUrl}
+              </p>
+              <button
+                onClick={() =>
+                  window.open(completionEvent.data?.previewUrl, "_blank")
+                }
+                className="mt-2 px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
+              >
+                Open Preview
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="p-4 bg-black/10 border-t border-white/5 flex items-center justify-between">
@@ -174,10 +192,10 @@ const SplitView: React.FC = () => {
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            {sse.currentEvent?.data?.previewUrl ? (
+            {completionEvent?.data?.previewUrl ? (
               <button
                 onClick={() =>
-                  window.open(sse.currentEvent?.data?.previewUrl, "_blank")
+                  window.open(completionEvent.data?.previewUrl, "_blank")
                 }
                 className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-bold"
               >
@@ -192,9 +210,9 @@ const SplitView: React.FC = () => {
         </div>
 
         <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center">
-          {sse.currentEvent?.data?.previewUrl ? (
+          {completionEvent?.data?.previewUrl ? (
             <iframe
-              src={sse.currentEvent.data.previewUrl}
+              src={completionEvent.data?.previewUrl || ""}
               title="Live Preview"
               className="w-full h-full rounded-lg border border-outline-variant"
             />

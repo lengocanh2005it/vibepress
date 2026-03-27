@@ -189,14 +189,22 @@ export class ReactGeneratorService {
     } = input;
 
     const templateSource = rawSource;
+    const templateNodes =
+      themeType === 'fse'
+        ? this.styleResolver.resolve(wpBlocksToJson(templateSource), tokens)
+        : undefined;
+    const promptTemplateSource = templateNodes
+      ? wpJsonToString(templateNodes)
+      : templateSource;
+    const promptSourceLength = promptTemplateSource.length;
 
     if (
       themeType === 'classic' ||
-      templateSource.length <= CHUNK_THRESHOLD_CHARS
+      promptSourceLength <= CHUNK_THRESHOLD_CHARS
     ) {
       const comp = await this.generateSingle({
         componentName,
-        templateSource,
+        templateSource: promptTemplateSource,
         modelName,
         systemPrompt,
         content,
@@ -207,18 +215,20 @@ export class ReactGeneratorService {
       return [comp];
     }
 
-    const nodes = wpBlocksToJson(templateSource);
-
     // Too large → split into sections (FSE only)
     this.logger.warn(
-      `Template ${componentName}: ${templateSource.length} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
+      `Template ${componentName}: ${promptSourceLength} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
+    );
+    const resolvedNodes = templateNodes ?? [];
+    const chunks = this.splitTemplateSections(
+      resolvedNodes,
+      CHUNK_TARGET_CHARS,
     );
     await this.logToFile(
       logPath,
-      `WARN "${componentName}" too large (${templateSource.length} chars) → splitting into ${this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS).length} sections`,
+      `WARN "${componentName}" too large (${promptSourceLength} chars) → splitting into ${chunks.length} sections`,
     );
 
-    const chunks = this.splitTemplateSections(nodes, CHUNK_TARGET_CHARS);
     this.logger.log(`Template ${componentName}: ${chunks.length} sections`);
 
     const subComponents: GeneratedComponent[] = [];

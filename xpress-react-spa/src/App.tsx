@@ -12,23 +12,23 @@ import { UserProvider } from "./context/UserContext";
 function App() {
   return (
     <UserProvider>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
 
-        <Route path="app" element={<SharedLayout />}>
-          <Route index element={<Navigate to="projects" replace />} />
-          <Route path="onboarding" element={<Onboarding />} />
-          <Route path="projects" element={<ProjectSelector />} />
-          <Route path="editor" element={<Editor />} />
-          <Route path="editor/split-view/:jobId" element={<SplitView />} />
-          <Route path="editor/visual" element={<VisualEditor />} />
-          <Route path="deploy" element={<DeployDashboard />} />
-        </Route>
+          <Route path="app" element={<SharedLayout />}>
+            <Route index element={<Navigate to="projects" replace />} />
+            <Route path="onboarding" element={<Onboarding />} />
+            <Route path="projects" element={<ProjectSelector />} />
+            <Route path="editor" element={<Editor />} />
+            <Route path="editor/split-view" element={<SplitView />} />
+            <Route path="editor/visual" element={<VisualEditor />} />
+            <Route path="deploy" element={<DeployDashboard />} />
+          </Route>
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
     </UserProvider>
   );
 }

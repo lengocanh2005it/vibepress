@@ -26,8 +26,8 @@ export class OrchestratorController {
   constructor(private readonly orchestratorService: OrchestratorService) {}
 
   @Post('run')
-  run(@Body() dto: RunPipelineDto) {
-    return this.orchestratorService.run(dto);
+  run(@Body('email') email: string) {
+    return this.orchestratorService.run(email);
   }
 
   @Get('status/:jobId')

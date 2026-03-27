@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { Subject } from 'rxjs';
+import { lastValueFrom, Subject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 import simpleGit from 'simple-git';
 import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
@@ -23,6 +23,7 @@ import { CotEvidenceService } from '../cot-evidence/cot-evidence.service.js';
 import { RunPipelineDto } from './orchestrator.controller.js';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { HttpService } from '@nestjs/axios';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
@@ -109,9 +110,21 @@ export class OrchestratorService {
     private readonly cleanup: CleanupService,
     private readonly cotEvidence: CotEvidenceService,
     private readonly configService: ConfigService,
+    private readonly httpService: HttpService,
   ) {}
 
-  async run(dto: RunPipelineDto): Promise<{ jobId: string }> {
+  async run(email: string): Promise<{ jobId: string }> {
+    const response = await lastValueFrom(
+      this.httpService.post(
+        `${this.configService.get<string>('automation.url', '')}/wp/db-info`,
+        {
+          email,
+        },
+      ),
+    );
+
+    const dto = response.data;
+
     this.validateDto(dto);
 
     const jobId = uuidv4();
@@ -134,13 +147,23 @@ export class OrchestratorService {
     this.jobs.set(jobId, state);
     this.progress.set(jobId, new Subject<ProgressEvent>());
 
+    console.log(jobId);
+
     // Wait 7 seconds before triggering pipeline
     await new Promise((resolve) => setTimeout(resolve, 7000));
 
     this.executePipeline(jobId, dto, state).catch((err) => {
       state.status = 'error';
       state.error = err.message;
-      this.progress.get(jobId)?.error(err);
+      const subject = this.progress.get(jobId);
+      subject?.next({
+        step: 'error',
+        label: 'Error',
+        status: 'error',
+        percent: 0,
+        message: `Pipeline failed: ${err.message}`,
+      });
+      subject?.complete();
       this.logger.error(`Pipeline ${jobId} failed:`, err);
     });
 
@@ -220,12 +243,16 @@ export class OrchestratorService {
 
     if (!themeDir) throw new BadRequestException('No theme source provided');
 
+    // Helper to add delay between steps for better log visibility
+    const stepDelay = () => new Promise((resolve) => setTimeout(resolve, 500));
+
     // ── Pipeline steps ────────────────────────────────────────────────────
 
     // Bước 1: Analyze repo structure
     await this.runStep(state, '1_repo_analyzer', logPath, () =>
       this.repoAnalyzer.analyze(themeDir!),
     );
+    await stepDelay();
 
     // Bước 2: Parse theme (classic PHP vs FSE block)
     const parsedTheme = await this.runStep(
@@ -239,6 +266,7 @@ export class OrchestratorService {
           : this.phpParser.parse(themeDir!);
       },
     );
+    await stepDelay();
 
     // Record evidence AC1, AC2, AC3, AC7
     await this.cotEvidence.write(
@@ -296,11 +324,13 @@ export class OrchestratorService {
     const content = await this.runStep(state, '3_db_content', logPath, () =>
       this.dbContent.extract(dbCreds),
     );
+    await stepDelay();
 
     // Bước 4: Planner — AI phân tích toàn bộ theme + DB, lên kế hoạch component
     const plan = await this.runStep(state, '4_planner', logPath, () =>
       this.planner.plan(parsedTheme, content),
     );
+    await stepDelay();
     await this.cotEvidence.write(
       jobId,
       'AC4',
@@ -326,6 +356,7 @@ export class OrchestratorService {
           logPath,
         }),
     );
+    await stepDelay();
 
     // Bước 6b: Validate + strip unused imports from generated TSX
     const validatedComponents = await this.runStep(
@@ -334,6 +365,7 @@ export class OrchestratorService {
       logPath,
       async () => this.validator.validate(components.components),
     );
+    await stepDelay();
     await this.cotEvidence.write(
       jobId,
       'AC8',
@@ -350,6 +382,7 @@ export class OrchestratorService {
     await this.runStep(state, '6_api_builder', logPath, () =>
       this.apiBuilder.build({ jobId }),
     );
+    await stepDelay();
     await this.cotEvidence.write(
       jobId,
       'AC5',
@@ -387,6 +420,7 @@ export class OrchestratorService {
           plan,
         }),
     );
+    await stepDelay();
 
     // Bước phụ: Gọi đến tool để evaluate sự tương đồng
     const response = await axios.post(
@@ -406,6 +440,7 @@ export class OrchestratorService {
     await this.runStep(state, '8_cleanup', logPath, () =>
       this.cleanup.cleanup(jobId),
     );
+    await stepDelay();
 
     const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
 
@@ -417,22 +452,25 @@ export class OrchestratorService {
         previewUrl: preview.previewUrl,
         dbCreds,
       };
-      return { success: true };
+      // Emit final event with previewUrl from within runStep
+      const subject = this.progress.get(jobId);
+      subject?.next({
+        step: '9_done',
+        label: STEP_META['9_done'].label,
+        status: 'done',
+        percent: 100,
+        message: `🎉 Migration complete in ${totalElapsed}s`,
+        data: {
+          previewUrl: preview.previewUrl,
+          metrics,
+        },
+      });
+      return { success: true, previewUrl: preview.previewUrl, metrics };
     });
+    await stepDelay();
 
-    // Complete the SSE stream after all steps finish
+    // Complete the SSE stream after runStep finishes
     const subject = this.progress.get(jobId);
-    subject?.next({
-      step: '9_done',
-      label: 'Migration complete',
-      status: 'done',
-      percent: 100,
-      message: `🎉 Migration complete in ${totalElapsed}s`,
-      data: {
-        previewUrl: preview.previewUrl,
-        metrics,
-      },
-    });
     subject?.complete();
     setTimeout(() => this.progress.delete(jobId), 60_000);
 

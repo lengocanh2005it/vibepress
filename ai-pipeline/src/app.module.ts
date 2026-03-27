@@ -11,12 +11,18 @@ import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
 import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.js';
 import { LlmModule } from './common/llm/llm.module.js';
+import { HttpModule } from '@nestjs/axios';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       load: [envConfig],
+    }),
+    HttpModule.register({
+      global: true,
+      maxRedirects: 3,
+      timeout: 10000,
     }),
     GroqModule,
     GeminiModule,
