@@ -40,6 +40,20 @@ export const getWpSitePages = async (siteUrl: string) => {
   }
 };
 
+export const getThemesFolders = async (repoUrl: string) => {
+  try {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/themes?repoUrl=${encodeURIComponent(repoUrl)}`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch themes');
+    }
+    const data = await response.json();
+    return data.themes as { name: string; path: string; url: string }[];
+  } catch (error) {
+    console.error('Error fetching themes:', error);
+    throw error;
+  }
+};
+
 export const getCommitHistory = async (repoUrl: string) => {
   try {
     const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/commits?repoUrl=${encodeURIComponent(repoUrl)}`);

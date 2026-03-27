@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
-import { getRepoByEmail, getCommitHistory } from '../services/automationService';
+import { getRepoByEmail, getCommitHistory, getThemesFolders } from '../services/automationService';
 
 interface Repository {
   siteId: string;
@@ -20,19 +20,11 @@ interface Commit {
   avatarUrl: string | null;
 }
 
-interface Page {
+interface Theme {
   name: string;
   path: string;
-  lastSync: string;
-  status: 'live' | 'draft';
+  url: string;
 }
-
-const pages: Page[] = [
-  { name: 'Landing Page',     path: '/index.html',            lastSync: '2 mins ago', status: 'live'  },
-  { name: 'Product Features', path: '/features/ai-sync.html', lastSync: '1 hour ago', status: 'live'  },
-  { name: 'Pricing Plans',    path: '/pricing.html',          lastSync: 'Yesterday',  status: 'draft' },
-  { name: 'Contact Support',  path: '/support/contact.html',  lastSync: '3 days ago', status: 'live'  },
-];
 
 const ProjectSelector: React.FC = () => {
   const navigate = useNavigate();
@@ -40,6 +32,7 @@ const ProjectSelector: React.FC = () => {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
   const [commitHistory, setCommitHistory] = useState<Commit[]>([]);
+  const [themes, setThemes] = useState<Theme[]>([]);
 
   useEffect(() => {
     if (!email) return;
@@ -53,6 +46,9 @@ const ProjectSelector: React.FC = () => {
     getCommitHistory(selectedRepo.wpRepoUrl)
       .then(data => setCommitHistory(data))
       .catch(err => console.error('Error fetching commit history:', err));
+    getThemesFolders(selectedRepo.wpRepoUrl)
+      .then(data => setThemes(data))
+      .catch(err => console.error('Error fetching themes:', err));
   }, [selectedRepo]);
 
   return (
@@ -137,46 +133,36 @@ const ProjectSelector: React.FC = () => {
           <table className="w-full text-left">
             <thead>
               <tr className="text-[10px] font-bold text-[#8e9892] uppercase tracking-widest border-b border-[#e8e6df]">
-                <th className="pb-4 font-medium pl-2">Page Name</th>
+                <th className="pb-4 font-medium pl-2">Theme Name</th>
                 <th className="pb-4 font-medium">Path</th>
-                <th className="pb-4 font-medium">Last Sync</th>
-                <th className="pb-4 font-medium">Status</th>
                 <th className="pb-4"></th>
               </tr>
             </thead>
             <tbody className="text-[14px] text-[#233227]">
-              {pages.map((page, index) => (
+              {themes.length > 0 ? themes.map((theme, index) => (
                 <tr
-                  key={page.path}
-                  className={`${index < pages.length - 1 ? 'border-b border-[#e8e6df]/50' : ''} hover:bg-[#e8e6df]/20 transition-colors group cursor-pointer`}
+                  key={theme.path}
+                  className={`${index < themes.length - 1 ? 'border-b border-[#e8e6df]/50' : ''} hover:bg-[#e8e6df]/20 transition-colors group cursor-pointer`}
                   onClick={() => navigate('/app/editor', { state: { siteUrl: selectedRepo?.siteUrl } })}
                 >
-                  <td className="py-5 pl-2 font-medium">{page.name}</td>
-                  <td className="py-5 font-mono text-[12px] text-[#5c6860]">{page.path}</td>
-                  <td className="py-5 text-[#5c6860] text-[13px]">{page.lastSync}</td>
-                  <td className="py-5">
-                    {page.status === 'live' ? (
-                      <span className="inline-flex items-center gap-1.5 bg-opacity-50 text-[#14b8a6] text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border border-[#d2f3e8]">
-                        <span className="w-1.5 h-1.5 rounded-full bg-[#14b8a6] shadow-[0_0_8px_#14b8a6]"></span>
-                        Live
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1.5 bg-[#f5efe6] text-[#b88c42] text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border border-[#eedfc9]">
-                        Draft
-                      </span>
-                    )}
+                  <td className="py-5 pl-2 font-medium flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[#49704F] text-[18px]">folder</span>
+                    {theme.name}
                   </td>
+                  <td className="py-5 font-mono text-[12px] text-[#5c6860]">{theme.path}</td>
                   <td className="py-5 text-right w-12">
-                    <span className="material-symbols-outlined text-[#8e9892] opacity-0 group-hover:opacity-100 transition-opacity">more_vert</span>
+                    <span className="material-symbols-outlined text-[#8e9892] opacity-0 group-hover:opacity-100 transition-opacity">arrow_forward</span>
                   </td>
                 </tr>
-              ))}
+              )) : (
+                <tr>
+                  <td colSpan={3} className="py-8 text-center text-[#8e9892] text-[13px]">
+                    {selectedRepo ? 'Đang tải danh sách themes...' : 'Chọn một repository để xem themes.'}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
-
-          <div className="mt-6 text-center">
-            <button className="text-[13px] font-bold text-[#233227] hover:text-[#49704F] transition-colors">View All Pages</button>
-          </div>
         </div>
 
         {/* Git Activity */}

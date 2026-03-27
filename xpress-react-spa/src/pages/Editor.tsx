@@ -58,6 +58,7 @@ const Editor: React.FC = () => {
   const [showCommentPopup, setShowCommentPopup] = useState(false);
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
+  const [chatTags, setChatTags] = useState<string[]>(['Refactor Header', 'Optimize SEO', 'Translate to VN', 'Check Dependencies']);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const [annotations, setAnnotations] = useState<Annotation[]>([
@@ -294,6 +295,18 @@ const Editor: React.FC = () => {
               <span className="material-symbols-outlined text-[16px]">{isCapturing ? 'close' : 'crop'}</span>
               {isCapturing ? 'Huỷ' : 'Capture'}
             </button>
+            {captures.length > 0 && (
+              <button
+                onClick={() => {
+                  const newTags = captures.map(c => c.comment).filter(Boolean);
+                  setChatTags(prev => [...prev, ...newTags]);
+                  setCaptures([]);
+                }}
+                className="bg-[#e1ecd6] text-[#49704F] border border-[#c2d9b5] text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 hover:bg-[#d2e0c6] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[16px]">save</span> Save
+              </button>
+            )}
             <button
               onClick={() => setAnnotationsOpen(!annotationsOpen)}
               className="bg-[#49704F] text-white text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 hover:bg-[#346E56] transition-colors"
@@ -505,13 +518,13 @@ const Editor: React.FC = () => {
         </div>
 
         <div className="p-3 flex flex-wrap gap-2">
-          {['Refactor Header', 'Optimize SEO', 'Translate to VN', 'Check Dependencies'].map((hint) => (
+          {chatTags.map((tag) => (
             <button
-              key={hint}
-              onClick={() => setChatInput(hint)}
+              key={tag}
+              onClick={() => setChatInput(tag)}
               className="text-[11px] text-[#3f593b] bg-[#eff7ee] border border-[#d8e8d3] px-3 py-1.5 rounded-full hover:bg-[#e0f0df] transition-colors"
             >
-              {hint}
+              {tag}
             </button>
           ))}
         </div>

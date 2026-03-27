@@ -54,11 +54,68 @@ async function gotoWithFallback(page, url) {
   throw lastError;
 }
 
-async function captureScreenshot(page, url, filePath, fullPage) {
+async function runInteractions(page, interactions = []) {
+  for (const step of interactions) {
+    switch (step.action) {
+      case 'click':
+        await page.locator(step.selector).first().click({ timeout: 8000 });
+        await page.waitForTimeout(step.waitAfter ?? 500);
+        break;
+      case 'hover':
+        await page.locator(step.selector).first().hover({ timeout: 8000 });
+        await page.waitForTimeout(step.waitAfter ?? 300);
+        break;
+      case 'wait':
+        await page.waitForTimeout(step.ms ?? 500);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+async function captureScreenshot(page, url, filePath, fullPage, interactions = []) {
   const navigationMode = await gotoWithFallback(page, url);
   await page.waitForTimeout(1200);
+  await runInteractions(page, interactions);
   await page.screenshot({ path: filePath, fullPage });
   return navigationMode;
+}
+
+async function captureDomStructure(page) {
+  return page.evaluate(() => {
+    const freq = {};
+    document.querySelectorAll('*').forEach(el => {
+      const tag = el.tagName.toLowerCase();
+      freq[tag] = (freq[tag] || 0) + 1;
+    });
+    return freq;
+  });
+}
+
+function compareDomStructure(freqA, freqB) {
+  const allTags = new Set([...Object.keys(freqA), ...Object.keys(freqB)]);
+  let intersection = 0;
+  let union = 0;
+  for (const tag of allTags) {
+    const a = freqA[tag] || 0;
+    const b = freqB[tag] || 0;
+    intersection += Math.min(a, b);
+    union += Math.max(a, b);
+  }
+  const similarity = union > 0 ? intersection / union : 1;
+  const tagDiffs = {};
+  for (const tag of allTags) {
+    const a = freqA[tag] || 0;
+    const b = freqB[tag] || 0;
+    if (a !== b) tagDiffs[tag] = { urlA: a, urlB: b, delta: b - a };
+  }
+  return {
+    similarityScore: Number((similarity * 100).toFixed(2)),
+    totalTagsA: Object.values(freqA).reduce((s, v) => s + v, 0),
+    totalTagsB: Object.values(freqB).reduce((s, v) => s + v, 0),
+    tagDiffs,
+  };
 }
 
 function cropToSize(image, width, height) {
@@ -234,6 +291,7 @@ async function compareWebVisuals({
   fullPage = true,
   viewportWidth = 1440,
   viewportHeight = 900,
+  interactions = [],
 }) {
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
 
@@ -247,13 +305,17 @@ async function compareWebVisuals({
   const browser = await chromium.launch();
   let navigationModeA = 'unknown';
   let navigationModeB = 'unknown';
+  let domFreqA = {};
+  let domFreqB = {};
 
   try {
     const page = await browser.newPage({
       viewport: { width: Number(viewportWidth), height: Number(viewportHeight) },
     });
-    navigationModeA = await captureScreenshot(page, urlA, imageAPath, Boolean(fullPage));
-    navigationModeB = await captureScreenshot(page, urlB, imageBPath, Boolean(fullPage));
+    navigationModeA = await captureScreenshot(page, urlA, imageAPath, Boolean(fullPage), interactions);
+    domFreqA = await captureDomStructure(page);
+    navigationModeB = await captureScreenshot(page, urlB, imageBPath, Boolean(fullPage), interactions);
+    domFreqB = await captureDomStructure(page);
   } finally {
     await browser.close();
   }
@@ -277,6 +339,8 @@ async function compareWebVisuals({
   const totalPixels   = width * height;
   const diffPct       = totalPixels > 0 ? (differentPixels / totalPixels) * 100 : 0;
 
+  const domComparison = compareDomStructure(domFreqA, domFreqB);
+
   return {
     urlA,
     urlB,
@@ -285,11 +349,16 @@ async function compareWebVisuals({
     totalPixels,
     resolutionUsed: { width, height },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
+<<<<<<< Updated upstream
     artifacts: {
       imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
       imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
       diff:   `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
     },
+=======
+    domComparison,
+    artifacts: { imageA: imageAPath, imageB: imageBPath, diff: diffPath },
+>>>>>>> Stashed changes
   };
 }
 

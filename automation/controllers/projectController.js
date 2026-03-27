@@ -563,6 +563,55 @@ function getDBinfoByEmail(req, res) {
 }
 
 // -------------------------------------------------------
+// GET /api/wp/themes?repoUrl=https://github.com/owner/repo
+// Trả về danh sách folder trong thư mục themes của repo
+// -------------------------------------------------------
+async function getThemesFolders(req, res) {
+  const { repoUrl } = req.query;
+
+  if (!repoUrl) {
+    return res.status(400).json({ success: false, error: "repoUrl query param is required" });
+  }
+
+  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+  if (!match) {
+    return res.status(400).json({ success: false, error: "Invalid GitHub repo URL" });
+  }
+
+  const [, owner, repo] = match;
+
+  try {
+    const response = await axios.get(
+      `https://api.github.com/repos/${owner}/${repo}/contents/themes`,
+      {
+        headers: {
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout: 10000,
+      }
+    );
+
+    const themes = response.data
+      .filter((item) => item.type === "dir")
+      .map((item) => ({
+        name: item.name,
+        path: item.path,
+        url: item.html_url,
+      }));
+
+    return res.status(200).json({ success: true, owner, repo, themes });
+  } catch (error) {
+    const status = error.response?.status || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.response?.data?.message || error.message,
+    });
+  }
+}
+
+// -------------------------------------------------------
 // GET /api/wp/commits?repoUrl=https://github.com/owner/repo
 // Trả về lịch sử commit của repo từ GitHub API
 // -------------------------------------------------------
@@ -667,6 +716,7 @@ module.exports = {
   getCommitsByRepo,
   getWpSitePages,
   getDBinfoByEmail,
+  getThemesFolders,
 };
 
 
