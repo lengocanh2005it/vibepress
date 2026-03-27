@@ -1,28 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { captureRegion, getWpSitePages } from '../services/automationService';
-
-interface WpPage {
-  id: number;
-  title: string;
-  slug: string;
-  link: string;
-  status: string;
-}
-
-interface Capture {
-  id: string;
-  filePath: string;
-  comment: string;
-  pageUrl: string;
-}
-
-interface SelectionRect {
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-}
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface Annotation {
   id: number;
@@ -34,12 +11,9 @@ interface Annotation {
   colorClasses: string;
 }
 
-
 const Editor: React.FC = () => {
   const navigate = useNavigate();
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
-  const location= useLocation();
-  const siteUrl = location.state?.siteUrl || '';
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -90,68 +64,9 @@ const Editor: React.FC = () => {
     }
   ]);
 
+  const [hoveredBlock, setHoveredBlock] = useState<string | null>(null);
   const [activeTarget, setActiveTarget] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
-  const [wpPages, setWpPages] = useState<WpPage[]>([]);
-  const [selectedPageUrl, setSelectedPageUrl] = useState<string>(siteUrl);
-
-  // Capture states
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [selection, setSelection] = useState<SelectionRect | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [captureComment, setCaptureComment] = useState('');
-  const [showCommentPopup, setShowCommentPopup] = useState(false);
-  const [captures, setCaptures] = useState<Capture[]>([]);
-  const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
-  const overlayRef = useRef<HTMLDivElement>(null);
-
-  const getRelativeRect = (sel: SelectionRect) => ({
-    x: Math.min(sel.startX, sel.endX),
-    y: Math.min(sel.startY, sel.endY),
-    width: Math.abs(sel.endX - sel.startX),
-    height: Math.abs(sel.endY - sel.startY),
-  });
-
-  const handleOverlayMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = overlayRef.current!.getBoundingClientRect();
-    setSelection({ startX: e.clientX - rect.left, startY: e.clientY - rect.top, endX: e.clientX - rect.left, endY: e.clientY - rect.top });
-    setIsDragging(true);
-  };
-
-  const handleOverlayMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDragging || !selection) return;
-    const rect = overlayRef.current!.getBoundingClientRect();
-    setSelection(s => s ? { ...s, endX: e.clientX - rect.left, endY: e.clientY - rect.top } : s);
-  };
-
-  const handleOverlayMouseUp = () => {
-    if (!selection) return;
-    setIsDragging(false);
-    const r = getRelativeRect(selection);
-    if (r.width > 10 && r.height > 10) setShowCommentPopup(true);
-  };
-
-  const handleSaveCapture = async () => {
-    if (!selection) return;
-    setIsSubmittingCapture(true);
-    try {
-      const result = await captureRegion(selectedPageUrl, getRelativeRect(selection), captureComment);
-      setCaptures(prev => [...prev, { id: Date.now().toString(), filePath: result.filePath, comment: captureComment, pageUrl: selectedPageUrl }]);
-    } finally {
-      setIsSubmittingCapture(false);
-      setShowCommentPopup(false);
-      setCaptureComment('');
-      setSelection(null);
-      setIsCapturing(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!siteUrl) return;
-    getWpSitePages(siteUrl)
-      .then(setWpPages)
-      .catch(() => setWpPages([]));
-  }, [siteUrl]);
 
   const handleAddComment = () => {
     if (!commentText.trim() || !activeTarget) return;
@@ -168,6 +83,36 @@ const Editor: React.FC = () => {
     setAnnotations([...annotations, newAnnotation]);
     setCommentText('');
     setActiveTarget(null);
+  };
+
+  const BlockWrapper = ({ id, children, className = "" }: { id: string, children: React.ReactNode, className?: string }) => {
+    const isHovered = hoveredBlock === id;
+    const isActive = activeTarget === id;
+    const blockAnnotations = annotations.filter(a => a.targetId === id);
+
+    return (
+      <div 
+        className={`relative cursor-pointer transition-all duration-200 ${isHovered || isActive ? 'ring-2 ring-[#49704F] ring-offset-4 ring-offset-[#e8e6df]/50 rounded-3xl scale-[1.01]' : ''} ${className}`}
+        onMouseEnter={() => setHoveredBlock(id)}
+        onMouseLeave={() => setHoveredBlock(null)}
+        onClick={() => {
+          setActiveTarget(id);
+          setAnnotationsOpen(true);
+        }}
+      >
+        {blockAnnotations.map((ann, idx) => (
+          <div key={ann.id} className="absolute -left-4 -top-4 w-8 h-8 rounded-full border-[3px] border-white bg-[#49704F] text-white flex items-center justify-center font-bold text-[14px] shadow-md z-30 transition-transform hover:scale-110" style={{ transform: `translateY(${idx * 40}px)` }}>
+            {ann.id}
+          </div>
+        ))}
+        {(isHovered && blockAnnotations.length === 0 && !isActive) && (
+           <div className="absolute -left-4 -top-4 w-8 h-8 rounded-full border-[3px] border-dashed border-[#49704F] bg-white text-[#49704F] flex items-center justify-center font-bold text-[18px] shadow-sm z-30">
+             +
+           </div>
+        )}
+        {children}
+      </div>
+    );
   };
 
   return (
@@ -211,44 +156,47 @@ const Editor: React.FC = () => {
           </div>
           
           <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
-            {wpPages.length === 0 && (
-              <p className="text-[#8e9892] text-[12px] px-1">Đang tải trang...</p>
-            )}
-            {wpPages.map((page) => {
-              const isActive = selectedPageUrl === page.link;
-              return (
-                <div
-                  key={page.id}
-                  onClick={() => setSelectedPageUrl(page.link)}
-                  className={`rounded-2xl p-4 flex flex-col gap-2 cursor-pointer transition-colors ${isActive ? 'border-2 border-[#49704F] bg-[#FAF7F0] shadow-sm' : 'bg-white border border-[#e8e6df] hover:border-[#dcd9ce]'}`}
-                >
-                  {isActive && (
-                    <div className="self-end bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">Editing</div>
-                  )}
-                  <div className="flex items-center gap-3">
-                    <span className={`material-symbols-outlined text-[18px] ${isActive ? 'text-[#49704F]' : 'text-[#8e9892]'}`}>article</span>
-                    <span className="font-bold text-[#233227] text-[14px]">{page.title}</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-[#8e9892]">/{page.slug}</span>
+            {/* Active Page */}
+            <div className="bg-[#FAF7F0] border-2 border-[#49704F] rounded-2xl p-4 flex flex-col gap-2 relative shadow-sm cursor-pointer">
+              <div className="absolute top-4 right-4 bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">Editing</div>
+              <div className="flex items-center gap-3">
+                <span className="material-symbols-outlined text-[#49704F] text-[18px]">home</span>
+                <span className="font-bold text-[#233227] text-[14px]">Home</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
+                <span className="material-symbols-outlined text-[13px]">history</span>
+                Saved 2m ago
+              </div>
+            </div>
+
+            {/* Inactive Pages */}
+            {['Blog', 'About Us', 'Services', 'Contact'].map((page, idx) => (
+              <div key={idx} className="bg-white border border-[#e8e6df] rounded-2xl p-4 flex flex-col gap-2 hover:border-[#dcd9ce] transition-colors cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-[#8e9892] text-[18px]">
+                    {page === 'Blog' ? 'article' : page === 'About Us' ? 'info' : page === 'Services' ? 'build' : 'mail'}
+                  </span>
+                  <span className="font-bold text-[#233227] text-[14px]">{page}</span>
                 </div>
-              );
-            })}
+                {page === 'Blog' && (
+                  <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
+                    <span className="material-symbols-outlined text-[13px]">history</span> Updated 5h ago
+                  </div>
+                )}
+              </div>
+            ))}
+
+            <button className="w-full mt-4 bg-transparent border-2 border-dashed border-[#dcd9ce] rounded-full py-3 flex items-center justify-center gap-2 text-[#233227] font-bold text-[13px] hover:bg-[#e8e6df]/30 transition-colors">
+              <span className="material-symbols-outlined text-[18px]">add_circle</span> Add new page
+            </button>
           </div>
         </aside>
 
         {/* Center Canvas */}
         <main className="flex-1 bg-[#e8e6df]/50 relative flex justify-center overflow-hidden">
           
-          {/* Toolbar */}
-          <div className="absolute top-6 right-6 z-20 flex gap-2">
-            <button
-              onClick={() => { setIsCapturing(c => !c); setSelection(null); setShowCommentPopup(false); }}
-              className={`text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 transition-colors ${isCapturing ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white border border-[#e8e6df] text-[#233227] hover:bg-[#f0ece4]'}`}
-            >
-              <span className="material-symbols-outlined text-[16px]">{isCapturing ? 'close' : 'crop'}</span>
-              {isCapturing ? 'Huỷ' : 'Capture'}
-            </button>
-            <button
+          <div className="absolute top-6 right-6 z-20">
+            <button 
               onClick={() => setAnnotationsOpen(!annotationsOpen)}
               className="bg-[#49704F] text-white text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 hover:bg-[#346E56] transition-colors"
             >
@@ -256,72 +204,70 @@ const Editor: React.FC = () => {
             </button>
           </div>
 
-          <div className="w-full h-full relative" onClick={() => setActiveTarget(null)}>
+          <div className="w-full max-w-4xl h-full overflow-y-auto pt-16 pb-32 px-12 relative remove-scrollbar" onClick={() => setActiveTarget(null)}>
+            
+            {/* Outline wireframes */}
+            <div className="space-y-6" onClick={e => e.stopPropagation()}>
 
-            {selectedPageUrl ? (
-              <iframe
-                src={selectedPageUrl}
-                className="w-full h-full border-none"
-                title="Site Preview"
-              />
-            ) : (
-              <div className="flex items-center justify-center h-full text-[#8e9892] text-sm">
-                Không có siteUrl. Hãy chọn một trang từ Project Selector.
-              </div>
-            )}
-
-            {/* Capture overlay */}
-            {isCapturing && (
-              <div
-                ref={overlayRef}
-                className="absolute inset-0 z-30"
-                style={{ cursor: 'crosshair', background: 'rgba(0,0,0,0.15)' }}
-                onMouseDown={handleOverlayMouseDown}
-                onMouseMove={handleOverlayMouseMove}
-                onMouseUp={handleOverlayMouseUp}
-              >
-                {selection && (() => {
-                  const r = getRelativeRect(selection);
-                  return (
-                    <div
-                      className="absolute border-2 border-[#49704F] bg-[#49704F]/10"
-                      style={{ left: r.x, top: r.y, width: r.width, height: r.height, pointerEvents: 'none' }}
-                    />
-                  );
-                })()}
-              </div>
-            )}
-
-            {/* Comment popup */}
-            {showCommentPopup && selection && (() => {
-              const r = getRelativeRect(selection);
-              return (
-                <div
-                  className="absolute z-40 bg-white rounded-2xl shadow-xl border border-[#e8e6df] p-4 w-72"
-                  style={{ left: Math.min(r.x, window.innerWidth - 300), top: r.y + r.height + 8 }}
-                  onClick={e => e.stopPropagation()}
-                >
-                  <p className="text-[13px] font-bold text-[#233227] mb-2">Thêm comment cho vùng này</p>
-                  <textarea
-                    autoFocus
-                    value={captureComment}
-                    onChange={e => setCaptureComment(e.target.value)}
-                    placeholder="Nhập comment..."
-                    className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
-                  />
-                  <div className="flex gap-2 justify-end">
-                    <button onClick={() => { setShowCommentPopup(false); setSelection(null); }} className="text-[#5c6860] text-[12px] font-bold px-3 py-1.5 rounded-lg hover:bg-[#e8e6df]/50">Huỷ</button>
-                    <button
-                      onClick={handleSaveCapture}
-                      disabled={isSubmittingCapture}
-                      className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
-                    >
-                      {isSubmittingCapture ? 'Đang chụp...' : 'Lưu'}
-                    </button>
+              {/* Block 1 */}
+              <BlockWrapper id="block-1">
+                <div className="bg-[#FAF7F0] border border-[#e8e6df] rounded-3xl p-6 shadow-sm pointer-events-none">
+                  <div className="flex justify-between items-center mb-6">
+                    <div className="flex gap-1.5">
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#ff5f56]"></div>
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]"></div>
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#27c93f]"></div>
+                    </div>
+                    <span className="font-mono text-[#8e9892] text-[11px]">&lt;?php wp_head(); ?&gt;</span>
                   </div>
+                  <div className="flex items-center gap-4">
+                    <div className="h-4 w-32 bg-[#e8e6df] rounded-full"></div>
+                    <div className="h-4 w-20 bg-[#e8e6df] rounded-full"></div>
+                    <div className="h-px bg-[#e8e6df] flex-1 mx-4"></div>
+                    <div className="w-8 h-8 rounded-full bg-[#e8e6df]"></div>
+                  </div>
+                  <div className="h-3 w-3/4 bg-[#e8e6df] rounded-full mt-6"></div>
                 </div>
-              );
-            })()}
+              </BlockWrapper>
+
+              {/* Block 2 & 3 row */}
+              <div className="flex gap-6 relative">
+                <BlockWrapper id="block-2" className="flex-1">
+                  <div className="bg-[#FAF7F0] border border-[#e8e6df] rounded-3xl p-8 flex flex-col gap-6 shadow-sm h-full pointer-events-none">
+                    <div className="h-6 w-1/3 bg-[#d2dacb] rounded-full"></div>
+                    <div className="space-y-3">
+                      <div className="h-3 w-full bg-[#e8e6df] rounded-full"></div>
+                      <div className="h-3 w-5/6 bg-[#e8e6df] rounded-full"></div>
+                      <div className="h-3 w-2/3 bg-[#e8e6df] rounded-full mt-4"></div>
+                    </div>
+                  </div>
+                </BlockWrapper>
+
+                <BlockWrapper id="block-3" className="w-1/3">
+                  <div className="bg-[#FAF7F0] border border-[#e8e6df] rounded-3xl p-6 flex flex-col shadow-sm relative h-full pointer-events-none">
+                    <div className="h-24 bg-[#e8e6df] rounded-xl w-full mb-4 opacity-50"></div>
+                    <div className="h-3 w-full bg-[#e8e6df] rounded-full mt-auto"></div>
+                  </div>
+                </BlockWrapper>
+              </div>
+
+              {/* Block 4 */}
+              <BlockWrapper id="block-4">
+                <div className="bg-[#FAF7F0] border border-[#e8e6df] rounded-3xl p-8 shadow-sm pointer-events-none">
+                  <div className="bg-[#e8e6df]/50 rounded-2xl h-64 mb-6 relative overflow-hidden flex items-center justify-center">
+                    <svg className="w-48 h-48 text-[#d2dacb] absolute" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+                      <path fill="currentColor" d="M44.7,-76.4C58.9,-69.2,71.8,-59.1,81.1,-46.3C90.4,-33.5,96.1,-18.1,95.4,-3.2C94.7,11.7,87.6,26.1,76.5,36.5C65.4,46.9,50.3,53.3,36.6,60.9C22.9,68.5,10.6,77.3,-2.8,81.9C-16.2,86.5,-30.7,86.9,-43.3,80.5C-55.9,74.1,-66.6,60.9,-75.4,46.6C-84.2,32.3,-91.1,16.9,-91,-0.1C-90.9,-17.1,-83.8,-33.4,-72,-44.6C-60.2,-55.8,-43.7,-61.9,-29.7,-69.5C-15.7,-77.1,-4.2,-86.2,6.5,-84.8C17.2,-83.4,30.5,-83.6,44.7,-76.4Z" transform="translate(100 100) scale(1.1)" />
+                    </svg>
+                    <svg className="w-24 h-24 text-[#8e9892] absolute bottom-4 left-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" /></svg>
+                  </div>
+                  <div className="h-5 w-48 bg-[#d2dacb] rounded-full mb-3"></div>
+                  <div className="h-3 w-full bg-[#e8e6df] rounded-full mb-2"></div>
+                  <div className="h-3 w-5/6 bg-[#e8e6df] rounded-full mb-6"></div>
+                  <div className="h-4 w-32 bg-[#e8e6df] rounded-full"></div>
+                </div>
+              </BlockWrapper>
+
+            </div>
           </div>
 
           {/* Floating AI Prompt Bar */}
@@ -352,7 +298,7 @@ const Editor: React.FC = () => {
 
         </main>
 
-        {/* Right Sidebar: Captures + Annotations */}
+        {/* Right Sidebar: Annotations only */}
         {annotationsOpen && (
           <aside className="w-80 shrink-0 bg-[#FAF7F0] border-l border-[#e8e6df] flex flex-col z-10 transition-all duration-300">
             <div className="p-6 pb-4 border-b border-[#e8e6df]">
@@ -362,25 +308,6 @@ const Editor: React.FC = () => {
               </div>
               <p className="text-[#5c6860] text-[13px]">Feedback from <span className="font-bold text-[#233227]">stakeholders</span>.</p>
             </div>
-
-            {/* Captures section */}
-            {captures.length > 0 && (
-              <div className="px-4 pt-4 pb-2 border-b border-[#e8e6df]">
-                <p className="text-[11px] font-bold text-[#8e9892] uppercase tracking-widest mb-3">Captures ({captures.length})</p>
-                <div className="space-y-3">
-                  {captures.map(cap => (
-                    <div key={cap.id} className="bg-[#f5f3ee] rounded-xl overflow-hidden border border-[#e8e6df]">
-                      <img
-                        src={`${import.meta.env.VITE_BACKEND_URL}${cap.filePath}`}
-                        alt="capture"
-                        className="w-full object-cover max-h-28"
-                      />
-                      {cap.comment && <p className="text-[12px] text-[#5c6860] px-3 py-2">{cap.comment}</p>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {activeTarget && (

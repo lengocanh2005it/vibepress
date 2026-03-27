@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream:xpress-react-spa/src/App.tsx
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import LandingPage from "./pages/LandingPage";
 import Onboarding from "./pages/Onboarding";
@@ -8,22 +7,9 @@ import SplitView from "./pages/SplitView";
 import VisualEditor from "./pages/VisualEditor";
 import DeployDashboard from "./pages/DeployDashboard";
 import SharedLayout from "./components/SharedLayout";
-=======
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import LandingPage from './pages/LandingPage';
-import Onboarding from './pages/Onboarding';
-import ProjectSelector from './pages/ProjectSelector';
-import Editor from './pages/Editor';
-import SplitView from './pages/SplitView';
-import VisualEditor from './pages/VisualEditor';
-import DeployDashboard from './pages/DeployDashboard';
-import SharedLayout from './components/SharedLayout';
-import { UserProvider } from './context/UserContext';
->>>>>>> Stashed changes:xpress-react-spa copy 2/src/App.tsx
 
 function App() {
   return (
-    <UserProvider>
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingPage />} />
@@ -41,7 +27,6 @@ function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
-    </UserProvider>
   );
 }
 

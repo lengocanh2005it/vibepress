@@ -506,6 +506,125 @@ function syncComplete(req, res) {
   return res.status(200).json({ success: true });
 }
 
+// -------------------------------------------------------
+// GET /api/wp/repos?email=xxx
+// Trả về danh sách repo của tất cả wpSites có adminEmail khớp
+// -------------------------------------------------------
+function getReposByEmail(req, res) {
+  const email = req.query.email;
+
+  if (!email) {
+    return res.status(400).json({ success: false, error: "email query param is required" });
+  }
+
+  const db = readDb();
+  const sites = Object.values(db.wpSites ?? {}).filter(
+    (s) => s.adminEmail?.toLowerCase() === email.toLowerCase()
+  );
+
+  const repos = sites.map((s) => ({
+    siteId: s.siteId,
+    siteUrl: s.siteUrl,
+    siteName: s.siteName,
+    wpRepoName: s.wpRepoName,
+    wpRepoUrl: s.wpRepoUrl,
+    registeredAt: s.registeredAt,
+  }));
+
+  return res.status(200).json({ success: true, email, repos });
+}
+
+// -------------------------------------------------------
+// GET /api/wp/commits?repoUrl=https://github.com/owner/repo
+// Trả về lịch sử commit của repo từ GitHub API
+// -------------------------------------------------------
+async function getCommitsByRepo(req, res) {
+  const { repoUrl } = req.query;
+
+  if (!repoUrl) {
+    return res.status(400).json({ success: false, error: "repoUrl query param is required" });
+  }
+
+  // Parse owner/repo từ URL dạng https://github.com/owner/repo
+  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+  if (!match) {
+    return res.status(400).json({ success: false, error: "Invalid GitHub repo URL" });
+  }
+
+  const [, owner, repo] = match;
+
+  try {
+    const response = await axios.get(
+      `https://api.github.com/repos/${owner}/${repo}/commits`,
+      {
+        headers: {
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        params: { per_page: 20 },
+        timeout: 10000,
+      }
+    );
+
+    const commits = response.data.map((c) => ({
+      sha: c.sha.slice(0, 7),
+      message: c.commit.message,
+      author: c.commit.author.name,
+      date: c.commit.author.date,
+      avatarUrl: c.author?.avatar_url ?? null,
+    }));
+
+    return res.status(200).json({ success: true, owner, repo, commits });
+  } catch (error) {
+    const status = error.response?.status || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.response?.data?.message || error.message,
+    });
+  }
+}
+
+// -------------------------------------------------------
+// GET /api/wp/site-pages?siteUrl=http://localhost:8000
+// Proxy gọi WP REST API lấy danh sách pages
+// -------------------------------------------------------
+async function getWpSitePages(req, res) {
+  const { siteUrl } = req.query;
+
+  if (!siteUrl) {
+    return res.status(400).json({ success: false, error: "siteUrl query param is required" });
+  }
+
+  try {
+    const response = await axios.get(
+      `${siteUrl}/wp-json/wp/v2/pages`,
+      { params: { per_page: 100, _fields: "id,title,link,slug,status" }, timeout: 10000 }
+    );
+
+    const pages = [
+      { id: 1, title: "Trang chủ", slug: "", link: siteUrl, status: "publish" },
+      ...response.data.map((p) => ({
+        id: p.id,
+        title: p.title?.rendered ?? p.slug,
+        slug: p.slug,
+        link: p.link,
+        status: p.status,
+      })),
+    ];
+
+    
+
+    return res.status(200).json({ success: true, pages });
+  } catch (error) {
+    const status = error.response?.status || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.response?.data?.message || error.message,
+    });
+  }
+}
+
 module.exports = {
   ensureFileSystemState,
   createProject,
@@ -514,4 +633,7 @@ module.exports = {
   registerWpSite,
   getToken,
   syncComplete,
+  getReposByEmail,
+  getCommitsByRepo,
+  getWpSitePages,
 };
