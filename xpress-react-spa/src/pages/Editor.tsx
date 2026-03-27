@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { captureRegion, getWpSitePages } from '../services/automationService';
+import { runAiProcess } from '../services/AiService';
+import { useUser } from '../context/UserContext';
 
 interface WpPage {
   id: number;
@@ -39,6 +41,7 @@ const Editor: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const siteUrl: string = location.state?.siteUrl || '';
+  const {email} = useUser();
 
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
   const [chatInput, setChatInput] = useState('');
@@ -108,7 +111,13 @@ const Editor: React.FC = () => {
     if (!chatInput.trim()) return;
     
     setChatInput('');
-    navigate('/app/editor/split-view');
+    if(email)
+    {
+      runAiProcess(email).then((data)=>{
+        console.log('AI process started with job ID:', data.jobId);
+        navigate('/app/editor/split-view', {state: {jobId: data.jobId}});
+      })
+    }
   };
 
   const handleAddComment = () => {

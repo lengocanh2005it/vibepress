@@ -534,6 +534,34 @@ function getReposByEmail(req, res) {
   return res.status(200).json({ success: true, email, repos });
 }
 
+function getDBinfoByEmail(req, res) {
+  const email = req.query.email;
+
+  if (!email) {
+    return res.status(400).json({ success: false, error: "email query param is required" });
+  }
+
+  const db = readDb();
+  const site = Object.values(db.wpSites ?? {}).find(
+    (s) => s.adminEmail?.toLowerCase() === email.toLowerCase()
+  );
+
+  if (!site) {
+    return res.status(404).json({ success: false, error: "No site found for this email" });
+  }
+
+  return res.status(200).json({
+    themeGithubUrl: site.wpRepoUrl,
+    dbCredentials: {
+      host: "localhost",
+      port: site.dbInfo?.db_port,
+      dbName: site.dbInfo?.db_name,
+      password: site.dbInfo?.db_password,
+      user: site.dbInfo?.db_user,
+    },
+  });
+}
+
 // -------------------------------------------------------
 // GET /api/wp/commits?repoUrl=https://github.com/owner/repo
 // Trả về lịch sử commit của repo từ GitHub API
@@ -625,6 +653,8 @@ async function getWpSitePages(req, res) {
   }
 }
 
+
+
 module.exports = {
   ensureFileSystemState,
   createProject,
@@ -636,4 +666,7 @@ module.exports = {
   getReposByEmail,
   getCommitsByRepo,
   getWpSitePages,
+  getDBinfoByEmail,
 };
+
+

@@ -1,11 +1,12 @@
 import React from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { useSse } from "../hooks/useSse";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { PipelineProgressEvent } from "../hooks/useSse";
+import { useSse } from "../hooks/useSse";
 
 const SplitView: React.FC = () => {
-  const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
+  const location=useLocation();
+  const jobId=location.state?.jobId || "";
   const sse = useSse(jobId || "");
 
   const getStatusIcon = (status: PipelineProgressEvent["status"]) => {

@@ -1,6 +1,6 @@
 const express = require('express');
 const upload = require('../middlewares/uploadMiddleware');
-const { createProject, getProjectById, uploadTheme, registerWpSite, getToken, syncComplete, getReposByEmail, getCommitsByRepo, getWpSitePages } = require('../controllers/projectController');
+const { createProject, getProjectById, uploadTheme, registerWpSite, getToken, syncComplete, getReposByEmail, getCommitsByRepo, getWpSitePages, getDBinfoByEmail } = require('../controllers/projectController');
 
 const router = express.Router();
 
@@ -13,5 +13,6 @@ router.post('/wp/sync-complete', syncComplete);
 router.get('/wp/repos', getReposByEmail);
 router.get('/wp/commits', getCommitsByRepo);
 router.get('/wp/site-pages', getWpSitePages);
+router.get('/wp/db-info', getDBinfoByEmail);
 
 module.exports = router;
