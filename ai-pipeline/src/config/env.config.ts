@@ -37,4 +37,7 @@ export default () => ({
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
     reactRepoToken: process.env.GITHUB_REACT_REPO_TOKEN,
   },
+  automation: {
+    url: process.env.AUTOMATION_URL,
+  },
 });

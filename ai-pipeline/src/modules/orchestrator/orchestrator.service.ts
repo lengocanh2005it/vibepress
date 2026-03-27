@@ -22,28 +22,46 @@ import { CleanupService } from '../agents/cleanup/cleanup.service.js';
 import { CotEvidenceService } from '../cot-evidence/cot-evidence.service.js';
 import { RunPipelineDto } from './orchestrator.controller.js';
 import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
 export interface ProgressEvent {
   step: string; // internal step name
-  label: string; // tên tiếng Việt
+  label: string; // display label
   status: PipelineStepStatus;
-  percent: number; // 0–100
-  message?: string; // log message tuỳ chọn
-  previewUrl?: string; // chỉ có ở event "done" cuối cùng
+  percent: number; // 0-100
+  message?: string; // optional log message
+  data?: ProgressEventData;
+}
+
+interface ProgressEventData {
+  previewUrl?: string;
+  metrics: {
+    urlA: string;
+    urlB: string;
+    diffPercentage: number;
+    differentPixels: number;
+    totalPixels: number;
+    artifacts: {
+      imageA: string;
+      imageB: string;
+      diff: string;
+    };
+  };
 }
 
 const STEP_META: Record<string, { label: string; weight: number }> = {
-  '1_repo_analyzer': { label: 'Phân tích cấu trúc repo', weight: 5 },
-  '2_theme_parser': { label: 'Parse theme WordPress', weight: 10 },
-  '3_db_content': { label: 'Trích xuất nội dung từ database', weight: 10 },
-  '4_planner': { label: 'AI lên kế hoạch component', weight: 15 },
-  '5_react_generator': { label: 'Sinh code React + Tailwind', weight: 40 },
-  '6b_validator': { label: 'Kiểm tra & dọn dẹp import', weight: 5 },
-  '6_api_builder': { label: 'Tạo API server Express', weight: 5 },
-  '7_preview_builder': { label: 'Dựng bản xem trước Vite', weight: 8 },
-  '8_cleanup': { label: 'Dọn dẹp file tạm', weight: 2 },
+  '1_repo_analyzer': { label: 'Analyze repository structure', weight: 5 },
+  '2_theme_parser': { label: 'Parse WordPress theme', weight: 10 },
+  '3_db_content': { label: 'Extract content from database', weight: 10 },
+  '4_planner': { label: 'Plan component architecture', weight: 15 },
+  '5_react_generator': { label: 'Generate React + Tailwind code', weight: 40 },
+  '6b_validator': { label: 'Validate and cleanup imports', weight: 5 },
+  '6_api_builder': { label: 'Build Express API server', weight: 5 },
+  '7_preview_builder': { label: 'Build Vite preview', weight: 8 },
+  '8_cleanup': { label: 'Cleanup temporary files', weight: 2 },
+  '9_done': { label: 'Migration complete', weight: 0 },
 };
 
 const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
@@ -110,10 +128,14 @@ export class OrchestratorService {
         { name: '6b_validator', status: 'pending' },
         { name: '7_preview_builder', status: 'pending' },
         { name: '8_cleanup', status: 'pending' },
+        { name: '9_done', status: 'pending' },
       ],
     };
     this.jobs.set(jobId, state);
     this.progress.set(jobId, new Subject<ProgressEvent>());
+
+    // Wait 7 seconds before triggering pipeline
+    await new Promise((resolve) => setTimeout(resolve, 7000));
 
     this.executePipeline(jobId, dto, state).catch((err) => {
       state.status = 'error';
@@ -366,28 +388,50 @@ export class OrchestratorService {
         }),
     );
 
+    // Bước phụ: Gọi đến tool để evaluate sự tương đồng
+    const response = await axios.post(
+      `${this.configService.get<string>('automation.url', '')}/visual/compare`,
+      {
+        urlA: preview.previewUrl,
+        urlB: 'http://localhost:8000/',
+        fullPage: true,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+      },
+    );
+
+    const metrics = response.data.result;
+
     // Bước 8: Xoá temp/repos và temp/uploads của job này
     await this.runStep(state, '8_cleanup', logPath, () =>
       this.cleanup.cleanup(jobId),
     );
 
     const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
-    state.status = 'done';
-    state.result = {
-      previewDir: preview.previewDir,
-      previewUrl: preview.previewUrl,
-      dbCreds,
-    };
 
-    // Emit event hoàn tất kèm previewUrl để FE hiển thị iframe
+    // Step 9: Migration completion
+    await this.runStep(state, '9_done', logPath, async () => {
+      state.status = 'done';
+      state.result = {
+        previewDir: preview.previewDir,
+        previewUrl: preview.previewUrl,
+        dbCreds,
+      };
+      return { success: true };
+    });
+
+    // Complete the SSE stream after all steps finish
     const subject = this.progress.get(jobId);
     subject?.next({
-      step: 'done',
-      label: 'Hoàn tất',
+      step: '9_done',
+      label: 'Migration complete',
       status: 'done',
       percent: 100,
-      message: `🎉 Pipeline hoàn tất sau ${totalElapsed}s`,
-      previewUrl: preview.previewUrl,
+      message: `🎉 Migration complete in ${totalElapsed}s`,
+      data: {
+        previewUrl: preview.previewUrl,
+        metrics,
+      },
     });
     subject?.complete();
     setTimeout(() => this.progress.delete(jobId), 60_000);
@@ -497,7 +541,7 @@ export class OrchestratorService {
       label: meta.label,
       status: 'running',
       percent: calcPercent(name),
-      message: `Đang ${meta.label.toLowerCase()}...`,
+      message: `Processing ${meta.label.toLowerCase()}...`,
     });
     this.logger.log(`[${state.jobId}] Step ${name} started`);
     await this.logToFile(logPath, `Step ${name} started`);
@@ -525,7 +569,7 @@ export class OrchestratorService {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       step.status = 'done';
 
-      // percent sau khi bước này xong
+      // Calculate percent after this step completes
       const stepOrder = Object.keys(STEP_META);
       let done = 0;
       for (const s of stepOrder) {
@@ -539,7 +583,7 @@ export class OrchestratorService {
         label: meta.label,
         status: 'done',
         percent: percentDone,
-        message: `✓ ${meta.label} — hoàn thành sau ${elapsed}s`,
+        message: `✓ ${meta.label} — completed in ${elapsed}s`,
       });
 
       this.logger.log(`[${state.jobId}] Step ${name} done (${elapsed}s)`);
@@ -555,9 +599,8 @@ export class OrchestratorService {
         label: meta.label,
         status: 'error',
         percent: calcPercent(name),
-        message: `✗ ${meta.label} thất bại: ${err.message}`,
+        message: `✗ ${meta.label} failed: ${err.message}`,
       });
-      subject?.complete();
       await this.logToFile(
         logPath,
         `Step ${name} ERROR (${elapsed}s): ${err.message}`,

@@ -14,7 +14,23 @@ export interface PipelineProgressEvent {
   status: PipelineStepStatus; // pending, running, done, error
   percent: number; // 0–100
   message?: string; // log message tuỳ chọn
-  previewUrl?: string; // chỉ có ở event "done" cuối cùng
+  data?: ProgressEventData;
+}
+
+interface ProgressEventData {
+  previewUrl?: string;
+  metrics: {
+    urlA: string;
+    urlB: string;
+    diffPercentage: number;
+    differentPixels: number;
+    totalPixels: number;
+    artifacts: {
+      imageA: string;
+      imageB: string;
+      diff: string;
+    };
+  };
 }
 
 /**
@@ -86,7 +102,7 @@ export function useSse(
         try {
           // ServerSentEvent data là JSON string
           const data = JSON.parse(event.data) as PipelineProgressEvent;
-
+          console.log(data);
           setState((prev) => ({
             ...prev,
             currentEvent: data,

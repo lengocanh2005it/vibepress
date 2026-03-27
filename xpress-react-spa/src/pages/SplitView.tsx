@@ -125,15 +125,15 @@ const SplitView: React.FC = () => {
           ))}
 
           {sse.currentEvent?.status === "done" &&
-            sse.currentEvent.previewUrl && (
+            sse.currentEvent.data?.previewUrl && (
               <div className="mt-8 p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400 text-xs">
                 <div className="font-bold mb-2">✅ Pipeline Complete!</div>
                 <p className="text-green-400/80">
-                  Preview URL: {sse.currentEvent.previewUrl}
+                  Preview URL: {sse.currentEvent.data.previewUrl}
                 </p>
                 <button
                   onClick={() =>
-                    window.open(sse.currentEvent?.previewUrl, "_blank")
+                    window.open(sse.currentEvent?.data?.previewUrl, "_blank")
                   }
                   className="mt-2 px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
                 >
@@ -174,10 +174,10 @@ const SplitView: React.FC = () => {
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            {sse.currentEvent?.previewUrl ? (
+            {sse.currentEvent?.data?.previewUrl ? (
               <button
                 onClick={() =>
-                  window.open(sse.currentEvent?.previewUrl, "_blank")
+                  window.open(sse.currentEvent?.data?.previewUrl, "_blank")
                 }
                 className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-bold"
               >
@@ -192,9 +192,9 @@ const SplitView: React.FC = () => {
         </div>
 
         <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center">
-          {sse.currentEvent?.previewUrl ? (
+          {sse.currentEvent?.data?.previewUrl ? (
             <iframe
-              src={sse.currentEvent.previewUrl}
+              src={sse.currentEvent.data.previewUrl}
               title="Live Preview"
               className="w-full h-full rounded-lg border border-outline-variant"
             />
