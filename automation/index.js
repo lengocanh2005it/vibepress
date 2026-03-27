@@ -21,6 +21,7 @@ app.use('/api', visualRoutes);
 app.use('/api', lighthouseRoutes);
 app.use('/api', captureRoutes);
 app.use('/captures', express.static(require('path').join(__dirname, 'uploads/captures')));
+app.use('/artifacts', express.static(require('path').join(__dirname, 'artifacts')));
 
 ensureFileSystemState();
 

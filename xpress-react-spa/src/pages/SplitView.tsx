@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { PipelineProgressEvent } from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
@@ -8,6 +8,7 @@ const SplitView: React.FC = () => {
   const location=useLocation();
   const jobId=location.state?.jobId || "";
   const sse = useSse(jobId || "");
+  const [showMetrics, setShowMetrics] = useState(false);
 
   const getStatusIcon = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
@@ -150,14 +151,24 @@ const SplitView: React.FC = () => {
               <p className="text-green-400/80">
                 Preview URL: {completionEvent.data?.previewUrl}
               </p>
-              <button
-                onClick={() =>
-                  window.open(completionEvent.data?.previewUrl, "_blank")
-                }
-                className="mt-2 px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
-              >
-                Open Preview
-              </button>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() =>
+                    window.open(completionEvent.data?.previewUrl, "_blank")
+                  }
+                  className="px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
+                >
+                  Open Preview
+                </button>
+                {completionEvent.data?.metrics && (
+                  <button
+                    onClick={() => setShowMetrics(true)}
+                    className="px-3 py-1 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/50 rounded text-blue-400 text-xs"
+                  >
+                    View Metrics
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -230,8 +241,170 @@ const SplitView: React.FC = () => {
           )}
         </div>
       </section>
+
+      {showMetrics && completionEvent?.data?.metrics && (() => {
+        const m = completionEvent.data.metrics;
+        const matchPct = Math.max(0, 100 - m.diffPercentage);
+        const scoreColor =
+          matchPct >= 95 ? "text-primary" :
+          matchPct >= 80 ? "text-[#705c30]" :
+          "text-error";
+        const scoreBg =
+          matchPct >= 95 ? "bg-primary/10 border-primary/30" :
+          matchPct >= 80 ? "bg-[#705c30]/10 border-[#705c30]/30" :
+          "bg-error/10 border-error/30";
+        const scoreLabel =
+          matchPct >= 95 ? "Excellent" :
+          matchPct >= 80 ? "Good" :
+          "Needs work";
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => setShowMetrics(false)}
+          >
+            <div
+              className="relative bg-surface w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl border border-outline-variant/40 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-surface border-b border-outline-variant/30">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-primary/10 rounded-lg">
+                    <span className="material-symbols-outlined text-primary text-xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                      compare
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="font-headline text-base font-bold text-on-surface leading-tight">Visual Diff Report</h2>
+                    <p className="text-xs text-on-surface-variant">Pixel-level comparison between original & generated</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowMetrics(false)}
+                  className="p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors"
+                >
+                  <span className="material-symbols-outlined text-xl">close</span>
+                </button>
+              </div>
+
+              <div className="p-6 space-y-5">
+                {/* Score + Stats row */}
+                <div className="grid grid-cols-4 gap-3">
+                  {/* Match Score — large */}
+                  <div className={`col-span-1 flex flex-col items-center justify-center p-4 rounded-2xl border ${scoreBg}`}>
+                    <p className={`text-4xl font-headline font-bold ${scoreColor}`}>
+                      {matchPct.toFixed(1)}<span className="text-lg">%</span>
+                    </p>
+                    <p className={`text-xs font-bold mt-1 ${scoreColor}`}>{scoreLabel}</p>
+                    <p className="text-[10px] text-on-surface-variant mt-0.5">Match Score</p>
+                  </div>
+
+                  {/* Diff % */}
+                  <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
+                    <span className="material-symbols-outlined text-on-surface-variant text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>
+                      difference
+                    </span>
+                    <div>
+                      <p className="text-2xl font-headline font-bold text-on-surface">{m.diffPercentage.toFixed(2)}<span className="text-sm font-normal">%</span></p>
+                      <p className="text-xs text-on-surface-variant mt-0.5">Pixel Diff</p>
+                    </div>
+                  </div>
+
+                  {/* Different pixels */}
+                  <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
+                    <span className="material-symbols-outlined text-on-surface-variant text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>
+                      grid_view
+                    </span>
+                    <div>
+                      <p className="text-2xl font-headline font-bold text-on-surface">{(m.differentPixels / 1000).toFixed(1)}<span className="text-sm font-normal">K</span></p>
+                      <p className="text-xs text-on-surface-variant mt-0.5">Changed Pixels</p>
+                    </div>
+                  </div>
+
+                  {/* Total pixels */}
+                  <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
+                    <span className="material-symbols-outlined text-on-surface-variant text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>
+                      photo_size_select_large
+                    </span>
+                    <div>
+                      <p className="text-2xl font-headline font-bold text-on-surface">{(m.totalPixels / 1000000).toFixed(2)}<span className="text-sm font-normal">M</span></p>
+                      <p className="text-xs text-on-surface-variant mt-0.5">Total Pixels</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div className="bg-surface-container-low rounded-xl p-3 border border-outline-variant/30">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs text-on-surface-variant">Pixel match</span>
+                    <span className={`text-xs font-bold ${scoreColor}`}>{matchPct.toFixed(2)}%</span>
+                  </div>
+                  <div className="h-2 bg-surface-container-high rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-700 ${matchPct >= 95 ? "bg-primary" : matchPct >= 80 ? "bg-[#705c30]" : "bg-error"}`}
+                      style={{ width: `${matchPct}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* URLs */}
+                <div className="bg-surface-container-low rounded-xl border border-outline-variant/30 overflow-hidden">
+                  {[
+                    { label: "Original", icon: "language", url: m.urlA },
+                    { label: "Generated", icon: "code", url: m.urlB },
+                  ].map(({ label, icon, url }, i) => (
+                    <div key={label} className={`flex items-center gap-3 px-4 py-3 ${i === 0 ? "border-b border-outline-variant/30" : ""}`}>
+                      <span className="material-symbols-outlined text-on-surface-variant text-base">{icon}</span>
+                      <span className="text-xs font-medium text-on-surface-variant w-16 shrink-0">{label}</span>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-primary hover:underline truncate"
+                      >
+                        {url}
+                      </a>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Screenshot comparison */}
+                <div>
+                  <p className="text-xs font-medium text-on-surface-variant mb-3 uppercase tracking-wider">Screenshot Comparison</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { label: "Original (A)", icon: "language", src: m.artifacts.imageA, accent: "border-outline-variant/50" },
+                      { label: "Generated (B)", icon: "code", src: m.artifacts.imageB, accent: "border-primary/40" },
+                      { label: "Pixel Diff", icon: "difference", src: m.artifacts.diff, accent: "border-error/30" },
+                    ].map(({ label, icon, src, accent }) => (
+                      <div
+                        key={label}
+                        className={`group rounded-xl border ${accent} overflow-hidden bg-surface-container-low cursor-pointer hover:shadow-md transition-shadow`}
+                        onClick={() => window.open(src, "_blank")}
+                      >
+                        <div className="flex items-center gap-2 px-3 py-2 border-b border-outline-variant/20">
+                          <span className="material-symbols-outlined text-on-surface-variant text-sm">{icon}</span>
+                          <span className="text-xs font-medium text-on-surface-variant">{label}</span>
+                          <span className="material-symbols-outlined text-on-surface-variant/40 text-sm ml-auto group-hover:text-on-surface-variant transition-colors">open_in_new</span>
+                        </div>
+                        <img
+                          src={src}
+                          alt={label}
+                          className="w-full aspect-video object-cover object-top group-hover:opacity-90 transition-opacity"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };
 
 export default SplitView;
+

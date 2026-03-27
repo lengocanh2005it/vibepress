@@ -584,7 +584,8 @@ ${renders}
     if (lastExportIdx !== -1) {
       const exportSlice = result.slice(lastExportIdx);
 
-      if (/function|=>|\{/.test(exportSlice)) {
+      const exportFirstLine = exportSlice.split('\n')[0];
+      if (/function|=>|\{/.test(exportFirstLine)) {
         // Function/arrow component: find closing brace via depth tracking
         let depth = 0;
         let opened = false;

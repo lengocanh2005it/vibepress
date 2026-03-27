@@ -144,11 +144,6 @@ export class OrchestratorService {
     this.jobs.set(jobId, state);
     this.progress.set(jobId, new Subject<ProgressEvent>());
 
-    console.log(jobId);
-
-    // Wait 7 seconds before triggering pipeline
-    await new Promise((resolve) => setTimeout(resolve, 7000));
-
     this.executePipeline(jobId, dto, state).catch((err) => {
       state.status = 'error';
       state.error = err.message;

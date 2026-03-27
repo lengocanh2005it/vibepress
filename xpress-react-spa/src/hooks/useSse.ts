@@ -65,6 +65,7 @@ export function useSse(
   });
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const pipelineCompletedRef = useRef(false);
 
   /**
    * Connect đến SSE endpoint
@@ -83,6 +84,7 @@ export function useSse(
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    pipelineCompletedRef.current = false;
 
     const url = `${apiUrl}/pipeline/progress/${jobId}`;
 
@@ -103,6 +105,9 @@ export function useSse(
           // ServerSentEvent data là JSON string
           const data = JSON.parse(event.data) as PipelineProgressEvent;
           console.log(data);
+          if (data.status === "done" && data.data?.previewUrl) {
+            pipelineCompletedRef.current = true;
+          }
           setState((prev) => ({
             ...prev,
             currentEvent: data,
@@ -116,21 +121,25 @@ export function useSse(
         }
       };
 
-      eventSource.onerror = (error) => {
-        const errorMsg =
-          error instanceof Event && error.type === "error"
-            ? "SSE connection error"
-            : String(error);
-
-        setState((prev) => ({
-          ...prev,
-          error: new Error(errorMsg),
-          isConnected: false,
-          isLoading: false,
-        }));
-
+      eventSource.onerror = () => {
         eventSource.close();
         eventSourceRef.current = null;
+
+        if (pipelineCompletedRef.current) {
+          // Server closed the stream after pipeline finished — not a real error
+          setState((prev) => ({
+            ...prev,
+            isConnected: false,
+            isLoading: false,
+          }));
+        } else {
+          setState((prev) => ({
+            ...prev,
+            error: new Error("Không thể kết nối tới server. Kiểm tra pipeline đang chạy không."),
+            isConnected: false,
+            isLoading: false,
+          }));
+        }
       };
 
       eventSourceRef.current = eventSource;

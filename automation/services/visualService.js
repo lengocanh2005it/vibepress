@@ -7,6 +7,7 @@ const PNG = require('pngjs').PNG;
 const axios = require('axios');
 const xml2js = require('xml2js');
 
+const { PORT } = require('../config/constants');
 const ARTIFACTS_DIR = path.join(__dirname, '..', 'artifacts');
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
@@ -284,7 +285,11 @@ async function compareWebVisuals({
     totalPixels,
     resolutionUsed: { width, height },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
-    artifacts: { imageA: imageAPath, imageB: imageBPath, diff: diffPath },
+    artifacts: {
+      imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
+      imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
+      diff:   `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
+    },
   };
 }
 

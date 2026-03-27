@@ -56,6 +56,51 @@ export class ValidatorService {
       return { isValid: false, error: `Unbalanced braces (depth: ${depth})` };
     }
 
+    // ── Content pattern checks — collect ALL violations before returning ────────
+
+    const violations: string[] = [];
+
+    // 1. CSS variable inside Tailwind arbitrary value — never works
+    if (/className=["'][^"']*\[var\(--/.test(code)) {
+      violations.push(
+        '`[var(--...]` inside className breaks Tailwind — resolve to actual px/rem (e.g. `rounded-[8px]`, `gap-[24px]`); if the value is unresolvable, omit the class entirely.',
+      );
+    }
+
+    // 2. Bare numeric+unit Tailwind class (no brackets) — e.g. gap-1rem, mt-2rem
+    const classStrings = [
+      ...[...code.matchAll(/className=["']([^"']+)["']/g)].map((m) => m[1]),
+      ...[...code.matchAll(/className=\{`([^`]+)`\}/g)].map((m) => m[1]),
+    ].join(' ');
+    const bareNumericUnit =
+      /\b(?:gap|mt|mb|ml|mr|pt|pb|pl|pr|mx|my|px|py|m|p|w|h|text|leading|tracking|rounded(?:-[a-z]+)?|font|min-[wh]|max-[wh])-\d[\d.]*(?:px|rem|em|vh|vw|%)\b/;
+    const numericMatch = classStrings.match(bareNumericUnit);
+    if (numericMatch) {
+      violations.push(
+        `Invalid Tailwind class \`${numericMatch[0]}\`: numeric values need brackets — write \`gap-[1rem]\` not \`gap-1rem\`.`,
+      );
+    }
+
+    // 3. Wrong siteInfo field names (siteName/siteUrl/blogDescription, NOT name/url/description)
+    const siteInfoMatch = code.match(/\bsiteInfo\.(name|url|description)\b/);
+    if (siteInfoMatch) {
+      violations.push(
+        `\`siteInfo.${siteInfoMatch[1]}\` does not exist. Use \`siteInfo.siteName\` / \`siteInfo.siteUrl\` / \`siteInfo.blogDescription\`.`,
+      );
+    }
+
+    // 4. Wrong post field names
+    const postFieldMatch = code.match(/\bpost\.(tags|title\.rendered)\b/);
+    if (postFieldMatch) {
+      violations.push(
+        `\`post.${postFieldMatch[1]}\` does not exist. Use \`post.title\` (string) or \`post.categories\` (string[]).`,
+      );
+    }
+
+    if (violations.length > 0) {
+      return { isValid: false, error: violations.join('\n') };
+    }
+
     return { isValid: true };
   }
 

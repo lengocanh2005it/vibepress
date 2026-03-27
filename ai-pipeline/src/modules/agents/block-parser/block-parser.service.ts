@@ -19,6 +19,7 @@ export interface ThemeDefaults {
   buttonBorderRadius?: string;
   buttonPadding?: string;
   blockGap?: string;
+  rootPadding?: string;
   headings?: {
     h1?: { fontSize?: string; fontWeight?: string };
     h2?: { fontSize?: string; fontWeight?: string };
@@ -38,7 +39,7 @@ export interface ThemeBlockStyle {
     lineHeight?: string;
   };
   border?: { radius?: string };
-  spacing?: { padding?: string };
+  spacing?: { padding?: string; gap?: string };
 }
 
 export interface ThemeTokens {
@@ -144,6 +145,7 @@ export class BlockParserService {
       themeJson.styles?.blocks ?? {},
       colors,
       fontSizes,
+      spacing,
     );
     const cssTokens = extractStyleCssTokens(styleCss, {
       colors,
@@ -270,6 +272,23 @@ export class BlockParserService {
       buttonPadding = rawPadding;
     }
 
+    // Root/global padding from styles.spacing.padding (applied to .wp-site-blocks in WP)
+    const rawRootPadding = styles.spacing?.padding;
+    let rootPadding: string | undefined;
+    if (rawRootPadding && typeof rawRootPadding === 'object') {
+      const raw = rawRootPadding as Record<string, string>;
+      const t = resolveSp(raw.top) ?? raw.top ?? '0';
+      const r = resolveSp(raw.right) ?? raw.right ?? '0';
+      const b = resolveSp(raw.bottom) ?? raw.bottom ?? '0';
+      const l = resolveSp(raw.left) ?? raw.left ?? '0';
+      // Only keep if at least one side is non-zero
+      if (t !== '0' || r !== '0' || b !== '0' || l !== '0') {
+        rootPadding = `${t} ${r} ${b} ${l}`;
+      }
+    } else if (typeof rawRootPadding === 'string') {
+      rootPadding = resolveSp(rawRootPadding) ?? rawRootPadding;
+    }
+
     // Per-heading typography
     const headingLevels = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const;
     const headings: ThemeDefaults['headings'] = {};
@@ -304,6 +323,7 @@ export class BlockParserService {
       !buttonBorderRadius &&
       !buttonPadding &&
       !blockGap &&
+      !rootPadding &&
       !hasHeadings
     )
       return undefined;
@@ -324,6 +344,7 @@ export class BlockParserService {
       ...(buttonBorderRadius && { buttonBorderRadius }),
       ...(buttonPadding && { buttonPadding }),
       ...(blockGap && { blockGap }),
+      ...(rootPadding && { rootPadding }),
       ...(hasHeadings && { headings }),
     };
   }
@@ -332,6 +353,7 @@ export class BlockParserService {
     blocksStyles: Record<string, any>,
     colors: ThemeTokens['colors'],
     fontSizes: ThemeTokens['fontSizes'],
+    spacing: ThemeTokens['spacing'],
   ): ThemeTokens['blockStyles'] {
     if (!blocksStyles || Object.keys(blocksStyles).length === 0)
       return undefined;
@@ -368,19 +390,28 @@ export class BlockParserService {
       if (style.border?.radius)
         resolved.border = { radius: style.border.radius as string };
 
+      const resolveSp = (v: string | undefined) =>
+        this.resolveSpacingVar(v, spacing);
+
       const rawPad = style.spacing?.padding;
-      if (rawPad) {
+      const rawGap = style.spacing?.blockGap as string | undefined;
+      const resolvedPad = (() => {
+        if (!rawPad) return undefined;
         if (typeof rawPad === 'object') {
-          const {
-            top = '0',
-            right = '0',
-            bottom = '0',
-            left = '0',
-          } = rawPad as any;
-          resolved.spacing = { padding: `${top} ${right} ${bottom} ${left}` };
-        } else {
-          resolved.spacing = { padding: rawPad as string };
+          const { top = '0', right = '0', bottom = '0', left = '0' } =
+            rawPad as any;
+          return `${resolveSp(top) ?? top} ${resolveSp(right) ?? right} ${resolveSp(bottom) ?? bottom} ${resolveSp(left) ?? left}`;
         }
+        return resolveSp(rawPad as string) ?? (rawPad as string);
+      })();
+      const resolvedGap = rawGap
+        ? (resolveSp(rawGap) ?? rawGap)
+        : undefined;
+      if (resolvedPad || resolvedGap) {
+        resolved.spacing = {
+          ...(resolvedPad && { padding: resolvedPad }),
+          ...(resolvedGap && { gap: resolvedGap }),
+        };
       }
 
       if (Object.keys(resolved).length > 0) {

@@ -124,6 +124,14 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       lines.push(
         `- Button padding: use \`style={{padding:"${d.buttonPadding}"}}\``,
       );
+    if (d.blockGap)
+      lines.push(
+        `- Default block gap: \`${d.blockGap}\` — WordPress applies this as \`margin-block-start\` between ALL direct children of the root wrapper (not just flex/grid). Replicate this by:\n  1. Root wrapper → \`flex flex-col gap-[${d.blockGap}]\` (this is the most critical rule)\n  2. Every inner flex/grid container with NO explicit \`gap\` field → also add \`gap-[${d.blockGap}]\``,
+      );
+    if (d.rootPadding)
+      lines.push(
+        `- Root/global padding: \`style={{padding:"${d.rootPadding}"}}\` — apply to the outermost wrapper \`<div>\` of this component (replicates WordPress .wp-site-blocks padding)`,
+      );
     if (d.headings && Object.keys(d.headings).length > 0) {
       lines.push(
         '**Heading typography** — apply per heading level (in addition to heading color above):',
@@ -201,6 +209,8 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
         parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
       if (style.border?.radius)
         parts.push(`rounded \`rounded-[${style.border.radius}]\``);
+      if (style.spacing?.gap)
+        parts.push(`gap \`gap-[${style.spacing.gap}]\``);
       if (style.spacing?.padding)
         parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
       if (parts.length > 0)
