@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { mkdir, writeFile, cp, readFile, stat } from 'fs/promises';
-import * as fs from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import { AssetDownloaderService } from './asset-downloader.service.js';
 
 export interface PreviewBuilderResult {
   jobId: string;
@@ -25,6 +25,8 @@ const PARTIAL_PATTERNS =
 @Injectable()
 export class PreviewBuilderService {
   private readonly logger = new Logger(PreviewBuilderService.name);
+
+  constructor(private assetDownloader: AssetDownloaderService) {}
 
   async build(input: {
     jobId: string;
@@ -48,22 +50,32 @@ export class PreviewBuilderService {
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
-    // 2. Copy theme assets vào frontend/public/assets/ (ảnh tĩnh của theme)
+    // 2. Copy theme assets (images, fonts) vào public/assets/
     if (themeDir) {
       const themeAssetsDir = join(themeDir, 'assets');
-      const publicAssetsDir = join(frontendDir, 'public', 'assets');
-      try {
-        await cp(themeAssetsDir, publicAssetsDir, { recursive: true });
-        this.logger.log(`Copied theme assets to: ${publicAssetsDir}`);
-      } catch {
-        this.logger.warn(`No assets folder found in theme: ${themeAssetsDir}`);
-      }
+      const destImagesDir = join(frontendDir, 'public', 'assets', 'images');
+      const destFontsDir = join(frontendDir, 'public', 'assets', 'fonts');
+      await this.assetDownloader.copyAssets(
+        themeAssetsDir,
+        destImagesDir,
+        destFontsDir,
+      );
     }
 
     // 3. Write generated components từ AI (code in memory)
+    // Relink WordPress image URLs từ /wp-content/uploads/ sang local /assets/images/
     for (const comp of components.components) {
       const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
+
+      // Match WordPress URLs (http://localhost/wp-content/uploads/... hoặc https://domain.com/wp-content/uploads/...)
+      const wpUploadPattern =
+        /https?:\/\/[^"'\s]+\/wp-content\/uploads\/([^"'\s]+\.(jpg|jpeg|png|gif|webp))/gi;
+      comp.code = comp.code.replace(wpUploadPattern, (match, fileName) => {
+        this.logger.log(`Relinked WP image: ${fileName}`);
+        return `/assets/images/${fileName}`;
+      });
+
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
 
@@ -327,7 +339,9 @@ ${fontEntries}
         copied++;
         this.logger.log(`Successfully copied asset: ${relativePath}`);
       } catch (err) {
-        this.logger.warn(`Failed to copy asset from ${sourcePath}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        this.logger.warn(
+          `Failed to copy asset from ${sourcePath}: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        );
       }
     }
 

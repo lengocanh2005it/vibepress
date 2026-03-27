@@ -39,7 +39,10 @@ export function extractStyleCssTokens(
   const inferred = inferTokensFromVars(vars);
   const colors = mergeBySlug(baseTokens?.colors ?? [], inferred.colors);
   const fonts = mergeBySlug(baseTokens?.fonts ?? [], inferred.fonts);
-  const fontSizes = mergeBySlug(baseTokens?.fontSizes ?? [], inferred.fontSizes);
+  const fontSizes = mergeBySlug(
+    baseTokens?.fontSizes ?? [],
+    inferred.fontSizes,
+  );
   const spacing = mergeBySlug(baseTokens?.spacing ?? [], inferred.spacing);
 
   const ctx: ResolveContext = { colors, fonts, fontSizes, spacing, vars };
@@ -79,7 +82,10 @@ function parseCssRules(input: string): CssRule[] {
         walk(body);
       } else if (selector) {
         rules.push({
-          selectors: selector.split(',').map((s) => s.trim()).filter(Boolean),
+          selectors: selector
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
           declarations: parseDeclarations(body),
         });
       }
@@ -434,7 +440,8 @@ function resolveRaw(
   const spacingVar =
     trimmed.match(/var\(--wp--preset--spacing--([^)]+)\)/) ??
     trimmed.match(/var:preset\|spacing\|([^|)\s]+)/);
-  if (spacingVar) return ctx.spacing.find((s) => s.slug === spacingVar[1])?.size;
+  if (spacingVar)
+    return ctx.spacing.find((s) => s.slug === spacingVar[1])?.size;
 
   const genericVar = trimmed.match(/^var\((--[^,\s)]+)(?:,\s*([^)]+))?\)$/);
   if (genericVar) {
