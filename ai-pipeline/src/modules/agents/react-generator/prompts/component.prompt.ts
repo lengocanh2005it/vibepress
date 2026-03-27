@@ -1,18 +1,13 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import {
-  WpSiteInfo,
-  WpMenu,
-  WpPost,
-  WpPage,
-} from '../../../sql/wp-query.service.js';
-import { DbContentResult } from '../../db-content/db-content.service.js';
-import {
-  wpBlocksToJson,
-  stripTags,
-} from '../../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
+import {
+  stripTags,
+  wpBlocksToJson,
+} from '../../../../common/utils/wp-block-to-json.js';
 import type { ThemeTokens } from '../../../agents/block-parser/block-parser.service.js';
+import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
+import { DbContentResult } from '../../db-content/db-content.service.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
   const result: string[] = [];
@@ -167,14 +162,12 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Apply them directly:',
     );
     lines.push(
-      '- `bgColor` → `style={{backgroundColor:"#hex"}}` (use the value as-is)',
+      '- `bgColor` → prefer `bg-[#hex]`; use `style={{backgroundColor:"#hex"}}` only when the value is dynamic',
     );
     lines.push(
-      '- `textColor` → `style={{color:"#hex"}}` (use the value as-is)',
+      '- `textColor` → prefer `text-[#hex]`; use `style={{color:"#hex"}}` only when the value is dynamic',
     );
-    lines.push(
-      '- If you need a color by CSS var (e.g. for root defaults), the palette is:',
-    );
+    lines.push('- Palette values available from the theme tokens:');
     for (const c of tokens.colors) {
       lines.push(`  - slug \`${c.slug}\` → \`${c.value}\``);
     }
@@ -462,7 +455,17 @@ export function buildSectionPrompt(input: {
     : '';
   const templateTexts = buildTemplateTextsNote(input.nodesJson);
   const classicThemeNote = buildClassicThemeNote(input.nodesJson);
-  const planContext = buildPlanContextNote(input.componentPlan);
+  const sectionContextNote = `## Section context — CRITICAL
+This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
+⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
+⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
+Render ONLY the JSX for the blocks in the template source below.`;
+  const planContext = [
+    sectionContextNote,
+    buildPlanContextNote(input.componentPlan),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   const retryNote = input.retryError
     ? `## ERROR FROM PREVIOUS ATTEMPT\n${input.retryError}\nFIX THIS.`
     : '';

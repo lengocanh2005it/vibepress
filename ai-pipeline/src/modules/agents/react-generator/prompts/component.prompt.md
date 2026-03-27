@@ -46,7 +46,6 @@ All endpoints are relative to `/api` — **ALWAYS use relative paths like `/api/
 - If the template has a text/hero section BEFORE an image section, render text first then image — never swap them
 - Each `<!-- wp:group -->`, `<!-- wp:cover -->`, `<!-- wp:columns -->` block in the template corresponds to a distinct section — keep them all in the same order
 - Do NOT combine two separate sections into one just because they look similar
-- **STRICT DOM HIERARCHY**: You must preserve the nested DOM structure of the source template exactly. DO NOT flatten the DOM (e.g., do not remove wrapper <div> elements that have class names). These wrappers are essential for CSS layout selectors to match correctly. If a block has a wrapper in the source, keep the wrapper in the React output.
 
 {{dataGrounding}}
 
@@ -91,75 +90,25 @@ There are two kinds of text in a WordPress template:
 - Export the component as default
 - Responsive: add `md:` and `lg:` prefixes where appropriate
 
-### Styling strategy — CSS variables + WP class names + Tailwind utilities
+### Styling strategy — Tailwind only
 
-The preview app has all WordPress CSS variables pre-injected in `:root`. Use them for **exact theme fidelity**:
+Use **Tailwind utilities directly on the JSX elements**. Do NOT rely on any external stylesheet for layout.
 
-**Colors** — use CSS variables instead of hardcoding hex:
-```tsx
-// ✅ Correct — references the actual theme color
-style={{color: 'var(--wp--preset--color--primary)'}}
-style={{backgroundColor: 'var(--wp--preset--color--contrast)'}}
+- **No CSS dependency**: do NOT import `App.css`, `index.css`, any other `.css` file, CSS module, SCSS file, styled-components, or inline `<style>` tags
+- **No WordPress layout classes**: do NOT depend on `wp-block-*`, `alignwide`, `alignfull`, `is-layout-*`, or other global classes for spacing, columns, cover overlays, or widths
+- **Every visual/layout rule must live in the component** via Tailwind utility classes plus minimal inline `style={{...}}` only when Tailwind cannot express the value cleanly (`backgroundImage`, `fontFamily`, `flexBasis`, dynamic opacity)
+- **Use theme token values as Tailwind arbitrary values** whenever possible: `bg-[#hex]`, `text-[#hex]`, `text-[2.25rem]`, `px-[1.5rem]`, `gap-[24px]`, `rounded-[24px]`, `max-w-[1200px]`
+- **Use Tailwind for layout aggressively**: `flex`, `grid`, `grid-cols-*`, `flex-col`, `items-*`, `justify-*`, `gap-*`, `w-full`, `min-h-*`, `mx-auto`, `px-*`, `py-*`, `relative`, `absolute`, `inset-0`, `z-*`, `overflow-hidden`
 
-// ✅ Also OK when you know the hex from theme tokens table
-className="text-[#1a1a1a]"
+### ⛔ NEVER rely on default or generic styling
 
-// ❌ NEVER — generic Tailwind colors
-className="text-gray-900 bg-white text-black"
-```
-
-**Font sizes** — use CSS variables:
-```tsx
-style={{fontSize: 'var(--wp--preset--font-size--large)'}}
-// OR from theme tokens table: className="text-[2.25rem]"
-```
-
-**Font families** — use CSS variables:
-```tsx
-style={{fontFamily: 'var(--wp--preset--font-family--body)'}}
-```
-
-**Spacing / gap / padding** — use CSS variables when from `gap` or `padding` fields:
-```tsx
-style={{gap: 'var(--wp--style--block-gap)'}}           // block-level gap
-style={{paddingTop: 'var(--wp--preset--spacing--50)'}} // spacing preset
-// OR use the resolved value from the JSON: className="pt-[1.5rem]"
-```
-
-**WP block class names** — add `wp-block-{type}` to each block's outermost JSX element. These classes have layout CSS already defined (flex, grid, cover, columns etc.):
-```tsx
-// block: "cover"
-<div className="wp-block-cover ..." style={{backgroundImage:`url('${src}')`}}>
-  <div className="wp-block-cover__inner-container ...">...</div>
-</div>
-
-// block: "columns"
-<div className="wp-block-columns ...">
-  <div className="wp-block-column ...">...</div>
-</div>
-
-// block: "group" with layout type from params.layout
-<div className="wp-block-group is-layout-flex ...">...</div>
-<div className="wp-block-group is-layout-flow ...">...</div>
-<div className="wp-block-group is-layout-constrained ...">...</div>
-
-// block: "query"
-<div className="wp-block-query ...">
-  <ul className="wp-block-post-template ...">...</ul>
-</div>
-```
-
-**Use Tailwind only for** fine-grained utilities without WP equivalents: `flex`, `grid`, `grid-cols-*`, `items-center`, `justify-between`, `w-full`, `mx-auto`, `overflow-hidden`, `relative`, `absolute`, `inset-0`, `z-10`, `max-w-[value]`, `text-center`, `min-h-[value]`.
-
-### ⛔ NEVER use generic Tailwind size/color/spacing classes
-
-| Forbidden | Use instead |
+| Avoid | Use instead |
 |---|---|
-| `text-xs/sm/base/lg/xl/2xl/3xl/4xl/5xl` | `style={{fontSize:'var(--wp--preset--font-size--slug)'}}` or `text-[exact-rem]` |
-| `text-gray-*` `text-slate-*` `bg-gray-*` `bg-white` `bg-black` | `style={{color:'var(--wp--preset--color--slug)'}}` or `text-[#hex]` |
-| `p-4` `px-6` `py-8` `mt-4` `gap-4` | `style={{padding:'var(--wp--preset--spacing--slug)'}}` or `p-[exact]` |
-| `font-bold` `font-semibold` | `font-[700]` from theme heading tokens |
-| `rounded` `rounded-md` `rounded-lg` | `rounded-[value]` from block `borderRadius` or theme tokens |
+| `text-gray-*` `text-slate-*` `bg-gray-*` `bg-white` `bg-black` when the template/theme gives a real color | `text-[#hex]` / `bg-[#hex]` from theme tokens or resolved block values |
+| `text-xs/sm/base/lg/xl/2xl/3xl/4xl/5xl` when the theme gives an exact size | `text-[exact-rem]` / `text-[exact-px]` |
+| `p-4` `px-6` `py-8` `mt-4` `gap-4` when the template gives an exact value | `p-[exact]` / `px-[exact]` / `py-[exact]` / `mt-[exact]` / `gap-[exact]` |
+| `font-bold` `font-semibold` when the theme gives a specific weight | `font-[700]` or the exact heading weight from tokens |
+| `rounded` `rounded-md` `rounded-lg` when the block/theme gives a radius | `rounded-[value]` |
 - **HTML content from API** (post_content, page content): always render with `dangerouslySetInnerHTML` and wrap in a `<div className="prose max-w-none">` to get proper typography styling for headings, paragraphs, lists, etc.
 - **Images from theme template**: paths like `get_template_directory_uri() . '/assets/...'` or PHP echo of asset URLs → convert to `/assets/...` (relative to public folder). Only use image paths that explicitly appear in the template source — do NOT invent paths like `/assets/images/logo.png` if they are not in the source
 - **Header background**: Do NOT set a background color on the `<header>` element — leave it transparent so it blends with the page background
@@ -169,13 +118,13 @@ style={{paddingTop: 'var(--wp--preset--spacing--50)'}} // spacing preset
 - **No invented images**: Do NOT add avatar, user profile, testimonial author, or decorative `<img>` elements unless they explicitly appear in the template source with a real `src` value. If no `src` exists in the template, omit the `<img>` entirely — never use invented paths.
 - **No invented text content**: Testimonial quotes, author names, job titles, company names, and all other static text must come EXACTLY from the template source. Do NOT invent people or content (e.g. do NOT write "Sarah Johnson, Travel Blogger" if that is not in the template).
 - **Footer navigation**: Only render menus that actually exist in the `GET /api/menus` response. Do NOT invent footer sections like "Categories", "Legal", "Social" with hardcoded links — if no matching menu exists in the API response, skip that section entirely. Footer column headings must be menu names from the API, not invented labels.
-- **Block colors** (`bgColor` / `textColor` slug fields): use CSS variables — `style={{backgroundColor:'var(--wp--preset--color--{slug})'}}` and `style={{color:'var(--wp--preset--color--{slug})'}}`. If the slug is not in the theme tokens table, fall back to the hex from the table or `#000000`. NEVER ignore colors on buttons.
-- **Default colors**: root wrapper `<div>` uses `style={{backgroundColor:'var(--wp--preset--color--base,#fff)', color:'var(--wp--preset--color--contrast,#000)'}}` (or the defaults from the theme tokens table). Headings use heading color var; links use link color var; buttons use button color vars.
-- **Default font**: root wrapper uses `style={{fontFamily:'var(--wp--preset--font-family--body,"inherit")', fontSize:'var(--wp--preset--font-size--medium,1rem)', lineHeight:'1.6'}}` — values from theme tokens table.
-- **Block font sizes** (`fontSize` slug): `style={{fontSize:'var(--wp--preset--font-size--{slug})'}}`. Do NOT use `text-sm`, `text-lg` etc.
-- **Block font families** (`fontFamily` slug): `style={{fontFamily:'var(--wp--preset--font-family--{slug})'}}`.
-- **Heading typography**: each `<h1>`–`<h6>` uses `style={{fontSize:'var(--wp--preset--font-size--{slug})', fontWeight:'{weight}'}}` from the **Heading typography** table. Do NOT use `text-2xl`, `font-bold` etc.
-- **Layout width**: content wrappers use `style={{maxWidth:'var(--wp--style--global--content-size,650px)'}} className="mx-auto"`. Wide blocks: `style={{maxWidth:'var(--wp--style--global--wide-size,1200px)'}} className="mx-auto"`. Full-width: `className="w-full"`.
+- **Block colors** (`bgColor` / `textColor` slug fields): apply the resolved value directly with `bg-[#hex]` / `text-[#hex]` when known at generation time, or inline `style={{backgroundColor:'#hex'}}` / `style={{color:'#hex'}}` when needed. NEVER ignore colors on buttons.
+- **Default colors**: root wrapper should set the page background/text colors from the theme tokens directly on the component, preferably with Tailwind arbitrary values and inline style only when necessary.
+- **Default font**: root wrapper should set font family/size/line-height directly on the component (`style={{fontFamily:"..."}}`, `className="text-[...] leading-[...]"`).
+- **Block font sizes** (`fontSize` slug): use `text-[exact-size]`. Do NOT use `text-sm`, `text-lg` etc. unless the theme truly has no exact size.
+- **Block font families** (`fontFamily` slug): apply `style={{fontFamily:'...'}}` using the theme token value.
+- **Heading typography**: each `<h1>`–`<h6>` uses the exact theme token size/weight with Tailwind arbitrary values like `text-[3rem] font-[700]`.
+- **Layout width**: content wrappers use `className="mx-auto w-full max-w-[650px]"`. Wide blocks use `className="mx-auto w-full max-w-[1200px]"`. Full-width uses `className="w-full"`.
 - **Button styling**: apply **Button border radius** (`rounded-[...]`) and **Button padding** (`style={{padding:"..."}}`) from the theme tokens table to all `<button>` and button-style elements that have no explicit padding/border override.
 - **Per-block-type styles**: the theme tokens table may include a **Per-block-type styles** section. Apply those styles to every element of that block type (e.g. all `button` elements get the specified tracking/weight/radius). These are theme-wide defaults — only override them when a specific block has an explicit `bgColor`/`textColor`/`fontSize` attribute.
 - **Inline block typography** (`typography` field on a node): if a JSON node has a `typography` field, apply it directly to that element: `letterSpacing` → `tracking-[value]`, `textTransform` → `uppercase`/`lowercase`/`capitalize`, `lineHeight` → `leading-[value]`, `fontSize` → `text-[value]`, `fontWeight` → `font-[value]`. These override the per-block-type defaults for that specific element.
@@ -199,8 +148,8 @@ style={{paddingTop: 'var(--wp--preset--spacing--50)'}} // spacing preset
 - **Text alignment** (`textAlign`): if a node has a `textAlign` field, apply `text-left`, `text-center`, or `text-right` directly.
 - **Column width** (`columnWidth`): if a `block: "column"` node has a `columnWidth` field (e.g. `"33.33%"`), apply `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}` — do NOT let equal-split flex override the explicit percentage.
 - **Cover overlay color** (`overlayColor`): if a `block: "cover"` node has an `overlayColor` field, it is already a hex value — use `style={{backgroundColor:'#hex'}}` for the overlay div. Fall back to `bg-black` only when `overlayColor` is absent.
-- **Section width** (`align`): if a node has an `align` field: `"full"` → `w-full` (full viewport width, no max-width); `"wide"` → `style={{maxWidth:'var(--wp--style--global--wide-size)'}} className="mx-auto w-full"`; `"center"` or absent → `style={{maxWidth:'var(--wp--style--global--content-size)'}} className="mx-auto"`.
-- **Font family on a block** (`fontFamily`): if a node has a `fontFamily` slug, apply `style={{fontFamily:'var(--wp--preset--font-family--{slug})'}}` to that element.
+- **Section width** (`align`): if a node has an `align` field: `"full"` → `w-full`; `"wide"` → `mx-auto w-full max-w-[wide-size-from-theme]`; `"center"` or absent → `mx-auto w-full max-w-[content-size-from-theme]`.
+- **Font family on a block** (`fontFamily`): if a node has a `fontFamily` slug, apply the actual family string via `style={{fontFamily:'...'}}`.
 - **Images from WordPress media library**: URLs containing `/wp-content/uploads/` → keep as-is, they point to the running WP instance
 
 ## Site context

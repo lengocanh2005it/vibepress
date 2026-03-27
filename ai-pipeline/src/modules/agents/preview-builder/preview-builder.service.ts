@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { mkdir, writeFile, cp, readFile } from 'fs/promises';
-import { join, resolve } from 'path';
+import { mkdir, writeFile, cp, readFile, stat } from 'fs/promises';
+import * as fs from 'fs/promises';
+import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
@@ -44,11 +45,6 @@ export class PreviewBuilderService {
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
     await cp(TEMPLATE_DIR, frontendDir, { recursive: true });
-    
-    // Inject base.css
-    const baseCssPath = resolve('src/modules/agents/preview-builder/templates/base.css');
-    await cp(baseCssPath, join(srcDir, 'base.css'));
-
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
@@ -69,6 +65,16 @@ export class PreviewBuilderService {
       const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+    }
+
+    // 3b. Copy đúng các asset mà component generated đang reference.
+    // Điều này tránh case assets/ có tồn tại nhưng thiếu các ảnh con mà JSX dùng.
+    if (themeDir) {
+      await this.copyReferencedThemeAssets(
+        themeDir,
+        join(frontendDir, 'public'),
+        components.components,
+      );
     }
 
     // 3. Generate App.tsx với routes từ components
@@ -147,7 +153,6 @@ export class PreviewBuilderService {
     await writeFile(
       join(srcDir, 'App.tsx'),
       `import { Routes, Route } from 'react-router-dom';
-import './base.css';
 ${routeImports}
 
 export default function App() {
@@ -237,111 +242,7 @@ ${fontEntries}
 `,
     );
 
-    // 2. Inject CSS variables + body font + heading sizes vào index.css
-    {
-      const cssPath = join(frontendDir, 'src', 'index.css');
-      let cssContent = await readFile(cssPath, 'utf-8');
-
-      // :root — inject ALL WP preset CSS variables so AI-generated components
-      // can reference var(--wp--preset--color--slug) etc. without guessing hex values.
-      const vars: string[] = [];
-
-      // Layout & gap (legacy aliases + WP standard names)
-      const cw = tokens.defaults?.contentWidth ?? '650px';
-      const ww = tokens.defaults?.wideWidth ?? '1200px';
-      const bg = tokens.defaults?.blockGap ?? '1.5rem';
-      vars.push(`  --wp-content-width: ${cw};`);
-      vars.push(`  --wp-wide-width: ${ww};`);
-      vars.push(`  --wp-block-gap: ${bg};`);
-      vars.push(`  --wp--style--global--content-size: ${cw};`);
-      vars.push(`  --wp--style--global--wide-size: ${ww};`);
-      vars.push(`  --wp--style--block-gap: ${bg};`);
-
-      // Color preset variables
-      for (const c of tokens.colors)
-        vars.push(`  --wp--preset--color--${c.slug}: ${c.value};`);
-
-      // Font-size preset variables
-      for (const s of tokens.fontSizes)
-        vars.push(`  --wp--preset--font-size--${s.slug}: ${s.size};`);
-
-      // Font-family preset variables
-      for (const f of tokens.fonts)
-        vars.push(`  --wp--preset--font-family--${f.slug}: ${f.family};`);
-
-      // Spacing preset variables
-      for (const s of tokens.spacing)
-        vars.push(`  --wp--preset--spacing--${s.slug}: ${s.size};`);
-
-      cssContent = cssContent.replace(
-        /:root \{[\s\S]*?\}/,
-        `:root {\n${vars.join('\n')}\n}`,
-      );
-
-      // body — default font-family, font-size, color từ theme
-      const bodyRules: string[] = [];
-      if (tokens.defaults?.fontFamily)
-        bodyRules.push(`  font-family: ${tokens.defaults.fontFamily};`);
-      if (tokens.defaults?.fontSize)
-        bodyRules.push(`  font-size: ${tokens.defaults.fontSize};`);
-      if (tokens.defaults?.textColor)
-        bodyRules.push(`  color: ${tokens.defaults.textColor};`);
-      if (tokens.defaults?.bgColor)
-        bodyRules.push(`  background-color: ${tokens.defaults.bgColor};`);
-      if (bodyRules.length > 0)
-        cssContent += `\nbody {\n${bodyRules.join('\n')}\n}\n`;
-
-      // Global block gap — mirrors WP's --wp--style--block-gap behavior
-      // .is-layout-flow uses margin-top; .is-layout-flex uses gap (handled by CSS class in index.css)
-      cssContent += `\n.wp-block-group.is-layout-flow > * + *,\n.wp-block-cover__inner-container > * + * {\n  margin-top: var(--wp--style--block-gap, 1.5rem);\n}\n`;
-
-      // Restore browser-default-like vertical spacing stripped by Tailwind Preflight.
-      // WordPress themes rely on these margins; without them elements appear crammed.
-      cssContent += `
-/* Prose spacing — restore browser defaults removed by Tailwind Preflight */
-h1, h2, h3, h4, h5, h6 {
-  margin-top: 0.75em;
-  margin-bottom: 0.4em;
-}
-p {
-  margin-top: 0;
-  margin-bottom: 1em;
-}
-ul, ol {
-  margin-top: 0;
-  margin-bottom: 1em;
-  padding-left: 1.5em;
-}
-li + li {
-  margin-top: 0.25em;
-}
-figure {
-  margin: 0 0 1em;
-}
-`;
-
-      // h1–h6 — heading sizes + weights từ theme tokens (chính xác hơn Tailwind generic)
-      const headings = tokens.defaults?.headings;
-      if (headings) {
-        const headingColor = tokens.defaults?.headingColor
-          ? `  color: ${tokens.defaults.headingColor};`
-          : '';
-        for (const level of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const) {
-          const h = headings[level];
-          if (!h) continue;
-          const rules: string[] = [];
-          if (h.fontSize) rules.push(`  font-size: ${h.fontSize};`);
-          if (h.fontWeight) rules.push(`  font-weight: ${h.fontWeight};`);
-          if (headingColor) rules.push(headingColor);
-          if (rules.length > 0)
-            cssContent += `\n${level} {\n${rules.join('\n')}\n}\n`;
-        }
-      }
-
-      await writeFile(cssPath, cssContent);
-    }
-
-    // 3. Inject Google Fonts vào index.html
+    // 2. Inject Google Fonts vào index.html
     const googleFonts = tokens.fonts
       .map((f) => f.name)
       .filter(
@@ -402,5 +303,51 @@ figure {
   private pickVitePort(jobId: string): number {
     const hash = jobId.replace(/-/g, '').slice(6, 12);
     return 5200 + (parseInt(hash, 16) % 800);
+  }
+
+  private async copyReferencedThemeAssets(
+    themeDir: string,
+    publicDir: string,
+    components: ReactGenerateResult['components'],
+  ): Promise<void> {
+    const assetPaths = this.collectReferencedAssetPaths(components);
+    if (assetPaths.length === 0) return;
+
+    let copied = 0;
+    for (const assetPath of assetPaths) {
+      const relativePath = assetPath.replace(/^\/+/, '');
+      const sourcePath = join(themeDir, relativePath);
+      const destPath = join(publicDir, relativePath);
+
+      try {
+        const info = await stat(sourcePath);
+        if (!info.isFile()) continue;
+        await mkdir(dirname(destPath), { recursive: true });
+        await cp(sourcePath, destPath, { force: true });
+        copied++;
+        this.logger.log(`Successfully copied asset: ${relativePath}`);
+      } catch (err) {
+        this.logger.warn(`Failed to copy asset from ${sourcePath}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      }
+    }
+
+    if (copied > 0) {
+      this.logger.log(`Copied ${copied} referenced theme assets to preview`);
+    }
+  }
+
+  private collectReferencedAssetPaths(
+    components: ReactGenerateResult['components'],
+  ): string[] {
+    const assets = new Set<string>();
+    const assetPattern = /\/assets\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
+
+    for (const comp of components) {
+      for (const match of comp.code.matchAll(assetPattern)) {
+        assets.add(match[0]);
+      }
+    }
+
+    return [...assets];
   }
 }

@@ -22,6 +22,16 @@ export class ValidatorService {
   checkCodeStructure(code: string): { isValid: boolean; error?: string } {
     if (!code.trim()) return { isValid: false, error: 'Empty code' };
 
+    if (
+      /import\s+(?:.+?\s+from\s+)?['"][^'"]+\.s?css['"];?/s.test(code) ||
+      /<style[\s>]/i.test(code)
+    ) {
+      return {
+        isValid: false,
+        error: 'External CSS or inline <style> tags are not allowed.',
+      };
+    }
+
     // Check for obvious duplicate classNames
     // Looks for a tag that contains 'className=' at least twice
     const classNameMatches = (code.match(/className=["'][^"']*["']/g) || [])

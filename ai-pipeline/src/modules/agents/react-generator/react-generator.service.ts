@@ -27,7 +27,7 @@ const CHUNK_THRESHOLD_CHARS = 40_000;
 const CHUNK_TARGET_CHARS = 15_000;
 // Component names matching these patterns are placed in src/components (partials), not src/pages
 const PARTIAL_PATTERNS =
-  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Search|Part|Archive|Comments|Template)/i;
+  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
 
 export interface GeneratedComponent {
   name: string;
@@ -77,7 +77,7 @@ export class ReactGeneratorService {
     const modelName = this.llmFactory.getModel();
 
     const systemPrompt = buildPlanPrompt(theme, content);
-    const tokens = theme.type === 'fse' ? theme.tokens : undefined;
+    const tokens = 'tokens' in theme ? theme.tokens : undefined;
 
     const pagesCount = theme.templates.length;
     const partialsCount = theme.type === 'fse' ? theme.parts.length : 0;
@@ -95,9 +95,17 @@ export class ReactGeneratorService {
       const componentName = this.toComponentName(tpl.name);
       const rawSource = 'markup' in tpl ? tpl.markup : tpl.html;
       const counter = `[${i + 1}/${total}]`;
-      const folder = PARTIAL_PATTERNS.test(componentName)
-        ? 'src/components'
-        : 'src/pages';
+      const componentPlan = plan?.find(
+        (p) => p.templateName === tpl.name || p.componentName === componentName,
+      );
+      const folder =
+        componentPlan?.type === 'partial'
+          ? 'src/components'
+          : componentPlan?.type === 'page'
+            ? 'src/pages'
+            : PARTIAL_PATTERNS.test(componentName)
+              ? 'src/components'
+              : 'src/pages';
 
       this.logger.log(
         `${counter} Generating "${componentName}.tsx" → ${folder}/`,
@@ -105,10 +113,6 @@ export class ReactGeneratorService {
       await this.logToFile(
         logPath,
         `${counter} Generating "${componentName}.tsx" → ${folder}/`,
-      );
-
-      const componentPlan = plan?.find(
-        (p) => p.templateName === tpl.name || p.componentName === componentName,
       );
 
       const t0 = Date.now();
@@ -233,10 +237,12 @@ export class ReactGeneratorService {
         totalSections: chunks.length,
         nodesJson,
         modelName,
+        systemPrompt,
         siteInfo: content.siteInfo,
         menus: content.menus,
         tokens,
         content,
+        componentPlan,
         logPath,
       });
 
@@ -337,10 +343,12 @@ export class ReactGeneratorService {
     totalSections: number;
     nodesJson: string;
     modelName: string;
+    systemPrompt?: string;
     siteInfo: DbContentResult['siteInfo'];
     menus: DbContentResult['menus'];
     tokens?: ThemeTokens;
     content?: DbContentResult;
+    componentPlan?: PlanResult[number];
     logPath?: string;
   }): Promise<GeneratedComponent> {
     const {
@@ -350,10 +358,12 @@ export class ReactGeneratorService {
       totalSections,
       nodesJson,
       modelName,
+      systemPrompt = '',
       siteInfo,
       menus,
       tokens,
       content,
+      componentPlan,
       logPath,
     } = input;
 
@@ -367,6 +377,7 @@ export class ReactGeneratorService {
       menus,
       tokens,
       content,
+      componentPlan,
     });
 
     let code = '';
@@ -374,7 +385,7 @@ export class ReactGeneratorService {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
         modelName,
-        '',
+        systemPrompt,
         userPrompt,
         5,
         logPath,

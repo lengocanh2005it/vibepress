@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
+import { extractStyleCssTokens } from '../style-token-extractor/style-token-extractor.js';
 
 export interface ThemeDefaults {
   textColor?: string;
@@ -66,8 +67,9 @@ export class BlockParserService {
     this.logger.log(`Parsing FSE/Block theme: ${themeDir}`);
 
     let themeName = 'Unknown';
+    let styleCss = '';
     try {
-      const styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+      styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
       const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
       if (nameMatch) themeName = nameMatch[1].trim();
     } catch {
@@ -75,7 +77,7 @@ export class BlockParserService {
     }
 
     const themeJson = await this.readJson(join(themeDir, 'theme.json'));
-    const tokens = this.extractTokens(themeJson);
+    const tokens = this.extractTokens(themeJson, styleCss);
 
     // Build pattern map: slug → markup (from patterns/*.php)
     const patternMap = await this.buildPatternMap(join(themeDir, 'patterns'));
@@ -107,7 +109,10 @@ export class BlockParserService {
     return { type: 'fse', themeJson, tokens, templates, parts, themeName };
   }
 
-  private extractTokens(themeJson: Record<string, any> | null): ThemeTokens {
+  private extractTokens(
+    themeJson: Record<string, any> | null,
+    styleCss?: string,
+  ): ThemeTokens {
     if (!themeJson)
       return { colors: [], fonts: [], fontSizes: [], spacing: [] };
     const settings = themeJson.settings ?? {};
@@ -140,8 +145,21 @@ export class BlockParserService {
       colors,
       fontSizes,
     );
+    const cssTokens = extractStyleCssTokens(styleCss, {
+      colors,
+      fonts,
+      fontSizes,
+      spacing,
+    });
 
-    return { colors, fonts, fontSizes, spacing, defaults, blockStyles };
+    return {
+      colors: this.mergeBySlug(colors, cssTokens.colors),
+      fonts: this.mergeBySlug(fonts, cssTokens.fonts),
+      fontSizes: this.mergeBySlug(fontSizes, cssTokens.fontSizes),
+      spacing: this.mergeBySlug(spacing, cssTokens.spacing),
+      defaults: this.mergeDefaults(defaults, cssTokens.defaults),
+      blockStyles: this.mergeBlockStyles(blockStyles, cssTokens.blockStyles),
+    };
   }
 
   /**
@@ -473,6 +491,81 @@ export class BlockParserService {
         .replace(/<\?php[^>]*$/gm, '')
         .trim()
     );
+  }
+
+  private mergeBySlug<T extends { slug: string }>(base: T[], extra: T[]): T[] {
+    const map = new Map<string, T>();
+    for (const item of base) map.set(item.slug, item);
+    for (const item of extra) if (!map.has(item.slug)) map.set(item.slug, item);
+    return [...map.values()];
+  }
+
+  private mergeDefaults(
+    primary?: ThemeDefaults,
+    fallback?: ThemeDefaults,
+  ): ThemeDefaults | undefined {
+    if (!primary && !fallback) return undefined;
+
+    const headings = this.mergeHeadings(primary?.headings, fallback?.headings);
+    const merged: ThemeDefaults = {
+      ...(fallback ?? {}),
+      ...(primary ?? {}),
+      ...(headings && { headings }),
+    };
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private mergeHeadings(
+    primary?: ThemeDefaults['headings'],
+    fallback?: ThemeDefaults['headings'],
+  ): ThemeDefaults['headings'] | undefined {
+    if (!primary && !fallback) return undefined;
+
+    const merged: NonNullable<ThemeDefaults['headings']> = {};
+    for (const level of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const) {
+      const value = {
+        ...(fallback?.[level] ?? {}),
+        ...(primary?.[level] ?? {}),
+      };
+      if (Object.keys(value).length > 0) merged[level] = value;
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private mergeBlockStyles(
+    primary?: Record<string, ThemeBlockStyle>,
+    fallback?: Record<string, ThemeBlockStyle>,
+  ): Record<string, ThemeBlockStyle> | undefined {
+    if (!primary && !fallback) return undefined;
+
+    const merged: Record<string, ThemeBlockStyle> = { ...(fallback ?? {}) };
+
+    for (const [blockType, style] of Object.entries(primary ?? {})) {
+      merged[blockType] = {
+        ...(fallback?.[blockType] ?? {}),
+        ...style,
+        color: {
+          ...(fallback?.[blockType]?.color ?? {}),
+          ...(style.color ?? {}),
+        },
+        typography: {
+          ...(fallback?.[blockType]?.typography ?? {}),
+          ...(style.typography ?? {}),
+        },
+        border: {
+          ...(fallback?.[blockType]?.border ?? {}),
+          ...(style.border ?? {}),
+        },
+        spacing: {
+          ...(fallback?.[blockType]?.spacing ?? {}),
+          ...(style.spacing ?? {}),
+        },
+      };
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   private async readHtmlDir(

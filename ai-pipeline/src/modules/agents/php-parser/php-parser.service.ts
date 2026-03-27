@@ -1,11 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { join, extname } from 'path';
+import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import { extractStyleCssTokens } from '../style-token-extractor/style-token-extractor.js';
 
 export interface PhpParseResult {
   type: 'classic';
   templates: { name: string; html: string }[];
   themeName?: string;
+  tokens?: ThemeTokens;
 }
 
 @Injectable()
@@ -18,8 +21,9 @@ export class PhpParserService {
     const phpFiles = entries.filter((f) => extname(f) === '.php');
 
     let themeName = 'Unknown';
+    let styleCss = '';
     try {
-      const styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+      styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
       const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
       if (nameMatch) themeName = nameMatch[1].trim();
     } catch {
@@ -33,7 +37,21 @@ export class PhpParserService {
       }),
     );
 
-    return { type: 'classic', templates, themeName };
+    const styleTokens = extractStyleCssTokens(styleCss);
+
+    return {
+      type: 'classic',
+      templates,
+      themeName,
+      tokens: {
+        colors: styleTokens.colors,
+        fonts: styleTokens.fonts,
+        fontSizes: styleTokens.fontSizes,
+        spacing: styleTokens.spacing,
+        defaults: styleTokens.defaults,
+        blockStyles: styleTokens.blockStyles,
+      },
+    };
   }
 
   // Chuyển PHP tags thành comments có nghĩa để AI hiểu cấu trúc
