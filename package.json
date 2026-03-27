@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start:ai-pipeline": "cd ai-pipeline && npm run start:prod",
     "start:automation": "cd automation && npm run start",
-    "start:all": "concurrently --names ai-pipeline,automation --prefix-colors blue,green \"npm run start:ai-pipeline\" \"npm run start:automation\""
+    "start:xpress-app": "cd xpress-react-spa && npm run dev",
+    "start:all": "concurrently --names ai-pipeline,automation --prefix-colors blue,green,yellow \"npm run start:ai-pipeline\" \"npm run start:automation\" \"npm run start:xpress-app\""
   },
   "repository": {
     "type": "git",
