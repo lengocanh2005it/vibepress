@@ -115,11 +115,8 @@ export class OrchestratorService {
 
   async run(email: string): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
-      this.httpService.post(
-        `${this.configService.get<string>('automation.url', '')}/wp/db-info`,
-        {
-          email,
-        },
+      this.httpService.get(
+        `${this.configService.get<string>('automation.url', '')}/wp/db-info?email=${encodeURIComponent(email)}`,
       ),
     );
 
