@@ -11,6 +11,11 @@ import {
   buildSectionPrompt,
 } from './prompts/component.prompt.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
+import {
+  buildVisualPlanPrompt,
+  parseVisualPlan,
+} from './prompts/visual-plan.prompt.js';
+import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import {
   wpBlocksToJson,
@@ -54,6 +59,7 @@ export class ReactGeneratorService {
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
     private readonly validator: ValidatorService,
+    private readonly codeGenerator: CodeGeneratorService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -293,7 +299,55 @@ export class ReactGeneratorService {
       logPath,
     } = input;
 
+    // ── Stage 1: AI → JSON visual plan ──────────────────────────────────────
+    await this.logToFile(logPath, `[two-stage] Stage 1: requesting visual plan for "${componentName}"`);
+    const { systemPrompt: s1System, userPrompt: s1User } = buildVisualPlanPrompt({
+      componentName,
+      templateSource,
+      content,
+      tokens,
+    });
+
     let code = '';
+
+    try {
+      const s1Raw = await this.generateWithRetry(
+        modelName,
+        s1System,
+        s1User,
+        3,
+        logPath,
+        `${componentName}:plan`,
+      );
+
+      const visualPlan = parseVisualPlan(s1Raw, componentName);
+
+      if (visualPlan) {
+        // ── Stage 2: deterministic TSX from plan ───────────────────────────
+        await this.logToFile(logPath, `[two-stage] Stage 2: generating TSX from plan (${visualPlan.sections.length} sections)`);
+        code = this.codeGenerator.generate(visualPlan);
+
+        const check = this.validator.checkCodeStructure(code);
+        if (check.isValid) {
+          this.logger.log(`[two-stage] "${componentName}" generated via visual plan ✓`);
+          return { name: componentName, filePath: '', code };
+        }
+
+        this.logger.warn(
+          `[two-stage] "${componentName}" generated code failed validation: ${check.error} — falling back to direct AI`,
+        );
+        await this.logToFile(logPath, `WARN [two-stage] "${componentName}" code-gen failed: ${check.error} — fallback`);
+      } else {
+        this.logger.warn(`[two-stage] "${componentName}" visual plan parse failed — falling back to direct AI`);
+        await this.logToFile(logPath, `WARN [two-stage] "${componentName}" plan parse failed — fallback`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`[two-stage] "${componentName}" Stage 1 error: ${err?.message} — falling back to direct AI`);
+      await this.logToFile(logPath, `WARN [two-stage] "${componentName}" Stage 1 error — fallback`);
+    }
+
+    // ── Fallback: direct AI TSX generation (original behaviour) ─────────────
+    await this.logToFile(logPath, `[two-stage] Fallback: direct AI generation for "${componentName}"`);
     let lastValidationError: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(

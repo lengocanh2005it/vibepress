@@ -1,14 +1,14 @@
-'use strict';
+"use strict";
 
-const fs = require('fs');
-const path = require('path');
-const { chromium } = require('playwright');
-const PNG = require('pngjs').PNG;
-const axios = require('axios');
-const xml2js = require('xml2js');
+const fs = require("fs");
+const path = require("path");
+const { chromium } = require("playwright");
+const PNG = require("pngjs").PNG;
+const axios = require("axios");
+const xml2js = require("xml2js");
 
-const { PORT } = require('../config/constants');
-const ARTIFACTS_DIR = path.join(__dirname, '..', 'artifacts');
+const { PORT } = require("../config/constants");
+const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 
@@ -23,26 +23,28 @@ const SAMPLE_LIMITS = {
 // ─── UTILS ─────────────────────────────────────────────────────────────────
 
 async function getPixelmatch() {
-  const mod = await import('pixelmatch');
+  const mod = await import("pixelmatch");
   return mod.default;
 }
 
 function sanitizeName(input) {
-  return String(input || 'site')
-    .replace(/https?:\/\//gi, '')
-    .replace(/[^a-z0-9.-]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'site';
+  return (
+    String(input || "site")
+      .replace(/https?:\/\//gi, "")
+      .replace(/[^a-z0-9.-]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "site"
+  );
 }
 
 function normalizeComparableUrl(input) {
   try {
-    const parsed = new URL(String(input || ''));
-    parsed.hash = '';
-    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    const parsed = new URL(String(input || ""));
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
     return parsed.toString();
   } catch {
-    return String(input || '').trim();
+    return String(input || "").trim();
   }
 }
 
@@ -51,15 +53,24 @@ function isSameTargetUrl(a, b) {
 }
 
 function isNavigationInterruptedError(err) {
-  return /interrupted by another navigation/i.test(String(err?.message || ''));
+  return /interrupted by another navigation/i.test(String(err?.message || ""));
 }
 
 async function gotoWithFallback(page, url) {
-  const attempts = [
-    { waitUntil: 'networkidle', timeout: 45000 },
-    { waitUntil: 'domcontentloaded', timeout: 45000 },
-    { waitUntil: 'load', timeout: 60000 },
-  ];
+  // For localhost Vite SPAs, networkidle never resolves (HMR WebSocket stays open).
+  // Use domcontentloaded for localhost, networkidle only for real remote sites.
+  const isLocalhost = /^https?:\/\/localhost(:\d+)?/i.test(url);
+
+  const attempts = isLocalhost
+    ? [
+        { waitUntil: "domcontentloaded", timeout: 30000 },
+        { waitUntil: "load", timeout: 60000 },
+      ]
+    : [
+        { waitUntil: "networkidle", timeout: 30000 },
+        { waitUntil: "domcontentloaded", timeout: 45000 },
+        { waitUntil: "load", timeout: 60000 },
+      ];
 
   let lastError = null;
   for (const attempt of attempts) {
@@ -70,17 +81,29 @@ async function gotoWithFallback(page, url) {
       // If browser/app has already navigated to the same target, treat it as success.
       if (isNavigationInterruptedError(err)) {
         try {
-          await page.waitForURL(current => isSameTargetUrl(current.href, url), { timeout: 10000 });
-          await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+          await page.waitForURL(
+            (current) => isSameTargetUrl(current.href, url),
+            { timeout: 10000 },
+          );
+          await page
+            .waitForLoadState("domcontentloaded", { timeout: 10000 })
+            .catch(() => {});
           return `${attempt.waitUntil}-recovered`;
         } catch {
           if (isSameTargetUrl(page.url(), url)) {
-            await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+            await page
+              .waitForLoadState("domcontentloaded", { timeout: 10000 })
+              .catch(() => {});
             return `${attempt.waitUntil}-recovered`;
           }
         }
       }
       lastError = err;
+      try {
+        await page.goto("about:blank", { timeout: 5000 });
+      } catch {
+        // ignore
+      }
     }
   }
   throw lastError;
@@ -89,15 +112,15 @@ async function gotoWithFallback(page, url) {
 async function runInteractions(page, interactions = []) {
   for (const step of interactions) {
     switch (step.action) {
-      case 'click':
+      case "click":
         await page.locator(step.selector).first().click({ timeout: 8000 });
         await page.waitForTimeout(step.waitAfter ?? 500);
         break;
-      case 'hover':
+      case "hover":
         await page.locator(step.selector).first().hover({ timeout: 8000 });
         await page.waitForTimeout(step.waitAfter ?? 300);
         break;
-      case 'wait':
+      case "wait":
         await page.waitForTimeout(step.ms ?? 500);
         break;
       default:
@@ -106,23 +129,40 @@ async function runInteractions(page, interactions = []) {
   }
 }
 
-async function captureScreenshot(page, url, filePath, fullPage, interactions = []) {
-  let navigationMode = 'reused';
-  if (!isSameTargetUrl(page.url(), url)) {
-    navigationMode = await gotoWithFallback(page, url);
-  } else {
-    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+async function captureScreenshot(
+  page,
+  url,
+  filePath,
+  fullPage,
+  interactions = [],
+) {
+  const navigationMode = await gotoWithFallback(page, url);
+  async function captureScreenshot(
+    page,
+    url,
+    filePath,
+    fullPage,
+    interactions = [],
+  ) {
+    let navigationMode = "reused";
+    if (!isSameTargetUrl(page.url(), url)) {
+      navigationMode = await gotoWithFallback(page, url);
+    } else {
+      await page
+        .waitForLoadState("domcontentloaded", { timeout: 10000 })
+        .catch(() => {});
+    }
+    await page.waitForTimeout(1200);
+    await runInteractions(page, interactions);
+    await page.screenshot({ path: filePath, fullPage });
+    return navigationMode;
   }
-  await page.waitForTimeout(1200);
-  await runInteractions(page, interactions);
-  await page.screenshot({ path: filePath, fullPage });
-  return navigationMode;
 }
 
 async function captureDomStructure(page) {
   return page.evaluate(() => {
     const freq = {};
-    document.querySelectorAll('*').forEach(el => {
+    document.querySelectorAll("*").forEach((el) => {
       const tag = el.tagName.toLowerCase();
       freq[tag] = (freq[tag] || 0) + 1;
     });
@@ -161,7 +201,7 @@ function cropToSize(image, width, height) {
     for (let x = 0; x < width; x++) {
       const src = (image.width * y + x) << 2;
       const dst = (width * y + x) << 2;
-      cropped.data[dst]     = image.data[src];
+      cropped.data[dst] = image.data[src];
       cropped.data[dst + 1] = image.data[src + 1];
       cropped.data[dst + 2] = image.data[src + 2];
       cropped.data[dst + 3] = image.data[src + 3];
@@ -171,11 +211,11 @@ function cropToSize(image, width, height) {
 }
 
 function normalizeBaseUrl(input) {
-  return String(input || '').replace(/\/+$/, '');
+  return String(input || "").replace(/\/+$/, "");
 }
 
 function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
-  const safeWpUrl = String(wpUrl || '').trim();
+  const safeWpUrl = String(wpUrl || "").trim();
   if (!safeWpUrl) return null;
 
   try {
@@ -199,14 +239,14 @@ function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
 /**
  * Infer page type từ URL pattern WordPress
  */
-function inferPageType(url, baseUrl = '') {
-  const p = url.replace(baseUrl, '');
-  if (p === '/' || p === '') return 'homepage';
-  if (/\/category\//i.test(p))  return 'category';
-  if (/\/tag\//i.test(p))       return 'tag';
-  if (/\/\d{4}\/\d{2}\//i.test(p)) return 'post';
-  if (/\/(blog|news|posts?)\//i.test(p)) return 'post';
-  return 'page';
+function inferPageType(url, baseUrl = "") {
+  const p = url.replace(baseUrl, "");
+  if (p === "/" || p === "") return "homepage";
+  if (/\/category\//i.test(p)) return "category";
+  if (/\/tag\//i.test(p)) return "tag";
+  if (/\/\d{4}\/\d{2}\//i.test(p)) return "post";
+  if (/\/(blog|news|posts?)\//i.test(p)) return "post";
+  return "page";
 }
 
 /**
@@ -216,7 +256,7 @@ async function parseSingleSitemap(sitemapUrl, baseUrl) {
   const res = await axios.get(sitemapUrl, { timeout: 8000 });
   const parsed = await xml2js.parseStringPromise(res.data);
   if (!parsed.urlset?.url) return [];
-  return parsed.urlset.url.map(u => ({
+  return parsed.urlset.url.map((u) => ({
     loc: u.loc[0],
     type: inferPageType(u.loc[0], baseUrl),
   }));
@@ -228,10 +268,10 @@ async function parseSingleSitemap(sitemapUrl, baseUrl) {
  */
 async function discoverFromSitemap(baseUrl) {
   const candidates = [
-    `${baseUrl}/wp-sitemap.xml`,   // WP 5.5+ built-in
-    `${baseUrl}/sitemap_index.xml`,      // Yoast / Rank Math
+    `${baseUrl}/wp-sitemap.xml`, // WP 5.5+ built-in
+    `${baseUrl}/sitemap_index.xml`, // Yoast / Rank Math
   ];
-  console.log('   Thử tìm sitemap tại các URL:',candidates.join(', '));
+  console.log("   Thử tìm sitemap tại các URL:", candidates.join(", "));
   for (const sitemapUrl of candidates) {
     try {
       const res = await axios.get(sitemapUrl, { timeout: 8000 });
@@ -239,7 +279,7 @@ async function discoverFromSitemap(baseUrl) {
 
       // Sitemap index → nhiều sitemap con
       if (parsed.sitemapindex?.sitemap) {
-        const childUrls = parsed.sitemapindex.sitemap.map(s => s.loc[0]);
+        const childUrls = parsed.sitemapindex.sitemap.map((s) => s.loc[0]);
         const all = [];
         for (const child of childUrls) {
           const items = await parseSingleSitemap(child, baseUrl);
@@ -251,7 +291,7 @@ async function discoverFromSitemap(baseUrl) {
 
       // Single sitemap
       if (parsed.urlset?.url) {
-        const items = parsed.urlset.url.map(u => ({
+        const items = parsed.urlset.url.map((u) => ({
           loc: u.loc[0],
           type: inferPageType(u.loc[0], baseUrl),
         }));
@@ -271,20 +311,29 @@ async function discoverFromSitemap(baseUrl) {
  * Fallback khi không có sitemap
  */
 async function discoverFromRestApi(baseUrl) {
-  const urls = [{ loc: baseUrl, type: 'homepage' }];
+  const urls = [{ loc: baseUrl, type: "homepage" }];
 
   const endpoints = [
-    { path: '/wp/v2/posts?per_page=100&status=publish', type: 'post' },
-    { path: '/wp/v2/pages?per_page=100&status=publish', type: 'page' },
-    { path: '/wp/v2/categories?per_page=100&hide_empty=true', type: 'category' },
+    { path: "/wp/v2/posts?per_page=100&status=publish", type: "post" },
+    { path: "/wp/v2/pages?per_page=100&status=publish", type: "page" },
+    {
+      path: "/wp/v2/categories?per_page=100&hide_empty=true",
+      type: "category",
+    },
   ];
 
   for (const ep of endpoints) {
     try {
-      const res = await axios.get(`${baseUrl}/wp-json${ep.path}`, { timeout: 8000 });
+      const res = await axios.get(`${baseUrl}/wp-json${ep.path}`, {
+        timeout: 8000,
+      });
       const items = (Array.isArray(res.data) ? res.data : [])
-        .map(item => ({ loc: item?.link || item?.url || null, type: ep.type, slug: item?.slug }))
-        .filter(item => Boolean(item.loc));
+        .map((item) => ({
+          loc: item?.link || item?.url || null,
+          type: ep.type,
+          slug: item?.slug,
+        }))
+        .filter((item) => Boolean(item.loc));
       urls.push(...items);
       console.log(`✅ REST API [${ep.type}]: ${items.length} items`);
     } catch (e) {
@@ -303,7 +352,7 @@ function smartSample(allUrls, limits = SAMPLE_LIMITS) {
   const groups = {};
   for (const url of allUrls) {
     if (!url?.loc) continue;
-    const t = url.type || 'page';
+    const t = url.type || "page";
     if (!groups[t]) groups[t] = [];
     groups[t].push(url);
   }
@@ -337,21 +386,36 @@ async function compareWebVisuals({
   const nameB = sanitizeName(urlB);
   const imageAPath = path.join(ARTIFACTS_DIR, `${runId}-${nameA}.png`);
   const imageBPath = path.join(ARTIFACTS_DIR, `${runId}-${nameB}.png`);
-  const diffPath   = path.join(ARTIFACTS_DIR, `${runId}-diff.png`);
+  const diffPath = path.join(ARTIFACTS_DIR, `${runId}-diff.png`);
 
   const browser = await chromium.launch();
-  let navigationModeA = 'unknown';
-  let navigationModeB = 'unknown';
+  let navigationModeA = "unknown";
+  let navigationModeB = "unknown";
   let domFreqA = {};
   let domFreqB = {};
 
   try {
     const page = await browser.newPage({
-      viewport: { width: Number(viewportWidth), height: Number(viewportHeight) },
+      viewport: {
+        width: Number(viewportWidth),
+        height: Number(viewportHeight),
+      },
     });
-    navigationModeA = await captureScreenshot(page, urlA, imageAPath, Boolean(fullPage), interactions);
+    navigationModeA = await captureScreenshot(
+      page,
+      urlA,
+      imageAPath,
+      Boolean(fullPage),
+      interactions,
+    );
     domFreqA = await captureDomStructure(page);
-    navigationModeB = await captureScreenshot(page, urlB, imageBPath, Boolean(fullPage), interactions);
+    navigationModeB = await captureScreenshot(
+      page,
+      urlB,
+      imageBPath,
+      Boolean(fullPage),
+      interactions,
+    );
     domFreqB = await captureDomStructure(page);
   } finally {
     await browser.close();
@@ -359,7 +423,7 @@ async function compareWebVisuals({
 
   const imageA = PNG.sync.read(fs.readFileSync(imageAPath));
   const imageB = PNG.sync.read(fs.readFileSync(imageBPath));
-  const width  = Math.min(imageA.width, imageB.width);
+  const width = Math.min(imageA.width, imageB.width);
   const height = Math.min(imageA.height, imageB.height);
 
   const normA = cropToSize(imageA, width, height);
@@ -367,14 +431,21 @@ async function compareWebVisuals({
   const diffImage = new PNG({ width, height });
 
   const pixelmatch = await getPixelmatch();
-  const differentPixels = pixelmatch(normA.data, normB.data, diffImage.data, width, height, {
-    threshold: 0.1,
-  });
+  const differentPixels = pixelmatch(
+    normA.data,
+    normB.data,
+    diffImage.data,
+    width,
+    height,
+    {
+      threshold: 0.1,
+    },
+  );
 
   fs.writeFileSync(diffPath, PNG.sync.write(diffImage));
 
-  const totalPixels   = width * height;
-  const diffPct       = totalPixels > 0 ? (differentPixels / totalPixels) * 100 : 0;
+  const totalPixels = width * height;
+  const diffPct = totalPixels > 0 ? (differentPixels / totalPixels) * 100 : 0;
 
   const domComparison = compareDomStructure(domFreqA, domFreqB);
 
@@ -389,11 +460,10 @@ async function compareWebVisuals({
     artifacts: {
       imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
       imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
-      diff:   `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
+      diff: `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
     },
     domComparison,
     artifacts: { imageA: imageAPath, imageB: imageBPath, diff: diffPath },
-
   };
 }
 
@@ -423,17 +493,19 @@ async function compareMultiplePages({
   viewportHeight = 900,
 }) {
   // 1. Discover
-  console.log('🔍 Discovering URLs...');
+  console.log("🔍 Discovering URLs...");
   const allUrls =
     (await discoverFromSitemap(wpBaseUrl)) ||
     (await discoverFromRestApi(wpBaseUrl));
 
   if (!allUrls?.length) {
-    throw new Error('Không tìm thấy URL nào. Kiểm tra sitemap hoặc WP REST API.');
+    throw new Error(
+      "Không tìm thấy URL nào. Kiểm tra sitemap hoặc WP REST API.",
+    );
   }
 
   // 2. Sample
-  console.log('📋 Smart sampling:');
+  console.log("📋 Smart sampling:");
   const sampled = smartSample(allUrls, sampleLimits);
 
   // 3. Compare từng cặp
@@ -443,14 +515,23 @@ async function compareMultiplePages({
 
   for (const urlItem of sampled) {
     const wpUrl = urlItem?.loc;
-    const reactUrl = mapWpUrlToReactUrl(wpUrl, normalizedWpBase, normalizedReactBase);
+    const reactUrl = mapWpUrlToReactUrl(
+      wpUrl,
+      normalizedWpBase,
+      normalizedReactBase,
+    );
 
     if (!wpUrl || !reactUrl) {
       const reason = !wpUrl
-        ? 'Missing wpUrl (loc) from discovery source'
+        ? "Missing wpUrl (loc) from discovery source"
         : `Cannot map WP URL to React base: ${wpUrl}`;
       console.warn(`   ❌ SKIP: ${reason}\n`);
-      results.push({ type: urlItem?.type || 'page', wpUrl, reactUrl: null, error: reason });
+      results.push({
+        type: urlItem?.type || "page",
+        wpUrl,
+        reactUrl: null,
+        error: reason,
+      });
       continue;
     }
 
@@ -465,7 +546,7 @@ async function compareMultiplePages({
       });
 
       const accuracy = 100 - result.diffPercentage;
-      const status   = accuracy >= 90 ? '✅ PASS' : '⚠️  FAIL';
+      const status = accuracy >= 90 ? "✅ PASS" : "⚠️  FAIL";
       console.log(`   ${status} — accuracy: ${accuracy.toFixed(2)}%\n`);
 
       results.push({ type: urlItem.type, accuracy, status, ...result });
@@ -476,26 +557,30 @@ async function compareMultiplePages({
   }
 
   // 4. Summary
-  const valid   = results.filter(r => r.accuracy !== undefined);
-  const passed  = valid.filter(r => r.accuracy >= 90).length;
-  const avgAcc  = valid.reduce((s, r) => s + r.accuracy, 0) / (valid.length || 1);
+  const valid = results.filter((r) => r.accuracy !== undefined);
+  const passed = valid.filter((r) => r.accuracy >= 90).length;
+  const avgAcc =
+    valid.reduce((s, r) => s + r.accuracy, 0) / (valid.length || 1);
 
   const summary = {
-    totalCompared : valid.length,
+    totalCompared: valid.length,
     passed,
-    failed        : valid.length - passed,
-    passRate      : Number(((passed / (valid.length || 1)) * 100).toFixed(1)),
-    avgAccuracy   : Number(avgAcc.toFixed(2)),
+    failed: valid.length - passed,
+    passRate: Number(((passed / (valid.length || 1)) * 100).toFixed(1)),
+    avgAccuracy: Number(avgAcc.toFixed(2)),
   };
 
   // Ghi report ra file
   const reportPath = path.join(ARTIFACTS_DIR, `report-${Date.now()}.json`);
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
-  fs.writeFileSync(reportPath, JSON.stringify({ summary, pages: results }, null, 2));
+  fs.writeFileSync(
+    reportPath,
+    JSON.stringify({ summary, pages: results }, null, 2),
+  );
 
-  console.log('═══════════════════════════════════');
-  console.log('📊 VISUAL METRIC REPORT');
-  console.log('═══════════════════════════════════');
+  console.log("═══════════════════════════════════");
+  console.log("📊 VISUAL METRIC REPORT");
+  console.log("═══════════════════════════════════");
   console.log(`Total   : ${summary.totalCompared} pages`);
   console.log(`Pass    : ${summary.passed}`);
   console.log(`Fail    : ${summary.failed}`);
@@ -509,6 +594,6 @@ async function compareMultiplePages({
 // ─── EXPORTS ────────────────────────────────────────────────────────────────
 
 module.exports = {
-  compareWebVisuals,    // dùng để so sánh 1 cặp URL (API cũ, giữ nguyên)
+  compareWebVisuals, // dùng để so sánh 1 cặp URL (API cũ, giữ nguyên)
   compareMultiplePages, // dùng để so sánh toàn site tự động
 };

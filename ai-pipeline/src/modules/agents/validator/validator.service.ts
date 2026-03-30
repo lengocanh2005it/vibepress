@@ -22,6 +22,41 @@ export class ValidatorService {
   checkCodeStructure(code: string): { isValid: boolean; error?: string } {
     if (!code.trim()) return { isValid: false, error: 'Empty code' };
 
+    // ── Hard failures (return immediately — no point collecting more) ─────────
+
+    // 1. Output is JSON instead of a React component (AI gave up and returned planner JSON)
+    const trimmed = code.trimStart();
+    if (
+      trimmed.startsWith('{') &&
+      /"(?:componentName|templateName|type|route|components|description)"\s*:/.test(
+        trimmed,
+      )
+    ) {
+      return {
+        isValid: false,
+        error:
+          'Output is JSON, not a React component. Re-generate as a TSX file.',
+      };
+    }
+
+    // 2. No export default — file is truncated or fundamentally wrong
+    if (!/export\s+default\s+/.test(code)) {
+      return {
+        isValid: false,
+        error:
+          'Missing `export default` — component is truncated or incomplete.',
+      };
+    }
+
+    // 3. No JSX return — component renders nothing
+    if (!/return\s*[\s\S]*?</.test(code)) {
+      return {
+        isValid: false,
+        error: 'No JSX return found — component has no rendered output.',
+      };
+    }
+
+    // 4. External CSS / inline <style>
     if (
       /import\s+(?:.+?\s+from\s+)?['"][^'"]+\.s?css['"];?/s.test(code) ||
       /<style[\s>]/i.test(code)
@@ -32,12 +67,7 @@ export class ValidatorService {
       };
     }
 
-    // Check for obvious duplicate classNames
-    // Looks for a tag that contains 'className=' at least twice
-    const classNameMatches = (code.match(/className=["'][^"']*["']/g) || [])
-      .length;
-    // This is still a bit naive, but let's count className occurrences per tag if possible.
-    // Given the complexity of parsing JSX, let's use a simpler heuristic for now.
+    // 5. Duplicate className on same tag
     if (
       /(<[a-zA-Z0-9]+[^>]*?className=["'][^"']*["'][^>]*?className=["'][^"']*["'][^>]*?>)/s.test(
         code,
@@ -46,7 +76,7 @@ export class ValidatorService {
       return { isValid: false, error: 'Duplicate className attributes found.' };
     }
 
-    // Check for unbalanced braces (safety catch)
+    // 6. Unbalanced braces — truncated output
     let depth = 0;
     for (const char of code) {
       if (char === '{') depth++;
@@ -56,18 +86,36 @@ export class ValidatorService {
       return { isValid: false, error: `Unbalanced braces (depth: ${depth})` };
     }
 
-    // ── Content pattern checks — collect ALL violations before returning ────────
+    // ── Content violations — collect ALL before returning ─────────────────────
 
     const violations: string[] = [];
 
-    // 1. CSS variable inside Tailwind arbitrary value — never works
+    // 7. <a href> used for internal React Router paths — breaks SPA navigation
+    const internalAHref = code.match(
+      /<a\s[^>]*href=["']\/(post|page|archive|category|tag)[/?"]/,
+    );
+    if (internalAHref) {
+      violations.push(
+        `Internal link uses \`<a href>\` for route "${internalAHref[0].match(/href=["']([^"']+)["']/)?.[1]}" — use \`<Link to="...">\` from react-router-dom instead.`,
+      );
+    }
+
+    // 8. CSS variable inside Tailwind arbitrary value — never works
     if (/className=["'][^"']*\[var\(--/.test(code)) {
       violations.push(
         '`[var(--...]` inside className breaks Tailwind — resolve to actual px/rem (e.g. `rounded-[8px]`, `gap-[24px]`); if the value is unresolvable, omit the class entirely.',
       );
     }
 
-    // 2. Bare numeric+unit Tailwind class (no brackets) — e.g. gap-1rem, mt-2rem
+    // 8b. Space inside CSS function in Tailwind arbitrary value — class silently ignored
+    // e.g. py-[min(6.5rem, 8vw)] → Tailwind drops the class entirely
+    if (/className=["'][^"']*\[(min|max|clamp)\([^)]*,\s/.test(code)) {
+      violations.push(
+        'Space inside CSS function in Tailwind arbitrary value: `py-[min(6.5rem, 8vw)]` is silently ignored. Remove the space: `py-[min(6.5rem,8vw)]`.',
+      );
+    }
+
+    // 9. Bare numeric+unit Tailwind class (no brackets) — e.g. gap-1rem, mt-2rem
     const classStrings = [
       ...[...code.matchAll(/className=["']([^"']+)["']/g)].map((m) => m[1]),
       ...[...code.matchAll(/className=\{`([^`]+)`\}/g)].map((m) => m[1]),
@@ -81,7 +129,7 @@ export class ValidatorService {
       );
     }
 
-    // 3. Wrong siteInfo field names (siteName/siteUrl/blogDescription, NOT name/url/description)
+    // 10. Wrong siteInfo field names
     const siteInfoMatch = code.match(/\bsiteInfo\.(name|url|description)\b/);
     if (siteInfoMatch) {
       violations.push(
@@ -89,7 +137,7 @@ export class ValidatorService {
       );
     }
 
-    // 4. Wrong post field names
+    // 11. Wrong post field names
     const postFieldMatch = code.match(/\bpost\.(tags|title\.rendered)\b/);
     if (postFieldMatch) {
       violations.push(

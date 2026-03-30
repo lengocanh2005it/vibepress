@@ -1,0 +1,298 @@
+import express from 'express';
+import cors from 'cors';
+import { createConnection } from 'mysql2/promise';
+import dotenv from 'dotenv';
+import { resolve } from 'path';
+
+dotenv.config({ path: resolve(process.cwd(), '.env'), override: true });
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PORT = Number(process.env.API_PORT) || 3100;
+
+function formatDate(mysqlDate: string | Date | null): string {
+  if (!mysqlDate) return '';
+  const d = new Date(mysqlDate);
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+async function getConn() {
+  return createConnection({
+    host: process.env.DB_HOST || 'localhost',
+    port: Number(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'wordpress',
+  });
+}
+
+async function getPrefix(
+  conn: Awaited<ReturnType<typeof getConn>>,
+): Promise<string> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT table_name AS tableName FROM information_schema.tables
+     WHERE table_schema = DATABASE() AND table_name LIKE '%options' LIMIT 1`,
+  );
+  if (!rows.length) return 'wp_';
+  return rows[0].tableName.replace(/options$/, '');
+}
+
+app.get('/api/site-info', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const keys = [
+      'siteurl',
+      'blogname',
+      'blogdescription',
+      'admin_email',
+      'WPLANG',
+    ];
+    const [rows] = await conn.query<any[]>(
+      `SELECT option_name, option_value FROM \`${prefix}options\`
+       WHERE option_name IN (${keys.map(() => '?').join(',')})`,
+      keys,
+    );
+    const opts: Record<string, string> = {};
+    for (const row of rows) opts[row.option_name] = row.option_value;
+    res.json({
+      siteUrl: opts['siteurl'] ?? '',
+      siteName: opts['blogname'] ?? '',
+      blogDescription: opts['blogdescription'] ?? '',
+      adminEmail: opts['admin_email'] ?? '',
+      language: opts['WPLANG'] ?? 'en',
+    });
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/posts', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
+              p.post_date,
+              u.display_name AS author_name,
+              img.guid AS featured_image,
+              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
+               FROM \`${prefix}term_relationships\` tr2
+               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+               WHERE tt2.taxonomy = 'category' AND tr2.object_id = p.ID) AS categories
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE p.post_type = 'post' AND p.post_status = 'publish'
+       ORDER BY p.post_date DESC`,
+    );
+    res.json(
+      rows.map((r) => ({
+        id: r.ID,
+        title: r.post_title,
+        content: r.post_content,
+        excerpt: r.post_excerpt,
+        slug: r.post_name,
+        type: r.post_type,
+        status: r.post_status,
+        date: formatDate(r.post_date),
+        author: r.author_name ?? '',
+        categories: r.categories ? r.categories.split(', ') : [],
+        featuredImage: r.featured_image ?? null,
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/posts/:slug', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
+              p.post_date,
+              u.display_name AS author_name,
+              img.guid AS featured_image,
+              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
+               FROM \`${prefix}term_relationships\` tr2
+               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+               WHERE tt2.taxonomy = 'category' AND tr2.object_id = p.ID) AS categories
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE p.post_name = ? AND p.post_status = 'publish' LIMIT 1`,
+      [req.params.slug],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const r = rows[0];
+    res.json({
+      id: r.ID,
+      title: r.post_title,
+      content: r.post_content,
+      excerpt: r.post_excerpt,
+      slug: r.post_name,
+      type: r.post_type,
+      status: r.post_status,
+      date: formatDate(r.post_date),
+      author: r.author_name ?? '',
+      categories: r.categories ? r.categories.split(', ') : [],
+      featuredImage: r.featured_image ?? null,
+    });
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/pages/:slug', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.menu_order,
+              COALESCE(pm.meta_value, '') AS template
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+       WHERE p.post_type = 'page' AND p.post_status = 'publish' AND p.post_name = ? LIMIT 1`,
+      [req.params.slug],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const r = rows[0];
+    res.json({
+      id: r.ID,
+      title: r.post_title,
+      content: r.post_content,
+      slug: r.post_name,
+      menuOrder: r.menu_order,
+      template: r.template,
+    });
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/pages', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.menu_order,
+              COALESCE(pm.meta_value, '') AS template
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+       WHERE p.post_type = 'page' AND p.post_status = 'publish'
+       ORDER BY p.menu_order`,
+    );
+    res.json(
+      rows.map((r) => ({
+        id: r.ID,
+        title: r.post_title,
+        content: r.post_content,
+        slug: r.post_name,
+        menuOrder: r.menu_order,
+        template: r.template,
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
+// Normalize a WordPress URL to a React Router path.
+// Strips host, converts /pages/ → /page/ and /posts/ → /post/.
+// External URLs (different origin) are kept as-is.
+function normalizeMenuUrl(raw: string): string {
+  if (!raw) return '';
+  try {
+    // If it's an absolute URL, extract the pathname
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      const u = new URL(raw);
+      raw = u.pathname;
+    }
+  } catch {
+    // not a valid URL — treat as relative path
+  }
+  return raw
+    .replace(/^\/pages\//, '/page/')
+    .replace(/^\/posts\//, '/post/');
+}
+
+app.get('/api/menus', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [menus] = await conn.query<any[]>(
+      `SELECT t.term_id, t.name, t.slug
+       FROM \`${prefix}terms\` t
+       INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
+       WHERE tt.taxonomy = 'nav_menu'`,
+    );
+    // Fallback: no nav menus registered → return published pages as "primary" menu
+    if (menus.length === 0) {
+      const [pages] = await conn.query<any[]>(
+        `SELECT ID, post_title, post_name, menu_order FROM \`${prefix}posts\`
+         WHERE post_type = 'page' AND post_status = 'publish'
+         ORDER BY menu_order, ID`,
+      );
+      return res.json([
+        {
+          name: 'Primary',
+          slug: 'primary',
+          items: pages.map((p, idx) => ({
+            id: p.ID,
+            title: p.post_title,
+            url: `/page/${p.post_name}`,
+            order: p.menu_order || idx,
+            parentId: 0,
+          })),
+        },
+      ]);
+    }
+
+    const result = [];
+    for (const menu of menus) {
+      const [items] = await conn.query<any[]>(
+        `SELECT p.ID, p.post_title, p.menu_order,
+                url_meta.meta_value AS url,
+                parent_meta.meta_value AS parent_id
+         FROM \`${prefix}posts\` p
+         INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
+         INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+         LEFT JOIN \`${prefix}postmeta\` url_meta ON url_meta.post_id = p.ID AND url_meta.meta_key = '_menu_item_url'
+         LEFT JOIN \`${prefix}postmeta\` parent_meta ON parent_meta.post_id = p.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
+         WHERE tt.term_id = ? AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'
+         ORDER BY p.menu_order`,
+        [menu.term_id],
+      );
+      result.push({
+        name: menu.name,
+        slug: menu.slug,
+        items: items.map((i) => ({
+          id: i.ID,
+          title: i.post_title,
+          url: normalizeMenuUrl(i.url ?? ''),
+          order: i.menu_order,
+          parentId: parseInt(i.parent_id ?? '0', 10),
+        })),
+      });
+    }
+    res.json(result);
+  } finally {
+    await conn.end();
+  }
+});
+
+app.listen(PORT, () =>
+  console.log(`API server running on http://localhost:${PORT}`),
+);
