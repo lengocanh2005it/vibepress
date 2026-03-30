@@ -13,6 +13,7 @@ export interface ThemeDefaults {
   buttonTextColor?: string;
   fontSize?: string;
   fontFamily?: string;
+  headingFontFamily?: string;
   lineHeight?: string;
   contentWidth?: string;
   wideWidth?: string;
@@ -250,6 +251,10 @@ export class BlockParserService {
       styles.typography?.fontFamily,
       fonts,
     );
+    const headingFontFamily = this.resolveFontFamily(
+      styles.elements?.heading?.typography?.fontFamily,
+      fonts,
+    );
     const lineHeight = styles.typography?.lineHeight as string | undefined;
     const blockGap = resolveSp(styles.spacing?.blockGap);
     const contentWidth = settings.layout?.contentSize as string | undefined;
@@ -317,6 +322,7 @@ export class BlockParserService {
       !buttonTextColor &&
       !fontSize &&
       !fontFamily &&
+      !headingFontFamily &&
       !lineHeight &&
       !contentWidth &&
       !wideWidth &&
@@ -338,6 +344,8 @@ export class BlockParserService {
       ...(buttonTextColor && { buttonTextColor }),
       ...(fontSize && { fontSize }),
       ...(fontFamily && { fontFamily }),
+      ...(headingFontFamily &&
+        headingFontFamily !== fontFamily && { headingFontFamily }),
       ...(lineHeight && { lineHeight }),
       ...(contentWidth && { contentWidth }),
       ...(wideWidth && { wideWidth }),

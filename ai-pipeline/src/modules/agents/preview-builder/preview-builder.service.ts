@@ -106,12 +106,12 @@ export class PreviewBuilderService {
       Home: '/',
       Index: '/',
       FrontPage: '/',
-      Single: '/posts/:slug',
-      SingleWithSidebar: '/posts/:slug',
-      Page: '/pages/:slug',
-      PageWithSidebar: '/pages/:slug',
-      PageWide: '/pages/:slug',
-      PageNoTitle: '/pages/:slug',
+      Single: '/post/:slug',
+      SingleWithSidebar: '/post/:slug',
+      Page: '/page/:slug',
+      PageWithSidebar: '/page/:slug',
+      PageWide: '/page/:slug',
+      PageNoTitle: '/page/:slug',
       Archive: '/archive',
       Category: '/category/:slug',
       Tag: '/tag/:slug',
@@ -263,19 +263,35 @@ ${fontEntries}
       .map((name) => name.replace(/\s+/g, '+'))
       .filter((v, i, a) => a.indexOf(v) === i);
 
-    if (googleFonts.length === 0) return;
+    if (googleFonts.length > 0) {
+      const fontQuery = googleFonts
+        .map((f) => `family=${f}:wght@400;500;600;700`)
+        .join('&');
+      const linkTag = `<link rel="preconnect" href="https://fonts.googleapis.com">\n    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n    <link href="https://fonts.googleapis.com/css2?${fontQuery}&display=swap" rel="stylesheet">`;
 
-    const fontQuery = googleFonts
-      .map((f) => `family=${f}:wght@400;500;600;700`)
-      .join('&');
-    const linkTag = `<link rel="preconnect" href="https://fonts.googleapis.com">\n    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n    <link href="https://fonts.googleapis.com/css2?${fontQuery}&display=swap" rel="stylesheet">`;
+      const indexPath = join(frontendDir, 'index.html');
+      const indexHtml = await readFile(indexPath, 'utf-8');
+      await writeFile(
+        indexPath,
+        indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
+      );
+    }
 
-    const indexPath = join(frontendDir, 'index.html');
-    const indexHtml = await readFile(indexPath, 'utf-8');
-    await writeFile(
-      indexPath,
-      indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
-    );
+    // 3. Inject font-family into index.css so components inherit without inline styles
+    const bodyFont = tokens.defaults?.fontFamily;
+    const headingFont = tokens.defaults?.headingFontFamily;
+    const cssLines: string[] = [];
+    if (bodyFont) cssLines.push(`body { font-family: ${bodyFont}; }`);
+    if (headingFont) {
+      cssLines.push(
+        `h1, h2, h3, h4, h5, h6 { font-family: ${headingFont}; }`,
+      );
+    }
+    if (cssLines.length > 0) {
+      const cssPath = join(frontendDir, 'src', 'index.css');
+      const existingCss = await readFile(cssPath, 'utf-8');
+      await writeFile(cssPath, existingCss.trimEnd() + '\n\n' + cssLines.join('\n') + '\n');
+    }
   }
 
   private runNpmInstall(dir: string): Promise<void> {

@@ -22,6 +22,11 @@ export default () => ({
   mistral: {
     apiKey: process.env.MISTRAL_API_KEY,
     model: process.env.MISTRAL_MODEL || 'mistral-small-latest',
+    maxTokens: parseInt(process.env.MISTRAL_MAX_TOKENS ?? '16384', 10),
+  },
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,

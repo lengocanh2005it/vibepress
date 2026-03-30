@@ -3,6 +3,7 @@ export interface LlmChatParams {
   systemPrompt?: string;
   userPrompt: string;
   maxTokens?: number;
+  temperature?: number;
 }
 
 export interface LlmChatResult {
@@ -16,4 +17,5 @@ export type LlmProvider =
   | 'mistral'
   | 'groq'
   | 'cerebras'
-  | 'gemini';
+  | 'gemini'
+  | 'openai';

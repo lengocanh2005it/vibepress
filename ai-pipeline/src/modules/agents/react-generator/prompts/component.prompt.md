@@ -22,6 +22,28 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 
 {{slugFetchingNote}}
 
+## Navigation — MANDATORY
+
+⛔ NEVER use `<a href="...">` for internal links — this causes full page reload and breaks React Router.
+✅ Always import and use `<Link to="...">` from `react-router-dom` for ALL internal navigation.
+
+```tsx
+// ❌ breaks SPA routing
+<a href={'/post/' + post.slug}>{post.title}</a>
+// ✅ correct
+import { Link } from 'react-router-dom';
+<Link to={'/post/' + post.slug}>{post.title}</Link>
+```
+
+Internal link paths:
+- Single post → `to={'/post/' + post.slug}`
+- Single page → `to={'/page/' + page.slug}`
+- Archive → `to="/archive"`
+- Category → `to={'/category/' + slug}`
+- Home → `to="/"`
+
+Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href target="_blank" rel="noopener noreferrer">`.
+
 ## Data fetching
 
 - `useEffect` + `useState`, fetch on mount, show loading/error states
@@ -62,6 +84,7 @@ Functional component, no props, export default. Import React/useState/useEffect.
 ⛔ No CSS imports. No `wp-block-*`, `alignwide`, `is-layout-*` classes. All layout via Tailwind + minimal `style={{}}` for `backgroundImage`, `fontFamily`, `flexBasis`, dynamic values only.
 ⛔ No CSS vars in Tailwind: `gap-[var(--foo)]` → BROKEN. Resolve to `gap-[24px]` first.
 ⛔ No bare numeric classes: `gap-1rem` → INVALID. Always `gap-[1rem]`.
+⛔ No spaces inside CSS functions in Tailwind arbitrary values: `py-[min(6.5rem, 8vw)]` → **class is silently ignored**. Write `py-[min(6.5rem,8vw)]` (no space after comma). Same for `max()`, `clamp()`.
 
 | ⛔ Avoid | ✅ Use instead |
 |---|---|
@@ -92,7 +115,7 @@ Functional component, no props, export default. Import React/useState/useEffect.
 
 ### Theme tokens
 
-- Root wrapper: set bg/text colors, font family/size/lineHeight, root padding (`style={{padding:"..."}}`)
+- Root wrapper: set bg/text colors, lineHeight only — `style={{lineHeight:"..."}}`. ⛔ NO `fontFamily` on root wrapper — body/heading fonts are injected via global CSS automatically. ⛔ NO horizontal/vertical padding on root wrapper — each section handles its own padding.
 - Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
 - **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
 - Headings: exact token size/weight per level (`text-[3rem] font-[700]`)
@@ -153,12 +176,17 @@ Site: {{siteName}} | URL: {{siteUrl}}
 // ✅
 <div className="gap-[1rem] mt-[2rem]" />
 
+// ❌ Space inside CSS function → Tailwind silently ignores the class, no padding applied!
+<div className="py-[min(6.5rem, 8vw)] px-[max(2rem, 5vw)]" />
+// ✅ No space after comma
+<div className="py-[min(6.5rem,8vw)] px-[max(2rem,5vw)]" />
+
 // ❌ Hardcoded nav/footer links
 <a href="#">Team</a>
-// ✅ Fetch from /api/menus
+// ✅ Fetch from /api/menus — use <Link> for internal, <a> for external
 {menus.map(menu => (
   <div key={menu.slug}><h3>{menu.name}</h3>
-    {menu.items?.map(i => <a key={i.id} href={i.url}>{i.title}</a>)}
+    {menu.items?.map(i => <Link key={i.id} to={i.url}>{i.title}</Link>)}
   </div>
 ))}
 
@@ -194,7 +222,7 @@ Pre-parsed block tree. Each node: `block` type, `text`, `src`, `href`, `children
 
 | inner block | render |
 |---|---|
-| `post-title` | `<a href={'/post/'+post.slug}>{post.title}</a>` |
+| `post-title` | `<Link to={'/post/'+post.slug}>{post.title}</Link>` |
 | `post-date` | `<time className="whitespace-nowrap">{post.date}</time>` |
 | `post-author` | `<span>by {post.author}</span>` |
 | `post-excerpt` | `<p>{post.excerpt}</p>` |

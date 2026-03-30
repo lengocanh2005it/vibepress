@@ -415,18 +415,25 @@ export class OrchestratorService {
     await stepDelay();
 
     // Bước phụ: Gọi đến tool để evaluate sự tương đồng
-    const response = await axios.post(
-      `${this.configService.get<string>('automation.url', '')}/visual/compare`,
-      {
-        urlA: preview.previewUrl,
-        urlB: 'http://localhost:8000/',
-        fullPage: true,
-        viewportWidth: 1440,
-        viewportHeight: 900,
-      },
-    );
-
-    const metrics = response.data.result;
+    let metrics: any = null;
+    try {
+      const response = await axios.post(
+        `${this.configService.get<string>('automation.url', '')}/visual/compare`,
+        {
+          urlA: preview.previewUrl,
+          urlB: 'http://localhost:8000/',
+          fullPage: true,
+          viewportWidth: 1440,
+          viewportHeight: 900,
+        },
+      );
+      metrics = response.data.result;
+    } catch (err: any) {
+      this.logger.error(
+        `[visual/compare] failed — ${err?.message ?? err}`,
+        err?.response?.data ?? err?.stack,
+      );
+    }
 
     // Bước 8: Xoá temp/repos và temp/uploads của job này
     await this.runStep(state, '8_cleanup', logPath, () =>
