@@ -37,6 +37,25 @@ function sanitizeName(input) {
   );
 }
 
+function normalizeComparableUrl(input) {
+  try {
+    const parsed = new URL(String(input || ""));
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return parsed.toString();
+  } catch {
+    return String(input || "").trim();
+  }
+}
+
+function isSameTargetUrl(a, b) {
+  return normalizeComparableUrl(a) === normalizeComparableUrl(b);
+}
+
+function isNavigationInterruptedError(err) {
+  return /interrupted by another navigation/i.test(String(err?.message || ""));
+}
+
 async function gotoWithFallback(page, url) {
   // For localhost Vite SPAs, networkidle never resolves (HMR WebSocket stays open).
   // Use domcontentloaded for localhost, networkidle only for real remote sites.
@@ -59,6 +78,26 @@ async function gotoWithFallback(page, url) {
       await page.goto(url, attempt);
       return attempt.waitUntil;
     } catch (err) {
+      // If browser/app has already navigated to the same target, treat it as success.
+      if (isNavigationInterruptedError(err)) {
+        try {
+          await page.waitForURL(
+            (current) => isSameTargetUrl(current.href, url),
+            { timeout: 10000 },
+          );
+          await page
+            .waitForLoadState("domcontentloaded", { timeout: 10000 })
+            .catch(() => {});
+          return `${attempt.waitUntil}-recovered`;
+        } catch {
+          if (isSameTargetUrl(page.url(), url)) {
+            await page
+              .waitForLoadState("domcontentloaded", { timeout: 10000 })
+              .catch(() => {});
+            return `${attempt.waitUntil}-recovered`;
+          }
+        }
+      }
       lastError = err;
       try {
         await page.goto("about:blank", { timeout: 5000 });
@@ -98,10 +137,26 @@ async function captureScreenshot(
   interactions = [],
 ) {
   const navigationMode = await gotoWithFallback(page, url);
-  await page.waitForTimeout(1200);
-  await runInteractions(page, interactions);
-  await page.screenshot({ path: filePath, fullPage });
-  return navigationMode;
+  async function captureScreenshot(
+    page,
+    url,
+    filePath,
+    fullPage,
+    interactions = [],
+  ) {
+    let navigationMode = "reused";
+    if (!isSameTargetUrl(page.url(), url)) {
+      navigationMode = await gotoWithFallback(page, url);
+    } else {
+      await page
+        .waitForLoadState("domcontentloaded", { timeout: 10000 })
+        .catch(() => {});
+    }
+    await page.waitForTimeout(1200);
+    await runInteractions(page, interactions);
+    await page.screenshot({ path: filePath, fullPage });
+    return navigationMode;
+  }
 }
 
 async function captureDomStructure(page) {
