@@ -3,3 +3,4 @@
 /temp_workspaces
 /.env
 /db.json
+/artifacts
