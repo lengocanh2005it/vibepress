@@ -54,14 +54,44 @@ export const getThemesFolders = async (repoUrl: string) => {
   }
 };
 
-export const getCommitHistory = async (repoUrl: string) => {
+export interface CommitHistoryResponse {
+  commits: {
+    sha: string;
+    message: string;
+    author: string;
+    date: string;
+    avatarUrl: string | null;
+  }[];
+  pagination: {
+    page: number;
+    perPage: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+  };
+}
+
+export const getCommitHistory = async (
+  repoUrl: string,
+  page = 1,
+  perPage = 10,
+) => {
   try {
-    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/commits?repoUrl=${encodeURIComponent(repoUrl)}`);
+    const response = await fetch(
+      `${import.meta.env.VITE_BACKEND_URL}/api/wp/commits?repoUrl=${encodeURIComponent(repoUrl)}&page=${page}&perPage=${perPage}`,
+    );
     if (!response.ok) {
       throw new Error('Failed to fetch commit history');
     }
     const data = await response.json();
-    return data.commits;
+    return {
+      commits: data.commits ?? [],
+      pagination: data.pagination ?? {
+        page,
+        perPage,
+        hasNextPage: false,
+        hasPrevPage: page > 1,
+      },
+    } as CommitHistoryResponse;
   } catch (error) {
     console.error('Error fetching commit history:', error);
     throw error;

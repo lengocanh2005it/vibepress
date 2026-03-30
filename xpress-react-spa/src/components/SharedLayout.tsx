@@ -5,6 +5,7 @@ const SharedLayout = () => {
   const navigate = useNavigate();
 
   const stepItems = [
+    { label: 'Download Plugin', path: '/app/onboarding' },
     { label: 'Page setup', path: '/app/projects' },
     { label: 'Canvas edit', path: '/app/editor' },
     { label: 'AI generate', path: '/app/editor/split-view' },
@@ -14,32 +15,54 @@ const SharedLayout = () => {
 
   const currentPath = location.pathname;
   const currentStep =
-    currentPath.startsWith('/app/deploy') ? 4 :
-    currentPath.startsWith('/app/editor/visual') ? 3 :
-    currentPath.startsWith('/app/editor/split-view') ? 2 :
-    currentPath.startsWith('/app/editor') ? 1 :
+    currentPath.startsWith('/app/deploy') ? 5 :
+    currentPath.startsWith('/app/editor/visual') ? 4 :
+    currentPath.startsWith('/app/editor/split-view') ? 3 :
+    currentPath.startsWith('/app/editor') ? 2 :
+    currentPath.startsWith('/app/projects') ? 1 :
     0;
 
   return (
     <div className="flex flex-col bg-surface text-on-surface font-body antialiased min-h-screen overflow-hidden">
       <header className="sticky top-0 z-50 bg-surface/95 backdrop-blur-md border-b border-outline-variant/30 shadow-sm">
-        <div className="max-w-7xl mx-auto flex items-center justify-between px-5 py-3">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/')}> 
-            <span className="text-xl font-bold text-primary font-headline italic">X-press AI</span>
-            <span className="text-sm text-stone-600">Back to landing</span>
-          </div>
-          <nav className="flex items-center gap-5 text-sm font-medium text-stone-700">
-            <NavLink
-              to="/app/projects"
-              className={({ isActive }) =>
-                `px-2 py-1 rounded-md ${isActive ? 'text-primary border-b-2 border-primary font-bold' : 'hover:text-primary'}`
-              }
+        <div className="max-w- mx-auto w-full px-5 py-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="group inline-flex items-center gap-3 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-surface-container"
             >
-              Home
-            </NavLink>
-            <a className="px-2 py-1 rounded-md hover:text-primary" href="#">Hosting</a>
-            <a className="px-2 py-1 rounded-md hover:text-primary" href="#">Support</a>
-          </nav>
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary font-bold">
+                XP
+              </span>
+              <span className="flex flex-col leading-tight">
+                <span className="text-xl font-bold text-primary font-headline italic">X-press AI</span>
+              </span>
+            </button>
+
+            <nav className="flex w-full items-center justify-start gap-2 rounded-full border border-outline-variant/40 bg-white/70 p-1 text-sm font-medium text-stone-700 md:w-auto md:justify-end">
+              <NavLink
+                to="/"
+                className={({ isActive }) =>
+                  `rounded-full px-3 py-1.5 transition-colors ${isActive ? 'bg-primary text-white shadow-sm' : 'hover:bg-surface-container hover:text-primary'}`
+                }
+              >
+                Home
+              </NavLink>
+              <button
+                type="button"
+                className="rounded-full px-3 py-1.5 text-stone-600 transition-colors hover:bg-surface-container hover:text-primary"
+              >
+                Hosting
+              </button>
+              <button
+                type="button"
+                className="rounded-full px-3 py-1.5 text-stone-600 transition-colors hover:bg-surface-container hover:text-primary"
+              >
+                Support
+              </button>
+            </nav>
+          </div>
         </div>
         <div className="px-5 pb-4 space-y-3">
           <div className="flex items-center justify-between">
@@ -54,11 +77,10 @@ const SharedLayout = () => {
             />
           </div>
 
-          <div className="grid grid-cols-5 gap-2 text-[11px] text-[#5c6a5e] font-semibold">
+          <div className="grid grid-cols-6 gap-2 text-[11px] text-[#5c6a5e] font-semibold">
             {stepItems.map((step, idx) => (
               <button
                 key={step.label}
-                onClick={() => navigate(step.path)}
                 className={`rounded-full py-1 ${idx === currentStep ? 'text-[#2f5a45] bg-[#d8f0e2]' : 'text-[#7f8e83] bg-white hover:bg-[#f2f7f0]'}`}
                 disabled={idx > currentStep + 1}
               >

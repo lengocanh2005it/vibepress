@@ -58,6 +58,7 @@ const Editor: React.FC = () => {
   const [showCommentPopup, setShowCommentPopup] = useState(false);
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatTags, setChatTags] = useState<string[]>(['Refactor Header', 'Optimize SEO', 'Translate to VN', 'Check Dependencies']);
   const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -382,29 +383,62 @@ const Editor: React.FC = () => {
             );
           })()}
 
-          {/* Floating AI Prompt Bar */}
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 w-full max-w-2xl px-4 z-40 flex flex-col items-center pointer-events-none">
-            <div className="flex flex-wrap justify-center gap-2 mb-3 pointer-events-auto">
-              <button className="bg-white border border-[#49704F]/20 text-[#233227] text-[12px] font-bold px-4 py-1.5 rounded-full shadow-sm hover:border-[#49704F] transition-colors">Refactor Header</button>
-              <button className="bg-white border border-[#49704F]/20 text-[#233227] text-[12px] font-bold px-4 py-1.5 rounded-full shadow-sm hover:border-[#49704F] transition-colors">Optimize SEO</button>
-              <button className="bg-white border border-[#49704F]/20 text-[#233227] text-[12px] font-bold px-4 py-1.5 rounded-full shadow-sm hover:border-[#49704F] transition-colors">Translate to VN</button>
-              <button className="bg-white border border-[#49704F]/20 text-[#233227] text-[12px] font-bold px-4 py-1.5 rounded-full shadow-sm hover:border-[#49704F] transition-colors">Check Dependencies</button>
-            </div>
+          {/* Preview chat toggle + collapsible chat panel */}
+          <div className="absolute right-6 bottom-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
+            {isChatOpen && (
+              <div className="max-w-[600px] max-h-[70vh] bg-white border border-[#d4d8d1] rounded-3xl shadow-xl backdrop-blur-md overflow-hidden pointer-events-auto">
+                <div className="p-3 border-b border-[#e5e8df]">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                      <h3 className="font-semibold text-sm text-[#2e3e2f]">Live Chat</h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsChatOpen(false)}
+                      className="text-[11px] text-[#7a836f] hover:text-[#233227] transition-colors"
+                    >
+                      Thu gọn
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[12px] text-[#5e6a5f]">Gợi ý: refactor header, tối ưu SEO, chuyển ngôn ngữ, kiểm tra Dependency</p>
+                </div>
 
-            <div className="w-full bg-[#FAF7F0] border border-[#e8e6df] rounded-full p-2 pl-4 pr-2 flex items-center shadow-lg shadow-[#49704F]/10 pointer-events-auto">
-              <span className="material-symbols-outlined text-[#49704F] mr-3">auto_awesome</span>
-              <input
-                type="text"
-                placeholder="Ask AI to refactor, translate or optimize your WordPress code..."
-                className="flex-1 bg-transparent border-none text-[14px] outline-none text-[#233227] placeholder:text-[#8e9892]"
-              />
-              <div className="flex items-center gap-3 px-3 border-l border-[#e8e6df] ml-2">
-                <span className="text-[11px] font-bold text-[#233227] tracking-wider">EN | <span className="text-[#8e9892]">VN</span></span>
+                <div className="p-3 flex flex-wrap gap-2">
+                  {chatTags.map((tag) => (
+                    <button
+                      key={tag}
+                      onClick={() => setChatInput(tag)}
+                      className="text-[11px] text-[#3f593b] bg-[#eff7ee] border border-[#d8e8d3] px-3 py-1.5 rounded-full hover:bg-[#e0f0df] transition-colors"
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="p-3 border-t border-[#e5e8df] flex gap-2 items-center">
+                  <input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') sendChatMessage(); }}
+                    className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
+                    placeholder="Nhập câu hỏi AI (enter gửi)..."
+                  />
+                  <button onClick={sendChatMessage} className="h-10 w-10 rounded-full bg-primary text-white flex items-center justify-center hover:bg-[#356944] transition-colors">
+                    <span className="material-symbols-outlined">send</span>
+                  </button>
+                </div>
               </div>
-              <button className="w-10 h-10 bg-[#49704F] rounded-full flex items-center justify-center text-white hover:bg-[#346E56] transition-colors shadow-sm">
-                <span className="material-symbols-outlined text-[18px]">send</span>
-              </button>
-            </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsChatOpen((prev) => !prev)}
+              className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white shadow-lg flex items-center gap-2 hover:bg-[#346E56] transition-colors"
+            >
+              <span className="material-symbols-outlined text-[18px]">{isChatOpen ? 'close' : 'auto_awesome'}</span>
+              <span className="text-[12px] font-bold">{isChatOpen ? 'Đóng chat' : 'Mở chat AI'}</span>
+            </button>
           </div>
 
         </main>
@@ -504,44 +538,6 @@ const Editor: React.FC = () => {
         )}
       </div>
 
-      {/* Bottom-centered chat bar */}
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 w-[min(100vw-1rem,920px)] bg-white border border-[#d4d8d1] rounded-3xl shadow-xl backdrop-blur-md z-50">
-        <div className="p-3 border-b border-[#e5e8df]">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-              <h3 className="font-semibold text-sm text-[#2e3e2f]">Live Chat</h3>
-            </div>
-            <span className="text-[11px] text-[#7a836f]">AI chat mode</span>
-          </div>
-          <p className="mt-2 text-[12px] text-[#5e6a5f]">Gợi ý: refactor header, tối ưu SEO, chuyển ngôn ngữ, kiểm tra Dependency</p>
-        </div>
-
-        <div className="p-3 flex flex-wrap gap-2">
-          {chatTags.map((tag) => (
-            <button
-              key={tag}
-              onClick={() => setChatInput(tag)}
-              className="text-[11px] text-[#3f593b] bg-[#eff7ee] border border-[#d8e8d3] px-3 py-1.5 rounded-full hover:bg-[#e0f0df] transition-colors"
-            >
-              {tag}
-            </button>
-          ))}
-        </div>
-
-        <div className="p-3 border-t border-[#e5e8df] flex gap-2 items-center">
-          <input
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') sendChatMessage(); }}
-            className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
-            placeholder="Nhập câu hỏi AI (enter gửi)..."
-          />
-          <button onClick={sendChatMessage} className="h-10 w-10 rounded-full bg-primary text-white flex items-center justify-center hover:bg-[#356944] transition-colors">
-            <span className="material-symbols-outlined">send</span>
-          </button>
-        </div>
-      </div>
     </div>
   );
 };

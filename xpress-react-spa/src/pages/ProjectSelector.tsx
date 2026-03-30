@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
-import { getRepoByEmail, getCommitHistory, getThemesFolders } from '../services/automationService';
+import { getRepoByEmail, getCommitHistory } from '../services/automationService';
 
 interface Repository {
   siteId: string;
@@ -20,10 +20,11 @@ interface Commit {
   avatarUrl: string | null;
 }
 
-interface Theme {
-  name: string;
-  path: string;
-  url: string;
+interface CommitPagination {
+  page: number;
+  perPage: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
 }
 
 const ProjectSelector: React.FC = () => {
@@ -32,7 +33,13 @@ const ProjectSelector: React.FC = () => {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
   const [commitHistory, setCommitHistory] = useState<Commit[]>([]);
-  const [themes, setThemes] = useState<Theme[]>([]);
+  const [commitPage, setCommitPage] = useState(1);
+  const [commitPagination, setCommitPagination] = useState<CommitPagination>({
+    page: 1,
+    perPage: 10,
+    hasNextPage: false,
+    hasPrevPage: false,
+  });
 
   useEffect(() => {
     if (!email) return;
@@ -43,13 +50,13 @@ const ProjectSelector: React.FC = () => {
 
   useEffect(() => {
     if (!selectedRepo) return;
-    getCommitHistory(selectedRepo.wpRepoUrl)
-      .then(data => setCommitHistory(data))
+    getCommitHistory(selectedRepo.wpRepoUrl, commitPage, 10)
+      .then((data) => {
+        setCommitHistory(data.commits);
+        setCommitPagination(data.pagination);
+      })
       .catch(err => console.error('Error fetching commit history:', err));
-    getThemesFolders(selectedRepo.wpRepoUrl)
-      .then(data => setThemes(data))
-      .catch(err => console.error('Error fetching themes:', err));
-  }, [selectedRepo]);
+  }, [selectedRepo, commitPage]);
 
   return (
     <div className="flex-1 w-full max-w-[1400px] mx-auto px-8 py-10 flex gap-8">
@@ -68,7 +75,17 @@ const ProjectSelector: React.FC = () => {
               return (
                 <div
                   key={repo.siteId}
-                  onClick={() => setSelectedRepo(repo)}
+                  onClick={() => {
+                    setSelectedRepo(repo);
+                    setCommitPage(1);
+                    setCommitHistory([]);
+                    setCommitPagination({
+                      page: 1,
+                      perPage: 10,
+                      hasNextPage: false,
+                      hasPrevPage: false,
+                    });
+                  }}
                   className={`bg-[#e8e6df]/50 border-2 rounded-3xl p-6 cursor-pointer transition-all ${isSelected ? 'border-[#49704F]' : 'border-transparent hover:border-[#dcd9ce]'}`}
                 >
                   <div className="flex items-center gap-3 mb-2">
@@ -95,86 +112,49 @@ const ProjectSelector: React.FC = () => {
           </button>
         </div>
 
-        {/* Total Assets Widget */}
+        {/* Total Assets Widget
         <div className="mt-auto bg-[#594d3f] rounded-[2rem] p-8 text-[#f4ead5] relative overflow-hidden shadow-xl">
           <h4 className="text-[13px] font-medium opacity-80 mb-2">Total Assets Hosted</h4>
           <p className="font-headline text-[38px] font-bold leading-none">1.2 GB</p>
           <span className="material-symbols-outlined text-[120px] absolute -bottom-6 -right-6 opacity-10 rotate-12">cloud_done</span>
-        </div>
+        </div> */}
       </aside>
 
       {/* Right Content */}
       <main className="flex-1 flex flex-col gap-6">
-
-        {/* Page Manager */}
-        <div className="bg-[#FAF7F0] rounded-[2.5rem] p-8 border border-[#e8e6df] shadow-[0_8px_30px_rgba(0,0,0,0.02)]">
-          <div className="flex justify-between items-end mb-8">
-            <div>
-              <h2 className="font-headline text-[22px] font-bold text-[#1a2b21] mb-1">Page Manager</h2>
-              <p className="text-[#5c6860] text-[14px]">
-                {selectedRepo ? `Repo: ${selectedRepo.siteName || selectedRepo.wpRepoName}` : 'Chọn một repository để xem'}
-              </p>
-            </div>
-            <div className="flex gap-3">
-              <div className="relative">
-                <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-[#8e9892] text-[18px]">search</span>
-                <input
-                  type="text"
-                  placeholder="Filter pages..."
-                  className="bg-[#e8e6df]/50 border-none rounded-full pl-11 pr-6 py-2.5 text-[14px] w-64 focus:ring-2 focus:ring-[#49704F]/30 outline-none text-[#233227] placeholder:text-[#8e9892]"
-                />
+        {/* Git Activity */}
+        <div className="bg-[#FAF7F0] rounded-[2.5rem] p-8 border border-[#e8e6df] shadow-[0_8px_30px_rgba(0,0,0,0.02)] flex-1">
+          <div className="flex flex-col gap-4 mb-8">
+            <div className="flex justify-between items-start">
+              <div>
+                <h2 className="font-headline text-[20px] font-bold text-[#1a2b21] mb-1">Git Activity</h2>
+                <p className="text-[#5c6860] text-[14px]">
+                  {selectedRepo ? `${selectedRepo.siteName || selectedRepo.wpRepoName} — main branch` : 'Main branch history'}
+                </p>
               </div>
-              <button className="w-10 h-10 bg-[#e8e6df]/50 rounded-full flex items-center justify-center text-[#5c6860] hover:bg-[#dcd9ce] transition-colors">
-                <span className="material-symbols-outlined text-[20px]">filter_list</span>
+              <span className="material-symbols-outlined text-[#8e9892]">history</span>
+            </div>
+
+            <div className="rounded-2xl border border-[#e8e6df] bg-white/60 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-[12px] uppercase tracking-widest text-[#8e9892] font-semibold mb-1">Selected Repository</p>
+                <p className="text-[15px] font-bold text-[#233227]">
+                  {selectedRepo ? (selectedRepo.siteName || selectedRepo.wpRepoName) : 'Chưa chọn repository'}
+                </p>
+                <p className="font-mono text-[11px] text-[#8e9892] mt-1 break-all">
+                  {selectedRepo ? selectedRepo.wpRepoUrl.replace('https://', '') : 'Chọn repository bên trái để xem lịch sử commit'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/app/editor', { state: { siteUrl: selectedRepo?.siteUrl } })}
+                disabled={!selectedRepo}
+                className="inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-[13px] font-bold transition-colors disabled:cursor-not-allowed disabled:bg-[#e8e6df] disabled:text-[#8e9892] bg-[#49704F] text-white hover:bg-[#3f6246]"
+              >
+                <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
+                Open Editor
               </button>
             </div>
-          </div>
-
-          <table className="w-full text-left">
-            <thead>
-              <tr className="text-[10px] font-bold text-[#8e9892] uppercase tracking-widest border-b border-[#e8e6df]">
-                <th className="pb-4 font-medium pl-2">Theme Name</th>
-                <th className="pb-4 font-medium">Path</th>
-                <th className="pb-4"></th>
-              </tr>
-            </thead>
-            <tbody className="text-[14px] text-[#233227]">
-              {themes.length > 0 ? themes.map((theme, index) => (
-                <tr
-                  key={theme.path}
-                  className={`${index < themes.length - 1 ? 'border-b border-[#e8e6df]/50' : ''} hover:bg-[#e8e6df]/20 transition-colors group cursor-pointer`}
-                  onClick={() => navigate('/app/editor', { state: { siteUrl: selectedRepo?.siteUrl } })}
-                >
-                  <td className="py-5 pl-2 font-medium flex items-center gap-2">
-                    <span className="material-symbols-outlined text-[#49704F] text-[18px]">folder</span>
-                    {theme.name}
-                  </td>
-                  <td className="py-5 font-mono text-[12px] text-[#5c6860]">{theme.path}</td>
-                  <td className="py-5 text-right w-12">
-                    <span className="material-symbols-outlined text-[#8e9892] opacity-0 group-hover:opacity-100 transition-opacity">arrow_forward</span>
-                  </td>
-                </tr>
-              )) : (
-                <tr>
-                  <td colSpan={3} className="py-8 text-center text-[#8e9892] text-[13px]">
-                    {selectedRepo ? 'Đang tải danh sách themes...' : 'Chọn một repository để xem themes.'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Git Activity */}
-        <div className="bg-[#FAF7F0] rounded-[2.5rem] p-8 border border-[#e8e6df] shadow-[0_8px_30px_rgba(0,0,0,0.02)]">
-          <div className="flex justify-between items-start mb-8">
-            <div>
-              <h2 className="font-headline text-[20px] font-bold text-[#1a2b21] mb-1">Git Activity</h2>
-              <p className="text-[#5c6860] text-[14px]">
-                {selectedRepo ? `${selectedRepo.siteName || selectedRepo.wpRepoName} — main branch` : 'Main branch history'}
-              </p>
-            </div>
-            <span className="material-symbols-outlined text-[#8e9892]">history</span>
           </div>
 
           <div className="space-y-6">
@@ -209,6 +189,32 @@ const ProjectSelector: React.FC = () => {
               </p>
             )}
           </div>
+
+          {selectedRepo && (
+            <div className="mt-8 pt-5 border-t border-[#e8e6df] flex items-center justify-between">
+              <p className="text-[12px] text-[#8e9892]">
+                Page {commitPagination.page} • {commitPagination.perPage} commits per page
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCommitPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={!commitPagination.hasPrevPage}
+                  className="rounded-full px-4 py-2 text-[12px] font-semibold border border-[#dcd9ce] text-[#5c6860] hover:bg-[#f1efe9] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCommitPage((prev) => prev + 1)}
+                  disabled={!commitPagination.hasNextPage}
+                  className="rounded-full px-4 py-2 text-[12px] font-semibold border border-[#dcd9ce] text-[#5c6860] hover:bg-[#f1efe9] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </main>
 

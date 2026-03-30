@@ -537,60 +537,14 @@ function getDBinfoByEmail(req, res) {
 }
 
 // -------------------------------------------------------
-// GET /api/wp/themes?repoUrl=https://github.com/owner/repo
-// Trả về danh sách folder trong thư mục themes của repo
-// -------------------------------------------------------
-async function getThemesFolders(req, res) {
-  const { repoUrl } = req.query;
-
-  if (!repoUrl) {
-    return res.status(400).json({ success: false, error: "repoUrl query param is required" });
-  }
-
-  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
-  if (!match) {
-    return res.status(400).json({ success: false, error: "Invalid GitHub repo URL" });
-  }
-
-  const [, owner, repo] = match;
-
-  try {
-    const response = await axios.get(
-      `https://api.github.com/repos/${owner}/${repo}/contents/themes`,
-      {
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        timeout: 10000,
-      }
-    );
-
-    const themes = response.data
-      .filter((item) => item.type === "dir")
-      .map((item) => ({
-        name: item.name,
-        path: item.path,
-        url: item.html_url,
-      }));
-
-    return res.status(200).json({ success: true, owner, repo, themes });
-  } catch (error) {
-    const status = error.response?.status || 500;
-    return res.status(status).json({
-      success: false,
-      error: error.response?.data?.message || error.message,
-    });
-  }
-}
-
-// -------------------------------------------------------
 // GET /api/wp/commits?repoUrl=https://github.com/owner/repo
 // Trả về lịch sử commit của repo từ GitHub API
 // -------------------------------------------------------
 async function getCommitsByRepo(req, res) {
   const { repoUrl } = req.query;
+  const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+  const perPageRaw = Number.parseInt(req.query.perPage, 10) || 10;
+  const perPage = Math.min(Math.max(perPageRaw, 1), 100);
 
   if (!repoUrl) {
     return res.status(400).json({ success: false, error: "repoUrl query param is required" });
@@ -613,7 +567,7 @@ async function getCommitsByRepo(req, res) {
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28",
         },
-        params: { per_page: 20 },
+        params: { per_page: perPage, page },
         timeout: 10000,
       }
     );
@@ -626,7 +580,22 @@ async function getCommitsByRepo(req, res) {
       avatarUrl: c.author?.avatar_url ?? null,
     }));
 
-    return res.status(200).json({ success: true, owner, repo, commits });
+    const linkHeader = response.headers?.link || "";
+    const hasNextPage = /rel="next"/.test(linkHeader);
+    const hasPrevPage = page > 1;
+
+    return res.status(200).json({
+      success: true,
+      owner,
+      repo,
+      commits,
+      pagination: {
+        page,
+        perPage,
+        hasNextPage,
+        hasPrevPage,
+      },
+    });
   } catch (error) {
     const status = error.response?.status || 500;
     return res.status(status).json({
@@ -689,8 +658,7 @@ module.exports = {
   getReposByEmail,
   getCommitsByRepo,
   getWpSitePages,
-  getDBinfoByEmail,
-  getThemesFolders,
+  getDBinfoByEmail
 };
 
 
