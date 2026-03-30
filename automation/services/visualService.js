@@ -136,27 +136,18 @@ async function captureScreenshot(
   fullPage,
   interactions = [],
 ) {
-  const navigationMode = await gotoWithFallback(page, url);
-  async function captureScreenshot(
-    page,
-    url,
-    filePath,
-    fullPage,
-    interactions = [],
-  ) {
-    let navigationMode = "reused";
-    if (!isSameTargetUrl(page.url(), url)) {
-      navigationMode = await gotoWithFallback(page, url);
-    } else {
-      await page
-        .waitForLoadState("domcontentloaded", { timeout: 10000 })
-        .catch(() => {});
-    }
-    await page.waitForTimeout(1200);
-    await runInteractions(page, interactions);
-    await page.screenshot({ path: filePath, fullPage });
-    return navigationMode;
+  let navigationMode = "reused";
+  if (!isSameTargetUrl(page.url(), url)) {
+    navigationMode = await gotoWithFallback(page, url);
+  } else {
+    await page
+      .waitForLoadState("domcontentloaded", { timeout: 10000 })
+      .catch(() => {});
   }
+  await page.waitForTimeout(1200);
+  await runInteractions(page, interactions);
+  await page.screenshot({ path: filePath, fullPage });
+  return navigationMode;
 }
 
 async function captureDomStructure(page) {
@@ -271,7 +262,7 @@ async function discoverFromSitemap(baseUrl) {
     `${baseUrl}/wp-sitemap.xml`, // WP 5.5+ built-in
     `${baseUrl}/sitemap_index.xml`, // Yoast / Rank Math
   ];
-  console.log("   Thử tìm sitemap tại các URL:", candidates.join(", "));
+  console.log("Thử tìm sitemap tại các URL:", candidates.join(", "));
   for (const sitemapUrl of candidates) {
     try {
       const res = await axios.get(sitemapUrl, { timeout: 8000 });
