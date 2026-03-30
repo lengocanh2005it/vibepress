@@ -477,32 +477,6 @@ function syncComplete(req, res) {
     `[WP] sync-complete OK — site=${site.siteUrl} synced=${synced} failed=${failed}`,
   );
 
-  // Trigger pipeline
-  if (site.dbInfo) {
-    const dbInfo = {
-      host: "localhost",
-      port: site.dbInfo.db_port,
-      dbName: site.dbInfo.db_name,
-      password: site.dbInfo.db_password,
-      user: site.dbInfo.db_user,
-    };
-
-    axios
-      .post(`${AI_PIPELINE_URL}/pipeline/run`, {
-        themeGithubUrl: site.wpRepoUrl,
-        dbCredentials: dbInfo,
-      })
-      .then(() => {
-        console.log(`[WP] Triggered pipeline for ${site.siteUrl}`);
-      })
-      .catch((error) => {
-        console.error(
-          `[WP] Failed to trigger pipeline for ${site.siteUrl}`,
-          error,
-        );
-      });
-  }
-
   return res.status(200).json({ success: true });
 }
 

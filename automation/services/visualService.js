@@ -35,6 +35,25 @@ function sanitizeName(input) {
     .slice(0, 40) || 'site';
 }
 
+function normalizeComparableUrl(input) {
+  try {
+    const parsed = new URL(String(input || ''));
+    parsed.hash = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    return parsed.toString();
+  } catch {
+    return String(input || '').trim();
+  }
+}
+
+function isSameTargetUrl(a, b) {
+  return normalizeComparableUrl(a) === normalizeComparableUrl(b);
+}
+
+function isNavigationInterruptedError(err) {
+  return /interrupted by another navigation/i.test(String(err?.message || ''));
+}
+
 async function gotoWithFallback(page, url) {
   const attempts = [
     { waitUntil: 'networkidle', timeout: 45000 },
@@ -48,6 +67,19 @@ async function gotoWithFallback(page, url) {
       await page.goto(url, attempt);
       return attempt.waitUntil;
     } catch (err) {
+      // If browser/app has already navigated to the same target, treat it as success.
+      if (isNavigationInterruptedError(err)) {
+        try {
+          await page.waitForURL(current => isSameTargetUrl(current.href, url), { timeout: 10000 });
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+          return `${attempt.waitUntil}-recovered`;
+        } catch {
+          if (isSameTargetUrl(page.url(), url)) {
+            await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+            return `${attempt.waitUntil}-recovered`;
+          }
+        }
+      }
       lastError = err;
     }
   }
@@ -75,7 +107,12 @@ async function runInteractions(page, interactions = []) {
 }
 
 async function captureScreenshot(page, url, filePath, fullPage, interactions = []) {
-  const navigationMode = await gotoWithFallback(page, url);
+  let navigationMode = 'reused';
+  if (!isSameTargetUrl(page.url(), url)) {
+    navigationMode = await gotoWithFallback(page, url);
+  } else {
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+  }
   await page.waitForTimeout(1200);
   await runInteractions(page, interactions);
   await page.screenshot({ path: filePath, fullPage });
@@ -349,16 +386,14 @@ async function compareWebVisuals({
     totalPixels,
     resolutionUsed: { width, height },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
-<<<<<<< Updated upstream
     artifacts: {
       imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
       imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
       diff:   `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
     },
-=======
     domComparison,
     artifacts: { imageA: imageAPath, imageB: imageBPath, diff: diffPath },
->>>>>>> Stashed changes
+
   };
 }
 
