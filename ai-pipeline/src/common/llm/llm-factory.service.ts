@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
+import { firstValueFrom } from 'rxjs';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import Groq from 'groq-sdk';
@@ -12,6 +14,10 @@ import { CEREBRAS_CLIENT } from '../providers/cerebras/cerebras.provider.js';
 import { GEMINI_CLIENT } from '../providers/gemini/gemini.provider.js';
 import { OPENAI_CLIENT } from '../providers/openai/openai.provider.js';
 import { OLLAMA_CLIENT } from '../providers/ollama/ollama.provider.js';
+import {
+  CUSTOM_CONFIG,
+  type CustomConfig,
+} from '../providers/custom/custom.provider.js';
 import type {
   LlmChatParams,
   LlmChatResult,
@@ -26,6 +32,7 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
   gemini: 'gemini-2.0-flash',
   openai: 'gpt-4o-mini',
   ollama: 'qwen2.5-coder:7b',
+  custom: 'default',
 };
 
 @Injectable()
@@ -38,6 +45,8 @@ export class LlmFactoryService {
     @Inject(GEMINI_CLIENT) private readonly gemini: GoogleGenerativeAI,
     @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
     @Inject(OLLAMA_CLIENT) private readonly ollama: Ollama,
+    @Inject(CUSTOM_CONFIG) private readonly customConfig: CustomConfig,
+    private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -76,6 +85,8 @@ export class LlmFactoryService {
         return this.chatOpenAINative(params);
       case 'ollama':
         return this.chatOllama(params);
+      case 'custom':
+        return this.chatCustom(params);
       case 'mistral':
       default:
         return this.chatOpenAICompat(this.mistral, params);
@@ -86,7 +97,13 @@ export class LlmFactoryService {
     client: OpenAI,
     params: LlmChatParams,
   ): Promise<LlmChatResult> {
-    const { model, systemPrompt, userPrompt, maxTokens = 8192, temperature = 0 } = params;
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 0,
+    } = params;
 
     const response = await client.chat.completions.create({
       model,
@@ -117,7 +134,13 @@ export class LlmFactoryService {
   private async chatOpenAINative(
     params: LlmChatParams,
   ): Promise<LlmChatResult> {
-    const { model, systemPrompt, userPrompt, maxTokens = 8192, temperature = 1 } = params;
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 1,
+    } = params;
 
     const response = await this.openai.chat.completions.create({
       model,
@@ -146,7 +169,13 @@ export class LlmFactoryService {
   }
 
   private async chatAnthropic(params: LlmChatParams): Promise<LlmChatResult> {
-    const { model, systemPrompt, userPrompt, maxTokens = 8192, temperature = 0 } = params;
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 0,
+    } = params;
 
     const response = await this.anthropic.messages.create({
       model,
@@ -171,7 +200,13 @@ export class LlmFactoryService {
   }
 
   private async chatGemini(params: LlmChatParams): Promise<LlmChatResult> {
-    const { model, systemPrompt, userPrompt, maxTokens = 8192, temperature = 0 } = params;
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 0,
+    } = params;
 
     const genModel = this.gemini.getGenerativeModel({
       model,
@@ -194,8 +229,62 @@ export class LlmFactoryService {
     };
   }
 
+  private async chatCustom(params: LlmChatParams): Promise<LlmChatResult> {
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 0,
+    } = params;
+    const { baseURL, apiKey } = this.customConfig;
+
+    const response = await firstValueFrom(
+      this.httpService.post(
+        `${baseURL}/gateway/chat/completions`,
+        {
+          model,
+          max_tokens: maxTokens,
+          temperature,
+          messages: [
+            ...(systemPrompt
+              ? [{ role: 'system', content: systemPrompt }]
+              : []),
+            { role: 'user', content: userPrompt },
+          ],
+        },
+        {
+          headers: {
+            Authorization: `${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      ),
+    );
+
+    const { text, inputTokens, outputTokens } = response.data;
+
+    if (!text) {
+      throw new Error(
+        `Empty response from custom model ${model} (finish_reason: ${response.data.choices?.[0]?.finish_reason ?? 'unknown'})`,
+      );
+    }
+
+    return {
+      text,
+      inputTokens: inputTokens ?? 0,
+      outputTokens: outputTokens ?? 0,
+    };
+  }
+
   private async chatOllama(params: LlmChatParams): Promise<LlmChatResult> {
-    const { model, systemPrompt, userPrompt, maxTokens = 8192, temperature = 0 } = params;
+    const {
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens = 8192,
+      temperature = 0,
+    } = params;
 
     const response = await this.ollama.chat({
       model,

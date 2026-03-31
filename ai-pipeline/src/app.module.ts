@@ -8,6 +8,7 @@ import { MistralModule } from './common/providers/mistral/mistral.module.js';
 import { AnthropicModule } from './common/providers/anthropic/anthropic.module.js';
 import { OpenAIModule } from './common/providers/openai/openai.module.js';
 import { OllamaModule } from './common/providers/ollama/ollama.module.js';
+import { CustomModule } from './common/providers/custom/custom.module.js';
 import { ImportModule } from './modules/import/import.module.js';
 import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
@@ -24,7 +25,6 @@ import { HttpModule } from '@nestjs/axios';
     HttpModule.register({
       global: true,
       maxRedirects: 3,
-      timeout: 10000,
     }),
     GroqModule,
     GeminiModule,
@@ -33,6 +33,7 @@ import { HttpModule } from '@nestjs/axios';
     AnthropicModule,
     OpenAIModule,
     OllamaModule,
+    CustomModule,
     LlmModule,
     ImportModule,
     ThemeModule,

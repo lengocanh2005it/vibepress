@@ -36,6 +36,12 @@ export default () => ({
     baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b',
   },
+  custom: {
+    baseURL: process.env.CUSTOM_BASE_URL || 'http://localhost:8000',
+    apiKey: process.env.CUSTOM_API_KEY || '',
+    model: process.env.CUSTOM_MODEL || 'default',
+    maxTokens: parseInt(process.env.CUSTOM_MAX_TOKENS ?? '8192', 10),
+  },
   reactGenerator: {
     delayBetweenComponents: parseInt(
       process.env.REACT_GEN_DELAY_MS ?? '5000',

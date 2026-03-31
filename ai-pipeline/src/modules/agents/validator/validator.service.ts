@@ -145,6 +145,22 @@ export class ValidatorService {
       );
     }
 
+    // 12. Data variables used in JSX without a corresponding useState declaration
+    const dataVars = ['menus', 'posts', 'pages', 'siteInfo'];
+    const missingState: string[] = [];
+    for (const varName of dataVars) {
+      if (!new RegExp(`\\b${varName}\\b`).test(code)) continue;
+      const hasDeclared = new RegExp(`const\\s+\\[\\s*${varName}\\b`).test(code);
+      if (!hasDeclared) missingState.push(varName);
+    }
+    if (missingState.length > 0) {
+      violations.push(
+        `Variables used in JSX but missing useState declaration: ${missingState.join(', ')}. ` +
+        `For each missing variable: add \`const [${missingState[0]}, set${missingState[0].charAt(0).toUpperCase() + missingState[0].slice(1)}] = useState(...)\` ` +
+        `AND add its fetch inside the Promise.all in useEffect.`,
+      );
+    }
+
     if (violations.length > 0) {
       return { isValid: false, error: violations.join('\n') };
     }
