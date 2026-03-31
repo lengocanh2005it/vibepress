@@ -7,6 +7,7 @@ const visualRoutes = require('./routes/visualRoutes');
 const lighthouseRoutes = require('./routes/lighthouseRoutes');
 const captureRoutes = require('./routes/captureRoutes');
 const contentRoutes = require('./routes/contentRoutes');
+const siteCompareRoutes = require('./routes/siteCompareRoutes');
 const { ensureFileSystemState } = require('./controllers/projectController');
 
 const app = express();
@@ -22,6 +23,7 @@ app.use('/api', visualRoutes);
 app.use('/api', lighthouseRoutes);
 app.use('/api', captureRoutes);
 app.use('/api', contentRoutes);
+app.use('/api', siteCompareRoutes);
 app.use('/captures', express.static(require('path').join(__dirname, 'uploads/captures')));
 app.use('/artifacts', express.static(require('path').join(__dirname, 'artifacts')));
 

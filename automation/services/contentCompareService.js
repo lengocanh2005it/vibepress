@@ -1,6 +1,6 @@
 "use strict";
 
-const { fetchAllWpContent }     = require("./wpApiService");
+const { fetchAllWpContent }     = require("./wpDbService");
 const { fetchAllReactContent }  = require("./reactApiService");
 
 // ─── SIMILARITY ──────────────────────────────────────────────────────────────
@@ -68,17 +68,19 @@ function compareItems(wpItem, reactItem) {
 // ─── MAIN ENTRY ──────────────────────────────────────────────────────────────
 
 /**
- * So sánh toàn bộ nội dung WP vs React backend
+ * So sánh toàn bộ nội dung WP (DB) vs React backend (API)
  *
- * @param {string} wpBaseUrl     - e.g. "http://localhost:8000"
- * @param {string} reactBaseUrl  - e.g. "http://localhost:3100"
+ * @param {object|string} dbInfoOrSiteId  - dbInfo object hoặc siteId từ db.json
+ * @param {string}        reactBeUrl      - e.g. "http://localhost:3100"
+ * @param {object}        [opts]
+ * @param {string[]}      [opts.postTypes] - giới hạn post types, mặc định lấy hết
  */
-async function compareAllContent(wpBaseUrl, reactBaseUrl) {
+async function compareAllContent(dbInfoOrSiteId, reactBeUrl, { postTypes } = {}) {
   console.log("🔍 Fetching content from both sources...");
 
   const [wpItems, reactItems] = await Promise.all([
-    fetchAllWpContent(wpBaseUrl),
-    fetchAllReactContent(reactBaseUrl),
+    fetchAllWpContent(dbInfoOrSiteId, { postTypes }),
+    fetchAllReactContent(reactBeUrl),
   ]);
 
   // Index React items theo slug để lookup O(1)
@@ -94,8 +96,10 @@ async function compareAllContent(wpBaseUrl, reactBaseUrl) {
         slug:   wpItem.slug,
         type:   wpItem.type,
         status: "MISSING",
-        scores: { title: 0, content: 0, excerpt: 0, overall: 0 },
+        scores: { title: 0, content: 0, overall: 0 },
         issues: [`Not found in React backend`],
+        wp:     { title: wpItem.titleText, contentPreview: wpItem.contentText.slice(0, 300) },
+        react:  null,
       });
       console.warn(`   ❌ MISSING [${wpItem.type}] ${wpItem.slug}`);
       continue;
@@ -114,12 +118,12 @@ async function compareAllContent(wpBaseUrl, reactBaseUrl) {
   }
 
   // Summary
+  // MISSING items được tính điểm 0 vào avgOverall để phản ánh đúng tình trạng thiếu nội dung
   const passed  = results.filter((r) => r.status === "PASS").length;
   const failed  = results.filter((r) => r.status === "FAIL").length;
   const missing = results.filter((r) => r.status === "MISSING").length;
-  const valid   = results.filter((r) => r.status !== "MISSING");
   const avgOverall =
-    valid.reduce((s, r) => s + r.scores.overall, 0) / (valid.length || 1);
+    results.reduce((s, r) => s + (r.scores.overall ?? 0), 0) / (results.length || 1);
 
   const summary = {
     total:      results.length,

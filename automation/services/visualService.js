@@ -8,16 +8,21 @@ const axios = require("axios");
 const xml2js = require("xml2js");
 
 const { PORT } = require("../config/constants");
+const { normalizeBaseUrl } = require("./textUtils");
+
 const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 
+// page: lấy hết (số lớn); còn lại sample 1 đại diện mỗi type.
+// Bất kỳ type nào không có trong đây → DEFAULT_TYPE_LIMIT.
+const DEFAULT_TYPE_LIMIT = 1;
 const SAMPLE_LIMITS = {
   homepage: 1,
-  post: 3,
-  page: 2,
+  post:     1,
+  page:     9999,
   category: 1,
-  tag: 1,
+  tag:      1,
 };
 
 // ─── UTILS ─────────────────────────────────────────────────────────────────
@@ -201,9 +206,6 @@ function cropToSize(image, width, height) {
   return cropped;
 }
 
-function normalizeBaseUrl(input) {
-  return String(input || "").replace(/\/+$/, "");
-}
 
 function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
   const safeWpUrl = String(wpUrl || "").trim();
@@ -228,28 +230,40 @@ function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
 // ─── URL DISCOVERY ─────────────────────────────────────────────────────────
 
 /**
- * Infer page type từ URL pattern WordPress
+ * Trích xuất post type / taxonomy từ URL của sitemap con WP:
+ *   wp-sitemap-posts-{post_type}-{page}.xml   → post_type
+ *   wp-sitemap-taxonomies-{taxonomy}-{page}.xml → taxonomy
+ * Trả về null nếu không match (Yoast/Rank Math dùng format khác → fallback inferPageType)
+ */
+function inferTypeFromSitemapUrl(sitemapUrl) {
+  const m = sitemapUrl.match(/wp-sitemap-(?:posts|taxonomies)-([^-]+(?:_[^-]+)*)-\d+\.xml/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Infer page type từ URL trang (chỉ dùng khi không lấy được type từ sitemap URL)
  */
 function inferPageType(url, baseUrl = "") {
   const p = url.replace(baseUrl, "");
   if (p === "/" || p === "") return "homepage";
-  if (/\/category\//i.test(p)) return "category";
-  if (/\/tag\//i.test(p)) return "tag";
-  if (/\/\d{4}\/\d{2}\//i.test(p)) return "post";
-  if (/\/(blog|news|posts?)\//i.test(p)) return "post";
+  if (/\/category\//i.test(p))  return "category";
+  if (/\/tag\//i.test(p))       return "tag";
+  if (/\/\d{4}\/\d{2}\//i.test(p))             return "post";
+  if (/\/(blog|news|posts?)\//i.test(p))        return "post";
   return "page";
 }
 
 /**
  * Parse một sitemap.xml đơn, trả về mảng { loc, type }
+ * typeHint: nếu biết type từ URL sitemap thì dùng luôn, không cần đoán
  */
-async function parseSingleSitemap(sitemapUrl, baseUrl) {
+async function parseSingleSitemap(sitemapUrl, baseUrl, typeHint = null) {
   const res = await axios.get(sitemapUrl, { timeout: 8000 });
   const parsed = await xml2js.parseStringPromise(res.data);
   if (!parsed.urlset?.url) return [];
   return parsed.urlset.url.map((u) => ({
-    loc: u.loc[0],
-    type: inferPageType(u.loc[0], baseUrl),
+    loc:  u.loc[0],
+    type: typeHint ?? inferPageType(u.loc[0], baseUrl),
   }));
 }
 
@@ -259,10 +273,10 @@ async function parseSingleSitemap(sitemapUrl, baseUrl) {
  */
 async function discoverFromSitemap(baseUrl) {
   const candidates = [
-    `${baseUrl}/wp-sitemap.xml`, // WP 5.5+ built-in
-    `${baseUrl}/sitemap_index.xml`, // Yoast / Rank Math
+    `${baseUrl}/wp-sitemap.xml`,      // WP 5.5+ built-in
+    `${baseUrl}/sitemap_index.xml`,   // Yoast / Rank Math
   ];
-  console.log("Thử tìm sitemap tại các URL:", candidates.join(", "));
+  console.log("Thử tìm sitemap tại:", candidates.join(", "));
   for (const sitemapUrl of candidates) {
     try {
       const res = await axios.get(sitemapUrl, { timeout: 8000 });
@@ -273,20 +287,25 @@ async function discoverFromSitemap(baseUrl) {
         const childUrls = parsed.sitemapindex.sitemap.map((s) => s.loc[0]);
         const all = [];
         for (const child of childUrls) {
-          const items = await parseSingleSitemap(child, baseUrl);
+          // Lấy type từ URL sitemap con (e.g. wp-sitemap-posts-product-1.xml → "product")
+          const typeHint = inferTypeFromSitemapUrl(child);
+          const items = await parseSingleSitemap(child, baseUrl, typeHint);
           all.push(...items);
+          if (typeHint) {
+            console.log(`   sitemap [${typeHint}]: ${items.length} URLs`);
+          }
         }
-        console.log(`✅ Sitemap index: found ${all.length} URLs`);
+        console.log(`✅ Sitemap index: ${all.length} URLs total`);
         return all;
       }
 
-      // Single sitemap
+      // Single sitemap (không có index)
       if (parsed.urlset?.url) {
         const items = parsed.urlset.url.map((u) => ({
-          loc: u.loc[0],
+          loc:  u.loc[0],
           type: inferPageType(u.loc[0], baseUrl),
         }));
-        console.log(`✅ Sitemap: found ${items.length} URLs`);
+        console.log(`✅ Sitemap: ${items.length} URLs`);
         return items;
       }
     } catch {
@@ -298,38 +317,67 @@ async function discoverFromSitemap(baseUrl) {
 }
 
 /**
- * Discover URLs từ WP REST API
- * Fallback khi không có sitemap
+ * Discover URLs từ WP REST API — fallback khi không có sitemap.
+ * Tự động discover TẤT CẢ post types và taxonomies đã đăng ký,
+ * không hardcode theo plugin cụ thể.
  */
 async function discoverFromRestApi(baseUrl) {
   const urls = [{ loc: baseUrl, type: "homepage" }];
+  const base = `${baseUrl}/wp-json`;
 
-  const endpoints = [
-    { path: "/wp/v2/posts?per_page=100&status=publish", type: "post" },
-    { path: "/wp/v2/pages?per_page=100&status=publish", type: "page" },
-    {
-      path: "/wp/v2/categories?per_page=100&hide_empty=true",
-      type: "category",
-    },
-  ];
+  // Post types WP internal — không có URL frontend, truy cập trả về 404
+  const WP_INTERNAL_TYPES = new Set([
+    "wp_template", "wp_template_part", "wp_global_styles",
+    "wp_navigation", "wp_block", "wp_font_family", "wp_font_face",
+    "attachment", "revision", "nav_menu_item",
+  ]);
 
-  for (const ep of endpoints) {
-    try {
-      const res = await axios.get(`${baseUrl}/wp-json${ep.path}`, {
-        timeout: 8000,
-      });
-      const items = (Array.isArray(res.data) ? res.data : [])
-        .map((item) => ({
-          loc: item?.link || item?.url || null,
-          type: ep.type,
-          slug: item?.slug,
-        }))
-        .filter((item) => Boolean(item.loc));
-      urls.push(...items);
-      console.log(`✅ REST API [${ep.type}]: ${items.length} items`);
-    } catch (e) {
-      console.warn(`⚠️  REST API [${ep.type}] failed: ${e.message}`);
+  // 1. Lấy danh sách tất cả post types public từ WP
+  try {
+    const typesRes = await axios.get(`${base}/wp/v2/types`, { timeout: 8000 });
+    const postTypes = Object.values(typesRes.data || {}).filter(
+      (t) => t.rest_base && t.viewable !== false && !WP_INTERNAL_TYPES.has(t.slug)
+    );
+    for (const pt of postTypes) {
+      try {
+        const res = await axios.get(
+          `${base}/wp/v2/${pt.rest_base}?per_page=100&status=publish`,
+          { timeout: 8000 }
+        );
+        const items = (Array.isArray(res.data) ? res.data : [])
+          .map((item) => ({ loc: item?.link ?? null, type: pt.slug, slug: item?.slug }))
+          .filter((item) => Boolean(item.loc));
+        if (items.length) {
+          urls.push(...items);
+          console.log(`✅ REST [post_type=${pt.slug}]: ${items.length} items`);
+        }
+      } catch { /* post type không có REST hoặc không có bài nào */ }
     }
+  } catch (e) {
+    console.warn(`⚠️  Không lấy được danh sách post types: ${e.message}`);
+  }
+
+  // 2. Lấy danh sách tất cả taxonomies public từ WP
+  try {
+    const taxRes = await axios.get(`${base}/wp/v2/taxonomies`, { timeout: 8000 });
+    const taxonomies = Object.values(taxRes.data || {}).filter((t) => t.rest_base);
+    for (const tax of taxonomies) {
+      try {
+        const res = await axios.get(
+          `${base}/wp/v2/${tax.rest_base}?per_page=100&hide_empty=true`,
+          { timeout: 8000 }
+        );
+        const items = (Array.isArray(res.data) ? res.data : [])
+          .map((item) => ({ loc: item?.link ?? null, type: tax.slug, slug: item?.slug }))
+          .filter((item) => Boolean(item.loc));
+        if (items.length) {
+          urls.push(...items);
+          console.log(`✅ REST [taxonomy=${tax.slug}]: ${items.length} items`);
+        }
+      } catch { /* taxonomy không public hoặc không có term nào */ }
+    }
+  } catch (e) {
+    console.warn(`⚠️  Không lấy được danh sách taxonomies: ${e.message}`);
   }
 
   return urls;
@@ -350,7 +398,7 @@ function smartSample(allUrls, limits = SAMPLE_LIMITS) {
 
   const sampled = [];
   for (const [type, items] of Object.entries(groups)) {
-    const limit = limits[type] ?? 1;
+    const limit = limits[type] ?? DEFAULT_TYPE_LIMIT;
     const taken = items.slice(0, limit);
     sampled.push(...taken);
     console.log(`   ${type.padEnd(10)} ${taken.length}/${items.length} trang`);
