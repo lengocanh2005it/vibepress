@@ -46,6 +46,37 @@ Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href tar
 
 ## Data fetching
 
+⛔ MANDATORY CONTRACT — violating this causes a runtime ReferenceError:
+1. List every API endpoint you will call based on the template blocks.
+2. Declare ONE `useState` per variable BEFORE writing any JSX.
+3. Fetch ALL of them together in a single `Promise.all` inside `useEffect`.
+4. NEVER use `menus`, `posts`, `pages`, `siteInfo` in JSX unless you declared `useState` for it above.
+
+```tsx
+// ✅ Correct — every variable used in JSX is declared AND fetched
+const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
+const [menus, setMenus] = useState<Menu[]>([]);
+const [posts, setPosts] = useState<Post[]>([]);
+
+useEffect(() => {
+  const fetchData = async () => {
+    const [r0, r1, r2] = await Promise.all([
+      fetch('/api/site-info'),
+      fetch('/api/menus'),
+      fetch('/api/posts'),
+    ]);
+    setSiteInfo(await r0.json());
+    setMenus(await r1.json());
+    setPosts(await r2.json());
+  };
+  fetchData();
+}, []);
+
+// ❌ Wrong — menus used in JSX but no useState, no fetch → ReferenceError
+const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
+// ... JSX uses menus.find(...) ← CRASH
+```
+
 - `useEffect` + `useState`, fetch on mount, show loading/error states
 - Define TypeScript interfaces above the component
 - Menu guard — always use optional chaining:

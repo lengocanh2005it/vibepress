@@ -502,7 +502,6 @@ async function compareWebVisuals({
       diff: `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
     },
     domComparison,
-    artifacts: { imageA: imageAPath, imageB: imageBPath, diff: diffPath },
   };
 }
 

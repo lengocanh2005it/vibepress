@@ -19,4 +19,5 @@ export type LlmProvider =
   | 'cerebras'
   | 'gemini'
   | 'openai'
-  | 'ollama';
+  | 'ollama'
+  | 'custom';
