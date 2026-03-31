@@ -32,6 +32,10 @@ export default () => ({
     apiKey: process.env.ANTHROPIC_API_KEY,
     model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
   },
+  ollama: {
+    baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+    model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b',
+  },
   reactGenerator: {
     delayBetweenComponents: parseInt(
       process.env.REACT_GEN_DELAY_MS ?? '5000',

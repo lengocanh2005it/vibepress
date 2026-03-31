@@ -18,4 +18,5 @@ export type LlmProvider =
   | 'groq'
   | 'cerebras'
   | 'gemini'
-  | 'openai';
+  | 'openai'
+  | 'ollama';

@@ -1,6 +1,11 @@
 import type { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ThemeTokens } from '../../block-parser/block-parser.service.js';
-import type { ComponentVisualPlan } from '../visual-plan.schema.js';
+import type {
+  ColorPalette,
+  ComponentVisualPlan,
+  DataNeed,
+  SectionPlan,
+} from '../visual-plan.schema.js';
 
 /**
  * Build the Stage 1 prompt: ask AI to analyze a template and return a
@@ -137,27 +142,181 @@ function buildSiteContext(content: DbContentResult): string {
   return lines.join('\n');
 }
 
+// ── Validation constants ───────────────────────────────────────────────────
+
+const VALID_SECTION_TYPES = new Set<string>([
+  'navbar', 'hero', 'cover', 'post-list', 'card-grid', 'media-text',
+  'testimonial', 'newsletter', 'footer', 'post-content', 'page-content',
+  'search', 'breadcrumb', 'custom',
+]);
+
+const VALID_DATA_NEEDS = new Set<string>([
+  'siteInfo', 'posts', 'pages', 'menus', 'postDetail', 'pageDetail',
+]);
+
+const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+const PALETTE_DEFAULTS: Record<string, string> = {
+  background: '#ffffff',
+  surface: '#f5f5f5',
+  text: '#111111',
+  textMuted: '#666666',
+  accent: '#0066cc',
+  accentText: '#ffffff',
+};
+
+function isHex(v: unknown): v is string {
+  return typeof v === 'string' && HEX_RE.test(v);
+}
+
+/**
+ * Sanitize the palette object: replace missing or non-hex values with
+ * sensible defaults so we never fail an entire plan over bad colors.
+ */
+function sanitizePalette(raw: any): ColorPalette {
+  const result: any = {};
+  for (const key of ['background', 'surface', 'text', 'textMuted', 'accent', 'accentText']) {
+    result[key] = isHex(raw?.[key]) ? raw[key] : PALETTE_DEFAULTS[key];
+  }
+  if (isHex(raw?.dark)) result.dark = raw.dark;
+  if (isHex(raw?.darkText)) result.darkText = raw.darkText;
+  return result as ColorPalette;
+}
+
+/**
+ * Validate one section object. Returns the (potentially auto-repaired) section
+ * or null if the section is structurally broken and cannot be used.
+ *
+ * Strategy:
+ *  - Unknown `type` → null (would silently produce empty output in code-generator)
+ *  - Missing required string content (e.g. imageSrc, jsx) → null
+ *  - Missing/wrong scalar config → auto-repair with sensible defaults
+ *  - Missing array fields that are mapped over → auto-repair with empty array
+ */
+function validateSection(raw: any): SectionPlan | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const type = raw.type as string;
+  if (!VALID_SECTION_TYPES.has(type)) return null;
+
+  // eslint-disable-next-line default-case
+  switch (type) {
+    case 'navbar':
+      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug) raw.menuSlug = 'primary';
+      if (typeof raw.sticky !== 'boolean') raw.sticky = false;
+      break;
+
+    case 'hero':
+      if (!['centered', 'left', 'split'].includes(raw.layout)) raw.layout = 'centered';
+      if (typeof raw.heading !== 'string') raw.heading = '';
+      break;
+
+    case 'cover':
+      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) return null;
+      if (typeof raw.dimRatio !== 'number') raw.dimRatio = 50;
+      if (typeof raw.minHeight !== 'string') raw.minHeight = '400px';
+      if (!['center', 'left', 'right'].includes(raw.contentAlign)) raw.contentAlign = 'center';
+      break;
+
+    case 'post-list':
+      if (!['list', 'grid-2', 'grid-3'].includes(raw.layout)) raw.layout = 'grid-3';
+      for (const f of ['showDate', 'showAuthor', 'showCategory', 'showExcerpt', 'showFeaturedImage']) {
+        if (typeof raw[f] !== 'boolean') raw[f] = true;
+      }
+      break;
+
+    case 'card-grid':
+      if (!Array.isArray(raw.cards) || raw.cards.length === 0) return null;
+      if (![2, 3, 4].includes(raw.columns)) raw.columns = 3;
+      // Ensure each card has heading + body strings
+      raw.cards = (raw.cards as any[]).filter(
+        (c) => c && typeof c.heading === 'string' && typeof c.body === 'string',
+      );
+      if (raw.cards.length === 0) return null;
+      break;
+
+    case 'media-text':
+      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) return null;
+      if (typeof raw.imageAlt !== 'string') raw.imageAlt = '';
+      if (!['left', 'right'].includes(raw.imagePosition)) raw.imagePosition = 'left';
+      break;
+
+    case 'testimonial':
+      if (typeof raw.quote !== 'string' || !raw.quote.trim()) return null;
+      if (typeof raw.authorName !== 'string') raw.authorName = '';
+      break;
+
+    case 'newsletter':
+      if (typeof raw.heading !== 'string') raw.heading = 'Subscribe to our newsletter';
+      if (typeof raw.buttonText !== 'string') raw.buttonText = 'Subscribe';
+      if (!['centered', 'card'].includes(raw.layout)) raw.layout = 'centered';
+      break;
+
+    case 'footer':
+      if (!Array.isArray(raw.menuColumns)) raw.menuColumns = [];
+      break;
+
+    case 'post-content':
+      if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
+      if (typeof raw.showMeta !== 'boolean') raw.showMeta = true;
+      break;
+
+    case 'page-content':
+      if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
+      break;
+
+    case 'custom':
+      if (typeof raw.jsx !== 'string' || !raw.jsx.trim()) return null;
+      if (typeof raw.description !== 'string') raw.description = 'Custom section';
+      if (!Array.isArray(raw.imports)) raw.imports = [];
+      break;
+
+    // search, breadcrumb — no required fields
+  }
+
+  return raw as SectionPlan;
+}
+
 /**
  * Parse and validate the AI response into a ComponentVisualPlan.
- * Returns null if parsing fails.
+ *
+ * - Palette: sanitized (bad hex → defaults), never rejects plan
+ * - Sections: each validated individually; invalid sections are dropped
+ * - Returns null only when JSON is unparseable or all sections are invalid
  */
 export function parseVisualPlan(
   raw: string,
   componentName: string,
 ): ComponentVisualPlan | null {
   const cleaned = raw
-    .replace(/^```[\w]*\n?/m, '')
-    .replace(/```$/m, '')
+    .replace(/^```[\w]*\n?/gm, '')
+    .replace(/^```$/gm, '')
     .trim();
 
+  let parsed: any;
   try {
-    const parsed = JSON.parse(cleaned) as ComponentVisualPlan;
-    if (!parsed.sections || !Array.isArray(parsed.sections)) return null;
-    if (!parsed.palette) return null;
-    // Ensure componentName matches
-    parsed.componentName = componentName;
-    return parsed;
+    parsed = JSON.parse(cleaned);
   } catch {
     return null;
   }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!Array.isArray(parsed.sections)) return null;
+
+  const palette = sanitizePalette(parsed.palette);
+
+  const sections: SectionPlan[] = [];
+  for (const rawSection of parsed.sections) {
+    const validated = validateSection(rawSection);
+    if (validated) {
+      sections.push(validated);
+    }
+  }
+
+  if (sections.length === 0) return null;
+
+  const dataNeeds: DataNeed[] = Array.isArray(parsed.dataNeeds)
+    ? (parsed.dataNeeds as any[]).filter((d): d is DataNeed => VALID_DATA_NEEDS.has(d))
+    : [];
+
+  return { componentName, dataNeeds, palette, sections };
 }

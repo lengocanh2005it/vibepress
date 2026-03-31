@@ -349,6 +349,7 @@ export class ReactGeneratorService {
     // ── Fallback: direct AI TSX generation (original behaviour) ─────────────
     await this.logToFile(logPath, `[two-stage] Fallback: direct AI generation for "${componentName}"`);
     let lastValidationError: string | undefined;
+    let isValid = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
         modelName,
@@ -361,7 +362,7 @@ export class ReactGeneratorService {
           tokens,
           componentPlan,
           attempt > 1
-            ? `Previous attempt failed structural validation: ${lastValidationError}`
+            ? `Previous attempt failed structural validation: ${lastValidationError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above, keep everything else.`
             : undefined,
         ),
         5,
@@ -372,7 +373,7 @@ export class ReactGeneratorService {
       code = this.mergeClassNames(code);
 
       const check = this.validator.checkCodeStructure(code);
-      if (check.isValid) break;
+      if (check.isValid) { isValid = true; break; }
 
       lastValidationError = check.error;
       this.logger.warn(
@@ -384,7 +385,50 @@ export class ReactGeneratorService {
       );
     }
 
+    // ── Self-fix: targeted AI repair pass ──────────────────────────────────
+    if (!isValid && lastValidationError) {
+      await this.logToFile(logPath, `[self-fix] Attempting targeted fix for "${componentName}": ${lastValidationError}`);
+      try {
+        code = await this.selfFix(modelName, code, lastValidationError, logPath, componentName);
+        const check = this.validator.checkCodeStructure(code);
+        if (check.isValid) {
+          isValid = true;
+          this.logger.log(`[self-fix] "${componentName}" fixed successfully ✓`);
+          await this.logToFile(logPath, `[self-fix] "${componentName}" fixed ✓`);
+        } else {
+          await this.logToFile(logPath, `WARN [self-fix] "${componentName}" still invalid after fix: ${check.error}`);
+        }
+      } catch (err: any) {
+        await this.logToFile(logPath, `WARN [self-fix] "${componentName}" fix call failed: ${err?.message}`);
+      }
+    }
+
+    if (!isValid) {
+      throw new Error(
+        `Component "${componentName}" failed validation after 3 attempts + self-fix: ${lastValidationError}`,
+      );
+    }
+
     return { name: componentName, filePath: '', code };
+  }
+
+  private async selfFix(
+    model: string,
+    brokenCode: string,
+    error: string,
+    logPath?: string,
+    label?: string,
+  ): Promise<string> {
+    const raw = await this.generateWithRetry(
+      model,
+      'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
+      `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+      3,
+      logPath,
+      label ? `${label}:fix` : undefined,
+    );
+    const fixed = this.stripMarkdownFences(raw);
+    return this.mergeClassNames(fixed);
   }
 
   private mergeClassNames(code: string): string {
@@ -446,6 +490,7 @@ export class ReactGeneratorService {
 
     let code = '';
     let lastValidationError: string | undefined;
+    let isValid = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
         modelName,
@@ -459,7 +504,7 @@ export class ReactGeneratorService {
       code = this.mergeClassNames(code);
 
       const check = this.validator.checkCodeStructure(code);
-      if (check.isValid) break;
+      if (check.isValid) { isValid = true; break; }
 
       lastValidationError = check.error;
       this.logger.warn(
@@ -468,6 +513,12 @@ export class ReactGeneratorService {
       await this.logToFile(
         logPath,
         `WARN "${sectionName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
+      );
+    }
+
+    if (!isValid) {
+      throw new Error(
+        `Section "${sectionName}" failed validation after 3 attempts: ${lastValidationError}`,
       );
     }
 

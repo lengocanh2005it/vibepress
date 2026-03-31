@@ -7,6 +7,7 @@ import { CerebrasModule } from './common/providers/cerebras/cerebras.module.js';
 import { MistralModule } from './common/providers/mistral/mistral.module.js';
 import { AnthropicModule } from './common/providers/anthropic/anthropic.module.js';
 import { OpenAIModule } from './common/providers/openai/openai.module.js';
+import { OllamaModule } from './common/providers/ollama/ollama.module.js';
 import { ImportModule } from './modules/import/import.module.js';
 import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
@@ -31,6 +32,7 @@ import { HttpModule } from '@nestjs/axios';
     MistralModule,
     AnthropicModule,
     OpenAIModule,
+    OllamaModule,
     LlmModule,
     ImportModule,
     ThemeModule,

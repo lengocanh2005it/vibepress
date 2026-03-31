@@ -49,13 +49,40 @@ export class PlannerService {
       `Planning ${templateNames.length} components for "${content.siteInfo.siteName}"`,
     );
 
-    const { text: raw } = await this.llmFactory.chat({
-      model: modelName,
-      systemPrompt,
-      userPrompt,
-      maxTokens: 4096,
-    });
-    const plan = this.parseResponse(raw, templateNames);
+    let plan: PlanResult | null = null;
+    let lastRaw = '';
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const prompt =
+        attempt === 1
+          ? userPrompt
+          : this.buildRetryPrompt(lastRaw, templateNames);
+
+      const { text: raw } = await this.llmFactory.chat({
+        model: modelName,
+        systemPrompt,
+        userPrompt: prompt,
+        maxTokens: 4096,
+      });
+
+      lastRaw = raw;
+      plan = this.tryParseResponse(raw);
+
+      if (plan) {
+        this.logger.log(`Plan received on attempt ${attempt}: ${plan.length} components`);
+        break;
+      }
+
+      this.logger.warn(
+        `Planner attempt ${attempt}/3 returned invalid JSON — retrying with correction prompt`,
+      );
+    }
+
+    if (!plan) {
+      this.logger.warn('All planner attempts failed, using fallback plan');
+      plan = this.buildFallbackPlan(templateNames);
+    }
+
     return this.enrichPlan(plan, sourceMap);
   }
 
@@ -192,30 +219,50 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     return lines.join('\n');
   }
 
-  private parseResponse(raw: string, templateNames: string[]): PlanResult {
-    // Strip markdown fences if present
+  /**
+   * Try to parse the AI response. Returns null on any failure so the caller
+   * can retry rather than immediately using the fallback plan.
+   */
+  private tryParseResponse(raw: string): PlanResult | null {
     const cleaned = raw
-      .replace(/^```[\w]*\n?/m, '')
-      .replace(/```$/m, '')
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
       .trim();
 
-    let parsed: ComponentPlan[];
+    let parsed: unknown;
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      this.logger.warn(
-        'Failed to parse planner JSON response, using fallback plan',
-      );
-      return this.buildFallbackPlan(templateNames);
+      return null;
     }
 
-    if (!Array.isArray(parsed)) {
-      this.logger.warn('Planner response is not an array, using fallback plan');
-      return this.buildFallbackPlan(templateNames);
-    }
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
 
-    this.logger.log(`Plan received: ${parsed.length} components`);
-    return parsed;
+    // Validate each entry has the minimum required fields
+    const valid = (parsed as any[]).filter(
+      (item) =>
+        item &&
+        typeof item.templateName === 'string' &&
+        typeof item.componentName === 'string' &&
+        (item.type === 'page' || item.type === 'partial'),
+    );
+
+    return valid.length > 0 ? (valid as PlanResult) : null;
+  }
+
+  private buildRetryPrompt(badRaw: string, templateNames: string[]): string {
+    const preview = badRaw.slice(0, 500);
+    return `Your previous response could not be parsed as a valid JSON array.
+
+Here is the start of what you returned:
+\`\`\`
+${preview}${badRaw.length > 500 ? '\n... (truncated)' : ''}
+\`\`\`
+
+Templates that MUST be planned: ${templateNames.join(', ')}
+
+Return ONLY a valid JSON array — no markdown fences, no explanation, no text before or after the array.
+Each object must have: templateName, componentName, type ("page"|"partial"), route (string|null), dataNeeds (string[]), isDetail (boolean), description (string).`;
   }
 
   private buildFallbackPlan(templateNames: string[]): PlanResult {
