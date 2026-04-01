@@ -9,6 +9,9 @@ const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'MVP Bot';
 const GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'mvp-bot@example.com';
 const AI_PIPELINE_PORT = process.env.AI_PIPELINE_PORT || '3001';
 const AI_PIPELINE_URL = `http://localhost:${AI_PIPELINE_PORT}`;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN || null;
+const RENDER_API_KEY = process.env.RENDER_API_KEY || null;
+const RENDER_OWNER_ID = process.env.RENDER_OWNER_ID || null;
 
 const BASE_DIR = __dirname + '/..';
 const DB_FILE = path.join(BASE_DIR, 'db.json');
@@ -30,6 +33,9 @@ module.exports = {
 	GIT_AUTHOR_NAME,
 	GIT_AUTHOR_EMAIL,
 	AI_PIPELINE_URL,
+	VERCEL_TOKEN,
+	RENDER_API_KEY,
+	RENDER_OWNER_ID,
 	DB_FILE,
 	TEMP_ROOT,
 	UPLOAD_ROOT,

@@ -36,6 +36,7 @@
     "groq-sdk": "^1.1.1",
     "multer": "^2.1.1",
     "mysql2": "^3.20.0",
+    "ollama": "^0.6.3",
     "openai": "^6.32.0",
     "puppeteer": "^24.40.0",
     "reflect-metadata": "^0.2.2",
