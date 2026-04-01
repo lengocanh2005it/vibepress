@@ -87,8 +87,9 @@ custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
 ## Rules
 - Use ONLY hex colors. Derive from theme tokens if available, otherwise use sensible defaults matching the template's visual style.
 - Text content in sections (headings, body text, card copy) must come EXACTLY from the template source — no invented text.
+- If you need to output a dynamic variable (e.g. {item.title} or {post.title}), use EXACTLY ONE pair of curly braces. NEVER use double braces like {{item.title}} or {{post.title}}, as it breaks JSX syntax.
 - If a section has a background image, use the exact \`src\` from the template.
-- For \`custom\` sections: the \`jsx\` field must be valid JSX, use variables \`siteInfo\`, \`posts\`, \`menus\`, \`params\` that will be in scope.
+- For \`custom\` sections: the \`jsx\` field must be valid JSX. You may reference \`siteInfo\`, \`posts\`, \`menus\`, \`pages\`, \`item\` (for postDetail/pageDetail) — but ONLY if you also list the matching key in \`dataNeeds\` (e.g. jsx uses \`posts\` → add \`"posts"\` to dataNeeds). Variables not declared in dataNeeds will be undefined at runtime.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const userPrompt = `## Component to plan: ${componentName}
@@ -114,7 +115,9 @@ function buildPaletteHint(tokens?: ThemeTokens): string {
   if (!tokens?.defaults) return '';
 
   const d = tokens.defaults;
-  const lines: string[] = ['## Theme palette hints (use for the palette field)'];
+  const lines: string[] = [
+    '## Theme palette hints (use for the palette field)',
+  ];
   if (d.bgColor) lines.push(`- background: "${d.bgColor}"`);
   if (d.textColor) lines.push(`- text: "${d.textColor}"`);
   if (d.headingColor) lines.push(`- headings: "${d.headingColor}"`);
@@ -136,7 +139,9 @@ function buildSiteContext(content: DbContentResult): string {
   const lines: string[] = ['## Site context'];
   lines.push(`Site name: ${content.siteInfo.siteName}`);
   lines.push(`Description: ${content.siteInfo.blogDescription || '(none)'}`);
-  lines.push(`Menus: ${content.menus.map((m) => `${m.name} (slug: ${m.slug})`).join(', ') || '(none)'}`);
+  lines.push(
+    `Menus: ${content.menus.map((m) => `${m.name} (slug: ${m.slug})`).join(', ') || '(none)'}`,
+  );
   lines.push(`Posts in DB: ${content.posts.length}`);
   lines.push(`Pages in DB: ${content.pages.length}`);
   return lines.join('\n');
@@ -145,13 +150,29 @@ function buildSiteContext(content: DbContentResult): string {
 // ── Validation constants ───────────────────────────────────────────────────
 
 const VALID_SECTION_TYPES = new Set<string>([
-  'navbar', 'hero', 'cover', 'post-list', 'card-grid', 'media-text',
-  'testimonial', 'newsletter', 'footer', 'post-content', 'page-content',
-  'search', 'breadcrumb', 'custom',
+  'navbar',
+  'hero',
+  'cover',
+  'post-list',
+  'card-grid',
+  'media-text',
+  'testimonial',
+  'newsletter',
+  'footer',
+  'post-content',
+  'page-content',
+  'search',
+  'breadcrumb',
+  'custom',
 ]);
 
 const VALID_DATA_NEEDS = new Set<string>([
-  'siteInfo', 'posts', 'pages', 'menus', 'postDetail', 'pageDetail',
+  'siteInfo',
+  'posts',
+  'pages',
+  'menus',
+  'postDetail',
+  'pageDetail',
 ]);
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -175,7 +196,14 @@ function isHex(v: unknown): v is string {
  */
 function sanitizePalette(raw: any): ColorPalette {
   const result: any = {};
-  for (const key of ['background', 'surface', 'text', 'textMuted', 'accent', 'accentText']) {
+  for (const key of [
+    'background',
+    'surface',
+    'text',
+    'textMuted',
+    'accent',
+    'accentText',
+  ]) {
     result[key] = isHex(raw?.[key]) ? raw[key] : PALETTE_DEFAULTS[key];
   }
   if (isHex(raw?.dark)) result.dark = raw.dark;
@@ -193,60 +221,105 @@ function sanitizePalette(raw: any): ColorPalette {
  *  - Missing/wrong scalar config → auto-repair with sensible defaults
  *  - Missing array fields that are mapped over → auto-repair with empty array
  */
-function validateSection(raw: any): SectionPlan | null {
-  if (!raw || typeof raw !== 'object') return null;
+function validateSectionDetailed(raw: any): {
+  section: SectionPlan | null;
+  reason?: string;
+} {
+  if (!raw || typeof raw !== 'object') {
+    return { section: null, reason: 'section is not an object' };
+  }
   const type = raw.type as string;
-  if (!VALID_SECTION_TYPES.has(type)) return null;
+  if (!VALID_SECTION_TYPES.has(type)) {
+    return {
+      section: null,
+      reason: `unsupported section type "${String(type)}"`,
+    };
+  }
+
+  // Auto-repair double braces {{var}} -> {var} across all string fields to prevent JSX errors
+  for (const key of Object.keys(raw)) {
+    if (typeof raw[key] === 'string') {
+      raw[key] = raw[key].replace(/\{\{([^}]+)\}\}/g, '{$1}');
+    }
+  }
 
   // eslint-disable-next-line default-case
   switch (type) {
     case 'navbar':
-      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug) raw.menuSlug = 'primary';
+      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug)
+        raw.menuSlug = 'primary';
       if (typeof raw.sticky !== 'boolean') raw.sticky = false;
       break;
 
     case 'hero':
-      if (!['centered', 'left', 'split'].includes(raw.layout)) raw.layout = 'centered';
+      if (!['centered', 'left', 'split'].includes(raw.layout))
+        raw.layout = 'centered';
       if (typeof raw.heading !== 'string') raw.heading = '';
       break;
 
     case 'cover':
-      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) return null;
+      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) {
+        return { section: null, reason: 'cover.imageSrc is required' };
+      }
       if (typeof raw.dimRatio !== 'number') raw.dimRatio = 50;
       if (typeof raw.minHeight !== 'string') raw.minHeight = '400px';
-      if (!['center', 'left', 'right'].includes(raw.contentAlign)) raw.contentAlign = 'center';
+      if (!['center', 'left', 'right'].includes(raw.contentAlign))
+        raw.contentAlign = 'center';
       break;
 
     case 'post-list':
-      if (!['list', 'grid-2', 'grid-3'].includes(raw.layout)) raw.layout = 'grid-3';
-      for (const f of ['showDate', 'showAuthor', 'showCategory', 'showExcerpt', 'showFeaturedImage']) {
+      if (!['list', 'grid-2', 'grid-3'].includes(raw.layout))
+        raw.layout = 'grid-3';
+      for (const f of [
+        'showDate',
+        'showAuthor',
+        'showCategory',
+        'showExcerpt',
+        'showFeaturedImage',
+      ]) {
         if (typeof raw[f] !== 'boolean') raw[f] = true;
       }
       break;
 
     case 'card-grid':
-      if (!Array.isArray(raw.cards) || raw.cards.length === 0) return null;
+      if (!Array.isArray(raw.cards) || raw.cards.length === 0) {
+        return {
+          section: null,
+          reason: 'card-grid.cards must be a non-empty array',
+        };
+      }
       if (![2, 3, 4].includes(raw.columns)) raw.columns = 3;
       // Ensure each card has heading + body strings
       raw.cards = (raw.cards as any[]).filter(
         (c) => c && typeof c.heading === 'string' && typeof c.body === 'string',
       );
-      if (raw.cards.length === 0) return null;
+      if (raw.cards.length === 0) {
+        return {
+          section: null,
+          reason: 'card-grid.cards has no valid {heading, body} items',
+        };
+      }
       break;
 
     case 'media-text':
-      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) return null;
+      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) {
+        return { section: null, reason: 'media-text.imageSrc is required' };
+      }
       if (typeof raw.imageAlt !== 'string') raw.imageAlt = '';
-      if (!['left', 'right'].includes(raw.imagePosition)) raw.imagePosition = 'left';
+      if (!['left', 'right'].includes(raw.imagePosition))
+        raw.imagePosition = 'left';
       break;
 
     case 'testimonial':
-      if (typeof raw.quote !== 'string' || !raw.quote.trim()) return null;
+      if (typeof raw.quote !== 'string' || !raw.quote.trim()) {
+        return { section: null, reason: 'testimonial.quote is required' };
+      }
       if (typeof raw.authorName !== 'string') raw.authorName = '';
       break;
 
     case 'newsletter':
-      if (typeof raw.heading !== 'string') raw.heading = 'Subscribe to our newsletter';
+      if (typeof raw.heading !== 'string')
+        raw.heading = 'Subscribe to our newsletter';
       if (typeof raw.buttonText !== 'string') raw.buttonText = 'Subscribe';
       if (!['centered', 'card'].includes(raw.layout)) raw.layout = 'centered';
       break;
@@ -265,15 +338,34 @@ function validateSection(raw: any): SectionPlan | null {
       break;
 
     case 'custom':
-      if (typeof raw.jsx !== 'string' || !raw.jsx.trim()) return null;
-      if (typeof raw.description !== 'string') raw.description = 'Custom section';
+      if (typeof raw.jsx !== 'string' || !raw.jsx.trim()) {
+        return { section: null, reason: 'custom.jsx is required' };
+      }
+      if (typeof raw.description !== 'string')
+        raw.description = 'Custom section';
       if (!Array.isArray(raw.imports)) raw.imports = [];
       break;
 
     // search, breadcrumb — no required fields
   }
 
-  return raw as SectionPlan;
+  return { section: raw as SectionPlan };
+}
+
+function validateSection(raw: any): SectionPlan | null {
+  return validateSectionDetailed(raw).section;
+}
+
+export interface VisualPlanParseDiagnostic {
+  reason: string;
+  rawOutput: string;
+  cleanedOutput: string;
+  droppedSections?: string[];
+}
+
+export interface VisualPlanParseResult {
+  plan: ComponentVisualPlan | null;
+  diagnostic?: VisualPlanParseDiagnostic;
 }
 
 /**
@@ -283,10 +375,10 @@ function validateSection(raw: any): SectionPlan | null {
  * - Sections: each validated individually; invalid sections are dropped
  * - Returns null only when JSON is unparseable or all sections are invalid
  */
-export function parseVisualPlan(
+export function parseVisualPlanDetailed(
   raw: string,
   componentName: string,
-): ComponentVisualPlan | null {
+): VisualPlanParseResult {
   const cleaned = raw
     .replace(/^```[\w]*\n?/gm, '')
     .replace(/^```$/gm, '')
@@ -295,28 +387,99 @@ export function parseVisualPlan(
   let parsed: any;
   try {
     parsed = JSON.parse(cleaned);
-  } catch {
-    return null;
+  } catch (err: any) {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: `invalid JSON: ${err?.message ?? 'unknown parse error'}`,
+        rawOutput: raw,
+        cleanedOutput: cleaned,
+      },
+    };
   }
 
-  if (!parsed || typeof parsed !== 'object') return null;
-  if (!Array.isArray(parsed.sections)) return null;
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: 'parsed output is not an object',
+        rawOutput: raw,
+        cleanedOutput: cleaned,
+      },
+    };
+  }
+  if (!Array.isArray(parsed.sections)) {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: 'missing sections array',
+        rawOutput: raw,
+        cleanedOutput: cleaned,
+      },
+    };
+  }
 
   const palette = sanitizePalette(parsed.palette);
 
   const sections: SectionPlan[] = [];
+  const droppedSections: string[] = [];
   for (const rawSection of parsed.sections) {
-    const validated = validateSection(rawSection);
-    if (validated) {
-      sections.push(validated);
+    const { section, reason } = validateSectionDetailed(rawSection);
+    if (section) {
+      sections.push(section);
+    } else {
+      droppedSections.push(
+        `type=${typeof rawSection?.type === 'string' ? rawSection.type : 'unknown'}: ${reason ?? 'invalid section'}`,
+      );
     }
   }
 
-  if (sections.length === 0) return null;
+  if (sections.length === 0) {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: 'all sections were rejected by validator',
+        rawOutput: raw,
+        cleanedOutput: cleaned,
+        droppedSections,
+      },
+    };
+  }
 
   const dataNeeds: DataNeed[] = Array.isArray(parsed.dataNeeds)
-    ? (parsed.dataNeeds as any[]).filter((d): d is DataNeed => VALID_DATA_NEEDS.has(d))
+    ? (parsed.dataNeeds as any[]).filter((d): d is DataNeed =>
+        VALID_DATA_NEEDS.has(d),
+      )
     : [];
 
-  return { componentName, dataNeeds, palette, sections };
+  // Planner always overrides typography + layout after calling parseVisualPlan.
+  // When called directly from CodeReviewerService (fallback path), we inject
+  // sensible defaults so CodeGeneratorService always receives a complete plan.
+  const typography = {
+    headingFamily: 'inherit',
+    bodyFamily: 'inherit',
+    h1: 'text-[2.5rem] leading-tight',
+    h2: 'text-[2rem] leading-snug',
+    h3: 'text-[1.5rem] leading-snug',
+    body: 'text-[1rem]',
+    small: 'text-sm',
+    buttonRadius: 'rounded',
+  };
+
+  const layout = {
+    containerClass: 'max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8',
+    blockGap: 'gap-16',
+    includes: [] as string[],
+  };
+
+  return {
+    plan: { componentName, dataNeeds, palette, sections, typography, layout },
+  };
+}
+
+export function parseVisualPlan(
+  raw: string,
+  componentName: string,
+): ComponentVisualPlan | null {
+  return parseVisualPlanDetailed(raw, componentName).plan;
 }

@@ -67,29 +67,54 @@ export class LlmFactoryService {
     return this.configService.get<number>(`${provider}.maxTokens`, 8192);
   }
 
+  /**
+   * Supported providers — used to parse the "provider/model" format.
+   * e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
+   */
+  private static readonly KNOWN_PROVIDERS = new Set<LlmProvider>([
+    'anthropic', 'mistral', 'groq', 'cerebras', 'gemini', 'openai', 'ollama', 'custom',
+  ]);
+
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
-    const provider = this.getProvider();
-    if (params.maxTokens === undefined) {
-      params = { ...params, maxTokens: this.getMaxTokens() };
+    let provider = this.getProvider();
+    let model = params.model;
+
+    // Parse "provider/model" format for per-call provider routing.
+    // e.g. "mistral/mistral-large-latest" → provider=mistral, model=mistral-large-latest
+    //      "ollama/qwen2.5-coder:7b"      → provider=ollama,  model=qwen2.5-coder:7b
+    const slashIdx = model.indexOf('/');
+    if (slashIdx !== -1) {
+      const prefix = model.slice(0, slashIdx) as LlmProvider;
+      if (LlmFactoryService.KNOWN_PROVIDERS.has(prefix)) {
+        provider = prefix;
+        model = model.slice(slashIdx + 1);
+      }
     }
+
+    const resolvedParams: LlmChatParams = {
+      ...params,
+      model,
+      maxTokens: params.maxTokens ?? this.getMaxTokens(),
+    };
+
     switch (provider) {
       case 'anthropic':
-        return this.chatAnthropic(params);
+        return this.chatAnthropic(resolvedParams);
       case 'gemini':
-        return this.chatGemini(params);
+        return this.chatGemini(resolvedParams);
       case 'groq':
-        return this.chatOpenAICompat(this.groq as unknown as OpenAI, params);
+        return this.chatOpenAICompat(this.groq as unknown as OpenAI, resolvedParams);
       case 'cerebras':
-        return this.chatOpenAICompat(this.cerebras, params);
+        return this.chatOpenAICompat(this.cerebras, resolvedParams);
       case 'openai':
-        return this.chatOpenAINative(params);
+        return this.chatOpenAINative(resolvedParams);
       case 'ollama':
-        return this.chatOllama(params);
+        return this.chatOllama(resolvedParams);
       case 'custom':
-        return this.chatCustom(params);
+        return this.chatCustom(resolvedParams);
       case 'mistral':
       default:
-        return this.chatOpenAICompat(this.mistral, params);
+        return this.chatOpenAICompat(this.mistral, resolvedParams);
     }
   }
 

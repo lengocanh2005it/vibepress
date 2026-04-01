@@ -67,6 +67,20 @@ export class ValidatorService {
       };
     }
 
+    // 4b. Sub-component imports that don't exist in the generated project
+    // @/components/Foo, @/pages/Foo, or ./UpperCaseName are hallucinated — not generated
+    const badImport = code.match(
+      /import\s+[^'"]+from\s+['"](?:@\/(?:components|pages)\/\w+|\.\/[A-Z][A-Za-z0-9]+)['"]/,
+    );
+    if (badImport) {
+      return {
+        isValid: false,
+        error:
+          `Importing a file that does not exist: \`${badImport[0].trim()}\`. ` +
+          `All code must be self-contained in a SINGLE file — do NOT import from \`@/components/\`, \`@/pages/\`, or relative \`./ComponentName\` paths. Inline the code instead.`,
+      };
+    }
+
     // 5. Duplicate className on same tag
     if (
       /(<[a-zA-Z0-9]+[^>]*?className=["'][^"']*["'][^>]*?className=["'][^"']*["'][^>]*?>)/s.test(
@@ -146,10 +160,23 @@ export class ValidatorService {
     }
 
     // 12. Data variables used in JSX without a corresponding useState declaration
+    //
+    // We intentionally use a NARROW match — only flag when the identifier appears
+    // in a JavaScript expression context:
+    //   {pages        ← JSX expression opening
+    //   pages.method  ← property / optional-chain access (requires \w after dot)
+    //   pages[        ← array index access
+    //
+    // This avoids false positives when static text content in section headings or
+    // body copy happens to contain the word (e.g. "Browse all pages and posts.").
+    // "all pages." → `pages.` is followed by a space, not \w → no match.
     const dataVars = ['menus', 'posts', 'pages', 'siteInfo'];
     const missingState: string[] = [];
     for (const varName of dataVars) {
-      if (!new RegExp(`\\b${varName}\\b`).test(code)) continue;
+      const jsUsage = new RegExp(
+        `\\{\\s*${varName}\\b|\\b${varName}\\??\\.[a-zA-Z_$]|\\b${varName}\\[`,
+      );
+      if (!jsUsage.test(code)) continue;
       const hasDeclared = new RegExp(`const\\s+\\[\\s*${varName}\\b`).test(code);
       if (!hasDeclared) missingState.push(varName);
     }

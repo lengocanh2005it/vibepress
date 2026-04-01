@@ -12,15 +12,17 @@ import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
 import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
+import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
 import { DbContentService } from '../agents/db-content/db-content.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
+import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
 import { ValidatorService } from '../agents/validator/validator.service.js';
 import { CleanupService } from '../agents/cleanup/cleanup.service.js';
 import { CotEvidenceService } from '../cot-evidence/cot-evidence.service.js';
-import { RunPipelineDto } from './orchestrator.controller.js';
+import { RunPipelineDto, PipelineModelConfig } from './orchestrator.controller.js';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { HttpService } from '@nestjs/axios';
@@ -52,17 +54,32 @@ interface ProgressEventData {
   };
 }
 
+// ── Pipeline steps aligned with the 6-stage flow diagram ─────────────────
+//
+//  Stage 1: Repository Analysis       → 1_repo_analyzer, 2_theme_parser
+//  Stage 2: WordPress Content Graph   → 3_content_graph
+//  Stage 3: Planner (C1→C2→C3→C4→C5→C6 loop)
+//                                     → 4_planner  (includes Plan Review inside)
+//  Stage 4+5: React Generator + Code Review Loop
+//                                     → 5_generator (includes D4 AST Validator inside)
+//  Stage 6: Build & Preview           → 6_api_builder, 7_preview_builder
+//
 const STEP_META: Record<string, { label: string; weight: number }> = {
-  '1_repo_analyzer': { label: 'Analyze repository structure', weight: 5 },
-  '2_theme_parser': { label: 'Parse WordPress theme', weight: 10 },
-  '3_db_content': { label: 'Extract content from database', weight: 10 },
-  '4_planner': { label: 'Plan component architecture', weight: 15 },
-  '5_react_generator': { label: 'Generate React + Tailwind code', weight: 40 },
-  '6b_validator': { label: 'Validate and cleanup imports', weight: 5 },
-  '6_api_builder': { label: 'Build Express API server', weight: 5 },
-  '7_preview_builder': { label: 'Build Vite preview', weight: 8 },
-  '8_cleanup': { label: 'Cleanup temporary files', weight: 2 },
-  '9_done': { label: 'Migration complete', weight: 0 },
+  // Stage 1: Repository Analysis
+  '1_repo_analyzer': { label: '[Stage 1] Clone & analyze theme repository', weight: 8 },
+  '2_theme_parser':  { label: '[Stage 1] Parse templates, parts & normalize blocks', weight: 10 },
+  '3_normalizer':    { label: '[Stage 1] Normalize and clean HTML templates', weight: 5 },
+  // Stage 2: WordPress Content Graph
+  '4_content_graph': { label: '[Stage 2] Build WordPress content graph (posts/pages/menus/taxonomies)', weight: 10 },
+  // Stage 3: Planner — Phase A→B→C→D with retry
+  '5_planner': { label: '[Stage 3] Plan component architecture & visual layout', weight: 40 },
+  // Stage 4+5: React Generator + Code Review Loop (includes D4 AST Validator)
+  '6_generator': { label: '[Stage 4+5] Generate React components & run code review loop', weight: 30 },
+  // Stage 6: Build & Preview
+  '7_api_builder':    { label: '[Stage 6] Build Express API server', weight: 5 },
+  '8_preview_builder':{ label: '[Stage 6] Build Vite preview + runtime instrumentation', weight: 8 },
+  '9_cleanup': { label: 'Cleanup temporary files', weight: 2 },
+  '10_done':    { label: 'Migration complete', weight: 0 },
 };
 
 const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
@@ -101,8 +118,10 @@ export class OrchestratorService {
     private readonly repoAnalyzer: RepoAnalyzerService,
     private readonly phpParser: PhpParserService,
     private readonly blockParser: BlockParserService,
+    private readonly normalizer: NormalizerService,
     private readonly dbContent: DbContentService,
     private readonly planner: PlannerService,
+    private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
     private readonly apiBuilder: ApiBuilderService,
     private readonly previewBuilder: PreviewBuilderService,
@@ -129,16 +148,24 @@ export class OrchestratorService {
       jobId,
       status: 'running',
       steps: [
+        // Stage 1: Repository Analysis (A1 → A2 → A3)
         { name: '1_repo_analyzer', status: 'pending' },
         { name: '2_theme_parser', status: 'pending' },
-        { name: '3_db_content', status: 'pending' },
-        { name: '4_planner', status: 'pending' },
-        { name: '5_react_generator', status: 'pending' },
-        { name: '6_api_builder', status: 'pending' },
-        { name: '6b_validator', status: 'pending' },
-        { name: '7_preview_builder', status: 'pending' },
-        { name: '8_cleanup', status: 'pending' },
-        { name: '9_done', status: 'pending' },
+        { name: '3_normalizer', status: 'pending' },
+        // Stage 2: WordPress Content Graph (B1)
+        { name: '4_content_graph', status: 'pending' },
+        // Stage 3: Planner — Phase A (AI Architecture) → B (Component Graph)
+        //          → C (AI Visual Sections) → D (Plan Review/Consistency)
+        //          → Plan Valid? → retry loop back to Phase A if invalid
+        { name: '5_planner', status: 'pending' },
+        // Stage 4: React Generator (D1 Visual Plan? → D2 Deterministic / D3 AI Fallback → D4 AST Validator)
+        // Stage 5: Code Review Loop (R1 Code Reviewer → R2 Plan Match? → R3 Fix Agent → D1)
+        { name: '6_generator', status: 'pending' },
+        // Stage 6: Build & Preview (E1 API → E2 Vite → E3 Runtime Instrumentation → E4 Visual Compare)
+        { name: '7_api_builder', status: 'pending' },
+        { name: '8_preview_builder', status: 'pending' },
+        { name: '9_cleanup', status: 'pending' },
+        { name: '10_done', status: 'pending' },
       ],
     };
     this.jobs.set(jobId, state);
@@ -199,6 +226,25 @@ export class OrchestratorService {
     const pipelineStart = Date.now();
     await this.logToFile(logPath, `Pipeline ${jobId} started`);
 
+    // ── Resolve per-step model overrides ─────────────────────────────────
+    // Priority: request-level modelConfig > env vars (PLANNER_MODEL etc.) > agent default.
+    // Format: plain model name (uses global AI_PROVIDER) or "provider/model"
+    // e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
+    const mc: PipelineModelConfig = dto.modelConfig ?? {};
+    const cfgPlanner      = this.configService.get<string>('pipeline.plannerModel');
+    const cfgCodeReviewer = this.configService.get<string>('pipeline.codeReviewerModel');
+    const cfgFixAgent     = this.configService.get<string>('pipeline.fixAgentModel');
+    const resolvedModels = {
+      planner:      mc.planner      ?? cfgPlanner,
+      codeReviewer: mc.codeReviewer ?? cfgCodeReviewer,
+      fixAgent:     mc.fixAgent     ?? mc.codeReviewer ?? cfgFixAgent ?? cfgCodeReviewer,
+    };
+    this.logger.log(
+      `[models] planner="${resolvedModels.planner ?? 'default'}" ` +
+      `codeReviewer="${resolvedModels.codeReviewer ?? 'default'}" ` +
+      `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
+    );
+
     // ── Resolve DB credentials ────────────────────────────────────────────
     let dbCreds: WpDbCredentials;
 
@@ -215,35 +261,32 @@ export class OrchestratorService {
       );
     }
 
-    // ── Resolve theme directory ───────────────────────────────────────────
-    let themeDir = dto.themeDir;
-
-    const themeGithubToken = this.configService.get<string>(
-      'github.wpRepoToken',
-      '',
-    );
-
-    if (!themeDir && dto.themeGithubUrl) {
-      const repoRoot = await this.cloneThemeRepo(
-        dto.themeGithubUrl,
-        themeGithubToken,
-        dto.themeGithubBranch ?? 'main',
-        jobId,
-      );
-      themeDir = await this.resolveThemeDir(repoRoot, dbCreds);
-    }
-
-    if (!themeDir) throw new BadRequestException('No theme source provided');
+    const themeGithubToken = this.configService.get<string>('github.wpRepoToken', '');
 
     // Helper to add delay between steps for better log visibility
     const stepDelay = () => new Promise((resolve) => setTimeout(resolve, 500));
 
     // ── Pipeline steps ────────────────────────────────────────────────────
 
-    // Bước 1: Analyze repo structure
-    await this.runStep(state, '1_repo_analyzer', logPath, () =>
-      this.repoAnalyzer.analyze(themeDir!),
-    );
+    // Bước 1: Clone repo (nếu có GitHub URL) và phân tích cấu trúc theme
+    const repoResult = await this.runStep(state, '1_repo_analyzer', logPath, async () => {
+      let resolvedDir = dto.themeDir;
+
+      if (!resolvedDir && dto.themeGithubUrl) {
+        const repoRoot = await this.cloneThemeRepo(
+          dto.themeGithubUrl,
+          themeGithubToken,
+          dto.themeGithubBranch ?? 'main',
+          jobId,
+        );
+        resolvedDir = await this.resolveThemeDir(repoRoot, dbCreds);
+      }
+
+      if (!resolvedDir) throw new BadRequestException('No theme source provided');
+
+      return this.repoAnalyzer.analyze(resolvedDir);
+    });
+    const themeDir = repoResult.themeDir;
     await stepDelay();
 
     // Bước 2: Parse theme (classic PHP vs FSE block)
@@ -312,66 +355,148 @@ export class OrchestratorService {
       true,
     );
 
-    // Bước 3: Extract content từ shared WP DB
-    const content = await this.runStep(state, '3_db_content', logPath, () =>
+    // Bước 3: Normalize & Clean HTML
+    const normalizedTheme = await this.runStep(
+      state,
+      '3_normalizer',
+      logPath,
+      () => this.normalizer.normalize(parsedTheme),
+    );
+    await stepDelay();
+
+    // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
+    // B1: Content Graph Builder — posts, pages, menus, categories, tags, custom taxonomies
+    const content = await this.runStep(state, '4_content_graph', logPath, () =>
       this.dbContent.extract(dbCreds),
     );
     await stepDelay();
 
-    // Bước 4: Planner — AI phân tích toàn bộ theme + DB, lên kế hoạch component
-    const plan = await this.runStep(state, '4_planner', logPath, () =>
-      this.planner.plan(parsedTheme, content),
-    );
+    // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
+    // All 4 phases + plan review + retry loop are ONE atomic step.
+    // Per diagram: C4 (Plan Review) and C5 (Plan Valid?) live INSIDE the Planner subgraph.
+    const MAX_PLAN_RETRIES = 3;
+    const reviewResult = await this.runStep(state, '5_planner', logPath, async () => {
+      // Phase A (C1): AI Architecture Plan
+      // Phase B (C2): Component Graph Builder — enrichPlan() deterministic
+      // Phase C (C3): AI Visual Sections — buildVisualPlans()
+      let plan = await this.planner.plan(normalizedTheme, content, resolvedModels.planner);
+
+      // Phase D (C4): Plan Review / Consistency Check
+      let review = this.planReviewer.review(plan);
+
+      // C5 → C6 retry loop: if plan invalid, loop back to C1
+      for (let attempt = 2; attempt <= MAX_PLAN_RETRIES && !review.isValid; attempt++) {
+        this.logger.warn(
+          `[${jobId}] [Stage 3: Phase D] Plan invalid (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${review.errors.join('; ')} — retrying Phases A→C`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Stage 3: C6 Retry] attempt ${attempt}: ${review.errors.join('; ')}`,
+        );
+        this.progress.get(jobId)?.next({
+          step: '5_planner',
+          label: STEP_META['5_planner'].label,
+          status: 'running',
+          percent: 25,
+          message: `[Phase D] Attempt ${attempt}/${MAX_PLAN_RETRIES}: plan invalid — retrying Phase A→C...`,
+        });
+
+        // C6 → C1: reset and re-run Phases A, B, C
+        plan = await this.planner.plan(normalizedTheme, content, resolvedModels.planner);
+        review = this.planReviewer.review(plan);
+      }
+
+      if (!review.isValid) {
+        this.logger.warn(
+          `[${jobId}] [Stage 3: Phase D] Plan still invalid after ${MAX_PLAN_RETRIES} attempts — proceeding`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Stage 3] Proceeding with invalid plan after ${MAX_PLAN_RETRIES} attempts`,
+        );
+      }
+
+      return review;
+    });
     await stepDelay();
+
     await this.cotEvidence.write(
       jobId,
       'AC4',
       'Lập kế hoạch component',
       {
-        total_components: plan.length,
+        total_components: reviewResult.plan.length,
+        with_visual_plan: reviewResult.plan.filter((c: any) => c.visualPlan).length,
       },
-      ['Generated component tree'],
+      ['[Stage 3] Generated component tree with visual plans (Phase A+B+C+D)'],
       true,
     );
 
-    // Bước 5: Generate React components + Tailwind
-    const components = await this.runStep(
+    // ── Stage 4: React Generator (D1→D2/D3→D4) + Stage 5: Code Review Loop (R1→R2→R3→D1) ──
+    // Per diagram: D4 (AST Validator) runs INSIDE Stage 4, not as a post-Stage-5 step.
+    // The CodeReviewerService implements the complete Stage 4+5 loop per component.
+    const generationResult = await this.runStep(
       state,
-      '5_react_generator',
+      '6_generator',
       logPath,
-      () =>
-        this.reactGenerator.generate({
-          theme: parsedTheme,
+      async () => {
+        // Stage 4+5 core: generate + code review per component
+        const result = await this.reactGenerator.generate({
+          theme: normalizedTheme,
           content,
-          plan,
+          plan: reviewResult.plan,
           jobId,
           logPath,
-        }),
+          modelConfig: {
+            codeReviewer: resolvedModels.codeReviewer,
+            fixAgent: resolvedModels.fixAgent,
+          },
+        });
+
+        // D4: AST Validator — strip unused imports (final cleanup pass inside Stage 4)
+        this.logger.log(
+          `[Stage 4: D4 AST Validator] Validating & cleaning ${result.components.length} components`,
+        );
+        const validated = this.validator.validate(result.components);
+        return { ...result, components: validated };
+      },
     );
     await stepDelay();
 
-    // Bước 6b: Validate + strip unused imports from generated TSX
-    const validatedComponents = await this.runStep(
-      state,
-      '6b_validator',
-      logPath,
-      async () => this.validator.validate(components.components),
-    );
-    await stepDelay();
+    // ── Write generated TSX files to localOutputDir for local inspection ─────
+    if (dto.localOutputDir) {
+      const pagesOut = join(dto.localOutputDir, 'pages');
+      const componentsOut = join(dto.localOutputDir, 'components');
+      await mkdir(pagesOut, { recursive: true });
+      await mkdir(componentsOut, { recursive: true });
+
+      const PARTIAL_PATTERNS = /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
+      for (const comp of generationResult.components) {
+        const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+        const targetDir = isPartial ? componentsOut : pagesOut;
+        await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+      }
+
+      const totalFiles = generationResult.components.length;
+      this.logger.log(`[${jobId}] Written ${totalFiles} TSX files → ${dto.localOutputDir}`);
+      await this.logToFile(logPath, `Written ${totalFiles} TSX files → ${dto.localOutputDir}`);
+    }
+
     await this.cotEvidence.write(
       jobId,
       'AC8',
       'Độ chính xác (Accuracy)',
       {
-        total: components.components.length,
-        valid: validatedComponents.length,
+        total: generationResult.components.length,
+        valid: generationResult.components.length,
       },
-      ['Validated imports'],
+      ['[Stage 4+5] Generated, reviewed, and validated all components'],
       true,
     );
 
-    // Bước 6: Generate Express API server
-    await this.runStep(state, '6_api_builder', logPath, () =>
+    // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
+    // E1: API Builder — Express server with all WP data endpoints
+    await this.runStep(state, '7_api_builder', logPath, () =>
       this.apiBuilder.build({ jobId }),
     );
     await stepDelay();
@@ -396,20 +521,20 @@ export class OrchestratorService {
       true,
     );
 
-    // Bước 7: Scaffold Vite + React Router preview
+    // E2+E3+E4: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3) + Visual Compare (E4)
     const preview = await this.runStep(
       state,
-      '7_preview_builder',
+      '8_preview_builder',
       logPath,
       () =>
         this.previewBuilder.build({
           jobId,
-          components: { ...components, components: validatedComponents },
+          components: generationResult,
           dbCreds,
           themeDir,
           tokens:
-            'tokens' in parsedTheme ? (parsedTheme as any).tokens : undefined,
-          plan,
+            'tokens' in normalizedTheme ? (normalizedTheme as any).tokens : undefined,
+          plan: reviewResult.plan,
         }),
     );
     await stepDelay();
@@ -436,7 +561,7 @@ export class OrchestratorService {
     }
 
     // Bước 8: Xoá temp/repos và temp/uploads của job này
-    await this.runStep(state, '8_cleanup', logPath, () =>
+    await this.runStep(state, '9_cleanup', logPath, () =>
       this.cleanup.cleanup(jobId),
     );
     await stepDelay();
@@ -444,7 +569,7 @@ export class OrchestratorService {
     const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
 
     // Step 9: Migration completion
-    await this.runStep(state, '9_done', logPath, async () => {
+    await this.runStep(state, '10_done', logPath, async () => {
       state.status = 'done';
       state.result = {
         previewDir: preview.previewDir,
@@ -454,8 +579,8 @@ export class OrchestratorService {
       // Emit final event with previewUrl from within runStep
       const subject = this.progress.get(jobId);
       subject?.next({
-        step: '9_done',
-        label: STEP_META['9_done'].label,
+        step: '10_done',
+        label: STEP_META['10_done'].label,
         status: 'done',
         percent: 100,
         message: `🎉 Migration complete in ${totalElapsed}s`,

@@ -1,6 +1,8 @@
 // ── Visual Plan Schema ─────────────────────────────────────────────────────
-// Stage 1 AI output: JSON describing the visual layout of a React component.
-// Stage 2 code generator consumes this to produce deterministic TSX.
+// Planner builds ComponentVisualPlan and injects it into ComponentPlan.
+// Code generator consumes the complete plan to produce deterministic TSX.
+// AI only contributes `sections[]` — palette, typography, layout are all
+// derived deterministically from theme.tokens by the planner.
 
 export type DataNeed =
   | 'siteInfo'
@@ -153,9 +155,41 @@ export type SectionPlan =
   | BreadcrumbSection
   | CustomSection;
 
+/**
+ * Typography tokens derived from theme.json / style.css.
+ * Injected by PlannerService — never set by AI.
+ */
+export interface TypographyTokens {
+  headingFamily: string; // CSS font-family for headings, e.g. "Inter, sans-serif"
+  bodyFamily: string;    // CSS font-family for body text
+  h1: string;            // Tailwind class, e.g. "text-[2.5rem] leading-tight"
+  h2: string;            // e.g. "text-[2rem] leading-snug"
+  h3: string;            // e.g. "text-[1.5rem] leading-snug"
+  body: string;          // e.g. "text-[1rem]"
+  small: string;         // e.g. "text-sm"
+  buttonRadius: string;  // e.g. "rounded" | "rounded-full" | "rounded-none"
+}
+
+/**
+ * Layout tokens derived from theme.json / style.css.
+ * Injected by PlannerService — never set by AI.
+ */
+export interface LayoutTokens {
+  containerClass: string; // e.g. "max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8"
+  blockGap: string;       // Tailwind gap class between sections, e.g. "gap-16"
+  /** Partial component names this page should import, e.g. ["Header", "Footer"] */
+  includes: string[];
+}
+
 export interface ComponentVisualPlan {
   componentName: string;
   dataNeeds: DataNeed[];
+  /** Colors — derived from theme.tokens by planner, forced on all components */
   palette: ColorPalette;
+  /** Typography — derived from theme.tokens by planner, forced on all components */
+  typography: TypographyTokens;
+  /** Layout — derived from theme.tokens + plan structure by planner */
+  layout: LayoutTokens;
+  /** Section layout — the only thing AI contributes */
   sections: SectionPlan[];
 }

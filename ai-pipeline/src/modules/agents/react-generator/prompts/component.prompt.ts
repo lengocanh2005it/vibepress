@@ -8,6 +8,7 @@ import {
 import type { ThemeTokens } from '../../../agents/block-parser/block-parser.service.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
+import type { ComponentVisualPlan } from '../visual-plan.schema.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
   const result: string[] = [];
@@ -47,6 +48,37 @@ const PAGE_TEMPLATES = new Set([
   'PageNoTitle',
   'PageFull',
 ]);
+
+const DATA_NEED_ALIASES: Record<string, string> = {
+  'site-info': 'siteInfo',
+  'post-detail': 'postDetail',
+  'page-detail': 'pageDetail',
+};
+
+export interface ComponentPromptContext {
+  description?: string;
+  dataNeeds?: string[];
+  route?: string | null;
+  isDetail?: boolean;
+  visualPlan?: ComponentVisualPlan;
+}
+
+function normalizeDataNeeds(dataNeeds?: string[]): string[] {
+  if (!dataNeeds || dataNeeds.length === 0) return [];
+
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of dataNeeds) {
+    const normalized = DATA_NEED_ALIASES[value] ?? value;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+
+  return result;
+}
 
 export function buildMenusNote(menus: WpMenu[]): string {
   if (!menus || menus.length === 0) return '';
@@ -253,8 +285,16 @@ ${texts.map((t) => `- ${t}`).join('\n')}
  * Injects explicit rules when the template is a classic PHP theme
  * (identified by {/* WP: ... *\/} hint comments instead of a JSON block tree).
  */
-function buildClassicThemeNote(templateSource: string): string {
+function buildClassicThemeNote(templateSource: string, isSingle: boolean, isPage: boolean): string {
   if (!templateSource.includes('{/* WP:')) return '';
+
+  const contentHint = (isSingle || isPage)
+    ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
+    : `- \`{/* WP: post.content (HTML) */}\` → fetch \`GET /api/pages\` and render \`pages[0]?.content\` with \`dangerouslySetInnerHTML={{ __html: pages[0]?.content ?? '' }}\``;
+
+  const loopHint = (isSingle || isPage)
+    ? `- \`{/* WP: loop start */}\` → (Single view) Render the specific \`${isSingle ? 'post' : 'page'}\` properties. NO loop / array map.`
+    : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -262,16 +302,16 @@ This template source is from a **classic PHP theme** (identified by \`{/* WP: ..
 ### What each hint means — follow exactly:
 - \`{/* WP: <Header /> */}\` → render site name (\`{siteInfo.siteName}\`) + fetch \`GET /api/menus\` and render ALL returned nav items
 - \`{/* WP: <Navigation /> */}\` → fetch \`GET /api/menus\` and render ALL items — **NEVER write \`{/* No menus available */}\`**
-- \`{/* WP: post.content (HTML) */}\` → fetch \`GET /api/pages\` and render \`pages[0]?.content\` with \`dangerouslySetInnerHTML={{ __html: pages[0]?.content ?? '' }}\`
-- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results
-- \`{/* WP: post.title */}\` → render \`{post.title}\` (inside loop)
-- \`{/* WP: post.excerpt */}\` → render \`{post.excerpt}\` (inside loop)
+${contentHint}
+${loopHint}
+- \`{/* WP: post.title */}\` → render title from fetched data
+- \`{/* WP: post.excerpt */}\` → render excerpt from fetched data
 - \`{/* WP: <Footer /> */}\` → render site name + fetch \`GET /api/menus\` for footer links
 
 ### ⛔ ABSOLUTE PROHIBITIONS for classic PHP themes:
 1. **NEVER invent hero headings** like "Discover Your Next Adventure", "Build Something Amazing", etc. — these are FABRICATIONS
 2. **NEVER write \`{/* No menus available */}\`** — if you fetch \`GET /api/menus\` and it returns items, you MUST render them
-3. **NEVER hardcode paragraph text** like "Explore the world through our curated collection..." — all body text comes from \`GET /api/pages\` or \`GET /api/posts\`
+3. **NEVER hardcode paragraph text** like "Explore the world through our curated collection..." — all body text comes from API
 4. **NO static hero section** unless the static text explicitly appears in the template source (after PHP stripping) in the \`## Static text\` list above
 `;
 }
@@ -279,7 +319,7 @@ This template source is from a **classic PHP theme** (identified by \`{/* WP: ..
 // ── Data Grounding ─────────────────────────────────────────────────────────
 
 export function buildDataGroundingNote(content: DbContentResult): string {
-  const { siteInfo, posts, pages, menus } = content;
+  const { siteInfo, posts, pages, menus, taxonomies } = content;
   const parts: string[] = [];
 
   parts.push(
@@ -308,7 +348,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   const postSample = posts.slice(0, 5);
   parts.push(
     `### Posts — ${posts.length} total (GET /api/posts)` +
-      (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
+    (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
   );
   for (const p of postSample) {
     parts.push(`  id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
@@ -321,7 +361,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   const pageSample = pages.slice(0, 5);
   parts.push(
     `### Pages — ${pages.length} total (GET /api/pages)` +
-      (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
+    (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
   );
   for (const p of pageSample) {
     const contentPreview = p.content
@@ -338,7 +378,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   // Menus full
   parts.push(
     `### Menus — ${menus.length} total (GET /api/menus)` +
-      (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
+    (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
   );
   for (const m of menus) {
     parts.push(
@@ -352,6 +392,28 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   }
   if (menus.length === 0) parts.push('  (empty)');
 
+  // Taxonomies — categories, tags, custom
+  if (taxonomies && taxonomies.length > 0) {
+    parts.push('');
+    parts.push(
+      `### Taxonomies — ${taxonomies.length} type(s) (GET /api/taxonomies)`,
+    );
+    parts.push(
+      '> Use taxonomy slugs for archive routes (e.g. /category/:slug, /tag/:slug).',
+    );
+    for (const tax of taxonomies) {
+      const termPreview = tax.terms
+        .slice(0, 8)
+        .map((t) => `"${t.slug}"(${t.count})`)
+        .join(', ');
+      const suffix =
+        tax.terms.length > 8 ? ` +${tax.terms.length - 8} more` : '';
+      parts.push(
+        `  taxonomy:"${tax.taxonomy}" — ${tax.terms.length} terms: ${termPreview}${suffix}`,
+      );
+    }
+  }
+
   return parts.join('\n');
 }
 
@@ -364,8 +426,32 @@ export function buildPlanContextNote(plan?: {
   const lines: string[] = ['## Component plan'];
   if (plan.description) lines.push(`Purpose: ${plan.description}`);
   if (plan.route) lines.push(`Route: \`${plan.route}\``);
-  if (plan.dataNeeds && plan.dataNeeds.length > 0)
-    lines.push(`Data needed: ${plan.dataNeeds.join(', ')}`);
+  const normalizedDataNeeds = normalizeDataNeeds(plan.dataNeeds);
+  if (normalizedDataNeeds.length > 0)
+    lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
+  return lines.join('\n');
+}
+
+export function buildVisualPlanContextNote(
+  visualPlan?: ComponentVisualPlan,
+): string {
+  if (!visualPlan) return '';
+
+  const lines: string[] = [
+    '## Approved visual plan from previous stage',
+    'Treat this plan as the primary code generation blueprint.',
+    'Preserve section order, required data dependencies, and the overall layout unless the template/data grounding above proves a field is impossible.',
+  ];
+
+  if (visualPlan.dataNeeds.length > 0) {
+    lines.push(`Declared data needs: ${visualPlan.dataNeeds.join(', ')}`);
+  }
+
+  lines.push('Visual plan JSON:');
+  lines.push('```json');
+  lines.push(JSON.stringify(visualPlan, null, 2));
+  lines.push('```');
+
   return lines.join('\n');
 }
 
@@ -375,28 +461,29 @@ export function buildComponentPrompt(
   siteInfo: WpSiteInfo,
   content?: DbContentResult,
   tokens?: ThemeTokens,
-  componentPlan?: {
-    description?: string;
-    dataNeeds?: string[];
-    route?: string | null;
-    isDetail?: boolean;
-  },
+  componentPlan?: ComponentPromptContext,
   retryError?: string,
 ): string {
+  const normalizedDataNeeds = normalizeDataNeeds(componentPlan?.dataNeeds);
   const isSingle =
     SINGLE_TEMPLATES.has(componentName) ||
     (componentPlan?.isDetail === true &&
-      componentPlan?.dataNeeds?.includes('post-detail'));
+      normalizedDataNeeds.includes('postDetail'));
   const isPage =
     PAGE_TEMPLATES.has(componentName) ||
     (componentPlan?.isDetail === true &&
-      componentPlan?.dataNeeds?.includes('page-detail'));
+      normalizedDataNeeds.includes('pageDetail'));
 
   const menuContextNote = buildMenusNote(content?.menus ?? []);
   const dataGrounding = content ? buildDataGroundingNote(content) : '';
   const templateTexts = buildTemplateTextsNote(templateSource);
-  const classicThemeNote = buildClassicThemeNote(templateSource);
-  const planContext = buildPlanContextNote(componentPlan);
+  const classicThemeNote = buildClassicThemeNote(templateSource, isSingle ?? false, isPage ?? false);
+  const planContext = [
+    buildPlanContextNote(componentPlan),
+    buildVisualPlanContextNote(componentPlan?.visualPlan),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   const retryNote = retryError
     ? `## ERROR FROM PREVIOUS ATTEMPT\n${retryError}\nFIX THIS.`
     : '';
@@ -441,30 +528,26 @@ export function buildSectionPrompt(input: {
   siteInfo: WpSiteInfo;
   menus: WpMenu[];
   tokens?: ThemeTokens;
-  componentPlan?: {
-    description?: string;
-    dataNeeds?: string[];
-    route?: string | null;
-    isDetail?: boolean;
-  };
+  componentPlan?: ComponentPromptContext;
   retryError?: string;
   content?: DbContentResult;
 }): string {
+  const normalizedDataNeeds = normalizeDataNeeds(input.componentPlan?.dataNeeds);
   const isSingle =
     SINGLE_TEMPLATES.has(input.parentName) ||
     (input.componentPlan?.isDetail === true &&
-      input.componentPlan?.dataNeeds?.includes('post-detail'));
+      normalizedDataNeeds.includes('postDetail'));
   const isPage =
     PAGE_TEMPLATES.has(input.parentName) ||
     (input.componentPlan?.isDetail === true &&
-      input.componentPlan?.dataNeeds?.includes('page-detail'));
+      normalizedDataNeeds.includes('pageDetail'));
 
   const menuContextNote = buildMenusNote(input.content?.menus ?? input.menus);
   const dataGrounding = input.content
     ? buildDataGroundingNote(input.content)
     : '';
   const templateTexts = buildTemplateTextsNote(input.nodesJson);
-  const classicThemeNote = buildClassicThemeNote(input.nodesJson);
+  const classicThemeNote = buildClassicThemeNote(input.nodesJson, isSingle ?? false, isPage ?? false);
   const sectionContextNote = `## Section context — CRITICAL
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
 ⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
@@ -473,6 +556,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
   const planContext = [
     sectionContextNote,
     buildPlanContextNote(input.componentPlan),
+    buildVisualPlanContextNote(input.componentPlan?.visualPlan),
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -504,42 +588,4 @@ Render ONLY the JSX for the blocks in the template source below.`;
     .replace('{{siteName}}', input.siteInfo.siteName)
     .replace('{{siteUrl}}', input.siteInfo.siteUrl)
     .replace('{{templateSource}}', input.nodesJson);
-}
-
-function buildPageContentNote(
-  componentName: string,
-  content?: DbContentResult,
-): string {
-  if (!content) return '';
-
-  const slug = componentName.replace(/([A-Z])/g, (_, l, i) =>
-    i === 0 ? l.toLowerCase() : `-${l.toLowerCase()}`,
-  );
-
-  const normalize = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '');
-  const slugNorm = normalize(slug);
-
-  const page = content.pages.find((p) => {
-    if (normalize(p.slug) === slugNorm) return true;
-    if (p.template && normalize(p.template).includes(slugNorm)) return true;
-    if (normalize(p.title ?? '').includes(slugNorm)) return true;
-    return false;
-  });
-
-  if (!page) return '';
-
-  const texts = extractTexts(wpBlocksToJson(page.content ?? ''));
-
-  const textList =
-    texts.length > 0
-      ? texts.map((t) => `- "${t}"`).join('\n')
-      : '(no static text found)';
-
-  return `
-## Page content from database
-This component renders the page **"${page.title}"** (slug: \`${page.slug}\`).
-
-**CRITICAL — use these exact strings for ALL static text in this component (headings, paragraphs, buttons, labels). Do NOT invent or paraphrase any text:**
-${textList}
-`;
 }

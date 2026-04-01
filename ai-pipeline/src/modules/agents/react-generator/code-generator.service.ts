@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import type {
   ComponentVisualPlan,
   ColorPalette,
+  TypographyTokens,
+  LayoutTokens,
   SectionPlan,
   NavbarSection,
   HeroSection,
@@ -15,6 +17,7 @@ import type {
   PostContentSection,
   PageContentSection,
   CustomSection,
+  DataNeed,
 } from './visual-plan.schema.js';
 
 const PADDING_MAP = {
@@ -25,23 +28,81 @@ const PADDING_MAP = {
   xl: 'py-24 lg:py-32',
 };
 
+interface RenderCtx {
+  p: ColorPalette;
+  t: TypographyTokens;
+  l: LayoutTokens;
+}
+
 @Injectable()
 export class CodeGeneratorService {
   /**
    * Generate a complete React TSX component from a visual plan.
-   * Returns undefined if generation is not possible (unexpected section types, etc.)
+   * All colors, typography, and layout are read from the plan — nothing hardcoded.
    */
   generate(plan: ComponentVisualPlan): string {
+    // Derive effective dataNeeds from both the plan declaration AND the actual
+    // sections rendered — prevents missing useState when AI omits a data need.
+    const effectiveDataNeeds = this.deriveDataNeeds(plan);
+    const effectivePlan = { ...plan, dataNeeds: effectiveDataNeeds };
+
     const extraImports = this.collectCustomImports(plan);
     const needsRouter = this.needsRouter(plan);
-    const needsParams = this.needsParams(plan);
+    const needsParams = this.needsParams(effectivePlan);
+
+    const ctx: RenderCtx = {
+      p: plan.palette,
+      t: plan.typography,
+      l: plan.layout,
+    };
 
     const imports = this.buildImports(plan, needsRouter, needsParams, extraImports);
     const interfaces = SHARED_INTERFACES;
-    const stateAndFetch = this.buildStateAndFetch(plan);
-    const body = this.buildBody(plan);
+    const stateAndFetch = this.buildStateAndFetch(effectivePlan);
+    const body = this.buildBody(plan, ctx);
 
     return [imports, interfaces, stateAndFetch, body].filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * Merge plan.dataNeeds with data vars required by the concrete sections.
+   * Prevents mismatches when AI forgets to declare a data dependency.
+   */
+  private deriveDataNeeds(plan: ComponentVisualPlan): DataNeed[] {
+    const needs = new Set(plan.dataNeeds);
+    for (const section of plan.sections) {
+      switch (section.type) {
+        case 'navbar':
+          needs.add('siteInfo');
+          needs.add('menus');
+          break;
+        case 'footer':
+          needs.add('siteInfo');
+          needs.add('menus');
+          break;
+        case 'post-list':
+        case 'search':
+          needs.add('posts');
+          break;
+        case 'post-content':
+          needs.add('postDetail');
+          break;
+        case 'page-content':
+          needs.add('pageDetail');
+          break;
+        case 'custom': {
+          // Scan the raw JSX string so data vars used there are declared
+          const jsx = (section as CustomSection).jsx ?? '';
+          if (/\bposts\b/.test(jsx))    needs.add('posts');
+          if (/\bmenus\b/.test(jsx))    needs.add('menus');
+          if (/\bsiteInfo\b/.test(jsx)) needs.add('siteInfo');
+          if (/\bpages\b/.test(jsx))    needs.add('pages');
+          if (/\bitem\b/.test(jsx) && !needs.has('postDetail')) needs.add('pageDetail');
+          break;
+        }
+      }
+    }
+    return Array.from(needs);
   }
 
   // ── Imports ───────────────────────────────────────────────────────────────
@@ -58,6 +119,10 @@ export class CodeGeneratorService {
     if (needsParams) routerParts.push('useParams');
     if (routerParts.length > 0) {
       lines.push(`import { ${routerParts.join(', ')} } from 'react-router-dom';`);
+    }
+    // Import shared partial components (Header, Footer, etc.) from layout plan
+    for (const name of plan.layout.includes) {
+      lines.push(`import ${name} from './${name}.js';`);
     }
     for (const imp of extraImports) {
       if (!lines.includes(imp)) lines.push(imp);
@@ -170,14 +235,14 @@ export class CodeGeneratorService {
 
   // ── Component body ────────────────────────────────────────────────────────
 
-  private buildBody(plan: ComponentVisualPlan): string {
+  private buildBody(plan: ComponentVisualPlan, ctx: RenderCtx): string {
     const { componentName, palette, sections } = plan;
     const sectionJsx = sections
-      .map((s) => this.renderSection(s, palette))
+      .map((s) => this.renderSection(s, ctx))
       .join('\n\n');
 
     return `  return (
-    <div className="bg-[${palette.background}] text-[${palette.text}] flex flex-col">
+    <div className="bg-[${palette.background}] text-[${palette.text}] flex flex-col" style={{ fontFamily: '${ctx.t.bodyFamily}' }}>
 ${sectionJsx}
     </div>
   );
@@ -188,44 +253,45 @@ export default ${componentName};`;
 
   // ── Section dispatcher ────────────────────────────────────────────────────
 
-  private renderSection(section: SectionPlan, palette: ColorPalette): string {
-    const bg = section.background ?? palette.background;
-    const tc = section.textColor ?? palette.text;
+  private renderSection(section: SectionPlan, ctx: RenderCtx): string {
+    const bg = section.background ?? ctx.p.background;
+    const tc = section.textColor ?? ctx.p.text;
     const py = PADDING_MAP[section.padding ?? 'lg'];
 
     switch (section.type) {
-      case 'navbar':       return this.renderNavbar(section, palette);
-      case 'hero':         return this.renderHero(section, palette, py);
-      case 'cover':        return this.renderCover(section, palette);
-      case 'post-list':    return this.renderPostList(section, palette, bg, tc, py);
-      case 'card-grid':    return this.renderCardGrid(section, palette, bg, tc, py);
-      case 'media-text':   return this.renderMediaText(section, palette, bg, tc, py);
-      case 'testimonial':  return this.renderTestimonial(section, palette, py);
-      case 'newsletter':   return this.renderNewsletter(section, palette, bg, tc, py);
-      case 'footer':       return this.renderFooter(section, palette);
-      case 'post-content': return this.renderPostContent(section, palette, py);
-      case 'page-content': return this.renderPageContent(section, palette, py);
-      case 'search':       return this.renderSearch(section, palette, py);
-      case 'breadcrumb':   return this.renderBreadcrumb(palette);
+      case 'navbar':       return this.renderNavbar(section, ctx);
+      case 'hero':         return this.renderHero(section, ctx, py);
+      case 'cover':        return this.renderCover(section, ctx);
+      case 'post-list':    return this.renderPostList(section, ctx, bg, tc, py);
+      case 'card-grid':    return this.renderCardGrid(section, ctx, bg, tc, py);
+      case 'media-text':   return this.renderMediaText(section, ctx, bg, tc, py);
+      case 'testimonial':  return this.renderTestimonial(section, ctx, py);
+      case 'newsletter':   return this.renderNewsletter(section, ctx, bg, tc, py);
+      case 'footer':       return this.renderFooter(section, ctx);
+      case 'post-content': return this.renderPostContent(section, ctx, py);
+      case 'page-content': return this.renderPageContent(section, ctx, py);
+      case 'search':       return this.renderSearch(section, ctx, py);
+      case 'breadcrumb':   return this.renderBreadcrumb(ctx);
       case 'custom':       return this.renderCustom(section);
     }
   }
 
   // ── Section renderers ─────────────────────────────────────────────────────
 
-  private renderNavbar(s: NavbarSection, p: ColorPalette): string {
+  private renderNavbar(s: NavbarSection, ctx: RenderCtx): string {
+    const { p, t, l } = ctx;
     const bg = s.background ?? p.surface;
     const tc = s.textColor ?? p.text;
     const sticky = s.sticky ? 'sticky top-0 z-50 ' : '';
     const cta = s.cta
       ? s.cta.style === 'button'
-        ? `\n            <Link to="${s.cta.link}" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 rounded hover:opacity-90 transition-opacity">${s.cta.text}</Link>`
+        ? `\n            <Link to="${s.cta.link}" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity">${s.cta.text}</Link>`
         : `\n            <Link to="${s.cta.link}" className="text-[${tc}] hover:text-[${p.accent}] transition-colors">${s.cta.text}</Link>`
       : '';
 
     return `      {/* Navbar */}
       <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           <div className="flex items-center justify-between py-4">
             <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
             <nav className="hidden md:flex items-center gap-6">
@@ -244,11 +310,12 @@ export default ${componentName};`;
       </header>`;
   }
 
-  private renderHero(s: HeroSection, p: ColorPalette, py: string): string {
+  private renderHero(s: HeroSection, ctx: RenderCtx, py: string): string {
+    const { p, t, l } = ctx;
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const cta = s.cta
-      ? `\n            <Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 rounded hover:opacity-90 transition-opacity">${s.cta.text}</Link>`
+      ? `\n            <Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity">${s.cta.text}</Link>`
       : '';
     const image = s.image
       ? s.image.position === 'below'
@@ -262,10 +329,10 @@ export default ${componentName};`;
     if (isSplit && s.image) {
       return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           <div className="flex flex-col md:flex-row gap-8 items-center">
             <div className="flex-1 flex flex-col gap-4">
-              <h1 className="text-[2.5rem] md:text-[3.5rem] font-normal text-[${tc}] leading-tight">${s.heading}</h1>
+              <h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>
               ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]">${s.subheading}</p>` : ''}
               ${cta}
             </div>${image}
@@ -276,9 +343,9 @@ export default ${componentName};`;
 
     return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           <div className="flex flex-col ${isCenter ? 'items-center text-center' : 'items-start'} gap-6 max-w-[640px] ${isCenter ? 'mx-auto' : ''}">
-            <h1 className="text-[2.5rem] md:text-[3.5rem] font-normal text-[${tc}] leading-tight">${s.heading}</h1>
+            <h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>
             ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]">${s.subheading}</p>` : ''}
             ${cta}
           </div>${image}
@@ -286,7 +353,8 @@ export default ${componentName};`;
       </section>`;
   }
 
-  private renderCover(s: CoverSection, p: ColorPalette): string {
+  private renderCover(s: CoverSection, ctx: RenderCtx): string {
+    const { p, t } = ctx;
     const tc = s.textColor ?? '#ffffff';
     const align =
       s.contentAlign === 'center' ? 'items-center text-center' :
@@ -299,20 +367,21 @@ export default ${componentName};`;
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
         <div className="relative z-10 w-full flex flex-col ${align} gap-4 px-4 sm:px-6 lg:px-8 py-16">
-          ${s.heading ? `<h1 className="text-[2.5rem] md:text-[3.5rem] font-normal text-[${tc}] leading-tight">${s.heading}</h1>` : ''}
+          ${s.heading ? `<h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>` : ''}
           ${s.subheading ? `<p className="text-lg text-white/80">${s.subheading}</p>` : ''}
-          ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 rounded hover:opacity-90 transition-opacity">${s.cta.text}</Link>` : ''}
+          ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity">${s.cta.text}</Link>` : ''}
         </div>
       </section>`;
   }
 
   private renderPostList(
     s: PostListSection,
-    p: ColorPalette,
+    ctx: RenderCtx,
     bg: string,
     tc: string,
     py: string,
   ): string {
+    const { p, t, l } = ctx;
     const isGrid = s.layout !== 'list';
     const cols = s.layout === 'grid-3' ? 3 : 2;
     const gridClass = isGrid
@@ -321,20 +390,20 @@ export default ${componentName};`;
 
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2">
-              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover rounded" />}` : ''}
+              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${t.buttonRadius}" />}` : ''}
               <Link to={\`/post/\${post.slug}\`} className="text-lg font-medium text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
               ${s.showExcerpt ? `<p className="text-sm text-[${p.textMuted}]">{post.excerpt}</p>` : ''}
-              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, p) : ''}
+              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
             </article>`
       : `            <article key={post.id} className="flex flex-col md:flex-row md:items-baseline gap-2 md:gap-4 py-4">
               <Link to={\`/post/\${post.slug}\`} className="flex-1 text-lg text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
-              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, p, true) : ''}
+              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx, true) : ''}
             </article>`;
 
     return `      {/* Post List */}
       <section className="bg-[${bg}] ${py} w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
-          ${s.title ? `<h2 className="text-[2rem] font-normal text-[${tc}] mb-8">${s.title}</h2>` : ''}
+        <div className="${l.containerClass}">
+          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-8">${s.title}</h2>` : ''}
           <div className="${gridClass}">
             {posts.map(post => (
 ${postCard}
@@ -344,7 +413,8 @@ ${postCard}
       </section>`;
   }
 
-  private postMeta(s: PostListSection, p: ColorPalette, inline = false): string {
+  private postMeta(s: PostListSection, ctx: RenderCtx, inline = false): string {
+    const { p } = ctx;
     const parts: string[] = [];
     if (s.showDate) parts.push(`<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`);
     if (s.showAuthor) parts.push(`<span>by {post.author}</span>`);
@@ -355,11 +425,12 @@ ${postCard}
 
   private renderCardGrid(
     s: CardGridSection,
-    p: ColorPalette,
+    ctx: RenderCtx,
     bg: string,
     tc: string,
     py: string,
   ): string {
+    const { p, t, l } = ctx;
     const colClass = `grid-cols-1 sm:grid-cols-2 ${s.columns >= 3 ? 'lg:grid-cols-3' : ''} ${s.columns === 4 ? 'xl:grid-cols-4' : ''}`;
     const cards = s.cards
       .map(
@@ -372,8 +443,8 @@ ${postCard}
 
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
-          ${s.title ? `<h2 className="text-[2rem] font-normal text-[${tc}] mb-4">${s.title}</h2>` : ''}
+        <div className="${l.containerClass}">
+          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-4">${s.title}</h2>` : ''}
           ${s.subtitle ? `<p className="text-[${p.textMuted}] mb-8">${s.subtitle}</p>` : ''}
           <div className="grid ${colClass} gap-6">
 ${cards}
@@ -384,23 +455,24 @@ ${cards}
 
   private renderMediaText(
     s: MediaTextSection,
-    p: ColorPalette,
+    ctx: RenderCtx,
     bg: string,
     tc: string,
     py: string,
   ): string {
+    const { p, t, l } = ctx;
     const imgFirst = s.imagePosition === 'left';
     const imgEl = `<div className="flex-1"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover" /></div>`;
     const textEl = `<div className="flex-1 flex flex-col gap-4">
-            ${s.heading ? `<h2 className="text-[1.75rem] font-normal text-[${tc}]">${s.heading}</h2>` : ''}
+            ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]">${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${p.textMuted}]">${s.body}</p>` : ''}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${p.textMuted}]">${li}</li>`).join('')}</ul>` : ''}
-            ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 rounded hover:opacity-90 transition-opacity">${s.cta.text}</Link>` : ''}
+            ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity">${s.cta.text}</Link>` : ''}
           </div>`;
 
     return `      {/* Media + Text */}
       <section className="bg-[${bg}] ${py} w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           <div className="flex flex-col md:flex-row gap-8 items-center">
             ${imgFirst ? `${imgEl}\n            ${textEl}` : `${textEl}\n            ${imgEl}`}
           </div>
@@ -408,15 +480,16 @@ ${cards}
       </section>`;
   }
 
-  private renderTestimonial(s: TestimonialSection, p: ColorPalette, py: string): string {
+  private renderTestimonial(s: TestimonialSection, ctx: RenderCtx, py: string): string {
+    const { p, t, l } = ctx;
     const bg = s.background ?? p.dark ?? '#111111';
     const tc = s.textColor ?? p.darkText ?? '#f9f9f9';
 
     return `      {/* Testimonial */}
       <section className="w-full ${py}" style={{ backgroundColor: '${bg}', color: '${tc}' }}>
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           <div className="flex flex-col items-center text-center gap-8 max-w-[720px] mx-auto">
-            <p className="text-[1.75rem] md:text-[2.25rem] font-normal leading-snug">"{s.quote}"</p>
+            <p className="${t.h3} font-normal leading-snug">"{s.quote}"</p>
             <div className="flex flex-col items-center gap-2">
               ${s.authorAvatar ? `<img src="${s.authorAvatar}" alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover" />` : ''}
               <span className="font-medium">${s.authorName}</span>
@@ -429,11 +502,12 @@ ${cards}
 
   private renderNewsletter(
     s: NewsletterSection,
-    p: ColorPalette,
+    ctx: RenderCtx,
     bg: string,
     tc: string,
     py: string,
   ): string {
+    const { p, t, l } = ctx;
     const inner =
       s.layout === 'card'
         ? `<div className="bg-[${p.surface}] rounded-2xl p-8 md:p-12 max-w-[560px] mx-auto text-center flex flex-col gap-4">`
@@ -441,11 +515,11 @@ ${cards}
 
     return `      {/* Newsletter */}
       <section className="bg-[${bg}] ${py} w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
+        <div className="${l.containerClass}">
           ${inner}
-            <h2 className="text-[2rem] font-normal text-[${tc}]">${s.heading}</h2>
+            <h2 className="${t.h2} font-normal text-[${tc}]">${s.heading}</h2>
             ${s.subheading ? `<p className="text-[${p.textMuted}]">${s.subheading}</p>` : ''}
-            <button className="self-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 rounded hover:opacity-90 transition-opacity">
+            <button className="self-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity">
               ${s.buttonText}
             </button>
           </div>
@@ -453,7 +527,8 @@ ${cards}
       </section>`;
   }
 
-  private renderFooter(s: FooterSection, p: ColorPalette): string {
+  private renderFooter(s: FooterSection, ctx: RenderCtx): string {
+    const { p, l } = ctx;
     const bg = s.background ?? p.surface;
     const tc = s.textColor ?? p.text;
 
@@ -476,7 +551,7 @@ ${cards}
 
     return `      {/* Footer */}
       <footer className="bg-[${bg}] border-t border-black/10 w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8 py-12">
+        <div className="${l.containerClass} py-12">
           <div className="grid grid-cols-1 md:grid-cols-${Math.min(4, s.menuColumns.length + 1)} gap-8">
             <div className="flex flex-col gap-3">
               <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
@@ -489,7 +564,8 @@ ${menuCols}
       </footer>`;
   }
 
-  private renderPostContent(s: PostContentSection, p: ColorPalette, py: string): string {
+  private renderPostContent(s: PostContentSection, ctx: RenderCtx, py: string): string {
+    const { p, t } = ctx;
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     return `      {/* Post Content */}
@@ -497,7 +573,7 @@ ${menuCols}
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
           {item && (
             <article className="flex flex-col gap-6">
-              ${s.showTitle ? `<h1 className="text-[2.25rem] font-normal text-[${tc}]">{item.title}</h1>` : ''}
+              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               ${s.showMeta ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">
                 <time>{new Date(item.date).toLocaleDateString()}</time>
                 <span>by {item.author}</span>
@@ -510,7 +586,8 @@ ${menuCols}
       </section>`;
   }
 
-  private renderPageContent(s: PageContentSection, p: ColorPalette, py: string): string {
+  private renderPageContent(s: PageContentSection, ctx: RenderCtx, py: string): string {
+    const { p, t } = ctx;
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     return `      {/* Page Content */}
@@ -518,7 +595,7 @@ ${menuCols}
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
           {item && (
             <article className="flex flex-col gap-6">
-              ${s.showTitle ? `<h1 className="text-[2.25rem] font-normal text-[${tc}]">{item.title}</h1>` : ''}
+              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
             </article>
           )}
@@ -526,16 +603,17 @@ ${menuCols}
       </section>`;
   }
 
-  private renderSearch(s: { type: 'search'; title?: string; background?: string; textColor?: string; padding?: string }, p: ColorPalette, py: string): string {
+  private renderSearch(s: { type: 'search'; title?: string; background?: string; textColor?: string; padding?: string }, ctx: RenderCtx, py: string): string {
+    const { p, t, l } = ctx;
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     return `      {/* Search */}
       <section className="bg-[${bg}] ${py} w-full">
-        <div className="mx-auto max-w-[1280px] px-4 sm:px-6 lg:px-8">
-          ${s.title ? `<h2 className="text-[2rem] font-normal text-[${tc}] mb-6">${s.title}</h2>` : ''}
+        <div className="${l.containerClass}">
+          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6">${s.title}</h2>` : ''}
           <div className="flex gap-2">
-            <input type="search" placeholder="Search..." className="flex-1 border border-black/20 rounded px-4 py-2 bg-transparent text-[${tc}]" />
-            <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 rounded hover:opacity-90">Search</button>
+            <input type="search" placeholder="Search..." className="flex-1 border border-black/20 ${t.buttonRadius} px-4 py-2 bg-transparent text-[${tc}]" />
+            <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90">Search</button>
           </div>
           <div className="mt-8 flex flex-col gap-4">
             {posts.map(post => (
@@ -546,9 +624,10 @@ ${menuCols}
       </section>`;
   }
 
-  private renderBreadcrumb(p: ColorPalette): string {
+  private renderBreadcrumb(ctx: RenderCtx): string {
+    const { p, l } = ctx;
     return `      {/* Breadcrumb */}
-      <nav className="w-full px-4 sm:px-6 lg:px-8 py-3 max-w-[1280px] mx-auto">
+      <nav className="w-full py-3 ${l.containerClass}">
         <ol className="flex items-center gap-2 text-sm text-[${p.textMuted}]">
           <li><Link to="/" className="hover:text-[${p.accent}] transition-colors">Home</Link></li>
           <li>/</li>

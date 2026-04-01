@@ -48,6 +48,14 @@ export default () => ({
       10,
     ),
   },
+  // Per-step model overrides — format: "provider/model" or plain model name.
+  // e.g. PLANNER_MODEL=mistral/mistral-large-latest
+  //      CODE_REVIEWER_MODEL=ollama/qwen2.5-coder:7b
+  pipeline: {
+    plannerModel:      process.env.PLANNER_MODEL,
+    codeReviewerModel: process.env.CODE_REVIEWER_MODEL,
+    fixAgentModel:     process.env.FIX_AGENT_MODEL,
+  },
   github: {
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
     reactRepoToken: process.env.GITHUB_REACT_REPO_TOKEN,

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
-import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type { WpNode } from '../utils/wp-block-to-json.js';
+import type { ThemeTokens } from '../../modules/agents/block-parser/block-parser.service.js';
 
 /**
  * StyleResolverService — pre-resolves all abstract style references in a
@@ -21,11 +21,11 @@ export class StyleResolverService {
    */
   resolve(nodes: WpNode[], tokens?: ThemeTokens): WpNode[] {
     const spacingMap = tokens?.spacing?.length
-      ? new Map(tokens.spacing.map((s) => [s.slug, s.size]))
+      ? new Map<string, string>(tokens.spacing.map((s) => [s.slug, s.size]))
       : null;
 
     const colorMap = tokens?.colors?.length
-      ? new Map(tokens.colors.map((c) => [c.slug, c.value]))
+      ? new Map<string, string>(tokens.colors.map((c) => [c.slug, c.value]))
       : null;
 
     let result = nodes;

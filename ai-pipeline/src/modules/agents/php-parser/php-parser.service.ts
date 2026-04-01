@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { join, extname } from 'path';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
-import { extractStyleCssTokens } from '../style-token-extractor/style-token-extractor.js';
+import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
 
 export interface PhpParseResult {
   type: 'classic';

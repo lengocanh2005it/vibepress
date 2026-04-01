@@ -7,6 +7,7 @@ import { PhpParserModule } from '../agents/php-parser/php-parser.module.js';
 import { BlockParserModule } from '../agents/block-parser/block-parser.module.js';
 import { DbContentModule } from '../agents/db-content/db-content.module.js';
 import { PlannerModule } from '../agents/planner/planner.module.js';
+import { PlanReviewerModule } from '../agents/plan-reviewer/plan-reviewer.module.js';
 import { ReactGeneratorModule } from '../agents/react-generator/react-generator.module.js';
 import { ApiBuilderModule } from '../agents/api-builder/api-builder.module.js';
 import { PreviewBuilderModule } from '../agents/preview-builder/preview-builder.module.js';
@@ -15,6 +16,7 @@ import { ValidatorModule } from '../agents/validator/validator.module.js';
 import { CleanupModule } from '../agents/cleanup/cleanup.module.js';
 import { ThemeModule } from '../theme/theme.module.js';
 import { CotEvidenceModule } from '../cot-evidence/cot-evidence.module.js';
+import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 
 @Module({
   imports: [
@@ -25,6 +27,7 @@ import { CotEvidenceModule } from '../cot-evidence/cot-evidence.module.js';
     BlockParserModule,
     DbContentModule,
     PlannerModule,
+    PlanReviewerModule,
     ReactGeneratorModule,
     ApiBuilderModule,
     PreviewBuilderModule,
@@ -32,6 +35,7 @@ import { CotEvidenceModule } from '../cot-evidence/cot-evidence.module.js';
     ValidatorModule,
     CleanupModule,
     CotEvidenceModule,
+    NormalizerModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService],

@@ -3,6 +3,24 @@ import { Observable, map } from 'rxjs';
 import { OrchestratorService } from './orchestrator.service.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 
+/**
+ * Per-step model overrides for the pipeline.
+ * Each field is optional — omitting it falls back to the default model
+ * resolved from environment variables (AI_PROVIDER + *_MODEL).
+ *
+ * Agents that only run deterministic logic (normalizer, plan-reviewer,
+ * code-generator, validator, api-builder, preview-builder) are not listed
+ * here because they never call an LLM.
+ */
+export interface PipelineModelConfig {
+  /** Model for Planner Phase A (architecture plan) + Phase C (visual sections per component) */
+  planner?: string;
+  /** Model for Code Reviewer: AI visual plan (D2) + direct AI TSX generation (D3) */
+  codeReviewer?: string;
+  /** Model for Fix Agent (R3 repair pass). Defaults to codeReviewer if omitted. */
+  fixAgent?: string;
+}
+
 export interface RunPipelineDto {
   // ── Theme source (chọn 1) ──────────────────────────────────────
   // Mode D (chính): GitHub repo chứa WP theme source
@@ -19,6 +37,13 @@ export interface RunPipelineDto {
 
   // ── Output ────────────────────────────────────────────────────
   githubRepoB?: string;
+  /** Absolute path on the local machine to copy generated TSX files into for inspection.
+   *  Files are written to {localOutputDir}/pages/ and {localOutputDir}/components/.
+   *  The directory is created if it does not exist. */
+  localOutputDir?: string;
+
+  // ── Per-step model overrides ──────────────────────────────────
+  modelConfig?: PipelineModelConfig;
 }
 
 @Controller('pipeline')

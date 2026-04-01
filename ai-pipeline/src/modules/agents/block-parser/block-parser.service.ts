@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { extractStyleCssTokens } from '../style-token-extractor/style-token-extractor.js';
+import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
 
 export interface ThemeDefaults {
   textColor?: string;

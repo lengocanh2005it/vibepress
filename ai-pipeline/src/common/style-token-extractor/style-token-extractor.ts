@@ -2,7 +2,7 @@ import type {
   ThemeBlockStyle,
   ThemeDefaults,
   ThemeTokens,
-} from '../block-parser/block-parser.service.js';
+} from '../../modules/agents/block-parser/block-parser.service.js';
 
 export interface StyleTokenExtractionResult {
   colors: ThemeTokens['colors'];

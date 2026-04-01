@@ -1,8 +1,19 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
-import { BlockParseResult } from '../block-parser/block-parser.service.js';
+import type { BlockParseResult, ThemeTokens, ThemeDefaults } from '../block-parser/block-parser.service.js';
+import {
+  buildVisualPlanPrompt,
+  parseVisualPlanDetailed,
+} from '../react-generator/prompts/visual-plan.prompt.js';
+import type {
+  ComponentVisualPlan,
+  ColorPalette,
+  TypographyTokens,
+  LayoutTokens,
+} from '../react-generator/visual-plan.schema.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -12,6 +23,8 @@ export interface ComponentPlan {
   dataNeeds: string[];
   isDetail: boolean;
   description: string;
+  /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
+  visualPlan?: ComponentVisualPlan;
 }
 
 export type PlanResult = ComponentPlan[];
@@ -19,14 +32,20 @@ export type PlanResult = ComponentPlan[];
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
+  private readonly rawOutputDivider =
+    '\n----- RAW OUTPUT BEGIN -----\n';
 
-  constructor(private readonly llmFactory: LlmFactoryService) {}
+  constructor(
+    private readonly llmFactory: LlmFactoryService,
+    private readonly configService: ConfigService,
+  ) {}
 
   async plan(
     theme: PhpParseResult | BlockParseResult,
     content: DbContentResult,
+    modelName?: string,
   ): Promise<PlanResult> {
-    // Build source map: templateName → raw source (used in layer 2 enrichment)
+    // Build source map for layer 2 enrichment and Phase B
     const sourceMap = new Map<string, string>();
     const allTemplates =
       theme.type === 'classic'
@@ -35,21 +54,24 @@ export class PlannerService {
     for (const t of allTemplates) {
       sourceMap.set(t.name, 'markup' in t ? t.markup : t.html);
     }
-    const modelName = this.llmFactory.getModel();
+
+    const resolvedModel = modelName ?? this.llmFactory.getModel();
 
     const templateNames =
       theme.type === 'classic'
         ? theme.templates.map((t) => t.name)
         : [...theme.templates, ...theme.parts].map((t) => t.name);
 
+    // ── Phase A: architecture plan ─────────────────────────────────────────
+    this.logger.log(
+      `[Phase A] Planning architecture for ${templateNames.length} components in "${content.siteInfo.siteName}"`,
+    );
+
     const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildUserPrompt(theme, content, templateNames);
 
-    this.logger.log(
-      `Planning ${templateNames.length} components for "${content.siteInfo.siteName}"`,
-    );
-
     let plan: PlanResult | null = null;
+    let lastError = 'unknown parse failure';
     let lastRaw = '';
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -59,31 +81,263 @@ export class PlannerService {
           : this.buildRetryPrompt(lastRaw, templateNames);
 
       const { text: raw } = await this.llmFactory.chat({
-        model: modelName,
+        model: resolvedModel,
         systemPrompt,
         userPrompt: prompt,
         maxTokens: 4096,
       });
 
       lastRaw = raw;
-      plan = this.tryParseResponse(raw);
+      const parsed = this.tryParseResponseDetailed(raw);
+      plan = parsed.plan;
+      if (!parsed.plan) lastError = parsed.reason;
 
       if (plan) {
-        this.logger.log(`Plan received on attempt ${attempt}: ${plan.length} components`);
+        this.logger.log(`[Phase A] Received on attempt ${attempt}: ${plan.length} components`);
         break;
       }
 
       this.logger.warn(
-        `Planner attempt ${attempt}/3 returned invalid JSON — retrying with correction prompt`,
+        `[Phase A] Attempt ${attempt}/3 failed: ${lastError}${this.formatRawOutput(raw)}`,
       );
     }
 
     if (!plan) {
-      this.logger.warn('All planner attempts failed, using fallback plan');
+      this.logger.warn(
+        `[Phase A] All attempts failed, using fallback plan. Last error: ${lastError}${this.formatRawOutput(lastRaw)}`,
+      );
       plan = this.buildFallbackPlan(templateNames);
     }
 
-    return this.enrichPlan(plan, sourceMap);
+    // ── Phase B (C2): Component Graph Builder — deterministic, no AI ────────
+    // Scans each template's source for navigation blocks, query blocks, etc.
+    // to enrich component routes, data needs, and layout flags.
+    this.logger.log(
+      `[Phase B: Component Graph Builder] Enriching plan for ${plan.length} components`,
+    );
+    const enriched = this.enrichPlan(plan, sourceMap);
+    this.logger.log(
+      `[Phase B: Component Graph Builder] Done — ${enriched.filter((c) => c.route).length} routable, ` +
+      `${enriched.filter((c) => c.dataNeeds?.includes('menus')).length} with menus`,
+    );
+
+    // ── Phase C (C3): AI Visual Sections ────────────────────────────────
+    // AI generates a visual section plan (navbar/hero/footer/etc.) per component.
+    // palette, typography, layout are injected deterministically from theme tokens.
+    const tokens = theme.type === 'fse' ? theme.tokens : undefined;
+    const globalPalette = this.deriveGlobalPalette(tokens);
+    const globalTypography = this.deriveGlobalTypography(tokens);
+
+    this.logger.log(
+      `[Phase C: AI Visual Sections] Generating visual plans for ${enriched.length} components (palette + typography from theme tokens)`,
+    );
+
+    return this.buildVisualPlans(enriched, sourceMap, content, tokens, globalPalette, globalTypography, resolvedModel);
+  }
+
+  // ── Phase C: AI visual plan per component ───────────────────────────
+
+  private async buildVisualPlans(
+    plan: PlanResult,
+    sourceMap: Map<string, string>,
+    content: DbContentResult,
+    tokens: ThemeTokens | undefined,
+    globalPalette: ColorPalette,
+    globalTypography: TypographyTokens,
+    modelName: string,
+  ): Promise<PlanResult> {
+    const delay =
+      this.configService.get<number>('reactGenerator.delayBetweenComponents') ?? 3000;
+
+    const result: PlanResult = [];
+
+    for (let i = 0; i < plan.length; i++) {
+      const componentPlan = plan[i];
+      const templateSource = sourceMap.get(componentPlan.templateName) ?? '';
+
+      if (i > 0) {
+        await new Promise((res) => setTimeout(res, delay));
+      }
+
+      let visualPlan: ComponentVisualPlan | undefined;
+      try {
+        const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
+          componentName: componentPlan.componentName,
+          templateSource,
+          content,
+          tokens,
+        });
+
+        const { text: raw } = await this.llmFactory.chat({
+          model: modelName,
+          systemPrompt,
+          userPrompt,
+          maxTokens: 4096,
+        });
+
+        const parsedResult = parseVisualPlanDetailed(
+          raw,
+          componentPlan.componentName,
+        );
+        const parsed = parsedResult.plan;
+        if (parsed) {
+          const layout = this.deriveComponentLayout(tokens, componentPlan.componentName, plan);
+          // Force palette + typography + layout from tokens — AI only contributes sections[]
+          visualPlan = { ...parsed, palette: globalPalette, typography: globalTypography, layout };
+          this.logger.log(
+            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓`,
+          );
+        } else {
+          const reason =
+            parsedResult.diagnostic?.reason ?? 'unknown visual plan parse failure';
+          const dropped = parsedResult.diagnostic?.droppedSections?.length
+            ? ` | droppedSections: ${parsedResult.diagnostic.droppedSections.join('; ')}`
+            : '';
+          this.logger.warn(
+            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" plan parse failed: ${reason}${dropped} — generator will fallback to D3${this.formatRawOutput(raw)}`,
+          );
+        }
+      } catch (err: any) {
+        this.logger.warn(
+          `[Phase C: AI Visual Sections] "${componentPlan.componentName}" error: ${err?.message} — generator will fallback to D3`,
+        );
+      }
+
+      result.push({ ...componentPlan, visualPlan });
+    }
+
+    const withPlan = result.filter((c) => c.visualPlan).length;
+    this.logger.log(
+      `[Phase C: AI Visual Sections] Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
+    );
+
+    return result;
+  }
+
+  // ── Global typography: deterministic from theme tokens, no AI ────────────
+
+  private deriveGlobalTypography(tokens?: ThemeTokens): TypographyTokens {
+    const d: ThemeDefaults = tokens?.defaults ?? {};
+    const fontSizeMap = new Map<string, string>(
+      tokens?.fontSizes.map((f) => [f.slug, f.size]) ?? [],
+    );
+    const fontMap = new Map<string, string>(
+      tokens?.fonts.map((f) => [f.slug, f.family]) ?? [],
+    );
+
+    const pickSize = (...slugs: string[]): string | undefined => {
+      for (const s of slugs) {
+        const v = fontSizeMap.get(s);
+        if (v) return v;
+      }
+      return undefined;
+    };
+
+    const headingFamily =
+      d.headingFontFamily ??
+      fontMap.get('heading') ??
+      fontMap.get('headings') ??
+      d.fontFamily ??
+      'inherit';
+
+    const bodyFamily = d.fontFamily ?? fontMap.get('body') ?? fontMap.get('base') ?? 'inherit';
+
+    const h1Size =
+      d.headings?.h1?.fontSize ??
+      pickSize('xx-large', 'x-large', 'huge') ??
+      '2.5rem';
+    const h2Size =
+      d.headings?.h2?.fontSize ??
+      pickSize('x-large', 'large') ??
+      '2rem';
+    const h3Size =
+      d.headings?.h3?.fontSize ??
+      pickSize('large', 'medium') ??
+      '1.5rem';
+    const bodySize = d.fontSize ?? pickSize('medium', 'normal', 'base') ?? '1rem';
+
+    return {
+      headingFamily,
+      bodyFamily,
+      h1: `text-[${h1Size}] leading-tight`,
+      h2: `text-[${h2Size}] leading-snug`,
+      h3: `text-[${h3Size}] leading-snug`,
+      body: `text-[${bodySize}]`,
+      small: 'text-sm',
+      buttonRadius: this.radiusToTailwind(d.buttonBorderRadius ?? '4px'),
+    };
+  }
+
+  private radiusToTailwind(radius: string): string {
+    const n = parseFloat(radius);
+    if (!n || n === 0) return 'rounded-none';
+    if (n >= 9999 || radius.includes('9999')) return 'rounded-full';
+    if (n <= 2) return 'rounded-sm';
+    if (n <= 4) return 'rounded';
+    if (n <= 8) return 'rounded-md';
+    if (n <= 12) return 'rounded-lg';
+    if (n <= 16) return 'rounded-xl';
+    return 'rounded-2xl';
+  }
+
+  // ── Layout tokens: container + includes per component ─────────────────────
+
+  private deriveComponentLayout(
+    tokens: ThemeTokens | undefined,
+    componentName: string,
+    allComponents: PlanResult,
+  ): LayoutTokens {
+    const d: ThemeDefaults = tokens?.defaults ?? {};
+
+    const maxW = d.contentWidth ? `max-w-[${d.contentWidth}]` : 'max-w-[1280px]';
+    const containerClass = `${maxW} mx-auto px-4 sm:px-6 lg:px-8`;
+
+    const blockGap = d.blockGap ? `gap-[${d.blockGap}]` : 'gap-16';
+
+    // Pages import Header/Footer partials if they exist in the plan
+    const current = allComponents.find((c) => c.componentName === componentName);
+    const includes: string[] = [];
+    if (current?.type === 'page') {
+      const partials = allComponents.filter((c) => c.type === 'partial');
+      const header = partials.find((c) => /^header$/i.test(c.componentName));
+      const footer = partials.find((c) => /^footer$/i.test(c.componentName));
+      if (header) includes.push(header.componentName);
+      if (footer) includes.push(footer.componentName);
+    }
+
+    return { containerClass, blockGap, includes };
+  }
+
+  // ── Global palette: deterministic from theme tokens, no AI ───────────────
+
+  private deriveGlobalPalette(tokens?: ThemeTokens): ColorPalette {
+    const d: ThemeDefaults = tokens?.defaults ?? {};
+    const colorMap = new Map<string, string>(
+      tokens?.colors.map((c) => [c.slug, c.value]) ?? [],
+    );
+
+    const pick = (...slugs: string[]): string | undefined => {
+      for (const s of slugs) {
+        const v = colorMap.get(s);
+        if (v) return v;
+      }
+      return undefined;
+    };
+
+    return {
+      background: d.bgColor ?? pick('background', 'base', 'white') ?? '#ffffff',
+      surface: pick('surface', 'secondary', 'light') ?? '#f5f5f5',
+      text: d.textColor ?? pick('foreground', 'contrast', 'dark') ?? '#111111',
+      textMuted: d.captionColor ?? pick('secondary-text', 'muted') ?? '#666666',
+      accent:
+        d.linkColor ??
+        d.buttonBgColor ??
+        pick('primary', 'accent', 'contrast-3') ??
+        '#0066cc',
+      accentText: d.buttonTextColor ?? pick('base', 'white') ?? '#ffffff',
+      dark: pick('dark', 'contrast') ?? d.textColor,
+      darkText: pick('light', 'base', 'white') ?? d.bgColor,
+    };
   }
 
   // ── Layer 2: enrich dataNeeds by scanning template source ─────────────────
@@ -96,7 +350,7 @@ export class PlannerService {
       const source = sourceMap.get(item.templateName) ?? '';
       const needs = new Set(item.dataNeeds);
 
-      // FSE block theme: detect by block comment patterns
+      // FSE block theme
       if (
         source.includes('wp:navigation') ||
         source.includes('block:"navigation"') ||
@@ -117,7 +371,7 @@ export class PlannerService {
       )
         needs.add('site-info');
 
-      // Classic PHP theme: detect by WP hint comments
+      // Classic PHP theme
       if (
         source.includes('{/* WP: <Header />') ||
         source.includes('{/* WP: <Navigation />') ||
@@ -150,10 +404,14 @@ ROUTING RULES:
 - index / home / front-page → route "/"
 - blog / archive → route "/blog"
 - single / single-post → route "/post/:slug" (isDetail: true, dataNeeds includes "post-detail")
-- page → route "/page/:slug" (isDetail: true, dataNeeds includes "page-detail")
+- page (DEFAULT page template only) → route "/page/:slug" (isDetail: true, dataNeeds includes "page-detail")
+- page-wide / page-no-title / page-with-sidebar / custom page templates → use their OWN unique route derived from the template name, e.g. "/page-wide/:slug", "/page-no-title/:slug" (isDetail: true, dataNeeds includes "page-detail")
 - Custom page templates → route "/<template-slug>" or "/<page-slug>" based on pages in DB
 - 404 → route "*"
 - header / footer / sidebar / nav / navigation / searchform / comments / widget / breadcrumb / pagination / loop / content-none / no-results / functions → type "partial", route null
+
+IMPORTANT — ROUTES MUST BE UNIQUE:
+Every page component MUST have a different route. If multiple templates would normally share the same WordPress URL pattern (e.g. all page templates share /page/:slug), assign each one a unique React route derived from its template name. Never assign the same route to two components.
 
 OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no explanation:
 [
@@ -219,11 +477,10 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     return lines.join('\n');
   }
 
-  /**
-   * Try to parse the AI response. Returns null on any failure so the caller
-   * can retry rather than immediately using the fallback plan.
-   */
-  private tryParseResponse(raw: string): PlanResult | null {
+  private tryParseResponseDetailed(raw: string): {
+    plan: PlanResult | null;
+    reason: string;
+  } {
     const cleaned = raw
       .replace(/^```[\w]*\n?/gm, '')
       .replace(/^```$/gm, '')
@@ -232,13 +489,20 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     let parsed: unknown;
     try {
       parsed = JSON.parse(cleaned);
-    } catch {
-      return null;
+    } catch (err: any) {
+      return {
+        plan: null,
+        reason: `invalid JSON: ${err?.message ?? 'unknown parse error'}`,
+      };
     }
 
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return {
+        plan: null,
+        reason: 'parsed output is not a non-empty array',
+      };
+    }
 
-    // Validate each entry has the minimum required fields
     const valid = (parsed as any[]).filter(
       (item) =>
         item &&
@@ -247,7 +511,29 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         (item.type === 'page' || item.type === 'partial'),
     );
 
-    return valid.length > 0 ? (valid as PlanResult) : null;
+    if (valid.length === 0) {
+      return {
+        plan: null,
+        reason:
+          'array parsed but no valid component objects were found (need templateName, componentName, type)',
+      };
+    }
+
+    if (valid.length !== (parsed as any[]).length) {
+      return {
+        plan: valid as PlanResult,
+        reason: `partially valid response: kept ${valid.length}/${(parsed as any[]).length} items`,
+      };
+    }
+
+    return {
+      plan: valid as PlanResult,
+      reason: 'ok',
+    };
+  }
+
+  private formatRawOutput(raw: string): string {
+    return `${this.rawOutputDivider}${raw || '(empty)'}\n----- RAW OUTPUT END -----`;
   }
 
   private buildRetryPrompt(badRaw: string, templateNames: string[]): string {

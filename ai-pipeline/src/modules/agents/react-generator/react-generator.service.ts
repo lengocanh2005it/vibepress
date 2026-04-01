@@ -6,23 +6,15 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
-import {
-  buildComponentPrompt,
-  buildSectionPrompt,
-} from './prompts/component.prompt.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
-import {
-  buildVisualPlanPrompt,
-  parseVisualPlan,
-} from './prompts/visual-plan.prompt.js';
-import { CodeGeneratorService } from './code-generator.service.js';
+import { CodeReviewerService } from './code-reviewer.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import {
   wpBlocksToJson,
   wpJsonToString,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
-import { StyleResolverService } from '../style-resolver/style-resolver.service.js';
+import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 
@@ -59,7 +51,7 @@ export class ReactGeneratorService {
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
     private readonly validator: ValidatorService,
-    private readonly codeGenerator: CodeGeneratorService,
+    private readonly codeReviewer: CodeReviewerService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -70,8 +62,10 @@ export class ReactGeneratorService {
     plan?: PlanResult;
     jobId?: string;
     logPath?: string;
+    /** Per-step model overrides. undefined fields fall back to llmFactory.getModel(). */
+    modelConfig?: { codeReviewer?: string; fixAgent?: string };
   }): Promise<ReactGenerateResult> {
-    const { theme, content, plan, jobId = 'unknown', logPath } = input;
+    const { theme, content, plan, jobId = 'unknown', logPath, modelConfig } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
@@ -80,7 +74,9 @@ export class ReactGeneratorService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    const modelName = this.llmFactory.getModel();
+    const defaultModel = this.llmFactory.getModel();
+    const modelName = modelConfig?.codeReviewer ?? defaultModel;
+    const fixAgentModel = modelConfig?.fixAgent ?? modelName;
 
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
@@ -126,6 +122,7 @@ export class ReactGeneratorService {
         componentName,
         rawSource,
         modelName,
+        fixAgentModel,
         systemPrompt,
         content,
         tokens,
@@ -175,6 +172,7 @@ export class ReactGeneratorService {
     componentName: string;
     rawSource: string;
     modelName: string;
+    fixAgentModel: string;
     systemPrompt: string;
     content: DbContentResult;
     tokens?: ThemeTokens;
@@ -186,6 +184,7 @@ export class ReactGeneratorService {
       componentName,
       rawSource,
       modelName,
+      fixAgentModel,
       systemPrompt,
       content,
       tokens,
@@ -204,21 +203,20 @@ export class ReactGeneratorService {
       : templateSource;
     const promptSourceLength = promptTemplateSource.length;
 
-    if (
-      themeType === 'classic' ||
-      promptSourceLength <= CHUNK_THRESHOLD_CHARS
-    ) {
-      const comp = await this.generateSingle({
+    if (themeType === 'classic' || promptSourceLength <= CHUNK_THRESHOLD_CHARS) {
+      // ── Delegate to CodeReviewerService (Review Loop) ─────────────────────
+      const { component } = await this.codeReviewer.reviewComponent({
         componentName,
         templateSource: promptTemplateSource,
         modelName,
+        fixAgentModel,
         systemPrompt,
         content,
         tokens,
         componentPlan,
         logPath,
       });
-      return [comp];
+      return [component];
     }
 
     // Too large → split into sections (FSE only)
@@ -226,10 +224,7 @@ export class ReactGeneratorService {
       `Template ${componentName}: ${promptSourceLength} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
     );
     const resolvedNodes = templateNodes ?? [];
-    const chunks = this.splitTemplateSections(
-      resolvedNodes,
-      CHUNK_TARGET_CHARS,
-    );
+    const chunks = this.splitTemplateSections(resolvedNodes, CHUNK_TARGET_CHARS);
     await this.logToFile(
       logPath,
       `WARN "${componentName}" too large (${promptSourceLength} chars) → splitting into ${chunks.length} sections`,
@@ -239,25 +234,24 @@ export class ReactGeneratorService {
 
     const subComponents: GeneratedComponent[] = [];
     const delay =
-      this.configService.get<number>('reactGenerator.delayBetweenComponents') ??
-      5000;
+      this.configService.get<number>('reactGenerator.delayBetweenComponents') ?? 5000;
 
     for (let i = 0; i < chunks.length; i++) {
       const sectionName = `${componentName}Section${i + 1}`;
       const nodesJson = wpJsonToString(chunks[i]);
 
-      const section = await this.generateSection({
+      // ── Delegate section review to CodeReviewerService ────────────────────
+      const section = await this.codeReviewer.reviewSection({
         sectionName,
         parentName: componentName,
         sectionIndex: i,
         totalSections: chunks.length,
         nodesJson,
         modelName,
+        fixAgentModel,
         systemPrompt,
-        siteInfo: content.siteInfo,
-        menus: content.menus,
-        tokens,
         content,
+        tokens,
         componentPlan,
         logPath,
       });
@@ -274,255 +268,6 @@ export class ReactGeneratorService {
       { name: componentName, filePath: '', code: assemblyCode },
       ...subComponents,
     ];
-  }
-
-  // ── Single-component generation ────────────────────────────────────────────
-
-  private async generateSingle(input: {
-    componentName: string;
-    templateSource: string;
-    modelName: string;
-    systemPrompt: string;
-    content: DbContentResult;
-    tokens?: ThemeTokens;
-    componentPlan?: PlanResult[number];
-    logPath?: string;
-  }): Promise<GeneratedComponent> {
-    const {
-      componentName,
-      templateSource,
-      modelName,
-      systemPrompt,
-      content,
-      tokens,
-      componentPlan,
-      logPath,
-    } = input;
-
-    // ── Stage 1: AI → JSON visual plan ──────────────────────────────────────
-    await this.logToFile(logPath, `[two-stage] Stage 1: requesting visual plan for "${componentName}"`);
-    const { systemPrompt: s1System, userPrompt: s1User } = buildVisualPlanPrompt({
-      componentName,
-      templateSource,
-      content,
-      tokens,
-    });
-
-    let code = '';
-
-    try {
-      const s1Raw = await this.generateWithRetry(
-        modelName,
-        s1System,
-        s1User,
-        3,
-        logPath,
-        `${componentName}:plan`,
-      );
-
-      const visualPlan = parseVisualPlan(s1Raw, componentName);
-
-      if (visualPlan) {
-        // ── Stage 2: deterministic TSX from plan ───────────────────────────
-        await this.logToFile(logPath, `[two-stage] Stage 2: generating TSX from plan (${visualPlan.sections.length} sections)`);
-        code = this.codeGenerator.generate(visualPlan);
-
-        const check = this.validator.checkCodeStructure(code);
-        if (check.isValid) {
-          this.logger.log(`[two-stage] "${componentName}" generated via visual plan ✓`);
-          return { name: componentName, filePath: '', code };
-        }
-
-        this.logger.warn(
-          `[two-stage] "${componentName}" generated code failed validation: ${check.error} — falling back to direct AI`,
-        );
-        await this.logToFile(logPath, `WARN [two-stage] "${componentName}" code-gen failed: ${check.error} — fallback`);
-      } else {
-        this.logger.warn(`[two-stage] "${componentName}" visual plan parse failed — falling back to direct AI`);
-        await this.logToFile(logPath, `WARN [two-stage] "${componentName}" plan parse failed — fallback`);
-      }
-    } catch (err: any) {
-      this.logger.warn(`[two-stage] "${componentName}" Stage 1 error: ${err?.message} — falling back to direct AI`);
-      await this.logToFile(logPath, `WARN [two-stage] "${componentName}" Stage 1 error — fallback`);
-    }
-
-    // ── Fallback: direct AI TSX generation (original behaviour) ─────────────
-    await this.logToFile(logPath, `[two-stage] Fallback: direct AI generation for "${componentName}"`);
-    let lastValidationError: string | undefined;
-    let isValid = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const raw = await this.generateWithRetry(
-        modelName,
-        systemPrompt,
-        buildComponentPrompt(
-          componentName,
-          templateSource,
-          content.siteInfo,
-          content,
-          tokens,
-          componentPlan,
-          attempt > 1
-            ? `Previous attempt failed structural validation: ${lastValidationError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above, keep everything else.`
-            : undefined,
-        ),
-        5,
-        logPath,
-        componentName,
-      );
-      code = this.stripMarkdownFences(raw);
-      code = this.mergeClassNames(code);
-
-      const check = this.validator.checkCodeStructure(code);
-      if (check.isValid) { isValid = true; break; }
-
-      lastValidationError = check.error;
-      this.logger.warn(
-        `Component ${componentName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
-      );
-      await this.logToFile(
-        logPath,
-        `WARN "${componentName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
-      );
-    }
-
-    // ── Self-fix: targeted AI repair pass ──────────────────────────────────
-    if (!isValid && lastValidationError) {
-      await this.logToFile(logPath, `[self-fix] Attempting targeted fix for "${componentName}": ${lastValidationError}`);
-      try {
-        code = await this.selfFix(modelName, code, lastValidationError, logPath, componentName);
-        const check = this.validator.checkCodeStructure(code);
-        if (check.isValid) {
-          isValid = true;
-          this.logger.log(`[self-fix] "${componentName}" fixed successfully ✓`);
-          await this.logToFile(logPath, `[self-fix] "${componentName}" fixed ✓`);
-        } else {
-          await this.logToFile(logPath, `WARN [self-fix] "${componentName}" still invalid after fix: ${check.error}`);
-        }
-      } catch (err: any) {
-        await this.logToFile(logPath, `WARN [self-fix] "${componentName}" fix call failed: ${err?.message}`);
-      }
-    }
-
-    if (!isValid) {
-      throw new Error(
-        `Component "${componentName}" failed validation after 3 attempts + self-fix: ${lastValidationError}`,
-      );
-    }
-
-    return { name: componentName, filePath: '', code };
-  }
-
-  private async selfFix(
-    model: string,
-    brokenCode: string,
-    error: string,
-    logPath?: string,
-    label?: string,
-  ): Promise<string> {
-    const raw = await this.generateWithRetry(
-      model,
-      'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
-      `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
-      3,
-      logPath,
-      label ? `${label}:fix` : undefined,
-    );
-    const fixed = this.stripMarkdownFences(raw);
-    return this.mergeClassNames(fixed);
-  }
-
-  private mergeClassNames(code: string): string {
-    // Simple regex-based approach to merge duplicate className attributes
-    // e.g. <div className="a" className="b"> -> <div className="a b">
-    return code.replace(
-      /(<[a-zA-Z0-9]+[^>]*?)\s+className=["']([^"']*)["']([^>]*?)\s+className=["']([^"']*)["']([^>]*>)/g,
-      (match, tagStart, class1, mid, class2, tagEnd) => {
-        return `${tagStart} className="${class1} ${class2}"${mid}${tagEnd}`;
-      },
-    );
-  }
-
-  // ── Section generation — one AI call per chunk ────────────────────────────
-
-  private async generateSection(input: {
-    sectionName: string;
-    parentName: string;
-    sectionIndex: number;
-    totalSections: number;
-    nodesJson: string;
-    modelName: string;
-    systemPrompt?: string;
-    siteInfo: DbContentResult['siteInfo'];
-    menus: DbContentResult['menus'];
-    tokens?: ThemeTokens;
-    content?: DbContentResult;
-    componentPlan?: PlanResult[number];
-    logPath?: string;
-  }): Promise<GeneratedComponent> {
-    const {
-      sectionName,
-      parentName,
-      sectionIndex,
-      totalSections,
-      nodesJson,
-      modelName,
-      systemPrompt = '',
-      siteInfo,
-      menus,
-      tokens,
-      content,
-      componentPlan,
-      logPath,
-    } = input;
-
-    const userPrompt = buildSectionPrompt({
-      sectionName,
-      parentName,
-      sectionIndex,
-      totalSections,
-      nodesJson,
-      siteInfo,
-      menus,
-      tokens,
-      content,
-      componentPlan,
-    });
-
-    let code = '';
-    let lastValidationError: string | undefined;
-    let isValid = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const raw = await this.generateWithRetry(
-        modelName,
-        systemPrompt,
-        userPrompt,
-        5,
-        logPath,
-        sectionName,
-      );
-      code = this.stripMarkdownFences(raw);
-      code = this.mergeClassNames(code);
-
-      const check = this.validator.checkCodeStructure(code);
-      if (check.isValid) { isValid = true; break; }
-
-      lastValidationError = check.error;
-      this.logger.warn(
-        `Section ${sectionName} failed validation (attempt ${attempt}/3): ${lastValidationError}, retrying...`,
-      );
-      await this.logToFile(
-        logPath,
-        `WARN "${sectionName}" failed validation: ${lastValidationError} — retry ${attempt}/3`,
-      );
-    }
-
-    if (!isValid) {
-      throw new Error(
-        `Section "${sectionName}" failed validation after 3 attempts: ${lastValidationError}`,
-      );
-    }
-
-    return { name: sectionName, filePath: '', code, isSubComponent: true };
   }
 
   // ── Section splitting ──────────────────────────────────────────────────────
@@ -604,125 +349,6 @@ ${renders}
     }
   }
 
-  // ── Shared helpers ─────────────────────────────────────────────────────────
-
-  private async generateWithRetry(
-    model: string,
-    systemPrompt: string,
-    userPrompt: string,
-    maxRetries = 5,
-    logPath?: string,
-    label?: string,
-  ): Promise<string> {
-    let delay = 30000;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const result = await this.llmFactory.chat({
-          model,
-          systemPrompt,
-          userPrompt,
-        });
-
-        await this.tokenTracker.track(
-          model,
-          result.inputTokens,
-          result.outputTokens,
-          label,
-        );
-
-        return result.text;
-      } catch (err: any) {
-        const isRateLimit = err?.status === 429;
-        const isServerError = err?.status === 500 || err?.status === 529;
-        const isTimeout =
-          err?.name === 'APIConnectionTimeoutError' ||
-          err?.name === 'APIConnectionError';
-        if (
-          (isRateLimit || isTimeout || isServerError) &&
-          attempt < maxRetries
-        ) {
-          const reason = isTimeout
-            ? 'Timeout'
-            : isServerError
-              ? 'Server error'
-              : 'Rate limit';
-          const msg = `${reason}, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`;
-          this.logger.warn(msg);
-          await this.logToFile(logPath, `WARN ${msg}`);
-          await new Promise((res) => setTimeout(res, delay));
-          delay = Math.min(delay * 2, 120000);
-        } else {
-          throw err;
-        }
-      }
-    }
-    return '';
-  }
-
-  private isBraceBalanced(code: string): boolean {
-    let depth = 0;
-    for (const ch of code) {
-      if (ch === '{') depth++;
-      else if (ch === '}') depth--;
-    }
-    return depth === 0;
-  }
-
-  private stripMarkdownFences(code: string): string {
-    let result = code
-      .replace(/^```[\w]*\n?/gm, '')
-      .replace(/^```$/gm, '')
-      .trim();
-
-    // Strip preamble: everything before the first real code line
-    const codeStart = result.search(
-      /^(import |export |const |function |\/\/|\/\*)/m,
-    );
-    if (codeStart > 0) {
-      result = result.slice(codeStart).trim();
-    }
-
-    // Strip postamble: use brace depth to find the real end of the component.
-    // Walk from the last `export default` forward, track { } depth.
-    // Everything after the closing `}` (depth back to 0) is explanation text.
-    const lastExportIdx = result.lastIndexOf('\nexport default ');
-    if (lastExportIdx !== -1) {
-      const exportSlice = result.slice(lastExportIdx);
-
-      const exportFirstLine = exportSlice.split('\n')[0];
-      if (/function|=>|\{/.test(exportFirstLine)) {
-        // Function/arrow component: find closing brace via depth tracking
-        let depth = 0;
-        let opened = false;
-        let endIdx = result.length;
-
-        for (let i = lastExportIdx; i < result.length; i++) {
-          const ch = result[i];
-          if (ch === '{') {
-            depth++;
-            opened = true;
-          } else if (ch === '}') {
-            depth--;
-            if (opened && depth === 0) {
-              endIdx = i + 1;
-              break;
-            }
-          }
-        }
-
-        result = result.slice(0, endIdx).trimEnd();
-      } else {
-        // Simple identifier re-export: cut at semicolon
-        const semiIdx = result.indexOf(';', lastExportIdx);
-        if (semiIdx !== -1) {
-          result = result.slice(0, semiIdx + 1).trimEnd();
-        }
-      }
-    }
-
-    return result;
-  }
-
   private toComponentName(templateName: string): string {
     const name = templateName
       .replace(/\.(php|html)$/, '')
@@ -732,3 +358,4 @@ ${renders}
     return /^\d/.test(name) ? `Page${name}` : name;
   }
 }
+

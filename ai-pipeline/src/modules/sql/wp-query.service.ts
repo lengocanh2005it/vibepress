@@ -44,6 +44,21 @@ export interface WpSiteInfo {
   tablePrefix: string;
 }
 
+export interface WpTaxonomyTerm {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  count: number;
+  parentId: number;
+}
+
+export interface WpTaxonomy {
+  /** taxonomy slug, e.g. 'category', 'post_tag', or any custom taxonomy */
+  taxonomy: string;
+  terms: WpTaxonomyTerm[];
+}
+
 @Injectable()
 export class WpQueryService {
   private readonly logger = new Logger(WpQueryService.name);
@@ -126,6 +141,65 @@ export class WpQueryService {
           })),
         });
       }
+
+      return result;
+    } finally {
+      await conn.end();
+    }
+  }
+
+  /**
+   * Get all public taxonomies and their terms.
+   * Includes built-in taxonomies (category, post_tag) and any custom ones registered by plugins/themes.
+   * Only fetches taxonomies that have at least one published post attached.
+   */
+  async getTaxonomies(creds: WpDbCredentials): Promise<WpTaxonomy[]> {
+    const conn = await this.createConnection(creds);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+
+      // Fetch all distinct taxonomy slugs that have published posts
+      const [taxRows] = await conn.query<any[]>(
+        `SELECT DISTINCT tt.taxonomy
+         FROM \`${prefix}term_taxonomy\` tt
+         INNER JOIN \`${prefix}term_relationships\` tr ON tr.term_taxonomy_id = tt.term_taxonomy_id
+         INNER JOIN \`${prefix}posts\` p ON p.ID = tr.object_id
+         WHERE p.post_status = 'publish'
+           AND tt.taxonomy NOT IN ('nav_menu', 'link_category', 'post_format')
+         ORDER BY tt.taxonomy`,
+      );
+
+      const result: WpTaxonomy[] = [];
+
+      for (const { taxonomy } of taxRows) {
+        const [termRows] = await conn.query<any[]>(
+          `SELECT t.term_id, t.name, t.slug, t.term_group,
+                  tt.description, tt.count, tt.parent
+           FROM \`${prefix}terms\` t
+           INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
+           WHERE tt.taxonomy = ? AND tt.count > 0
+           ORDER BY tt.count DESC, t.name ASC`,
+          [taxonomy],
+        );
+
+        if (termRows.length === 0) continue;
+
+        result.push({
+          taxonomy,
+          terms: termRows.map((row) => ({
+            id: row.term_id,
+            name: row.name,
+            slug: row.slug,
+            description: row.description ?? '',
+            count: row.count,
+            parentId: row.parent ?? 0,
+          })),
+        });
+      }
+
+      this.logger.log(
+        `Extracted ${result.length} taxonomies: ${result.map((t) => `${t.taxonomy}(${t.terms.length})`).join(', ')}`,
+      );
 
       return result;
     } finally {
