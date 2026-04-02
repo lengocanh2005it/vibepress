@@ -1,12 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { mkdir, writeFile, cp, readFile, stat } from 'fs/promises';
+import {
+  access,
+  copyFile,
+  cp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
+import { ValidatorService } from '../validator/validator.service.js';
 
 export interface PreviewBuilderResult {
   jobId: string;
@@ -18,6 +30,8 @@ export interface PreviewBuilderResult {
 }
 
 const TEMPLATE_DIR = resolve('templates/react-preview');
+const SERVER_TEMPLATE_DIR = resolve('templates/express-server');
+const DEP_CACHE_ROOT = resolve('temp/cache/template-deps');
 
 const PARTIAL_PATTERNS =
   /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
@@ -26,7 +40,10 @@ const PARTIAL_PATTERNS =
 export class PreviewBuilderService {
   private readonly logger = new Logger(PreviewBuilderService.name);
 
-  constructor(private assetDownloader: AssetDownloaderService) {}
+  constructor(
+    private assetDownloader: AssetDownloaderService,
+    private readonly validator: ValidatorService,
+  ) {}
 
   async build(input: {
     jobId: string;
@@ -161,6 +178,7 @@ export class PreviewBuilderService {
     }
 
     const routes = routeLines.join('\n');
+    const smokeRoutes = this.buildSmokeRoutes([...usedPaths]);
 
     await writeFile(
       join(srcDir, 'App.tsx'),
@@ -185,6 +203,7 @@ ${routes}
     // 5. Generate .env cho từng folder
     const apiPort = this.pickApiPort(jobId);
     const vitePort = this.pickVitePort(jobId);
+    const serverDir = join(rootDir, 'server');
 
     // frontend/.env — chỉ cần biết API chạy ở đâu
     await writeFile(
@@ -198,18 +217,27 @@ ${routes}
       `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n`,
     );
 
-    // 6. npm install cho cả 2 folder song song, rồi spawn dev servers
-    const serverDir = join(rootDir, 'server');
-    this.logger.log('Installing dependencies...');
+    // 6. Reuse cached template dependencies, install only on cache miss
+    this.logger.log('Preparing dependency cache...');
     await Promise.all([
-      this.runNpmInstall(frontendDir),
-      this.runNpmInstall(serverDir),
+      this.attachTemplateDependencies(
+        TEMPLATE_DIR,
+        frontendDir,
+        'react-preview',
+      ),
+      this.attachTemplateDependencies(
+        SERVER_TEMPLATE_DIR,
+        serverDir,
+        'express-server',
+      ),
     ]);
+    await this.validator.assertPreviewBuild(frontendDir);
     this.logger.log('Starting dev servers...');
     const frontendProc = this.spawnDevServer(frontendDir);
     const serverProc = this.spawnDevServer(serverDir);
 
     const previewUrl = `http://localhost:${vitePort}`;
+    await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
     return {
       jobId,
@@ -283,14 +311,15 @@ ${fontEntries}
     const cssLines: string[] = [];
     if (bodyFont) cssLines.push(`body { font-family: ${bodyFont}; }`);
     if (headingFont) {
-      cssLines.push(
-        `h1, h2, h3, h4, h5, h6 { font-family: ${headingFont}; }`,
-      );
+      cssLines.push(`h1, h2, h3, h4, h5, h6 { font-family: ${headingFont}; }`);
     }
     if (cssLines.length > 0) {
       const cssPath = join(frontendDir, 'src', 'index.css');
       const existingCss = await readFile(cssPath, 'utf-8');
-      await writeFile(cssPath, existingCss.trimEnd() + '\n\n' + cssLines.join('\n') + '\n');
+      await writeFile(
+        cssPath,
+        existingCss.trimEnd() + '\n\n' + cssLines.join('\n') + '\n',
+      );
     }
   }
 
@@ -309,6 +338,83 @@ ${fontEntries}
           );
       });
     });
+  }
+
+  private async attachTemplateDependencies(
+    templateDir: string,
+    runtimeDir: string,
+    cacheName: string,
+  ): Promise<void> {
+    const cacheDir = await this.ensureTemplateDependencyCache(
+      templateDir,
+      cacheName,
+    );
+    await this.linkNodeModules(cacheDir, runtimeDir);
+    await this.copyLockfileIfPresent(cacheDir, runtimeDir);
+  }
+
+  private async ensureTemplateDependencyCache(
+    templateDir: string,
+    cacheName: string,
+  ): Promise<string> {
+    const packageJson = await readFile(
+      join(templateDir, 'package.json'),
+      'utf-8',
+    );
+    const cacheKey = createHash('sha1')
+      .update(packageJson)
+      .digest('hex')
+      .slice(0, 12);
+    const cacheDir = join(DEP_CACHE_ROOT, `${cacheName}-${cacheKey}`);
+    const readyMarker = join(cacheDir, '.deps-ready');
+
+    if (await this.pathExists(readyMarker)) {
+      return cacheDir;
+    }
+
+    await mkdir(DEP_CACHE_ROOT, { recursive: true });
+    await rm(cacheDir, { recursive: true, force: true });
+    await cp(templateDir, cacheDir, { recursive: true });
+
+    this.logger.log(`Bootstrapping dependency cache: ${cacheName}-${cacheKey}`);
+    await this.runNpmInstall(cacheDir);
+    await writeFile(readyMarker, new Date().toISOString(), 'utf-8');
+    return cacheDir;
+  }
+
+  private async linkNodeModules(
+    cacheDir: string,
+    runtimeDir: string,
+  ): Promise<void> {
+    const sourceNodeModules = join(cacheDir, 'node_modules');
+    const targetNodeModules = join(runtimeDir, 'node_modules');
+
+    if (!(await this.pathExists(sourceNodeModules))) {
+      throw new Error(
+        `Cached dependencies missing for ${cacheDir}: node_modules not found`,
+      );
+    }
+
+    await rm(targetNodeModules, { recursive: true, force: true });
+    await symlink(sourceNodeModules, targetNodeModules, 'junction');
+  }
+
+  private async copyLockfileIfPresent(
+    cacheDir: string,
+    runtimeDir: string,
+  ): Promise<void> {
+    const sourceLockfile = join(cacheDir, 'package-lock.json');
+    if (!(await this.pathExists(sourceLockfile))) return;
+    await copyFile(sourceLockfile, join(runtimeDir, 'package-lock.json'));
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await access(path);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private spawnDevServer(dir: string) {
@@ -379,5 +485,12 @@ ${fontEntries}
     }
 
     return [...assets];
+  }
+
+  private buildSmokeRoutes(paths: string[]): string[] {
+    const staticRoutes = paths.filter(
+      (path) => path === '/' || (!path.includes(':') && path !== '*'),
+    );
+    return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
   }
 }

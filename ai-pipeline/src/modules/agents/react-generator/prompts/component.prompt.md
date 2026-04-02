@@ -2,16 +2,23 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 
 ## API endpoints — relative paths only, NEVER hardcode host
 
-| Endpoint               | Returns                                                          |
-| ---------------------- | ---------------------------------------------------------------- |
-| `GET /api/site-info`   | `{ siteName, siteUrl, blogDescription, adminEmail, language }`   |
-| `GET /api/posts`       | `Post[]` sorted newest first                                     |
-| `GET /api/posts/:slug` | single `Post`                                                    |
-| `GET /api/pages`       | `Page[]`                                                         |
-| `GET /api/pages/:slug` | single `Page`                                                    |
-| `GET /api/menus`       | `{ name, slug, items: { id, title, url, order, parentId }[] }[]` |
+| Endpoint                                  | Returns                                                               |
+| ----------------------------------------- | --------------------------------------------------------------------- |
+| `GET /api/site-info`                      | `{ siteName, siteUrl, blogDescription, adminEmail, language }`        |
+| `GET /api/posts`                          | `Post[]` sorted newest first                                          |
+| `GET /api/posts/:slug`                    | single `Post`                                                         |
+| `GET /api/pages`                          | `Page[]`                                                              |
+| `GET /api/pages/:slug`                    | single `Page`                                                         |
+| `GET /api/menus`                          | `{ name, slug, items: { id, title, url, order, parentId }[] }[]`      |
+| `GET /api/taxonomies`                     | `string[]` — list of taxonomy slugs (e.g. `"category"`, `"post_tag"`) |
+| `GET /api/taxonomies/:taxonomy`           | `Term[]` — terms for that taxonomy                                    |
+| `GET /api/taxonomies/:taxonomy/:term/posts` | `Post[]` — posts filtered by taxonomy + term slug                   |
+| `GET /api/comments?slug=<post-slug>`      | `Comment[]` — approved comments for a post, ordered oldest-first     |
+| `GET /api/comments?postId=<id>`           | same as above, by post ID                                            |
 
 **Post fields**: `id, title, content, excerpt, slug, type, status, date, author, categories: string[], featuredImage: string|null`
+**Term fields**: `id, name, slug, description, count, parentId`
+**Comment fields**: `id, author, date, content, parentId (0 = top-level), userId`
 ⛔ `post.tags`, `post.title.rendered`, unlisted fields → `undefined`, runtime error.
 ⛔ `site-info` fields: `siteName/siteUrl/blogDescription` — NOT `name/url/description`.
 ⛔ `menus` items: `parentId` is `number` (0 = top-level, never `null`) — filter with `item.parentId === 0`.
@@ -105,6 +112,8 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 ⛔ Footer nav: fetch `/api/menus`, group by menu → columns — NEVER hardcode links
 
 {{dataGrounding}}
+
+{{imageSources}}
 
 {{classicThemeNote}}
 

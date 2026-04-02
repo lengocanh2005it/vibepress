@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { readFile, readdir } from 'fs/promises';
-import { join } from 'path';
+import { readFile, readdir, stat } from 'fs/promises';
+import { basename, join, relative } from 'path';
 import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
 
 export interface ThemeDefaults {
@@ -59,6 +59,15 @@ export interface BlockParseResult {
   templates: { name: string; markup: string }[];
   parts: { name: string; markup: string }[];
   themeName?: string;
+  diagnostics?: BlockParseDiagnostic;
+}
+
+export interface BlockParseDiagnostic {
+  warnings: string[];
+  unresolvedPatterns: string[];
+  unresolvedTemplateParts: string[];
+  templateCount: number;
+  partCount: number;
 }
 
 @Injectable()
@@ -80,26 +89,54 @@ export class BlockParserService {
 
     const themeJson = await this.readJson(join(themeDir, 'theme.json'));
     const tokens = this.extractTokens(themeJson, styleCss);
+    const diagnostics: BlockParseDiagnostic = {
+      warnings: [],
+      unresolvedPatterns: [],
+      unresolvedTemplateParts: [],
+      templateCount: 0,
+      partCount: 0,
+    };
 
     // Build pattern map: slug → markup (from patterns/*.php)
     const patternMap = await this.buildPatternMap(join(themeDir, 'patterns'));
 
     const rawParts = await this.readHtmlDir(join(themeDir, 'parts'));
+    const rawPartMap = new Map<string, string>();
+    for (const p of rawParts) {
+      rawPartMap.set(
+        p.name,
+        this.resolvePatterns(p.markup, patternMap, diagnostics),
+      );
+    }
 
-    // Build part map: slug → resolved markup
+    // Build part map: slug → fully resolved markup (patterns + nested template-parts)
     const partMap = new Map<string, string>();
     for (const p of rawParts) {
-      partMap.set(p.name, this.resolvePatterns(p.markup, patternMap));
+      partMap.set(
+        p.name,
+        this.resolvePartMarkup(
+          p.name,
+          rawPartMap,
+          diagnostics,
+          new Set<string>(),
+        ),
+      );
     }
 
     const rawTemplates = await this.readHtmlDir(join(themeDir, 'templates'));
+    if (rawTemplates.length === 0) {
+      throw new Error(
+        `FSE theme parse failed: no templates found in ${join(themeDir, 'templates')}`,
+      );
+    }
 
     // Resolve patterns + template-parts in templates
     const templates = rawTemplates.map((t) => ({
       name: t.name,
       markup: this.resolveTemplateParts(
-        this.resolvePatterns(t.markup, patternMap),
+        this.resolvePatterns(t.markup, patternMap, diagnostics),
         partMap,
+        diagnostics,
       ),
     }));
 
@@ -108,7 +145,48 @@ export class BlockParserService {
       markup: partMap.get(p.name) ?? p.markup,
     }));
 
-    return { type: 'fse', themeJson, tokens, templates, parts, themeName };
+    diagnostics.templateCount = templates.length;
+    diagnostics.partCount = parts.length;
+
+    if (templates.every((t) => t.markup.trim().length === 0)) {
+      throw new Error(
+        `FSE theme parse failed: ${templates.length} templates were found but all resolved template markups are empty`,
+      );
+    }
+
+    diagnostics.unresolvedPatterns = this.collectUnresolvedRefs(
+      [...templates, ...parts].map((item) => item.markup),
+      /<!-- pattern:([^ ]+) not found -->/g,
+    );
+    diagnostics.unresolvedTemplateParts = this.collectUnresolvedRefs(
+      [...templates, ...parts].map((item) => item.markup),
+      /<!-- part:([^ ]+) not found -->/g,
+    );
+
+    if (diagnostics.unresolvedPatterns.length > 0) {
+      diagnostics.warnings.push(
+        `${diagnostics.unresolvedPatterns.length} unresolved pattern reference(s): ${diagnostics.unresolvedPatterns.join(', ')}`,
+      );
+    }
+    if (diagnostics.unresolvedTemplateParts.length > 0) {
+      diagnostics.warnings.push(
+        `${diagnostics.unresolvedTemplateParts.length} unresolved template-part reference(s): ${diagnostics.unresolvedTemplateParts.join(', ')}`,
+      );
+    }
+
+    diagnostics.warnings.forEach((warning) =>
+      this.logger.warn(`[block parser] ${warning}`),
+    );
+
+    return {
+      type: 'fse',
+      themeJson,
+      tokens,
+      templates,
+      parts,
+      themeName,
+      diagnostics,
+    };
   }
 
   private extractTokens(
@@ -406,15 +484,17 @@ export class BlockParserService {
       const resolvedPad = (() => {
         if (!rawPad) return undefined;
         if (typeof rawPad === 'object') {
-          const { top = '0', right = '0', bottom = '0', left = '0' } =
-            rawPad as any;
+          const {
+            top = '0',
+            right = '0',
+            bottom = '0',
+            left = '0',
+          } = rawPad as any;
           return `${resolveSp(top) ?? top} ${resolveSp(right) ?? right} ${resolveSp(bottom) ?? bottom} ${resolveSp(left) ?? left}`;
         }
         return resolveSp(rawPad as string) ?? (rawPad as string);
       })();
-      const resolvedGap = rawGap
-        ? (resolveSp(rawGap) ?? rawGap)
-        : undefined;
+      const resolvedGap = rawGap ? (resolveSp(rawGap) ?? rawGap) : undefined;
       if (resolvedPad || resolvedGap) {
         resolved.spacing = {
           ...(resolvedPad && { padding: resolvedPad }),
@@ -437,11 +517,77 @@ export class BlockParserService {
   private resolveTemplateParts(
     markup: string,
     partMap: Map<string, string>,
+    diagnostics?: BlockParseDiagnostic,
   ): string {
     return markup.replace(
       /<!-- wp:template-part \{[^}]*"slug":"([^"]+)"[^}]*\} \/-->/g,
-      (_, slug) => partMap.get(slug) ?? `<!-- part:${slug} not found -->`,
+      (_, slug) =>
+        this.findPartMarkup(slug, partMap) ?? `<!-- part:${slug} not found -->`,
     );
+  }
+
+  private resolvePartMarkup(
+    partName: string,
+    rawPartMap: Map<string, string>,
+    diagnostics: BlockParseDiagnostic,
+    stack: Set<string>,
+  ): string {
+    const markup = rawPartMap.get(partName);
+    if (!markup) {
+      diagnostics.unresolvedTemplateParts.push(partName);
+      return `<!-- part:${partName} not found -->`;
+    }
+
+    if (stack.has(partName)) {
+      diagnostics.warnings.push(
+        `Circular template-part reference detected for "${partName}" — nested expansion stopped.`,
+      );
+      return `<!-- part:${partName} circular reference -->`;
+    }
+
+    const nextStack = new Set(stack);
+    nextStack.add(partName);
+
+    return markup.replace(
+      /<!-- wp:template-part \{[^}]*"slug":"([^"]+)"[^}]*\} \/-->/g,
+      (_, slug) => {
+        const resolvedName = this.findPartName(slug, rawPartMap);
+        if (!resolvedName) return `<!-- part:${slug} not found -->`;
+        return this.resolvePartMarkup(
+          resolvedName,
+          rawPartMap,
+          diagnostics,
+          nextStack,
+        );
+      },
+    );
+  }
+
+  private findPartMarkup(
+    slug: string,
+    partMap: Map<string, string>,
+  ): string | undefined {
+    const resolvedName = this.findPartName(slug, partMap);
+    return resolvedName ? partMap.get(resolvedName) : undefined;
+  }
+
+  private findPartName(
+    slug: string,
+    partMap: Map<string, unknown>,
+  ): string | undefined {
+    if (partMap.has(slug)) return slug;
+
+    const normalizedSlug = slug.replace(/^\/+|\/+$/g, '');
+    if (partMap.has(normalizedSlug)) return normalizedSlug;
+
+    const matches = [...partMap.keys()].filter((key) => {
+      if (key === normalizedSlug) return true;
+      return (
+        key.endsWith(`/${normalizedSlug}`) || basename(key) === normalizedSlug
+      );
+    });
+
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   /**
@@ -453,9 +599,7 @@ export class BlockParserService {
   ): Promise<Map<string, string>> {
     const map = new Map<string, string>();
     try {
-      const files = (await readdir(patternsDir)).filter((f) =>
-        f.endsWith('.php'),
-      );
+      const files = await this.walkFiles(patternsDir, '.php');
       for (const file of files) {
         const raw = await readFile(join(patternsDir, file), 'utf-8');
         const slugMatch = raw.match(/\*\s*Slug:\s*(.+)/);
@@ -477,6 +621,7 @@ export class BlockParserService {
   private resolvePatterns(
     markup: string,
     patternMap: Map<string, string>,
+    _diagnostics?: BlockParseDiagnostic,
     depth = 0,
   ): string {
     if (depth > 5) return markup;
@@ -485,9 +630,24 @@ export class BlockParserService {
       (_, slug) => {
         const patternMarkup = patternMap.get(slug);
         if (!patternMarkup) return `<!-- pattern:${slug} not found -->`;
-        return this.resolvePatterns(patternMarkup, patternMap, depth + 1);
+        return this.resolvePatterns(
+          patternMarkup,
+          patternMap,
+          _diagnostics,
+          depth + 1,
+        );
       },
     );
+  }
+
+  private collectUnresolvedRefs(markups: string[], re: RegExp): string[] {
+    const results = new Set<string>();
+    for (const markup of markups) {
+      for (const match of markup.matchAll(re)) {
+        results.add(match[1]);
+      }
+    }
+    return [...results];
   }
 
   /**
@@ -611,18 +771,43 @@ export class BlockParserService {
     dir: string,
   ): Promise<{ name: string; markup: string }[]> {
     try {
-      const entries = await readdir(dir);
+      const entries = await this.walkFiles(dir, '.html');
       return Promise.all(
-        entries
-          .filter((f) => f.endsWith('.html'))
-          .map(async (file) => ({
-            name: file.replace('.html', ''),
-            markup: await readFile(join(dir, file), 'utf-8'),
-          })),
+        entries.map(async (file) => ({
+          name: this.normalizeRelativeName(file.replace(/\.html$/i, '')),
+          markup: await readFile(join(dir, file), 'utf-8'),
+        })),
       );
     } catch {
       return [];
     }
+  }
+
+  private async walkFiles(
+    dir: string,
+    ext: '.php' | '.html',
+  ): Promise<string[]> {
+    const results: string[] = [];
+    const visit = async (currentDir: string): Promise<void> => {
+      const entries = await readdir(currentDir);
+      for (const entry of entries) {
+        const fullPath = join(currentDir, entry);
+        const info = await stat(fullPath);
+        if (info.isDirectory()) {
+          await visit(fullPath);
+          continue;
+        }
+        if (!entry.toLowerCase().endsWith(ext)) continue;
+        results.push(relative(dir, fullPath).replace(/\\/g, '/'));
+      }
+    };
+
+    await visit(dir);
+    return results.sort((a, b) => a.localeCompare(b));
+  }
+
+  private normalizeRelativeName(value: string): string {
+    return value.replace(/\\/g, '/').replace(/^\.\/+/, '');
   }
 
   private async readJson(path: string): Promise<Record<string, any> | null> {

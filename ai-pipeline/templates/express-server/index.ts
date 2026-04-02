@@ -43,6 +43,68 @@ async function getPrefix(
   return rows[0].tableName.replace(/options$/, '');
 }
 
+function parseSerializedPhpStringArray(serialized: string): string[] {
+  if (!serialized) return [];
+  const result: string[] = [];
+  const regex = /s:\d+:"([^"]+)";/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(serialized)) !== null) {
+    result.push(match[1]);
+  }
+  return result;
+}
+
+async function getStoreCapabilities(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+) {
+  const [optionRows] = await conn.query<any[]>(
+    `SELECT option_name, option_value FROM \`${prefix}options\`
+     WHERE option_name IN ('active_plugins', 'woocommerce_db_version')`,
+  );
+  const optionMap = new Map<string, string>();
+  for (const row of optionRows) {
+    optionMap.set(row.option_name, row.option_value ?? '');
+  }
+
+  const activePlugins = parseSerializedPhpStringArray(
+    optionMap.get('active_plugins') ?? '',
+  );
+
+  const [productRows] = await conn.query<any[]>(
+    `SELECT COUNT(*) AS total
+     FROM \`${prefix}posts\`
+     WHERE post_type = 'product' AND post_status IN ('publish', 'private')`,
+  );
+  const [productCategoryRows] = await conn.query<any[]>(
+    `SELECT COUNT(*) AS total
+     FROM \`${prefix}term_taxonomy\`
+     WHERE taxonomy = 'product_cat'`,
+  );
+  const [corePageRows] = await conn.query<any[]>(
+    `SELECT post_name
+     FROM \`${prefix}posts\`
+     WHERE post_type = 'page'
+       AND post_status IN ('publish', 'private')
+       AND post_name IN ('shop', 'cart', 'checkout', 'my-account')`,
+  );
+
+  const hasWooCommerce =
+    activePlugins.some((pluginFile) => pluginFile.startsWith('woocommerce/')) ||
+    !!optionMap.get('woocommerce_db_version') ||
+    Number(productRows[0]?.total ?? 0) > 0 ||
+    Number(productCategoryRows[0]?.total ?? 0) > 0 ||
+    corePageRows.length > 0;
+
+  return {
+    wooCommerce: hasWooCommerce,
+    activePlugins,
+    productsCount: Number(productRows[0]?.total ?? 0),
+    productCategoriesCount: Number(productCategoryRows[0]?.total ?? 0),
+    corePages: corePageRows.map((row) => String(row.post_name)),
+  };
+}
+
 app.get('/api/site-info', async (req, res) => {
   const conn = await getConn();
   try {
@@ -209,6 +271,143 @@ app.get('/api/pages', async (req, res) => {
   }
 });
 
+app.get('/api/store/capabilities', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    res.json(await getStoreCapabilities(conn, prefix));
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/products', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_status,
+              p.post_date,
+              sku.meta_value AS sku,
+              price.meta_value AS price,
+              regular_price.meta_value AS regular_price,
+              sale_price.meta_value AS sale_price,
+              img.guid AS featured_image,
+              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
+               FROM \`${prefix}term_relationships\` tr2
+               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+               WHERE tt2.taxonomy = 'product_cat' AND tr2.object_id = p.ID) AS categories
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` sku ON sku.post_id = p.ID AND sku.meta_key = '_sku'
+       LEFT JOIN \`${prefix}postmeta\` price ON price.post_id = p.ID AND price.meta_key = '_price'
+       LEFT JOIN \`${prefix}postmeta\` regular_price ON regular_price.post_id = p.ID AND regular_price.meta_key = '_regular_price'
+       LEFT JOIN \`${prefix}postmeta\` sale_price ON sale_price.post_id = p.ID AND sale_price.meta_key = '_sale_price'
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       WHERE p.post_type = 'product' AND p.post_status IN ('publish', 'private')
+       ORDER BY p.menu_order ASC, p.post_date DESC`,
+    );
+    res.json(
+      rows.map((r) => ({
+        id: r.ID,
+        title: r.post_title,
+        content: r.post_content,
+        excerpt: r.post_excerpt,
+        slug: r.post_name,
+        status: r.post_status,
+        date: formatDate(r.post_date),
+        sku: r.sku ?? '',
+        price: r.price ?? null,
+        regularPrice: r.regular_price ?? null,
+        salePrice: r.sale_price ?? null,
+        featuredImage: r.featured_image ?? null,
+        categories: r.categories ? r.categories.split(', ') : [],
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/products/:slug', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_status,
+              p.post_date,
+              sku.meta_value AS sku,
+              price.meta_value AS price,
+              regular_price.meta_value AS regular_price,
+              sale_price.meta_value AS sale_price,
+              img.guid AS featured_image,
+              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
+               FROM \`${prefix}term_relationships\` tr2
+               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+               WHERE tt2.taxonomy = 'product_cat' AND tr2.object_id = p.ID) AS categories
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` sku ON sku.post_id = p.ID AND sku.meta_key = '_sku'
+       LEFT JOIN \`${prefix}postmeta\` price ON price.post_id = p.ID AND price.meta_key = '_price'
+       LEFT JOIN \`${prefix}postmeta\` regular_price ON regular_price.post_id = p.ID AND regular_price.meta_key = '_regular_price'
+       LEFT JOIN \`${prefix}postmeta\` sale_price ON sale_price.post_id = p.ID AND sale_price.meta_key = '_sale_price'
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       WHERE p.post_type = 'product'
+         AND p.post_status IN ('publish', 'private')
+         AND p.post_name = ?
+       LIMIT 1`,
+      [req.params.slug],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const r = rows[0];
+    res.json({
+      id: r.ID,
+      title: r.post_title,
+      content: r.post_content,
+      excerpt: r.post_excerpt,
+      slug: r.post_name,
+      status: r.post_status,
+      date: formatDate(r.post_date),
+      sku: r.sku ?? '',
+      price: r.price ?? null,
+      regularPrice: r.regular_price ?? null,
+      salePrice: r.sale_price ?? null,
+      featuredImage: r.featured_image ?? null,
+      categories: r.categories ? r.categories.split(', ') : [],
+    });
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/product-categories', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT t.term_id, t.name, t.slug, tt.description, tt.parent, tt.count
+       FROM \`${prefix}terms\` t
+       INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
+       WHERE tt.taxonomy = 'product_cat'
+       ORDER BY tt.count DESC, t.name ASC`,
+    );
+    res.json(
+      rows.map((row) => ({
+        id: row.term_id,
+        name: row.name,
+        slug: row.slug,
+        description: row.description ?? '',
+        parentId: row.parent ?? 0,
+        count: row.count ?? 0,
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
 // Normalize a WordPress URL to a React Router path.
 // Strips host, converts /pages/ → /page/ and /posts/ → /post/.
 // External URLs (different origin) are kept as-is.
@@ -288,6 +487,143 @@ app.get('/api/menus', async (req, res) => {
       });
     }
     res.json(result);
+  } finally {
+    await conn.end();
+  }
+});
+
+// ── Taxonomy endpoints ─────────────────────────────────────────────────────
+
+// List all taxonomy slugs that have published posts
+app.get('/api/taxonomies', async (_req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT DISTINCT tt.taxonomy
+       FROM \`${prefix}term_taxonomy\` tt
+       INNER JOIN \`${prefix}term_relationships\` tr ON tr.term_taxonomy_id = tt.term_taxonomy_id
+       INNER JOIN \`${prefix}posts\` p ON p.ID = tr.object_id
+       WHERE p.post_status = 'publish'
+         AND tt.taxonomy NOT IN ('nav_menu', 'link_category', 'post_format')
+       ORDER BY tt.taxonomy`,
+    );
+    res.json(rows.map((r: any) => r.taxonomy));
+  } finally {
+    await conn.end();
+  }
+});
+
+// Get terms for a specific taxonomy (e.g. category, post_tag, product_cat)
+app.get('/api/taxonomies/:taxonomy', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT t.term_id, t.name, t.slug, tt.description, tt.count, tt.parent
+       FROM \`${prefix}terms\` t
+       INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
+       WHERE tt.taxonomy = ? AND tt.count > 0
+       ORDER BY tt.count DESC, t.name ASC`,
+      [req.params.taxonomy],
+    );
+    res.json(
+      rows.map((r: any) => ({
+        id: r.term_id,
+        name: r.name,
+        slug: r.slug,
+        description: r.description ?? '',
+        count: r.count,
+        parentId: r.parent ?? 0,
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
+// Get published posts filtered by taxonomy + term slug
+app.get('/api/taxonomies/:taxonomy/:term/posts', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name,
+              p.post_type, p.post_status, p.post_date,
+              u.display_name AS author_name,
+              img.guid AS featured_image
+       FROM \`${prefix}posts\` p
+       INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
+       INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+       INNER JOIN \`${prefix}terms\` t ON t.term_id = tt.term_id
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE tt.taxonomy = ? AND t.slug = ? AND p.post_status = 'publish'
+       ORDER BY p.post_date DESC`,
+      [req.params.taxonomy, req.params.term],
+    );
+    res.json(
+      rows.map((r: any) => ({
+        id: r.ID,
+        title: r.post_title,
+        content: r.post_content,
+        excerpt: r.post_excerpt,
+        slug: r.post_name,
+        type: r.post_type,
+        status: r.post_status,
+        date: formatDate(r.post_date),
+        author: r.author_name ?? '',
+        featuredImage: r.featured_image ?? null,
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
+// ── Comments endpoint ──────────────────────────────────────────────────────
+
+// Get approved comments for a post — supports ?postId=<id> or ?slug=<post-slug>
+app.get('/api/comments', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    let postId: number | null = null;
+
+    if (req.query.postId) {
+      postId = Number(req.query.postId);
+    } else if (req.query.slug) {
+      const [slugRows] = await conn.query<any[]>(
+        `SELECT ID FROM \`${prefix}posts\`
+         WHERE post_name = ? AND post_status = 'publish' LIMIT 1`,
+        [req.query.slug],
+      );
+      postId = slugRows[0]?.ID ?? null;
+    }
+
+    if (!postId) {
+      return res.status(400).json({ error: 'postId or slug query param required' });
+    }
+
+    const [rows] = await conn.query<any[]>(
+      `SELECT c.comment_ID, c.comment_author, c.comment_date,
+              c.comment_content, c.comment_parent, c.user_id
+       FROM \`${prefix}comments\` c
+       WHERE c.comment_post_ID = ? AND c.comment_approved = '1'
+       ORDER BY c.comment_date ASC`,
+      [postId],
+    );
+    res.json(
+      rows.map((r: any) => ({
+        id: r.comment_ID,
+        author: r.comment_author,
+        date: formatDate(r.comment_date),
+        content: r.comment_content,
+        parentId: r.comment_parent ?? 0,
+        userId: r.user_id ?? 0,
+      })),
+    );
   } finally {
     await conn.end();
   }

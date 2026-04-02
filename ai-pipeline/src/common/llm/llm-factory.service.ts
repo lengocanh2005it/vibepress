@@ -72,7 +72,14 @@ export class LlmFactoryService {
    * e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
    */
   private static readonly KNOWN_PROVIDERS = new Set<LlmProvider>([
-    'anthropic', 'mistral', 'groq', 'cerebras', 'gemini', 'openai', 'ollama', 'custom',
+    'anthropic',
+    'mistral',
+    'groq',
+    'cerebras',
+    'gemini',
+    'openai',
+    'ollama',
+    'custom',
   ]);
 
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
@@ -103,7 +110,10 @@ export class LlmFactoryService {
       case 'gemini':
         return this.chatGemini(resolvedParams);
       case 'groq':
-        return this.chatOpenAICompat(this.groq as unknown as OpenAI, resolvedParams);
+        return this.chatOpenAICompat(
+          this.groq as unknown as OpenAI,
+          resolvedParams,
+        );
       case 'cerebras':
         return this.chatOpenAICompat(this.cerebras, resolvedParams);
       case 'openai':
@@ -143,9 +153,10 @@ export class LlmFactoryService {
     });
 
     const text = response.choices[0]?.message?.content;
+    const finishReason = response.choices[0]?.finish_reason;
     if (!text) {
       throw new Error(
-        `Empty response from ${model} (finish_reason: ${response.choices[0]?.finish_reason ?? 'unknown'})`,
+        `Empty response from ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
       );
     }
 
@@ -153,6 +164,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usage?.prompt_tokens ?? 0,
       outputTokens: response.usage?.completion_tokens ?? 0,
+      truncated: finishReason === 'length',
     };
   }
 
@@ -180,9 +192,10 @@ export class LlmFactoryService {
     });
 
     const text = response.choices[0]?.message?.content;
+    const finishReason = response.choices[0]?.finish_reason;
     if (!text) {
       throw new Error(
-        `Empty response from ${model} (finish_reason: ${response.choices[0]?.finish_reason ?? 'unknown'})`,
+        `Empty response from ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
       );
     }
 
@@ -190,6 +203,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usage?.prompt_tokens ?? 0,
       outputTokens: response.usage?.completion_tokens ?? 0,
+      truncated: finishReason === 'length',
     };
   }
 
@@ -221,6 +235,7 @@ export class LlmFactoryService {
       text: firstBlock.text,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+      truncated: response.stop_reason === 'max_tokens',
     };
   }
 
@@ -251,6 +266,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
       outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+      truncated: response.candidates?.[0]?.finishReason === 'MAX_TOKENS',
     };
   }
 
@@ -288,10 +304,11 @@ export class LlmFactoryService {
     );
 
     const { text, inputTokens, outputTokens } = response.data;
+    const finishReason = response.data.choices?.[0]?.finish_reason;
 
     if (!text) {
       throw new Error(
-        `Empty response from custom model ${model} (finish_reason: ${response.data.choices?.[0]?.finish_reason ?? 'unknown'})`,
+        `Empty response from custom model ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
       );
     }
 
@@ -299,6 +316,7 @@ export class LlmFactoryService {
       text,
       inputTokens: inputTokens ?? 0,
       outputTokens: outputTokens ?? 0,
+      truncated: finishReason === 'length',
     };
   }
 
@@ -332,6 +350,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.prompt_eval_count ?? 0,
       outputTokens: response.eval_count ?? 0,
+      truncated: response.done_reason === 'length',
     };
   }
 }

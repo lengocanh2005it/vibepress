@@ -48,13 +48,28 @@ export default () => ({
       10,
     ),
   },
+  planner: {
+    visualPlanConcurrency: parseInt(
+      process.env.PLANNER_VISUAL_CONCURRENCY ?? '3',
+      10,
+    ),
+  },
   // Per-step model overrides — format: "provider/model" or plain model name.
-  // e.g. PLANNER_MODEL=mistral/mistral-large-latest
-  //      CODE_REVIEWER_MODEL=ollama/qwen2.5-coder:7b
+  // Preferred env names:
+  //   PLANNING_MODEL=openai/gpt-4.0
+  //   GEN_CODE_MODEL=mistral/codestral-latest
+  //   REVIEW_CODE_MODEL=openai/gpt-4.0
+  // Backward-compatible aliases:
+  //   PLANNER_MODEL, CODE_REVIEWER_MODEL, FIX_AGENT_MODEL
   pipeline: {
-    plannerModel:      process.env.PLANNER_MODEL,
-    codeReviewerModel: process.env.CODE_REVIEWER_MODEL,
-    fixAgentModel:     process.env.FIX_AGENT_MODEL,
+    planningModel: process.env.PLANNING_MODEL ?? process.env.PLANNER_MODEL,
+    genCodeModel: process.env.GEN_CODE_MODEL,
+    reviewCodeModel:
+      process.env.REVIEW_CODE_MODEL ?? process.env.CODE_REVIEWER_MODEL,
+    fixAgentModel:
+      process.env.FIX_AGENT_MODEL ??
+      process.env.REVIEW_CODE_MODEL ??
+      process.env.CODE_REVIEWER_MODEL,
   },
   github: {
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,

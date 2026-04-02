@@ -44,6 +44,67 @@ export interface WpSiteInfo {
   tablePrefix: string;
 }
 
+export interface WpPluginInfo {
+  slug: string;
+  pluginFile: string;
+  active: boolean;
+  source: 'active_plugins' | 'heuristic';
+}
+
+export interface WpCommerceInfo {
+  hasWooCommerce: boolean;
+  productsCount: number;
+  productCategoriesCount: number;
+  corePages: string[];
+}
+
+export interface WpSiteCapabilities {
+  wooCommerce: boolean;
+  activePluginSlugs: string[];
+}
+
+export interface WpMetaKeyUsage {
+  metaKey: string;
+  count: number;
+}
+
+export interface WpShortcodeUsage {
+  shortcode: string;
+  count: number;
+}
+
+export interface WpBlockTypeUsage {
+  blockType: string;
+  count: number;
+}
+
+export interface WpElementorDocument {
+  postId: number;
+  postType: string;
+  slug: string;
+  title: string;
+  widgetTypes: string[];
+}
+
+export interface WpCustomPostType {
+  postType: string;
+  count: number;
+  /** Taxonomy slugs associated with this post type, e.g. ['product_cat', 'product_tag'] */
+  taxonomies: string[];
+}
+
+export interface WpRuntimeFeatures {
+  plugins: WpPluginInfo[];
+  metaKeys: WpMetaKeyUsage[];
+  shortcodes: WpShortcodeUsage[];
+  blockTypes: WpBlockTypeUsage[];
+  optionKeys: string[];
+  elementorDocuments: WpElementorDocument[];
+  customPostTypes: WpCustomPostType[];
+  capabilities: WpSiteCapabilities;
+  commerce: WpCommerceInfo;
+}
+
 export interface WpTaxonomyTerm {
   id: number;
   name: string;
@@ -252,6 +313,212 @@ export class WpQueryService {
     }
   }
 
+  async getRuntimeFeatures(creds: WpDbCredentials): Promise<WpRuntimeFeatures> {
+    const conn = await this.createConnection(creds);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [optionRows] = await conn.query<any[]>(
+        `SELECT option_name, option_value FROM \`${prefix}options\`
+         WHERE option_name IN ('active_plugins', 'woocommerce_db_version')
+            OR option_name LIKE 'woocommerce_%'
+            OR option_name LIKE 'elementor_%'
+            OR option_name LIKE 'acf_%'
+            OR option_name LIKE 'wpseo_%'`,
+      );
+
+      const optionMap = new Map<string, string>();
+      for (const row of optionRows) {
+        optionMap.set(row.option_name, row.option_value ?? '');
+      }
+
+      const activePluginFiles = this.parseSerializedPhpStringArray(
+        optionMap.get('active_plugins') ?? '',
+      );
+      const plugins = activePluginFiles.map<WpPluginInfo>((pluginFile) => ({
+        slug: pluginFile.split('/')[0] || pluginFile,
+        pluginFile,
+        active: true,
+        source: 'active_plugins',
+      }));
+      const optionKeys = optionRows
+        .map((row) => String(row.option_name))
+        .filter((name) => name !== 'active_plugins')
+        .sort();
+
+      const explicitMetaKeys = [
+        '_elementor_data',
+        '_elementor_css',
+        '_price',
+        '_sku',
+        '_stock_status',
+        '_wc_average_rating',
+      ];
+      const metaLikeClauses = [
+        'meta_key LIKE ?',
+        'meta_key LIKE ?',
+        'meta_key LIKE ?',
+        'meta_key LIKE ?',
+      ].join(' OR ');
+      const [metaKeyRows] = await conn.query<any[]>(
+        `SELECT meta_key, COUNT(*) AS cnt
+         FROM \`${prefix}postmeta\`
+         WHERE meta_key IN (${explicitMetaKeys.map(() => '?').join(',')})
+            OR ${metaLikeClauses}
+         GROUP BY meta_key
+         ORDER BY cnt DESC, meta_key ASC`,
+        [
+          ...explicitMetaKeys,
+          'elementor_%',
+          'woocommerce_%',
+          'acf_%',
+          '_acf_%',
+        ],
+      );
+      const metaKeys: WpMetaKeyUsage[] = metaKeyRows.map((row) => ({
+        metaKey: String(row.meta_key),
+        count: Number(row.cnt),
+      }));
+
+      const [productRows] = await conn.query<any[]>(
+        `SELECT COUNT(*) AS total
+         FROM \`${prefix}posts\`
+         WHERE post_type = 'product' AND post_status IN ('publish', 'private')`,
+      );
+      const [productCategoryRows] = await conn.query<any[]>(
+        `SELECT COUNT(*) AS total
+         FROM \`${prefix}term_taxonomy\`
+         WHERE taxonomy = 'product_cat'`,
+      );
+      const [corePageRows] = await conn.query<any[]>(
+        `SELECT post_name
+         FROM \`${prefix}posts\`
+         WHERE post_type = 'page'
+           AND post_status IN ('publish', 'private')
+           AND post_name IN ('shop', 'cart', 'checkout', 'my-account')`,
+      );
+      const [shortcodeRows] = await conn.query<any[]>(
+        `SELECT post_content
+         FROM \`${prefix}posts\`
+         WHERE post_status IN ('publish', 'private')
+           AND post_content LIKE '%[%'`,
+      );
+      const [blockRows] = await conn.query<any[]>(
+        `SELECT post_content
+         FROM \`${prefix}posts\`
+         WHERE post_status IN ('publish', 'private')
+           AND post_content LIKE '%<!-- wp:%'`,
+      );
+      const [elementorRows] = await conn.query<any[]>(
+        `SELECT p.ID, p.post_type, p.post_name, p.post_title, pm.meta_value
+         FROM \`${prefix}posts\` p
+         INNER JOIN \`${prefix}postmeta\` pm
+           ON pm.post_id = p.ID AND pm.meta_key = '_elementor_data'
+         WHERE p.post_status IN ('publish', 'private')`,
+      );
+
+      const productsCount = Number(productRows[0]?.total ?? 0);
+      const productCategoriesCount = Number(productCategoryRows[0]?.total ?? 0);
+      const corePages = corePageRows.map((row) => String(row.post_name));
+      const shortcodes = this.collectUsage(
+        shortcodeRows.map((row) => String(row.post_content ?? '')),
+        /\[([a-z0-9_-]+)/gi,
+      ).map(([shortcode, count]) => ({ shortcode, count }));
+      const blockTypes = this.collectUsage(
+        blockRows.map((row) => String(row.post_content ?? '')),
+        /<!--\s*wp:([a-z0-9/-]+)/gi,
+      ).map(([blockType, count]) => ({ blockType, count }));
+      const elementorDocuments: WpElementorDocument[] = elementorRows.map((row) => ({
+        postId: Number(row.ID),
+        postType: String(row.post_type),
+        slug: String(row.post_name ?? ''),
+        title: String(row.post_title ?? ''),
+        widgetTypes: this.extractElementorWidgetTypes(String(row.meta_value ?? '')),
+      }));
+
+      const hasWooByPlugin = plugins.some((plugin) => plugin.slug === 'woocommerce');
+      const hasWooByData =
+        !!optionMap.get('woocommerce_db_version') ||
+        productsCount > 0 ||
+        productCategoriesCount > 0 ||
+        corePages.length > 0;
+      const hasWooCommerce = hasWooByPlugin || hasWooByData;
+
+      if (hasWooCommerce && !hasWooByPlugin) {
+        plugins.push({
+          slug: 'woocommerce',
+          pluginFile: 'woocommerce/woocommerce.php',
+          active: true,
+          source: 'heuristic',
+        });
+      }
+
+      const activePluginSlugs = Array.from(
+        new Set(plugins.map((plugin) => plugin.slug).filter(Boolean)),
+      ).sort();
+
+      // Detect custom post types registered by plugins (excludes all WP built-ins)
+      const BUILTIN_POST_TYPES = [
+        'post', 'page', 'attachment', 'revision', 'nav_menu_item',
+        'custom_css', 'customize_changeset', 'oembed_cache', 'user_request',
+        'wp_block', 'wp_template', 'wp_template_part', 'wp_global_styles',
+        'wp_navigation', 'wp_font_face', 'wp_font_family',
+      ];
+      const ph = BUILTIN_POST_TYPES.map(() => '?').join(',');
+      const [cptCountRows] = await conn.query<any[]>(
+        `SELECT post_type, COUNT(*) AS cnt
+         FROM \`${prefix}posts\`
+         WHERE post_status IN ('publish', 'private')
+           AND post_type NOT IN (${ph})
+         GROUP BY post_type
+         ORDER BY cnt DESC`,
+        BUILTIN_POST_TYPES,
+      );
+      const [cptTaxRows] = await conn.query<any[]>(
+        `SELECT DISTINCT p.post_type, tt.taxonomy
+         FROM \`${prefix}posts\` p
+         INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
+         INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+         WHERE p.post_status IN ('publish', 'private')
+           AND p.post_type NOT IN (${ph})
+           AND tt.taxonomy NOT IN ('nav_menu', 'link_category', 'post_format')`,
+        BUILTIN_POST_TYPES,
+      );
+      const cptTaxMap = new Map<string, string[]>();
+      for (const row of cptTaxRows) {
+        const arr = cptTaxMap.get(row.post_type) ?? [];
+        arr.push(row.taxonomy);
+        cptTaxMap.set(row.post_type, arr);
+      }
+      const customPostTypes: WpCustomPostType[] = cptCountRows.map((row) => ({
+        postType: String(row.post_type),
+        count: Number(row.cnt),
+        taxonomies: cptTaxMap.get(row.post_type) ?? [],
+      }));
+
+      return {
+        plugins,
+        metaKeys,
+        shortcodes,
+        blockTypes,
+        optionKeys,
+        elementorDocuments,
+        customPostTypes,
+        capabilities: {
+          wooCommerce: hasWooCommerce,
+          activePluginSlugs,
+        },
+        commerce: {
+          hasWooCommerce,
+          productsCount,
+          productCategoriesCount,
+          corePages,
+        },
+      };
+    } finally {
+      await conn.end();
+    }
+  }
+
   // Tự detect table prefix từ information_schema
   private async getTablePrefix(
     conn: Awaited<ReturnType<typeof createConnection>>,
@@ -296,5 +563,68 @@ export class WpQueryService {
       menuOrder: row.menu_order,
       template: row.template,
     };
+  }
+
+  private parseSerializedPhpStringArray(serialized: string): string[] {
+    if (!serialized) return [];
+    const result: string[] = [];
+    const regex = /s:\d+:"([^"]+)";/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(serialized)) !== null) {
+      result.push(match[1]);
+    }
+    return result;
+  }
+
+  private collectUsage(
+    contents: string[],
+    pattern: RegExp,
+  ): Array<[string, number]> {
+    const counts = new Map<string, number>();
+    for (const content of contents) {
+      pattern.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(content)) !== null) {
+        const key = String(match[1] ?? '').trim().toLowerCase();
+        if (!key) continue;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
+
+  private extractElementorWidgetTypes(raw: string): string[] {
+    if (!raw) return [];
+
+    let parsed: unknown = raw;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return [];
+      }
+    }
+
+    const widgetTypes = new Set<string>();
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+
+      const record = node as Record<string, unknown>;
+      const widgetType = record['widgetType'];
+      if (typeof widgetType === 'string' && widgetType) {
+        widgetTypes.add(widgetType);
+      }
+
+      for (const value of Object.values(record)) {
+        visit(value);
+      }
+    };
+
+    visit(parsed);
+    return [...widgetTypes].sort();
   }
 }

@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    cacheDir: '.vite',
     server: {
       port: parseInt(env.VITE_PORT || '5173', 10),
       proxy: {

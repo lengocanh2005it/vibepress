@@ -241,8 +241,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
         parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
       if (style.border?.radius)
         parts.push(`rounded \`rounded-[${style.border.radius}]\``);
-      if (style.spacing?.gap)
-        parts.push(`gap \`gap-[${style.spacing.gap}]\``);
+      if (style.spacing?.gap) parts.push(`gap \`gap-[${style.spacing.gap}]\``);
       if (style.spacing?.padding)
         parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
       if (parts.length > 0)
@@ -285,16 +284,22 @@ ${texts.map((t) => `- ${t}`).join('\n')}
  * Injects explicit rules when the template is a classic PHP theme
  * (identified by {/* WP: ... *\/} hint comments instead of a JSON block tree).
  */
-function buildClassicThemeNote(templateSource: string, isSingle: boolean, isPage: boolean): string {
+function buildClassicThemeNote(
+  templateSource: string,
+  isSingle: boolean,
+  isPage: boolean,
+): string {
   if (!templateSource.includes('{/* WP:')) return '';
 
-  const contentHint = (isSingle || isPage)
-    ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
-    : `- \`{/* WP: post.content (HTML) */}\` → fetch \`GET /api/pages\` and render \`pages[0]?.content\` with \`dangerouslySetInnerHTML={{ __html: pages[0]?.content ?? '' }}\``;
+  const contentHint =
+    isSingle || isPage
+      ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
+      : `- \`{/* WP: post.content (HTML) */}\` → fetch \`GET /api/pages\` and render \`pages[0]?.content\` with \`dangerouslySetInnerHTML={{ __html: pages[0]?.content ?? '' }}\``;
 
-  const loopHint = (isSingle || isPage)
-    ? `- \`{/* WP: loop start */}\` → (Single view) Render the specific \`${isSingle ? 'post' : 'page'}\` properties. NO loop / array map.`
-    : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results`;
+  const loopHint =
+    isSingle || isPage
+      ? `- \`{/* WP: loop start */}\` → (Single view) Render the specific \`${isSingle ? 'post' : 'page'}\` properties. NO loop / array map.`
+      : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -348,7 +353,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   const postSample = posts.slice(0, 5);
   parts.push(
     `### Posts — ${posts.length} total (GET /api/posts)` +
-    (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
+      (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
   );
   for (const p of postSample) {
     parts.push(`  id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
@@ -361,7 +366,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   const pageSample = pages.slice(0, 5);
   parts.push(
     `### Pages — ${pages.length} total (GET /api/pages)` +
-    (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
+      (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
   );
   for (const p of pageSample) {
     const contentPreview = p.content
@@ -378,7 +383,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   // Menus full
   parts.push(
     `### Menus — ${menus.length} total (GET /api/menus)` +
-    (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
+      (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
   );
   for (const m of menus) {
     parts.push(
@@ -424,11 +429,105 @@ export function buildPlanContextNote(plan?: {
 }): string {
   if (!plan) return '';
   const lines: string[] = ['## Component plan'];
-  if (plan.description) lines.push(`Purpose: ${plan.description}`);
-  if (plan.route) lines.push(`Route: \`${plan.route}\``);
   const normalizedDataNeeds = normalizeDataNeeds(plan.dataNeeds);
+  if (plan.description) lines.push(`Purpose: ${plan.description}`);
+  if (plan.route) {
+    lines.push(`Route: \`${plan.route}\``);
+    lines.push(
+      /:[A-Za-z_]/.test(plan.route)
+        ? 'Route contract: only read the URL params declared in this route.'
+        : 'Route contract: this route has no URL params, so do NOT import or call `useParams`.',
+    );
+  }
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
+  const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
+  if (normalizedDataNeeds.includes('postDetail')) {
+    lines.push(
+      routeHasParams
+        ? 'Detail data contract: fetch the specific post with `/api/posts/${slug}` and render that record, not the full posts list.'
+        : 'Data contract: this component displays post detail data but does NOT own the route. ' +
+          'Accept a `post` prop of type `Post` from the parent component — do NOT call `useParams` or fetch `/api/posts/...` yourself.',
+    );
+  }
+  if (normalizedDataNeeds.includes('pageDetail')) {
+    lines.push(
+      routeHasParams
+        ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
+        : 'Data contract: this component displays page detail data but does NOT own the route. ' +
+          'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
+    );
+  }
+  if (normalizedDataNeeds.includes('comments')) {
+    lines.push(
+      'Comments data contract: fetch `GET /api/comments?slug=${slug}` (use the post slug from `useParams`) inside the same `useEffect` as the post detail fetch. ' +
+      'Comment fields: `id, author, date, content, parentId (0 = top-level), userId`. ' +
+      'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
+      'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty.',
+    );
+  }
+  if (
+    !normalizedDataNeeds.includes('postDetail') &&
+    !normalizedDataNeeds.includes('pageDetail')
+  ) {
+    lines.push(
+      'Data contract: do NOT fetch slug-based detail endpoints unless the plan explicitly requires detail data.',
+    );
+  }
+  return lines.join('\n');
+}
+
+function extractStaticImageSources(templateSource: string): string[] {
+  const result = new Set<string>();
+
+  try {
+    const parsed = JSON.parse(templateSource);
+    const visit = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      if (typeof node.src === 'string' && node.src.trim()) {
+        result.add(node.src.trim());
+      }
+      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
+        result.add(node.imageSrc.trim());
+      }
+      if (Array.isArray(node.children)) node.children.forEach(visit);
+      if (Array.isArray(node)) node.forEach(visit);
+    };
+    visit(parsed);
+  } catch {
+    for (const match of templateSource.matchAll(
+      /(?:src|imageSrc)="([^"]+)"/g,
+    )) {
+      if (match[1]) result.add(match[1].trim());
+    }
+    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
+      if (match[1]) result.add(match[1].trim());
+    }
+  }
+
+  return [...result];
+}
+
+function buildImageSourcesNote(templateSource: string): string {
+  const sources = extractStaticImageSources(templateSource);
+  const lines = ['## Static image sources in this template'];
+
+  if (sources.length === 0) {
+    lines.push('- None. Do NOT invent images, avatars, or placeholders.');
+  } else {
+    for (const src of sources.slice(0, 20)) {
+      lines.push(`- ${src}`);
+    }
+    if (sources.length > 20) {
+      lines.push(`- ... and ${sources.length - 20} more`);
+    }
+    lines.push('Use only these exact sources for static images and avatars.');
+  }
+
+  lines.push(
+    '⛔ If a testimonial/person/media block has no image source in the template, omit the image/avatar entirely.',
+  );
+
   return lines.join('\n');
 }
 
@@ -465,19 +564,29 @@ export function buildComponentPrompt(
   retryError?: string,
 ): string {
   const normalizedDataNeeds = normalizeDataNeeds(componentPlan?.dataNeeds);
-  const isSingle =
-    SINGLE_TEMPLATES.has(componentName) ||
-    (componentPlan?.isDetail === true &&
-      normalizedDataNeeds.includes('postDetail'));
-  const isPage =
-    PAGE_TEMPLATES.has(componentName) ||
-    (componentPlan?.isDetail === true &&
-      normalizedDataNeeds.includes('pageDetail'));
+  const hasPlanContract =
+    componentPlan !== undefined &&
+    (componentPlan.route !== undefined ||
+      componentPlan.isDetail !== undefined ||
+      componentPlan.dataNeeds !== undefined);
+  const isSingle = hasPlanContract
+    ? componentPlan?.isDetail === true &&
+      normalizedDataNeeds.includes('postDetail')
+    : SINGLE_TEMPLATES.has(componentName);
+  const isPage = hasPlanContract
+    ? componentPlan?.isDetail === true &&
+      normalizedDataNeeds.includes('pageDetail')
+    : PAGE_TEMPLATES.has(componentName);
 
   const menuContextNote = buildMenusNote(content?.menus ?? []);
   const dataGrounding = content ? buildDataGroundingNote(content) : '';
   const templateTexts = buildTemplateTextsNote(templateSource);
-  const classicThemeNote = buildClassicThemeNote(templateSource, isSingle ?? false, isPage ?? false);
+  const imageSources = buildImageSourcesNote(templateSource);
+  const classicThemeNote = buildClassicThemeNote(
+    templateSource,
+    isSingle ?? false,
+    isPage ?? false,
+  );
   const planContext = [
     buildPlanContextNote(componentPlan),
     buildVisualPlanContextNote(componentPlan?.visualPlan),
@@ -507,6 +616,7 @@ export function buildComponentPrompt(
     .replace('{{classicThemeNote}}', classicThemeNote)
     .replace('{{themeTokens}}', buildThemeTokensNote(tokens))
     .replace('{{dataGrounding}}', dataGrounding)
+    .replace('{{imageSources}}', imageSources)
     .replace('{{templateTexts}}', templateTexts)
     .replace('{{retryError}}', retryNote)
     .replace('{{siteName}}', siteInfo.siteName)
@@ -516,8 +626,7 @@ export function buildComponentPrompt(
 
 /**
  * Lightweight prompt for sub-components generated by section chunking.
- * No routing, no useParams, no page-level fetching.
- * The parent assembly component handles routing; each section just renders its slice.
+ * Each section renders only its slice of the page and must not recreate the page shell.
  */
 export function buildSectionPrompt(input: {
   sectionName: string;
@@ -532,26 +641,39 @@ export function buildSectionPrompt(input: {
   retryError?: string;
   content?: DbContentResult;
 }): string {
-  const normalizedDataNeeds = normalizeDataNeeds(input.componentPlan?.dataNeeds);
-  const isSingle =
-    SINGLE_TEMPLATES.has(input.parentName) ||
-    (input.componentPlan?.isDetail === true &&
-      normalizedDataNeeds.includes('postDetail'));
-  const isPage =
-    PAGE_TEMPLATES.has(input.parentName) ||
-    (input.componentPlan?.isDetail === true &&
-      normalizedDataNeeds.includes('pageDetail'));
+  const normalizedDataNeeds = normalizeDataNeeds(
+    input.componentPlan?.dataNeeds,
+  );
+  const hasPlanContract =
+    input.componentPlan !== undefined &&
+    (input.componentPlan.route !== undefined ||
+      input.componentPlan.isDetail !== undefined ||
+      input.componentPlan.dataNeeds !== undefined);
+  const isSingle = hasPlanContract
+    ? input.componentPlan?.isDetail === true &&
+      normalizedDataNeeds.includes('postDetail')
+    : SINGLE_TEMPLATES.has(input.parentName);
+  const isPage = hasPlanContract
+    ? input.componentPlan?.isDetail === true &&
+      normalizedDataNeeds.includes('pageDetail')
+    : PAGE_TEMPLATES.has(input.parentName);
 
   const menuContextNote = buildMenusNote(input.content?.menus ?? input.menus);
   const dataGrounding = input.content
     ? buildDataGroundingNote(input.content)
     : '';
   const templateTexts = buildTemplateTextsNote(input.nodesJson);
-  const classicThemeNote = buildClassicThemeNote(input.nodesJson, isSingle ?? false, isPage ?? false);
+  const imageSources = buildImageSourcesNote(input.nodesJson);
+  const classicThemeNote = buildClassicThemeNote(
+    input.nodesJson,
+    isSingle ?? false,
+    isPage ?? false,
+  );
   const sectionContextNote = `## Section context — CRITICAL
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
 ⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
 ⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
+If this section needs runtime data, declare/fetch only the data actually rendered in this section.
 Render ONLY the JSX for the blocks in the template source below.`;
   const planContext = [
     sectionContextNote,
@@ -566,14 +688,11 @@ Render ONLY the JSX for the blocks in the template source below.`;
 
   const slugFetchingNote =
     isSingle || isPage
-      ? `## IMPORTANT — This is a detail/single view component
-- Import \`useParams\` from \`react-router-dom\`
-- Read the slug from URL: \`const { slug } = useParams<{ slug: string }>()\`
-- Fetch the specific ${isSingle ? 'post' : 'page'} by slug:
-  - ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'}
-- If the response is null/404, show a "Not found" message
-- Do NOT fetch the full list and pick index 0 — always use the slug from URL
-- Always render \`post.title\` as a heading (e.g. \`<h1>{post.title}</h1>\`) above the content — do NOT skip it. \`title\` is a plain string, not an object`
+      ? `## Detail route context for this section
+- The parent component route is slug-based.
+- Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
+- If you need detail data in this section, fetch ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'} by slug. Never fetch the full list and pick index 0.
+- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
       : '';
 
   return TEMPLATE.replace('{{componentName}}', input.sectionName)
@@ -583,6 +702,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
     .replace('{{classicThemeNote}}', classicThemeNote)
     .replace('{{themeTokens}}', buildThemeTokensNote(input.tokens))
     .replace('{{dataGrounding}}', dataGrounding)
+    .replace('{{imageSources}}', imageSources)
     .replace('{{templateTexts}}', templateTexts)
     .replace('{{retryError}}', retryNote)
     .replace('{{siteName}}', input.siteInfo.siteName)

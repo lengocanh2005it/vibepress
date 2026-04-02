@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { ComponentPlan, PlanResult } from '../planner/planner.service.js';
+import type {
+  ComponentVisualPlan,
+  DataNeed as VisualDataNeed,
+  SectionPlan,
+} from '../react-generator/visual-plan.schema.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -8,20 +13,50 @@ export interface PlanReviewResult {
   isValid: boolean;
 }
 
+type PlanDataNeed =
+  | 'posts'
+  | 'pages'
+  | 'menus'
+  | 'site-info'
+  | 'post-detail'
+  | 'page-detail';
+
+interface RoutePolicy {
+  type: 'page' | 'partial';
+  route: string | null;
+  routeMode: 'hard' | 'soft';
+  isDetail: boolean;
+  requiredDataNeeds: PlanDataNeed[];
+}
+
+const PARTIAL_PATTERNS =
+  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)(?:[-_].+)?$/i;
+const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
+  'posts',
+  'pages',
+  'menus',
+  'site-info',
+  'post-detail',
+  'page-detail',
+]);
+
 @Injectable()
 export class PlanReviewerService {
   private readonly logger = new Logger(PlanReviewerService.name);
 
-  review(plan: PlanResult): PlanReviewResult {
+  review(plan: PlanResult, expectedTemplateNames: string[]): PlanReviewResult {
     const warnings: string[] = [];
     const errors: string[] = [];
     let reviewed = [...plan];
 
-    reviewed = this.fixDuplicateRoutes(reviewed, warnings);
+    reviewed = this.resolveDuplicateHomePages(reviewed, warnings);
+    reviewed = this.normalizeComponentNames(reviewed, warnings);
     reviewed = this.fixTypeRouteInconsistencies(reviewed, warnings);
+    reviewed = this.alignRouteSemantics(reviewed, warnings);
+    reviewed = this.alignDataNeeds(reviewed, warnings);
+    reviewed = this.fixDuplicateRoutes(reviewed, warnings);
     this.checkVisualPlanCoverage(reviewed, warnings);
-    this.checkDataNeeds(reviewed, warnings);
-    this.validateHard(reviewed, errors);
+    this.validateHard(reviewed, expectedTemplateNames, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
     const partials = reviewed.filter((c) => c.type === 'partial').length;
@@ -46,13 +81,429 @@ export class PlanReviewerService {
     return { plan: reviewed, warnings, errors, isValid: errors.length === 0 };
   }
 
-  // ── Hard validation (triggers retry) ─────────────────────────────────────
+  private normalizeComponentNames(
+    plan: PlanResult,
+    warnings: string[],
+  ): PlanResult {
+    const used = new Set<string>();
 
-  private validateHard(plan: PlanResult, errors: string[]): void {
+    return plan.map((item) => {
+      const deterministic = this.toComponentName(item.templateName);
+      let componentName = this.isValidComponentName(item.componentName)
+        ? item.componentName
+        : deterministic;
+
+      if (componentName !== item.componentName) {
+        warnings.push(
+          `Component name "${item.componentName}" for template "${item.templateName}" was invalid → renamed to "${componentName}"`,
+        );
+      }
+
+      if (used.has(componentName)) {
+        const base = deterministic || 'Component';
+        let suffix = 2;
+        let candidate = `${base}${suffix}`;
+        while (used.has(candidate)) {
+          suffix++;
+          candidate = `${base}${suffix}`;
+        }
+        warnings.push(
+          `Duplicate component name "${componentName}" for template "${item.templateName}" → renamed to "${candidate}"`,
+        );
+        componentName = candidate;
+      }
+
+      used.add(componentName);
+      return { ...item, componentName };
+    });
+  }
+
+  private fixTypeRouteInconsistencies(
+    plan: PlanResult,
+    warnings: string[],
+  ): PlanResult {
+    return plan.map((item) => {
+      const policy = this.inferRoutePolicy(item);
+      let next = item;
+
+      if (next.type !== policy.type) {
+        warnings.push(
+          `Template "${next.templateName}" had type "${next.type}" → normalized to "${policy.type}"`,
+        );
+        next = { ...next, type: policy.type };
+      }
+
+      if (next.type === 'partial') {
+        const detailNeeds = next.dataNeeds.filter(
+          (need) => need === 'post-detail' || need === 'page-detail',
+        );
+        if (next.route !== null) {
+          warnings.push(
+            `Partial "${next.componentName}" had route "${next.route}" → cleared`,
+          );
+          next = { ...next, route: null };
+        }
+        if (next.isDetail) {
+          warnings.push(
+            `Partial "${next.componentName}" had isDetail=true → set to false`,
+          );
+          next = { ...next, isDetail: false };
+        }
+        if (detailNeeds.length > 0) {
+          warnings.push(
+            `Partial "${next.componentName}" had detail dataNeeds (${detailNeeds.join(', ')}) → removed`,
+          );
+          next = {
+            ...next,
+            dataNeeds: next.dataNeeds.filter(
+              (need) => need !== 'post-detail' && need !== 'page-detail',
+            ),
+          };
+        }
+      }
+
+      return next;
+    });
+  }
+
+  private alignRouteSemantics(
+    plan: PlanResult,
+    warnings: string[],
+  ): PlanResult {
+    return plan.map((item) => {
+      const policy = this.inferRoutePolicy(item);
+      let next = item;
+
+      if (policy.routeMode === 'hard') {
+        if (next.route !== policy.route) {
+          warnings.push(
+            `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${policy.route ?? 'null'}"`,
+          );
+          next = { ...next, route: policy.route };
+        }
+      } else if (next.type === 'page' && !next.route) {
+        warnings.push(
+          `Page "${next.componentName}" missing route → assigned "${policy.route}"`,
+        );
+        next = { ...next, route: policy.route };
+      }
+
+      if (next.isDetail !== policy.isDetail) {
+        warnings.push(
+          `Template "${next.templateName}" had isDetail=${String(next.isDetail)} → normalized to ${String(policy.isDetail)}`,
+        );
+        next = { ...next, isDetail: policy.isDetail };
+      }
+
+      if (
+        next.type === 'page' &&
+        next.route &&
+        next.route.includes(':slug') &&
+        !next.isDetail
+      ) {
+        warnings.push(
+          `Page "${next.componentName}" uses slug param route "${next.route}" → set isDetail=true`,
+        );
+        next = { ...next, isDetail: true };
+      }
+
+      return next;
+    });
+  }
+
+  private alignDataNeeds(plan: PlanResult, warnings: string[]): PlanResult {
+    return plan.map((item) => {
+      const policy = this.inferRoutePolicy(item);
+      const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
+        VALID_DATA_NEEDS.has(need as PlanDataNeed),
+      );
+      const needs = new Set<PlanDataNeed>(normalized);
+      const before = [...needs];
+
+      if (policy.type === 'partial') {
+        needs.delete('post-detail');
+        needs.delete('page-detail');
+      }
+
+      for (const need of policy.requiredDataNeeds) {
+        needs.add(need);
+      }
+
+      if (
+        item.route?.startsWith('/category/') ||
+        item.route?.startsWith('/tag/') ||
+        item.route?.startsWith('/author/')
+      ) {
+        needs.add('posts');
+      }
+
+      if (
+        item.route === '/blog' ||
+        item.route === '/archive' ||
+        item.route === '/search'
+      ) {
+        needs.add('posts');
+      }
+
+      if (needs.has('post-detail') && needs.has('page-detail')) {
+        // Resolve conflict using policy — keep whichever the template requires
+        if (policy.requiredDataNeeds.includes('page-detail')) {
+          needs.delete('post-detail');
+        } else {
+          needs.delete('page-detail');
+        }
+      }
+
+      const after = [...needs];
+      if (before.join('|') !== after.join('|')) {
+        warnings.push(
+          `Template "${item.templateName}" dataNeeds [${before.join(', ')}] → [${after.join(', ')}]`,
+        );
+      }
+
+      const next = { ...item, dataNeeds: after };
+      return this.syncVisualPlan(next, warnings);
+    });
+  }
+
+  private syncVisualPlan(
+    item: PlanResult[number],
+    warnings: string[],
+  ): PlanResult[number] {
+    if (!item.visualPlan) return item;
+
+    const allowedPostDetail =
+      item.isDetail === true && item.dataNeeds.includes('post-detail');
+    const allowedPageDetail =
+      item.isDetail === true && item.dataNeeds.includes('page-detail');
+    const nextSections = item.visualPlan.sections.filter((section) =>
+      this.isSectionAllowed(section, allowedPostDetail, allowedPageDetail),
+    );
+    const nextDataNeeds = this.toVisualDataNeeds(item.dataNeeds);
+
+    const sectionsChanged =
+      nextSections.length !== item.visualPlan.sections.length ||
+      nextSections.some((section, index) => section !== item.visualPlan!.sections[index]);
+    const dataNeedsChanged =
+      item.visualPlan.dataNeeds.join('|') !== nextDataNeeds.join('|');
+
+    if (!sectionsChanged && !dataNeedsChanged) {
+      return item;
+    }
+
+    if (sectionsChanged) {
+      warnings.push(
+        `Template "${item.templateName}" visualPlan sections were synchronized to match route/detail contract`,
+      );
+    }
+    if (dataNeedsChanged) {
+      warnings.push(
+        `Template "${item.templateName}" visualPlan dataNeeds [${item.visualPlan.dataNeeds.join(', ')}] → [${nextDataNeeds.join(', ')}]`,
+      );
+    }
+
+    const visualPlan: ComponentVisualPlan = {
+      ...item.visualPlan,
+      dataNeeds: nextDataNeeds,
+      sections: nextSections,
+    };
+    return { ...item, visualPlan };
+  }
+
+  private isSectionAllowed(
+    section: SectionPlan,
+    allowedPostDetail: boolean,
+    allowedPageDetail: boolean,
+  ): boolean {
+    if (section.type === 'post-content' || section.type === 'comments') {
+      return allowedPostDetail;
+    }
+    if (section.type === 'page-content') {
+      return allowedPageDetail;
+    }
+    return true;
+  }
+
+  private toVisualDataNeeds(dataNeeds: string[]): VisualDataNeed[] {
+    const mapped = new Set<VisualDataNeed>();
+    for (const need of dataNeeds) {
+      switch (need) {
+        case 'site-info':
+          mapped.add('siteInfo');
+          break;
+        case 'post-detail':
+          mapped.add('postDetail');
+          break;
+        case 'page-detail':
+          mapped.add('pageDetail');
+          break;
+        case 'posts':
+        case 'pages':
+        case 'menus':
+          mapped.add(need);
+          break;
+      }
+    }
+    return [...mapped];
+  }
+
+  private fixDuplicateRoutes(plan: PlanResult, warnings: string[]): PlanResult {
+    const routeCount = new Map<string, number>();
+    for (const item of plan) {
+      if (item.route) {
+        routeCount.set(item.route, (routeCount.get(item.route) ?? 0) + 1);
+      }
+    }
+
+    const allRoutes = new Set(
+      plan.map((item) => item.route).filter(Boolean) as string[],
+    );
+    const seen = new Map<string, number>();
+
+    return plan.map((item) => {
+      if (!item.route || item.type !== 'page') return item;
+      if ((routeCount.get(item.route) ?? 0) <= 1) return item;
+
+      const count = seen.get(item.route) ?? 0;
+      seen.set(item.route, count + 1);
+      if (count === 0) return item;
+
+      const baseSlug = this.toKebabCase(
+        item.templateName.replace(/\.(php|html)$/i, ''),
+      );
+      const routeWithSlug = item.route.includes(':slug');
+      let newRoute = routeWithSlug ? `/${baseSlug}/:slug` : `/${baseSlug}`;
+
+      let suffix = count + 1;
+      while (allRoutes.has(newRoute)) {
+        newRoute = routeWithSlug
+          ? `/${baseSlug}-${suffix}/:slug`
+          : `/${baseSlug}-${suffix}`;
+        suffix++;
+      }
+
+      allRoutes.add(newRoute);
+      warnings.push(
+        `Duplicate route "${item.route}" on "${item.componentName}" → renamed to "${newRoute}"`,
+      );
+      return { ...item, route: newRoute, isDetail: newRoute.includes(':slug') };
+    });
+  }
+
+  private checkVisualPlanCoverage(plan: PlanResult, warnings: string[]): void {
+    const missing = plan
+      .filter((c) => !c.visualPlan)
+      .map((c) => c.componentName);
+    if (missing.length > 0) {
+      warnings.push(
+        `${missing.length} component(s) without visual plan (generator will use fallback AI): ${missing.join(', ')}`,
+      );
+    }
+  }
+
+  private validateHard(
+    plan: PlanResult,
+    expectedTemplateNames: string[],
+    errors: string[],
+  ): void {
     if (plan.length === 0) {
       errors.push('Plan is empty — no components were generated');
       return;
     }
+
+    const expected = new Set(expectedTemplateNames);
+    const templateCounts = new Map<string, number>();
+    const componentCounts = new Map<string, number>();
+    const pageRoutes = new Map<string, string[]>();
+
+    for (const item of plan) {
+      const policy = this.inferRoutePolicy(item);
+      templateCounts.set(
+        item.templateName,
+        (templateCounts.get(item.templateName) ?? 0) + 1,
+      );
+      componentCounts.set(
+        item.componentName,
+        (componentCounts.get(item.componentName) ?? 0) + 1,
+      );
+
+      if (!expected.has(item.templateName)) {
+        errors.push(
+          `Unexpected template in plan: "${item.templateName}" is not present in normalized theme input`,
+        );
+      }
+
+      if (!this.isValidComponentName(item.componentName)) {
+        errors.push(
+          `Invalid component name "${item.componentName}" for template "${item.templateName}"`,
+        );
+      }
+
+      if (item.type === 'partial' && item.route !== null) {
+        errors.push(
+          `Partial "${item.componentName}" must not have a route (got "${item.route}")`,
+        );
+      }
+
+      if (item.type === 'page') {
+        if (!item.route) {
+          errors.push(`Page "${item.componentName}" is missing a route`);
+        } else if (!this.isValidRoute(item.route)) {
+          errors.push(
+            `Page "${item.componentName}" has invalid route "${item.route}"`,
+          );
+        } else {
+          const owners = pageRoutes.get(item.route) ?? [];
+          owners.push(item.componentName);
+          pageRoutes.set(item.route, owners);
+        }
+      }
+
+      if (item.route?.includes(':slug') && !item.isDetail) {
+        errors.push(
+          `Page "${item.componentName}" uses route "${item.route}" with slug param but isDetail=false`,
+        );
+      }
+
+      for (const need of policy.requiredDataNeeds) {
+        if (!item.dataNeeds.includes(need)) {
+          errors.push(
+            `Component "${item.componentName}" is missing required dataNeed "${need}"`,
+          );
+        }
+      }
+    }
+
+    for (const templateName of expectedTemplateNames) {
+      if (!templateCounts.has(templateName)) {
+        errors.push(`Missing template in plan: "${templateName}"`);
+      }
+    }
+
+    for (const [templateName, count] of templateCounts) {
+      if (count > 1) {
+        errors.push(
+          `Template "${templateName}" appears ${count} times in plan (must be exactly once)`,
+        );
+      }
+    }
+
+    for (const [componentName, count] of componentCounts) {
+      if (count > 1) {
+        errors.push(
+          `Component name "${componentName}" appears ${count} times in plan (must be unique)`,
+        );
+      }
+    }
+
+    for (const [route, owners] of pageRoutes) {
+      if (owners.length > 1) {
+        errors.push(
+          `Duplicate page route "${route}" is used by: ${owners.join(', ')}`,
+        );
+      }
+    }
+
     const pages = plan.filter((c) => c.type === 'page');
     if (pages.length === 0) {
       errors.push(
@@ -61,88 +512,201 @@ export class PlanReviewerService {
     }
   }
 
-  // ── Fix duplicate routes ───────────────────────────────────────────────────
+  private resolveDuplicateHomePages(
+    plan: PlanResult,
+    warnings: string[],
+  ): PlanResult {
+    // WordPress hierarchy: front-page > home > index
+    // If multiple templates compete for "/", keep only the highest-priority one.
+    const HOME_PRIORITY = ['front-page', 'home', 'index'];
 
-  private fixDuplicateRoutes(plan: PlanResult, warnings: string[]): PlanResult {
-    const routeCount = new Map<string, number>();
-    for (const c of plan) {
-      if (c.route) routeCount.set(c.route, (routeCount.get(c.route) ?? 0) + 1);
-    }
-
-    // Track all routes in the final plan to avoid collisions with derived names
-    const allRoutes = new Set(plan.map((c) => c.route).filter(Boolean) as string[]);
-
-    const seen = new Map<string, number>();
-    return plan.map((c) => {
-      if (!c.route || routeCount.get(c.route)! <= 1) return c;
-
-      const count = seen.get(c.route) ?? 0;
-      seen.set(c.route, count + 1);
-
-      if (count === 0) return c; // first occurrence keeps original
-
-      // Derive a meaningful route from the component name (PascalCase → kebab-case)
-      const kebab = c.componentName.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
-
-      // For param routes (/page/:slug) replace the static prefix with the component-based prefix
-      // For static routes (/blog) use /kebab-component-name directly
-      let newRoute = c.route.includes(':')
-        ? c.route.replace(/^\/[^/]+/, `/${kebab}`)  // /page/:slug → /page-wide/:slug
-        : `/${kebab}`;                                // /blog → /index
-
-      // Ensure no collision with existing routes
-      if (allRoutes.has(newRoute)) {
-        newRoute = `${newRoute}-${count + 1}`;
-      }
-      allRoutes.add(newRoute);
-
-      warnings.push(`Duplicate route "${c.route}" on "${c.componentName}" → renamed to "${newRoute}"`);
-      return { ...c, route: newRoute };
-    });
-  }
-
-  // ── Fix type/route inconsistencies ────────────────────────────────────────
-
-  private fixTypeRouteInconsistencies(plan: PlanResult, warnings: string[]): PlanResult {
-    return plan.map((c) => {
-      if (c.type === 'partial' && c.route !== null) {
-        warnings.push(`Partial "${c.componentName}" had route "${c.route}" → cleared`);
-        return { ...c, route: null };
-      }
-      if (c.type === 'page' && !c.route) {
-        const fallback = `/${c.componentName.toLowerCase()}`;
-        warnings.push(`Page "${c.componentName}" missing route → assigned "${fallback}"`);
-        return { ...c, route: fallback };
-      }
-      return c;
-    });
-  }
-
-  // ── Check visual plan coverage ────────────────────────────────────────────
-
-  private checkVisualPlanCoverage(plan: PlanResult, warnings: string[]): void {
-    const missing = plan.filter((c) => !c.visualPlan).map((c) => c.componentName);
-    if (missing.length > 0) {
-      warnings.push(
-        `${missing.length} component(s) without visual plan (generator will use fallback AI): ${missing.join(', ')}`,
+    const homeItems = plan
+      .map((item) => ({
+        item,
+        base: item.templateName.replace(/\.(php|html)$/i, '').toLowerCase(),
+      }))
+      .filter(({ base }) => HOME_PRIORITY.includes(base))
+      .sort(
+        (a, b) =>
+          HOME_PRIORITY.indexOf(a.base) - HOME_PRIORITY.indexOf(b.base),
       );
-    }
+
+    if (homeItems.length <= 1) return plan;
+
+    const winner = homeItems[0];
+    const toDemote = new Set(
+      homeItems.slice(1).map(({ item }) => item.templateName),
+    );
+
+    return plan.map((item) => {
+      if (!toDemote.has(item.templateName)) return item;
+      const base = item.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
+      warnings.push(
+        `Template "${base}" demoted to partial — "${winner.base}" already covers route "/"`,
+      );
+      return {
+        ...item,
+        type: 'partial' as const,
+        route: null,
+        isDetail: false,
+        dataNeeds: item.dataNeeds.filter(
+          (n) => n !== 'post-detail' && n !== 'page-detail',
+        ),
+      };
+    });
   }
 
-  // ── Check dataNeeds completeness ──────────────────────────────────────────
+  private inferRoutePolicy(item: ComponentPlan): RoutePolicy {
+    const templateBase = item.templateName
+      .replace(/\.(php|html)$/i, '')
+      .toLowerCase();
+    const routeSlug = this.toKebabCase(templateBase);
 
-  private checkDataNeeds(plan: PlanResult, warnings: string[]): void {
-    for (const c of plan) {
-      if (c.type === 'partial') continue;
-      if (
-        c.isDetail &&
-        !c.dataNeeds.includes('post-detail') &&
-        !c.dataNeeds.includes('page-detail')
-      ) {
-        warnings.push(
-          `Detail page "${c.componentName}" (isDetail: true) missing "post-detail" or "page-detail" in dataNeeds`,
-        );
-      }
+    if (PARTIAL_PATTERNS.test(templateBase)) {
+      return {
+        type: 'partial',
+        route: null,
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: [],
+      };
     }
+
+    if (/^(front-page|home|index)$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: [],
+      };
+    }
+
+    if (/^404$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '*',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: [],
+      };
+    }
+
+    if (/^search$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/search',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^archive$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/archive',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^blog$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/blog',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^category(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/category/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^tag(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/tag/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^author(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/author/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^single(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route:
+          templateBase === 'single' || templateBase === 'single-post'
+            ? '/post/:slug'
+            : `/${routeSlug}/:slug`,
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['post-detail'],
+      };
+    }
+
+    if (/^page(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['page-detail'],
+      };
+    }
+
+    return {
+      type: 'page',
+      route: `/${routeSlug}`,
+      routeMode: 'soft',
+      isDetail: false,
+      requiredDataNeeds: [],
+    };
+  }
+
+  private isValidComponentName(name: string): boolean {
+    return /^[A-Z][A-Za-z0-9]*$/.test(name);
+  }
+
+  private isValidRoute(route: string): boolean {
+    return route === '*' || route.startsWith('/');
+  }
+
+  private toComponentName(templateName: string): string {
+    const name = templateName
+      .replace(/\.(php|html)$/i, '')
+      .split(/[\\/_-]/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join('');
+    return /^\d/.test(name) ? `Page${name}` : name;
+  }
+
+  private toKebabCase(value: string): string {
+    return value
+      .replace(/([a-z])([A-Z])/g, '$1-$2')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase();
   }
 }

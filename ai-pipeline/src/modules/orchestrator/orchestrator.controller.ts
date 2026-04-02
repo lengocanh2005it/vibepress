@@ -14,10 +14,16 @@ import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
  */
 export interface PipelineModelConfig {
   /** Model for Planner Phase A (architecture plan) + Phase C (visual sections per component) */
+  planning?: string;
+  /** Model for React code generation in the generator stage */
+  genCode?: string;
+  /** Model for review/repair passes in the generator stage */
+  reviewCode?: string;
+  /** @deprecated use `planning` */
   planner?: string;
-  /** Model for Code Reviewer: AI visual plan (D2) + direct AI TSX generation (D3) */
+  /** @deprecated use `reviewCode` */
   codeReviewer?: string;
-  /** Model for Fix Agent (R3 repair pass). Defaults to codeReviewer if omitted. */
+  /** Optional override for the repair pass. Defaults to reviewCode if omitted. */
   fixAgent?: string;
 }
 

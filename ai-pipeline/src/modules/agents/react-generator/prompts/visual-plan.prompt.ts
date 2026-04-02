@@ -21,6 +21,7 @@ export function buildVisualPlanPrompt(input: {
 
   const palette = buildPaletteHint(tokens);
   const siteCtx = buildSiteContext(content);
+  const imageHints = buildImageSourcesHint(templateSource);
 
   const systemPrompt = `You are a WordPress-to-React UI planner.
 Given a WordPress template (block JSON tree or PHP markup) and site context, you output a JSON ComponentVisualPlan describing the visual layout.
@@ -46,6 +47,12 @@ interface ComponentVisualPlan {
 }
 \`\`\`
 
+Every section also supports optional exact spacing fields from the template:
+\`\`\`
+{ paddingStyle?: string, marginStyle?: string }
+\`\`\`
+Use them when the template source exposes real spacing values and you can preserve them exactly.
+
 ## Available section types
 
 | type | use when |
@@ -61,6 +68,7 @@ interface ComponentVisualPlan {
 | \`footer\` | page footer with nav columns |
 | \`post-content\` | single post detail (uses :slug param) |
 | \`page-content\` | single page detail (uses :slug param) |
+| \`comments\`     | WordPress comments list + leave a reply form |
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
 | \`custom\` | LAST RESORT for anything not in list — provide the JSX directly in the \`jsx\` field |
@@ -77,8 +85,9 @@ media-text:   { imageSrc, imageAlt, imagePosition: left|right, heading?, body?, 
 testimonial:  { quote, authorName, authorTitle?, authorAvatar? }
 newsletter:   { heading, subheading?, buttonText, layout: centered|card }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
-post-content: { showTitle, showMeta }
+post-content: { showTitle, showAuthor, showDate, showCategories }
 page-content: { showTitle }
+comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
@@ -89,6 +98,9 @@ custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
 - Text content in sections (headings, body text, card copy) must come EXACTLY from the template source — no invented text.
 - If you need to output a dynamic variable (e.g. {item.title} or {post.title}), use EXACTLY ONE pair of curly braces. NEVER use double braces like {{item.title}} or {{post.title}}, as it breaks JSX syntax.
 - If a section has a background image, use the exact \`src\` from the template.
+- Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
+- For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
+- Preserve exact padding/margin from the template when visible by filling \`paddingStyle\` / \`marginStyle\` with concrete CSS shorthand values.
 - For \`custom\` sections: the \`jsx\` field must be valid JSX. You may reference \`siteInfo\`, \`posts\`, \`menus\`, \`pages\`, \`item\` (for postDetail/pageDetail) — but ONLY if you also list the matching key in \`dataNeeds\` (e.g. jsx uses \`posts\` → add \`"posts"\` to dataNeeds). Variables not declared in dataNeeds will be undefined at runtime.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
@@ -97,6 +109,8 @@ custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
 ${siteCtx}
 
 ${palette}
+
+${imageHints}
 
 ## Template source
 
@@ -147,6 +161,53 @@ function buildSiteContext(content: DbContentResult): string {
   return lines.join('\n');
 }
 
+export function extractStaticImageSources(templateSource: string): string[] {
+  const result = new Set<string>();
+
+  try {
+    const parsed = JSON.parse(templateSource);
+    const visit = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      if (typeof node.src === 'string' && node.src.trim()) {
+        result.add(node.src.trim());
+      }
+      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
+        result.add(node.imageSrc.trim());
+      }
+      if (Array.isArray(node.children)) node.children.forEach(visit);
+      if (Array.isArray(node)) node.forEach(visit);
+    };
+    visit(parsed);
+  } catch {
+    for (const match of templateSource.matchAll(
+      /(?:src|imageSrc)="([^"]+)"/g,
+    )) {
+      if (match[1]) result.add(match[1].trim());
+    }
+    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
+      if (match[1]) result.add(match[1].trim());
+    }
+  }
+
+  return [...result];
+}
+
+function buildImageSourcesHint(templateSource: string): string {
+  const sources = extractStaticImageSources(templateSource);
+  if (sources.length === 0) {
+    return '## Static image sources in template\n- None. Do NOT invent images or avatars.';
+  }
+
+  return [
+    '## Static image sources in template',
+    ...sources.slice(0, 20).map((src) => `- ${src}`),
+    sources.length > 20 ? `- ... and ${sources.length - 20} more` : '',
+    'Use only these exact sources for static images/avatars.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 // ── Validation constants ───────────────────────────────────────────────────
 
 const VALID_SECTION_TYPES = new Set<string>([
@@ -161,6 +222,7 @@ const VALID_SECTION_TYPES = new Set<string>([
   'footer',
   'post-content',
   'page-content',
+  'comments',
   'search',
   'breadcrumb',
   'custom',
@@ -221,7 +283,10 @@ function sanitizePalette(raw: any): ColorPalette {
  *  - Missing/wrong scalar config → auto-repair with sensible defaults
  *  - Missing array fields that are mapped over → auto-repair with empty array
  */
-function validateSectionDetailed(raw: any): {
+function validateSectionDetailed(
+  raw: any,
+  options?: { allowedImageSrcs?: string[] },
+): {
   section: SectionPlan | null;
   reason?: string;
 } {
@@ -242,6 +307,8 @@ function validateSectionDetailed(raw: any): {
       raw[key] = raw[key].replace(/\{\{([^}]+)\}\}/g, '{$1}');
     }
   }
+  if (typeof raw.paddingStyle !== 'string') delete raw.paddingStyle;
+  if (typeof raw.marginStyle !== 'string') delete raw.marginStyle;
 
   // eslint-disable-next-line default-case
   switch (type) {
@@ -255,10 +322,20 @@ function validateSectionDetailed(raw: any): {
       if (!['centered', 'left', 'split'].includes(raw.layout))
         raw.layout = 'centered';
       if (typeof raw.heading !== 'string') raw.heading = '';
+      if (
+        raw.image &&
+        !isAllowedStaticImage(raw.image.src, options?.allowedImageSrcs)
+      ) {
+        delete raw.image;
+      }
       break;
 
     case 'cover':
-      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) {
+      if (
+        typeof raw.imageSrc !== 'string' ||
+        !raw.imageSrc ||
+        !isAllowedStaticImage(raw.imageSrc, options?.allowedImageSrcs)
+      ) {
         return { section: null, reason: 'cover.imageSrc is required' };
       }
       if (typeof raw.dimRatio !== 'number') raw.dimRatio = 50;
@@ -302,7 +379,11 @@ function validateSectionDetailed(raw: any): {
       break;
 
     case 'media-text':
-      if (typeof raw.imageSrc !== 'string' || !raw.imageSrc) {
+      if (
+        typeof raw.imageSrc !== 'string' ||
+        !raw.imageSrc ||
+        !isAllowedStaticImage(raw.imageSrc, options?.allowedImageSrcs)
+      ) {
         return { section: null, reason: 'media-text.imageSrc is required' };
       }
       if (typeof raw.imageAlt !== 'string') raw.imageAlt = '';
@@ -315,6 +396,9 @@ function validateSectionDetailed(raw: any): {
         return { section: null, reason: 'testimonial.quote is required' };
       }
       if (typeof raw.authorName !== 'string') raw.authorName = '';
+      if (!isAllowedStaticImage(raw.authorAvatar, options?.allowedImageSrcs)) {
+        delete raw.authorAvatar;
+      }
       break;
 
     case 'newsletter':
@@ -330,11 +414,27 @@ function validateSectionDetailed(raw: any): {
 
     case 'post-content':
       if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
-      if (typeof raw.showMeta !== 'boolean') raw.showMeta = true;
+      // migrate legacy showMeta → individual flags
+      if ('showMeta' in raw) {
+        const meta = raw.showMeta as boolean;
+        raw.showAuthor = raw.showAuthor ?? meta;
+        raw.showDate = raw.showDate ?? meta;
+        raw.showCategories = raw.showCategories ?? meta;
+        delete raw.showMeta;
+      }
+      if (typeof raw.showAuthor !== 'boolean') raw.showAuthor = true;
+      if (typeof raw.showDate !== 'boolean') raw.showDate = true;
+      if (typeof raw.showCategories !== 'boolean') raw.showCategories = true;
       break;
 
     case 'page-content':
       if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
+      break;
+
+    case 'comments':
+      if (typeof raw.showForm !== 'boolean') raw.showForm = true;
+      if (typeof raw.requireName !== 'boolean') raw.requireName = true;
+      if (typeof raw.requireEmail !== 'boolean') raw.requireEmail = false;
       break;
 
     case 'custom':
@@ -350,6 +450,15 @@ function validateSectionDetailed(raw: any): {
   }
 
   return { section: raw as SectionPlan };
+}
+
+function isAllowedStaticImage(
+  src: unknown,
+  allowedImageSrcs?: string[],
+): src is string {
+  if (typeof src !== 'string' || !src.trim()) return false;
+  if (!allowedImageSrcs || allowedImageSrcs.length === 0) return false;
+  return allowedImageSrcs.includes(src.trim());
 }
 
 function validateSection(raw: any): SectionPlan | null {
@@ -378,6 +487,7 @@ export interface VisualPlanParseResult {
 export function parseVisualPlanDetailed(
   raw: string,
   componentName: string,
+  options?: { allowedImageSrcs?: string[] },
 ): VisualPlanParseResult {
   const cleaned = raw
     .replace(/^```[\w]*\n?/gm, '')
@@ -424,7 +534,7 @@ export function parseVisualPlanDetailed(
   const sections: SectionPlan[] = [];
   const droppedSections: string[] = [];
   for (const rawSection of parsed.sections) {
-    const { section, reason } = validateSectionDetailed(rawSection);
+    const { section, reason } = validateSectionDetailed(rawSection, options);
     if (section) {
       sections.push(section);
     } else {

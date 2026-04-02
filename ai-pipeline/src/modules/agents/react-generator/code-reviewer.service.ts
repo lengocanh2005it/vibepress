@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
-import { ValidatorService } from '../validator/validator.service.js';
+import {
+  ValidatorService,
+  type CodeValidationContext,
+} from '../validator/validator.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
 import {
   buildComponentPrompt,
@@ -10,6 +13,7 @@ import {
 } from './prompts/component.prompt.js';
 import {
   buildVisualPlanPrompt,
+  extractStaticImageSources,
   parseVisualPlanDetailed,
 } from './prompts/visual-plan.prompt.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
@@ -72,8 +76,7 @@ export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
   private readonly componentSystemPrompt =
     'You are a senior React + TypeScript + Tailwind engineer. Generate a complete component from the provided migration context and return ONLY raw TSX code.';
-  private readonly rawOutputDivider =
-    '\n----- RAW OUTPUT BEGIN -----\n';
+  private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
 
   constructor(
     private readonly llmFactory: LlmFactoryService,
@@ -108,6 +111,7 @@ export class CodeReviewerService {
     let attempts = 0;
     let lastError: string | undefined;
     let promptContext = this.buildPromptContext(componentPlan);
+    let validationContext = this.buildValidationContext(promptContext, componentName);
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
@@ -155,6 +159,7 @@ export class CodeReviewerService {
         const deterministic = await this.tryDeterministicPlan(
           componentName,
           componentPlan.visualPlan,
+          validationContext,
           logPath,
           'pre-computed plan',
         );
@@ -199,11 +204,14 @@ export class CodeReviewerService {
           logPath,
           `${componentName}:plan`,
         );
-        const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName);
+        const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName, {
+          allowedImageSrcs: extractStaticImageSources(templateSource),
+        });
         const visualPlan = parsedPlan.plan;
 
         if (visualPlan) {
           promptContext = this.buildPromptContext(componentPlan, visualPlan);
+          validationContext = this.buildValidationContext(promptContext, componentName);
           await this.log(
             logPath,
             `[reviewer] Stage 2: generating TSX with AI from visual plan (${visualPlan.sections.length} sections)`,
@@ -242,6 +250,7 @@ export class CodeReviewerService {
           const deterministic = await this.tryDeterministicPlan(
             componentName,
             visualPlan,
+            validationContext,
             logPath,
             'AI visual plan',
           );
@@ -322,7 +331,10 @@ export class CodeReviewerService {
           logPath,
           componentName,
         );
-        const check = this.validator.checkCodeStructure(code);
+        const check = this.validator.checkCodeStructure(
+          code,
+          validationContext,
+        );
         if (check.isValid) {
           this.logger.log(`[reviewer:fix-agent] "${componentName}" ✓ repaired`);
           await this.log(
@@ -396,6 +408,10 @@ export class CodeReviewerService {
     let code = '';
     let lastError: string | undefined;
     let isValid = false;
+    const validationContext = this.buildValidationContext(
+      this.buildPromptContext(componentPlan),
+      sectionName,
+    );
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       const raw = await this.generateWithRetry(
@@ -410,7 +426,7 @@ export class CodeReviewerService {
       code = this.mergeClassNames(code);
       code = this.fixDoublebraces(code);
 
-      const check = this.validator.checkCodeStructure(code);
+      const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.isValid) {
         isValid = true;
         break;
@@ -435,7 +451,10 @@ export class CodeReviewerService {
           logPath,
           sectionName,
         );
-        const check = this.validator.checkCodeStructure(code);
+        const check = this.validator.checkCodeStructure(
+          code,
+          validationContext,
+        );
         if (check.isValid) {
           isValid = true;
           await this.log(
@@ -466,12 +485,12 @@ export class CodeReviewerService {
     if (!componentPlan && !visualPlan) return undefined;
 
     const resolvedVisualPlan = visualPlan ?? componentPlan?.visualPlan;
-    const dataNeeds =
-      componentPlan?.dataNeeds && componentPlan.dataNeeds.length > 0
-        ? [...componentPlan.dataNeeds]
-        : resolvedVisualPlan?.dataNeeds
-          ? [...resolvedVisualPlan.dataNeeds]
-          : undefined;
+    const hasExplicitDataNeeds = Array.isArray(componentPlan?.dataNeeds);
+    const dataNeeds = hasExplicitDataNeeds
+      ? [...(componentPlan?.dataNeeds ?? [])]
+      : resolvedVisualPlan?.dataNeeds
+        ? [...resolvedVisualPlan.dataNeeds]
+        : undefined;
 
     return {
       description: componentPlan?.description,
@@ -479,6 +498,19 @@ export class CodeReviewerService {
       isDetail: componentPlan?.isDetail,
       dataNeeds,
       visualPlan: resolvedVisualPlan,
+    };
+  }
+
+  private buildValidationContext(
+    componentPlan?: ComponentPromptContext,
+    componentName?: string,
+  ): CodeValidationContext {
+    return {
+      componentName,
+      route: componentPlan?.route,
+      isDetail: componentPlan?.isDetail,
+      dataNeeds: componentPlan?.dataNeeds,
+      allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
     };
   }
 
@@ -514,6 +546,7 @@ export class CodeReviewerService {
     let code = '';
     let lastError: string | undefined;
     let lastRawOutput = '';
+    const validationContext = this.buildValidationContext(componentPlan, componentName);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const raw = await this.generateWithRetry(
@@ -538,7 +571,7 @@ export class CodeReviewerService {
       lastRawOutput = raw;
       code = this.postProcessCode(raw);
 
-      const check = this.validator.checkCodeStructure(code);
+      const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.isValid) {
         return {
           code,
@@ -570,11 +603,17 @@ export class CodeReviewerService {
   private async tryDeterministicPlan(
     componentName: string,
     visualPlan: ComponentVisualPlan,
+    validationContext: CodeValidationContext,
     logPath?: string,
     label = 'visual plan',
   ): Promise<{ code: string; isValid: boolean; error?: string }> {
     const code = this.codeGenerator.generate(visualPlan);
-    const check = this.validator.checkCodeStructure(code);
+    const check = this.validator.checkCodeStructure(code, {
+      ...validationContext,
+      dataNeeds: validationContext.dataNeeds ?? visualPlan.dataNeeds,
+      allowedRelativeImports:
+        validationContext.allowedRelativeImports ?? visualPlan.layout.includes,
+    });
 
     if (check.isValid) {
       this.logger.log(
@@ -631,13 +670,40 @@ export class CodeReviewerService {
     label?: string,
   ): Promise<string> {
     let delay = 30_000;
+    let maxTokens = this.llmFactory.getMaxTokens();
+    let lastTruncatedText = '';
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const result = await this.llmFactory.chat({
           model,
           systemPrompt,
           userPrompt,
+          maxTokens,
         });
+        if (result.truncated) {
+          lastTruncatedText = result.text;
+          const nextMaxTokens = Math.max(
+            maxTokens + 1,
+            Math.ceil(maxTokens * 1.5),
+          );
+          const msg =
+            `Output truncated at maxTokens=${maxTokens}; ` +
+            `retrying with maxTokens=${nextMaxTokens} (attempt ${attempt}/${maxRetries})`;
+          if (attempt < maxRetries) {
+            this.logger.warn(msg);
+            await this.log(logPath, `WARN ${msg}${label ? ` [${label}]` : ''}`);
+            maxTokens = nextMaxTokens;
+            continue;
+          }
+          this.logger.warn(
+            `${msg} — max retries reached, returning truncated output`,
+          );
+          await this.log(
+            logPath,
+            `WARN ${msg} — max retries reached, returning truncated output${label ? ` [${label}]` : ''}`,
+          );
+          return lastTruncatedText;
+        }
         return result.text;
       } catch (err: any) {
         const isRateLimit = err?.status === 429;

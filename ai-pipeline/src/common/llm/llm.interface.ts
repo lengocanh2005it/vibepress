@@ -10,6 +10,7 @@ export interface LlmChatResult {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  truncated?: boolean;
 }
 
 export type LlmProvider =

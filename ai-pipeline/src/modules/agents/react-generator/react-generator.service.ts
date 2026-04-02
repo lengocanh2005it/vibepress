@@ -50,9 +50,8 @@ export class ReactGeneratorService {
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
-    private readonly validator: ValidatorService,
     private readonly codeReviewer: CodeReviewerService,
-  ) {}
+  ) { }
 
   // ── Public entry point ─────────────────────────────────────────────────────
 
@@ -63,9 +62,20 @@ export class ReactGeneratorService {
     jobId?: string;
     logPath?: string;
     /** Per-step model overrides. undefined fields fall back to llmFactory.getModel(). */
-    modelConfig?: { codeReviewer?: string; fixAgent?: string };
+    modelConfig?: {
+      codeGenerator?: string;
+      reviewCode?: string;
+      fixAgent?: string;
+    };
   }): Promise<ReactGenerateResult> {
-    const { theme, content, plan, jobId = 'unknown', logPath, modelConfig } = input;
+    const {
+      theme,
+      content,
+      plan,
+      jobId = 'unknown',
+      logPath,
+      modelConfig,
+    } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
 
@@ -75,8 +85,9 @@ export class ReactGeneratorService {
     }
 
     const defaultModel = this.llmFactory.getModel();
-    const modelName = modelConfig?.codeReviewer ?? defaultModel;
-    const fixAgentModel = modelConfig?.fixAgent ?? modelName;
+    const codeGeneratorModel = modelConfig?.codeGenerator ?? defaultModel;
+    const reviewCodeModel = modelConfig?.reviewCode ?? codeGeneratorModel;
+    const fixAgentModel = modelConfig?.fixAgent ?? reviewCodeModel;
 
     const systemPrompt = buildPlanPrompt(theme, content);
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
@@ -121,7 +132,7 @@ export class ReactGeneratorService {
       const produced = await this.generateForTemplate({
         componentName,
         rawSource,
-        modelName,
+        codeGeneratorModel,
         fixAgentModel,
         systemPrompt,
         content,
@@ -171,7 +182,7 @@ export class ReactGeneratorService {
   private async generateForTemplate(input: {
     componentName: string;
     rawSource: string;
-    modelName: string;
+    codeGeneratorModel: string;
     fixAgentModel: string;
     systemPrompt: string;
     content: DbContentResult;
@@ -183,7 +194,7 @@ export class ReactGeneratorService {
     const {
       componentName,
       rawSource,
-      modelName,
+      codeGeneratorModel,
       fixAgentModel,
       systemPrompt,
       content,
@@ -203,12 +214,15 @@ export class ReactGeneratorService {
       : templateSource;
     const promptSourceLength = promptTemplateSource.length;
 
-    if (themeType === 'classic' || promptSourceLength <= CHUNK_THRESHOLD_CHARS) {
+    if (
+      themeType === 'classic' ||
+      promptSourceLength <= CHUNK_THRESHOLD_CHARS
+    ) {
       // ── Delegate to CodeReviewerService (Review Loop) ─────────────────────
       const { component } = await this.codeReviewer.reviewComponent({
         componentName,
         templateSource: promptTemplateSource,
-        modelName,
+        modelName: codeGeneratorModel,
         fixAgentModel,
         systemPrompt,
         content,
@@ -224,7 +238,10 @@ export class ReactGeneratorService {
       `Template ${componentName}: ${promptSourceLength} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
     );
     const resolvedNodes = templateNodes ?? [];
-    const chunks = this.splitTemplateSections(resolvedNodes, CHUNK_TARGET_CHARS);
+    const chunks = this.splitTemplateSections(
+      resolvedNodes,
+      CHUNK_TARGET_CHARS,
+    );
     await this.logToFile(
       logPath,
       `WARN "${componentName}" too large (${promptSourceLength} chars) → splitting into ${chunks.length} sections`,
@@ -234,7 +251,8 @@ export class ReactGeneratorService {
 
     const subComponents: GeneratedComponent[] = [];
     const delay =
-      this.configService.get<number>('reactGenerator.delayBetweenComponents') ?? 5000;
+      this.configService.get<number>('reactGenerator.delayBetweenComponents') ??
+      5000;
 
     for (let i = 0; i < chunks.length; i++) {
       const sectionName = `${componentName}Section${i + 1}`;
@@ -247,7 +265,7 @@ export class ReactGeneratorService {
         sectionIndex: i,
         totalSections: chunks.length,
         nodesJson,
-        modelName,
+        modelName: codeGeneratorModel,
         fixAgentModel,
         systemPrompt,
         content,
@@ -352,10 +370,9 @@ ${renders}
   private toComponentName(templateName: string): string {
     const name = templateName
       .replace(/\.(php|html)$/, '')
-      .split(/[-_]/)
+      .split(/[\\/_-]/)
       .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
       .join('');
     return /^\d/.test(name) ? `Page${name}` : name;
   }
 }
-

@@ -14,13 +14,13 @@ export type DataNeed =
 
 export interface ColorPalette {
   background: string; // page/root background e.g. "#f9f9f9"
-  surface: string;    // card / elevated surfaces e.g. "#ffffff"
-  text: string;       // primary body text e.g. "#111111"
-  textMuted: string;  // secondary / caption text e.g. "#636363"
-  accent: string;     // buttons, links, hover e.g. "#d8613c"
+  surface: string; // card / elevated surfaces e.g. "#ffffff"
+  text: string; // primary body text e.g. "#111111"
+  textMuted: string; // secondary / caption text e.g. "#636363"
+  accent: string; // buttons, links, hover e.g. "#d8613c"
   accentText: string; // text on accent background e.g. "#ffffff"
-  dark?: string;      // dark section background e.g. "#111111"
-  darkText?: string;  // text on dark sections e.g. "#f9f9f9"
+  dark?: string; // dark section background e.g. "#111111"
+  darkText?: string; // text on dark sections e.g. "#f9f9f9"
 }
 
 // ── Section types ──────────────────────────────────────────────────────────
@@ -29,12 +29,14 @@ interface BaseSection {
   background?: string; // overrides palette for this section
   textColor?: string;
   padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl';
+  paddingStyle?: string; // exact CSS shorthand from template, e.g. "2rem 1.5rem"
+  marginStyle?: string; // exact CSS shorthand from template
 }
 
 export interface NavbarSection extends BaseSection {
   type: 'navbar';
   sticky: boolean;
-  menuSlug: string;       // e.g. "primary"
+  menuSlug: string; // e.g. "primary"
   cta?: { text: string; link: string; style: 'button' | 'link' };
 }
 
@@ -50,8 +52,8 @@ export interface HeroSection extends BaseSection {
 export interface CoverSection extends BaseSection {
   type: 'cover';
   imageSrc: string;
-  dimRatio: number;    // 0–100
-  minHeight: string;   // e.g. "500px"
+  dimRatio: number; // 0–100
+  minHeight: string; // e.g. "500px"
   heading?: string;
   subheading?: string;
   cta?: { text: string; link: string };
@@ -114,7 +116,16 @@ export interface FooterSection extends BaseSection {
 export interface PostContentSection extends BaseSection {
   type: 'post-content';
   showTitle: boolean;
-  showMeta: boolean; // date, author, categories
+  showAuthor: boolean;
+  showDate: boolean;
+  showCategories: boolean;
+}
+
+export interface CommentsSection extends BaseSection {
+  type: 'comments';
+  showForm: boolean; // render "Leave a Reply" form
+  requireName: boolean; // show name field in form
+  requireEmail: boolean; // show email field in form
 }
 
 export interface PageContentSection extends BaseSection {
@@ -153,6 +164,7 @@ export type SectionPlan =
   | PageContentSection
   | SearchSection
   | BreadcrumbSection
+  | CommentsSection
   | CustomSection;
 
 /**
@@ -161,13 +173,13 @@ export type SectionPlan =
  */
 export interface TypographyTokens {
   headingFamily: string; // CSS font-family for headings, e.g. "Inter, sans-serif"
-  bodyFamily: string;    // CSS font-family for body text
-  h1: string;            // Tailwind class, e.g. "text-[2.5rem] leading-tight"
-  h2: string;            // e.g. "text-[2rem] leading-snug"
-  h3: string;            // e.g. "text-[1.5rem] leading-snug"
-  body: string;          // e.g. "text-[1rem]"
-  small: string;         // e.g. "text-sm"
-  buttonRadius: string;  // e.g. "rounded" | "rounded-full" | "rounded-none"
+  bodyFamily: string; // CSS font-family for body text
+  h1: string; // Tailwind class, e.g. "text-[2.5rem] leading-tight"
+  h2: string; // e.g. "text-[2rem] leading-snug"
+  h3: string; // e.g. "text-[1.5rem] leading-snug"
+  body: string; // e.g. "text-[1rem]"
+  small: string; // e.g. "text-sm"
+  buttonRadius: string; // exact class, e.g. "rounded-[8px]" | "rounded-full"
 }
 
 /**
@@ -175,8 +187,13 @@ export interface TypographyTokens {
  * Injected by PlannerService — never set by AI.
  */
 export interface LayoutTokens {
-  containerClass: string; // e.g. "max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8"
-  blockGap: string;       // Tailwind gap class between sections, e.g. "gap-16"
+  containerClass: string; // e.g. "max-w-[1280px] mx-auto w-full"
+  blockGap: string; // Tailwind gap class between sections, e.g. "gap-16"
+  rootPadding?: string; // exact CSS padding shorthand from theme defaults
+  buttonPadding?: string; // exact CSS padding shorthand from theme defaults
+  imageRadius?: string; // exact border radius for image-like blocks
+  cardRadius?: string; // exact border radius for cards/groups
+  cardPadding?: string; // exact CSS padding shorthand for group/card-like surfaces
   /** Partial component names this page should import, e.g. ["Header", "Footer"] */
   includes: string[];
 }
