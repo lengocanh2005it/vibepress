@@ -207,7 +207,7 @@ function cropToSize(image, width, height) {
 }
 
 
-function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
+function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl, type = null) {
   const safeWpUrl = String(wpUrl || "").trim();
   if (!safeWpUrl) return null;
 
@@ -220,7 +220,14 @@ function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl) {
       return null;
     }
 
-    const mapped = new URL(wp.pathname + wp.search + wp.hash, reactBase);
+    // React routes WordPress "page" type với prefix /page/
+    // e.g. WP: /about-us/  →  React: /page/about-us/
+    let pathname = wp.pathname;
+    if (type === "page" && pathname !== "/") {
+      pathname = "/page" + pathname;
+    }
+
+    const mapped = new URL(pathname + wp.search + wp.hash, reactBase);
     return mapped.toString();
   } catch {
     return null;
@@ -557,6 +564,7 @@ async function compareMultiplePages({
       wpUrl,
       normalizedWpBase,
       normalizedReactBase,
+      urlItem.type,
     );
 
     if (!wpUrl || !reactUrl) {
