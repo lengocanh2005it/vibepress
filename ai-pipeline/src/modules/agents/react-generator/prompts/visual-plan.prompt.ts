@@ -71,7 +71,7 @@ Use them when the template source exposes real spacing values and you can preser
 | \`comments\`     | WordPress comments list + leave a reply form |
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
-| \`custom\` | LAST RESORT for anything not in list — provide the JSX directly in the \`jsx\` field |
+| \`sidebar\` | sidebar column for page/post layouts with menus, page links, or recent posts |
 
 ## Section schemas (key fields only)
 
@@ -90,7 +90,7 @@ page-content: { showTitle }
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
-custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
+sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
 \`\`\`
 
 ## Rules
@@ -101,7 +101,9 @@ custom:       { description, jsx: "<JSX string>", imports?: ["import ..."] }
 - Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
 - Preserve exact padding/margin from the template when visible by filling \`paddingStyle\` / \`marginStyle\` with concrete CSS shorthand values.
-- For \`custom\` sections: the \`jsx\` field must be valid JSX. You may reference \`siteInfo\`, \`posts\`, \`menus\`, \`pages\`, \`item\` (for postDetail/pageDetail) — but ONLY if you also list the matching key in \`dataNeeds\` (e.g. jsx uses \`posts\` → add \`"posts"\` to dataNeeds). Variables not declared in dataNeeds will be undefined at runtime.
+- NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
+- For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
+- When \`pageDetail\` is in dataNeeds: the WordPress page API only exposes \`id, title, content, slug\`. Do not plan UI that requires post-only fields (author, categories, date, excerpt, featured image) on **pages** — those apply to posts only.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const userPrompt = `## Component to plan: ${componentName}
@@ -225,7 +227,7 @@ const VALID_SECTION_TYPES = new Set<string>([
   'comments',
   'search',
   'breadcrumb',
-  'custom',
+  'sidebar',
 ]);
 
 const VALID_DATA_NEEDS = new Set<string>([
@@ -279,7 +281,7 @@ function sanitizePalette(raw: any): ColorPalette {
  *
  * Strategy:
  *  - Unknown `type` → null (would silently produce empty output in code-generator)
- *  - Missing required string content (e.g. imageSrc, jsx) → null
+ *  - Missing required string content (e.g. imageSrc) → null
  *  - Missing/wrong scalar config → auto-repair with sensible defaults
  *  - Missing array fields that are mapped over → auto-repair with empty array
  */
@@ -437,13 +439,16 @@ function validateSectionDetailed(
       if (typeof raw.requireEmail !== 'boolean') raw.requireEmail = false;
       break;
 
-    case 'custom':
-      if (typeof raw.jsx !== 'string' || !raw.jsx.trim()) {
-        return { section: null, reason: 'custom.jsx is required' };
+    case 'sidebar':
+      if (typeof raw.title !== 'string') delete raw.title;
+      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug.trim()) {
+        delete raw.menuSlug;
       }
-      if (typeof raw.description !== 'string')
-        raw.description = 'Custom section';
-      if (!Array.isArray(raw.imports)) raw.imports = [];
+      if (typeof raw.showSiteInfo !== 'boolean') raw.showSiteInfo = false;
+      if (typeof raw.showPages !== 'boolean') raw.showPages = true;
+      if (typeof raw.showPosts !== 'boolean') raw.showPosts = false;
+      if (typeof raw.maxItems !== 'number' || raw.maxItems <= 0)
+        raw.maxItems = 6;
       break;
 
     // search, breadcrumb — no required fields
@@ -495,13 +500,29 @@ export function parseVisualPlanDetailed(
     .trim();
 
   let parsed: any;
+  let parseError: any;
   try {
     parsed = JSON.parse(cleaned);
   } catch (err: any) {
+    parseError = err;
+  }
+
+  if (!parsed) {
+    for (const candidate of buildJsonRepairCandidates(cleaned)) {
+      try {
+        parsed = JSON.parse(candidate);
+        break;
+      } catch {
+        // try next repair candidate
+      }
+    }
+  }
+
+  if (!parsed) {
     return {
       plan: null,
       diagnostic: {
-        reason: `invalid JSON: ${err?.message ?? 'unknown parse error'}`,
+        reason: `invalid JSON: ${parseError?.message ?? 'unknown parse error'}`,
         rawOutput: raw,
         cleanedOutput: cleaned,
       },
@@ -592,4 +613,62 @@ export function parseVisualPlan(
   componentName: string,
 ): ComponentVisualPlan | null {
   return parseVisualPlanDetailed(raw, componentName).plan;
+}
+
+function buildJsonRepairCandidates(input: string): string[] {
+  const candidates: string[] = [];
+
+  const escapedControls = escapeControlCharsInJsonStrings(input);
+  if (escapedControls !== input) candidates.push(escapedControls);
+
+  return candidates;
+}
+
+function escapeControlCharsInJsonStrings(input: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const char of input) {
+    if (!inString) {
+      out += char;
+      if (char === '"') inString = true;
+      continue;
+    }
+
+    if (escaped) {
+      out += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      out += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      out += char;
+      inString = false;
+      continue;
+    }
+
+    if (char === '\n') {
+      out += '\\n';
+      continue;
+    }
+    if (char === '\r') {
+      out += '\\r';
+      continue;
+    }
+    if (char === '\t') {
+      out += '\\t';
+      continue;
+    }
+
+    out += char;
+  }
+
+  return out;
 }

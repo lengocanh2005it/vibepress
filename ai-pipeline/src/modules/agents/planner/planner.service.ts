@@ -16,6 +16,7 @@ import {
 import type {
   ComponentVisualPlan,
   ColorPalette,
+  DataNeed,
   TypographyTokens,
   LayoutTokens,
 } from '../react-generator/visual-plan.schema.js';
@@ -168,7 +169,11 @@ export class PlannerService {
 
     const result: PlanResult = new Array(plan.length);
 
-    for (let batchStart = 0; batchStart < plan.length; batchStart += concurrency) {
+    for (
+      let batchStart = 0;
+      batchStart < plan.length;
+      batchStart += concurrency
+    ) {
       if (batchStart > 0) {
         await new Promise((res) => setTimeout(res, batchDelay));
       }
@@ -224,43 +229,71 @@ export class PlannerService {
         content,
         tokens,
       });
+      const allowedImageSrcs = extractStaticImageSources(templateSource);
+      let lastRaw = '';
+      let lastReason = 'unknown visual plan parse failure';
+      let lastDropped = '';
 
-      const { text: raw } = await this.llmFactory.chat({
-        model: modelName,
-        systemPrompt,
-        userPrompt,
-        maxTokens: 4096,
-      });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const prompt =
+          attempt === 1
+            ? userPrompt
+            : this.buildVisualPlanRetryPrompt(
+                componentPlan.componentName,
+                lastReason,
+                lastRaw,
+              );
 
-      const parsedResult = parseVisualPlanDetailed(
-        raw,
-        componentPlan.componentName,
-        { allowedImageSrcs: extractStaticImageSources(templateSource) },
-      );
-      const parsed = parsedResult.plan;
-      if (parsed) {
-        const layout = this.deriveComponentLayout(
-          tokens,
+        const { text: raw } = await this.llmFactory.chat({
+          model: modelName,
+          systemPrompt,
+          userPrompt: prompt,
+          maxTokens: 4096,
+        });
+
+        lastRaw = raw;
+        const parsedResult = parseVisualPlanDetailed(
+          raw,
           componentPlan.componentName,
-          fullPlan,
+          { allowedImageSrcs },
         );
-        visualPlan = {
-          ...parsed,
-          palette: globalPalette,
-          typography: globalTypography,
-          layout,
-        };
-        this.logger.log(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓`,
-        );
-      } else {
-        const reason =
-          parsedResult.diagnostic?.reason ?? 'unknown visual plan parse failure';
-        const dropped = parsedResult.diagnostic?.droppedSections?.length
+        const parsed = parsedResult.plan;
+        if (parsed) {
+          const layout = this.deriveComponentLayout(
+            tokens,
+            componentPlan.componentName,
+            fullPlan,
+          );
+          visualPlan = {
+            ...parsed,
+            dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+            palette: globalPalette,
+            typography: globalTypography,
+            layout,
+          };
+          this.logger.log(
+            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt})`,
+          );
+          break;
+        }
+
+        lastReason =
+          parsedResult.diagnostic?.reason ??
+          'unknown visual plan parse failure';
+        lastDropped = parsedResult.diagnostic?.droppedSections?.length
           ? ` | droppedSections: ${parsedResult.diagnostic.droppedSections.join('; ')}`
           : '';
+
+        if (attempt < 2) {
+          this.logger.warn(
+            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+          );
+        }
+      }
+
+      if (!visualPlan) {
         this.logger.warn(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}" plan parse failed: ${reason}${dropped} — generator will fallback to D3${this.formatRawOutput(raw)}`,
+          `[Phase C: AI Visual Sections] "${componentPlan.componentName}" plan parse failed: ${lastReason}${lastDropped} — generator will fallback to D3${this.formatRawOutput(lastRaw)}`,
         );
       }
     } catch (err: any) {
@@ -352,6 +385,7 @@ export class PlannerService {
     const cardPadding =
       tokens?.blockStyles?.group?.spacing?.padding ??
       tokens?.blockStyles?.column?.spacing?.padding;
+    const isSidebarLayout = /WithSidebar$/i.test(componentName);
 
     const maxW = d.contentWidth
       ? `max-w-[${d.contentWidth}]`
@@ -376,6 +410,8 @@ export class PlannerService {
     return {
       containerClass,
       blockGap,
+      contentLayout: isSidebarLayout ? 'sidebar-right' : 'single-column',
+      sidebarWidth: '320px',
       rootPadding: d.rootPadding,
       buttonPadding: d.buttonPadding,
       imageRadius,
@@ -427,6 +463,15 @@ export class PlannerService {
       const source = sourceMap.get(item.templateName) ?? '';
       const needs = new Set(item.dataNeeds);
 
+      // Determine whether this template renders a page (page-detail) or a post (post-detail)
+      // based on the template name, which is authoritative at this stage.
+      const templateBase = item.templateName
+        .replace(/\.(php|html)$/i, '')
+        .toLowerCase();
+      const isPageTemplate =
+        templateBase.startsWith('page') || templateBase === 'front-page';
+      const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
+
       // FSE block theme
       if (
         source.includes('wp:navigation') ||
@@ -440,7 +485,7 @@ export class PlannerService {
         source.includes('wp:post-content') ||
         source.includes('"post-content"')
       )
-        needs.add('post-detail');
+        needs.add(detailNeed);
       if (
         source.includes('wp:site-title') ||
         source.includes('"site-title"') ||
@@ -460,7 +505,7 @@ export class PlannerService {
         source.includes('{/* WP: post.content') ||
         source.includes('{/* WP: post.title')
       )
-        needs.add('post-detail');
+        needs.add(detailNeed);
       if (
         source.includes('{/* WP: comments') ||
         source.includes('comments_template')
@@ -486,27 +531,53 @@ Given a list of WordPress theme templates and the site's database content, you o
 For each template, decide:
 1. Is it a page (has its own route) or a partial (used inside pages — header, footer, sidebar, navigation, etc.)?
 2. What route should it have? Use React Router v6 path syntax.
-3. What data does it need from the API? (posts, pages, menus, site-info, post-detail, page-detail, comments)
+3. What data does it need from the API?
 4. Is it a detail view that needs useParams() to fetch by slug?
 5. Write a one-line description of what the component renders.
 
-ROUTING RULES:
-- index / home / front-page → route "/"
-- blog / archive → route "/blog"
-- single / single-post → route "/post/:slug" (isDetail: true, dataNeeds includes "post-detail")
-- page (DEFAULT page template only) → route "/page/:slug" (isDetail: true, dataNeeds includes "page-detail")
-- page-wide / page-no-title / page-with-sidebar / custom page templates → use their OWN unique route derived from the template name, e.g. "/page-wide/:slug", "/page-no-title/:slug" (isDetail: true, dataNeeds includes "page-detail")
-- Custom page templates → route "/<template-slug>" or "/<page-slug>" based on pages in DB
+── ROUTING RULES ──────────────────────────────────────────────────────────────
+- front-page → route "/"
+- home → route "/" ONLY when no front-page template exists; otherwise route "/blog"
+ - index → route "/" ONLY when neither front-page nor home exists; otherwise route "/index"
+- archive → route "/archive"  (category/tag/date archives — NOT the blog homepage)
+- search → route "/search"
 - 404 → route "*"
-- header / footer / sidebar / nav / navigation / searchform / comments / widget / breadcrumb / pagination / loop / content-none / no-results / functions → type "partial", route null
+- single / single-post → route "/post/:slug"   (isDetail: true)
+- page (the default page template) → route "/page/:slug"   (isDetail: true)
+- Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
+  e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
+       template "page-wide"           → "/page-wide/:slug"
+       template "page-no-title"       → "/page-no-title/:slug"
+  The route segment MUST match the template name exactly — do NOT invent a different name.
+- header / footer / sidebar / nav / navigation / searchform / comments / comment /
+  post-meta / widget / breadcrumb / pagination / loop / content-none / no-results /
+  functions → type "partial", route null
 
-IMPORTANT — ROUTES MUST BE UNIQUE:
-Every page component MUST have a different route. If multiple templates would normally share the same WordPress URL pattern (e.g. all page templates share /page/:slug), assign each one a unique React route derived from its template name. Never assign the same route to two components.
+── DATA NEEDS RULES ───────────────────────────────────────────────────────────
+Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "page-detail" | "comments"
+
+- "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
+- "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
+- Page templates MUST use "page-detail" — NEVER "post-detail"
+- Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
+- Archive / listing pages use "posts", not "post-detail"
+- Any component that renders navigation or a header/footer should include "menus"
+- Any component that renders the site name / tagline should include "site-info"
+
+── UNIQUE ROUTES ──────────────────────────────────────────────────────────────
+Every page component MUST have a different route.
+If a conflict would arise, use the template name to disambiguate (see routing rules above).
+Never assign the same route to two different components.
+
+── TEMPLATE NAME CONTRACT ─────────────────────────────────────────────────────
+"templateName" MUST exactly match one of the provided template names.
+Do not add ".php" or ".html" unless it is already present in the provided name.
+Do not append notes such as "(DB: ...)" or any explanation to templateName.
 
 OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no explanation:
 [
   {
-    "templateName": "index.php",
+    "templateName": "index",
     "componentName": "Index",
     "type": "page",
     "route": "/",
@@ -552,10 +623,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     lines.push(
       `Active plugins: ${content.capabilities.activePluginSlugs.join(', ') || '(none detected)'}`,
     );
-    lines.push(`WooCommerce detected: ${content.capabilities.wooCommerce ? 'yes' : 'no'}`);
+    lines.push(
+      `WooCommerce detected: ${content.capabilities.wooCommerce ? 'yes' : 'no'}`,
+    );
     if (content.capabilities.wooCommerce) {
       lines.push(`Published products: ${content.commerce.productsCount}`);
-      lines.push(`Product categories: ${content.commerce.productCategoriesCount}`);
+      lines.push(
+        `Product categories: ${content.commerce.productCategoriesCount}`,
+      );
       lines.push(
         `Core commerce pages: ${content.commerce.corePages.join(', ') || '(not found in DB)'}`,
       );
@@ -581,9 +656,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       lines.push(content.discovery.elementorWidgetTypes.join(', '));
       lines.push(
         'npm package hints: slides/carousel → swiper, form → react-hook-form, ' +
-        'popup → @radix-ui/react-dialog, accordion → @radix-ui/react-accordion, ' +
-        'tabs → @radix-ui/react-tabs, video → react-player, countdown → react-countdown, ' +
-        'google-maps → @react-google-maps/api',
+          'popup → @radix-ui/react-dialog, accordion → @radix-ui/react-accordion, ' +
+          'tabs → @radix-ui/react-tabs, video → react-player, countdown → react-countdown, ' +
+          'google-maps → @react-google-maps/api',
       );
       lines.push('');
     }
@@ -648,13 +723,21 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       };
     }
 
-    const valid = (parsed as any[]).filter(
-      (item) =>
-        item &&
-        typeof item.templateName === 'string' &&
-        typeof item.componentName === 'string' &&
-        (item.type === 'page' || item.type === 'partial'),
-    );
+    const valid = (parsed as any[])
+      .filter(
+        (item) =>
+          item &&
+          typeof item.templateName === 'string' &&
+          typeof item.componentName === 'string' &&
+          (item.type === 'page' || item.type === 'partial'),
+      )
+      .map((item) => ({
+        ...item,
+        templateName: this.normalizeTemplateNameToExpected(
+          item.templateName,
+          expectedTemplateNames,
+        ),
+      }));
 
     if (valid.length === 0) {
       return {
@@ -735,6 +818,25 @@ Return ONLY a valid JSON array — no markdown fences, no explanation, no text b
 Each object must have: templateName, componentName, type ("page"|"partial"), route (string|null), dataNeeds (string[]), isDetail (boolean), description (string).`;
   }
 
+  private buildVisualPlanRetryPrompt(
+    componentName: string,
+    reason: string,
+    badRaw: string,
+  ): string {
+    const preview = badRaw.slice(0, 700);
+    return `Your previous response for component "${componentName}" could not be parsed.
+
+Failure reason: ${reason}
+
+Start of previous response:
+\`\`\`
+${preview}${badRaw.length > 700 ? '\n... (truncated)' : ''}
+\`\`\`
+
+Return ONLY a single valid JSON object matching ComponentVisualPlan.
+Do not include markdown fences, comments, extra prose, or malformed JSON.`;
+  }
+
   private buildFallbackPlan(templateNames: string[]): PlanResult {
     const PARTIAL_PATTERNS =
       /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
@@ -780,5 +882,62 @@ Each object must have: templateName, componentName, type ("page"|"partial"), rou
       .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
       .join('');
     return /^\d/.test(name) ? `Page${name}` : name;
+  }
+
+  private toVisualDataNeeds(dataNeeds: string[]): DataNeed[] {
+    const ordered: DataNeed[] = [
+      'postDetail',
+      'pageDetail',
+      'posts',
+      'pages',
+      'menus',
+      'siteInfo',
+    ];
+    const mapped = new Set<DataNeed>();
+
+    for (const need of dataNeeds) {
+      switch (need) {
+        case 'site-info':
+          mapped.add('siteInfo');
+          break;
+        case 'post-detail':
+          mapped.add('postDetail');
+          break;
+        case 'page-detail':
+          mapped.add('pageDetail');
+          break;
+        case 'posts':
+        case 'pages':
+        case 'menus':
+          mapped.add(need);
+          break;
+      }
+    }
+
+    return ordered.filter((need) => mapped.has(need));
+  }
+
+  private normalizeTemplateNameToExpected(
+    candidate: string,
+    expectedTemplateNames: string[],
+  ): string {
+    if (expectedTemplateNames.includes(candidate)) return candidate;
+
+    const normalizedCandidate = this.normalizeTemplateKey(candidate);
+    const matches = expectedTemplateNames.filter(
+      (expected) => this.normalizeTemplateKey(expected) === normalizedCandidate,
+    );
+
+    return matches.length === 1 ? matches[0] : candidate;
+  }
+
+  private normalizeTemplateKey(value: string): string {
+    return value
+      .trim()
+      .replace(/\s*\([^)]*\)\s*$/g, '')
+      .replace(/\.(php|html)$/i, '')
+      .replace(/\\/g, '/')
+      .replace(/^\.\/+/, '')
+      .toLowerCase();
   }
 }

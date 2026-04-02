@@ -19,6 +19,8 @@ export interface PipelineModelConfig {
   genCode?: string;
   /** Model for review/repair passes in the generator stage */
   reviewCode?: string;
+  /** Model for backend/API review after server generation */
+  backendReview?: string;
   /** @deprecated use `planning` */
   planner?: string;
   /** @deprecated use `reviewCode` */

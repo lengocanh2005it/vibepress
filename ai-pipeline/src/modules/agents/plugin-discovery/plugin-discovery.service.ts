@@ -71,7 +71,11 @@ export class PluginDiscoveryService {
           .map((item) => item.blockType),
         pluginOptionKeys: runtimeFeatures.optionKeys.slice(0, 24),
         elementorWidgetTypes: Array.from(
-          new Set(runtimeFeatures.elementorDocuments.flatMap((doc) => doc.widgetTypes)),
+          new Set(
+            runtimeFeatures.elementorDocuments.flatMap(
+              (doc) => doc.widgetTypes,
+            ),
+          ),
         ).sort(),
       },
     };
@@ -127,6 +131,33 @@ export class PluginDiscoveryService {
       this.collectCf7Evidence(runtimeFeatures, restNamespaces),
     );
 
+    // Detect any remaining active plugins not caught by the known detectors above
+    const detectedSlugs = new Set(detected.map((d) => d.slug));
+    const knownPluginSlugs = new Set([
+      'woocommerce',
+      'elementor',
+      'advanced-custom-fields',
+      'advanced-custom-fields-pro',
+      'wordpress-seo',
+      'contact-form-7',
+    ]);
+    for (const plugin of runtimeFeatures.plugins) {
+      if (detectedSlugs.has(plugin.slug) || knownPluginSlugs.has(plugin.slug))
+        continue;
+      detected.push({
+        slug: plugin.slug,
+        confidence: 'high',
+        evidence: [
+          {
+            source: 'active_plugins',
+            match: plugin.pluginFile ?? plugin.slug,
+            confidence: 'high',
+          },
+        ],
+        capabilities: [],
+      });
+    }
+
     return detected.sort((a, b) => a.slug.localeCompare(b.slug));
   }
 
@@ -146,7 +177,9 @@ export class PluginDiscoveryService {
     );
     this.pushIf(
       evidence,
-      runtimeFeatures.customPostTypes.some((item) => item.postType === 'product'),
+      runtimeFeatures.customPostTypes.some(
+        (item) => item.postType === 'product',
+      ),
       {
         source: 'post_types',
         match: 'product',
@@ -154,8 +187,15 @@ export class PluginDiscoveryService {
         confidence: 'high',
       },
     );
-    for (const metaKey of ['_price', '_sku', '_stock_status', '_wc_average_rating']) {
-      const hit = runtimeFeatures.metaKeys.find((item) => item.metaKey === metaKey);
+    for (const metaKey of [
+      '_price',
+      '_sku',
+      '_stock_status',
+      '_wc_average_rating',
+    ]) {
+      const hit = runtimeFeatures.metaKeys.find(
+        (item) => item.metaKey === metaKey,
+      );
       this.pushIf(evidence, !!hit, {
         source: 'meta_keys',
         match: metaKey,
@@ -169,32 +209,33 @@ export class PluginDiscoveryService {
       {
         source: 'option_keys',
         match:
-          runtimeFeatures.optionKeys.find((key) => key.startsWith('woocommerce_')) ??
-          'woocommerce_*',
+          runtimeFeatures.optionKeys.find((key) =>
+            key.startsWith('woocommerce_'),
+          ) ?? 'woocommerce_*',
         confidence: 'medium',
       },
     );
     this.pushIf(
       evidence,
-      runtimeFeatures.shortcodes.some((item) => item.shortcode === 'woocommerce_cart'),
+      runtimeFeatures.shortcodes.some(
+        (item) => item.shortcode === 'woocommerce_cart',
+      ),
       {
         source: 'shortcodes',
         match: 'woocommerce_cart',
         confidence: 'medium',
       },
     );
+    this.pushIf(evidence, restNamespaces.includes('wc/v3'), {
+      source: 'rest_namespaces',
+      match: 'wc/v3',
+      confidence: 'high',
+    });
     this.pushIf(
       evidence,
-      restNamespaces.includes('wc/v3'),
-      {
-        source: 'rest_namespaces',
-        match: 'wc/v3',
-        confidence: 'high',
-      },
-    );
-    this.pushIf(
-      evidence,
-      runtimeFeatures.blockTypes.some((item) => item.blockType.startsWith('woocommerce/')),
+      runtimeFeatures.blockTypes.some((item) =>
+        item.blockType.startsWith('woocommerce/'),
+      ),
       {
         source: 'block_types',
         match:
@@ -242,20 +283,17 @@ export class PluginDiscoveryService {
       {
         source: 'option_keys',
         match:
-          runtimeFeatures.optionKeys.find((key) => key.startsWith('elementor_')) ??
-          'elementor_*',
+          runtimeFeatures.optionKeys.find((key) =>
+            key.startsWith('elementor_'),
+          ) ?? 'elementor_*',
         confidence: 'medium',
       },
     );
-    this.pushIf(
-      evidence,
-      restNamespaces.includes('elementor/v1'),
-      {
-        source: 'rest_namespaces',
-        match: 'elementor/v1',
-        confidence: 'high',
-      },
-    );
+    this.pushIf(evidence, restNamespaces.includes('elementor/v1'), {
+      source: 'rest_namespaces',
+      match: 'elementor/v1',
+      confidence: 'high',
+    });
     return evidence;
   }
 
@@ -284,27 +322,32 @@ export class PluginDiscoveryService {
     );
     this.pushIf(
       evidence,
-      runtimeFeatures.metaKeys.some((item) =>
-        item.metaKey.startsWith('acf_') || item.metaKey.startsWith('_acf_'),
+      runtimeFeatures.metaKeys.some(
+        (item) =>
+          item.metaKey.startsWith('acf_') || item.metaKey.startsWith('_acf_'),
       ),
       {
         source: 'meta_keys',
         match:
           runtimeFeatures.metaKeys.find(
             (item) =>
-              item.metaKey.startsWith('acf_') || item.metaKey.startsWith('_acf_'),
+              item.metaKey.startsWith('acf_') ||
+              item.metaKey.startsWith('_acf_'),
           )?.metaKey ?? 'acf_*',
         confidence: 'medium',
       },
     );
     this.pushIf(
       evidence,
-      runtimeFeatures.blockTypes.some((item) => item.blockType.startsWith('acf/')),
+      runtimeFeatures.blockTypes.some((item) =>
+        item.blockType.startsWith('acf/'),
+      ),
       {
         source: 'block_types',
         match:
-          runtimeFeatures.blockTypes.find((item) => item.blockType.startsWith('acf/'))
-            ?.blockType ?? 'acf/*',
+          runtimeFeatures.blockTypes.find((item) =>
+            item.blockType.startsWith('acf/'),
+          )?.blockType ?? 'acf/*',
         confidence: 'high',
       },
     );
@@ -319,15 +362,11 @@ export class PluginDiscoveryService {
         confidence: 'medium',
       },
     );
-    this.pushIf(
-      evidence,
-      restNamespaces.includes('acf/v3'),
-      {
-        source: 'rest_namespaces',
-        match: 'acf/v3',
-        confidence: 'high',
-      },
-    );
+    this.pushIf(evidence, restNamespaces.includes('acf/v3'), {
+      source: 'rest_namespaces',
+      match: 'acf/v3',
+      confidence: 'high',
+    });
     return evidence;
   }
 
@@ -345,24 +384,16 @@ export class PluginDiscoveryService {
         confidence: 'high',
       },
     );
-    this.pushIf(
-      evidence,
-      runtimeFeatures.optionKeys.includes('wpseo_titles'),
-      {
-        source: 'option_keys',
-        match: 'wpseo_titles',
-        confidence: 'high',
-      },
-    );
-    this.pushIf(
-      evidence,
-      restNamespaces.includes('yoast/v1'),
-      {
-        source: 'rest_namespaces',
-        match: 'yoast/v1',
-        confidence: 'high',
-      },
-    );
+    this.pushIf(evidence, runtimeFeatures.optionKeys.includes('wpseo_titles'), {
+      source: 'option_keys',
+      match: 'wpseo_titles',
+      confidence: 'high',
+    });
+    this.pushIf(evidence, restNamespaces.includes('yoast/v1'), {
+      source: 'rest_namespaces',
+      match: 'yoast/v1',
+      confidence: 'high',
+    });
     return evidence;
   }
 
@@ -373,7 +404,9 @@ export class PluginDiscoveryService {
     const evidence: PluginEvidence[] = [];
     this.pushIf(
       evidence,
-      runtimeFeatures.plugins.some((plugin) => plugin.slug === 'contact-form-7'),
+      runtimeFeatures.plugins.some(
+        (plugin) => plugin.slug === 'contact-form-7',
+      ),
       {
         source: 'active_plugins',
         match: 'contact-form-7/wp-contact-form-7.php',
@@ -384,7 +417,8 @@ export class PluginDiscoveryService {
       evidence,
       runtimeFeatures.shortcodes.some(
         (item) =>
-          item.shortcode === 'contact-form-7' || item.shortcode === 'contact-form',
+          item.shortcode === 'contact-form-7' ||
+          item.shortcode === 'contact-form',
       ),
       {
         source: 'shortcodes',
@@ -403,8 +437,9 @@ export class PluginDiscoveryService {
       {
         source: 'rest_namespaces',
         match:
-          restNamespaces.find((namespace) => /contact-forms|cf7/i.test(namespace)) ??
-          'cf7/*',
+          restNamespaces.find((namespace) =>
+            /contact-forms|cf7/i.test(namespace),
+          ) ?? 'cf7/*',
         confidence: 'medium',
       },
     );
@@ -425,7 +460,9 @@ export class PluginDiscoveryService {
       capabilities.push('product-categories');
     }
     if (
-      runtimeFeatures.shortcodes.some((item) => item.shortcode === 'woocommerce_cart') ||
+      runtimeFeatures.shortcodes.some(
+        (item) => item.shortcode === 'woocommerce_cart',
+      ) ||
       runtimeFeatures.commerce.corePages.includes('cart')
     ) {
       capabilities.push('cart');
@@ -463,7 +500,11 @@ export class PluginDiscoveryService {
     restNamespaces: string[],
   ): string[] {
     const capabilities = ['custom-fields'];
-    if (runtimeFeatures.blockTypes.some((item) => item.blockType.startsWith('acf/'))) {
+    if (
+      runtimeFeatures.blockTypes.some((item) =>
+        item.blockType.startsWith('acf/'),
+      )
+    ) {
       capabilities.push('blocks');
     }
     if (restNamespaces.includes('acf/v3')) {
@@ -488,7 +529,9 @@ export class PluginDiscoveryService {
     restNamespaces: string[],
   ): string[] {
     const capabilities = ['forms'];
-    if (restNamespaces.some((namespace) => /contact-forms|cf7/i.test(namespace))) {
+    if (
+      restNamespaces.some((namespace) => /contact-forms|cf7/i.test(namespace))
+    ) {
       capabilities.push('rest-api');
     }
     return capabilities;
@@ -497,8 +540,12 @@ export class PluginDiscoveryService {
   private scoreConfidence(
     evidence: PluginEvidence[],
   ): 'high' | 'medium' | 'low' {
-    const highCount = evidence.filter((item) => item.confidence === 'high').length;
-    const mediumCount = evidence.filter((item) => item.confidence === 'medium').length;
+    const highCount = evidence.filter(
+      (item) => item.confidence === 'high',
+    ).length;
+    const mediumCount = evidence.filter(
+      (item) => item.confidence === 'medium',
+    ).length;
     if (highCount >= 2) return 'high';
     if (highCount >= 1 || mediumCount >= 2) return 'medium';
     return 'low';
@@ -516,7 +563,10 @@ export class PluginDiscoveryService {
     if (!siteUrl) return [];
     let url: URL;
     try {
-      url = new URL('/wp-json/', siteUrl.endsWith('/') ? siteUrl : `${siteUrl}/`);
+      url = new URL(
+        '/wp-json/',
+        siteUrl.endsWith('/') ? siteUrl : `${siteUrl}/`,
+      );
     } catch {
       return [];
     }
@@ -529,8 +579,8 @@ export class PluginDiscoveryService {
         }),
       );
       const namespaces = Array.isArray(response.data?.namespaces)
-        ? response.data.namespaces.filter((value: unknown): value is string =>
-            typeof value === 'string',
+        ? response.data.namespaces.filter(
+            (value: unknown): value is string => typeof value === 'string',
           )
         : [];
       return namespaces.sort();

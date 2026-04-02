@@ -52,6 +52,7 @@ export class PlanReviewerService {
     reviewed = this.resolveDuplicateHomePages(reviewed, warnings);
     reviewed = this.normalizeComponentNames(reviewed, warnings);
     reviewed = this.fixTypeRouteInconsistencies(reviewed, warnings);
+    reviewed = this.alignHomeHierarchyRoutes(reviewed, warnings);
     reviewed = this.alignRouteSemantics(reviewed, warnings);
     reviewed = this.alignDataNeeds(reviewed, warnings);
     reviewed = this.fixDuplicateRoutes(reviewed, warnings);
@@ -70,9 +71,12 @@ export class PlanReviewerService {
       this.logger.error(`${errors.length} hard error(s) — plan is invalid:`);
       errors.forEach((e) => this.logger.error(`  ✗ ${e}`));
     }
+    // Normalizations (duplicate home templates, visualPlan sync, etc.) — not failures.
     if (warnings.length > 0) {
-      this.logger.warn(`${warnings.length} issue(s) found and auto-fixed:`);
-      warnings.forEach((w) => this.logger.warn(`  - ${w}`));
+      this.logger.log(
+        `Plan review applied ${warnings.length} routine adjustment(s):`,
+      );
+      warnings.forEach((w) => this.logger.log(`  • ${w}`));
     }
     if (errors.length === 0 && warnings.length === 0) {
       this.logger.log('Plan review passed ✓');
@@ -126,7 +130,17 @@ export class PlanReviewerService {
       const policy = this.inferRoutePolicy(item);
       let next = item;
 
-      if (next.type !== policy.type) {
+      // Don't un-demote templates that resolveDuplicateHomePages intentionally
+      // set to partial (front-page/home/index priority resolution).
+      const templateBase = next.templateName
+        .replace(/\.(php|html)$/i, '')
+        .toLowerCase();
+      const isDemotedHomeTemplate =
+        /^(front-page|home|index)$/.test(templateBase) &&
+        next.type === 'partial' &&
+        policy.type === 'page';
+
+      if (!isDemotedHomeTemplate && next.type !== policy.type) {
         warnings.push(
           `Template "${next.templateName}" had type "${next.type}" → normalized to "${policy.type}"`,
         );
@@ -254,8 +268,8 @@ export class PlanReviewerService {
         }
       }
 
-      const after = [...needs];
-      if (before.join('|') !== after.join('|')) {
+      const after = this.orderPlanDataNeeds([...needs]);
+      if (!this.haveSameMembers(before, after)) {
         warnings.push(
           `Template "${item.templateName}" dataNeeds [${before.join(', ')}] → [${after.join(', ')}]`,
         );
@@ -283,9 +297,13 @@ export class PlanReviewerService {
 
     const sectionsChanged =
       nextSections.length !== item.visualPlan.sections.length ||
-      nextSections.some((section, index) => section !== item.visualPlan!.sections[index]);
-    const dataNeedsChanged =
-      item.visualPlan.dataNeeds.join('|') !== nextDataNeeds.join('|');
+      nextSections.some(
+        (section, index) => section !== item.visualPlan!.sections[index],
+      );
+    const dataNeedsChanged = !this.haveSameMembers(
+      item.visualPlan.dataNeeds,
+      nextDataNeeds,
+    );
 
     if (!sectionsChanged && !dataNeedsChanged) {
       return item;
@@ -344,7 +362,7 @@ export class PlanReviewerService {
           break;
       }
     }
-    return [...mapped];
+    return this.orderVisualDataNeeds([...mapped]);
   }
 
   private fixDuplicateRoutes(plan: PlanResult, warnings: string[]): PlanResult {
@@ -516,8 +534,9 @@ export class PlanReviewerService {
     plan: PlanResult,
     warnings: string[],
   ): PlanResult {
-    // WordPress hierarchy: front-page > home > index
-    // If multiple templates compete for "/", keep only the highest-priority one.
+    // WordPress hierarchy: front-page > home > index.
+    // Keep the highest-priority home-like template first so duplicate-route
+    // resolution later preserves "/" for the correct winner.
     const HOME_PRIORITY = ['front-page', 'home', 'index'];
 
     const homeItems = plan
@@ -527,32 +546,105 @@ export class PlanReviewerService {
       }))
       .filter(({ base }) => HOME_PRIORITY.includes(base))
       .sort(
-        (a, b) =>
-          HOME_PRIORITY.indexOf(a.base) - HOME_PRIORITY.indexOf(b.base),
+        (a, b) => HOME_PRIORITY.indexOf(a.base) - HOME_PRIORITY.indexOf(b.base),
       );
 
     if (homeItems.length <= 1) return plan;
 
     const winner = homeItems[0];
-    const toDemote = new Set(
-      homeItems.slice(1).map(({ item }) => item.templateName),
+    warnings.push(
+      `Multiple home-like templates detected — prioritizing "${winner.base}" for route "/" and reassigning lower-priority routes later`,
     );
 
+    const rank = new Map(
+      HOME_PRIORITY.map((name, index) => [name, index] as const),
+    );
+
+    return [...plan].sort((a, b) => {
+      const aBase = a.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
+      const bBase = b.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
+      const aRank = rank.get(aBase);
+      const bRank = rank.get(bBase);
+      if (aRank == null && bRank == null) return 0;
+      if (aRank == null) return 1;
+      if (bRank == null) return -1;
+      return aRank - bRank;
+    });
+  }
+
+  private alignHomeHierarchyRoutes(
+    plan: PlanResult,
+    warnings: string[],
+  ): PlanResult {
+    const byBase = new Map<
+      string,
+      { route: string; type: 'page'; isDetail: false }
+    >();
+
+    const hasFrontPage = plan.some((item) =>
+      /^front-page$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+    );
+    const hasHome = plan.some((item) =>
+      /^home$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+    );
+    const hasIndex = plan.some((item) =>
+      /^index$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+    );
+
+    if (hasFrontPage) {
+      byBase.set('front-page', { route: '/', type: 'page', isDetail: false });
+      if (hasHome) {
+        byBase.set('home', { route: '/blog', type: 'page', isDetail: false });
+      }
+      if (hasIndex) {
+        byBase.set('index', {
+          route: '/index',
+          type: 'page',
+          isDetail: false,
+        });
+      }
+    } else if (hasHome) {
+      byBase.set('home', { route: '/', type: 'page', isDetail: false });
+      if (hasIndex) {
+        byBase.set('index', {
+          route: '/index',
+          type: 'page',
+          isDetail: false,
+        });
+      }
+    } else if (hasIndex) {
+      byBase.set('index', { route: '/', type: 'page', isDetail: false });
+    }
+
+    if (byBase.size === 0) return plan;
+
     return plan.map((item) => {
-      if (!toDemote.has(item.templateName)) return item;
-      const base = item.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
-      warnings.push(
-        `Template "${base}" demoted to partial — "${winner.base}" already covers route "/"`,
-      );
-      return {
-        ...item,
-        type: 'partial' as const,
-        route: null,
-        isDetail: false,
-        dataNeeds: item.dataNeeds.filter(
-          (n) => n !== 'post-detail' && n !== 'page-detail',
-        ),
-      };
+      const base = item.templateName
+        .replace(/\.(php|html)$/i, '')
+        .toLowerCase();
+      const expected = byBase.get(base);
+      if (!expected) return item;
+
+      let next = item;
+      if (next.type !== expected.type) {
+        warnings.push(
+          `Template "${next.templateName}" had type "${next.type}" → normalized to "${expected.type}" by home hierarchy`,
+        );
+        next = { ...next, type: expected.type };
+      }
+      if (next.route !== expected.route) {
+        warnings.push(
+          `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${expected.route}" by home hierarchy`,
+        );
+        next = { ...next, route: expected.route };
+      }
+      if (next.isDetail !== expected.isDetail) {
+        warnings.push(
+          `Template "${next.templateName}" had isDetail=${String(next.isDetail)} → normalized to false by home hierarchy`,
+        );
+        next = { ...next, isDetail: false };
+      }
+      return next;
     });
   }
 
@@ -575,8 +667,8 @@ export class PlanReviewerService {
     if (/^(front-page|home|index)$/.test(templateBase)) {
       return {
         type: 'page',
-        route: '/',
-        routeMode: 'hard',
+        route: item.route ?? '/',
+        routeMode: 'soft',
         isDetail: false,
         requiredDataNeeds: [],
       };
@@ -708,5 +800,36 @@ export class PlanReviewerService {
       .replace(/[^a-zA-Z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .toLowerCase();
+  }
+
+  private orderPlanDataNeeds(dataNeeds: PlanDataNeed[]): PlanDataNeed[] {
+    const order: PlanDataNeed[] = [
+      'post-detail',
+      'page-detail',
+      'posts',
+      'pages',
+      'menus',
+      'site-info',
+    ];
+    return order.filter((need) => dataNeeds.includes(need));
+  }
+
+  private orderVisualDataNeeds(dataNeeds: VisualDataNeed[]): VisualDataNeed[] {
+    const order: VisualDataNeed[] = [
+      'postDetail',
+      'pageDetail',
+      'posts',
+      'pages',
+      'menus',
+      'siteInfo',
+    ];
+    return order.filter((need) => dataNeeds.includes(need));
+  }
+
+  private haveSameMembers(valuesA: string[], valuesB: string[]): boolean {
+    if (valuesA.length !== valuesB.length) return false;
+    const sortedA = [...valuesA].sort();
+    const sortedB = [...valuesB].sort();
+    return sortedA.every((value, index) => value === sortedB[index]);
   }
 }

@@ -7,6 +7,19 @@ import { buildCptRoutesPrompt } from './prompts/api.prompt.js';
 
 const TEMPLATE_DIR = resolve('templates/express-server');
 
+/** LLMs sometimes emit `app.get(getPrefix() + '...')` — that calls getPrefix at load time without conn and crashes. */
+function assertInjectedRoutesDoNotMisuseGetPrefix(injectedCode: string): void {
+  const routeMisuse =
+    /app\.(?:get|post|put|delete|patch)\(\s*getPrefix\s*\(/;
+  const concatMisuse = /\bgetPrefix\s*\(\s*\)\s*\+/;
+  if (routeMisuse.test(injectedCode) || concatMisuse.test(injectedCode)) {
+    throw new Error(
+      'Generated API routes misuse getPrefix(): use a string literal for the route path ' +
+        '(e.g. app.get("/api/...")) and call `const prefix = await getPrefix(conn)` inside the handler after getConn().',
+    );
+  }
+}
+
 export interface ApiBuilderResult {
   outDir: string;
   files: { name: string; filePath: string; code: string }[];
@@ -23,7 +36,15 @@ export class ApiBuilderService {
     dbName: string;
     content: Pick<
       DbContentResult,
-      'siteInfo' | 'pages' | 'posts' | 'menus' | 'taxonomies' | 'capabilities' | 'customPostTypes' | 'commerce' | 'detectedPlugins'
+      | 'siteInfo'
+      | 'pages'
+      | 'posts'
+      | 'menus'
+      | 'taxonomies'
+      | 'capabilities'
+      | 'customPostTypes'
+      | 'commerce'
+      | 'detectedPlugins'
     >;
   }): Promise<ApiBuilderResult> {
     const { jobId = 'unknown', content } = input;
@@ -34,22 +55,38 @@ export class ApiBuilderService {
 
     const templateFile = join(outDir, 'index.ts');
 
-    const PLUGIN_ROUTE_SLUGS = ['acf', 'yoast', 'contact-form-7'];
-    const pluginsNeedingRoutes = content.detectedPlugins.filter((p) =>
-      PLUGIN_ROUTE_SLUGS.includes(p.slug),
+    // All detected plugins except those already fully covered by the static template (e.g. WooCommerce)
+    const TEMPLATE_COVERED_PLUGINS = new Set(['woocommerce']);
+    /** Injected LLM routes are unreliable for these — skip and rely on template + hand-written routes later if needed. */
+    const PLUGIN_SLUGS_SKIP_AI_ROUTES = new Set(['vibepress-db-info']);
+    const pluginsNeedingRoutes = content.detectedPlugins.filter(
+      (p) =>
+        !TEMPLATE_COVERED_PLUGINS.has(p.slug) &&
+        !PLUGIN_SLUGS_SKIP_AI_ROUTES.has(p.slug) &&
+        p.confidence !== 'low',
     );
 
     // No custom post types AND no plugins that need extra routes → template is sufficient
-    if (content.customPostTypes.length === 0 && pluginsNeedingRoutes.length === 0) {
-      this.logger.log(`No custom post types or plugin routes needed — using template as-is`);
+    if (
+      content.customPostTypes.length === 0 &&
+      pluginsNeedingRoutes.length === 0
+    ) {
+      this.logger.log(
+        `No custom post types or plugin routes needed — using template as-is`,
+      );
       const code = await readFile(templateFile, 'utf-8');
-      return { outDir, files: [{ name: 'index.ts', filePath: templateFile, code }] };
+      return {
+        outDir,
+        files: [{ name: 'index.ts', filePath: templateFile, code }],
+      };
     }
 
     if (content.customPostTypes.length > 0) {
       this.logger.log(
         `Detected ${content.customPostTypes.length} custom post type(s): ` +
-          content.customPostTypes.map((c) => `${c.postType}(${c.count})`).join(', '),
+          content.customPostTypes
+            .map((c) => `${c.postType}(${c.count})`)
+            .join(', '),
       );
     }
     if (pluginsNeedingRoutes.length > 0) {
@@ -79,13 +116,62 @@ export class ApiBuilderService {
       `${extraRoutes}\n\n$1`,
     );
 
+    assertInjectedRoutesDoNotMisuseGetPrefix(injected);
+
     await writeFile(templateFile, injected, 'utf-8');
     const injectSummary = [
-      content.customPostTypes.length > 0 ? `${content.customPostTypes.length} CPT(s)` : null,
-      pluginsNeedingRoutes.length > 0 ? `${pluginsNeedingRoutes.map((p) => p.slug).join(', ')} routes` : null,
-    ].filter(Boolean).join(', ');
+      content.customPostTypes.length > 0
+        ? `${content.customPostTypes.length} CPT(s)`
+        : null,
+      pluginsNeedingRoutes.length > 0
+        ? `${pluginsNeedingRoutes.map((p) => p.slug).join(', ')} routes`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
     this.logger.log(`Injected [${injectSummary}] into ${templateFile}`);
 
-    return { outDir, files: [{ name: 'index.ts', filePath: templateFile, code: injected }] };
+    return {
+      outDir,
+      files: [{ name: 'index.ts', filePath: templateFile, code: injected }],
+    };
+  }
+
+  async fixApi(input: {
+    result: ApiBuilderResult;
+    feedback: string;
+    modelName?: string;
+    logPath?: string;
+  }): Promise<ApiBuilderResult> {
+    const { result, feedback, modelName } = input;
+    const resolvedModel = modelName ?? this.llm.getModel();
+
+    this.logger.log(
+      `[api-fixer] Auto-fixing backend based on review feedback`,
+    );
+
+    // For now, we only have one backend file: index.ts
+    const indexFile = result.files.find((f) => f.name === 'index.ts');
+    if (!indexFile) return result;
+
+    const { text } = await this.llm.chat({
+      model: resolvedModel,
+      systemPrompt:
+        'You are an Express/TypeScript expert. Fix the reported issue in the server code. Return ONLY the complete corrected code, no explanation.',
+      userPrompt: `The following Express server code has a review failure: ${feedback}\n\nFix it and return the complete corrected code:\n\`\`\`ts\n${indexFile.code}\n\`\`\``,
+      maxTokens: 4096,
+    });
+
+    const fixedCode = text
+      .replace(/^```[\w]*\n?/m, '')
+      .replace(/\n?```$/m, '')
+      .trim();
+
+    assertInjectedRoutesDoNotMisuseGetPrefix(fixedCode);
+
+    await writeFile(indexFile.filePath, fixedCode, 'utf-8');
+    indexFile.code = fixedCode;
+
+    return result;
   }
 }

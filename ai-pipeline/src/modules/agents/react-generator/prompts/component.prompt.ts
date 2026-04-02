@@ -60,6 +60,7 @@ export interface ComponentPromptContext {
   dataNeeds?: string[];
   route?: string | null;
   isDetail?: boolean;
+  type?: 'page' | 'partial';
   visualPlan?: ComponentVisualPlan;
 }
 
@@ -337,6 +338,10 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   parts.push(
     '> Posts have: id, title, content, excerpt, slug, type, status, date, author, categories (string[]), featuredImage.',
   );
+  parts.push('> Pages have: id, title, content, slug.');
+  parts.push(
+    '> ⛔ Pages do NOT have: excerpt, date, author, categories, featuredImage, comments.',
+  );
   parts.push(
     '> ⛔ NEVER render siteName more than once per component — one element only.',
   );
@@ -447,7 +452,7 @@ export function buildPlanContextNote(plan?: {
       routeHasParams
         ? 'Detail data contract: fetch the specific post with `/api/posts/${slug}` and render that record, not the full posts list.'
         : 'Data contract: this component displays post detail data but does NOT own the route. ' +
-          'Accept a `post` prop of type `Post` from the parent component — do NOT call `useParams` or fetch `/api/posts/...` yourself.',
+            'Accept a `post` prop of type `Post` from the parent component — do NOT call `useParams` or fetch `/api/posts/...` yourself.',
     );
   }
   if (normalizedDataNeeds.includes('pageDetail')) {
@@ -455,15 +460,21 @@ export function buildPlanContextNote(plan?: {
       routeHasParams
         ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
         : 'Data contract: this component displays page detail data but does NOT own the route. ' +
-          'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
+            'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
+    );
+    lines.push(
+      '⛔ Page Detail Contract: a page has NO `author`, `categories`, `date`, `excerpt`, `featuredImage`, or `comments`. Use ONLY `id, title, content, slug`.',
+    );
+    lines.push(
+      '⛔ If you declare `interface Page`, it must ONLY have those 4 fields. Do NOT use `Post` type for pages.',
     );
   }
   if (normalizedDataNeeds.includes('comments')) {
     lines.push(
       'Comments data contract: fetch `GET /api/comments?slug=${slug}` (use the post slug from `useParams`) inside the same `useEffect` as the post detail fetch. ' +
-      'Comment fields: `id, author, date, content, parentId (0 = top-level), userId`. ' +
-      'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
-      'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty.',
+        'Comment fields: `id, author, date, content, parentId (0 = top-level), userId`. ' +
+        'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
+        'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty.',
     );
   }
   if (
@@ -594,7 +605,17 @@ export function buildComponentPrompt(
     .filter(Boolean)
     .join('\n\n');
   const retryNote = retryError
-    ? `## ERROR FROM PREVIOUS ATTEMPT\n${retryError}\nFIX THIS.`
+    ? `## ERROR FROM PREVIOUS ATTEMPT\n${retryError}\nFIX THIS.${
+        /jsx|closing tag|Expected corresponding|parse/i.test(retryError)
+          ? '\n\n**Parsing:** Re-check every `<div>` / `<section>` / `<main>` / `<article>` — each must have a matching `</…>` in order. The file must be complete, valid TSX before `export default`.'
+          : ''
+      }${
+        /Page detail contract|interface Page|post-only field/i.test(
+          retryError,
+        )
+          ? '\n\n**Page type:** Remove `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments` from any `interface Page` and from `page.` / `item.` usage. `Page` = `{ id, title, content, slug }` only. Use `Post` if you need author/categories.'
+          : ''
+      }`
     : '';
 
   const slugFetchingNote =
@@ -606,7 +627,14 @@ export function buildComponentPrompt(
   - ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'}
 - If the response is null/404, show a "Not found" message
 - Do NOT fetch the full list and pick index 0 — always use the slug from URL
-- Always render \`post.title\` as a heading (e.g. \`<h1>{post.title}</h1>\`) above the content — do NOT skip it. \`title\` is a plain string, not an object`
+- Always render \`${isSingle ? 'post' : 'page'}.title\` as a heading (e.g. \`<h1>{${isSingle ? 'post' : 'page'}.title}</h1>\`) above the content — do NOT skip it. \`title\` is a plain string, not an object
+${
+  isPage
+    ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`date\`, \`excerpt\`, \`featuredImage\`, \`comments\`.
+- \`interface Page\` (MANDATORY for pages) must list only \`id, title, content, slug\`.
+- Use \`item: Page | null\` state, not \`Post\`.`
+    : ''
+}`
       : '';
 
   return TEMPLATE.replace('{{componentName}}', componentName)

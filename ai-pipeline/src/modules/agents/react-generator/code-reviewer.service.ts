@@ -111,27 +111,36 @@ export class CodeReviewerService {
     let attempts = 0;
     let lastError: string | undefined;
     let promptContext = this.buildPromptContext(componentPlan);
-    let validationContext = this.buildValidationContext(promptContext, componentName);
+    let validationContext = this.buildValidationContext(
+      promptContext,
+      componentName,
+    );
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
 
-      // ── D1: Pre-computed visual plan → AI codegen (first round only) ───────
+      // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
       if (!isRetry && componentPlan?.visualPlan) {
+        promptContext = this.buildPromptContext(
+          componentPlan,
+          componentPlan.visualPlan,
+        );
+        validationContext = this.buildValidationContext(
+          promptContext,
+          componentName,
+        );
         await this.log(
           logPath,
-          `[reviewer] "${componentName}": using pre-computed visual plan as AI codegen context (${componentPlan.visualPlan.sections.length} sections)`,
+          `[reviewer] "${componentName}": using reviewed pre-computed visual plan for AI codegen (${componentPlan.visualPlan.sections.length} sections)`,
         );
+
         const planned = await this.generateComponentWithPlan({
           componentName,
           templateSource,
           modelName,
           content,
           tokens,
-          componentPlan: this.buildPromptContext(
-            componentPlan,
-            componentPlan.visualPlan,
-          ),
+          componentPlan: promptContext,
           logPath,
           logLabel: 'precomputed-plan',
         });
@@ -139,21 +148,25 @@ export class CodeReviewerService {
         code = planned.code;
         if (planned.isValid) {
           this.logger.log(
-            `[reviewer] "${componentName}" ✓ via AI codegen from pre-computed plan`,
+            `[reviewer] "${componentName}" ✓ via reviewed pre-computed visual plan`,
           );
           return {
-            component: { name: componentName, filePath: '', code },
+            component: {
+              name: componentName,
+              filePath: '',
+              code,
+            },
             fromVisualPlan: true,
             attempts,
           };
         }
         lastError = planned.lastError ?? lastError;
         this.logger.warn(
-          `[reviewer] "${componentName}" pre-computed plan AI codegen failed: ${planned.lastError} — deterministic fallback`,
+          `[reviewer] "${componentName}" AI pre-computed plan codegen failed: ${planned.lastError} — deterministic fallback`,
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" pre-computed plan AI codegen failed: ${planned.lastError} — deterministic fallback`,
+          `WARN [reviewer] "${componentName}" AI pre-computed plan codegen failed: ${planned.lastError} — deterministic fallback`,
         );
 
         const deterministic = await this.tryDeterministicPlan(
@@ -175,120 +188,132 @@ export class CodeReviewerService {
           };
         }
         lastError = deterministic.error ?? lastError;
-      }
-
-      // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
-      // Always attempted: each AI call can produce a different plan, so this is
-      // meaningful on both the first round and the R3→D1 restart.
-      await this.log(
-        logPath,
-        isRetry
-          ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
-          : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
-      );
-
-      const { systemPrompt: s1System, userPrompt: s1User } =
-        buildVisualPlanPrompt({
-          componentName,
-          templateSource,
-          content,
-          tokens,
-        });
-
-      try {
-        const s1Raw = await this.generateWithRetry(
-          modelName,
-          s1System,
-          s1User,
-          3,
-          logPath,
-          `${componentName}:plan`,
-        );
-        const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName, {
-          allowedImageSrcs: extractStaticImageSources(templateSource),
-        });
-        const visualPlan = parsedPlan.plan;
-
-        if (visualPlan) {
-          promptContext = this.buildPromptContext(componentPlan, visualPlan);
-          validationContext = this.buildValidationContext(promptContext, componentName);
-          await this.log(
-            logPath,
-            `[reviewer] Stage 2: generating TSX with AI from visual plan (${visualPlan.sections.length} sections)`,
-          );
-          const planned = await this.generateComponentWithPlan({
-            componentName,
-            templateSource,
-            modelName,
-            content,
-            tokens,
-            componentPlan: promptContext,
-            logPath,
-            logLabel: 'visual-plan',
-          });
-          attempts += planned.attemptsUsed;
-          code = planned.code;
-          if (planned.isValid) {
-            this.logger.log(
-              `[reviewer] "${componentName}" ✓ via AI visual plan`,
-            );
-            return {
-              component: { name: componentName, filePath: '', code },
-              fromVisualPlan: true,
-              attempts,
-            };
-          }
-          lastError = planned.lastError ?? lastError;
-          this.logger.warn(
-            `[reviewer] "${componentName}" AI plan-guided codegen failed: ${planned.lastError} — deterministic fallback`,
-          );
-          await this.log(
-            logPath,
-            `WARN [reviewer] "${componentName}" AI plan-guided codegen failed: ${planned.lastError} — deterministic fallback`,
-          );
-
-          const deterministic = await this.tryDeterministicPlan(
-            componentName,
-            visualPlan,
-            validationContext,
-            logPath,
-            'AI visual plan',
-          );
-          if (deterministic.isValid) {
-            return {
-              component: {
-                name: componentName,
-                filePath: '',
-                code: deterministic.code,
-              },
-              fromVisualPlan: true,
-              attempts,
-            };
-          }
-          lastError = deterministic.error ?? lastError;
-        } else {
-          const reason =
-            parsedPlan.diagnostic?.reason ??
-            'unknown visual plan parse failure';
-          const dropped = parsedPlan.diagnostic?.droppedSections?.length
-            ? ` | droppedSections: ${parsedPlan.diagnostic.droppedSections.join('; ')}`
-            : '';
-          this.logger.warn(
-            `[reviewer] "${componentName}" AI plan parse failed: ${reason}${dropped} — direct AI fallback${this.formatRawOutput(s1Raw)}`,
-          );
-          await this.log(
-            logPath,
-            `WARN [reviewer] "${componentName}" plan parse failed: ${reason}${dropped}${this.formatRawOutput(s1Raw)}`,
-          );
-        }
-      } catch (err: any) {
         this.logger.warn(
-          `[reviewer] "${componentName}" Stage 1 error: ${err?.message} — direct AI fallback`,
+          `[reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — falling back to AI paths`,
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" Stage 1 error — direct AI`,
+          `WARN [reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — falling back to AI paths`,
         );
+      }
+
+      // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
+      // Only used when no reviewed pre-computed plan is available on round 1,
+      // or after the R3→D1 retry when we want a fresh visual plan.
+      if (isRetry || !componentPlan?.visualPlan) {
+        await this.log(
+          logPath,
+          isRetry
+            ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
+            : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
+        );
+
+        const { systemPrompt: s1System, userPrompt: s1User } =
+          buildVisualPlanPrompt({
+            componentName,
+            templateSource,
+            content,
+            tokens,
+          });
+
+        try {
+          const s1Raw = await this.generateWithRetry(
+            modelName,
+            s1System,
+            s1User,
+            3,
+            logPath,
+            `${componentName}:plan`,
+          );
+          const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName, {
+            allowedImageSrcs: extractStaticImageSources(templateSource),
+          });
+          const visualPlan = parsedPlan.plan;
+
+          if (visualPlan) {
+            promptContext = this.buildPromptContext(componentPlan, visualPlan);
+            validationContext = this.buildValidationContext(
+              promptContext,
+              componentName,
+            );
+            await this.log(
+              logPath,
+              `[reviewer] Stage 2: generating TSX with AI from visual plan (${visualPlan.sections.length} sections)`,
+            );
+            const planned = await this.generateComponentWithPlan({
+              componentName,
+              templateSource,
+              modelName,
+              content,
+              tokens,
+              componentPlan: promptContext,
+              logPath,
+              logLabel: 'visual-plan',
+            });
+            attempts += planned.attemptsUsed;
+            code = planned.code;
+            if (planned.isValid) {
+              this.logger.log(
+                `[reviewer] "${componentName}" ✓ via AI visual plan`,
+              );
+              return {
+                component: { name: componentName, filePath: '', code },
+                fromVisualPlan: true,
+                attempts,
+              };
+            }
+            lastError = planned.lastError ?? lastError;
+            this.logger.warn(
+              `[reviewer] "${componentName}" AI plan-guided codegen failed: ${planned.lastError} — deterministic fallback`,
+            );
+            await this.log(
+              logPath,
+              `WARN [reviewer] "${componentName}" AI plan-guided codegen failed: ${planned.lastError} — deterministic fallback`,
+            );
+
+            const deterministic = await this.tryDeterministicPlan(
+              componentName,
+              visualPlan,
+              validationContext,
+              logPath,
+              'AI visual plan',
+            );
+            if (deterministic.isValid) {
+              return {
+                component: {
+                  name: componentName,
+                  filePath: '',
+                  code: deterministic.code,
+                },
+                fromVisualPlan: true,
+                attempts,
+              };
+            }
+            lastError = deterministic.error ?? lastError;
+          } else {
+            const reason =
+              parsedPlan.diagnostic?.reason ??
+              'unknown visual plan parse failure';
+            const dropped = parsedPlan.diagnostic?.droppedSections?.length
+              ? ` | droppedSections: ${parsedPlan.diagnostic.droppedSections.join('; ')}`
+              : '';
+            this.logger.warn(
+              `[reviewer] "${componentName}" AI plan parse failed: ${reason}${dropped} — direct AI fallback${this.formatRawOutput(s1Raw)}`,
+            );
+            await this.log(
+              logPath,
+              `WARN [reviewer] "${componentName}" plan parse failed: ${reason}${dropped}${this.formatRawOutput(s1Raw)}`,
+            );
+          }
+        } catch (err: any) {
+          this.logger.warn(
+            `[reviewer] "${componentName}" Stage 1 error: ${err?.message} — direct AI fallback`,
+          );
+          await this.log(
+            logPath,
+            `WARN [reviewer] "${componentName}" Stage 1 error — direct AI`,
+          );
+        }
       }
 
       // ── D3 + Match? loop: direct AI TSX (up to 3 attempts per round) ────────
@@ -335,6 +360,7 @@ export class CodeReviewerService {
           code,
           validationContext,
         );
+        if (check.fixedCode) code = check.fixedCode;
         if (check.isValid) {
           this.logger.log(`[reviewer:fix-agent] "${componentName}" ✓ repaired`);
           await this.log(
@@ -411,6 +437,7 @@ export class CodeReviewerService {
     const validationContext = this.buildValidationContext(
       this.buildPromptContext(componentPlan),
       sectionName,
+      true,
     );
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -425,8 +452,10 @@ export class CodeReviewerService {
       code = this.stripMarkdownFences(raw);
       code = this.mergeClassNames(code);
       code = this.fixDoublebraces(code);
+      code = this.normalizeTailwindFunctionSpacing(code);
 
       const check = this.validator.checkCodeStructure(code, validationContext);
+      if (check.fixedCode) code = check.fixedCode;
       if (check.isValid) {
         isValid = true;
         break;
@@ -455,6 +484,7 @@ export class CodeReviewerService {
           code,
           validationContext,
         );
+        if (check.fixedCode) code = check.fixedCode;
         if (check.isValid) {
           isValid = true;
           await this.log(
@@ -496,6 +526,7 @@ export class CodeReviewerService {
       description: componentPlan?.description,
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
+      type: componentPlan?.type,
       dataNeeds,
       visualPlan: resolvedVisualPlan,
     };
@@ -504,12 +535,15 @@ export class CodeReviewerService {
   private buildValidationContext(
     componentPlan?: ComponentPromptContext,
     componentName?: string,
+    isSubComponent = false,
   ): CodeValidationContext {
     return {
       componentName,
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
       dataNeeds: componentPlan?.dataNeeds,
+      type: componentPlan?.type,
+      isSubComponent,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
     };
   }
@@ -546,7 +580,10 @@ export class CodeReviewerService {
     let code = '';
     let lastError: string | undefined;
     let lastRawOutput = '';
-    const validationContext = this.buildValidationContext(componentPlan, componentName);
+    const validationContext = this.buildValidationContext(
+      componentPlan,
+      componentName,
+    );
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const raw = await this.generateWithRetry(
@@ -572,6 +609,7 @@ export class CodeReviewerService {
       code = this.postProcessCode(raw);
 
       const check = this.validator.checkCodeStructure(code, validationContext);
+      if (check.fixedCode) code = check.fixedCode;
       if (check.isValid) {
         return {
           code,
@@ -607,13 +645,14 @@ export class CodeReviewerService {
     logPath?: string,
     label = 'visual plan',
   ): Promise<{ code: string; isValid: boolean; error?: string }> {
-    const code = this.codeGenerator.generate(visualPlan);
+    let code = this.codeGenerator.generate(visualPlan);
     const check = this.validator.checkCodeStructure(code, {
       ...validationContext,
       dataNeeds: validationContext.dataNeeds ?? visualPlan.dataNeeds,
       allowedRelativeImports:
         validationContext.allowedRelativeImports ?? visualPlan.layout.includes,
     });
+    if (check.fixedCode) code = check.fixedCode;
 
     if (check.isValid) {
       this.logger.log(
@@ -640,7 +679,7 @@ export class CodeReviewerService {
     };
   }
 
-  private async selfFix(
+  public async selfFix(
     model: string,
     brokenCode: string,
     error: string,
@@ -655,8 +694,7 @@ export class CodeReviewerService {
       logPath,
       label ? `${label}:fix` : undefined,
     );
-    const fixed = this.stripMarkdownFences(raw);
-    return this.fixDoublebraces(this.mergeClassNames(fixed));
+    return this.postProcessCode(raw);
   }
 
   // ── LLM call with exponential back-off ───────────────────────────────────
@@ -736,8 +774,10 @@ export class CodeReviewerService {
   // ── Code post-processors ──────────────────────────────────────────────────
 
   private postProcessCode(code: string): string {
-    return this.fixDoublebraces(
-      this.mergeClassNames(this.stripMarkdownFences(code)),
+    return this.normalizeTailwindFunctionSpacing(
+      this.fixDoublebraces(
+        this.mergeClassNames(this.stripMarkdownFences(code)),
+      ),
     );
   }
 
@@ -806,6 +846,14 @@ export class CodeReviewerService {
     // Pattern 2: line with only whitespace + {{expr}} + optional whitespace before <
     result = result.replace(/^(\s*)\{\{([^{}]+)\}\}(\s*<)/gm, '$1{$2}$3');
     return result;
+  }
+
+  private normalizeTailwindFunctionSpacing(code: string): string {
+    return code.replace(
+      /\[(min|max|clamp)\(([^)\]]+)\)\]/g,
+      (_match, fnName: string, inner: string) =>
+        `[${fnName}(${inner.replace(/,\s+/g, ',')})]`,
+    );
   }
 
   // ── Logger ────────────────────────────────────────────────────────────────

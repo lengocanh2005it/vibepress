@@ -30,6 +30,10 @@ export interface GeneratedComponent {
   name: string;
   filePath: string;
   code: string;
+  route?: string | null;
+  isDetail?: boolean;
+  dataNeeds?: string[];
+  type?: 'page' | 'partial';
   // When true, preview-builder must NOT create a route for this component.
   // Sub-components are assembled into their parent; they are not standalone pages.
   isSubComponent?: boolean;
@@ -51,7 +55,7 @@ export class ReactGeneratorService {
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
     private readonly codeReviewer: CodeReviewerService,
-  ) { }
+  ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
 
@@ -230,7 +234,7 @@ export class ReactGeneratorService {
         componentPlan,
         logPath,
       });
-      return [component];
+      return [this.attachPlanContext(component, componentPlan)];
     }
 
     // Too large → split into sections (FSE only)
@@ -283,9 +287,47 @@ export class ReactGeneratorService {
 
     const assemblyCode = this.buildAssemblyCode(componentName, subComponents);
     return [
-      { name: componentName, filePath: '', code: assemblyCode },
+      this.attachPlanContext(
+        { name: componentName, filePath: '', code: assemblyCode },
+        componentPlan,
+      ),
       ...subComponents,
     ];
+  }
+
+  // ── Automated Repair ────────────────────────────────────────────────────────
+
+  async fixComponent(input: {
+    component: GeneratedComponent;
+    plan: PlanResult;
+    feedback: string;
+    modelConfig?: { fixAgent?: string };
+    logPath?: string;
+  }): Promise<GeneratedComponent> {
+    const { component, plan, feedback, modelConfig, logPath } = input;
+    const componentPlan = plan.find((p) => p.componentName === component.name);
+    const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
+
+    this.logger.log(
+      `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+    );
+    await this.logToFile(
+      logPath,
+      `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${feedback}`,
+    );
+
+    const fixedCode = await this.codeReviewer.selfFix(
+      fixAgentModel,
+      component.code,
+      feedback,
+      logPath,
+      component.name,
+    );
+
+    return this.attachPlanContext(
+      { ...component, code: fixedCode },
+      componentPlan,
+    );
   }
 
   // ── Section splitting ──────────────────────────────────────────────────────
@@ -351,6 +393,23 @@ ${renders}
   );
 }
 `;
+  }
+
+  private attachPlanContext(
+    component: GeneratedComponent,
+    componentPlan?: PlanResult[number],
+    overrides?: Partial<GeneratedComponent>,
+  ): GeneratedComponent {
+    return {
+      ...component,
+      route: componentPlan?.route ?? component.route,
+      isDetail: componentPlan?.isDetail ?? component.isDetail,
+      dataNeeds: componentPlan?.dataNeeds
+        ? [...componentPlan.dataNeeds]
+        : component.dataNeeds,
+      type: componentPlan?.type ?? component.type,
+      ...overrides,
+    };
   }
 
   // ── File logger ────────────────────────────────────────────────────────────

@@ -17,9 +17,12 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 | `GET /api/comments?postId=<id>`           | same as above, by post ID                                            |
 
 **Post fields**: `id, title, content, excerpt, slug, type, status, date, author, categories: string[], featuredImage: string|null`
+**Page fields**: `id, title, content, slug`
+⛔ **Types:** If you write `interface Page { ... }`, it may **only** list those four fields (and optional React helpers). Never add `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments`, or `menuOrder` — those belong to **posts** or other APIs, not `GET /api/pages/:slug`. Do not copy a `Post` interface and rename it to `Page`.
 **Term fields**: `id, name, slug, description, count, parentId`
 **Comment fields**: `id, author, date, content, parentId (0 = top-level), userId`
 ⛔ `post.tags`, `post.title.rendered`, unlisted fields → `undefined`, runtime error.
+⛔ Pages do NOT have `excerpt`, `date`, `author`, `categories`, `featuredImage`, or `comments`.
 ⛔ `site-info` fields: `siteName/siteUrl/blogDescription` — NOT `name/url/description`.
 ⛔ `menus` items: `parentId` is `number` (0 = top-level, never `null`) — filter with `item.parentId === 0`.
 
@@ -51,6 +54,12 @@ Internal link paths:
 - Home → `to="/"`
 
 Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href target="_blank" rel="noopener noreferrer">`.
+
+## Valid TSX — must parse as a complete file
+
+- Every opening JSX element (`<div>`, `<section>`, `<main>`, `<article>`, `<header>`, `<footer>`, …) needs a **matching** closing tag in the correct order. Omitting `</div>` in a deep layout causes `Expected corresponding JSX closing tag` and fails validation.
+- Keep nesting shallow if needed: one outer wrapper (e.g. `min-h-screen flex flex-col`) and close it **once** right before the component function ends.
+- End with a single `export default function …` whose body is balanced — do not stop mid-markup.
 
 ## Data fetching
 
@@ -127,7 +136,10 @@ Functional component, no props, export default. Import React/useState/useEffect.
 ⛔ No CSS imports. No `wp-block-*`, `alignwide`, `is-layout-*` classes. All layout via Tailwind + minimal `style={{}}` for `backgroundImage`, `fontFamily`, `flexBasis`, dynamic values only.
 ⛔ No CSS vars in Tailwind: `gap-[var(--foo)]` → BROKEN. Resolve to `gap-[24px]` first.
 ⛔ No bare numeric classes: `gap-1rem` → INVALID. Always `gap-[1rem]`.
-⛔ No spaces inside CSS functions in Tailwind arbitrary values: `py-[min(6.5rem, 8vw)]` → **class is silently ignored**. Write `py-[min(6.5rem,8vw)]` (no space after comma). Same for `max()`, `clamp()`.
+⛔ HARD RULE: Tailwind arbitrary values using `min()`, `max()`, or `clamp()` must be fully compact inside the parentheses.
+⛔ NEVER write `py-[min(6.5rem, 8vw)]`, `px-[max(2rem, 5vw)]`, `text-[clamp(1rem, 2vw, 2rem)]`.
+✅ ALWAYS write `py-[min(6.5rem,8vw)]`, `px-[max(2rem,5vw)]`, `text-[clamp(1rem,2vw,2rem)]`.
+⛔ Before returning the final TSX, remove every space after commas inside any Tailwind CSS function.
 
 | ⛔ Avoid                                                        | ✅ Use instead            |
 | --------------------------------------------------------------- | ------------------------- |
@@ -251,6 +263,12 @@ Site: {{siteName}} | URL: {{siteUrl}}
 // ✅ No src → render nothing
 {node.src && <img src={node.src} className="w-full object-cover" />}
 ```
+
+## Final self-check before returning code
+
+- If any `className` contains `min(`, `max(`, or `clamp(`, ensure every comma is immediately followed by the next token with no space.
+- Bad: `py-[min(6.5rem, 8vw)]`
+- Good: `py-[min(6.5rem,8vw)]`
 
 ## GOLDEN RULE
 

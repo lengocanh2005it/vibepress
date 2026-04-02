@@ -18,7 +18,7 @@ import type {
   PageContentSection,
   CommentsSection,
   SearchSection,
-  CustomSection,
+  SidebarSection,
   DataNeed,
 } from './visual-plan.schema.js';
 
@@ -29,6 +29,8 @@ const PADDING_MAP = {
   lg: 'py-16 lg:py-24',
   xl: 'py-24 lg:py-32',
 };
+const PARTIAL_PATTERNS =
+  /^(Header|Footer|Sidebar|Nav|Navigation|Searchform|Comments|Comment|PostMeta|Post-Meta|Widget|Breadcrumb|Pagination|Loop|ContentNone|NoResults|Functions)/i;
 
 interface RenderCtx {
   p: ColorPalette;
@@ -48,7 +50,6 @@ export class CodeGeneratorService {
     const effectiveDataNeeds = this.deriveDataNeeds(plan);
     const effectivePlan = { ...plan, dataNeeds: effectiveDataNeeds };
 
-    const extraImports = this.collectCustomImports(effectivePlan);
     const needsRouter = this.needsRouter(effectivePlan);
     const needsParams = this.needsParams(effectivePlan);
 
@@ -58,12 +59,7 @@ export class CodeGeneratorService {
       l: effectivePlan.layout,
     };
 
-    const imports = this.buildImports(
-      effectivePlan,
-      needsRouter,
-      needsParams,
-      extraImports,
-    );
+    const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
     const interfaces = SHARED_INTERFACES;
     const stateAndFetch = this.buildStateAndFetch(effectivePlan);
     const body = this.buildBody(effectivePlan, ctx);
@@ -100,15 +96,12 @@ export class CodeGeneratorService {
         case 'page-content':
           needs.add('pageDetail');
           break;
-        case 'custom': {
-          // Scan the raw JSX string so data vars used there are declared
-          const jsx = (section as CustomSection).jsx ?? '';
-          if (/\bposts\b/.test(jsx)) needs.add('posts');
-          if (/\bmenus\b/.test(jsx)) needs.add('menus');
-          if (/\bsiteInfo\b/.test(jsx)) needs.add('siteInfo');
-          if (/\bpages\b/.test(jsx)) needs.add('pages');
-          if (/\bitem\b/.test(jsx) && !needs.has('postDetail'))
-            needs.add('pageDetail');
+        case 'sidebar': {
+          const sidebar = section as SidebarSection;
+          if (sidebar.showSiteInfo) needs.add('siteInfo');
+          if (sidebar.showPages) needs.add('pages');
+          if (sidebar.showPosts) needs.add('posts');
+          if (sidebar.menuSlug) needs.add('menus');
           break;
         }
       }
@@ -122,7 +115,6 @@ export class CodeGeneratorService {
     plan: ComponentVisualPlan,
     needsRouter: boolean,
     needsParams: boolean,
-    extraImports: string[],
   ): string {
     const lines: string[] = [
       "import React, { useState, useEffect } from 'react';",
@@ -136,24 +128,30 @@ export class CodeGeneratorService {
       );
     }
     // Import shared partial components (Header, Footer, etc.) from layout plan
+    const currentFolder = PARTIAL_PATTERNS.test(plan.componentName)
+      ? 'components'
+      : 'pages';
     for (const name of plan.layout.includes) {
-      lines.push(`import ${name} from './${name}';`);
-    }
-    for (const imp of extraImports) {
-      if (!lines.includes(imp)) lines.push(imp);
+      const targetFolder = PARTIAL_PATTERNS.test(name) ? 'components' : 'pages';
+      const importPath =
+        currentFolder === targetFolder
+          ? `./${name}`
+          : `../${targetFolder}/${name}`;
+      lines.push(`import ${name} from '${importPath}';`);
     }
     return lines.join('\n');
   }
 
-  private collectCustomImports(plan: ComponentVisualPlan): string[] {
-    return plan.sections
-      .filter((s): s is CustomSection => s.type === 'custom')
-      .flatMap((s) => s.imports ?? []);
-  }
-
   private needsRouter(plan: ComponentVisualPlan): boolean {
-    return plan.sections.some(
-      (s) => s.type !== 'custom' || (s as CustomSection).jsx?.includes('<Link'),
+    return plan.sections.some((s) =>
+      [
+        'navbar',
+        'footer',
+        'breadcrumb',
+        'post-list',
+        'search',
+        'sidebar',
+      ].includes(s.type),
     );
   }
 
@@ -180,11 +178,14 @@ export class CodeGeneratorService {
     if (dataNeeds.includes('posts'))
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
     if (dataNeeds.includes('pages'))
-      lines.push(`  const [pages, setPages] = useState<Post[]>([]);`);
+      lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     if (dataNeeds.includes('menus'))
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
-    if (dataNeeds.includes('postDetail') || dataNeeds.includes('pageDetail')) {
+    if (dataNeeds.includes('postDetail')) {
       lines.push(`  const [item, setItem] = useState<Post | null>(null);`);
+      lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+    } else if (dataNeeds.includes('pageDetail')) {
+      lines.push(`  const [item, setItem] = useState<Page | null>(null);`);
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
     }
     lines.push(`  const [loading, setLoading] = useState(true);`);
@@ -277,9 +278,7 @@ export class CodeGeneratorService {
 
   private buildBody(plan: ComponentVisualPlan, ctx: RenderCtx): string {
     const { componentName, palette, sections } = plan;
-    const sectionJsx = sections
-      .map((s) => this.renderSection(s, ctx))
-      .join('\n\n');
+    const sectionJsx = this.buildSections(plan, ctx);
     const rootStyle = this.buildStyleAttr({
       fontFamily: ctx.t.bodyFamily,
       padding: ctx.l.rootPadding,
@@ -293,6 +292,43 @@ ${sectionJsx}
 };
 
 export default ${componentName};`;
+  }
+
+  private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
+    const parts: string[] = [];
+    const sidebarSection =
+      plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
+        ? (plan.sections.find(
+            (s): s is SidebarSection => s.type === 'sidebar',
+          ) ?? null)
+        : null;
+    const mainContentSection = plan.sections.find(
+      (s) => s.type === 'page-content' || s.type === 'post-content',
+    );
+
+    for (const section of plan.sections) {
+      if (sidebarSection && section === sidebarSection && mainContentSection) {
+        continue;
+      }
+      if (
+        sidebarSection &&
+        mainContentSection &&
+        section === mainContentSection
+      ) {
+        parts.push(
+          this.renderContentWithSidebar(
+            mainContentSection,
+            sidebarSection,
+            ctx,
+            plan.layout.contentLayout === 'sidebar-left',
+          ),
+        );
+        continue;
+      }
+      parts.push(this.renderSection(section, ctx));
+    }
+
+    return parts.join('\n\n');
   }
 
   // ── Section dispatcher ────────────────────────────────────────────────────
@@ -331,8 +367,8 @@ export default ${componentName};`;
         return this.renderSearch(section, ctx, py);
       case 'breadcrumb':
         return this.renderBreadcrumb(ctx);
-      case 'custom':
-        return this.renderCustom(section);
+      case 'sidebar':
+        return this.renderSidebar(section, ctx, py);
     }
   }
 
@@ -720,32 +756,13 @@ ${menuCols}
     ctx: RenderCtx,
     py: string,
   ): string {
-    const { p, t } = ctx;
+    const { p } = ctx;
     const bg = s.background ?? p.background;
-    const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
-    const hasMeta = s.showDate || s.showAuthor || s.showCategories;
-    const metaParts: string[] = [];
-    if (s.showDate)
-      metaParts.push(`<time>{new Date(item.date).toLocaleDateString()}</time>`);
-    if (s.showAuthor) metaParts.push(`<span>by {item.author}</span>`);
-    if (s.showCategories)
-      metaParts.push(
-        `{item.categories[0] && <span>{item.categories[0]}</span>}`,
-      );
-    const metaBlock = hasMeta
-      ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
-      : '';
     return `      {/* Post Content */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
-          {item && (
-            <article className="flex flex-col gap-6">
-              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
-              ${metaBlock}
-              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
-            </article>
-          )}
+${this.renderPostContentInner(s, ctx)}
         </div>
       </section>`;
   }
@@ -806,19 +823,13 @@ ${menuCols}
     ctx: RenderCtx,
     py: string,
   ): string {
-    const { p, t } = ctx;
+    const { p } = ctx;
     const bg = s.background ?? p.background;
-    const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
     return `      {/* Page Content */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
-          {item && (
-            <article className="flex flex-col gap-6">
-              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
-              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
-            </article>
-          )}
+${this.renderPageContentInner(s, ctx)}
         </div>
       </section>`;
   }
@@ -857,9 +868,163 @@ ${menuCols}
       </nav>`;
   }
 
-  private renderCustom(s: CustomSection): string {
-    return `      {/* ${s.description} */}
-      ${s.jsx}`;
+  private renderSidebar(s: SidebarSection, ctx: RenderCtx, py: string): string {
+    const bg = s.background ?? ctx.p.background;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+
+    return `      {/* Sidebar */}
+      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+        <div className="${ctx.l.containerClass}">
+${this.renderSidebarCard(s, ctx, 10)}
+        </div>
+      </section>`;
+  }
+
+  private renderContentWithSidebar(
+    mainSection: PostContentSection | PageContentSection,
+    sidebarSection: SidebarSection,
+    ctx: RenderCtx,
+    sidebarLeft: boolean,
+  ): string {
+    const { p } = ctx;
+    const bg = mainSection.background ?? p.background;
+    const py = PADDING_MAP[mainSection.padding ?? 'lg'];
+    const sectionStyle = this.buildSectionStyleAttr(mainSection);
+    const mainContent =
+      mainSection.type === 'post-content'
+        ? this.renderPostContentInner(mainSection, ctx)
+        : this.renderPageContentInner(mainSection, ctx);
+    const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
+    const gridStyle = this.buildStyleAttr({
+      gridTemplateColumns: sidebarLeft
+        ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
+        : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
+    });
+
+    return `      {/* Main Content With Sidebar */}
+      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+        <div className="${ctx.l.containerClass}">
+          <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
+            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0">${mainContent.trim()}</div>`}
+            ${sidebarLeft ? `<div className="min-w-0">${mainContent.trim()}</div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
+          </div>
+        </div>
+      </section>`;
+  }
+
+  private renderPostContentInner(
+    s: PostContentSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const tc = s.textColor ?? p.text;
+    const hasMeta = s.showDate || s.showAuthor || s.showCategories;
+    const metaParts: string[] = [];
+    if (s.showDate)
+      metaParts.push(`<time>{new Date(item.date).toLocaleDateString()}</time>`);
+    if (s.showAuthor) metaParts.push(`<span>by {item.author}</span>`);
+    if (s.showCategories)
+      metaParts.push(
+        `{item.categories[0] && <span>{item.categories[0]}</span>}`,
+      );
+    const metaBlock = hasMeta
+      ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
+      : '';
+
+    return `          {item && (
+            <article className="flex flex-col gap-6">
+              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
+              ${metaBlock}
+              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+            </article>
+          )}`;
+  }
+
+  private renderPageContentInner(
+    s: PageContentSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const tc = s.textColor ?? p.text;
+    return `          {item && (
+            <article className="flex flex-col gap-6">
+              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
+              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+            </article>
+          )}`;
+  }
+
+  private renderSidebarCard(
+    s: SidebarSection,
+    ctx: RenderCtx,
+    maxItemsOverride?: number,
+  ): string {
+    const { p, t, l } = ctx;
+    const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
+    const paddingStyle = this.buildStyleAttr({ padding: l.cardPadding });
+    const titleBlock = s.title
+      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]">${s.title}</h3>\n`
+      : '';
+    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
+    const menuSlug = s.menuSlug ? `'${s.menuSlug}'` : 'undefined';
+
+    const siteInfoBlock = s.showSiteInfo
+      ? `            <div className="flex flex-col gap-2">
+              <div className="font-semibold text-[${p.text}]">{siteInfo?.siteName}</div>
+              {siteInfo?.blogDescription && (
+                <p className="text-sm text-[${p.textMuted}]">{siteInfo.blogDescription}</p>
+              )}
+            </div>
+`
+      : '';
+
+    const menuBlock = s.menuSlug
+      ? `            <div className="flex flex-col gap-3">
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Navigation</div>
+              <nav className="flex flex-col gap-2">
+                {(menus.find(m => m.slug === ${menuSlug}) ?? menus[0])?.items
+                  ?.filter(item => item.parentId === 0)
+                  ?.slice(0, ${maxItems})
+                  ?.map(item => (
+                    <Link key={item.id} to={item.url} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
+                      {item.title}
+                    </Link>
+                  ))}
+              </nav>
+            </div>
+`
+      : '';
+
+    const pagesBlock = s.showPages
+      ? `            <div className="flex flex-col gap-3">
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Pages</div>
+              <nav className="flex flex-col gap-2">
+                {pages.slice(0, ${maxItems}).map(page => (
+                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
+                    {page.title}
+                  </Link>
+                ))}
+              </nav>
+            </div>
+`
+      : '';
+
+    const postsBlock = s.showPosts
+      ? `            <div className="flex flex-col gap-3">
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Latest Posts</div>
+              <div className="flex flex-col gap-3">
+                {posts.slice(0, ${maxItems}).map(post => (
+                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
+                    {post.title}
+                  </Link>
+                ))}
+              </div>
+            </div>
+`
+      : '';
+
+    return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
+${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </div>`;
   }
 }
 
@@ -895,6 +1060,13 @@ interface Post {
   featuredImage: string | null;
   comments?: Comment[];
   comment_count?: number;
+}
+
+interface Page {
+  id: number;
+  title: string;
+  content: string;
+  slug: string;
 }
 
 interface MenuItem {

@@ -56,20 +56,37 @@ export default () => ({
   },
   // Per-step model overrides — format: "provider/model" or plain model name.
   // Preferred env names:
-  //   PLANNING_MODEL=openai/gpt-4.0
+  //   PLANNING_MODEL=mistral/mistral-large-latest
   //   GEN_CODE_MODEL=mistral/codestral-latest
-  //   REVIEW_CODE_MODEL=openai/gpt-4.0
+  //   REVIEW_CODE_MODEL=mistral/codestral-latest
+  //   AI_REVIEW_MODE=warn
+  //   BACKEND_AI_REVIEW_MODE=warn
   // Backward-compatible aliases:
   //   PLANNER_MODEL, CODE_REVIEWER_MODEL, FIX_AGENT_MODEL
   pipeline: {
-    planningModel: process.env.PLANNING_MODEL ?? process.env.PLANNER_MODEL,
-    genCodeModel: process.env.GEN_CODE_MODEL,
+    planningModel:
+      process.env.PLANNING_MODEL ??
+      process.env.PLANNER_MODEL ??
+      'mistral/mistral-large-latest',
+    genCodeModel:
+      process.env.GEN_CODE_MODEL ?? 'mistral/codestral-latest',
     reviewCodeModel:
-      process.env.REVIEW_CODE_MODEL ?? process.env.CODE_REVIEWER_MODEL,
+      process.env.REVIEW_CODE_MODEL ??
+      process.env.CODE_REVIEWER_MODEL ??
+      'mistral/mistral-large-latest',
+    backendReviewModel:
+      process.env.BACKEND_REVIEW_MODEL ??
+      process.env.REVIEW_CODE_MODEL ??
+      process.env.CODE_REVIEWER_MODEL ??
+      'mistral/mistral-large-latest',
     fixAgentModel:
       process.env.FIX_AGENT_MODEL ??
       process.env.REVIEW_CODE_MODEL ??
-      process.env.CODE_REVIEWER_MODEL,
+      process.env.CODE_REVIEWER_MODEL ??
+      process.env.GEN_CODE_MODEL ??
+      'mistral/codestral-latest',
+    aiReviewMode: process.env.AI_REVIEW_MODE ?? 'warn',
+    backendAiReviewMode: process.env.BACKEND_AI_REVIEW_MODE ?? 'warn',
   },
   github: {
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,

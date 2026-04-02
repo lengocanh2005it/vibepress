@@ -17,7 +17,9 @@ import { DbContentService } from '../agents/db-content/db-content.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
+import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
 import { ValidatorService } from '../agents/validator/validator.service.js';
 import { CleanupService } from '../agents/cleanup/cleanup.service.js';
@@ -192,7 +194,9 @@ export class OrchestratorService {
     private readonly planner: PlannerService,
     private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
+    private readonly generatedCodeReview: GeneratedCodeReviewService,
     private readonly apiBuilder: ApiBuilderService,
+    private readonly generatedApiReview: GeneratedApiReviewService,
     private readonly previewBuilder: PreviewBuilderService,
     private readonly validator: ValidatorService,
     private readonly cleanup: CleanupService,
@@ -304,18 +308,40 @@ export class OrchestratorService {
     // Format: plain model name (uses global AI_PROVIDER) or "provider/model"
     // e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
     const mc: PipelineModelConfig = dto.modelConfig ?? {};
-    const cfgPlanning = this.configService.get<string>('pipeline.planningModel');
+    const cfgPlanning = this.configService.get<string>(
+      'pipeline.planningModel',
+    );
     const cfgGenCode = this.configService.get<string>('pipeline.genCodeModel');
     const cfgReviewCode = this.configService.get<string>(
       'pipeline.reviewCodeModel',
+    );
+    const cfgBackendReview = this.configService.get<string>(
+      'pipeline.backendReviewModel',
+    );
+    const cfgAiReviewMode = this.configService.get<string>(
+      'pipeline.aiReviewMode',
+      'warn',
+    );
+    const cfgBackendAiReviewMode = this.configService.get<string>(
+      'pipeline.backendAiReviewMode',
+      'warn',
     );
     const cfgFixAgent = this.configService.get<string>(
       'pipeline.fixAgentModel',
     );
     const resolvedModels = {
-      planning: mc.planning ?? mc.planner ?? cfgPlanning,
-      genCode: mc.genCode ?? cfgGenCode,
+      planning: mc.planning ?? mc.planner ?? cfgPlanning ?? 'mistral/mistral-large-latest',
+      genCode: mc.genCode ?? cfgGenCode ?? 'mistral/codestral-latest',
       reviewCode: mc.reviewCode ?? mc.codeReviewer ?? cfgReviewCode,
+      backendReview: mc.backendReview ?? mc.reviewCode ?? mc.codeReviewer ?? cfgBackendReview,
+      aiReviewMode:
+        (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
+          | 'warn'
+          | 'blocking',
+      backendAiReviewMode:
+        (cfgBackendAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
+          | 'warn'
+          | 'blocking',
       fixAgent:
         mc.fixAgent ??
         mc.reviewCode ??
@@ -327,6 +353,9 @@ export class OrchestratorService {
       `[models] planning="${resolvedModels.planning ?? 'default'}" ` +
         `genCode="${resolvedModels.genCode ?? 'default'}" ` +
         `reviewCode="${resolvedModels.reviewCode ?? 'default'}" ` +
+        `backendReview="${resolvedModels.backendReview ?? 'default'}" ` +
+        `aiReviewMode="${resolvedModels.aiReviewMode}" ` +
+        `backendAiReviewMode="${resolvedModels.backendAiReviewMode}" ` +
         `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
     );
 
@@ -548,9 +577,11 @@ export class OrchestratorService {
       true,
     );
 
-    // ── Stage 4: React Generator (D1→D2/D3→D4) + Stage 5: Code Review Loop (R1→R2→R3→D1) ──
-    // Per diagram: D4 (AST Validator) runs INSIDE Stage 4, not as a post-Stage-5 step.
-    // The CodeReviewerService implements the complete Stage 4+5 loop per component.
+    // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
+    // Flow inside this step:
+    //   1. AI code generation per component
+    //   2. Rule-based validator cleanup / contract checks
+    //   3. AI generated-code review across the finished component set
     const generationResult = await this.runStep(
       state,
       '6_generator',
@@ -570,12 +601,53 @@ export class OrchestratorService {
           },
         });
 
-        // D4: AST Validator — strip unused imports (final cleanup pass inside Stage 4)
         this.logger.log(
-          `[Stage 4: D4 AST Validator] Validating & cleaning ${result.components.length} components`,
+          `[Stage 4: D4 Validator] Validating & cleaning ${result.components.length} components`,
         );
-        const validated = this.validator.validate(result.components);
-        return { ...result, components: validated };
+        let components = this.validator.validate(result.components);
+
+        const MAX_FIX_ATTEMPTS = 2;
+        for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+          this.logger.log(
+            `[Stage 5: AI Generated Code Review] Reviewing ${components.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+          );
+          const review = await this.generatedCodeReview.review({
+            components,
+            plan: reviewResult.plan,
+            modelName: resolvedModels.reviewCode,
+            mode: resolvedModels.aiReviewMode,
+            logPath,
+          });
+
+          if (review.success || review.failures.length === 0) {
+            break;
+          }
+
+          this.logger.warn(
+            `[Stage 5: AI Generated Code Review] ${review.failures.length} components failed review. Attempting auto-fix.`,
+          );
+          await this.logToFile(
+            logPath,
+            `[Stage 5] ${review.failures.length} components failed review. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+          );
+
+          for (const failure of review.failures) {
+            const compIndex = components.findIndex(
+              (c) => c.name === failure.componentName,
+            );
+            if (compIndex !== -1) {
+              components[compIndex] = await this.reactGenerator.fixComponent({
+                component: components[compIndex],
+                plan: reviewResult.plan,
+                feedback: failure.message,
+                modelConfig: { fixAgent: resolvedModels.fixAgent },
+                logPath,
+              });
+            }
+          }
+        }
+
+        return { ...result, components };
       },
     );
     await stepDelay();
@@ -611,10 +683,49 @@ export class OrchestratorService {
     }
 
     // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
-    // E1: API Builder — Express server with all WP data endpoints
-    await this.runStep(state, '7_api_builder', logPath, () =>
-      this.apiBuilder.build({ jobId, dbName: dbCreds.dbName, content }),
-    );
+    await this.runStep(state, '7_api_builder', logPath, async () => {
+      let api = await this.apiBuilder.build({
+        jobId,
+        dbName: dbCreds.dbName,
+        content,
+      });
+
+      const MAX_FIX_ATTEMPTS = 2;
+      for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+        this.logger.log(
+          `[Stage 6: AI Generated Backend Review] Reviewing ${api.files.length} backend file(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+        );
+        const review = await this.generatedApiReview.review({
+          api,
+          plan: reviewResult.plan,
+          content,
+          modelName: resolvedModels.backendReview,
+          mode: resolvedModels.backendAiReviewMode,
+          logPath,
+        });
+
+        if (review.success || !review.blockingMessage) {
+          break;
+        }
+
+        this.logger.warn(
+          `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+        );
+
+        api = await this.apiBuilder.fixApi({
+          result: api,
+          feedback: review.blockingMessage,
+          modelName: resolvedModels.fixAgent,
+          logPath,
+        });
+      }
+
+      return api;
+    });
     await stepDelay();
     await this.cotEvidence.write(
       jobId,

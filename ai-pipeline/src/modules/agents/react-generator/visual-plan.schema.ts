@@ -142,12 +142,14 @@ export interface BreadcrumbSection extends BaseSection {
   type: 'breadcrumb';
 }
 
-/** Fallback: AI provides the JSX directly for complex/unknown sections */
-export interface CustomSection extends BaseSection {
-  type: 'custom';
-  description: string;
-  jsx: string; // raw JSX string, inserted verbatim into component
-  imports?: string[]; // extra import lines needed
+export interface SidebarSection extends BaseSection {
+  type: 'sidebar';
+  title?: string;
+  menuSlug?: string;
+  showSiteInfo: boolean;
+  showPages: boolean;
+  showPosts: boolean;
+  maxItems?: number;
 }
 
 export type SectionPlan =
@@ -165,7 +167,7 @@ export type SectionPlan =
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
-  | CustomSection;
+  | SidebarSection;
 
 /**
  * Typography tokens derived from theme.json / style.css.
@@ -189,6 +191,8 @@ export interface TypographyTokens {
 export interface LayoutTokens {
   containerClass: string; // e.g. "max-w-[1280px] mx-auto w-full"
   blockGap: string; // Tailwind gap class between sections, e.g. "gap-16"
+  contentLayout?: 'single-column' | 'sidebar-right' | 'sidebar-left';
+  sidebarWidth?: string; // exact CSS width for sidebar column, e.g. "320px"
   rootPadding?: string; // exact CSS padding shorthand from theme defaults
   buttonPadding?: string; // exact CSS padding shorthand from theme defaults
   imageRadius?: string; // exact border radius for image-like blocks

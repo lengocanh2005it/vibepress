@@ -46,14 +46,15 @@ export class DbContentService {
   async extract(creds: WpDbCredentials): Promise<DbContentResult> {
     this.logger.log(`Extracting WP content from DB: ${creds.dbName}`);
 
-    const [siteInfo, posts, pages, menus, taxonomies, runtimeFeatures] = await Promise.all([
-      this.wpQuery.getSiteInfo(creds),
-      this.wpQuery.getPosts(creds),
-      this.wpQuery.getPages(creds),
-      this.wpQuery.getMenus(creds),
-      this.wpQuery.getTaxonomies(creds),
-      this.wpQuery.getRuntimeFeatures(creds),
-    ]);
+    const [siteInfo, posts, pages, menus, taxonomies, runtimeFeatures] =
+      await Promise.all([
+        this.wpQuery.getSiteInfo(creds),
+        this.wpQuery.getPosts(creds),
+        this.wpQuery.getPages(creds),
+        this.wpQuery.getMenus(creds),
+        this.wpQuery.getTaxonomies(creds),
+        this.wpQuery.getRuntimeFeatures(creds),
+      ]);
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
       runtimeFeatures,
@@ -61,9 +62,9 @@ export class DbContentService {
 
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ` +
-      `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
-      `${runtimeFeatures.capabilities.wooCommerce ? `, WooCommerce (${runtimeFeatures.commerce.productsCount} products)` : ''}` +
-      `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
+        `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
+        `${runtimeFeatures.capabilities.wooCommerce ? `, WooCommerce (${runtimeFeatures.commerce.productsCount} products)` : ''}` +
+        `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
 
     return {

@@ -99,11 +99,28 @@ export class PreviewBuilderService {
     // 3b. Copy đúng các asset mà component generated đang reference.
     // Điều này tránh case assets/ có tồn tại nhưng thiếu các ảnh con mà JSX dùng.
     if (themeDir) {
-      await this.copyReferencedThemeAssets(
+      const missingAssets = await this.copyReferencedThemeAssets(
         themeDir,
         join(frontendDir, 'public'),
         components.components,
       );
+      if (missingAssets.size > 0) {
+        for (const comp of components.components) {
+          const stripped = this.stripImgTagsForMissingAssets(
+            comp.code,
+            missingAssets,
+          );
+          if (stripped === comp.code) continue;
+          comp.code = stripped;
+          const isPartial =
+            PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+          const targetDir = isPartial ? componentsDir : pagesDir;
+          await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+        }
+        this.logger.log(
+          `Removed <img> / empty JSX for ${missingAssets.size} missing theme asset(s)`,
+        );
+      }
     }
 
     // 3. Generate App.tsx với routes từ components
@@ -443,9 +460,10 @@ ${fontEntries}
     themeDir: string,
     publicDir: string,
     components: ReactGenerateResult['components'],
-  ): Promise<void> {
+  ): Promise<Set<string>> {
+    const missing = new Set<string>();
     const assetPaths = this.collectReferencedAssetPaths(components);
-    if (assetPaths.length === 0) return;
+    if (assetPaths.length === 0) return missing;
 
     let copied = 0;
     for (const assetPath of assetPaths) {
@@ -461,15 +479,64 @@ ${fontEntries}
         copied++;
         this.logger.log(`Successfully copied asset: ${relativePath}`);
       } catch (err) {
-        this.logger.warn(
-          `Failed to copy asset from ${sourcePath}: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        );
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        if (msg.includes('ENOENT')) {
+          const canonical = assetPath.startsWith('/')
+            ? assetPath
+            : `/${relativePath}`;
+          missing.add(canonical);
+          this.logger.debug(
+            `Theme asset not found (will drop <img>): ${relativePath}`,
+          );
+        } else {
+          this.logger.warn(`Failed to copy asset from ${sourcePath}: ${msg}`);
+        }
       }
     }
 
     if (copied > 0) {
       this.logger.log(`Copied ${copied} referenced theme assets to preview`);
     }
+    return missing;
+  }
+
+  /**
+   * Remove <img> tags pointing at theme files that do not exist, and JSX fragments
+   * like `{cond && }` left empty after removal.
+   */
+  private stripImgTagsForMissingAssets(
+    code: string,
+    missing: Set<string>,
+  ): string {
+    if (missing.size === 0) return code;
+    let out = code;
+    for (const path of missing) {
+      const variants = new Set([
+        path,
+        path.startsWith('/') ? path.slice(1) : `/${path}`,
+      ]);
+      for (const v of variants) {
+        const esc = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(
+          new RegExp(`<img\\s[^>]*?\\bsrc=["']${esc}["'][^>]*/>`, 'gis'),
+          '',
+        );
+        out = out.replace(
+          new RegExp(
+            `<img\\s[^>]*?\\bsrc=\\{\\s*["']${esc}["']\\s*\\}[^>]*/>`,
+            'gis',
+          ),
+          '',
+        );
+        out = out.replace(
+          new RegExp(`<img\\s[^>]*?\\bsrc=\\{\\s*\`${esc}\`\\s*\\}[^>]*/>`, 'gis'),
+          '',
+        );
+      }
+    }
+    // `{condition && }` left after stripping the only child (e.g. avatar img)
+    out = out.replace(/\{\s*[\w.?()]+\s*&&\s*\}/g, '');
+    return out;
   }
 
   private collectReferencedAssetPaths(

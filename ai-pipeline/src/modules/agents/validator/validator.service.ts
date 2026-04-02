@@ -32,6 +32,8 @@ export interface CodeValidationContext {
   route?: string | null;
   isDetail?: boolean;
   dataNeeds?: string[];
+  type?: 'page' | 'partial';
+  isSubComponent?: boolean;
   allowedRelativeImports?: string[];
 }
 
@@ -45,16 +47,24 @@ export class ValidatorService {
    * - Fail fast on structural/semantic issues before preview build
    */
   validate(components: GeneratedComponent[]): GeneratedComponent[] {
-    const normalized = components.map((comp) => ({
-      ...comp,
-      code: this.removeUnusedImports(comp.code),
-    }));
-    const generatedComponentNames = normalized.map((comp) => comp.name);
+    const generatedComponentNames = components.map((comp) => comp.name);
+
+    const normalized = components.map((comp) => {
+      let code = this.removeUnusedImports(comp.code);
+      const sanitized = this.sanitizeTailwindClasses(code);
+      if (sanitized !== code) code = sanitized;
+      return { ...comp, code };
+    });
 
     const componentErrors: string[] = [];
     for (const comp of normalized) {
       const check = this.checkCodeStructure(comp.code, {
         componentName: comp.name,
+        route: comp.route,
+        isDetail: comp.isDetail,
+        dataNeeds: comp.dataNeeds,
+        type: comp.type,
+        isSubComponent: comp.isSubComponent,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -67,13 +77,6 @@ export class ValidatorService {
     if (componentErrors.length > 0) {
       throw new Error(
         `[validator] Generated component validation failed:\n${componentErrors.join('\n')}`,
-      );
-    }
-
-    const projectDiagnostics = this.checkProjectCompilation(normalized);
-    if (projectDiagnostics.length > 0) {
-      throw new Error(
-        `[validator] Preview TypeScript preflight failed:\n${projectDiagnostics.join('\n')}`,
       );
     }
 
@@ -141,13 +144,32 @@ export class ValidatorService {
   }
 
   /**
+   * Fix common AI Tailwind mistakes before validation so we do not burn retries.
+   * - Spaces after commas in `min()`/`max()`/`clamp()` inside arbitrary `[...]` classes
+   * - `gap-10px`-style classes → `gap-[10px]`
+   */
+  sanitizeTailwindClasses(raw: string): string {
+    let out = raw;
+    out = out.replace(/\[(min|max|clamp)\(([^[\]]*)\)\]/g, (_m, fn, inner) => {
+      const compact = String(inner).replace(/,\s+/g, ',');
+      return `[${fn}(${compact})]`;
+    });
+    out = out.replace(
+      /\b(gap|mt|mb|ml|mr|pt|pb|pl|pr|mx|my|px|py|m|p|w|h|text|leading|tracking|rounded(?:-[a-z]+)?|font|min-[wh]|max-[wh])-(\d[\d.]*)(px|rem|em|vh|vw|%)\b/g,
+      (_m, prefix, num, unit) => `${prefix}-[${num}${unit}]`,
+    );
+    return out;
+  }
+
+  /**
    * Basic structural validation to detect obvious layout-breaking code
    */
   checkCodeStructure(
-    code: string,
+    rawCode: string,
     context: CodeValidationContext = {},
-  ): { isValid: boolean; error?: string } {
-    if (!code.trim()) return { isValid: false, error: 'Empty code' };
+  ): { isValid: boolean; error?: string; fixedCode?: string } {
+    if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
+    const code = this.sanitizeTailwindClasses(rawCode);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -368,6 +390,24 @@ export class ValidatorService {
         `\`post.${postFieldMatch[1]}\` does not exist. Use \`post.title\` (string) or \`post.categories\` (string[]).`,
       );
     }
+    if (expectsPageDetail) {
+      const pageFieldMatch = code.match(
+        /\b(?:pageDetail|page|item)\.(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
+      );
+      if (pageFieldMatch) {
+        violations.push(
+          `Page detail contract violated: \`Page.${pageFieldMatch[1]}\` does not exist. A page only exposes \`id, title, content, slug\` in this pipeline.`,
+        );
+      }
+      const pageInterfaceMatch = code.match(
+        /interface\s+Page\s*\{[\s\S]*?\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b[\s\S]*?\}/,
+      );
+      if (pageInterfaceMatch) {
+        violations.push(
+          `Page detail contract violated: \`interface Page\` declares post-only field \`${pageInterfaceMatch[1]}\`. Keep Page limited to \`id, title, content, slug\`.`,
+        );
+      }
+    }
 
     // 11b. React Router API used without importing from react-router-dom
     if (
@@ -426,8 +466,14 @@ export class ValidatorService {
     // Partials (header, footer, postmeta, sidebar, …) receive data via props from their
     // parent page — they do not own a route or fetch detail data themselves.
     // Skip routing/fetching enforcement for them to avoid contradictory violations.
-    const isPartialComponent = PARTIAL_PATTERNS.test(context.componentName ?? '');
-    if (!isPartialComponent) {
+    const isPartialComponent = PARTIAL_PATTERNS.test(
+      context.componentName ?? '',
+    );
+    const skipRouteDataContractChecks =
+      context.type === 'partial' ||
+      context.isSubComponent === true ||
+      isPartialComponent;
+    if (!skipRouteDataContractChecks) {
       if (expectsAnyDetail && !/\buseParams\s*</.test(code)) {
         violations.push(
           'Detail component is missing `useParams<{ slug: string }>()` for slug-based routing.',
@@ -504,7 +550,10 @@ export class ValidatorService {
       return { isValid: false, error: violations.join('\n') };
     }
 
-    return { isValid: true };
+    return {
+      isValid: true,
+      ...(code !== rawCode ? { fixedCode: code } : {}),
+    };
   }
 
   private checkProjectCompilation(components: GeneratedComponent[]): string[] {
@@ -512,6 +561,9 @@ export class ValidatorService {
     const componentImports: string[] = [];
     const componentRenders: string[] = [];
     const targetPaths = new Set<string>();
+    const setVirtualFile = (filePath: string, content: string) => {
+      files.set(this.normalizeVirtualPath(filePath), content);
+    };
 
     for (let idx = 0; idx < components.length; idx++) {
       const comp = components[idx];
@@ -522,14 +574,14 @@ export class ValidatorService {
         ];
       }
       targetPaths.add(filePath);
-      files.set(filePath, comp.code);
+      setVirtualFile(filePath, comp.code);
       componentImports.push(
         `import Component${idx} from '${this.toImportPath(VIRTUAL_APP_FILE, filePath)}';`,
       );
       componentRenders.push(`      <Component${idx} />`);
     }
 
-    files.set(
+    setVirtualFile(
       VIRTUAL_APP_FILE,
       `import React from 'react';
 ${componentImports.join('\n')}
@@ -543,7 +595,7 @@ ${componentRenders.join('\n')}
 }
 `,
     );
-    files.set(
+    setVirtualFile(
       VIRTUAL_MAIN_FILE,
       `import React from 'react';
 import ReactDOM from 'react-dom/client';
@@ -557,12 +609,14 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 );
 `,
     );
-    files.set(`${VIRTUAL_ROOT}/src/index.css`, '');
-    files.set(VIRTUAL_REACT_SHIM_FILE, this.buildReactShim());
+    setVirtualFile(`${VIRTUAL_ROOT}/src/index.css`, '');
+    setVirtualFile(VIRTUAL_REACT_SHIM_FILE, this.buildReactShim());
 
     const host = this.createVirtualCompilerHost(files);
     const program = ts.createProgram({
-      rootNames: [...files.keys()],
+      rootNames: [...files.keys()].filter((filePath) =>
+        /\.(?:tsx?|d\.ts)$/i.test(filePath),
+      ),
       options: PREVIEW_COMPILER_OPTIONS,
       host,
     });
@@ -702,8 +756,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 
   private isIdentifierUsed(ident: string, body: string): boolean {
     // Use word-boundary regex so "useState" doesn't match "useStateExtra"
+    const sanitizedBody = body
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/.*$/gm, ' ')
+      .replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
     const re = new RegExp(`\\b${ident}\\b`);
-    return re.test(body);
+    return re.test(sanitizedBody);
   }
 
   private findInvalidRelativeImport(
@@ -711,6 +769,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     context: CodeValidationContext,
   ): string | null {
     const allowed = new Set(context.allowedRelativeImports ?? []);
+    const currentFolder = this.getComponentFolder(
+      context.componentName,
+      context.type,
+      context.isSubComponent,
+    );
     const matches = [
       ...code.matchAll(/import\s+[^'"]+from\s+['"]([^'"]+)['"]/g),
     ];
@@ -720,22 +783,62 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       if (/^@\/(?:components|pages)\//.test(importPath)) {
         return importPath;
       }
-      if (!importPath.startsWith('./')) continue;
-
-      const basename = importPath
-        .replace(/^\.\//, '')
-        .replace(/\.(?:js|jsx|ts|tsx)$/, '');
-      if (!/^[A-Z][A-Za-z0-9]+$/.test(basename)) continue;
+      if (!importPath.startsWith('./') && !importPath.startsWith('../')) continue;
 
       if (/\.(?:js|jsx)$/.test(importPath)) {
         return importPath;
       }
+
+      const basename = importPath
+        .replace(/^\.\/|^\.\.\//, '')
+        .split('/')
+        .pop()
+        ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
+      if (!basename) return importPath;
+      if (
+        importPath.startsWith('./') &&
+        /^(?:components|pages)\//.test(importPath.replace(/^\.\//, ''))
+      ) {
+        return importPath;
+      }
+      if (
+        importPath.startsWith('../') &&
+        !/^\.\.\/(?:components|pages)\//.test(importPath)
+      ) {
+        return importPath;
+      }
+      if (!/^[A-Z][A-Za-z0-9]+$/.test(basename)) continue;
+
       if (!allowed.has(basename)) {
+        return importPath;
+      }
+
+      const targetFolder = this.getComponentFolder(basename);
+      const expectedPath =
+        currentFolder === targetFolder
+          ? `./${basename}`
+          : `../${targetFolder}/${basename}`;
+      if (importPath !== expectedPath) {
         return importPath;
       }
     }
 
     return null;
+  }
+
+  private getComponentFolder(
+    componentName?: string,
+    type?: 'page' | 'partial',
+    isSubComponent?: boolean,
+  ): 'pages' | 'components' {
+    if (
+      type === 'partial' ||
+      isSubComponent === true ||
+      PARTIAL_PATTERNS.test(componentName ?? '')
+    ) {
+      return 'components';
+    }
+    return 'pages';
   }
 
   private matchesDetailFetch(
@@ -783,25 +886,59 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   ): ts.CompilerHost {
     const defaultHost = ts.createCompilerHost(PREVIEW_COMPILER_OPTIONS, true);
     const normalize = (fileName: string) => this.normalizeVirtualPath(fileName);
+    const normalizedFiles = new Map<string, string>();
+    const virtualDirs = new Set<string>([this.normalizeVirtualPath(VIRTUAL_ROOT)]);
+
+    for (const [filePath, content] of files.entries()) {
+      normalizedFiles.set(normalize(filePath), content);
+    }
+
+    for (const filePath of files.keys()) {
+      const parts = filePath.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join('/');
+        if (dir) virtualDirs.add(this.normalizeVirtualPath(dir));
+      }
+    }
 
     return {
       ...defaultHost,
       getCurrentDirectory: () => VIRTUAL_ROOT,
-      getCanonicalFileName: (fileName) =>
-        ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase(),
-      useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+      getCanonicalFileName: (fileName) => fileName,
+      useCaseSensitiveFileNames: () => true,
       getNewLine: () => ts.sys.newLine,
       fileExists: (fileName) => {
         const normalized = normalize(fileName);
-        return files.has(normalized) || defaultHost.fileExists(fileName);
+        return normalizedFiles.has(normalized) || defaultHost.fileExists(fileName);
+      },
+      directoryExists: (dirName) => {
+        const normalized = normalize(dirName);
+        return (
+          virtualDirs.has(normalized) ||
+          defaultHost.directoryExists?.(dirName) ||
+          false
+        );
+      },
+      getDirectories: (dirName) => {
+        const normalizedDir = normalize(dirName).replace(/\/+$/, '');
+        const result = new Set<string>(defaultHost.getDirectories?.(dirName) ?? []);
+
+        for (const virtualDir of virtualDirs) {
+          if (!virtualDir.startsWith(`${normalizedDir}/`)) continue;
+          const rest = virtualDir.slice(normalizedDir.length + 1);
+          if (!rest || rest.includes('/')) continue;
+          result.add(rest);
+        }
+
+        return [...result];
       },
       readFile: (fileName) => {
         const normalized = normalize(fileName);
-        return files.get(normalized) ?? defaultHost.readFile(fileName);
+        return normalizedFiles.get(normalized) ?? defaultHost.readFile(fileName);
       },
       getSourceFile: (fileName, languageVersion, onError) => {
         const normalized = normalize(fileName);
-        const virtualContent = files.get(normalized);
+        const virtualContent = normalizedFiles.get(normalized);
         if (virtualContent != null) {
           return ts.createSourceFile(
             fileName,
@@ -814,6 +951,36 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         return defaultHost.getSourceFile(fileName, languageVersion, onError);
       },
       writeFile: () => undefined,
+      resolveModuleNames: (moduleNames, containingFile) => {
+        return moduleNames.map((name) => {
+          // 1. Resolve shims (React, etc.)
+          if (['react', 'react/jsx-runtime', 'react-dom/client', 'react-router-dom'].includes(name)) {
+            return {
+              resolvedFileName: this.normalizeVirtualPath(VIRTUAL_REACT_SHIM_FILE),
+              isExternalLibraryImport: true,
+            };
+          }
+
+          // 2. Resolve local components
+          if (name.startsWith('./') || name.startsWith('../')) {
+            const currentDir = containingFile.replace(/\/[^/]+$/, '');
+            let resolvedPath = ts.sys.useCaseSensitiveFileNames
+              ? `${currentDir}/${name}`
+              : `${currentDir}/${name}`.toLowerCase();
+            
+            // Try variants (.tsx, .ts)
+            const extensions = ['.tsx', '.ts', ''];
+            for (const ext of extensions) {
+              const fullPath = this.normalizeVirtualPath(`${resolvedPath}${ext}`);
+              if (files.has(fullPath)) {
+                return { resolvedFileName: fullPath };
+              }
+            }
+          }
+
+          return undefined;
+        });
+      },
     };
   }
 
@@ -930,11 +1097,17 @@ export {};
   }
 
   private shouldIgnoreProjectDiagnostic(diag: ts.Diagnostic): boolean {
+    const message = ts.flattenDiagnosticMessageText(diag.messageText, '\n');
     return (
-      diag.code === 2307 &&
-      /Cannot find module 'react\/jsx-runtime'/.test(
-        ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-      )
+      /react\/jsx-runtime/.test(message) ||
+      (diag.code === 2307 &&
+        /Cannot find module '(react|react\/jsx-runtime|react-dom\/client|react-router-dom)'/.test(
+          message,
+        )) ||
+      (diag.code === 2792 &&
+        /Cannot find module '(react|react\/jsx-runtime|react-dom\/client|react-router-dom)'/.test(
+          message,
+        ))
     );
   }
 

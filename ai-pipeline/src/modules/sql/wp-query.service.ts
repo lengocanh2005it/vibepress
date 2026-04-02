@@ -427,15 +427,21 @@ export class WpQueryService {
         blockRows.map((row) => String(row.post_content ?? '')),
         /<!--\s*wp:([a-z0-9/-]+)/gi,
       ).map(([blockType, count]) => ({ blockType, count }));
-      const elementorDocuments: WpElementorDocument[] = elementorRows.map((row) => ({
-        postId: Number(row.ID),
-        postType: String(row.post_type),
-        slug: String(row.post_name ?? ''),
-        title: String(row.post_title ?? ''),
-        widgetTypes: this.extractElementorWidgetTypes(String(row.meta_value ?? '')),
-      }));
+      const elementorDocuments: WpElementorDocument[] = elementorRows.map(
+        (row) => ({
+          postId: Number(row.ID),
+          postType: String(row.post_type),
+          slug: String(row.post_name ?? ''),
+          title: String(row.post_title ?? ''),
+          widgetTypes: this.extractElementorWidgetTypes(
+            String(row.meta_value ?? ''),
+          ),
+        }),
+      );
 
-      const hasWooByPlugin = plugins.some((plugin) => plugin.slug === 'woocommerce');
+      const hasWooByPlugin = plugins.some(
+        (plugin) => plugin.slug === 'woocommerce',
+      );
       const hasWooByData =
         !!optionMap.get('woocommerce_db_version') ||
         productsCount > 0 ||
@@ -458,10 +464,22 @@ export class WpQueryService {
 
       // Detect custom post types registered by plugins (excludes all WP built-ins)
       const BUILTIN_POST_TYPES = [
-        'post', 'page', 'attachment', 'revision', 'nav_menu_item',
-        'custom_css', 'customize_changeset', 'oembed_cache', 'user_request',
-        'wp_block', 'wp_template', 'wp_template_part', 'wp_global_styles',
-        'wp_navigation', 'wp_font_face', 'wp_font_family',
+        'post',
+        'page',
+        'attachment',
+        'revision',
+        'nav_menu_item',
+        'custom_css',
+        'customize_changeset',
+        'oembed_cache',
+        'user_request',
+        'wp_block',
+        'wp_template',
+        'wp_template_part',
+        'wp_global_styles',
+        'wp_navigation',
+        'wp_font_face',
+        'wp_font_family',
       ];
       const ph = BUILTIN_POST_TYPES.map(() => '?').join(',');
       const [cptCountRows] = await conn.query<any[]>(
@@ -585,12 +603,16 @@ export class WpQueryService {
       pattern.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(content)) !== null) {
-        const key = String(match[1] ?? '').trim().toLowerCase();
+        const key = String(match[1] ?? '')
+          .trim()
+          .toLowerCase();
         if (!key) continue;
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    return [...counts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    );
   }
 
   private extractElementorWidgetTypes(raw: string): string[] {
