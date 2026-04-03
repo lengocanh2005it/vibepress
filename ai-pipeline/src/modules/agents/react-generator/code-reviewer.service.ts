@@ -106,6 +106,7 @@ export class CodeReviewerService {
     // MAX_ROUNDS implements R3 → D1 in the pipeline diagram:
     // after Fix Agent fails, restart from D1 (Visual Plan?) for one more round.
     const MAX_ROUNDS = 2;
+    const forceDirectAi = process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
 
     let code = '';
     let attempts = 0;
@@ -120,7 +121,7 @@ export class CodeReviewerService {
       const isRetry = round > 1;
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
-      if (!isRetry && componentPlan?.visualPlan) {
+      if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
         promptContext = this.buildPromptContext(
           componentPlan,
           componentPlan.visualPlan,
@@ -200,7 +201,7 @@ export class CodeReviewerService {
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
       // Only used when no reviewed pre-computed plan is available on round 1,
       // or after the R3→D1 retry when we want a fresh visual plan.
-      if (isRetry || !componentPlan?.visualPlan) {
+      if (!forceDirectAi && (isRetry || !componentPlan?.visualPlan)) {
         await this.log(
           logPath,
           isRetry
@@ -583,10 +584,7 @@ export class CodeReviewerService {
     let code = '';
     let lastError: string | undefined;
     let lastRawOutput = '';
-    const validationContext = this.buildValidationContext(
-      componentPlan,
-      componentName,
-    );
+    const validationContext = this.buildValidationContext(componentPlan, componentName);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const raw = await this.generateWithRetry(
@@ -614,12 +612,7 @@ export class CodeReviewerService {
       const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.fixedCode) code = check.fixedCode;
       if (check.isValid) {
-        return {
-          code,
-          isValid: true,
-          attemptsUsed: attempt,
-          lastRawOutput,
-        };
+        return { code, isValid: true, attemptsUsed: attempt, lastRawOutput };
       }
 
       lastError = check.error;
@@ -630,6 +623,71 @@ export class CodeReviewerService {
         logPath,
         `WARN [reviewer] "${componentName}" ${logLabel} attempt ${attempt}/${maxAttempts}: ${lastError}${this.formatRawOutput(raw)}\n----- PROCESSED OUTPUT BEGIN -----\n${code || '(empty)'}\n----- PROCESSED OUTPUT END -----`,
       );
+
+      // Auto repair for specific failure modes at last attempt before falling back up the pipeline
+      if (attempt === maxAttempts) {
+        const isNoJsx = lastError?.includes('No JSX return found');
+        const isPageContract = lastError?.includes('Page detail contract violated');
+
+        if (isNoJsx || isPageContract) {
+          const reason = isNoJsx ? 'No JSX return found' : 'Page detail contract violated';
+          this.logger.warn(
+            `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
+          );
+          await this.log(
+            logPath,
+            `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
+          );
+
+          try {
+            const fixed = await this.selfFix(
+              modelName,
+              code,
+              `${reason}: ${lastError}`,
+              logPath,
+              `${componentName}:${logLabel}:autofix`,
+            );
+            code = fixed;
+
+            const finalCheck = this.validator.checkCodeStructure(code, validationContext);
+            if (finalCheck.fixedCode) code = finalCheck.fixedCode;
+
+            if (finalCheck.isValid) {
+              this.logger.log(
+                `[reviewer:autofix] "${componentName}" ✓ repaired no-JSX and validated`,
+              );
+              await this.log(
+                logPath,
+                `[reviewer:autofix] "${componentName}" ✓ repaired no-JSX and validated`,
+              );
+              return { code, isValid: true, attemptsUsed: attempt, lastRawOutput: raw };
+            }
+
+            lastError = finalCheck.error ?? lastError;
+            this.logger.warn(
+              `[reviewer:autofix] "${componentName}" self-fix still invalid: ${lastError}`,
+            );
+            await this.log(
+              logPath,
+              `WARN [reviewer:autofix] "${componentName}" self-fix still invalid: ${lastError}`,
+            );
+          } catch (fixErr: unknown) {
+            const fixErrMessage =
+              fixErr instanceof Error
+                ? fixErr.message
+                : typeof fixErr === 'string'
+                ? fixErr
+                : JSON.stringify(fixErr);
+            this.logger.warn(
+              `[reviewer:autofix] "${componentName}" self-fix failed: ${fixErrMessage}`,
+            );
+            await this.log(
+              logPath,
+              `WARN [reviewer:autofix] "${componentName}" self-fix failed: ${fixErrMessage}`,
+            );
+          }
+        }
+      }
     }
 
     return {

@@ -2,10 +2,24 @@ import { DbContentResult } from '../../db-content/db-content.service.js';
 
 // CPTs and plugins already handled by the static Express template — skip to avoid duplicates
 const TEMPLATE_COVERED_TYPES = new Set(['product']);
-const TEMPLATE_COVERED_PLUGINS = new Set(['woocommerce']);
+const TEMPLATE_COVERED_PLUGINS = new Set<string>([]);
 
 // Specific SQL instructions for well-known plugins
 const KNOWN_PLUGIN_INSTRUCTIONS: Record<string, string> = {
+  woocommerce: [
+    '- WooCommerce → Comprehensive e-commerce routes:',
+    '  GET /api/products?category=&min_price=&max_price=&search= → all products with filters',
+    '  GET /api/products/:id → single product with variations, attributes, related products',
+    '  GET /api/products/:id/variations → product variations (size, color, etc)',
+    '  GET /api/product-categories → all WooCommerce categories with product count',
+    '  GET /api/product-categories/:id/products → products in a category',
+    '  GET /api/product-attributes → available attributes (color, size, brand, etc)',
+    '  GET /api/cart → cart contents (from wp_options with serialized _woocommerce_cart_hash)',
+    '  POST /api/cart/add → add item to cart',
+    '  Query wp_posts (post_type="product"), wp_postmeta (meta_keys: _price, _stock, _sku, _product_attributes)',
+    '  For variations: query wp_posts (post_type="product_variation", post_parent=product_id)',
+    '  Return product with { id, title, price, currency, description, image, sku, stock, categories[], attributes{} }',
+  ].join('\n'),
   acf: [
     '- ACF → GET /api/posts/:id/fields',
     '  Query wp_postmeta WHERE post_id = ? AND meta_key NOT LIKE "\\_%"',

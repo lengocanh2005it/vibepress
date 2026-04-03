@@ -9,8 +9,7 @@ const TEMPLATE_DIR = resolve('templates/express-server');
 
 /** LLMs sometimes emit `app.get(getPrefix() + '...')` — that calls getPrefix at load time without conn and crashes. */
 function assertInjectedRoutesDoNotMisuseGetPrefix(injectedCode: string): void {
-  const routeMisuse =
-    /app\.(?:get|post|put|delete|patch)\(\s*getPrefix\s*\(/;
+  const routeMisuse = /app\.(?:get|post|put|delete|patch)\(\s*getPrefix\s*\(/;
   const concatMisuse = /\bgetPrefix\s*\(\s*\)\s*\+/;
   if (routeMisuse.test(injectedCode) || concatMisuse.test(injectedCode)) {
     throw new Error(
@@ -55,24 +54,33 @@ export class ApiBuilderService {
 
     const templateFile = join(outDir, 'index.ts');
 
-    // All detected plugins except those already fully covered by the static template (e.g. WooCommerce)
-    const TEMPLATE_COVERED_PLUGINS = new Set(['woocommerce']);
-    /** Injected LLM routes are unreliable for these — skip and rely on template + hand-written routes later if needed. */
+    // Only generate AI routes for popular plugins that need custom API endpoints
+    const PLUGINS_NEEDING_AI_ROUTES = new Set([
+      'woocommerce', // e-commerce functionality
+      'contact-form-7', // form submissions
+      'wpforms', // form submissions
+      'elementor', // dynamic content
+      'divi-builder', // dynamic content
+      'acf', // advanced custom fields
+      'polylang', // multi-language
+      'wpml', // multi-language
+    ]);
+    /** Skip AI routes for these plugins — rely on template or manual implementation */
     const PLUGIN_SLUGS_SKIP_AI_ROUTES = new Set(['vibepress-db-info']);
     const pluginsNeedingRoutes = content.detectedPlugins.filter(
       (p) =>
-        !TEMPLATE_COVERED_PLUGINS.has(p.slug) &&
+        PLUGINS_NEEDING_AI_ROUTES.has(p.slug) &&
         !PLUGIN_SLUGS_SKIP_AI_ROUTES.has(p.slug) &&
         p.confidence !== 'low',
     );
 
-    // No custom post types AND no plugins that need extra routes → template is sufficient
+    // No custom post types AND no popular plugins detected → template is sufficient
     if (
       content.customPostTypes.length === 0 &&
       pluginsNeedingRoutes.length === 0
     ) {
       this.logger.log(
-        `No custom post types or plugin routes needed — using template as-is`,
+        `No custom post types or popular plugins needing routes — using template as-is`,
       );
       const code = await readFile(templateFile, 'utf-8');
       return {
@@ -91,7 +99,7 @@ export class ApiBuilderService {
     }
     if (pluginsNeedingRoutes.length > 0) {
       this.logger.log(
-        `Plugins needing extra routes: ${pluginsNeedingRoutes.map((p) => p.slug).join(', ')}`,
+        `Popular plugins needing AI-generated routes: ${pluginsNeedingRoutes.map((p) => p.slug).join(', ')}`,
       );
     }
 
@@ -124,7 +132,7 @@ export class ApiBuilderService {
         ? `${content.customPostTypes.length} CPT(s)`
         : null,
       pluginsNeedingRoutes.length > 0
-        ? `${pluginsNeedingRoutes.map((p) => p.slug).join(', ')} routes`
+        ? `${pluginsNeedingRoutes.map((p) => p.slug).join(', ')} plugin routes`
         : null,
     ]
       .filter(Boolean)
@@ -146,9 +154,7 @@ export class ApiBuilderService {
     const { result, feedback, modelName } = input;
     const resolvedModel = modelName ?? this.llm.getModel();
 
-    this.logger.log(
-      `[api-fixer] Auto-fixing backend based on review feedback`,
-    );
+    this.logger.log(`[api-fixer] Auto-fixing backend based on review feedback`);
 
     // For now, we only have one backend file: index.ts
     const indexFile = result.files.find((f) => f.name === 'index.ts');

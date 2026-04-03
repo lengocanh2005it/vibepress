@@ -19,7 +19,9 @@ type PlanDataNeed =
   | 'menus'
   | 'site-info'
   | 'post-detail'
-  | 'page-detail';
+  | 'page-detail'
+  | 'authorDetail'
+  | 'categoryDetail';
 
 interface RoutePolicy {
   type: 'page' | 'partial';
@@ -38,7 +40,13 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'site-info',
   'post-detail',
   'page-detail',
+  'authorDetail',
+  'categoryDetail',
 ]);
+
+// Templates injected deterministically by the planner for standard WordPress
+// archive routes — they will not appear in the raw theme template list.
+const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
 
 @Injectable()
 export class PlanReviewerService {
@@ -445,7 +453,10 @@ export class PlanReviewerService {
         (componentCounts.get(item.componentName) ?? 0) + 1,
       );
 
-      if (!expected.has(item.templateName)) {
+      if (
+        !expected.has(item.templateName) &&
+        !STANDARD_INJECTABLE_TEMPLATES.has(item.templateName)
+      ) {
         errors.push(
           `Unexpected template in plan: "${item.templateName}" is not present in normalized theme input`,
         );
@@ -493,7 +504,11 @@ export class PlanReviewerService {
     }
 
     for (const templateName of expectedTemplateNames) {
-      if (!templateCounts.has(templateName)) {
+      // Standard injectable templates are added by the planner, not the theme — skip missing check.
+      if (
+        !templateCounts.has(templateName) &&
+        !STANDARD_INJECTABLE_TEMPLATES.has(templateName)
+      ) {
         errors.push(`Missing template in plan: "${templateName}"`);
       }
     }

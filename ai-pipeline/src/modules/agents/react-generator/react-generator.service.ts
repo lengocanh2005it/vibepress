@@ -99,10 +99,30 @@ export class ReactGeneratorService {
     const pagesCount = theme.templates.length;
     const partialsCount = theme.type === 'fse' ? theme.parts.length : 0;
 
-    const templates =
+    const templates: Array<{ name: string; html?: string; markup?: string }> =
       theme.type === 'classic'
-        ? theme.templates
+        ? [...theme.templates]
         : [...theme.templates, ...theme.parts];
+
+    const existingTemplateNames = new Set(
+      templates.map((t) => t.name.toLowerCase()),
+    );
+
+    // Ensure standard routes are generated even when not present in theme templates.
+    const createFallbackTemplate = (name: string, body: string) =>
+      theme.type === 'classic'
+        ? { name, html: body }
+        : { name, markup: body };
+
+    if (!existingTemplateNames.has('author')) {
+      templates.push(createFallbackTemplate('author', '<div><!-- Author template fallback --></div>'));
+    }
+    if (!existingTemplateNames.has('category')) {
+      templates.push(createFallbackTemplate('category', '<div><!-- Category template fallback --></div>'));
+    }
+    if (!existingTemplateNames.has('page')) {
+      templates.push(createFallbackTemplate('page', '<div><!-- Page template fallback --></div>'));
+    }
 
     const total = templates.length;
     const components: GeneratedComponent[] = [];
@@ -110,7 +130,7 @@ export class ReactGeneratorService {
     for (let i = 0; i < templates.length; i++) {
       const tpl = templates[i];
       const componentName = this.toComponentName(tpl.name);
-      const rawSource = 'markup' in tpl ? tpl.markup : tpl.html;
+      const rawSource = (tpl.markup ?? tpl.html ?? '') as string;
       const counter = `[${i + 1}/${total}]`;
       const componentPlan = plan?.find(
         (p) => p.templateName === tpl.name || p.componentName === componentName,
