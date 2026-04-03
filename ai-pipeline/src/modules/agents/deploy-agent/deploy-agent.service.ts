@@ -82,8 +82,7 @@ export class DeployAgentService {
   }
 
   // Port 5200–5999 từ jobId để tránh conflict
-  private pickPort(jobId: string): number {
-    const hash = jobId.replace(/-/g, '').slice(0, 6);
-    return 5200 + (parseInt(hash, 16) % 800);
+  private pickPort(_jobId: string): number {
+    return 5353;
   }
 }

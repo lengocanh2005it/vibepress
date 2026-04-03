@@ -446,14 +446,12 @@ ${fontEntries}
     return proc;
   }
 
-  private pickApiPort(jobId: string): number {
-    const hash = jobId.replace(/-/g, '').slice(0, 6);
-    return 3200 + (parseInt(hash, 16) % 800);
+  private pickApiPort(_jobId: string): number {
+    return 3775;
   }
 
-  private pickVitePort(jobId: string): number {
-    const hash = jobId.replace(/-/g, '').slice(6, 12);
-    return 5200 + (parseInt(hash, 16) % 800);
+  private pickVitePort(_jobId: string): number {
+    return 5353;
   }
 
   private async copyReferencedThemeAssets(

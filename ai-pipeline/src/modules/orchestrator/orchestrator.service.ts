@@ -330,18 +330,24 @@ export class OrchestratorService {
       'pipeline.fixAgentModel',
     );
     const resolvedModels = {
-      planning: mc.planning ?? mc.planner ?? cfgPlanning ?? 'mistral/mistral-large-latest',
+      planning:
+        mc.planning ??
+        mc.planner ??
+        cfgPlanning ??
+        'mistral/mistral-large-latest',
       genCode: mc.genCode ?? cfgGenCode ?? 'mistral/codestral-latest',
       reviewCode: mc.reviewCode ?? mc.codeReviewer ?? cfgReviewCode,
-      backendReview: mc.backendReview ?? mc.reviewCode ?? mc.codeReviewer ?? cfgBackendReview,
-      aiReviewMode:
-        (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
-          | 'warn'
-          | 'blocking',
-      backendAiReviewMode:
-        (cfgBackendAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
-          | 'warn'
-          | 'blocking',
+      backendReview:
+        mc.backendReview ??
+        mc.reviewCode ??
+        mc.codeReviewer ??
+        cfgBackendReview,
+      aiReviewMode: (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
+        | 'warn'
+        | 'blocking',
+      backendAiReviewMode: (cfgBackendAiReviewMode === 'blocking'
+        ? 'blocking'
+        : 'warn') as 'warn' | 'blocking',
       fixAgent:
         mc.fixAgent ??
         mc.reviewCode ??
@@ -774,14 +780,12 @@ export class OrchestratorService {
       const response = await axios.post(
         `${this.configService.get<string>('automation.url', '')}/visual/compare`,
         {
-          urlA: preview.previewUrl,
-          urlB: 'http://localhost:8000/',
-          fullPage: true,
-          viewportWidth: 1440,
-          viewportHeight: 900,
+          wpBaseUrl: 'http://localhost:8000/',
+          reactFeUrl: 'http://localhost:5353',
+          reactBeUrl: 'http://localhost:3775',
         },
       );
-      metrics = response.data.result;
+      metrics = response.data;
     } catch (err: any) {
       this.logger.error(
         `[visual/compare] failed — ${err?.message ?? err}`,
