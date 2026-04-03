@@ -220,11 +220,14 @@ function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl, type = null) {
       return null;
     }
 
-    // React routes WordPress "page" type với prefix /page/
-    // e.g. WP: /about-us/  →  React: /page/about-us/
+    // React routes WordPress types với prefix tương ứng
+    // e.g. WP: /about-us/       (page) →  React: /page/about-us/
+    //      WP: /chao-moi-nguoi/ (post) →  React: /post/chao-moi-nguoi/
     let pathname = wp.pathname;
     if (type === "page" && pathname !== "/") {
       pathname = "/page" + pathname;
+    } else if (type === "post" && pathname !== "/") {
+      pathname = "/post" + pathname;
     }
 
     const mapped = new URL(pathname + wp.search + wp.hash, reactBase);

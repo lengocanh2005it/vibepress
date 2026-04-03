@@ -262,6 +262,12 @@ Site: {{siteName}} | URL: {{siteUrl}}
 <div className="w-12 h-12 rounded-full bg-gray-300" />
 // ✅ No src → render nothing
 {node.src && <img src={node.src} className="w-full object-cover" />}
+
+// ❌ Non-unique key → "Encountered two children with the same key" warning
+{items.map(item => <li key={item.email}>{item.name}</li>)}
+{items.map(item => <li key={item.title}>{item.title}</li>)}
+// ✅ Always use a unique id, or fall back to index
+{items.map((item, i) => <li key={item.id ?? i}>{item.name}</li>)}
 ```
 
 ## Final self-check before returning code
