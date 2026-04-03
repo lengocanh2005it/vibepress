@@ -171,7 +171,7 @@ export class ValidatorService {
     context: CodeValidationContext = {},
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
-    const code = this.sanitizeTailwindClasses(rawCode);
+    let code = this.sanitizeTailwindClasses(rawCode);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -342,6 +342,36 @@ export class ValidatorService {
       expectsPageDetail ||
       expectsProductDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
+
+    // Pre-processing: deterministically strip post-only fields from `interface Page`
+    // so the AI does not need a retry attempt just for a bad type declaration.
+    // Runtime usage violations (page.author etc.) are still caught below.
+    if (expectsPageDetail) {
+      const ifaceStart = code.search(/\binterface\s+Page\s*\{/);
+      if (ifaceStart !== -1) {
+        const openBrace = code.indexOf('{', ifaceStart);
+        let depth = 0;
+        let closeBrace = -1;
+        for (let i = openBrace; i < code.length; i++) {
+          if (code[i] === '{') depth++;
+          else if (code[i] === '}') {
+            depth--;
+            if (depth === 0) { closeBrace = i; break; }
+          }
+        }
+        if (closeBrace !== -1) {
+          const BAD_PAGE_FIELDS =
+            /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/;
+          const body = code.slice(openBrace + 1, closeBrace);
+          const cleanedBody = body
+            .split('\n')
+            .filter((line) => !BAD_PAGE_FIELDS.test(line))
+            .join('\n');
+          code =
+            code.slice(0, openBrace + 1) + cleanedBody + code.slice(closeBrace);
+        }
+      }
+    }
 
     // 7. <a href> used for internal React Router paths — breaks SPA navigation
     const internalAHref = code.match(

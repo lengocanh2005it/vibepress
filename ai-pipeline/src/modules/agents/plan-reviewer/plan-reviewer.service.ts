@@ -236,10 +236,12 @@ export class PlanReviewerService {
   private alignDataNeeds(plan: PlanResult, warnings: string[]): PlanResult {
     // When the plan has a shared Header or Footer partial, page components must
     // NOT include their own navbar/footer sections (Layout wrapper handles them).
-    const hasSharedLayout = plan.some(
-      (c) =>
-        c.type === 'partial' && /^(header|footer)/i.test(c.componentName),
-    );
+    const hasSharedLayout = plan.some((c) => {
+      const policy = this.inferRoutePolicy(c);
+      return (
+        policy.type === 'partial' && /^(header|footer)/i.test(c.componentName)
+      );
+    });
 
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);

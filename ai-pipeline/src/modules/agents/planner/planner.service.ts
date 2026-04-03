@@ -406,18 +406,10 @@ export class PlannerService {
 
     const blockGap = d.blockGap ? `gap-[${d.blockGap}]` : 'gap-16';
 
-    // Pages import Header/Footer partials if they exist in the plan
-    const current = allComponents.find(
-      (c) => c.componentName === componentName,
-    );
+    // Header/Footer are rendered by the shared Layout wrapper (preview-builder
+    // generates Layout.tsx that wraps all Routes). Page components must NOT import
+    // them directly — doing so causes Header/Footer to appear twice on screen.
     const includes: string[] = [];
-    if (current?.type === 'page') {
-      const partials = allComponents.filter((c) => c.type === 'partial');
-      const header = partials.find((c) => /^header$/i.test(c.componentName));
-      const footer = partials.find((c) => /^footer$/i.test(c.componentName));
-      if (header) includes.push(header.componentName);
-      if (footer) includes.push(footer.componentName);
-    }
 
     return {
       containerClass,

@@ -26,6 +26,22 @@ const CHUNK_TARGET_CHARS = 15_000;
 const PARTIAL_PATTERNS =
   /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
 
+/**
+ * Returns true for top-level block nodes that represent the shared site header
+ * or footer (template-part with header/footer slug, or direct header/footer blocks).
+ * Page components must not render these — the Layout wrapper already does.
+ */
+function isSharedLayoutBlock(node: WpNode): boolean {
+  if (/^(header|footer|core\/header|core\/footer)$/i.test(node.block))
+    return true;
+  if (
+    node.block === 'template-part' &&
+    /^(header|footer)/i.test(String(node.params?.slug ?? ''))
+  )
+    return true;
+  return false;
+}
+
 export interface GeneratedComponent {
   name: string;
   filePath: string;
@@ -233,8 +249,20 @@ export class ReactGeneratorService {
       themeType === 'fse'
         ? this.styleResolver.resolve(wpBlocksToJson(templateSource), tokens)
         : undefined;
-    const promptTemplateSource = templateNodes
-      ? wpJsonToString(templateNodes)
+
+    // For FSE page components, strip top-level header/footer blocks before
+    // building the prompt — the shared Layout wrapper (Header + Footer partials)
+    // already renders those elements; letting the AI see them causes duplication.
+    const isHeaderOrFooterPartial =
+      componentPlan?.type === 'partial' &&
+      /^(header|footer)/i.test(componentName);
+    const filteredNodes =
+      templateNodes && !isHeaderOrFooterPartial
+        ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
+        : templateNodes;
+
+    const promptTemplateSource = filteredNodes
+      ? wpJsonToString(filteredNodes)
       : templateSource;
     const promptSourceLength = promptTemplateSource.length;
 
@@ -261,7 +289,7 @@ export class ReactGeneratorService {
     this.logger.warn(
       `Template ${componentName}: ${promptSourceLength} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
     );
-    const resolvedNodes = templateNodes ?? [];
+    const resolvedNodes = filteredNodes ?? [];
     const chunks = this.splitTemplateSections(
       resolvedNodes,
       CHUNK_TARGET_CHARS,
