@@ -48,6 +48,33 @@ const SplitView: React.FC = () => {
   const completionEvent = getCompletionEvent();
   const latestEvent = sse.currentEvent;
 
+  const [pushGitState, setPushGitState] = useState<{
+    loading: boolean;
+    githubUrl: string | null;
+    error: string | null;
+  }>({ loading: false, githubUrl: null, error: null });
+
+  const handlePushToGit = async () => {
+    setPushGitState({ loading: true, githubUrl: null, error: null });
+    try {
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/deploy/push-git`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.success)
+        throw new Error(data.error || "Push failed");
+      setPushGitState({ loading: false, githubUrl: data.githubUrl, error: null });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setPushGitState({ loading: false, githubUrl: null, error: message });
+    }
+  };
+
   // Group events by step and get the latest status for each step
   const getLatestStepStatuses = () => {
     const stepMap = new Map<string, PipelineProgressEvent>();
@@ -204,6 +231,27 @@ const SplitView: React.FC = () => {
                   >
                     View Metrics
                   </button>
+                )}
+                {pushGitState.githubUrl ? (
+                  <button
+                    onClick={() => window.open(pushGitState.githubUrl!, "_blank")}
+                    className="px-3 py-1 bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/50 rounded text-violet-400 text-xs"
+                  >
+                    View on GitHub →
+                  </button>
+                ) : (
+                  <button
+                    onClick={handlePushToGit}
+                    disabled={pushGitState.loading}
+                    className="px-3 py-1 bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/50 rounded text-violet-400 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {pushGitState.loading ? "Pushing…" : "Push to GitHub"}
+                  </button>
+                )}
+                {pushGitState.error && (
+                  <span className="text-red-400 text-xs self-center">
+                    {pushGitState.error}
+                  </span>
                 )}
               </div>
             </div>

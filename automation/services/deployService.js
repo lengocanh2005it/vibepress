@@ -49,19 +49,33 @@ async function getMysqlNgrokTunnel() {
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
 async function createGithubRepo(repoName) {
+  const headers = {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    Accept: 'application/vnd.github+json',
+  };
+
   console.log(`[GitHub] Creating repo: ${repoName}`);
-  const res = await axios.post(
-    'https://api.github.com/user/repos',
-    { name: repoName, private: true, auto_init: false },
-    {
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: 'application/vnd.github+json',
-      },
-    },
-  );
-  console.log(`[GitHub] Repo created: ${res.data.html_url}`);
-  return { name: res.data.name, htmlUrl: res.data.html_url, cloneUrl: res.data.clone_url };
+  try {
+    const res = await axios.post(
+      'https://api.github.com/user/repos',
+      { name: repoName, private: true, auto_init: false },
+      { headers },
+    );
+    console.log(`[GitHub] Repo created: ${res.data.html_url}`);
+    return { name: res.data.name, htmlUrl: res.data.html_url, cloneUrl: res.data.clone_url };
+  } catch (err) {
+    // 422 = repo đã tồn tại → lấy thông tin repo hiện có
+    if (err.response?.status === 422) {
+      console.log(`[GitHub] Repo "${repoName}" already exists — fetching existing repo`);
+      const existing = await axios.get(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${repoName}`,
+        { headers },
+      );
+      console.log(`[GitHub] Using existing repo: ${existing.data.html_url}`);
+      return { name: existing.data.name, htmlUrl: existing.data.html_url, cloneUrl: existing.data.clone_url };
+    }
+    throw err;
+  }
 }
 
 async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
@@ -242,6 +256,51 @@ async function createVercelProject({ repoName, branch = 'main' }) {
   return { projectId, vercelUrl };
 }
 
+// ── Push to Git only ─────────────────────────────────────────────────────────
+
+async function pushToGit({ jobId, repoName, branch = 'main' }) {
+  console.log(`\n[PushToGit] ── Start jobId=${jobId} ──────────────────────`);
+
+  if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is not configured');
+  if (!GITHUB_OWNER) throw new Error('GITHUB_OWNER is not configured');
+
+  const generatedDir = path.join(AI_PIPELINE_GENERATED_DIR, jobId);
+  console.log(`[PushToGit] Checking generated dir: ${generatedDir}`);
+  if (!(await fse.pathExists(generatedDir))) {
+    throw new Error(`Generated directory not found for jobId: ${jobId}`);
+  }
+
+  const finalRepoName = repoName || `react-migration-${jobId.slice(0, 8)}`;
+  console.log(`[PushToGit] Repo name: ${finalRepoName}`);
+
+  // 1. Tạo GitHub repo
+  const repo = await createGithubRepo(finalRepoName);
+
+  // 2. Copy generated code → workDir
+  const workDir = path.join(TEMP_ROOT, `deploy_${jobId}`);
+  await fse.remove(workDir);
+  await fse.copy(generatedDir, workDir);
+  console.log(`[PushToGit] Copied to: ${workDir}`);
+
+  // 3. Push lên GitHub
+  const commitSha = await initAndPush({
+    workDir,
+    repoCloneUrl: repo.cloneUrl,
+    branch,
+    message: `feat: initial React migration [jobId=${jobId}]`,
+  });
+
+  await fse.remove(workDir);
+  console.log(`\n[PushToGit] ── Done — GitHub: ${repo.htmlUrl} ──────────`);
+
+  return {
+    jobId,
+    repoName: finalRepoName,
+    githubUrl: repo.htmlUrl,
+    commitSha,
+  };
+}
+
 // ── Main flow ─────────────────────────────────────────────────────────────────
 
 async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} }) {
@@ -338,4 +397,4 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   };
 }
 
-module.exports = { deployFullStack };
+module.exports = { deployFullStack, pushToGit };

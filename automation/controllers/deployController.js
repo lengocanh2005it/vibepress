@@ -1,4 +1,4 @@
-const { deployFullStack } = require('../services/deployService');
+const { deployFullStack, pushToGit } = require('../services/deployService');
 
 async function deployJob(req, res) {
   const { jobId, repoName, branch, dbCreds, dbInfo } = req.body;
@@ -24,4 +24,17 @@ async function deployJob(req, res) {
   }
 }
 
-module.exports = { deployJob };
+async function pushToGitJob(req, res) {
+  const { jobId, repoName, branch } = req.body;
+
+  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
+
+  try {
+    const result = await pushToGit({ jobId, repoName, branch });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+module.exports = { deployJob, pushToGitJob };
