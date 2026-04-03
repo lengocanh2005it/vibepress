@@ -622,13 +622,26 @@ async function getWpSitePages(req, res) {
       { params: { per_page: 100, _fields: "id,title,link,slug,status" }, timeout: 10000 }
     );
 
+    // Normalize page links to use the same origin as siteUrl.
+    // WordPress REST API returns `link` based on its own configured siteurl,
+    // which may differ from the siteUrl the browser can actually reach.
+    const siteOrigin = new URL(siteUrl).origin;
+    const normalizeLink = (wpLink) => {
+      try {
+        const parsed = new URL(wpLink);
+        return siteOrigin + parsed.pathname;
+      } catch {
+        return siteUrl;
+      }
+    };
+
     const pages = [
       { id: 1, title: "Trang chủ", slug: "", link: siteUrl, status: "publish" },
       ...response.data.map((p) => ({
         id: p.id,
         title: p.title?.rendered ?? p.slug,
         slug: p.slug,
-        link: p.link,
+        link: normalizeLink(p.link),
         status: p.status,
       })),
     ];
@@ -647,6 +660,87 @@ async function getWpSitePages(req, res) {
 
 
 
+// In-memory cache: siteOrigin → { cookie, expiresAt }
+const WP_SESSION_CACHE = new Map();
+
+/**
+ * Lấy auth cookie từ plugin Vibepress trên WordPress.
+ * Plugin tự sinh cookie cho admin — backend không cần biết password.
+ * Cookie được cache cho đến khi hết hạn (plugin set 1 giờ).
+ */
+async function getWpAuthCookie(siteUrl, apiKey) {
+  const cached = WP_SESSION_CACHE.get(siteUrl);
+  // Dùng lại cache nếu còn hơn 2 phút
+  if (cached && cached.expiresAt > Date.now() + 2 * 60 * 1000) return cached.cookie;
+
+  try {
+    const res = await axios.get(
+      `${siteUrl}/wp-json/vibepress/v1/auth-cookie`,
+      {
+        headers: { "X-Vibepress-Key": apiKey },
+        timeout: 10000,
+      },
+    );
+
+    const { cookieName, cookieValue, expiresAt } = res.data;
+    const cookie = `${cookieName}=${cookieValue}`;
+
+    WP_SESSION_CACHE.set(siteUrl, {
+      cookie,
+      expiresAt: expiresAt * 1000, // plugin trả về Unix timestamp (giây)
+    });
+
+    return cookie;
+  } catch (e) {
+    console.warn(`[proxy] getWpAuthCookie failed for ${siteUrl}:`, e.message);
+    return null;
+  }
+}
+
+async function proxyWpPage(req, res) {
+  const { url } = req.query;
+
+  if (!url) {
+    return res.status(400).json({ success: false, error: "url query param is required" });
+  }
+
+  try {
+    const targetUrl = new URL(url);
+
+    // Lấy auth cookie từ plugin Vibepress — plugin tự sinh, không cần password.
+    // Giúp WooCommerce pages (Tài khoản, Thanh toán…) render đúng nội dung.
+    const site = findSiteBySiteUrl(targetUrl.origin);
+    const extraHeaders = {};
+    if (site?.apiKey) {
+      const authCookie = await getWpAuthCookie(targetUrl.origin, site.apiKey);
+      if (authCookie) extraHeaders["Cookie"] = authCookie;
+    }
+
+    const response = await axios.get(url, {
+      timeout: 15000,
+      responseType: "text",
+      maxRedirects: 5,
+      headers: extraHeaders,
+    });
+
+    let html = response.data;
+
+    // Inject <base> so relative URLs (CSS, JS, images, links) resolve to the WP origin.
+    html = html.replace(/(<head[^>]*>)/i, `$1\n  <base href="${targetUrl.origin}/">`);
+
+    // Build a fresh response — intentionally omits X-Frame-Options and
+    // Content-Security-Policy that WordPress/WooCommerce would send.
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  } catch (error) {
+    const status = error.response?.status || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   ensureFileSystemState,
   createProject,
@@ -658,6 +752,7 @@ module.exports = {
   getReposByEmail,
   getCommitsByRepo,
   getWpSitePages,
+  proxyWpPage,
   getDBinfoByEmail
 };
 
