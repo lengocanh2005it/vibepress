@@ -398,8 +398,11 @@ export class ValidatorService {
       );
     }
     if (expectsPageDetail) {
+      // Note: `item` is intentionally excluded — it is commonly used as a loop
+      // variable over Posts (e.g. sidebar recent-posts), not over Page objects.
+      // Only flag unambiguous page variable names.
       const pageFieldMatch = code.match(
-        /\b(?:pageDetail|page|item)\.(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
+        /\b(?:pageDetail|page)\.(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
       );
       if (pageFieldMatch) {
         violations.push(

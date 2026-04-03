@@ -234,6 +234,13 @@ export class PlanReviewerService {
   }
 
   private alignDataNeeds(plan: PlanResult, warnings: string[]): PlanResult {
+    // When the plan has a shared Header or Footer partial, page components must
+    // NOT include their own navbar/footer sections (Layout wrapper handles them).
+    const hasSharedLayout = plan.some(
+      (c) =>
+        c.type === 'partial' && /^(header|footer)/i.test(c.componentName),
+    );
+
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);
       const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
@@ -284,13 +291,14 @@ export class PlanReviewerService {
       }
 
       const next = { ...item, dataNeeds: after };
-      return this.syncVisualPlan(next, warnings);
+      return this.syncVisualPlan(next, warnings, hasSharedLayout);
     });
   }
 
   private syncVisualPlan(
     item: PlanResult[number],
     warnings: string[],
+    hasSharedLayout: boolean = false,
   ): PlanResult[number] {
     if (!item.visualPlan) return item;
 
@@ -298,8 +306,15 @@ export class PlanReviewerService {
       item.isDetail === true && item.dataNeeds.includes('post-detail');
     const allowedPageDetail =
       item.isDetail === true && item.dataNeeds.includes('page-detail');
+    // Strip navbar/footer sections from page components when Layout wrapper manages them
+    const stripLayoutSections = hasSharedLayout && item.type === 'page';
     const nextSections = item.visualPlan.sections.filter((section) =>
-      this.isSectionAllowed(section, allowedPostDetail, allowedPageDetail),
+      this.isSectionAllowed(
+        section,
+        allowedPostDetail,
+        allowedPageDetail,
+        stripLayoutSections,
+      ),
     );
     const nextDataNeeds = this.toVisualDataNeeds(item.dataNeeds);
 
@@ -340,7 +355,13 @@ export class PlanReviewerService {
     section: SectionPlan,
     allowedPostDetail: boolean,
     allowedPageDetail: boolean,
+    stripLayoutSections: boolean = false,
   ): boolean {
+    // When a shared Layout wrapper provides Header/Footer, page components must
+    // not render their own navbar or footer (would appear twice on screen).
+    if (stripLayoutSections && (section.type === 'navbar' || section.type === 'footer')) {
+      return false;
+    }
     if (section.type === 'post-content' || section.type === 'comments') {
       return allowedPostDetail;
     }

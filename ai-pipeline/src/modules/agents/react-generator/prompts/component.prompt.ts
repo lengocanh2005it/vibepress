@@ -734,7 +734,7 @@ export function buildComponentPrompt(
           : ''
       }${
         /Page detail contract|interface Page|post-only field/i.test(retryError)
-          ? '\n\n**Page type:** Remove `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments` from any `interface Page` and from `page.` / `item.` usage. `Page` = `{ id, title, content, slug }` only. Use `Post` if you need author/categories.'
+          ? '\n\n**Page type:** `interface Page` must declare ONLY `{ id, title, content, slug }` — remove `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments` from it. Do NOT access `page.author` or `pageDetail.author`. Sidebar/list items (recent posts, etc.) must use a separate `interface Post` — using `item.author` inside a `posts.map()` is fine.'
           : ''
       }`
     : '';
