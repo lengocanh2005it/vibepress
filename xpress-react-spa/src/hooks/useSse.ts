@@ -17,19 +17,71 @@ export interface PipelineProgressEvent {
   data?: ProgressEventData;
 }
 
+interface MetricPageVisual {
+  accuracy: number;
+  diffPct: number;
+  status: string;
+  artifacts: {
+    imageA: string;
+    imageB: string;
+    diff: string;
+  };
+  error: string | null;
+}
+
+interface MetricPageContent {
+  status: string;
+  scores: {
+    title: number;
+    content: number;
+    overall: number;
+  };
+  issues: string[];
+  wp: { title: string; contentPreview: string };
+  react: { title: string; contentPreview: string } | null;
+}
+
+export interface MetricPage {
+  url: string | null;
+  slug: string;
+  type: string;
+  visual: MetricPageVisual | null;
+  content: MetricPageContent | null;
+}
+
+export interface MetricsSummary {
+  visual: {
+    totalCompared: number;
+    passed: number;
+    failed: number;
+    passRate: number;
+    avgAccuracy: number;
+  };
+  content: {
+    total: number;
+    passed: number;
+    failed: number;
+    missing: number;
+    passRate: number;
+    avgOverall: number;
+  };
+  overall: {
+    visualAvgAccuracy: number;
+    contentAvgOverall: number;
+    visualPassRate: number;
+    contentPassRate: number;
+  };
+  errors: {
+    visual: string | null;
+    content: string | null;
+  };
+}
+
 interface ProgressEventData {
   previewUrl?: string;
   metrics: {
-    urlA: string;
-    urlB: string;
-    diffPercentage: number;
-    differentPixels: number;
-    totalPixels: number;
-    artifacts: {
-      imageA: string;
-      imageB: string;
-      diff: string;
-    };
+    summary: MetricsSummary;
+    pages: MetricPage[];
   };
 }
 

@@ -282,26 +282,26 @@ const SplitView: React.FC = () => {
       {showMetrics &&
         completionEvent?.data?.metrics &&
         (() => {
-          const m = completionEvent.data.metrics;
-          const matchPct = Math.max(0, 100 - m.diffPercentage);
+          const { summary, pages } = completionEvent.data.metrics;
+          const visualAccuracy = summary.visual.avgAccuracy;
           const scoreColor =
-            matchPct >= 95
+            visualAccuracy >= 95
               ? "text-primary"
-              : matchPct >= 80
+              : visualAccuracy >= 80
                 ? "text-[#705c30]"
                 : "text-error";
           const scoreBg =
-            matchPct >= 95
+            visualAccuracy >= 95
               ? "bg-primary/10 border-primary/30"
-              : matchPct >= 80
+              : visualAccuracy >= 80
                 ? "bg-[#705c30]/10 border-[#705c30]/30"
                 : "bg-error/10 border-error/30";
-          const scoreLabel =
-            matchPct >= 95
-              ? "Excellent"
-              : matchPct >= 80
-                ? "Good"
-                : "Needs work";
+          const scoreBarColor =
+            visualAccuracy >= 95
+              ? "bg-primary"
+              : visualAccuracy >= 80
+                ? "bg-[#705c30]"
+                : "bg-error";
 
           return (
             <div
@@ -320,15 +320,16 @@ const SplitView: React.FC = () => {
                         className="material-symbols-outlined text-primary text-xl"
                         style={{ fontVariationSettings: "'FILL' 1" }}
                       >
-                        compare
+                        analytics
                       </span>
                     </div>
                     <div>
                       <h2 className="font-headline text-base font-bold text-on-surface leading-tight">
-                        Visual Diff Report
+                        Migration Report
                       </h2>
                       <p className="text-xs text-on-surface-variant">
-                        Pixel-level comparison between original & generated
+                        Visual &amp; content comparison across {pages.length}{" "}
+                        pages
                       </p>
                     </div>
                   </div>
@@ -343,179 +344,183 @@ const SplitView: React.FC = () => {
                 </div>
 
                 <div className="p-6 space-y-5">
-                  {/* Score + Stats row */}
-                  <div className="grid grid-cols-4 gap-3">
-                    {/* Match Score — large */}
+                  {/* Summary cards */}
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* Visual */}
                     <div
-                      className={`col-span-1 flex flex-col items-center justify-center p-4 rounded-2xl border ${scoreBg}`}
+                      className={`p-4 rounded-2xl border ${scoreBg}`}
                     >
-                      <p
-                        className={`text-4xl font-headline font-bold ${scoreColor}`}
-                      >
-                        {matchPct.toFixed(1)}
-                        <span className="text-lg">%</span>
+                      <p className="text-xs font-medium text-on-surface-variant mb-2 uppercase tracking-wider">
+                        Visual
                       </p>
-                      <p className={`text-xs font-bold mt-1 ${scoreColor}`}>
-                        {scoreLabel}
-                      </p>
-                      <p className="text-[10px] text-on-surface-variant mt-0.5">
-                        Match Score
-                      </p>
-                    </div>
-
-                    {/* Diff % */}
-                    <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
-                      <span
-                        className="material-symbols-outlined text-on-surface-variant text-lg"
-                        style={{ fontVariationSettings: "'FILL' 1" }}
-                      >
-                        difference
-                      </span>
-                      <div>
-                        <p className="text-2xl font-headline font-bold text-on-surface">
-                          {m.diffPercentage.toFixed(2)}
-                          <span className="text-sm font-normal">%</span>
-                        </p>
-                        <p className="text-xs text-on-surface-variant mt-0.5">
-                          Pixel Diff
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Different pixels */}
-                    <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
-                      <span
-                        className="material-symbols-outlined text-on-surface-variant text-lg"
-                        style={{ fontVariationSettings: "'FILL' 1" }}
-                      >
-                        grid_view
-                      </span>
-                      <div>
-                        <p className="text-2xl font-headline font-bold text-on-surface">
-                          {(m.differentPixels / 1000).toFixed(1)}
-                          <span className="text-sm font-normal">K</span>
-                        </p>
-                        <p className="text-xs text-on-surface-variant mt-0.5">
-                          Changed Pixels
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Total pixels */}
-                    <div className="flex flex-col justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/30">
-                      <span
-                        className="material-symbols-outlined text-on-surface-variant text-lg"
-                        style={{ fontVariationSettings: "'FILL' 1" }}
-                      >
-                        photo_size_select_large
-                      </span>
-                      <div>
-                        <p className="text-2xl font-headline font-bold text-on-surface">
-                          {(m.totalPixels / 1000000).toFixed(2)}
-                          <span className="text-sm font-normal">M</span>
-                        </p>
-                        <p className="text-xs text-on-surface-variant mt-0.5">
-                          Total Pixels
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Progress bar */}
-                  <div className="bg-surface-container-low rounded-xl p-3 border border-outline-variant/30">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-on-surface-variant">
-                        Pixel match
-                      </span>
-                      <span className={`text-xs font-bold ${scoreColor}`}>
-                        {matchPct.toFixed(2)}%
-                      </span>
-                    </div>
-                    <div className="h-2 bg-surface-container-high rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-700 ${matchPct >= 95 ? "bg-primary" : matchPct >= 80 ? "bg-[#705c30]" : "bg-error"}`}
-                        style={{ width: `${matchPct}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* URLs */}
-                  <div className="bg-surface-container-low rounded-xl border border-outline-variant/30 overflow-hidden">
-                    {[
-                      { label: "Original", icon: "language", url: m.urlA },
-                      { label: "Generated", icon: "code", url: m.urlB },
-                    ].map(({ label, icon, url }, i) => (
-                      <div
-                        key={label}
-                        className={`flex items-center gap-3 px-4 py-3 ${i === 0 ? "border-b border-outline-variant/30" : ""}`}
-                      >
-                        <span className="material-symbols-outlined text-on-surface-variant text-base">
-                          {icon}
-                        </span>
-                        <span className="text-xs font-medium text-on-surface-variant w-16 shrink-0">
-                          {label}
-                        </span>
-                        <a
-                          href={url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-primary hover:underline truncate"
+                      <div className="flex items-end gap-2 mb-2">
+                        <p
+                          className={`text-3xl font-headline font-bold ${scoreColor}`}
                         >
-                          {url}
-                        </a>
+                          {summary.visual.avgAccuracy.toFixed(1)}
+                          <span className="text-base">%</span>
+                        </p>
+                        <p className="text-xs text-on-surface-variant mb-1">
+                          avg accuracy
+                        </p>
                       </div>
-                    ))}
+                      <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
+                        <div
+                          className={`h-full rounded-full ${scoreBarColor}`}
+                          style={{
+                            width: `${summary.visual.avgAccuracy}%`,
+                          }}
+                        />
+                      </div>
+                      <div className="flex gap-3 text-xs">
+                        <span className="text-green-500">
+                          {summary.visual.passed} passed
+                        </span>
+                        <span className="text-error">
+                          {summary.visual.failed} failed
+                        </span>
+                        <span className="text-on-surface-variant">
+                          {summary.visual.totalCompared} total
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Content */}
+                    <div className="p-4 rounded-2xl border border-outline-variant/30 bg-surface-container-low">
+                      <p className="text-xs font-medium text-on-surface-variant mb-2 uppercase tracking-wider">
+                        Content
+                      </p>
+                      <div className="flex items-end gap-2 mb-2">
+                        <p className="text-3xl font-headline font-bold text-on-surface">
+                          {summary.content.passRate.toFixed(1)}
+                          <span className="text-base">%</span>
+                        </p>
+                        <p className="text-xs text-on-surface-variant mb-1">
+                          pass rate
+                        </p>
+                      </div>
+                      <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
+                        <div
+                          className="h-full rounded-full bg-primary"
+                          style={{ width: `${summary.content.passRate}%` }}
+                        />
+                      </div>
+                      <div className="flex gap-3 text-xs">
+                        <span className="text-green-500">
+                          {summary.content.passed} passed
+                        </span>
+                        <span className="text-yellow-500">
+                          {summary.content.missing} missing
+                        </span>
+                        <span className="text-on-surface-variant">
+                          {summary.content.total} total
+                        </span>
+                      </div>
+                    </div>
                   </div>
 
-                  {/* Screenshot comparison */}
+                  {/* Pages table */}
                   <div>
                     <p className="text-xs font-medium text-on-surface-variant mb-3 uppercase tracking-wider">
-                      Screenshot Comparison
+                      Pages
                     </p>
-                    <div className="grid grid-cols-3 gap-3">
-                      {[
-                        {
-                          label: "Original (A)",
-                          icon: "language",
-                          src: m.artifacts.imageA,
-                          accent: "border-outline-variant/50",
-                        },
-                        {
-                          label: "Generated (B)",
-                          icon: "code",
-                          src: m.artifacts.imageB,
-                          accent: "border-primary/40",
-                        },
-                        {
-                          label: "Pixel Diff",
-                          icon: "difference",
-                          src: m.artifacts.diff,
-                          accent: "border-error/30",
-                        },
-                      ].map(({ label, icon, src, accent }) => (
-                        <div
-                          key={label}
-                          className={`group rounded-xl border ${accent} overflow-hidden bg-surface-container-low cursor-pointer hover:shadow-md transition-shadow`}
-                          onClick={() => window.open(src, "_blank")}
-                        >
-                          <div className="flex items-center gap-2 px-3 py-2 border-b border-outline-variant/20">
-                            <span className="material-symbols-outlined text-on-surface-variant text-sm">
-                              {icon}
-                            </span>
-                            <span className="text-xs font-medium text-on-surface-variant">
-                              {label}
-                            </span>
-                            <span className="material-symbols-outlined text-on-surface-variant/40 text-sm ml-auto group-hover:text-on-surface-variant transition-colors">
-                              open_in_new
-                            </span>
+                    <div className="rounded-xl border border-outline-variant/30 overflow-hidden">
+                      <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-surface-container text-xs font-medium text-on-surface-variant border-b border-outline-variant/30">
+                        <span className="col-span-4">Page</span>
+                        <span className="col-span-2">Type</span>
+                        <span className="col-span-3">Visual accuracy</span>
+                        <span className="col-span-3">Content</span>
+                      </div>
+                      {pages.map((page, i) => {
+                        const acc = page.visual?.accuracy ?? null;
+                        const accColor =
+                          acc === null
+                            ? ""
+                            : acc >= 95
+                              ? "text-primary"
+                              : acc >= 80
+                                ? "text-[#705c30]"
+                                : "text-error";
+                        const accBar =
+                          acc === null
+                            ? ""
+                            : acc >= 95
+                              ? "bg-primary"
+                              : acc >= 80
+                                ? "bg-[#705c30]"
+                                : "bg-error";
+                        return (
+                          <div
+                            key={page.slug + i}
+                            className={`grid grid-cols-12 gap-2 px-4 py-3 text-xs ${i < pages.length - 1 ? "border-b border-outline-variant/20" : ""} hover:bg-surface-container/50`}
+                          >
+                            <div className="col-span-4 flex flex-col justify-center min-w-0">
+                              <p className="font-medium text-on-surface truncate">
+                                {page.slug}
+                              </p>
+                              {page.url && (
+                                <p className="text-on-surface-variant/50 truncate">
+                                  {page.url.replace(
+                                    /^https?:\/\/[^/]+/,
+                                    "",
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                            <div className="col-span-2 flex items-center">
+                              <span className="px-2 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant text-[10px]">
+                                {page.type}
+                              </span>
+                            </div>
+                            <div className="col-span-3 flex flex-col justify-center gap-1">
+                              {acc !== null ? (
+                                <>
+                                  <div className="flex items-center gap-1.5">
+                                    <div className="flex-1 h-1 bg-surface-container-high rounded-full overflow-hidden">
+                                      <div
+                                        className={`h-full rounded-full ${accBar}`}
+                                        style={{ width: `${acc}%` }}
+                                      />
+                                    </div>
+                                    <span
+                                      className={`font-mono text-[11px] shrink-0 ${accColor}`}
+                                    >
+                                      {acc.toFixed(1)}%
+                                    </span>
+                                  </div>
+                                </>
+                              ) : (
+                                <span className="text-on-surface-variant/40">
+                                  —
+                                </span>
+                              )}
+                            </div>
+                            <div className="col-span-3 flex items-center">
+                              {page.content ? (
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                                    page.content.status === "PASS"
+                                      ? "bg-green-500/10 text-green-600"
+                                      : page.content.status === "MISSING"
+                                        ? "bg-yellow-500/10 text-yellow-600"
+                                        : "bg-error/10 text-error"
+                                  }`}
+                                >
+                                  {page.content.status}
+                                  {page.content.status === "PASS" &&
+                                  page.content.scores.overall > 0
+                                    ? ` · ${page.content.scores.overall}%`
+                                    : ""}
+                                </span>
+                              ) : (
+                                <span className="text-on-surface-variant/40 text-[10px]">
+                                  —
+                                </span>
+                              )}
+                            </div>
                           </div>
-                          <img
-                            src={src}
-                            alt={label}
-                            className="w-full aspect-video object-cover object-top group-hover:opacity-90 transition-opacity"
-                          />
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
