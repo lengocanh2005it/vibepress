@@ -53,6 +53,7 @@ export default () => ({
       process.env.PLANNER_VISUAL_CONCURRENCY ?? '3',
       10,
     ),
+    minimalVisualPlan: process.env.PLANNER_MINIMAL_VISUAL_PLAN === 'true',
   },
   // Per-step model overrides — format: "provider/model" or plain model name.
   // Preferred env names:
@@ -68,8 +69,7 @@ export default () => ({
       process.env.PLANNING_MODEL ??
       process.env.PLANNER_MODEL ??
       'mistral/mistral-large-latest',
-    genCodeModel:
-      process.env.GEN_CODE_MODEL ?? 'mistral/codestral-latest',
+    genCodeModel: process.env.GEN_CODE_MODEL ?? 'mistral/codestral-latest',
     reviewCodeModel:
       process.env.REVIEW_CODE_MODEL ??
       process.env.CODE_REVIEWER_MODEL ??

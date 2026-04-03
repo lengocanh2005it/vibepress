@@ -53,6 +53,7 @@ const DATA_NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
+  'product-detail': 'productDetail',
 };
 
 export interface ComponentPromptContext {
@@ -468,6 +469,27 @@ export function buildPlanContextNote(plan?: {
     lines.push(
       '⛔ If you declare `interface Page`, it must ONLY have those 4 fields. Do NOT use `Post` type for pages.',
     );
+    lines.push(
+      '⛔ In ANY output, do not reference page fields outside of `id`, `title`, `content`, `slug`.' +
+        '\n- Reject and rewrite if you detect: `page.author`, `page.categories`, `page.date`, `page.excerpt`, `page.featuredImage`, `page.comments`.' +
+        '\n- If the template shows an <img> element, render it from existing page content markup or via a separate visual section; do NOT use `page.featuredImage`.' +
+        '\n- If you need post-only metadata, use `Post` type in `postDetail` components, not `Page`.' +
+        '\n- Page detail type must be exactly: `interface Page { id: string; title: string; content: string; slug: string; }`',
+    );
+  }
+  if (normalizedDataNeeds.includes('productDetail')) {
+    lines.push(
+      routeHasParams
+        ? 'Detail data contract: fetch the specific product with `/api/products/${productId}` (or by slug) and render that product, including variations and related products.'
+        : 'Data contract: this component displays a product and should fetch it from `/api/products/${productId}` inside a `useEffect`.',
+    );
+    lines.push(
+      'WooCommerce Product Detail: fetch from `/api/products/:id` — returns { id, title, price, currency, description, image, sku, stock, categories[], attributes{}, variations[] }.',
+    );
+    lines.push(
+      'If the URL has a parameter like `:productId`, use `useParams()` to extract it and fetch the product. ' +
+        'Show product images, price, description, attributes (size, color, etc), variations selector, stock status, and "Add to Cart" button.',
+    );
   }
   if (normalizedDataNeeds.includes('comments')) {
     lines.push(
@@ -479,12 +501,99 @@ export function buildPlanContextNote(plan?: {
   }
   if (
     !normalizedDataNeeds.includes('postDetail') &&
-    !normalizedDataNeeds.includes('pageDetail')
+    !normalizedDataNeeds.includes('pageDetail') &&
+    !normalizedDataNeeds.includes('productDetail')
   ) {
     lines.push(
       'Data contract: do NOT fetch slug-based detail endpoints unless the plan explicitly requires detail data.',
     );
   }
+
+  // ── UI Rendering Guidelines ────────────────────────────────────────────────
+  lines.push('');
+  lines.push('## UI Rendering Guidelines');
+  lines.push(
+    'Render a complete, production-ready React component that matches the template source structure and visual design. Follow these standards:',
+  );
+  lines.push('');
+  lines.push('### Layout & Structure');
+  lines.push(
+    '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<header>`, `<footer>`, `<nav>` instead of generic `<div>`.',
+  );
+  lines.push(
+    '- Implement responsive design: use Tailwind responsive prefixes (`sm:`, `md:`, `lg:`, `xl:`) for mobile-first layouts.',
+  );
+  lines.push(
+    '- Container widths: use theme tokens for max-width (e.g., `max-w-[1280px]` from contentWidth), center with `mx-auto`.',
+  );
+  lines.push(
+    '- Spacing: use consistent spacing from theme tokens (blockGap, padding, margins) — avoid arbitrary values.',
+  );
+  lines.push('');
+  lines.push('### Typography & Colors');
+  lines.push(
+    '- Headings: use theme typography tokens (`h1`, `h2`, `h3`, `body`) for consistent sizing and family.',
+  );
+  lines.push(
+    '- Colors: use palette from theme tokens (`text`, `textMuted`, `accent`, `background`, `surface`) — no hardcoded colors.',
+  );
+  lines.push(
+    '- Text hierarchy: ensure proper heading levels (h1 → h2 → h3) and semantic structure.',
+  );
+  lines.push('');
+  lines.push('### Images & Media');
+  lines.push(
+    '- Images: use exact `src` from template source or static image sources provided. Add `alt` attributes for accessibility.',
+  );
+  lines.push(
+    '- Responsive images: use `w-full h-auto` for fluid images, or specific aspect ratios from template.',
+  );
+  lines.push(
+    '- Image radius: apply theme `imageRadius` (e.g., `rounded-[8px]`) for consistent styling.',
+  );
+  lines.push('');
+  lines.push('### Interactive Elements');
+  lines.push(
+    '- Buttons/Links: use `accent` colors, theme `buttonPadding` and `buttonRadius` for consistent styling.',
+  );
+  lines.push(
+    '- Navigation: render menus as `<nav>` with proper ARIA labels and keyboard navigation.',
+  );
+  lines.push(
+    '- Forms: if present, use semantic `<form>`, `<label>`, `<input>` with proper `for` attributes.',
+  );
+  lines.push('');
+  lines.push('### Accessibility & Best Practices');
+  lines.push(
+    '- ARIA: add `aria-label`, `role` where needed (e.g., `role="navigation"` for nav).',
+  );
+  lines.push(
+    '- Keyboard navigation: ensure focusable elements have visible focus states.',
+  );
+  lines.push(
+    '- Screen readers: use `sr-only` for hidden labels, descriptive `alt` text.',
+  );
+  lines.push(
+    '- Loading states: show loading indicators for async data (posts, pages, comments).',
+  );
+  lines.push(
+    '- Error handling: display user-friendly error messages for failed API calls.',
+  );
+  lines.push('');
+  lines.push('### Code Quality');
+  lines.push(
+    '- Clean JSX: no unnecessary nesting, use fragments `<>` where appropriate.',
+  );
+  lines.push(
+    '- Tailwind classes: use utility-first approach, combine with arbitrary values only when theme tokens require it.',
+  );
+  lines.push(
+    '- Performance: avoid inline functions in render, use `useCallback` for event handlers if needed.',
+  );
+  lines.push(
+    '- TypeScript: declare proper interfaces for props and state, use union types for variants.',
+  );
+
   return lines.join('\n');
 }
 
@@ -610,9 +719,7 @@ export function buildComponentPrompt(
           ? '\n\n**Parsing:** Re-check every `<div>` / `<section>` / `<main>` / `<article>` — each must have a matching `</…>` in order. The file must be complete, valid TSX before `export default`.'
           : ''
       }${
-        /Page detail contract|interface Page|post-only field/i.test(
-          retryError,
-        )
+        /Page detail contract|interface Page|post-only field/i.test(retryError)
           ? '\n\n**Page type:** Remove `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments` from any `interface Page` and from `page.` / `item.` usage. `Page` = `{ id, title, content, slug }` only. Use `Post` if you need author/categories.'
           : ''
       }`

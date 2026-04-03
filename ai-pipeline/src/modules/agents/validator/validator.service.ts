@@ -97,6 +97,8 @@ export class ValidatorService {
     previewUrl: string,
     routes: string[] = ['/'],
   ): Promise<void> {
+    await this.waitForPreviewServer(previewUrl, 30_000);
+
     const browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox'],
@@ -324,6 +326,7 @@ export class ValidatorService {
     const DATA_NEED_ALIASES: Record<string, string> = {
       'post-detail': 'postDetail',
       'page-detail': 'pageDetail',
+      'product-detail': 'productDetail',
       'site-info': 'siteInfo',
     };
     const violations: string[] = [];
@@ -332,8 +335,12 @@ export class ValidatorService {
     );
     const expectsPostDetail = dataNeeds.has('postDetail');
     const expectsPageDetail = dataNeeds.has('pageDetail');
+    const expectsProductDetail = dataNeeds.has('productDetail');
     const expectsAnyDetail =
-      context.isDetail === true || expectsPostDetail || expectsPageDetail;
+      context.isDetail === true ||
+      expectsPostDetail ||
+      expectsPageDetail ||
+      expectsProductDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
 
     // 7. <a href> used for internal React Router paths — breaks SPA navigation
@@ -494,6 +501,11 @@ export class ValidatorService {
           'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
+      if (expectsProductDetail && !this.matchesDetailFetch(code, 'products')) {
+        violations.push(
+          'WooCommerce product detail component must fetch the record via `/api/products/${productId}` (or equivalent string concatenation).',
+        );
+      }
       if (
         !dataNeeds.has('postDetail') &&
         this.matchesDetailFetch(code, 'posts')
@@ -508,6 +520,14 @@ export class ValidatorService {
       ) {
         violations.push(
           'Component fetches `/api/pages/${slug}` even though its plan does not require page detail data.',
+        );
+      }
+      if (
+        !dataNeeds.has('productDetail') &&
+        this.matchesDetailFetch(code, 'products')
+      ) {
+        violations.push(
+          'Component fetches `/api/products/...` even though its plan does not require product detail data.',
         );
       }
     }
@@ -783,7 +803,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       if (/^@\/(?:components|pages)\//.test(importPath)) {
         return importPath;
       }
-      if (!importPath.startsWith('./') && !importPath.startsWith('../')) continue;
+      if (!importPath.startsWith('./') && !importPath.startsWith('../'))
+        continue;
 
       if (/\.(?:js|jsx)$/.test(importPath)) {
         return importPath;
@@ -843,12 +864,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 
   private matchesDetailFetch(
     code: string,
-    resource: 'posts' | 'pages',
+    resource: 'posts' | 'pages' | 'products',
   ): boolean {
     const patterns = [
-      new RegExp(String.raw`fetch\(\s*\`/api/${resource}/\$\{slug\}\``),
-      new RegExp(String.raw`fetch\(\s*['"]/api/${resource}/['"]\s*\+\s*slug`),
-      new RegExp(String.raw`fetch\(\s*['"]/api/${resource}/\$\{slug\}['"]`),
+      new RegExp(
+        String.raw`fetch\(\s*\`/api/${resource}/\$\{(?:slug|productId)\}\``,
+      ),
+      new RegExp(
+        String.raw`fetch\(\s*['"]/api/${resource}/['"]\s*\+\s*(?:slug|productId)`,
+      ),
+      new RegExp(
+        String.raw`fetch\(\s*['"]/api/${resource}/\$\{(?:slug|productId)\}['"]`,
+      ),
     ];
     return patterns.some((pattern) => pattern.test(code));
   }
@@ -887,7 +914,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     const defaultHost = ts.createCompilerHost(PREVIEW_COMPILER_OPTIONS, true);
     const normalize = (fileName: string) => this.normalizeVirtualPath(fileName);
     const normalizedFiles = new Map<string, string>();
-    const virtualDirs = new Set<string>([this.normalizeVirtualPath(VIRTUAL_ROOT)]);
+    const virtualDirs = new Set<string>([
+      this.normalizeVirtualPath(VIRTUAL_ROOT),
+    ]);
 
     for (const [filePath, content] of files.entries()) {
       normalizedFiles.set(normalize(filePath), content);
@@ -909,7 +938,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       getNewLine: () => ts.sys.newLine,
       fileExists: (fileName) => {
         const normalized = normalize(fileName);
-        return normalizedFiles.has(normalized) || defaultHost.fileExists(fileName);
+        return (
+          normalizedFiles.has(normalized) || defaultHost.fileExists(fileName)
+        );
       },
       directoryExists: (dirName) => {
         const normalized = normalize(dirName);
@@ -921,7 +952,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       },
       getDirectories: (dirName) => {
         const normalizedDir = normalize(dirName).replace(/\/+$/, '');
-        const result = new Set<string>(defaultHost.getDirectories?.(dirName) ?? []);
+        const result = new Set<string>(
+          defaultHost.getDirectories?.(dirName) ?? [],
+        );
 
         for (const virtualDir of virtualDirs) {
           if (!virtualDir.startsWith(`${normalizedDir}/`)) continue;
@@ -934,7 +967,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       },
       readFile: (fileName) => {
         const normalized = normalize(fileName);
-        return normalizedFiles.get(normalized) ?? defaultHost.readFile(fileName);
+        return (
+          normalizedFiles.get(normalized) ?? defaultHost.readFile(fileName)
+        );
       },
       getSourceFile: (fileName, languageVersion, onError) => {
         const normalized = normalize(fileName);
@@ -954,9 +989,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       resolveModuleNames: (moduleNames, containingFile) => {
         return moduleNames.map((name) => {
           // 1. Resolve shims (React, etc.)
-          if (['react', 'react/jsx-runtime', 'react-dom/client', 'react-router-dom'].includes(name)) {
+          if (
+            [
+              'react',
+              'react/jsx-runtime',
+              'react-dom/client',
+              'react-router-dom',
+            ].includes(name)
+          ) {
             return {
-              resolvedFileName: this.normalizeVirtualPath(VIRTUAL_REACT_SHIM_FILE),
+              resolvedFileName: this.normalizeVirtualPath(
+                VIRTUAL_REACT_SHIM_FILE,
+              ),
               isExternalLibraryImport: true,
             };
           }
@@ -967,11 +1011,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             let resolvedPath = ts.sys.useCaseSensitiveFileNames
               ? `${currentDir}/${name}`
               : `${currentDir}/${name}`.toLowerCase();
-            
+
             // Try variants (.tsx, .ts)
             const extensions = ['.tsx', '.ts', ''];
             for (const ext of extensions) {
-              const fullPath = this.normalizeVirtualPath(`${resolvedPath}${ext}`);
+              const fullPath = this.normalizeVirtualPath(
+                `${resolvedPath}${ext}`,
+              );
               if (files.has(fullPath)) {
                 return { resolvedFileName: fullPath };
               }
@@ -1169,6 +1215,49 @@ export {};
 
   private shouldIgnoreRequestFailure(url: string): boolean {
     return /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url);
+  }
+
+  /**
+   * Poll the preview server until it's ready or timeout is reached.
+   * Uses HTTP HEAD requests to avoid loading the full page.
+   */
+  private async waitForPreviewServer(
+    previewUrl: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    const startTime = Date.now();
+    const interval = 500; // ms between polls
+    const maxWaitAttempts = Math.ceil(timeoutMs / interval);
+
+    for (let attempt = 1; attempt <= maxWaitAttempts; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutHandle = setTimeout(() => controller.abort(), 5000);
+        try {
+          const response = await fetch(previewUrl, {
+            method: 'HEAD',
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutHandle);
+          if (response.ok || response.status === 404) {
+            // 404 is fine — server is responding
+            return;
+          }
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
+      } catch {
+        // Server not ready yet or network error — keep polling
+      }
+
+      if (Date.now() - startTime > timeoutMs) {
+        throw new Error(
+          `[validator] Preview server at ${previewUrl} did not respond within ${timeoutMs}ms`,
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, interval));
+    }
   }
 
   private async gotoWithRetry(

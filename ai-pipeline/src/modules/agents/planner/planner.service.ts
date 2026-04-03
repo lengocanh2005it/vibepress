@@ -135,6 +135,16 @@ export class PlannerService {
     const globalPalette = this.deriveGlobalPalette(tokens);
     const globalTypography = this.deriveGlobalTypography(tokens);
 
+    const skipVisualPlan =
+      this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
+
+    if (skipVisualPlan) {
+      this.logger.log(
+        `[Phase C: AI Visual Sections] Skipped visual plan generation (minimalVisualPlan=true), plan only includes data/contract`,
+      );
+      return enriched;
+    }
+
     this.logger.log(
       `[Phase C: AI Visual Sections] Generating visual plans for ${enriched.length} components (palette + typography from theme tokens)`,
     );
@@ -471,6 +481,22 @@ export class PlannerService {
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'front-page';
       const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
+
+      // WooCommerce product template detection
+      const isProductTemplate =
+        templateBase.includes('product') ||
+        templateBase === 'single-product' ||
+        templateBase.includes('shop') ||
+        templateBase === 'archive-product';
+      if (isProductTemplate || source.includes('woocommerce')) {
+        needs.add('woocommerce');
+        if (
+          isProductTemplate &&
+          (templateBase.includes('single') || templateBase === 'single-product')
+        ) {
+          needs.add('product-detail'); // Single product page needs product data
+        }
+      }
 
       // FSE block theme
       if (

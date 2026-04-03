@@ -106,6 +106,7 @@ export class CodeReviewerService {
     // MAX_ROUNDS implements R3 → D1 in the pipeline diagram:
     // after Fix Agent fails, restart from D1 (Visual Plan?) for one more round.
     const MAX_ROUNDS = 2;
+    const forceDirectAi = process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
 
     let code = '';
     let attempts = 0;
@@ -120,7 +121,7 @@ export class CodeReviewerService {
       const isRetry = round > 1;
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
-      if (!isRetry && componentPlan?.visualPlan) {
+      if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
         promptContext = this.buildPromptContext(
           componentPlan,
           componentPlan.visualPlan,
@@ -200,7 +201,7 @@ export class CodeReviewerService {
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
       // Only used when no reviewed pre-computed plan is available on round 1,
       // or after the R3→D1 retry when we want a fresh visual plan.
-      if (isRetry || !componentPlan?.visualPlan) {
+      if (!forceDirectAi && (isRetry || !componentPlan?.visualPlan)) {
         await this.log(
           logPath,
           isRetry
