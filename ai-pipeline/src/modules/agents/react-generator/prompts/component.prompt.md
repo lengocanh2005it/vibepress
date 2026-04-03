@@ -352,12 +352,15 @@ Rules:
 
 ## Header/Footer fidelity
 
-When template includes `header`/`footer`, preserve them exactly in output:
+**For Header and Footer partial components** (when `componentName` starts with `Header` or `Footer`):
 
 - `header` should become `<header>` with its child blocks and compound layout.
 - `footer` should become `<footer>` with link columns, menus, site info, and credit elements.
 - Respect block order and spacing (e.g., if header has nav + banner, keep order).
-- Do not produce a generic placeholder header/footer when the template explicitly defines these blocks.
+- Fetch menus from `/api/menus` and render ALL navigation items — never hardcode links.
+- Do not produce a generic placeholder when the template explicitly defines these blocks.
+
+**For PAGE components** (any other component): ⛔ Do NOT render a `<header>` or `<footer>` — they are provided by the shared Layout wrapper.
 
 ⛔ NEVER flatten nested layout blocks.
 

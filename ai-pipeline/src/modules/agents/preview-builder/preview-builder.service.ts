@@ -135,6 +135,50 @@ export class PreviewBuilderService {
       (c) => !PARTIAL_PATTERNS.test(c.name),
     );
 
+    // Detect shared Header/Footer partials để tạo Layout wrapper
+    const headerComp = allComponents.find(
+      (c) => /^header/i.test(c.name) && !c.isSubComponent,
+    );
+    const footerComp = allComponents.find(
+      (c) => /^footer/i.test(c.name) && !c.isSubComponent,
+    );
+    const hasSharedLayout = !!(headerComp || footerComp);
+
+    // Nếu có Header/Footer, gen Layout.tsx để wrap tất cả các trang
+    if (hasSharedLayout) {
+      const headerImport = headerComp
+        ? `import ${headerComp.name} from './${headerComp.name}';`
+        : '';
+      const footerImport = footerComp
+        ? `import ${footerComp.name} from './${footerComp.name}';`
+        : '';
+      const headerJsx = headerComp ? `      <${headerComp.name} />` : '';
+      const footerJsx = footerComp ? `      <${footerComp.name} />` : '';
+
+      const layoutLines = [
+        `import React from 'react';`,
+        headerImport,
+        footerImport,
+        ``,
+        `export default function Layout({ children }: { children: React.ReactNode }) {`,
+        `  return (`,
+        `    <div className="min-h-screen flex flex-col">`,
+        headerJsx,
+        `      <main className="flex-1">{children}</main>`,
+        footerJsx,
+        `    </div>`,
+        `  );`,
+        `}`,
+      ]
+        .filter((l) => l !== '')
+        .join('\n');
+
+      await writeFile(join(componentsDir, 'Layout.tsx'), layoutLines, 'utf-8');
+      this.logger.log(
+        `Generated Layout.tsx with ${[headerComp?.name, footerComp?.name].filter(Boolean).join(' + ')}`,
+      );
+    }
+
     // Build route map từ plan (primary) — fallback sang convention nếu plan thiếu
     const FALLBACK_ROUTE_MAP: Record<string, string> = {
       Home: '/',
@@ -161,7 +205,12 @@ export class PreviewBuilderService {
       }
     }
 
+    // Khi có Layout, Header/Footer đã được import bởi Layout — không cần import lại trong App.tsx
+    const layoutManagedNames = new Set(
+      [headerComp?.name, footerComp?.name].filter(Boolean) as string[],
+    );
     const routeImports = allComponents
+      .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
       .map((c) => {
         const folder =
           PARTIAL_PATTERNS.test(c.name) || c.isSubComponent
@@ -197,16 +246,22 @@ export class PreviewBuilderService {
     const routes = routeLines.join('\n');
     const smokeRoutes = this.buildSmokeRoutes([...usedPaths]);
 
+    const layoutImport = hasSharedLayout
+      ? `import Layout from './components/Layout';`
+      : '';
+    const routesBlock = hasSharedLayout
+      ? `    <Layout>\n      <Routes>\n${routes}\n      </Routes>\n    </Layout>`
+      : `    <Routes>\n${routes}\n    </Routes>`;
+
     await writeFile(
       join(srcDir, 'App.tsx'),
       `import { Routes, Route } from 'react-router-dom';
+${layoutImport}
 ${routeImports}
 
 export default function App() {
   return (
-    <Routes>
-${routes}
-    </Routes>
+${routesBlock}
   );
 }
 `,

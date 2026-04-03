@@ -432,6 +432,7 @@ export function buildPlanContextNote(plan?: {
   description?: string;
   dataNeeds?: string[];
   route?: string | null;
+  type?: 'page' | 'partial';
 }): string {
   if (!plan) return '';
   const lines: string[] = ['## Component plan'];
@@ -506,6 +507,19 @@ export function buildPlanContextNote(plan?: {
   ) {
     lines.push(
       'Data contract: do NOT fetch slug-based detail endpoints unless the plan explicitly requires detail data.',
+    );
+  }
+
+  // ── Layout contract for page components ───────────────────────────────────
+  if (plan?.type === 'page') {
+    lines.push('');
+    lines.push('## Layout contract — MANDATORY');
+    lines.push('This component renders PAGE CONTENT ONLY.');
+    lines.push(
+      '⛔ Do NOT generate a `<header>` navigation bar or `<footer>` element — they are rendered by the shared Layout wrapper that wraps every page.',
+    );
+    lines.push(
+      '✅ Start your JSX return with the main page content directly (e.g. `<main>`, `<section>`, or a wrapper `<div>`). No site logo, no top nav, no copyright footer.',
     );
   }
 

@@ -62,10 +62,9 @@ export class PlannerService {
 
     const resolvedModel = modelName ?? this.llmFactory.getModel();
 
-    const templateNames =
-      theme.type === 'classic'
-        ? theme.templates.map((t) => t.name)
-        : [...theme.templates, ...theme.parts].map((t) => t.name);
+    // Ensure standard routes are generated even when not present in theme templates
+    const templates = this.ensureStandardTemplates(allTemplates, theme.type);
+    const templateNames = templates.map((t) => t.name);
 
     // ── Phase A: architecture plan ─────────────────────────────────────────
     this.logger.log(
@@ -115,6 +114,9 @@ export class PlannerService {
       );
       plan = this.buildFallbackPlan(templateNames);
     }
+
+    // Deterministically add any standard templates the AI omitted (author, category).
+    plan = this.injectMissingStandardComponents(plan, templateNames);
 
     // ── Phase B (C2): Component Graph Builder — deterministic, no AI ────────
     // Scans each template's source for navigation blocks, query blocks, etc.
@@ -802,10 +804,16 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       }
     }
 
-    if (missing.length > 0 || unexpected.length > 0 || duplicates.length > 0) {
+    // Standard templates injected synthetically — AI doesn't need to produce them.
+    // If they're the only missing items, the plan is still valid; they'll be added
+    // deterministically by injectMissingStandardComponents() after Phase A.
+    const INJECTABLE_STANDARDS = new Set(['author', 'category']);
+    const missingRequired = missing.filter((n) => !INJECTABLE_STANDARDS.has(n));
+
+    if (missingRequired.length > 0 || unexpected.length > 0 || duplicates.length > 0) {
       const reasons: string[] = [];
-      if (missing.length > 0) {
-        reasons.push(`missing templates: ${missing.join(', ')}`);
+      if (missingRequired.length > 0) {
+        reasons.push(`missing templates: ${missingRequired.join(', ')}`);
       }
       if (unexpected.length > 0) {
         reasons.push(`unexpected templates: ${unexpected.join(', ')}`);
@@ -863,6 +871,46 @@ Return ONLY a single valid JSON object matching ComponentVisualPlan.
 Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
+  private ensureStandardTemplates(
+    templates: Array<{ name: string; html?: string; markup?: string }>,
+    themeType: 'classic' | 'fse',
+  ): Array<{ name: string; html?: string; markup?: string }> {
+    const existingTemplateNames = new Set(
+      templates.map((t) => t.name.toLowerCase()),
+    );
+
+    // Ensure standard routes are generated even when not present in theme templates.
+    const createFallbackTemplate = (name: string, body: string) =>
+      themeType === 'classic' ? { name, html: body } : { name, markup: body };
+
+    if (!existingTemplateNames.has('author')) {
+      templates.push(
+        createFallbackTemplate(
+          'author',
+          '<div class="author-page"><h1>Author: {author.name}</h1><div class="author-bio">{author.description}</div><div class="author-posts"><!-- List of author posts --></div></div>',
+        ),
+      );
+    }
+    if (!existingTemplateNames.has('category')) {
+      templates.push(
+        createFallbackTemplate(
+          'category',
+          '<div class="category-page"><h1>Category: {category.name}</h1><div class="category-description">{category.description}</div><div class="category-posts"><!-- List of category posts --></div></div>',
+        ),
+      );
+    }
+    if (!existingTemplateNames.has('page')) {
+      templates.push(
+        createFallbackTemplate(
+          'page',
+          '<div><!-- Page template fallback --></div>',
+        ),
+      );
+    }
+
+    return templates;
+  }
+
   private buildFallbackPlan(templateNames: string[]): PlanResult {
     const PARTIAL_PATTERNS =
       /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
@@ -870,16 +918,86 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return templateNames.map((name) => {
       const componentName = this.toComponentName(name);
       const isPartial = PARTIAL_PATTERNS.test(componentName);
+
+      // Determine appropriate data needs based on template type
+      let dataNeeds: string[] = ['posts', 'menus', 'site-info'];
+      let route: string | null = isPartial
+        ? null
+        : `/${componentName.toLowerCase()}`;
+      let isDetail = false;
+
+      if (name.toLowerCase() === 'author') {
+        dataNeeds = ['authorDetail', 'posts', 'menus', 'site-info'];
+        route = '/author/:slug';
+        isDetail = true;
+      } else if (name.toLowerCase() === 'category') {
+        dataNeeds = ['categoryDetail', 'posts', 'menus', 'site-info'];
+        route = '/category/:slug';
+        isDetail = true;
+      } else if (name.toLowerCase() === 'page') {
+        dataNeeds = ['pageDetail', 'menus', 'site-info'];
+        route = '/:slug';
+        isDetail = true;
+      }
+
       return {
         templateName: name,
         componentName,
         type: isPartial ? 'partial' : 'page',
-        route: isPartial ? null : `/${componentName.toLowerCase()}`,
-        dataNeeds: ['posts', 'menus', 'site-info'],
-        isDetail: false,
+        route,
+        dataNeeds,
+        isDetail,
         description: `Component generated from ${name}`,
       };
     });
+  }
+
+  /**
+   * Ensures standard WordPress archive pages (author, category) are always
+   * present in the plan, regardless of whether the AI included them.
+   * Called after Phase A so the AI's work is preserved for real templates.
+   */
+  private injectMissingStandardComponents(
+    plan: PlanResult,
+    templateNames: string[],
+  ): PlanResult {
+    const seenTemplates = new Set(plan.map((p) => p.templateName));
+    const injected: PlanResult = [...plan];
+
+    for (const name of templateNames) {
+      if (seenTemplates.has(name)) continue;
+
+      if (name.toLowerCase() === 'author') {
+        this.logger.log(
+          `[Phase A] Injecting standard component "Author" (/author/:slug)`,
+        );
+        injected.push({
+          templateName: 'author',
+          componentName: 'Author',
+          type: 'page',
+          route: '/author/:slug',
+          dataNeeds: ['authorDetail', 'posts', 'menus', 'site-info'],
+          isDetail: true,
+          description: 'Author archive page showing posts by a specific author',
+        });
+      } else if (name.toLowerCase() === 'category') {
+        this.logger.log(
+          `[Phase A] Injecting standard component "Category" (/category/:slug)`,
+        );
+        injected.push({
+          templateName: 'category',
+          componentName: 'Category',
+          type: 'page',
+          route: '/category/:slug',
+          dataNeeds: ['categoryDetail', 'posts', 'menus', 'site-info'],
+          isDetail: true,
+          description:
+            'Category archive page showing posts in a specific category',
+        });
+      }
+    }
+
+    return injected;
   }
 
   private extractTemplateHints(source: string): string {
