@@ -755,22 +755,63 @@ export class OrchestratorService {
     );
 
     // E2+E3+E4: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3) + Visual Compare (E4)
+    // Mutable component list — allows the build fix-loop below to patch TS errors
+    let buildComponents = generationResult.components;
+    const MAX_BUILD_FIX_ATTEMPTS = 2;
+
     const preview = await this.runStep(
       state,
       '8_preview_builder',
       logPath,
-      () =>
-        this.previewBuilder.build({
-          jobId,
-          components: generationResult,
-          dbCreds,
-          themeDir,
-          tokens:
-            'tokens' in normalizedTheme
-              ? (normalizedTheme as any).tokens
-              : undefined,
-          plan: reviewResult.plan,
-        }),
+      async () => {
+        for (let attempt = 1; attempt <= MAX_BUILD_FIX_ATTEMPTS + 1; attempt++) {
+          try {
+            return await this.previewBuilder.build({
+              jobId,
+              components: { ...generationResult, components: buildComponents },
+              dbCreds,
+              themeDir,
+              tokens:
+                'tokens' in normalizedTheme
+                  ? (normalizedTheme as any).tokens
+                  : undefined,
+              plan: reviewResult.plan,
+            });
+          } catch (err: any) {
+            const errMsg: string = err?.message ?? String(err);
+            const isBuildFail = errMsg.includes(
+              '[validator] Preview build failed:',
+            );
+            if (!isBuildFail || attempt > MAX_BUILD_FIX_ATTEMPTS) throw err;
+
+            const tsErrors = this.parseTsBuildErrors(errMsg);
+            if (tsErrors.length === 0) throw err;
+
+            this.logger.warn(
+              `[Stage 8: Build Fix] ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}).`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 8] Build failed with ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS})`,
+            );
+
+            for (const { componentName, error } of tsErrors) {
+              const idx = buildComponents.findIndex(
+                (c) => c.name === componentName,
+              );
+              if (idx === -1) continue;
+              buildComponents[idx] = await this.reactGenerator.fixComponent({
+                component: buildComponents[idx],
+                plan: reviewResult.plan,
+                feedback: `TypeScript build error:\n${error}`,
+                modelConfig: { fixAgent: resolvedModels.fixAgent },
+                logPath,
+              });
+            }
+          }
+        }
+        throw new Error('[Stage 8] Build fix-loop exhausted all attempts');
+      },
     );
     await stepDelay();
 
@@ -1032,5 +1073,28 @@ export class OrchestratorService {
       throw new BadRequestException('Provide themeGithubUrl or themeDir');
     if (!hasDb)
       throw new BadRequestException('Provide sqlFilePath or dbCredentials');
+  }
+
+  /**
+   * Parse TypeScript build error output and extract per-component errors.
+   * Matches lines like:
+   *   src/pages/Page.tsx(132,99): error TS2552: Cannot find name 'post'. Did you mean 'posts'?
+   */
+  private parseTsBuildErrors(
+    errorOutput: string,
+  ): Array<{ componentName: string; error: string }> {
+    const pattern =
+      /src\/pages\/(\w+)\.tsx\(\d+,\d+\): error (TS\d+:[^\n]+)/g;
+    const errMap = new Map<string, string[]>();
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(errorOutput)) !== null) {
+      const [, componentName, error] = match;
+      if (!errMap.has(componentName)) errMap.set(componentName, []);
+      errMap.get(componentName)!.push(error.trim());
+    }
+    return Array.from(errMap.entries()).map(([componentName, errors]) => ({
+      componentName,
+      error: errors.join('\n'),
+    }));
   }
 }
