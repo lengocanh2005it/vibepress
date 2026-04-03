@@ -778,7 +778,7 @@ export class OrchestratorService {
     let metrics: any = null;
     try {
       const response = await axios.post(
-        `${this.configService.get<string>('automation.url', '')}/visual/compare`,
+        `${this.configService.get<string>('automation.url', '')}/site/compare`,
         {
           wpBaseUrl: 'http://localhost:8000/',
           reactFeUrl: 'http://localhost:5353',

@@ -148,7 +148,7 @@ export class CodeReviewerService {
         code = planned.code;
         if (planned.isValid) {
           this.logger.log(
-            `[reviewer] "${componentName}" ✓ via reviewed pre-computed visual plan`,
+            `[reviewer] "${componentName}" ✓ AI codegen succeeded using reviewed visual plan`,
           );
           return {
             component: {
@@ -254,7 +254,7 @@ export class CodeReviewerService {
             code = planned.code;
             if (planned.isValid) {
               this.logger.log(
-                `[reviewer] "${componentName}" ✓ via AI visual plan`,
+                `[reviewer] "${componentName}" ✓ AI codegen succeeded using AI-generated visual plan`,
               );
               return {
                 component: { name: componentName, filePath: '', code },
@@ -336,6 +336,9 @@ export class CodeReviewerService {
       lastError = direct.lastError ?? lastError;
 
       if (direct.isValid) {
+        this.logger.log(
+          `[reviewer] "${componentName}" ✓ AI codegen succeeded using direct template prompt`,
+        );
         return {
           component: { name: componentName, filePath: '', code },
           fromVisualPlan: false,
@@ -656,11 +659,11 @@ export class CodeReviewerService {
 
     if (check.isValid) {
       this.logger.log(
-        `[reviewer] "${componentName}" ✓ via deterministic fallback from ${label}`,
+        `[reviewer] "${componentName}" ✓ deterministic codegen fallback succeeded from ${label}`,
       );
       await this.log(
         logPath,
-        `[reviewer] "${componentName}" ✓ via deterministic fallback from ${label}`,
+        `[reviewer] "${componentName}" ✓ deterministic codegen fallback succeeded from ${label}`,
       );
       return { code, isValid: true };
     }
