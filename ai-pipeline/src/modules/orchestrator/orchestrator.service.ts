@@ -826,7 +826,7 @@ export class OrchestratorService {
           reactBeUrl: 'http://localhost:3775',
         },
       );
-      metrics = response.data;
+      metrics = response.data?.result ?? response.data;
     } catch (err: any) {
       this.logger.error(
         `[visual/compare] failed — ${err?.message ?? err}`,
