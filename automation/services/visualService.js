@@ -474,13 +474,15 @@ async function compareWebVisuals({
   const imageB = PNG.sync.read(fs.readFileSync(imageBPath));
   const width = Math.min(imageA.width, imageB.width);
   const height = Math.min(imageA.height, imageB.height);
+  const maxWidth = Math.max(imageA.width, imageB.width);
+  const maxHeight = Math.max(imageA.height, imageB.height);
 
   const normA = cropToSize(imageA, width, height);
   const normB = cropToSize(imageB, width, height);
   const diffImage = new PNG({ width, height });
 
   const pixelmatch = await getPixelmatch();
-  const differentPixels = pixelmatch(
+  const overlapDiffPixels = pixelmatch(
     normA.data,
     normB.data,
     diffImage.data,
@@ -493,7 +495,11 @@ async function compareWebVisuals({
 
   fs.writeFileSync(diffPath, PNG.sync.write(diffImage));
 
-  const totalPixels = width * height;
+  // Pixels nằm ngoài vùng overlap (phần dư của trang dài/rộng hơn)
+  // đều được coi là sai lệch hoàn toàn vì một trang có nội dung, trang kia không có.
+  const extraPixels = maxWidth * maxHeight - width * height;
+  const differentPixels = overlapDiffPixels + extraPixels;
+  const totalPixels = maxWidth * maxHeight;
   const diffPct = totalPixels > 0 ? (differentPixels / totalPixels) * 100 : 0;
 
   const domComparison = compareDomStructure(domFreqA, domFreqB);
@@ -503,8 +509,10 @@ async function compareWebVisuals({
     urlB,
     diffPercentage: Number(diffPct.toFixed(4)),
     differentPixels,
+    overlapDiffPixels,
+    extraPixels,
     totalPixels,
-    resolutionUsed: { width, height },
+    resolutionUsed: { width, height, maxWidth, maxHeight },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
     artifacts: {
       imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
