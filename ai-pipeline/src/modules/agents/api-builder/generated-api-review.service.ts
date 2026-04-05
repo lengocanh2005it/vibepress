@@ -58,7 +58,11 @@ export class GeneratedApiReviewService {
     );
 
     const reviewPrompt = this.buildReviewPrompt(api, plan, content);
-    const review = await this.reviewBackend(reviewPrompt, resolvedModel, logPath);
+    const review = await this.reviewBackend(
+      reviewPrompt,
+      resolvedModel,
+      logPath,
+    );
 
     const blockingIssues = this.getBlockingIssues(review);
     let blockingMessage: string | undefined;
@@ -69,9 +73,11 @@ export class GeneratedApiReviewService {
             .map((issue) => `[${issue.severity}] ${issue.message}`)
             .join(' | ')
         : review.summary || 'AI reviewer rejected the generated backend';
-      
+
       if (mode === 'blocking') {
-        this.logger.warn(`[AI Generated Backend Review] Blocking issues found: ${blockingMessage}`);
+        this.logger.warn(
+          `[AI Generated Backend Review] Blocking issues found: ${blockingMessage}`,
+        );
       }
     }
 
@@ -168,7 +174,9 @@ export class GeneratedApiReviewService {
       | 'commerce'
     >,
   ): string {
-    const requiredDataNeeds = [...new Set(plan.flatMap((item) => item.dataNeeds))];
+    const requiredDataNeeds = [
+      ...new Set(plan.flatMap((item) => item.dataNeeds)),
+    ];
     const detailRoutes = plan
       .filter((item) => item.isDetail && item.route)
       .map((item) => `${item.componentName}: ${item.route}`);
@@ -210,9 +218,7 @@ ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n
 
 Generated backend files:
 ${api.files
-  .map(
-    (file) => `\n### ${file.name}\n\`\`\`ts\n${file.code}\n\`\`\``,
-  )
+  .map((file) => `\n### ${file.name}\n\`\`\`ts\n${file.code}\n\`\`\``)
   .join('\n')}`;
   }
 

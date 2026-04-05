@@ -4,6 +4,7 @@ import type {
   ColorPalette,
   TypographyTokens,
   LayoutTokens,
+  BlockStyleToken,
   SectionPlan,
   NavbarSection,
   HeroSection,
@@ -36,6 +37,7 @@ interface RenderCtx {
   p: ColorPalette;
   t: TypographyTokens;
   l: LayoutTokens;
+  b?: Record<string, BlockStyleToken>;
 }
 
 @Injectable()
@@ -57,6 +59,7 @@ export class CodeGeneratorService {
       p: effectivePlan.palette,
       t: effectivePlan.typography,
       l: effectivePlan.layout,
+      b: effectivePlan.blockStyles,
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -166,6 +169,12 @@ export class CodeGeneratorService {
 
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
+    const commentsSection =
+      plan.sections.find(
+        (section): section is CommentsSection => section.type === 'comments',
+      ) ?? null;
+    const needsComments = !!commentsSection && dataNeeds.includes('postDetail');
+    const supportsCommentForm = needsComments && commentsSection.showForm;
     const lines: string[] = [];
 
     lines.push(`const ${componentName}: React.FC = () => {`);
@@ -188,9 +197,49 @@ export class CodeGeneratorService {
       lines.push(`  const [item, setItem] = useState<Page | null>(null);`);
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
     }
+    if (needsComments) {
+      lines.push(`  const [comments, setComments] = useState<Comment[]>([]);`);
+      lines.push(
+        `  const topLevelComments = comments.filter((comment) => (comment.parentId ?? 0) === 0);`,
+      );
+      lines.push(
+        `  const repliesFor = (parentId: number) => comments.filter((comment) => (comment.parentId ?? 0) === parentId);`,
+      );
+    }
+    if (supportsCommentForm) {
+      lines.push(`  const [commentAuthor, setCommentAuthor] = useState('');`);
+      lines.push(`  const [commentEmail, setCommentEmail] = useState('');`);
+      lines.push(`  const [commentContent, setCommentContent] = useState('');`);
+      lines.push(
+        `  const [submittingComment, setSubmittingComment] = useState(false);`,
+      );
+      lines.push(
+        `  const [commentError, setCommentError] = useState<string | null>(null);`,
+      );
+      lines.push(
+        `  const [commentSuccess, setCommentSuccess] = useState<string | null>(null);`,
+      );
+    }
     lines.push(`  const [loading, setLoading] = useState(true);`);
     lines.push(`  const [error, setError] = useState<string | null>(null);`);
     lines.push('');
+
+    if (needsComments) {
+      lines.push(`  const fetchComments = async () => {`);
+      lines.push(`    if (!slug) return;`);
+      lines.push(
+        `    const commentsRes = await fetch(\`/api/comments?slug=\${encodeURIComponent(slug)}\`);`,
+      );
+      lines.push(
+        `    if (!commentsRes.ok) throw new Error('Comments not available');`,
+      );
+      lines.push(`    const commentsData = await commentsRes.json();`);
+      lines.push(
+        `    setComments(Array.isArray(commentsData) ? commentsData : []);`,
+      );
+      lines.push(`  };`);
+      lines.push('');
+    }
 
     // Fetch
     lines.push(`  useEffect(() => {`);
@@ -218,14 +267,21 @@ export class CodeGeneratorService {
     }
     if (dataNeeds.includes('postDetail')) {
       lines.push(
+        `        if (!slug) throw new Error('Post slug is required');`,
+      );
+      lines.push(
         `        const detailRes = await fetch(\`/api/posts/\${slug}\`);`,
       );
       lines.push(
         `        if (!detailRes.ok) throw new Error('Post not found');`,
       );
       lines.push(`        setItem(await detailRes.json());`);
+      if (needsComments) lines.push(`        await fetchComments();`);
     }
     if (dataNeeds.includes('pageDetail')) {
+      lines.push(
+        `        if (!slug) throw new Error('Page slug is required');`,
+      );
       lines.push(
         `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
       );
@@ -263,6 +319,88 @@ export class CodeGeneratorService {
     }
 
     lines.push('');
+
+    if (supportsCommentForm) {
+      const authorValue = commentsSection.requireName
+        ? 'commentAuthor.trim()'
+        : "'Guest'";
+      const emailValue = commentsSection.requireEmail
+        ? 'commentEmail.trim()'
+        : "'guest@local.dev'";
+      lines.push(
+        `  const handleCommentSubmit = async (event: React.FormEvent<HTMLFormElement>) => {`,
+      );
+      lines.push(`    event.preventDefault();`);
+      lines.push(`    if (!slug) {`);
+      lines.push(`      setCommentError('Post slug is missing.');`);
+      lines.push(`      return;`);
+      lines.push(`    }`);
+      if (commentsSection.requireName) {
+        lines.push(`    if (!commentAuthor.trim()) {`);
+        lines.push(`      setCommentError('Name is required.');`);
+        lines.push(`      return;`);
+        lines.push(`    }`);
+      }
+      if (commentsSection.requireEmail) {
+        lines.push(`    if (!commentEmail.trim()) {`);
+        lines.push(`      setCommentError('Email is required.');`);
+        lines.push(`      return;`);
+        lines.push(`    }`);
+      }
+      lines.push(`    if (!commentContent.trim()) {`);
+      lines.push(`      setCommentError('Comment is required.');`);
+      lines.push(`      return;`);
+      lines.push(`    }`);
+      lines.push('');
+      lines.push(`    setSubmittingComment(true);`);
+      lines.push(`    setCommentError(null);`);
+      lines.push(`    setCommentSuccess(null);`);
+      lines.push('');
+      lines.push(`    try {`);
+      lines.push(`      const response = await fetch('/api/comments', {`);
+      lines.push(`        method: 'POST',`);
+      lines.push(`        headers: { 'Content-Type': 'application/json' },`);
+      lines.push(`        body: JSON.stringify({`);
+      lines.push(`          slug,`);
+      lines.push(`          author: ${authorValue},`);
+      lines.push(`          email: ${emailValue},`);
+      lines.push(`          content: commentContent.trim(),`);
+      lines.push(`          parentId: 0,`);
+      lines.push(`        }),`);
+      lines.push(`      });`);
+      lines.push('');
+      lines.push(`      const createdComment = await response.json();`);
+      lines.push(`      if (!response.ok) {`);
+      lines.push(
+        `        throw new Error(createdComment?.error || 'Could not post comment');`,
+      );
+      lines.push(`      }`);
+      lines.push('');
+      lines.push(`      setComments((prev) => [...prev, createdComment]);`);
+      lines.push(`      setItem((prev) =>`);
+      lines.push(`        prev`);
+      lines.push(
+        `          ? { ...prev, comment_count: (prev.comment_count ?? comments.length) + 1 }`,
+      );
+      lines.push(`          : prev,`);
+      lines.push(`      );`);
+      lines.push(`      setCommentContent('');`);
+      lines.push(`      setCommentSuccess('Comment posted successfully.');`);
+      if (commentsSection.requireName)
+        lines.push(`      setCommentAuthor('');`);
+      if (commentsSection.requireEmail)
+        lines.push(`      setCommentEmail('');`);
+      lines.push(`    } catch (err) {`);
+      lines.push(
+        `      setCommentError(err instanceof Error ? err.message : 'Could not post comment');`,
+      );
+      lines.push(`    } finally {`);
+      lines.push(`      setSubmittingComment(false);`);
+      lines.push(`    }`);
+      lines.push(`  };`);
+      lines.push('');
+    }
+
     lines.push(
       `  if (loading) return <div className="min-h-screen flex items-center justify-center"><span>Loading...</span></div>;`,
     );
@@ -419,17 +557,77 @@ export default ${componentName};`;
   }
 
   private buttonStyleAttr(ctx: RenderCtx): string {
-    return this.buildStyleAttr({ padding: ctx.l.buttonPadding });
+    const style = this.pickBlockStyle(ctx, 'button');
+    return this.buildBlockStyleAttr(
+      style,
+      { padding: ctx.l.buttonPadding },
+      true,
+    );
+  }
+
+  private pickBlockStyle(
+    ctx: RenderCtx,
+    ...keys: string[]
+  ): BlockStyleToken | undefined {
+    if (!ctx.b) return undefined;
+    for (const key of keys) {
+      const value = ctx.b[key];
+      if (value) return value;
+    }
+    return undefined;
+  }
+
+  private buildBlockStyleAttr(
+    style?: BlockStyleToken,
+    base: Record<string, string | number | undefined> = {},
+    preferStyle = false,
+  ): string {
+    const styleMap: Record<string, string | number | undefined> = {
+      ...base,
+    };
+    if (style?.color?.background) {
+      if (preferStyle || styleMap.backgroundColor === undefined) {
+        styleMap.backgroundColor = style.color.background;
+      }
+    }
+    if (style?.color?.text) {
+      if (preferStyle || styleMap.color === undefined) {
+        styleMap.color = style.color.text;
+      }
+    }
+    if (style?.typography?.fontSize)
+      styleMap.fontSize = style.typography.fontSize;
+    if (style?.typography?.fontFamily)
+      styleMap.fontFamily = style.typography.fontFamily;
+    if (style?.typography?.fontWeight)
+      styleMap.fontWeight = style.typography.fontWeight;
+    if (style?.typography?.letterSpacing)
+      styleMap.letterSpacing = style.typography.letterSpacing;
+    if (style?.typography?.lineHeight)
+      styleMap.lineHeight = style.typography.lineHeight;
+    if (style?.border?.radius) styleMap.borderRadius = style.border.radius;
+    if (style?.border?.width) styleMap.borderWidth = style.border.width;
+    if (style?.border?.style) styleMap.borderStyle = style.border.style;
+    if (style?.border?.color) styleMap.borderColor = style.border.color;
+    if (style?.spacing?.padding) styleMap.padding = style.spacing.padding;
+    if (style?.spacing?.margin) styleMap.margin = style.spacing.margin;
+    if (style?.spacing?.gap) styleMap.gap = style.spacing.gap;
+    return this.buildStyleAttr(styleMap);
   }
 
   // ── Section renderers ─────────────────────────────────────────────────────
 
   private renderNavbar(s: NavbarSection, ctx: RenderCtx): string {
     const { p, t, l } = ctx;
+    const navStyle = this.pickBlockStyle(ctx, 'navigation');
     const bg = s.background ?? p.surface;
     const tc = s.textColor ?? p.text;
     const sticky = s.sticky ? 'sticky top-0 z-50 ' : '';
-    const sectionStyle = this.buildSectionStyleAttr(s);
+    const sectionStyle = this.buildBlockStyleAttr(
+      navStyle,
+      { ...this.extractSectionStyleBase(s) },
+      true,
+    );
     const buttonStyle = this.buttonStyleAttr(ctx);
     const cta = s.cta
       ? s.cta.style === 'button'
@@ -460,6 +658,7 @@ export default ${componentName};`;
 
   private renderHero(s: HeroSection, ctx: RenderCtx, py: string): string {
     const { p, t, l } = ctx;
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
@@ -470,8 +669,8 @@ export default ${componentName};`;
       : '';
     const image = s.image
       ? s.image.position === 'below'
-        ? `\n          <img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}" />`
-        : `\n          <div className="flex-1"><img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}" /></div>`
+        ? `\n          <img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />`
+        : `\n          <div className="flex-1"><img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`
       : '';
 
     const isCenter = s.layout === 'centered';
@@ -542,6 +741,8 @@ export default ${componentName};`;
     py: string,
   ): string {
     const { p, t, l } = ctx;
+    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const sectionStyle = this.buildSectionStyleAttr(s);
     const imageRadius = this.imageRadiusClass(ctx);
     const isGrid = s.layout !== 'list';
@@ -551,8 +752,8 @@ export default ${componentName};`;
       : 'flex flex-col divide-y divide-black/10';
 
     const postCard = isGrid
-      ? `            <article key={post.id} className="flex flex-col gap-2">
-              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}" />}` : ''}
+      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding })}>
+              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />}` : ''}
               <Link to={\`/post/\${post.slug}\`} className="text-lg font-medium text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
               ${s.showExcerpt ? `<p className="text-sm text-[${p.textMuted}]">{post.excerpt}</p>` : ''}
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
@@ -601,7 +802,12 @@ ${postCard}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const cardRadius = this.cardRadiusClass(ctx);
-    const cardStyle = this.buildStyleAttr({ padding: l.cardPadding });
+    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
+    const cardStyle = this.buildBlockStyleAttr(
+      cardStylePreset,
+      { padding: l.cardPadding },
+      true,
+    );
     const colClass = `grid-cols-1 sm:grid-cols-2 ${s.columns >= 3 ? 'lg:grid-cols-3' : ''} ${s.columns === 4 ? 'xl:grid-cols-4' : ''}`;
     const cards = s.cards
       .map(
@@ -636,8 +842,9 @@ ${cards}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const imageRadius = this.imageRadiusClass(ctx);
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const imgFirst = s.imagePosition === 'left';
-    const imgEl = `<div className="flex-1"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}" /></div>`;
+    const imgEl = `<div className="flex-1"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
     const textEl = `<div className="flex-1 flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]">${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${p.textMuted}]">${s.body}</p>` : ''}
@@ -693,7 +900,12 @@ ${cards}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const cardRadius = this.cardRadiusClass(ctx);
-    const cardStyle = this.buildStyleAttr({ padding: l.cardPadding });
+    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
+    const cardStyle = this.buildBlockStyleAttr(
+      cardStylePreset,
+      { padding: l.cardPadding },
+      true,
+    );
     const inner =
       s.layout === 'card'
         ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 max-w-[560px] mx-auto text-center flex flex-col gap-4"${cardStyle}>`
@@ -715,9 +927,14 @@ ${cards}
 
   private renderFooter(s: FooterSection, ctx: RenderCtx): string {
     const { p, l } = ctx;
+    const footerStyle = this.pickBlockStyle(ctx, 'group', 'navigation');
     const bg = s.background ?? p.surface;
     const tc = s.textColor ?? p.text;
-    const sectionStyle = this.buildSectionStyleAttr(s);
+    const sectionStyle = this.buildBlockStyleAttr(
+      footerStyle,
+      { ...this.extractSectionStyleBase(s) },
+      true,
+    );
 
     const menuCols = s.menuColumns
       .map(
@@ -776,15 +993,33 @@ ${this.renderPostContentInner(s, ctx)}
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const renderCommentCard = (
+      commentVar: string,
+    ) => `                      <div className="flex items-start gap-3">
+                        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]">
+                          {${commentVar}.author.charAt(0).toUpperCase()}
+                        </span>
+                        <div className="flex-1">
+                          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="text-sm font-medium text-[${tc}]">{${commentVar}.author}</div>
+                            <time className="text-xs text-[${p.textMuted}]">{${commentVar}.date}</time>
+                          </div>
+                          <p className="mt-2 whitespace-pre-line text-sm text-[${p.textMuted}]">{${commentVar}.content}</p>
+                        </div>
+                      </div>`;
     const formBlock = s.showForm
       ? `
               <div className="flex flex-col gap-4 pt-6 border-t border-black/10">
                 <h3 className="${t.h3} font-normal text-[${tc}]">Leave a Reply</h3>
-                <form className="flex flex-col gap-3">
-                  ${s.requireName ? `<input type="text" placeholder="Name *" required className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
-                  ${s.requireEmail ? `<input type="email" placeholder="Email" className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
-                  <textarea rows={4} placeholder="Your comment..." className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm resize-none" />
-                  <button type="submit" className="self-start bg-[${p.accent}] text-[${p.accentText}] px-5 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity text-sm"${this.buttonStyleAttr(ctx)}>Post Comment</button>
+                <form className="flex flex-col gap-3" onSubmit={handleCommentSubmit}>
+                  ${s.requireName ? `<input type="text" placeholder="Name *" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
+                  ${s.requireEmail ? `<input type="email" placeholder="Email *" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
+                  <textarea rows={4} placeholder="Your comment..." value={commentContent} onChange={(event) => setCommentContent(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm resize-none" />
+                  {commentError ? <p className="text-sm text-red-600">{commentError}</p> : null}
+                  {commentSuccess ? <p className="text-sm text-green-700">{commentSuccess}</p> : null}
+                  <button type="submit" disabled={submittingComment} className="self-start bg-[${p.accent}] text-[${p.accentText}] px-5 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity text-sm disabled:cursor-not-allowed disabled:opacity-60"${this.buttonStyleAttr(ctx)}>
+                    {submittingComment ? 'Posting...' : 'Post Comment'}
+                  </button>
                 </form>
               </div>`
       : '';
@@ -793,19 +1028,25 @@ ${this.renderPostContentInner(s, ctx)}
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
           {item && (
             <div className="flex flex-col gap-6">
-              <h2 className="${t.h2} font-normal text-[${tc}]">Comments</h2>
-              {(item.comments ?? []).length > 0 ? (
+              <h2 className="${t.h2} font-normal text-[${tc}]">
+                {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
+              </h2>
+              {topLevelComments.length > 0 ? (
                 <div className="flex flex-col gap-6">
-                  {(item.comments ?? []).map((comment) => (
-                    <div key={comment.id} className="flex flex-col gap-2">
-                      <div className="flex items-center gap-3">
-                        <img src={comment.author_avatar} alt={comment.author_name} className="w-9 h-9 rounded-full object-cover" />
-                        <div>
-                          <div className="text-sm font-medium text-[${tc}]">{comment.author_name}</div>
-                          <time className="text-xs text-[${p.textMuted}]">{new Date(comment.date).toLocaleDateString()}</time>
+                  {topLevelComments.map((comment) => (
+                    <div key={comment.id} className="flex flex-col gap-4">
+${renderCommentCard('comment')}
+                      {repliesFor(comment.id).length > 0 ? (
+                        <div className="ml-4 border-l border-black/10 pl-4 sm:ml-10 sm:pl-6">
+                          <div className="flex flex-col gap-4">
+                            {repliesFor(comment.id).map((reply) => (
+                              <div key={reply.id} className="flex flex-col gap-2">
+${renderCommentCard('reply')}
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                      <div className="text-sm text-[${p.textMuted}] pl-12" dangerouslySetInnerHTML={{ __html: comment.content }} />
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -960,8 +1201,13 @@ ${this.renderSidebarCard(s, ctx, 10)}
     maxItemsOverride?: number,
   ): string {
     const { p, t, l } = ctx;
+    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
     const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
-    const paddingStyle = this.buildStyleAttr({ padding: l.cardPadding });
+    const paddingStyle = this.buildBlockStyleAttr(
+      cardStylePreset,
+      { padding: l.cardPadding },
+      true,
+    );
     const titleBlock = s.title
       ? `            <h3 className="${t.h3} font-normal text-[${p.text}]">${s.title}</h3>\n`
       : '';
@@ -1026,6 +1272,15 @@ ${this.renderSidebarCard(s, ctx, 10)}
     return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
 ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </div>`;
   }
+
+  private extractSectionStyleBase(
+    section: SectionPlan,
+  ): Record<string, string | number | undefined> {
+    return {
+      padding: section.paddingStyle,
+      margin: section.marginStyle,
+    };
+  }
 }
 
 // ── Shared TypeScript interfaces injected at top of every component ─────────
@@ -1040,10 +1295,11 @@ const SHARED_INTERFACES = `interface SiteInfo {
 
 interface Comment {
   id: number;
-  author_name: string;
-  author_avatar: string;
+  author: string;
   date: string;
   content: string;
+  parentId: number;
+  userId: number;
 }
 
 interface Post {

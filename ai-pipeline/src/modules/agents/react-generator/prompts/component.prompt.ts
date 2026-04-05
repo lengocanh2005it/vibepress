@@ -235,6 +235,10 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
         parts.push(`bg \`bg-[${style.color.background}]\``);
       if (style.typography?.fontSize)
         parts.push(`size \`text-[${style.typography.fontSize}]\``);
+      if (style.typography?.fontFamily)
+        parts.push(
+          `font \`style={{fontFamily:"${style.typography.fontFamily}"}}\``,
+        );
       if (style.typography?.fontWeight)
         parts.push(`weight \`font-[${style.typography.fontWeight}]\``);
       if (style.typography?.letterSpacing)
@@ -243,9 +247,17 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
         parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
       if (style.border?.radius)
         parts.push(`rounded \`rounded-[${style.border.radius}]\``);
+      if (style.border?.width)
+        parts.push(`border-width \`border-[${style.border.width}]\``);
+      if (style.border?.style)
+        parts.push(`border-style \`${style.border.style}\``);
+      if (style.border?.color)
+        parts.push(`border-color \`border-[${style.border.color}]\``);
       if (style.spacing?.gap) parts.push(`gap \`gap-[${style.spacing.gap}]\``);
       if (style.spacing?.padding)
         parts.push(`padding \`style={{padding:"${style.spacing.padding}"}}\``);
+      if (style.spacing?.margin)
+        parts.push(`margin \`style={{margin:"${style.spacing.margin}"}}\``);
       if (parts.length > 0)
         lines.push(`- \`${blockType}\`: ${parts.join(', ')}`);
     }
@@ -497,7 +509,9 @@ export function buildPlanContextNote(plan?: {
       'Comments data contract: fetch `GET /api/comments?slug=${slug}` (use the post slug from `useParams`) inside the same `useEffect` as the post detail fetch. ' +
         'Comment fields: `id, author, date, content, parentId (0 = top-level), userId`. ' +
         'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
-        'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty.',
+        'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty. ' +
+        'If the approved comments section includes a reply form, create controlled form state, submit with `POST /api/comments`, and update the local comments state immediately after a successful post (append the new comment or refetch comments). ' +
+        'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed.',
     );
   }
   if (
@@ -521,13 +535,37 @@ export function buildPlanContextNote(plan?: {
     lines.push(
       '✅ Start your JSX return with the main page content directly (e.g. `<main>`, `<section>`, or a wrapper `<div>`). No site logo, no top nav, no copyright footer.',
     );
+    lines.push(
+      '⛔ Do NOT fetch `GET /api/site-info` or `GET /api/menus` just to rebuild global site chrome inside this page. Shared Header/Footer/Navigation partials own that data.',
+    );
+    lines.push(
+      '⛔ Do NOT render `siteInfo.siteName`, `siteInfo.blogDescription`, or `menus.find(...)/menus.map(...)` in this page unless the approved plan is specifically for a dedicated layout partial.',
+    );
   }
 
   // ── UI Rendering Guidelines ────────────────────────────────────────────────
   lines.push('');
+  lines.push('## Fidelity Goal');
+  lines.push(
+    'This is a WordPress-to-React migration, not a redesign. Match the original WordPress UI as closely as possible.',
+  );
+  lines.push(
+    '- Preserve the original block order, wrapper hierarchy, alignment, and section density from the template source.',
+  );
+  lines.push(
+    '- Keep the same visual tone as the source template. Do NOT center, enlarge, simplify, or "modernize" sections unless the original template already does that.',
+  );
+  lines.push(
+    '- Do NOT add hero/marketing/newsletter/testimonial treatments unless those blocks clearly exist in the template source or approved visual plan.',
+  );
+  lines.push(
+    '- If the original template is simple or sparse, keep it simple or sparse. Do NOT embellish it.',
+  );
+
+  lines.push('');
   lines.push('## UI Rendering Guidelines');
   lines.push(
-    'Render a complete, production-ready React component that matches the template source structure and visual design. Follow these standards:',
+    'Render a complete React component that preserves the template source structure and original visual design as faithfully as possible. Follow these standards:',
   );
   lines.push('');
   lines.push('### Layout & Structure');
@@ -674,6 +712,7 @@ export function buildVisualPlanContextNote(
     '## Approved visual plan from previous stage',
     'Treat this plan as the primary code generation blueprint.',
     'Preserve section order, required data dependencies, and the overall layout unless the template/data grounding above proves a field is impossible.',
+    'Do NOT reinterpret this into a prettier or more modern layout. Preserve the original WordPress look and structure.',
   ];
 
   if (visualPlan.dataNeeds.length > 0) {

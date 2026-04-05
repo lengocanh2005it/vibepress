@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import type {
@@ -43,12 +44,17 @@ export class PlannerService {
   constructor(
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
+    private readonly aiLogger: AiLoggerService,
   ) {}
 
   async plan(
     theme: PhpParseResult | BlockParseResult,
     content: DbContentResult,
     modelName?: string,
+    jobId?: string,
+    options?: {
+      includeVisualPlans?: boolean;
+    },
   ): Promise<PlanResult> {
     // Build source map for layer 2 enrichment and Phase B
     const sourceMap = new Map<string, string>();
@@ -61,6 +67,7 @@ export class PlannerService {
     }
 
     const resolvedModel = modelName ?? this.llmFactory.getModel();
+    const includeVisualPlans = options?.includeVisualPlans ?? true;
 
     // Ensure standard routes are generated even when not present in theme templates
     const templates = this.ensureStandardTemplates(allTemplates, theme.type);
@@ -77,6 +84,8 @@ export class PlannerService {
     let plan: PlanResult | null = null;
     let lastError = 'unknown parse failure';
     let lastRaw = '';
+    const attempts: any[] = [];
+    const startTime = new Date().toISOString();
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       const prompt =
@@ -84,7 +93,11 @@ export class PlannerService {
           ? userPrompt
           : this.buildRetryPrompt(lastRaw, templateNames);
 
-      const { text: raw } = await this.llmFactory.chat({
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+      } = await this.llmFactory.chat({
         model: resolvedModel,
         systemPrompt,
         userPrompt: prompt,
@@ -95,6 +108,24 @@ export class PlannerService {
       const parsed = this.tryParseResponseDetailed(raw, templateNames);
       plan = parsed.plan;
       if (!parsed.plan) lastError = parsed.reason;
+
+      // Track attempt — store full prompt + response for CoT replay
+      attempts.push({
+        attemptNumber: attempt,
+        promptSent: {
+          system: systemPrompt,
+          user: prompt,
+        },
+        response: raw,
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+        },
+        timestamp: new Date().toISOString(),
+        success: !!plan,
+        error: plan ? undefined : lastError,
+      });
 
       if (plan) {
         this.logger.log(
@@ -115,8 +146,43 @@ export class PlannerService {
       plan = this.buildFallbackPlan(templateNames);
     }
 
-    // Deterministically add any standard templates the AI omitted (author, category).
-    plan = this.injectMissingStandardComponents(plan, templateNames);
+    // Log AI activity for planning
+    if (this.aiLogger && jobId) {
+      const endTime = new Date().toISOString();
+      const totalTokens = attempts.reduce(
+        (sum, att) => sum + att.tokensUsed.total,
+        0,
+      );
+      const totalInput = attempts.reduce(
+        (sum, att) => sum + att.tokensUsed.input,
+        0,
+      );
+      const totalOutput = attempts.reduce(
+        (sum, att) => sum + att.tokensUsed.output,
+        0,
+      );
+
+      await this.aiLogger.logCotProcess({
+        jobId,
+        step: 'planning',
+        model: resolvedModel,
+        startTime,
+        endTime,
+        totalAttempts: attempts.length,
+        attempts,
+        finalSuccess: !!plan,
+        totalTokenCost: totalTokens,
+        totalTokens: {
+          input: totalInput,
+          output: totalOutput,
+        },
+        finalError: plan ? undefined : lastError,
+      });
+    }
+
+    // Deterministically add any templates the AI omitted so a near-complete
+    // answer does not trigger wasteful retries or lose the valid components.
+    plan = this.injectMissingTemplates(plan, templateNames);
 
     // ── Phase B (C2): Component Graph Builder — deterministic, no AI ────────
     // Scans each template's source for navigation blocks, query blocks, etc.
@@ -138,11 +204,12 @@ export class PlannerService {
     const globalTypography = this.deriveGlobalTypography(tokens);
 
     const skipVisualPlan =
-      this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
+      !includeVisualPlans ||
+      (this.configService.get<boolean>('planner.minimalVisualPlan') ?? false);
 
     if (skipVisualPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] Skipped visual plan generation (minimalVisualPlan=true), plan only includes data/contract`,
+        `[Phase C: AI Visual Sections] Skipped visual plan generation (${includeVisualPlans ? 'minimalVisualPlan=true' : 'deferred until after plan review'}), plan only includes data/contract`,
       );
       return enriched;
     }
@@ -153,6 +220,50 @@ export class PlannerService {
 
     return this.buildVisualPlans(
       enriched,
+      sourceMap,
+      content,
+      tokens,
+      globalPalette,
+      globalTypography,
+      resolvedModel,
+    );
+  }
+
+  async attachVisualPlans(
+    theme: PhpParseResult | BlockParseResult,
+    content: DbContentResult,
+    plan: PlanResult,
+    modelName?: string,
+  ): Promise<PlanResult> {
+    const skipVisualPlan =
+      this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
+    if (skipVisualPlan) {
+      this.logger.log(
+        `[Phase C: AI Visual Sections] Skipped visual plan generation (minimalVisualPlan=true), plan only includes data/contract`,
+      );
+      return plan;
+    }
+
+    const sourceMap = new Map<string, string>();
+    const allTemplates =
+      theme.type === 'classic'
+        ? theme.templates
+        : [...theme.templates, ...theme.parts];
+    for (const t of allTemplates) {
+      sourceMap.set(t.name, 'markup' in t ? t.markup : t.html);
+    }
+
+    const tokens = theme.type === 'fse' ? theme.tokens : undefined;
+    const globalPalette = this.deriveGlobalPalette(tokens);
+    const globalTypography = this.deriveGlobalTypography(tokens);
+    const resolvedModel = modelName ?? this.llmFactory.getModel();
+
+    this.logger.log(
+      `[Phase C: AI Visual Sections] Generating visual plans for ${plan.length} reviewed components (palette + typography from theme tokens)`,
+    );
+
+    return this.buildVisualPlans(
+      plan,
       sourceMap,
       content,
       tokens,
@@ -282,6 +393,7 @@ export class PlannerService {
             palette: globalPalette,
             typography: globalTypography,
             layout,
+            blockStyles: tokens?.blockStyles,
           };
           this.logger.log(
             `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt})`,
@@ -463,9 +575,19 @@ export class PlannerService {
     plan: PlanResult,
     sourceMap: Map<string, string>,
   ): PlanResult {
+    const hasSharedChromePartials = plan.some(
+      (candidate) =>
+        candidate.type === 'partial' &&
+        /^(header|footer|nav|navigation)(?:[-_].+)?$/i.test(
+          candidate.componentName,
+        ),
+    );
+
     return plan.map((item) => {
       const source = sourceMap.get(item.templateName) ?? '';
       const needs = new Set(item.dataNeeds);
+      const ownsSharedChromeData =
+        item.type === 'partial' || !hasSharedChromePartials;
 
       // Determine whether this template renders a page (page-detail) or a post (post-detail)
       // based on the template name, which is authoritative at this stage.
@@ -498,7 +620,7 @@ export class PlannerService {
         source.includes('block:"navigation"') ||
         source.includes('"navigation"')
       )
-        needs.add('menus');
+        if (ownsSharedChromeData) needs.add('menus');
       if (source.includes('wp:query') || source.includes('"query"'))
         needs.add('posts');
       if (
@@ -511,7 +633,7 @@ export class PlannerService {
         source.includes('"site-title"') ||
         source.includes('wp:site-tagline')
       )
-        needs.add('site-info');
+        if (ownsSharedChromeData) needs.add('site-info');
 
       // Classic PHP theme
       if (
@@ -519,7 +641,7 @@ export class PlannerService {
         source.includes('{/* WP: <Navigation />') ||
         source.includes('{/* WP: <Footer />')
       )
-        needs.add('menus');
+        if (ownsSharedChromeData) needs.add('menus');
       if (source.includes('{/* WP: loop start */}')) needs.add('posts');
       if (
         source.includes('{/* WP: post.content') ||
@@ -539,6 +661,13 @@ export class PlannerService {
         source.includes('"comment-template"')
       )
         needs.add('comments');
+
+      // When the plan already has dedicated Header/Footer/Nav partials, page
+      // components must not keep site chrome data needs for duplicated layout.
+      if (item.type === 'page' && hasSharedChromePartials) {
+        needs.delete('menus');
+        needs.delete('site-info');
+      }
 
       return { ...item, dataNeeds: Array.from(needs) };
     });
@@ -581,8 +710,10 @@ Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "pag
 - Page templates MUST use "page-detail" — NEVER "post-detail"
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
-- Any component that renders navigation or a header/footer should include "menus"
-- Any component that renders the site name / tagline should include "site-info"
+- Dedicated Header / Footer / Navigation partials may include "menus"
+- Dedicated Header / Footer partials that render site title or tagline may include "site-info"
+- Ordinary page components MUST NOT request "menus" or "site-info" just because the original WordPress template referenced shared header/footer chrome.
+- If the site has shared Header/Footer/Nav partials, keep global chrome data in those partials only.
 
 ── UNIQUE ROUTES ──────────────────────────────────────────────────────────────
 Every page component MUST have a different route.
@@ -601,7 +732,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     "componentName": "Index",
     "type": "page",
     "route": "/",
-    "dataNeeds": ["posts", "menus", "site-info"],
+    "dataNeeds": ["posts"],
     "isDetail": false,
     "description": "Main blog index showing a list of posts"
   },
@@ -797,14 +928,22 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     }
 
     // Standard templates injected synthetically — AI doesn't need to produce them.
-    // If they're the only missing items, the plan is still valid; they'll be added
-    // deterministically by injectMissingStandardComponents() after Phase A.
+    // Small numbers of other omissions are also tolerated because the planner
+    // can inject deterministic fallback components after Phase A.
     const INJECTABLE_STANDARDS = new Set(['author', 'category']);
     const missingRequired = missing.filter((n) => !INJECTABLE_STANDARDS.has(n));
+    const maxInjectableMissing = Math.max(
+      1,
+      Math.floor(expectedTemplateNames.length * 0.25),
+    );
 
-    if (missingRequired.length > 0 || unexpected.length > 0 || duplicates.length > 0) {
+    if (
+      missingRequired.length > maxInjectableMissing ||
+      unexpected.length > 0 ||
+      duplicates.length > 0
+    ) {
       const reasons: string[] = [];
-      if (missingRequired.length > 0) {
+      if (missingRequired.length > maxInjectableMissing) {
         reasons.push(`missing templates: ${missingRequired.join(', ')}`);
       }
       if (unexpected.length > 0) {
@@ -912,22 +1051,22 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const isPartial = PARTIAL_PATTERNS.test(componentName);
 
       // Determine appropriate data needs based on template type
-      let dataNeeds: string[] = ['posts', 'menus', 'site-info'];
+      let dataNeeds: string[] = ['posts'];
       let route: string | null = isPartial
         ? null
         : `/${componentName.toLowerCase()}`;
       let isDetail = false;
 
       if (name.toLowerCase() === 'author') {
-        dataNeeds = ['authorDetail', 'posts', 'menus', 'site-info'];
+        dataNeeds = ['authorDetail', 'posts'];
         route = '/author/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'category') {
-        dataNeeds = ['categoryDetail', 'posts', 'menus', 'site-info'];
+        dataNeeds = ['categoryDetail', 'posts'];
         route = '/category/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'page') {
-        dataNeeds = ['pageDetail', 'menus', 'site-info'];
+        dataNeeds = ['page-detail'];
         route = '/:slug';
         isDetail = true;
       }
@@ -945,51 +1084,48 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   /**
-   * Ensures standard WordPress archive pages (author, category) are always
-   * present in the plan, regardless of whether the AI included them.
-   * Called after Phase A so the AI's work is preserved for real templates.
+   * Ensures any templates the AI omitted are added deterministically after
+   * Phase A so near-complete plans do not need a full retry.
    */
-  private injectMissingStandardComponents(
+  private injectMissingTemplates(
     plan: PlanResult,
     templateNames: string[],
   ): PlanResult {
     const seenTemplates = new Set(plan.map((p) => p.templateName));
-    const injected: PlanResult = [...plan];
+    const missingTemplateNames = templateNames.filter(
+      (name) => !seenTemplates.has(name),
+    );
+    if (missingTemplateNames.length === 0) return plan;
 
+    const fallbackByTemplate = new Map(
+      this.buildFallbackPlan(missingTemplateNames).map((item) => [
+        item.templateName,
+        item,
+      ]),
+    );
+
+    for (const name of missingTemplateNames) {
+      const fallback = fallbackByTemplate.get(name);
+      if (!fallback) continue;
+      this.logger.warn(
+        `[Phase A] Injecting fallback component for missing template "${name}" → "${fallback.componentName}"`,
+      );
+    }
+
+    const ordered: PlanResult = [];
     for (const name of templateNames) {
-      if (seenTemplates.has(name)) continue;
-
-      if (name.toLowerCase() === 'author') {
-        this.logger.log(
-          `[Phase A] Injecting standard component "Author" (/author/:slug)`,
-        );
-        injected.push({
-          templateName: 'author',
-          componentName: 'Author',
-          type: 'page',
-          route: '/author/:slug',
-          dataNeeds: ['authorDetail', 'posts', 'menus', 'site-info'],
-          isDetail: true,
-          description: 'Author archive page showing posts by a specific author',
-        });
-      } else if (name.toLowerCase() === 'category') {
-        this.logger.log(
-          `[Phase A] Injecting standard component "Category" (/category/:slug)`,
-        );
-        injected.push({
-          templateName: 'category',
-          componentName: 'Category',
-          type: 'page',
-          route: '/category/:slug',
-          dataNeeds: ['categoryDetail', 'posts', 'menus', 'site-info'],
-          isDetail: true,
-          description:
-            'Category archive page showing posts in a specific category',
-        });
+      const existing = plan.find((item) => item.templateName === name);
+      if (existing) {
+        ordered.push(existing);
+        continue;
+      }
+      const fallback = fallbackByTemplate.get(name);
+      if (fallback) {
+        ordered.push(fallback);
       }
     }
 
-    return injected;
+    return ordered;
   }
 
   private extractTemplateHints(source: string): string {

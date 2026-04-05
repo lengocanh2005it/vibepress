@@ -629,6 +629,89 @@ app.get('/api/comments', async (req, res) => {
   }
 });
 
+// Submit a new comment for a post
+// Body: { postId?: number, slug?: string, author: string, email: string, content: string, parentId?: number }
+app.post('/api/comments', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const { author, email, content, website = '', parentId = 0 } = req.body ?? {};
+
+    // Validate required fields
+    if (!author || typeof author !== 'string' || !author.trim()) {
+      return res.status(400).json({ error: 'author is required' });
+    }
+    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ error: 'valid email is required' });
+    }
+    if (!content || typeof content !== 'string' || !content.trim()) {
+      return res.status(400).json({ error: 'content is required' });
+    }
+
+    // Resolve postId from body or slug
+    let postId: number | null = req.body?.postId ? Number(req.body.postId) : null;
+    if (!postId && req.body?.slug) {
+      const [slugRows] = await conn.query<any[]>(
+        `SELECT ID FROM \`${prefix}posts\`
+         WHERE post_name = ? AND post_status = 'publish' LIMIT 1`,
+        [String(req.body.slug).trim()],
+      );
+      postId = slugRows[0]?.ID ?? null;
+    }
+    if (!postId) {
+      return res.status(400).json({ error: 'postId or slug is required' });
+    }
+
+    // Verify the post actually exists and is published
+    const [postRows] = await conn.query<any[]>(
+      `SELECT ID FROM \`${prefix}posts\` WHERE ID = ? AND post_status = 'publish' LIMIT 1`,
+      [postId],
+    );
+    if (!postRows.length) {
+      return res.status(404).json({ error: 'post not found' });
+    }
+
+    const now = new Date();
+    // comment_approved = 1 so comment is immediately visible (matches read endpoint filter)
+    const [result] = await conn.query<any>(
+      `INSERT INTO \`${prefix}comments\`
+         (comment_post_ID, comment_author, comment_author_email, comment_author_url,
+          comment_content, comment_date, comment_date_gmt, comment_approved,
+          comment_parent, comment_type, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '1', ?, 'comment', 0)`,
+      [
+        postId,
+        author.trim().substring(0, 245),
+        email.trim().substring(0, 100),
+        typeof website === 'string' ? website.trim().substring(0, 200) : '',
+        content.trim(),
+        now,
+        now,
+        Number(parentId) || 0,
+      ],
+    );
+
+    const commentId = result.insertId;
+
+    // Update comment count on the post
+    await conn.query(
+      `UPDATE \`${prefix}posts\` SET comment_count = comment_count + 1 WHERE ID = ?`,
+      [postId],
+    );
+
+    res.status(201).json({
+      id: commentId,
+      author: author.trim(),
+      date: formatDate(now.toISOString()),
+      content: content.trim(),
+      parentId: Number(parentId) || 0,
+      userId: 0,
+    });
+  } finally {
+    await conn.end();
+  }
+});
+
 app.listen(PORT, () =>
   console.log(`API server running on http://localhost:${PORT}`),
 );

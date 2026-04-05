@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
+import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
@@ -15,11 +16,13 @@ import {
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
-import { ValidatorService } from '../validator/validator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 
-// Templates larger than this threshold are split into section sub-components (FSE only)
-const CHUNK_THRESHOLD_CHARS = 40_000;
+// Classic templates can stay on the normal single-component path up to this size.
+const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
+// FSE templates benefit from direct block-tree prompting, so allow larger inputs
+// before splitting into section components.
+const FSE_CHUNK_THRESHOLD_CHARS = 80_000;
 // Target size per section chunk
 const CHUNK_TARGET_CHARS = 15_000;
 // Component names matching these patterns are placed in src/components (partials), not src/pages
@@ -71,6 +74,7 @@ export class ReactGeneratorService {
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
     private readonly codeReviewer: CodeReviewerService,
+    private readonly aiLogger: AiLoggerService,
   ) {}
 
   // ── Public entry point ─────────────────────────────────────────────────────
@@ -126,30 +130,54 @@ export class ReactGeneratorService {
 
     // Ensure standard routes are generated even when not present in theme templates.
     const createFallbackTemplate = (name: string, body: string) =>
-      theme.type === 'classic'
-        ? { name, html: body }
-        : { name, markup: body };
+      theme.type === 'classic' ? { name, html: body } : { name, markup: body };
 
     if (!existingTemplateNames.has('author')) {
-      templates.push(createFallbackTemplate('author', '<div><!-- Author template fallback --></div>'));
+      templates.push(
+        createFallbackTemplate(
+          'author',
+          '<div><!-- Author template fallback --></div>',
+        ),
+      );
     }
     if (!existingTemplateNames.has('category')) {
-      templates.push(createFallbackTemplate('category', '<div><!-- Category template fallback --></div>'));
+      templates.push(
+        createFallbackTemplate(
+          'category',
+          '<div><!-- Category template fallback --></div>',
+        ),
+      );
     }
     if (!existingTemplateNames.has('page')) {
-      templates.push(createFallbackTemplate('page', '<div><!-- Page template fallback --></div>'));
+      templates.push(
+        createFallbackTemplate(
+          'page',
+          '<div><!-- Page template fallback --></div>',
+        ),
+      );
     }
 
     const total = templates.length;
     const components: GeneratedComponent[] = [];
+    const hasSharedHeader = !!plan?.some(
+      (item) => item.type === 'partial' && /^header/i.test(item.componentName),
+    );
+    const hasSharedFooter = !!plan?.some(
+      (item) => item.type === 'partial' && /^footer/i.test(item.componentName),
+    );
 
     for (let i = 0; i < templates.length; i++) {
       const tpl = templates[i];
       const componentName = this.toComponentName(tpl.name);
       const rawSource = (tpl.markup ?? tpl.html ?? '') as string;
       const counter = `[${i + 1}/${total}]`;
-      const componentPlan = plan?.find(
+      const rawComponentPlan = plan?.find(
         (p) => p.templateName === tpl.name || p.componentName === componentName,
+      );
+      const componentPlan = this.stripSharedLayoutSectionsFromPlan(
+        rawComponentPlan,
+        hasSharedHeader,
+        hasSharedFooter,
       );
       const folder =
         componentPlan?.type === 'partial'
@@ -180,6 +208,7 @@ export class ReactGeneratorService {
         themeType: theme.type,
         componentPlan,
         logPath,
+        jobId,
       });
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
@@ -230,6 +259,7 @@ export class ReactGeneratorService {
     themeType: 'classic' | 'fse';
     componentPlan?: PlanResult[number];
     logPath?: string;
+    jobId?: string;
   }): Promise<GeneratedComponent[]> {
     const {
       componentName,
@@ -242,6 +272,7 @@ export class ReactGeneratorService {
       themeType,
       componentPlan,
       logPath,
+      jobId,
     } = input;
 
     const templateSource = rawSource;
@@ -265,29 +296,44 @@ export class ReactGeneratorService {
       ? wpJsonToString(filteredNodes)
       : templateSource;
     const promptSourceLength = promptTemplateSource.length;
+    const chunkThreshold =
+      themeType === 'fse'
+        ? FSE_CHUNK_THRESHOLD_CHARS
+        : CLASSIC_CHUNK_THRESHOLD_CHARS;
+    const preferDirectAi = themeType === 'fse';
 
-    if (
-      themeType === 'classic' ||
-      promptSourceLength <= CHUNK_THRESHOLD_CHARS
-    ) {
-      // ── Delegate to CodeReviewerService (Review Loop) ─────────────────────
-      const { component } = await this.codeReviewer.reviewComponent({
+    if (themeType === 'classic' || promptSourceLength <= chunkThreshold) {
+      const result = await this.codeReviewer.reviewComponent({
         componentName,
         templateSource: promptTemplateSource,
         modelName: codeGeneratorModel,
         fixAgentModel,
+        preferDirectAi,
         systemPrompt,
         content,
         tokens,
         componentPlan,
         logPath,
+        jobId,
       });
-      return [this.attachPlanContext(component, componentPlan)];
+
+      if (this.aiLogger && jobId) {
+        await this.aiLogger.logAiActivity(
+          jobId,
+          'code-generation',
+          result.rawResponse,
+          0,
+          codeGeneratorModel,
+          true,
+        );
+      }
+
+      return [this.attachPlanContext(result.component, componentPlan)];
     }
 
     // Too large → split into sections (FSE only)
     this.logger.warn(
-      `Template ${componentName}: ${promptSourceLength} chars > ${CHUNK_THRESHOLD_CHARS} → splitting into sections`,
+      `Template ${componentName}: ${promptSourceLength} chars > ${chunkThreshold} → splitting into sections`,
     );
     const resolvedNodes = filteredNodes ?? [];
     const chunks = this.splitTemplateSections(
@@ -296,7 +342,7 @@ export class ReactGeneratorService {
     );
     await this.logToFile(
       logPath,
-      `WARN "${componentName}" too large (${promptSourceLength} chars) → splitting into ${chunks.length} sections`,
+      `WARN "${componentName}" too large (${promptSourceLength} chars > ${chunkThreshold}) → splitting into ${chunks.length} sections`,
     );
 
     this.logger.log(`Template ${componentName}: ${chunks.length} sections`);
@@ -319,11 +365,13 @@ export class ReactGeneratorService {
         nodesJson,
         modelName: codeGeneratorModel,
         fixAgentModel,
+        preferDirectAi,
         systemPrompt,
         content,
         tokens,
         componentPlan,
         logPath,
+        jobId,
       });
 
       subComponents.push(section);
@@ -341,6 +389,34 @@ export class ReactGeneratorService {
       ),
       ...subComponents,
     ];
+  }
+
+  private stripSharedLayoutSectionsFromPlan(
+    componentPlan: PlanResult[number] | undefined,
+    hasSharedHeader: boolean,
+    hasSharedFooter: boolean,
+  ): PlanResult[number] | undefined {
+    if (!componentPlan?.visualPlan || componentPlan.type !== 'page') {
+      return componentPlan;
+    }
+
+    const sections = componentPlan.visualPlan.sections.filter((section) => {
+      if (hasSharedHeader && section.type === 'navbar') return false;
+      if (hasSharedFooter && section.type === 'footer') return false;
+      return true;
+    });
+
+    if (sections.length === componentPlan.visualPlan.sections.length) {
+      return componentPlan;
+    }
+
+    return {
+      ...componentPlan,
+      visualPlan: {
+        ...componentPlan.visualPlan,
+        sections,
+      },
+    };
   }
 
   // ── Automated Repair ────────────────────────────────────────────────────────

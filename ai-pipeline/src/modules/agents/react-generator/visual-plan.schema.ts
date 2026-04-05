@@ -10,7 +10,8 @@ export type DataNeed =
   | 'pages'
   | 'menus'
   | 'postDetail'
-  | 'pageDetail';
+  | 'pageDetail'
+  | 'comments';
 
 export interface ColorPalette {
   background: string; // page/root background e.g. "#f9f9f9"
@@ -21,6 +22,28 @@ export interface ColorPalette {
   accentText: string; // text on accent background e.g. "#ffffff"
   dark?: string; // dark section background e.g. "#111111"
   darkText?: string; // text on dark sections e.g. "#f9f9f9"
+}
+
+export interface BlockStyleToken {
+  color?: { text?: string; background?: string };
+  typography?: {
+    fontSize?: string;
+    fontFamily?: string;
+    fontWeight?: string;
+    letterSpacing?: string;
+    lineHeight?: string;
+  };
+  border?: {
+    radius?: string;
+    width?: string;
+    style?: string;
+    color?: string;
+  };
+  spacing?: {
+    padding?: string;
+    margin?: string;
+    gap?: string;
+  };
 }
 
 // ── Section types ──────────────────────────────────────────────────────────
@@ -211,6 +234,8 @@ export interface ComponentVisualPlan {
   typography: TypographyTokens;
   /** Layout — derived from theme.tokens + plan structure by planner */
   layout: LayoutTokens;
+  /** Block-level style presets derived from theme tokens/style.css */
+  blockStyles?: Record<string, BlockStyleToken>;
   /** Section layout — the only thing AI contributes */
   sections: SectionPlan[];
 }

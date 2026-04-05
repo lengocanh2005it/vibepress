@@ -15,7 +15,7 @@ import { DeployAgentModule } from '../agents/deploy-agent/deploy-agent.module.js
 import { ValidatorModule } from '../agents/validator/validator.module.js';
 import { CleanupModule } from '../agents/cleanup/cleanup.module.js';
 import { ThemeModule } from '../theme/theme.module.js';
-import { CotEvidenceModule } from '../cot-evidence/cot-evidence.module.js';
+import { AiLoggerModule } from '../ai-logger/ai-logger.module.js';
 import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 
 @Module({
@@ -34,7 +34,7 @@ import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
     DeployAgentModule,
     ValidatorModule,
     CleanupModule,
-    CotEvidenceModule,
+    AiLoggerModule,
     NormalizerModule,
   ],
   controllers: [OrchestratorController],

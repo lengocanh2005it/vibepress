@@ -50,9 +50,7 @@ export class ValidatorService {
     const generatedComponentNames = components.map((comp) => comp.name);
 
     const normalized = components.map((comp) => {
-      let code = this.removeUnusedImports(comp.code);
-      const sanitized = this.sanitizeTailwindClasses(code);
-      if (sanitized !== code) code = sanitized;
+      const code = this.sanitizeGeneratedCode(comp.code);
       return { ...comp, code };
     });
 
@@ -163,6 +161,23 @@ export class ValidatorService {
     return out;
   }
 
+  stripDebugStatements(raw: string): string {
+    return raw
+      .split('\n')
+      .filter((line) => {
+        const trimmed = line.trim();
+        return !/^console\.(log|warn|error|info|debug)\s*\(/.test(trimmed);
+      })
+      .join('\n');
+  }
+
+  sanitizeGeneratedCode(raw: string): string {
+    let code = this.removeUnusedImports(raw);
+    code = this.sanitizeTailwindClasses(code);
+    code = this.stripDebugStatements(code);
+    return code;
+  }
+
   /**
    * Basic structural validation to detect obvious layout-breaking code
    */
@@ -171,7 +186,7 @@ export class ValidatorService {
     context: CodeValidationContext = {},
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
-    let code = this.sanitizeTailwindClasses(rawCode);
+    let code = this.sanitizeGeneratedCode(rawCode);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -342,31 +357,40 @@ export class ValidatorService {
       expectsPageDetail ||
       expectsProductDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
+    const isPartialComponent = PARTIAL_PATTERNS.test(
+      context.componentName ?? '',
+    );
+    const isPageComponent =
+      context.type === 'page' &&
+      context.isSubComponent !== true &&
+      !isPartialComponent;
 
     // Pre-processing: deterministically strip post-only fields from `interface Page`
     // so the AI does not need a retry attempt just for a bad type declaration.
     // Runtime usage violations (page.author etc.) are still caught below.
     if (expectsPageDetail) {
-      const ifaceStart = code.search(/\binterface\s+Page\s*\{/);
-      if (ifaceStart !== -1) {
-        const openBrace = code.indexOf('{', ifaceStart);
+      const pageTypeRegex = /\b(?:interface|type)\s+Page\b[^{]*\{/;
+      const match = code.match(pageTypeRegex);
+      if (match) {
+        const startIdx = match.index!;
+        const openBrace = code.indexOf('{', startIdx);
         let depth = 0;
         let closeBrace = -1;
         for (let i = openBrace; i < code.length; i++) {
           if (code[i] === '{') depth++;
           else if (code[i] === '}') {
             depth--;
-            if (depth === 0) { closeBrace = i; break; }
+            if (depth === 0) {
+              closeBrace = i;
+              break;
+            }
           }
         }
         if (closeBrace !== -1) {
-          const BAD_PAGE_FIELDS =
-            /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/;
           const body = code.slice(openBrace + 1, closeBrace);
-          const cleanedBody = body
-            .split('\n')
-            .filter((line) => !BAD_PAGE_FIELDS.test(line))
-            .join('\n');
+          const BAD_FIELDS =
+            /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b(\??\s*:[^;}\n]+[;,\n]?)?/g;
+          const cleanedBody = body.replace(BAD_FIELDS, '');
           code =
             code.slice(0, openBrace + 1) + cleanedBody + code.slice(closeBrace);
         }
@@ -440,13 +464,41 @@ export class ValidatorService {
         );
       }
       const pageInterfaceMatch = code.match(
-        /interface\s+Page\s*\{[\s\S]*?\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b[\s\S]*?\}/,
+        /\b(?:interface|type)\s+Page\b[^{]*\{[\s\S]*?\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b[\s\S]*?\}/,
       );
       if (pageInterfaceMatch) {
         violations.push(
-          `Page detail contract violated: \`interface Page\` declares post-only field \`${pageInterfaceMatch[1]}\`. Keep Page limited to \`id, title, content, slug\`.`,
+          `Page detail contract violated: \`interface Page\` (or \`type Page\`) declares post-only field \`${pageInterfaceMatch[1]}\`. Keep Page limited to \`id, title, content, slug\`.`,
         );
       }
+    }
+
+    if (isPageComponent) {
+      const redundantTagMatch = code.match(/<(header|footer)\b/i);
+      if (redundantTagMatch) {
+        violations.push(
+          `Layout contract violated: page components must NOT include their own \`<${redundantTagMatch[1]}>\` tag. Global navigation and footer are provided by the shared Layout wrapper.`,
+        );
+      }
+      if (this.fetchesSharedChromeData(code)) {
+        violations.push(
+          'Layout data contract violated: page components must NOT fetch `/api/site-info` or `/api/menus` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
+        );
+      }
+      if (this.usesSharedChromeData(code)) {
+        violations.push(
+          'Layout data contract violated: page components must NOT render shared chrome data such as `siteInfo.siteName` or `menus.find(...)/menus.map(...)`. Shared Header/Footer/Navigation partials own that UI.',
+        );
+      }
+    }
+
+    const commentFieldMatch = code.match(
+      /\bcomment\.(author_name|author_avatar)\b/,
+    );
+    if (commentFieldMatch) {
+      violations.push(
+        `Comment contract violated: \`comment.${commentFieldMatch[1]}\` does not exist. Use \`comment.author\` and derive any avatar UI from initials instead.`,
+      );
     }
 
     // 11b. React Router API used without importing from react-router-dom
@@ -506,9 +558,6 @@ export class ValidatorService {
     // Partials (header, footer, postmeta, sidebar, …) receive data via props from their
     // parent page — they do not own a route or fetch detail data themselves.
     // Skip routing/fetching enforcement for them to avoid contradictory violations.
-    const isPartialComponent = PARTIAL_PATTERNS.test(
-      context.componentName ?? '',
-    );
     const skipRouteDataContractChecks =
       context.type === 'partial' ||
       context.isSubComponent === true ||
@@ -913,6 +962,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return patterns.some((pattern) => pattern.test(code));
   }
 
+  private fetchesSharedChromeData(code: string): boolean {
+    return /fetch\(\s*['"`]\/api\/(?:site-info|menus)\b/.test(code);
+  }
+
+  private usesSharedChromeData(code: string): boolean {
+    return (
+      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription)\b/.test(code) ||
+      /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
+      /\{\s*menus\b/.test(code)
+    );
+  }
+
   private getVirtualComponentFilePath(comp: GeneratedComponent): string {
     const folder =
       PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent
@@ -1243,7 +1304,9 @@ export {};
   private shouldIgnoreConsoleError(text: string): boolean {
     return (
       // Network errors expected during smoke test (API not fully ready, 404/400 on optional resources)
-      /favicon\.ico|WebSocket connection to|Failed to load resource: the server responded with a status of 40[04]/.test(text) ||
+      /favicon\.ico|WebSocket connection to|Failed to load resource: the server responded with a status of 40[04]/.test(
+        text,
+      ) ||
       // React duplicate-key warning — code quality issue caught by review loop, not a crash
       /Encountered two children with the same key/.test(text)
     );

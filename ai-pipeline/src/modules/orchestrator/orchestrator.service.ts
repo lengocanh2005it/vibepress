@@ -1,36 +1,35 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { lastValueFrom, ReplaySubject, Subject } from 'rxjs';
-import { v4 as uuidv4 } from 'uuid';
-import simpleGit from 'simple-git';
-import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
-import { join } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import type { AgentResult } from '@/common/types/pipeline.type.js';
+import { HttpService } from '@nestjs/axios';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
+import { join } from 'path';
+import { lastValueFrom, ReplaySubject } from 'rxjs';
+import simpleGit from 'simple-git';
+import { v4 as uuidv4 } from 'uuid';
+import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
+import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
+import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
+import { CleanupService } from '../agents/cleanup/cleanup.service.js';
+import { DbContentService } from '../agents/db-content/db-content.service.js';
+import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
+import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
+import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
+import { PlannerService } from '../agents/planner/planner.service.js';
+import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
+import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
+import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
+import { ValidatorService } from '../agents/validator/validator.service.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
-import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
-import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
-import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
-import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
-import { DbContentService } from '../agents/db-content/db-content.service.js';
-import { PlannerService } from '../agents/planner/planner.service.js';
-import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
-import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
-import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
-import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
-import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
-import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
-import { ValidatorService } from '../agents/validator/validator.service.js';
-import { CleanupService } from '../agents/cleanup/cleanup.service.js';
-import { CotEvidenceService } from '../cot-evidence/cot-evidence.service.js';
 import {
-  RunPipelineDto,
   PipelineModelConfig,
+  RunPipelineDto,
 } from './orchestrator.controller.js';
-import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
-import { HttpService } from '@nestjs/axios';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
@@ -80,76 +79,83 @@ const STEP_META: Record<
 > = {
   // Stage 1: Repository Analysis
   '1_repo_analyzer': {
-    label: 'Read Theme Repository',
+    label: 'Analyze Theme Source',
     weight: 8,
     activeMessage:
-      'AI agent is cloning the repository and reading the theme structure.',
-    doneMessage: 'Theme repository has been cloned and analyzed.',
+      'Resolving the theme source, cloning the repository when needed, and inspecting the theme file structure.',
+    doneMessage:
+      'Theme source has been resolved and the repository structure is understood.',
   },
   '2_theme_parser': {
     label: 'Parse Theme Templates',
     weight: 10,
     activeMessage:
-      'AI agent is parsing templates, parts, and block markup from the theme.',
-    doneMessage: 'Theme templates and parts have been parsed successfully.',
+      'Detecting the theme type and converting templates, parts, and block markup into a machine-readable template graph.',
+    doneMessage:
+      'Theme templates and reusable parts have been parsed into structured source.',
   },
   '3_normalizer': {
-    label: 'Normalize Source Templates',
+    label: 'Normalize Template Source',
     weight: 5,
     activeMessage:
-      'AI agent is cleaning and normalizing template source for downstream planning.',
-    doneMessage: 'Template source has been normalized and cleaned.',
+      'Cleaning and normalizing parsed template source so downstream planning works on consistent markup.',
+    doneMessage:
+      'Template source has been normalized for planning and generation.',
   },
   // Stage 2: WordPress Content Graph
   '4_content_graph': {
-    label: 'Load WordPress Content',
+    label: 'Extract WordPress Content Model',
     weight: 10,
     activeMessage:
-      'AI agent is loading posts, pages, menus, and taxonomy data from WordPress.',
-    doneMessage: 'WordPress content graph is ready.',
+      'Querying WordPress for posts, pages, menus, taxonomies, plugins, and runtime capabilities.',
+    doneMessage:
+      'WordPress content model and runtime capability graph are ready.',
   },
   // Stage 3: Planner — Phase A→B→C→D with retry
   '5_planner': {
-    label: 'Plan Components And Routes',
+    label: 'Plan Routes, Data, And Visual Sections',
     weight: 40,
     activeMessage:
-      'AI planner is mapping templates to components, routes, data needs, and visual sections.',
-    doneMessage: 'Component plan, routes, and visual layout plan are ready.',
+      'Building the component graph, route map, data contracts, and approved visual sections for each template.',
+    doneMessage: 'Component architecture, routes, and visual plans are ready.',
   },
   // Stage 4+5: React Generator + Code Review Loop (includes D4 AST Validator)
   '6_generator': {
-    label: 'Generate React Components',
+    label: 'Generate And Repair React Components',
     weight: 30,
     activeMessage:
-      'AI code agent is generating React components, reviewing output, and repairing invalid code.',
-    doneMessage: 'React components have been generated and validated.',
+      'Generating React components, validating contracts, reviewing output, and repairing invalid code when needed.',
+    doneMessage:
+      'React components have been generated, reviewed, and validated.',
   },
   // Stage 6: Build & Preview
   '7_api_builder': {
-    label: 'Prepare Preview API',
+    label: 'Build Preview API Layer',
     weight: 5,
-    activeMessage: 'AI agent is preparing the preview API server.',
-    doneMessage: 'Preview API server has been prepared.',
+    activeMessage:
+      'Preparing the Express preview API, injecting extra routes, and reviewing backend coverage against the frontend contract.',
+    doneMessage: 'Preview API layer has been built and reviewed.',
   },
   '8_preview_builder': {
-    label: 'Build And Check Preview',
+    label: 'Assemble Preview And Run Checks',
     weight: 8,
     activeMessage:
-      'AI agent is assembling the preview app, verifying the build, and checking runtime behavior.',
-    doneMessage: 'Preview app build and runtime checks have passed.',
+      'Assembling the preview app, wiring environment files, verifying the build, and smoke-testing runtime behavior.',
+    doneMessage:
+      'Preview app assembly, build checks, and runtime smoke tests have passed.',
   },
   '9_cleanup': {
-    label: 'Clean Temporary Files',
+    label: 'Clean Temporary Workspace',
     weight: 2,
     activeMessage:
-      'AI agent is cleaning temporary files from this migration run.',
-    doneMessage: 'Temporary files have been cleaned up.',
+      'Cleaning temporary repositories, uploads, and generated artifacts from this migration run.',
+    doneMessage: 'Temporary workspace cleanup has finished.',
   },
   '10_done': {
-    label: 'Migration Ready',
+    label: 'Preview Ready',
     weight: 0,
-    activeMessage: 'Migration is being finalized.',
-    doneMessage: 'Migration workflow is complete.',
+    activeMessage: 'Finalizing preview metadata and completion state.',
+    doneMessage: 'Migration workflow is complete and the preview is ready.',
   },
 };
 
@@ -200,7 +206,6 @@ export class OrchestratorService {
     private readonly previewBuilder: PreviewBuilderService,
     private readonly validator: ValidatorService,
     private readonly cleanup: CleanupService,
-    private readonly cotEvidence: CotEvidenceService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
@@ -282,6 +287,64 @@ export class OrchestratorService {
 
   private createProgressStream(): ReplaySubject<ProgressEvent> {
     return new ReplaySubject<ProgressEvent>(100);
+  }
+
+  private getStepMeta(name: string) {
+    return (
+      STEP_META[name] ?? {
+        label: name,
+        weight: 1,
+        activeMessage: `AI agent is working on ${name}.`,
+        doneMessage: `${name} has completed.`,
+      }
+    );
+  }
+
+  private calcPercentBefore(name: string): number {
+    const stepOrder = Object.keys(STEP_META);
+    let done = 0;
+    for (const stepName of stepOrder) {
+      if (stepName === name) break;
+      done += STEP_META[stepName]?.weight ?? 0;
+    }
+    return Math.round((done / TOTAL_WEIGHT) * 100);
+  }
+
+  private calcPercentThrough(name: string): number {
+    const stepOrder = Object.keys(STEP_META);
+    let done = 0;
+    for (const stepName of stepOrder) {
+      done += STEP_META[stepName]?.weight ?? 0;
+      if (stepName === name) break;
+    }
+    return Math.round((done / TOTAL_WEIGHT) * 100);
+  }
+
+  private emitStepProgress(
+    state: PipelineStatus,
+    name: string,
+    progressWithinStep: number,
+    message: string,
+    data?: ProgressEventData,
+  ): void {
+    const meta = this.getStepMeta(name);
+    const subject = this.progress.get(state.jobId);
+    const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
+    const beforeWeight = Object.keys(STEP_META)
+      .slice(0, Math.max(Object.keys(STEP_META).indexOf(name), 0))
+      .reduce((sum, stepName) => sum + (STEP_META[stepName]?.weight ?? 0), 0);
+    const percent = Math.round(
+      ((beforeWeight + meta.weight * bounded) / TOTAL_WEIGHT) * 100,
+    );
+
+    subject?.next({
+      step: name,
+      label: meta.label,
+      status: 'running',
+      percent,
+      message,
+      data,
+    });
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
@@ -397,14 +460,32 @@ export class OrchestratorService {
       '1_repo_analyzer',
       logPath,
       async () => {
+        this.emitStepProgress(
+          state,
+          '1_repo_analyzer',
+          0.1,
+          'Resolving the theme source input and preparing repository analysis.',
+        );
         let resolvedDir = dto.themeDir;
 
         if (!resolvedDir && dto.themeGithubUrl) {
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.35,
+            'Cloning the WordPress theme repository from GitHub.',
+          );
           const repoRoot = await this.cloneThemeRepo(
             dto.themeGithubUrl,
             themeGithubToken,
             dto.themeGithubBranch ?? 'main',
             jobId,
+          );
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.7,
+            'Repository cloned. Resolving the active theme directory from WordPress data.',
           );
           resolvedDir = await this.resolveThemeDir(repoRoot, dbCreds);
         }
@@ -412,6 +493,12 @@ export class OrchestratorService {
         if (!resolvedDir)
           throw new BadRequestException('No theme source provided');
 
+        this.emitStepProgress(
+          state,
+          '1_repo_analyzer',
+          0.9,
+          'Scanning theme folders, templates, and structural entry points.',
+        );
         return this.repoAnalyzer.analyze(resolvedDir);
       },
     );
@@ -424,7 +511,21 @@ export class OrchestratorService {
       '2_theme_parser',
       logPath,
       async () => {
+        this.emitStepProgress(
+          state,
+          '2_theme_parser',
+          0.15,
+          'Detecting whether the source theme is classic PHP or block-based FSE.',
+        );
         const detection = await this.themeDetector.detect(themeDir!);
+        this.emitStepProgress(
+          state,
+          '2_theme_parser',
+          0.55,
+          detection.type === 'fse'
+            ? 'Parsing block templates and template parts from the FSE theme.'
+            : 'Parsing PHP templates, partials, and WordPress template hints from the classic theme.',
+        );
         return detection.type === 'fse'
           ? this.blockParser.parse(themeDir!)
           : this.phpParser.parse(themeDir!);
@@ -433,70 +534,54 @@ export class OrchestratorService {
     await stepDelay();
 
     // Record evidence AC1, AC2, AC3, AC7
-    await this.cotEvidence.write(
-      jobId,
-      'AC1',
-      'Nhận diện Theme',
-      {
-        theme_name: (parsedTheme as any).themeName ?? 'Unknown',
-        version: (parsedTheme as any).themeJson?.version ?? 'Unknown',
-        type: parsedTheme.type,
-        core_files: parsedTheme.templates.map((t) => t.name),
-      },
-      [
-        `Đọc style.css → Theme Name: ${(parsedTheme as any).themeName ?? 'not found'}`,
-        `Detected theme type: ${parsedTheme.type}`,
-        `Found ${parsedTheme.templates.length} templates`,
-      ],
-      true,
-    );
-
-    await this.cotEvidence.write(
-      jobId,
-      'AC2',
-      'Parse Cấu trúc',
-      {
-        total_templates: parsedTheme.templates.length,
-      },
-      ['Parsed theme into layout map'],
-      true,
-    );
-
-    await this.cotEvidence.write(
-      jobId,
-      'AC3',
-      'Trích xuất Design System',
-      {
-        has_tokens: 'tokens' in parsedTheme,
-      },
-      ['Extracted theme design tokens'],
-      true,
-    );
-
-    await this.cotEvidence.write(
-      jobId,
-      'AC7',
-      'Cơ chế Fallback',
-      {
-        fallback_used: !parsedTheme.templates.length,
-      },
-      ['Theme parsing completed'],
-      true,
-    );
+    // Removed cotEvidence logging
 
     // Bước 3: Normalize & Clean HTML
     const normalizedTheme = await this.runStep(
       state,
       '3_normalizer',
       logPath,
-      () => this.normalizer.normalize(parsedTheme),
+      async () => {
+        this.emitStepProgress(
+          state,
+          '3_normalizer',
+          0.25,
+          'Cleaning parsed template source and removing noisy markup before planning.',
+        );
+        const result = await this.normalizer.normalize(parsedTheme);
+        this.emitStepProgress(
+          state,
+          '3_normalizer',
+          0.8,
+          'Normalized source is ready for route and component planning.',
+        );
+        return result;
+      },
     );
     await stepDelay();
 
     // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
     // B1: Content Graph Builder — posts, pages, menus, categories, tags, custom taxonomies
-    const content = await this.runStep(state, '4_content_graph', logPath, () =>
-      this.dbContent.extract(dbCreds),
+    const content = await this.runStep(
+      state,
+      '4_content_graph',
+      logPath,
+      async () => {
+        this.emitStepProgress(
+          state,
+          '4_content_graph',
+          0.15,
+          'Querying WordPress tables for site info, pages, posts, menus, and taxonomies.',
+        );
+        const result = await this.dbContent.extract(dbCreds);
+        this.emitStepProgress(
+          state,
+          '4_content_graph',
+          0.75,
+          'Combining runtime capabilities, plugin discovery, and extracted content into one content graph.',
+        );
+        return result;
+      },
     );
     await stepDelay();
 
@@ -515,13 +600,26 @@ export class OrchestratorService {
       '5_planner',
       logPath,
       async () => {
+        this.emitStepProgress(
+          state,
+          '5_planner',
+          0.08,
+          'Building the first component architecture pass from normalized theme source and WordPress content.',
+        );
         // Phase A (C1): AI Architecture Plan
         // Phase B (C2): Component Graph Builder — enrichPlan() deterministic
-        // Phase C (C3): AI Visual Sections — buildVisualPlans()
         let plan = await this.planner.plan(
           normalizedTheme,
           content,
           resolvedModels.planning,
+          jobId,
+          { includeVisualPlans: false },
+        );
+        this.emitStepProgress(
+          state,
+          '5_planner',
+          0.4,
+          `Initial architecture plan created for ${plan.length} component contract(s). Running consistency review before visual sections are generated.`,
         );
 
         // Phase D (C4): Plan Review / Consistency Check
@@ -540,23 +638,28 @@ export class OrchestratorService {
             logPath,
             `[Stage 3: C6 Retry] attempt ${attempt}: ${review.errors.join('; ')}`,
           );
-          this.progress.get(jobId)?.next({
-            step: '5_planner',
-            label: STEP_META['5_planner'].label,
-            status: 'running',
-            percent: 25,
-            message:
-              `AI planner is retrying the component plan ` +
-              `(attempt ${attempt}/${MAX_PLAN_RETRIES}) after consistency checks failed.`,
-          });
+          this.emitStepProgress(
+            state,
+            '5_planner',
+            0.35,
+            `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: rebuilding routes, data needs, and visual sections after review feedback.`,
+          );
 
           // C6 → C1: reset and re-run Phases A, B, C
           plan = await this.planner.plan(
             normalizedTheme,
             content,
             resolvedModels.planning,
+            jobId,
+            { includeVisualPlans: false },
           );
           review = this.planReviewer.review(plan, expectedTemplateNames);
+          this.emitStepProgress(
+            state,
+            '5_planner',
+            0.55,
+            `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: re-running consistency review on the regenerated architecture plan.`,
+          );
         }
 
         if (!review.isValid) {
@@ -565,23 +668,40 @@ export class OrchestratorService {
           );
         }
 
+        this.emitStepProgress(
+          state,
+          '5_planner',
+          0.72,
+          'Architecture review passed. Generating visual sections from the reviewed route map and data contracts.',
+        );
+        const planWithVisuals = await this.planner.attachVisualPlans(
+          normalizedTheme,
+          content,
+          review.plan,
+          resolvedModels.planning,
+        );
+        review = this.planReviewer.review(
+          planWithVisuals,
+          expectedTemplateNames,
+        );
+        if (!review.isValid) {
+          throw new Error(
+            `[Stage 3] Visual-plan synchronization failed after architecture review: ${review.errors.join('; ')}`,
+          );
+        }
+
+        this.emitStepProgress(
+          state,
+          '5_planner',
+          0.92,
+          'Planner review passed. Route map, data contracts, and visual sections are locked in.',
+        );
         return review;
       },
     );
     await stepDelay();
 
-    await this.cotEvidence.write(
-      jobId,
-      'AC4',
-      'Lập kế hoạch component',
-      {
-        total_components: reviewResult.plan.length,
-        with_visual_plan: reviewResult.plan.filter((c: any) => c.visualPlan)
-          .length,
-      },
-      ['[Stage 3] Generated component tree with visual plans (Phase A+B+C+D)'],
-      true,
-    );
+    // Removed cotEvidence logging for planning
 
     // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
     // Flow inside this step:
@@ -593,6 +713,12 @@ export class OrchestratorService {
       '6_generator',
       logPath,
       async () => {
+        this.emitStepProgress(
+          state,
+          '6_generator',
+          0.08,
+          'Generating React components from the approved visual plans.',
+        );
         // Stage 4+5 core: generate + code review per component
         const result = await this.reactGenerator.generate({
           theme: normalizedTheme,
@@ -610,10 +736,22 @@ export class OrchestratorService {
         this.logger.log(
           `[Stage 4: D4 Validator] Validating & cleaning ${result.components.length} components`,
         );
+        this.emitStepProgress(
+          state,
+          '6_generator',
+          0.45,
+          `Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
+        );
         let components = this.validator.validate(result.components);
 
         const MAX_FIX_ATTEMPTS = 2;
         for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+          this.emitStepProgress(
+            state,
+            '6_generator',
+            0.65,
+            `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking generated components against the approved contract.`,
+          );
           this.logger.log(
             `[Stage 5: AI Generated Code Review] Reviewing ${components.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
           );
@@ -631,6 +769,12 @@ export class OrchestratorService {
 
           this.logger.warn(
             `[Stage 5: AI Generated Code Review] ${review.failures.length} components failed review. Attempting auto-fix.`,
+          );
+          this.emitStepProgress(
+            state,
+            '6_generator',
+            0.82,
+            `Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
           );
           await this.logToFile(
             logPath,
@@ -653,6 +797,12 @@ export class OrchestratorService {
           }
         }
 
+        this.emitStepProgress(
+          state,
+          '6_generator',
+          0.94,
+          'React generation, validation, and repair loops have finished successfully.',
+        );
         return { ...result, components };
       },
     );
@@ -690,11 +840,23 @@ export class OrchestratorService {
 
     // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
     await this.runStep(state, '7_api_builder', logPath, async () => {
+      this.emitStepProgress(
+        state,
+        '7_api_builder',
+        0.15,
+        'Building the Express preview API template and injecting required routes.',
+      );
       let api = await this.apiBuilder.build({
         jobId,
         dbName: dbCreds.dbName,
         content,
       });
+      this.emitStepProgress(
+        state,
+        '7_api_builder',
+        0.55,
+        'Running backend review to verify API coverage matches the generated frontend contracts.',
+      );
 
       const MAX_FIX_ATTEMPTS = 2;
       for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
@@ -717,6 +879,12 @@ export class OrchestratorService {
         this.logger.warn(
           `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
         );
+        this.emitStepProgress(
+          state,
+          '7_api_builder',
+          0.78,
+          `Backend auto-fix ${attempt}/${MAX_FIX_ATTEMPTS}: repairing generated API code from review feedback.`,
+        );
         await this.logToFile(
           logPath,
           `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
@@ -730,29 +898,17 @@ export class OrchestratorService {
         });
       }
 
+      this.emitStepProgress(
+        state,
+        '7_api_builder',
+        0.93,
+        'Preview API layer is ready for the runtime preview environment.',
+      );
       return api;
     });
     await stepDelay();
-    await this.cotEvidence.write(
-      jobId,
-      'AC5',
-      'Khởi tạo API',
-      {
-        endpoints_created: true,
-      },
-      ['Rest API endpoints generated'],
-      true,
-    );
-    await this.cotEvidence.write(
-      jobId,
-      'AC6',
-      'Resource Coverage',
-      {
-        resource_coverage: 'full',
-      },
-      ['Covered posts, pages, menu'],
-      true,
-    );
+    // Removed cotEvidence logging
+    // Removed cotEvidence logging
 
     // E2+E3+E4: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3) + Visual Compare (E4)
     // Mutable component list — allows the build fix-loop below to patch TS errors
@@ -764,8 +920,24 @@ export class OrchestratorService {
       '8_preview_builder',
       logPath,
       async () => {
-        for (let attempt = 1; attempt <= MAX_BUILD_FIX_ATTEMPTS + 1; attempt++) {
+        this.emitStepProgress(
+          state,
+          '8_preview_builder',
+          0.08,
+          'Copying the React preview template, writing generated pages, and preparing environment files.',
+        );
+        for (
+          let attempt = 1;
+          attempt <= MAX_BUILD_FIX_ATTEMPTS + 1;
+          attempt++
+        ) {
           try {
+            this.emitStepProgress(
+              state,
+              '8_preview_builder',
+              0.38,
+              `Preview build attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS + 1}: installing dependencies, building, and starting dev servers.`,
+            );
             return await this.previewBuilder.build({
               jobId,
               components: { ...generationResult, components: buildComponents },
@@ -789,6 +961,12 @@ export class OrchestratorService {
 
             this.logger.warn(
               `[Stage 8: Build Fix] ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}).`,
+            );
+            this.emitStepProgress(
+              state,
+              '8_preview_builder',
+              0.7,
+              `Preview build fix ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}: repairing ${tsErrors.length} TypeScript build issue(s).`,
             );
             await this.logToFile(
               logPath,
@@ -833,22 +1011,6 @@ export class OrchestratorService {
         err?.response?.data ?? err?.stack,
       );
     }
-
-    await this.cotEvidence.write(
-      jobId,
-      'AC8',
-      'Độ chính xác (Accuracy)',
-      {
-        total: generationResult.components.length,
-        valid: generationResult.components.length,
-        previewUrl: preview.previewUrl,
-        previewValidated: true,
-      },
-      [
-        '[Stage 4+5+6] Components passed generation, validation, preview build, and runtime smoke test',
-      ],
-      true,
-    );
 
     // Bước 8: Xoá temp/repos và temp/uploads của job này
     await this.runStep(state, '9_cleanup', logPath, () =>
@@ -974,30 +1136,15 @@ export class OrchestratorService {
     const step = state.steps.find((s) => s.name === name)!;
     if (step.status === 'skipped') return undefined as T;
 
-    const meta = STEP_META[name] ?? {
-      label: name,
-      weight: 1,
-      activeMessage: `AI agent is working on ${name}.`,
-      doneMessage: `${name} has completed.`,
-    };
+    const meta = this.getStepMeta(name);
     const subject = this.progress.get(state.jobId);
-
-    const calcPercent = (completedUpTo: string): number => {
-      const stepOrder = Object.keys(STEP_META);
-      let done = 0;
-      for (const s of stepOrder) {
-        if (s === completedUpTo) break;
-        done += STEP_META[s]?.weight ?? 0;
-      }
-      return Math.round((done / TOTAL_WEIGHT) * 100);
-    };
 
     step.status = 'running';
     subject?.next({
       step: name,
       label: meta.label,
       status: 'running',
-      percent: calcPercent(name),
+      percent: this.calcPercentBefore(name),
       message: meta.activeMessage,
     });
     this.logger.log(`[${state.jobId}] Step ${name} started`);
@@ -1027,19 +1174,11 @@ export class OrchestratorService {
       step.status = 'done';
 
       // Calculate percent after this step completes
-      const stepOrder = Object.keys(STEP_META);
-      let done = 0;
-      for (const s of stepOrder) {
-        done += STEP_META[s]?.weight ?? 0;
-        if (s === name) break;
-      }
-      const percentDone = Math.round((done / TOTAL_WEIGHT) * 100);
-
       subject?.next({
         step: name,
         label: meta.label,
         status: 'done',
-        percent: percentDone,
+        percent: this.calcPercentThrough(name),
         message: `${meta.doneMessage} (${elapsed}s)`,
       });
 
@@ -1055,7 +1194,7 @@ export class OrchestratorService {
         step: name,
         label: meta.label,
         status: 'error',
-        percent: calcPercent(name),
+        percent: this.calcPercentBefore(name),
         message: `${meta.label} failed: ${err.message}`,
       });
       await this.logToFile(
@@ -1083,8 +1222,7 @@ export class OrchestratorService {
   private parseTsBuildErrors(
     errorOutput: string,
   ): Array<{ componentName: string; error: string }> {
-    const pattern =
-      /src\/pages\/(\w+)\.tsx\(\d+,\d+\): error (TS\d+:[^\n]+)/g;
+    const pattern = /src\/pages\/(\w+)\.tsx\(\d+,\d+\): error (TS\d+:[^\n]+)/g;
     const errMap = new Map<string, string[]>();
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(errorOutput)) !== null) {

@@ -60,6 +60,15 @@ export class PreviewBuilderService {
     const srcDir = join(frontendDir, 'src');
     const componentsDir = join(srcDir, 'components');
     const pagesDir = join(srcDir, 'pages');
+    const allComponents = components.components;
+    const headerComp = allComponents.find(
+      (c) => /^header/i.test(c.name) && !c.isSubComponent,
+    );
+    const footerComp = allComponents.find(
+      (c) => /^footer/i.test(c.name) && !c.isSubComponent,
+    );
+    const hasSharedHeader = !!headerComp;
+    const hasSharedFooter = !!footerComp;
 
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
@@ -93,6 +102,13 @@ export class PreviewBuilderService {
         return `/assets/images/${fileName}`;
       });
 
+      if (!isPartial && (hasSharedHeader || hasSharedFooter)) {
+        comp.code = this.stripSharedLayoutSectionsFromPageCode(comp.code, {
+          header: hasSharedHeader,
+          footer: hasSharedFooter,
+        });
+      }
+
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
 
@@ -115,7 +131,11 @@ export class PreviewBuilderService {
           const isPartial =
             PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
           const targetDir = isPartial ? componentsDir : pagesDir;
-          await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+          await writeFile(
+            join(targetDir, `${comp.name}.tsx`),
+            comp.code,
+            'utf-8',
+          );
         }
         this.logger.log(
           `Removed <img> / empty JSX for ${missingAssets.size} missing theme asset(s)`,
@@ -124,8 +144,6 @@ export class PreviewBuilderService {
     }
 
     // 3. Generate App.tsx với routes từ components
-    const allComponents = components.components;
-
     // Sub-components (isSubComponent=true) are assembled inside their parent.
     // They must NOT become standalone routes.
     const routeableComponents = allComponents.filter((c) => !c.isSubComponent);
@@ -136,12 +154,6 @@ export class PreviewBuilderService {
     );
 
     // Detect shared Header/Footer partials để tạo Layout wrapper
-    const headerComp = allComponents.find(
-      (c) => /^header/i.test(c.name) && !c.isSubComponent,
-    );
-    const footerComp = allComponents.find(
-      (c) => /^footer/i.test(c.name) && !c.isSubComponent,
-    );
     const hasSharedLayout = !!(headerComp || footerComp);
 
     // Nếu có Header/Footer, gen Layout.tsx để wrap tất cả các trang
@@ -509,6 +521,33 @@ ${fontEntries}
     return 5353;
   }
 
+  private stripSharedLayoutSectionsFromPageCode(
+    code: string,
+    options: { header: boolean; footer: boolean },
+  ): string {
+    let next = code;
+    if (options.header) {
+      next = this.stripNamedSection(next, 'Navbar', 'header');
+    }
+    if (options.footer) {
+      next = this.stripNamedSection(next, 'Footer', 'footer');
+    }
+    return next;
+  }
+
+  private stripNamedSection(
+    code: string,
+    commentName: string,
+    tagName: 'header' | 'footer',
+  ): string {
+    const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(
+      String.raw`\s*\{\/\*\s*${commentName}\s*\*\/\}\s*<${escapedTag}\b[\s\S]*?<\/${escapedTag}>`,
+      'i',
+    );
+    return code.replace(pattern, '\n');
+  }
+
   private async copyReferencedThemeAssets(
     themeDir: string,
     publicDir: string,
@@ -582,7 +621,10 @@ ${fontEntries}
           '',
         );
         out = out.replace(
-          new RegExp(`<img\\s[^>]*?\\bsrc=\\{\\s*\`${esc}\`\\s*\\}[^>]*/>`, 'gis'),
+          new RegExp(
+            `<img\\s[^>]*?\\bsrc=\\{\\s*\`${esc}\`\\s*\\}[^>]*/>`,
+            'gis',
+          ),
           '',
         );
       }

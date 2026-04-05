@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
   ValidatorService,
   type CodeValidationContext,
@@ -28,11 +29,14 @@ export interface ReviewInput {
   modelName: string;
   /** Model for the Fix Agent (R3 repair pass). Defaults to modelName if omitted. */
   fixAgentModel?: string;
+  /** Prefer direct block-tree prompting over visual-plan-first codegen for this call. */
+  preferDirectAi?: boolean;
   systemPrompt: string;
   content: DbContentResult;
   tokens?: ThemeTokens;
   componentPlan?: PlanResult[number];
   logPath?: string;
+  jobId?: string;
 }
 
 export interface SectionReviewInput {
@@ -44,11 +48,14 @@ export interface SectionReviewInput {
   modelName: string;
   /** Model for the Fix Agent (R3 repair pass). Defaults to modelName if omitted. */
   fixAgentModel?: string;
+  /** Prefer direct block-tree prompting over visual-plan context for this section. */
+  preferDirectAi?: boolean;
   systemPrompt?: string;
   content: DbContentResult;
   tokens?: ThemeTokens;
   componentPlan?: PlanResult[number];
   logPath?: string;
+  jobId?: string;
 }
 
 export interface ReviewResult {
@@ -57,6 +64,8 @@ export interface ReviewResult {
   fromVisualPlan: boolean;
   /** number of AI generation attempts used */
   attempts: number;
+  /** raw response from AI for logging */
+  rawResponse: string;
 }
 
 /**
@@ -82,6 +91,7 @@ export class CodeReviewerService {
     private readonly llmFactory: LlmFactoryService,
     private readonly validator: ValidatorService,
     private readonly codeGenerator: CodeGeneratorService,
+    private readonly aiLogger?: AiLoggerService,
   ) {}
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -96,26 +106,40 @@ export class CodeReviewerService {
       templateSource,
       modelName,
       fixAgentModel = modelName,
+      preferDirectAi = false,
       systemPrompt: _systemPrompt,
       content,
       tokens,
       componentPlan,
       logPath,
+      jobId,
     } = input;
 
     // MAX_ROUNDS implements R3 → D1 in the pipeline diagram:
     // after Fix Agent fails, restart from D1 (Visual Plan?) for one more round.
     const MAX_ROUNDS = 2;
-    const forceDirectAi = process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
+    const forceDirectAi =
+      preferDirectAi || process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
+    const startTime = new Date().toISOString();
 
     let code = '';
     let attempts = 0;
     let lastError: string | undefined;
-    let promptContext = this.buildPromptContext(componentPlan);
+    const cotAttempts: any[] = [];
+    let promptContext = this.buildPromptContext(componentPlan, undefined, {
+      includeVisualPlan: !forceDirectAi,
+    });
     let validationContext = this.buildValidationContext(
       promptContext,
       componentName,
     );
+
+    if (preferDirectAi && componentPlan?.visualPlan) {
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}": preferDirectAi enabled; bypassing visual-plan-first path to preserve WordPress block fidelity`,
+      );
+    }
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
@@ -151,6 +175,37 @@ export class CodeReviewerService {
           this.logger.log(
             `[reviewer] "${componentName}" ✓ AI codegen succeeded using reviewed visual plan`,
           );
+
+          // Log COT process before returning
+          if (this.aiLogger && jobId) {
+            cotAttempts.push({
+              attemptNumber: cotAttempts.length + 1,
+              response: planned.lastRawOutput?.substring(0, 500) || '',
+              tokensUsed: {
+                input: 0,
+                output: 0,
+                total: 0,
+              },
+              timestamp: new Date().toISOString(),
+              success: true,
+              validationFeedback: 'Pre-computed visual plan codegen succeeded',
+            });
+
+            await this.aiLogger.logCotProcess({
+              jobId,
+              step: 'code-generation',
+              componentName,
+              model: modelName,
+              startTime,
+              endTime: new Date().toISOString(),
+              totalAttempts: cotAttempts.length,
+              attempts: cotAttempts,
+              finalSuccess: true,
+              totalTokenCost: 0,
+              totalTokens: { input: 0, output: 0 },
+            });
+          }
+
           return {
             component: {
               name: componentName,
@@ -159,6 +214,7 @@ export class CodeReviewerService {
             },
             fromVisualPlan: true,
             attempts,
+            rawResponse: planned.lastRawOutput || '',
           };
         }
         lastError = planned.lastError ?? lastError;
@@ -178,6 +234,33 @@ export class CodeReviewerService {
           'pre-computed plan',
         );
         if (deterministic.isValid) {
+          // Log COT process before returning
+          if (this.aiLogger && jobId) {
+            cotAttempts.push({
+              attemptNumber: cotAttempts.length + 1,
+              response: 'Deterministic fallback (rule-based generation)',
+              tokensUsed: { input: 0, output: 0, total: 0 },
+              timestamp: new Date().toISOString(),
+              success: true,
+              validationFeedback:
+                'Deterministic pre-computed plan codegen succeeded',
+            });
+
+            await this.aiLogger.logCotProcess({
+              jobId,
+              step: 'code-generation',
+              componentName,
+              model: modelName,
+              startTime,
+              endTime: new Date().toISOString(),
+              totalAttempts: cotAttempts.length,
+              attempts: cotAttempts,
+              finalSuccess: true,
+              totalTokenCost: 0,
+              totalTokens: { input: 0, output: 0 },
+            });
+          }
+
           return {
             component: {
               name: componentName,
@@ -186,6 +269,7 @@ export class CodeReviewerService {
             },
             fromVisualPlan: true,
             attempts,
+            rawResponse: '',
           };
         }
         lastError = deterministic.error ?? lastError;
@@ -218,7 +302,7 @@ export class CodeReviewerService {
           });
 
         try {
-          const s1Raw = await this.generateWithRetry(
+          const { text: s1Raw } = await this.generateWithRetry(
             modelName,
             s1System,
             s1User,
@@ -257,10 +341,44 @@ export class CodeReviewerService {
               this.logger.log(
                 `[reviewer] "${componentName}" ✓ AI codegen succeeded using AI-generated visual plan`,
               );
+
+              // Log COT process before returning
+              if (this.aiLogger && jobId) {
+                cotAttempts.push({
+                  attemptNumber: cotAttempts.length + 1,
+                  response: (planned.lastRawOutput || '').substring(0, 500),
+                  tokensUsed: {
+                    input: 0,
+                    output: 0,
+                    total: 0,
+                  },
+                  timestamp: new Date().toISOString(),
+                  success: true,
+                  validationFeedback:
+                    'AI visual plan + codegen succeeded on attempt ' +
+                    (cotAttempts.length + 1),
+                });
+
+                await this.aiLogger.logCotProcess({
+                  jobId,
+                  step: 'code-generation',
+                  componentName,
+                  model: modelName,
+                  startTime,
+                  endTime: new Date().toISOString(),
+                  totalAttempts: cotAttempts.length,
+                  attempts: cotAttempts,
+                  finalSuccess: true,
+                  totalTokenCost: 0,
+                  totalTokens: { input: 0, output: 0 },
+                });
+              }
+
               return {
                 component: { name: componentName, filePath: '', code },
                 fromVisualPlan: true,
                 attempts,
+                rawResponse: planned.lastRawOutput || '',
               };
             }
             lastError = planned.lastError ?? lastError;
@@ -288,6 +406,7 @@ export class CodeReviewerService {
                 },
                 fromVisualPlan: true,
                 attempts,
+                rawResponse: '',
               };
             }
             lastError = deterministic.error ?? lastError;
@@ -340,10 +459,42 @@ export class CodeReviewerService {
         this.logger.log(
           `[reviewer] "${componentName}" ✓ AI codegen succeeded using direct template prompt`,
         );
+
+        // Log COT process before returning
+        if (this.aiLogger && jobId) {
+          cotAttempts.push({
+            attemptNumber: cotAttempts.length + 1,
+            response: (direct.lastRawOutput || '').substring(0, 500),
+            tokensUsed: {
+              input: 0,
+              output: 0,
+              total: 0,
+            },
+            timestamp: new Date().toISOString(),
+            success: true,
+            validationFeedback: 'Direct AI TSX generation succeeded',
+          });
+
+          await this.aiLogger.logCotProcess({
+            jobId,
+            step: 'code-generation',
+            componentName,
+            model: modelName,
+            startTime,
+            endTime: new Date().toISOString(),
+            totalAttempts: cotAttempts.length,
+            attempts: cotAttempts,
+            finalSuccess: true,
+            totalTokenCost: 0,
+            totalTokens: { input: 0, output: 0 },
+          });
+        }
+
         return {
           component: { name: componentName, filePath: '', code },
           fromVisualPlan: false,
           attempts,
+          rawResponse: direct.lastRawOutput || '',
         };
       }
 
@@ -371,10 +522,42 @@ export class CodeReviewerService {
             logPath,
             `[reviewer:fix-agent] "${componentName}" ✓ repaired`,
           );
+
+          // Log COT process before returning
+          if (this.aiLogger && jobId) {
+            cotAttempts.push({
+              attemptNumber: cotAttempts.length + 1,
+              response: 'Fix Agent repair successful',
+              tokensUsed: {
+                input: 0,
+                output: 0,
+                total: 0,
+              },
+              timestamp: new Date().toISOString(),
+              success: true,
+              validationFeedback: 'Fix Agent repair resolved validation errors',
+            });
+
+            await this.aiLogger.logCotProcess({
+              jobId,
+              step: 'code-generation',
+              componentName,
+              model: fixAgentModel,
+              startTime,
+              endTime: new Date().toISOString(),
+              totalAttempts: cotAttempts.length,
+              attempts: cotAttempts,
+              finalSuccess: true,
+              totalTokenCost: 0,
+              totalTokens: { input: 0, output: 0 },
+            });
+          }
+
           return {
             component: { name: componentName, filePath: '', code },
             fromVisualPlan: false,
             attempts,
+            rawResponse: '',
           };
         }
         // R3 → D1: Fix Agent did not resolve the issue — loop back to D1
@@ -397,6 +580,33 @@ export class CodeReviewerService {
       }
     }
 
+    // All retries exhausted — log final failure
+    if (this.aiLogger && jobId) {
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        response: `All retry paths exhausted after ${MAX_ROUNDS} rounds`,
+        tokensUsed: { input: 0, output: 0, total: 0 },
+        timestamp: new Date().toISOString(),
+        success: false,
+        error: lastError,
+      });
+
+      await this.aiLogger.logCotProcess({
+        jobId,
+        step: 'code-generation',
+        componentName,
+        model: modelName,
+        startTime,
+        endTime: new Date().toISOString(),
+        totalAttempts: cotAttempts.length,
+        attempts: cotAttempts,
+        finalSuccess: false,
+        totalTokenCost: 0,
+        totalTokens: { input: 0, output: 0 },
+        finalError: lastError,
+      });
+    }
+
     throw new Error(
       `[reviewer] "${componentName}" failed after ${MAX_ROUNDS} rounds + fix-agent: ${lastError}`,
     );
@@ -415,12 +625,20 @@ export class CodeReviewerService {
       nodesJson,
       modelName,
       fixAgentModel = modelName,
+      preferDirectAi = false,
       systemPrompt = '',
       content,
       tokens,
       componentPlan,
       logPath,
+      jobId,
     } = input;
+
+    const startTime = new Date().toISOString();
+    const cotAttempts: any[] = [];
+    const promptContext = this.buildPromptContext(componentPlan, undefined, {
+      includeVisualPlan: !preferDirectAi,
+    });
 
     const userPrompt = buildSectionPrompt({
       sectionName,
@@ -432,20 +650,24 @@ export class CodeReviewerService {
       menus: content.menus,
       tokens,
       content,
-      componentPlan,
+      componentPlan: promptContext,
     });
 
     let code = '';
     let lastError: string | undefined;
     let isValid = false;
     const validationContext = this.buildValidationContext(
-      this.buildPromptContext(componentPlan),
+      promptContext,
       sectionName,
       true,
     );
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const raw = await this.generateWithRetry(
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+      } = await this.generateWithRetry(
         modelName,
         systemPrompt,
         userPrompt,
@@ -502,9 +724,62 @@ export class CodeReviewerService {
     }
 
     if (!isValid) {
+      // Log section generation failure
+      if (this.aiLogger && jobId) {
+        cotAttempts.push({
+          attemptNumber: cotAttempts.length + 1,
+          response: `Section generation failed after all attempts`,
+          tokensUsed: { input: 0, output: 0, total: 0 },
+          timestamp: new Date().toISOString(),
+          success: false,
+          error: lastError,
+        });
+
+        await this.aiLogger.logCotProcess({
+          jobId,
+          step: 'section-generation',
+          componentName: sectionName,
+          model: modelName,
+          startTime,
+          endTime: new Date().toISOString(),
+          totalAttempts: cotAttempts.length,
+          attempts: cotAttempts,
+          finalSuccess: false,
+          totalTokenCost: 0,
+          totalTokens: { input: 0, output: 0 },
+          finalError: lastError,
+        });
+      }
+
       throw new Error(
         `[reviewer] Section "${sectionName}" failed after 3 attempts: ${lastError}`,
       );
+    }
+
+    // Log successful section generation
+    if (this.aiLogger && jobId) {
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        response: 'Section generation succeeded',
+        tokensUsed: { input: 0, output: 0, total: 0 },
+        timestamp: new Date().toISOString(),
+        success: true,
+        validationFeedback: 'Section code passed validation',
+      });
+
+      await this.aiLogger.logCotProcess({
+        jobId,
+        step: 'section-generation',
+        componentName: sectionName,
+        model: modelName,
+        startTime,
+        endTime: new Date().toISOString(),
+        totalAttempts: cotAttempts.length,
+        attempts: cotAttempts,
+        finalSuccess: true,
+        totalTokenCost: 0,
+        totalTokens: { input: 0, output: 0 },
+      });
     }
 
     return { name: sectionName, filePath: '', code, isSubComponent: true };
@@ -515,10 +790,14 @@ export class CodeReviewerService {
   private buildPromptContext(
     componentPlan?: PlanResult[number] | ComponentPromptContext,
     visualPlan?: ComponentVisualPlan,
+    options?: { includeVisualPlan?: boolean },
   ): ComponentPromptContext | undefined {
     if (!componentPlan && !visualPlan) return undefined;
 
-    const resolvedVisualPlan = visualPlan ?? componentPlan?.visualPlan;
+    const resolvedVisualPlan =
+      options?.includeVisualPlan === false
+        ? undefined
+        : (visualPlan ?? componentPlan?.visualPlan);
     const hasExplicitDataNeeds = Array.isArray(componentPlan?.dataNeeds);
     const dataNeeds = hasExplicitDataNeeds
       ? [...(componentPlan?.dataNeeds ?? [])]
@@ -568,6 +847,8 @@ export class CodeReviewerService {
     attemptsUsed: number;
     lastError?: string;
     lastRawOutput?: string;
+    /** Per-attempt CoT records — caller merges into its own cotAttempts */
+    cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[];
   }> {
     const {
       componentName,
@@ -584,23 +865,33 @@ export class CodeReviewerService {
     let code = '';
     let lastError: string | undefined;
     let lastRawOutput = '';
-    const validationContext = this.buildValidationContext(componentPlan, componentName);
+    const cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[] =
+      [];
+    const validationContext = this.buildValidationContext(
+      componentPlan,
+      componentName,
+    );
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const raw = await this.generateWithRetry(
+      const userPromptForAttempt = buildComponentPrompt(
+        componentName,
+        templateSource,
+        content.siteInfo,
+        content,
+        tokens,
+        componentPlan,
+        attempt > 1
+          ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
+          : undefined,
+      );
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+      } = await this.generateWithRetry(
         modelName,
         this.componentSystemPrompt,
-        buildComponentPrompt(
-          componentName,
-          templateSource,
-          content.siteInfo,
-          content,
-          tokens,
-          componentPlan,
-          attempt > 1
-            ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
-            : undefined,
-        ),
+        userPromptForAttempt,
         5,
         logPath,
         `${componentName}:${logLabel}`,
@@ -611,8 +902,29 @@ export class CodeReviewerService {
 
       const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.fixedCode) code = check.fixedCode;
+
+      cotAttempts.push({
+        attemptNumber: attempt,
+        promptSent: {
+          system: this.componentSystemPrompt,
+          user: userPromptForAttempt,
+        },
+        response: raw,
+        tokensUsed: { input: inTok, output: outTok, total: inTok + outTok },
+        timestamp: new Date().toISOString(),
+        success: check.isValid,
+        error: check.isValid ? undefined : check.error,
+        validationFeedback: check.isValid ? `${logLabel} succeeded` : undefined,
+      });
+
       if (check.isValid) {
-        return { code, isValid: true, attemptsUsed: attempt, lastRawOutput };
+        return {
+          code,
+          isValid: true,
+          attemptsUsed: attempt,
+          lastRawOutput,
+          cotAttempts,
+        };
       }
 
       lastError = check.error;
@@ -627,10 +939,14 @@ export class CodeReviewerService {
       // Auto repair for specific failure modes at last attempt before falling back up the pipeline
       if (attempt === maxAttempts) {
         const isNoJsx = lastError?.includes('No JSX return found');
-        const isPageContract = lastError?.includes('Page detail contract violated');
+        const isPageContract = lastError?.includes(
+          'Page detail contract violated',
+        );
 
         if (isNoJsx || isPageContract) {
-          const reason = isNoJsx ? 'No JSX return found' : 'Page detail contract violated';
+          const reason = isNoJsx
+            ? 'No JSX return found'
+            : 'Page detail contract violated';
           this.logger.warn(
             `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
           );
@@ -649,7 +965,10 @@ export class CodeReviewerService {
             );
             code = fixed;
 
-            const finalCheck = this.validator.checkCodeStructure(code, validationContext);
+            const finalCheck = this.validator.checkCodeStructure(
+              code,
+              validationContext,
+            );
             if (finalCheck.fixedCode) code = finalCheck.fixedCode;
 
             if (finalCheck.isValid) {
@@ -660,7 +979,25 @@ export class CodeReviewerService {
                 logPath,
                 `[reviewer:autofix] "${componentName}" ✓ repaired no-JSX and validated`,
               );
-              return { code, isValid: true, attemptsUsed: attempt, lastRawOutput: raw };
+              cotAttempts.push({
+                attemptNumber: cotAttempts.length + 1,
+                promptSent: {
+                  system: this.componentSystemPrompt,
+                  user: userPromptForAttempt,
+                },
+                response: raw,
+                tokensUsed: { input: 0, output: 0, total: 0 },
+                timestamp: new Date().toISOString(),
+                success: true,
+                validationFeedback: `autofix resolved: ${reason}`,
+              });
+              return {
+                code,
+                isValid: true,
+                attemptsUsed: attempt,
+                lastRawOutput: raw,
+                cotAttempts,
+              };
             }
 
             lastError = finalCheck.error ?? lastError;
@@ -676,8 +1013,8 @@ export class CodeReviewerService {
               fixErr instanceof Error
                 ? fixErr.message
                 : typeof fixErr === 'string'
-                ? fixErr
-                : JSON.stringify(fixErr);
+                  ? fixErr
+                  : JSON.stringify(fixErr);
             this.logger.warn(
               `[reviewer:autofix] "${componentName}" self-fix failed: ${fixErrMessage}`,
             );
@@ -696,6 +1033,7 @@ export class CodeReviewerService {
       attemptsUsed: maxAttempts,
       lastError,
       lastRawOutput,
+      cotAttempts,
     };
   }
 
@@ -747,7 +1085,7 @@ export class CodeReviewerService {
     logPath?: string,
     label?: string,
   ): Promise<string> {
-    const raw = await this.generateWithRetry(
+    const { text: raw } = await this.generateWithRetry(
       model,
       'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
       `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
@@ -767,10 +1105,14 @@ export class CodeReviewerService {
     maxRetries = 5,
     logPath?: string,
     label?: string,
-  ): Promise<string> {
+  ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
     let delay = 30_000;
     let maxTokens = this.llmFactory.getMaxTokens();
-    let lastTruncatedText = '';
+    let lastTruncatedResult: {
+      text: string;
+      inputTokens: number;
+      outputTokens: number;
+    } | null = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const result = await this.llmFactory.chat({
@@ -780,7 +1122,11 @@ export class CodeReviewerService {
           maxTokens,
         });
         if (result.truncated) {
-          lastTruncatedText = result.text;
+          lastTruncatedResult = {
+            text: result.text,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+          };
           const nextMaxTokens = Math.max(
             maxTokens + 1,
             Math.ceil(maxTokens * 1.5),
@@ -801,9 +1147,13 @@ export class CodeReviewerService {
             logPath,
             `WARN ${msg} — max retries reached, returning truncated output${label ? ` [${label}]` : ''}`,
           );
-          return lastTruncatedText;
+          return lastTruncatedResult;
         }
-        return result.text;
+        return {
+          text: result.text,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+        };
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
         const isServerError = err?.status === 500 || err?.status === 529;
@@ -829,7 +1179,7 @@ export class CodeReviewerService {
         }
       }
     }
-    return '';
+    return { text: '', inputTokens: 0, outputTokens: 0 };
   }
 
   // ── Code post-processors ──────────────────────────────────────────────────

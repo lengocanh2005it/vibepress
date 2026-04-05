@@ -66,12 +66,13 @@ export class GeneratedCodeReviewService {
         component,
         contract,
       );
-      
+
       const issuesMessage = review.issues.length
         ? review.issues
             .map((issue) => `[${issue.severity}] ${issue.message}`)
             .join(' | ')
-        : review.summary || (review.pass ? 'Passed' : 'AI reviewer rejected the component');
+        : review.summary ||
+          (review.pass ? 'Passed' : 'AI reviewer rejected the component');
 
       if (blockingIssues.length > 0) {
         failures.push({
@@ -92,7 +93,7 @@ export class GeneratedCodeReviewService {
 
       if (!review.pass || review.issues.length > 0) {
         if (blockingIssues.length === 0) {
-           this.logger.warn(
+          this.logger.warn(
             `[AI Generated Code Review] "${component.name}" advisory: ${issuesMessage}`,
           );
           await this.log(
@@ -101,7 +102,9 @@ export class GeneratedCodeReviewService {
           );
         }
       } else {
-        this.logger.log(`[AI Generated Code Review] "${component.name}" passed`);
+        this.logger.log(
+          `[AI Generated Code Review] "${component.name}" passed`,
+        );
       }
     }
 
@@ -203,6 +206,7 @@ Rules:
   3. component fetches or uses data not justified by the contract
   4. JSX/TSX structure is likely broken
   5. imports/variables/hooks are clearly inconsistent with the code
+  6. component materially redesigns the approved WordPress layout instead of preserving it
 - For partial components, be much more lenient:
   - do NOT fail only because they fetch optional helper data
   - do NOT fail only because approved data is fetched but not heavily used
@@ -210,7 +214,7 @@ Rules:
 - Do NOT fail on component/function/export naming differences if the file still clearly implements the approved component.
 - If the approved visual sections include \`comments\`, comments fetching/rendering is justified.
 - Do NOT fail only because fetched data is unused unless it clearly indicates a wrong endpoint or broken logic.
-- Do NOT flag subjective styling preferences.
+- Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, or obviously different wrapper structure from the approved plan.
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - If the component is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
@@ -264,7 +268,15 @@ ${component.code}
       lines.push(
         '- /api/comments?slug=${slug} is allowed because comments are in the approved sections',
       );
-    if (isDetail && !normalized.has('post-detail') && !normalized.has('page-detail')) {
+    if (visualSectionTypes.includes('comments'))
+      lines.push(
+        '- POST /api/comments is allowed when the approved comments section renders a reply form and should update local comment state after success',
+      );
+    if (
+      isDetail &&
+      !normalized.has('post-detail') &&
+      !normalized.has('page-detail')
+    ) {
       lines.push(
         '- Detail route exists, but only the explicitly declared detail endpoint is allowed',
       );

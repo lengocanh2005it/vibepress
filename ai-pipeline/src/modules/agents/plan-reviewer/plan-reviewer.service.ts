@@ -276,6 +276,17 @@ export class PlanReviewerService {
         needs.add('posts');
       }
 
+      if (hasSharedLayout && policy.type === 'page') {
+        const removedChromeNeeds: PlanDataNeed[] = [];
+        if (needs.delete('menus')) removedChromeNeeds.push('menus');
+        if (needs.delete('site-info')) removedChromeNeeds.push('site-info');
+        if (removedChromeNeeds.length > 0) {
+          warnings.push(
+            `Template "${item.templateName}" removed shared layout dataNeeds (${removedChromeNeeds.join(', ')}) because Header/Footer partials own global chrome`,
+          );
+        }
+      }
+
       if (needs.has('post-detail') && needs.has('page-detail')) {
         // Resolve conflict using policy — keep whichever the template requires
         if (policy.requiredDataNeeds.includes('page-detail')) {
@@ -361,7 +372,10 @@ export class PlanReviewerService {
   ): boolean {
     // When a shared Layout wrapper provides Header/Footer, page components must
     // not render their own navbar or footer (would appear twice on screen).
-    if (stripLayoutSections && (section.type === 'navbar' || section.type === 'footer')) {
+    if (
+      stripLayoutSections &&
+      (section.type === 'navbar' || section.type === 'footer')
+    ) {
       return false;
     }
     if (section.type === 'post-content' || section.type === 'comments') {

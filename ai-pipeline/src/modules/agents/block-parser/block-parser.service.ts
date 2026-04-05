@@ -35,12 +35,18 @@ export interface ThemeBlockStyle {
   color?: { text?: string; background?: string };
   typography?: {
     fontSize?: string;
+    fontFamily?: string;
     fontWeight?: string;
     letterSpacing?: string;
     lineHeight?: string;
   };
-  border?: { radius?: string };
-  spacing?: { padding?: string; gap?: string };
+  border?: {
+    radius?: string;
+    width?: string;
+    style?: string;
+    color?: string;
+  };
+  spacing?: { padding?: string; margin?: string; gap?: string };
 }
 
 export interface ThemeTokens {
@@ -193,9 +199,7 @@ export class BlockParserService {
     themeJson: Record<string, any> | null,
     styleCss?: string,
   ): ThemeTokens {
-    if (!themeJson)
-      return { colors: [], fonts: [], fontSizes: [], spacing: [] };
-    const settings = themeJson.settings ?? {};
+    const settings = themeJson?.settings ?? {};
 
     const colors: ThemeTokens['colors'] = (settings.color?.palette ?? []).map(
       (c: any) => ({ slug: c.slug, value: c.color }),
@@ -213,19 +217,18 @@ export class BlockParserService {
       settings.spacing?.spacingSizes ?? []
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
-    const defaults = this.extractDefaults(
-      themeJson,
-      colors,
-      fonts,
-      fontSizes,
-      spacing,
-    );
-    const blockStyles = this.extractBlockStyles(
-      themeJson.styles?.blocks ?? {},
-      colors,
-      fontSizes,
-      spacing,
-    );
+    const defaults = themeJson
+      ? this.extractDefaults(themeJson, colors, fonts, fontSizes, spacing)
+      : undefined;
+    const blockStyles = themeJson
+      ? this.extractBlockStyles(
+          themeJson.styles?.blocks ?? {},
+          colors,
+          fonts,
+          fontSizes,
+          spacing,
+        )
+      : undefined;
     const cssTokens = extractStyleCssTokens(styleCss, {
       colors,
       fonts,
@@ -252,10 +255,13 @@ export class BlockParserService {
     colors: ThemeTokens['colors'],
   ): string | undefined {
     if (!value) return undefined;
+    const trimmed = value.trim();
     // Already a hex value
-    if (value.startsWith('#')) return value;
+    if (trimmed.startsWith('#')) return trimmed;
+    const shorthand = trimmed.match(/var:preset\|color\|([^|)\s]+)/);
+    if (shorthand) return colors.find((c) => c.slug === shorthand[1])?.value;
     // Extract slug from var(--wp--preset--color--<slug>)
-    const match = value.match(/var\(--wp--preset--color--([^)]+)\)/);
+    const match = trimmed.match(/var\(--wp--preset--color--([^)]+)\)/);
     if (!match) return undefined;
     const slug = match[1];
     return colors.find((c) => c.slug === slug)?.value;
@@ -266,10 +272,13 @@ export class BlockParserService {
     fonts: ThemeTokens['fonts'],
   ): string | undefined {
     if (!value) return undefined;
+    const trimmed = value.trim();
+    const shorthand = trimmed.match(/var:preset\|font-family\|([^|)\s]+)/);
+    if (shorthand) return fonts.find((f) => f.slug === shorthand[1])?.family;
     // Already a plain font family string (no CSS var)
-    if (!value.includes('var(')) return value;
+    if (!trimmed.includes('var(')) return trimmed;
     // Extract slug from var(--wp--preset--font-family--<slug>)
-    const match = value.match(/var\(--wp--preset--font-family--([^)]+)\)/);
+    const match = trimmed.match(/var\(--wp--preset--font-family--([^)]+)\)/);
     if (!match) return undefined;
     const slug = match[1];
     return fonts.find((f) => f.slug === slug)?.family;
@@ -280,8 +289,11 @@ export class BlockParserService {
     fontSizes: ThemeTokens['fontSizes'],
   ): string | undefined {
     if (!value) return undefined;
-    if (!value.includes('var(')) return value;
-    const match = value.match(/var\(--wp--preset--font-size--([^)]+)\)/);
+    const trimmed = value.trim();
+    const shorthand = trimmed.match(/var:preset\|font-size\|([^|)\s]+)/);
+    if (shorthand) return fontSizes.find((s) => s.slug === shorthand[1])?.size;
+    if (!trimmed.includes('var(')) return trimmed;
+    const match = trimmed.match(/var\(--wp--preset--font-size--([^)]+)\)/);
     if (!match) return undefined;
     return fontSizes.find((s) => s.slug === match[1])?.size;
   }
@@ -300,6 +312,19 @@ export class BlockParserService {
     const cssVar = value.match(/var\(--wp--preset--spacing--([^)]+)\)/);
     if (cssVar) return spacing.find((s) => s.slug === cssVar[1])?.size;
     return undefined;
+  }
+
+  private normalizeSpacingShorthand(
+    value: string | undefined,
+    spacing: ThemeTokens['spacing'],
+  ): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    return trimmed
+      .split(/\s+/)
+      .map((part) => this.resolveSpacingVar(part, spacing) ?? part)
+      .join(' ');
   }
 
   private extractDefaults(
@@ -337,9 +362,12 @@ export class BlockParserService {
     const blockGap = resolveSp(styles.spacing?.blockGap);
     const contentWidth = settings.layout?.contentSize as string | undefined;
     const wideWidth = settings.layout?.wideSize as string | undefined;
-    const buttonBorderRadius = styles.elements?.button?.border?.radius as
+    const rawButtonBorderRadius = styles.elements?.button?.border?.radius as
       | string
       | undefined;
+    const buttonBorderRadius =
+      this.normalizeSpacingShorthand(rawButtonBorderRadius, spacing) ??
+      rawButtonBorderRadius;
 
     const rawPadding = styles.elements?.button?.spacing?.padding;
     let buttonPadding: string | undefined;
@@ -350,9 +378,10 @@ export class BlockParserService {
         bottom = '0',
         left = '0',
       } = rawPadding as any;
-      buttonPadding = `${top} ${right} ${bottom} ${left}`;
+      buttonPadding = `${resolveSp(top) ?? top} ${resolveSp(right) ?? right} ${resolveSp(bottom) ?? bottom} ${resolveSp(left) ?? left}`;
     } else if (typeof rawPadding === 'string') {
-      buttonPadding = rawPadding;
+      buttonPadding =
+        this.normalizeSpacingShorthand(rawPadding, spacing) ?? rawPadding;
     }
 
     // Root/global padding from styles.spacing.padding (applied to .wp-site-blocks in WP)
@@ -369,7 +398,9 @@ export class BlockParserService {
         rootPadding = `${t} ${r} ${b} ${l}`;
       }
     } else if (typeof rawRootPadding === 'string') {
-      rootPadding = resolveSp(rawRootPadding) ?? rawRootPadding;
+      rootPadding =
+        this.normalizeSpacingShorthand(rawRootPadding, spacing) ??
+        rawRootPadding;
     }
 
     // Per-heading typography
@@ -438,6 +469,7 @@ export class BlockParserService {
   private extractBlockStyles(
     blocksStyles: Record<string, any>,
     colors: ThemeTokens['colors'],
+    fonts: ThemeTokens['fonts'],
     fontSizes: ThemeTokens['fontSizes'],
     spacing: ThemeTokens['spacing'],
   ): ThemeTokens['blockStyles'] {
@@ -460,26 +492,50 @@ export class BlockParserService {
         style.typography?.fontSize,
         fontSizes,
       );
+      const fontFamily = this.resolveFontFamily(
+        style.typography?.fontFamily,
+        fonts,
+      );
       const fontWeight = style.typography?.fontWeight as string | undefined;
       const letterSpacing = style.typography?.letterSpacing as
         | string
         | undefined;
       const lineHeight = style.typography?.lineHeight as string | undefined;
-      if (fontSize || fontWeight || letterSpacing || lineHeight)
+      if (fontSize || fontFamily || fontWeight || letterSpacing || lineHeight)
         resolved.typography = {
           ...(fontSize && { fontSize }),
+          ...(fontFamily && { fontFamily }),
           ...(fontWeight && { fontWeight }),
           ...(letterSpacing && { letterSpacing }),
           ...(lineHeight && { lineHeight }),
         };
 
-      if (style.border?.radius)
-        resolved.border = { radius: style.border.radius as string };
+      const borderRadius = this.normalizeSpacingShorthand(
+        style.border?.radius as string | undefined,
+        spacing,
+      );
+      const borderWidth = this.normalizeSpacingShorthand(
+        style.border?.width as string | undefined,
+        spacing,
+      );
+      const borderStyle = style.border?.style as string | undefined;
+      const borderColor = this.resolveCssVar(
+        style.border?.color as string | undefined,
+        colors,
+      );
+      if (borderRadius || borderWidth || borderStyle || borderColor)
+        resolved.border = {
+          ...(borderRadius && { radius: borderRadius }),
+          ...(borderWidth && { width: borderWidth }),
+          ...(borderStyle && { style: borderStyle }),
+          ...(borderColor && { color: borderColor }),
+        };
 
       const resolveSp = (v: string | undefined) =>
         this.resolveSpacingVar(v, spacing);
 
       const rawPad = style.spacing?.padding;
+      const rawMargin = style.spacing?.margin;
       const rawGap = style.spacing?.blockGap as string | undefined;
       const resolvedPad = (() => {
         if (!rawPad) return undefined;
@@ -492,12 +548,32 @@ export class BlockParserService {
           } = rawPad as any;
           return `${resolveSp(top) ?? top} ${resolveSp(right) ?? right} ${resolveSp(bottom) ?? bottom} ${resolveSp(left) ?? left}`;
         }
-        return resolveSp(rawPad as string) ?? (rawPad as string);
+        return (
+          this.normalizeSpacingShorthand(rawPad as string, spacing) ??
+          (rawPad as string)
+        );
+      })();
+      const resolvedMargin = (() => {
+        if (!rawMargin) return undefined;
+        if (typeof rawMargin === 'object') {
+          const {
+            top = '0',
+            right = '0',
+            bottom = '0',
+            left = '0',
+          } = rawMargin as any;
+          return `${resolveSp(top) ?? top} ${resolveSp(right) ?? right} ${resolveSp(bottom) ?? bottom} ${resolveSp(left) ?? left}`;
+        }
+        return (
+          this.normalizeSpacingShorthand(rawMargin as string, spacing) ??
+          (rawMargin as string)
+        );
       })();
       const resolvedGap = rawGap ? (resolveSp(rawGap) ?? rawGap) : undefined;
-      if (resolvedPad || resolvedGap) {
+      if (resolvedPad || resolvedMargin || resolvedGap) {
         resolved.spacing = {
           ...(resolvedPad && { padding: resolvedPad }),
+          ...(resolvedMargin && { margin: resolvedMargin }),
           ...(resolvedGap && { gap: resolvedGap }),
         };
       }

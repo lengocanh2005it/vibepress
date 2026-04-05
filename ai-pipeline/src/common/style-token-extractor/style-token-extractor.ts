@@ -355,10 +355,21 @@ function extractBlockStyles(
           },
         }
       : {}),
-    ...(normalizePadding(button.padding, ctx)
-      ? { spacing: { padding: normalizePadding(button.padding, ctx) } }
+    ...(normalizePadding(button.padding, ctx) ||
+    normalizePadding(button.margin, ctx)
+      ? {
+          spacing: {
+            ...(normalizePadding(button.padding, ctx) && {
+              padding: normalizePadding(button.padding, ctx),
+            }),
+            ...(normalizePadding(button.margin, ctx) && {
+              margin: normalizePadding(button.margin, ctx),
+            }),
+          },
+        }
       : {}),
     ...(resolveValue(button['font-size'], ctx, 'size') ||
+    resolveValue(button['font-family'], ctx, 'font') ||
     resolveValue(button['font-weight'], ctx, 'plain') ||
     resolveValue(button['letter-spacing'], ctx, 'plain') ||
     resolveValue(button['line-height'], ctx, 'plain')
@@ -366,6 +377,9 @@ function extractBlockStyles(
           typography: {
             ...(resolveValue(button['font-size'], ctx, 'size') && {
               fontSize: resolveValue(button['font-size'], ctx, 'size'),
+            }),
+            ...(resolveValue(button['font-family'], ctx, 'font') && {
+              fontFamily: resolveValue(button['font-family'], ctx, 'font'),
             }),
             ...(resolveValue(button['font-weight'], ctx, 'plain') && {
               fontWeight: resolveValue(button['font-weight'], ctx, 'plain'),
@@ -427,13 +441,19 @@ function resolveRaw(
   const trimmed = value.trim();
   if (!trimmed) return undefined;
 
-  const colorVar = trimmed.match(/var\(--wp--preset--color--([^)]+)\)/);
+  const colorVar =
+    trimmed.match(/var\(--wp--preset--color--([^)]+)\)/) ??
+    trimmed.match(/var:preset\|color\|([^|)\s]+)/);
   if (colorVar) return ctx.colors.find((c) => c.slug === colorVar[1])?.value;
 
-  const fontVar = trimmed.match(/var\(--wp--preset--font-family--([^)]+)\)/);
+  const fontVar =
+    trimmed.match(/var\(--wp--preset--font-family--([^)]+)\)/) ??
+    trimmed.match(/var:preset\|font-family\|([^|)\s]+)/);
   if (fontVar) return ctx.fonts.find((f) => f.slug === fontVar[1])?.family;
 
-  const fontSizeVar = trimmed.match(/var\(--wp--preset--font-size--([^)]+)\)/);
+  const fontSizeVar =
+    trimmed.match(/var\(--wp--preset--font-size--([^)]+)\)/) ??
+    trimmed.match(/var:preset\|font-size\|([^|)\s]+)/);
   if (fontSizeVar)
     return ctx.fontSizes.find((s) => s.slug === fontSizeVar[1])?.size;
 
@@ -455,8 +475,14 @@ function normalizePadding(
   value: string | undefined,
   ctx: ResolveContext,
 ): string | undefined {
-  const resolved = resolveRaw(value, ctx);
-  return resolved?.trim();
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed
+    .split(/\s+/)
+    .map((part) => resolveRaw(part, ctx) ?? part)
+    .join(' ')
+    .trim();
 }
 
 function mergeBySlug<T extends { slug: string }>(base: T[], extra: T[]): T[] {

@@ -27,6 +27,9 @@ export function buildVisualPlanPrompt(input: {
 Given a WordPress template (block JSON tree or PHP markup) and site context, you output a JSON ComponentVisualPlan describing the visual layout.
 You do NOT write TSX code — only a structured JSON plan.
 
+Primary goal: preserve the ORIGINAL WordPress UI as faithfully as possible.
+This is a migration plan, NOT a redesign brief.
+
 ## ComponentVisualPlan schema
 
 \`\`\`typescript
@@ -94,13 +97,17 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 \`\`\`
 
 ## Rules
-- Use ONLY hex colors. Derive from theme tokens if available, otherwise use sensible defaults matching the template's visual style.
+- Preserve the original WordPress layout hierarchy and reading order as closely as possible.
+- Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
+- Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
+- Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
 - Text content in sections (headings, body text, card copy) must come EXACTLY from the template source — no invented text.
 - If you need to output a dynamic variable (e.g. {item.title} or {post.title}), use EXACTLY ONE pair of curly braces. NEVER use double braces like {{item.title}} or {{post.title}}, as it breaks JSX syntax.
 - If a section has a background image, use the exact \`src\` from the template.
 - Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
 - Preserve exact padding/margin from the template when visible by filling \`paddingStyle\` / \`marginStyle\` with concrete CSS shorthand values.
+- Preserve the original alignment, column count, and section density when the template source makes them visible.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
 - When \`pageDetail\` is in dataNeeds: the WordPress page API only exposes \`id, title, content, slug\`. Do not plan UI that requires post-only fields (author, categories, date, excerpt, featured image) on **pages** — those apply to posts only.
@@ -604,7 +611,15 @@ export function parseVisualPlanDetailed(
   };
 
   return {
-    plan: { componentName, dataNeeds, palette, sections, typography, layout },
+    plan: {
+      componentName,
+      dataNeeds,
+      palette,
+      sections,
+      typography,
+      layout,
+      blockStyles: {},
+    },
   };
 }
 

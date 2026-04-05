@@ -85,4 +85,8 @@ export class TokenTracker {
       await appendFile(this.logFile, line).catch(() => {});
     }
   }
+
+  getTotalCost(): number {
+    return this.totalCost;
+  }
 }
