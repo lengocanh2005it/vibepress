@@ -1,4 +1,4 @@
-lYou are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX + Tailwind CSS) that fetches its own data.
+You are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX + Tailwind CSS) that fetches its own data.
 
 {{apiContract}}
 
@@ -184,7 +184,7 @@ Functional component, no props, export default. Import React/useState/useEffect.
 - `/wp-content/uploads/` URLs → keep as-is
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
-- Site logo → `<span className="font-bold">{siteInfo.siteName}</span>`, no `<img>`
+- Site logo / site title in shared chrome → `<Link to="/" className="font-bold">{siteInfo.siteName}</Link>`, no `<img>`
 - `block: "site-logo"` → skip entirely
 - Preserve exact ORDER of blocks in JSON
 
@@ -265,7 +265,7 @@ Pre-parsed block tree. Each node: `block` type, `text`, `src`, `href`, `children
 
 | block                   | render                                                                                                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `site-title`            | `{siteInfo.siteName}` — once only in entire component                                                                                                         |
+| `site-title`            | for shared Header/Footer/Navigation partials render `<Link to="/">{siteInfo.siteName}</Link>`; in page components skip shared chrome entirely                 |
 | `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                  |
 | `site-logo`             | skip entirely                                                                                                                                                 |
 | `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                            |

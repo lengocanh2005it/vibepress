@@ -500,9 +500,24 @@ export class ValidatorService {
     }
 
     if (isSharedChromePartial) {
+      const usesSiteTitle =
+        /\bsiteInfo\??\.siteName\b/.test(code) ||
+        /\{siteInfo\??\.siteName\}/.test(code);
+      const hasHomeLinkForBrand =
+        /<Link\b[^>]*\bto=["']\/["'][^>]*>[\s\S]*siteInfo\??\.siteName[\s\S]*<\/Link>/.test(
+          code,
+        ) ||
+        /<Link\b[^>]*\bto=\{["']\/["']\}[^>]*>[\s\S]*siteInfo\??\.siteName[\s\S]*<\/Link>/.test(
+          code,
+        );
       if (dataNeeds.has('menus') && !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) && !/\bmenu\.items\b/.test(code)) {
         violations.push(
           'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
+        );
+      }
+      if (usesSiteTitle && !hasHomeLinkForBrand) {
+        violations.push(
+          'Shared chrome contract violated: when Header/Footer/Navigation renders `siteInfo.siteName`, it must wrap the site title in `<Link to=\"/\">...</Link>` so the brand navigates home.',
         );
       }
       if (

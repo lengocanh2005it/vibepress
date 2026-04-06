@@ -334,10 +334,10 @@ function buildClassicThemeNote(
   // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
   const headerHint = isPageComponent
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Header /> */}\` → render site name (\`{siteInfo.siteName}\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
+    : `- \`{/* WP: <Header /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
   const footerHint = isPageComponent
     ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → render site name + fetch \`GET /api/menus\` for footer links`;
+    : `- \`{/* WP: <Footer /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` for footer links`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).

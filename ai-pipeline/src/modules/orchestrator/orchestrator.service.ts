@@ -691,21 +691,52 @@ export class OrchestratorService {
           0.72,
           'Architecture review passed. Generating visual sections from the reviewed route map and data contracts.',
         );
-        const planWithVisuals = await this.planner.attachVisualPlans(
+        const MAX_VISUAL_RETRIES = 2;
+        let planWithVisuals = await this.planner.attachVisualPlans(
           normalizedTheme,
           content,
           review.plan,
           resolvedModels.planning,
         );
-        review = this.planReviewer.review(
+        let visualReview = this.planReviewer.review(
           planWithVisuals,
           expectedTemplateNames,
         );
-        if (!review.isValid) {
-          throw new Error(
-            `[Stage 3] Visual-plan synchronization failed after architecture review: ${review.errors.join('; ')}`,
+        for (
+          let vAttempt = 2;
+          vAttempt <= MAX_VISUAL_RETRIES && !visualReview.isValid;
+          vAttempt++
+        ) {
+          this.logger.warn(
+            `[${jobId}] [Stage 3: Visual Plan] Review failed (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualReview.errors.join('; ')} — retrying attachVisualPlans`,
+          );
+          await this.logToFile(
+            logPath,
+            `[Stage 3: Visual Plan Retry] attempt ${vAttempt}: ${visualReview.errors.join('; ')}`,
+          );
+          this.emitStepProgress(
+            state,
+            '5_planner',
+            0.82,
+            `Visual plan retry ${vAttempt}/${MAX_VISUAL_RETRIES}: regenerating visual sections after consistency check failed.`,
+          );
+          planWithVisuals = await this.planner.attachVisualPlans(
+            normalizedTheme,
+            content,
+            review.plan,
+            resolvedModels.planning,
+          );
+          visualReview = this.planReviewer.review(
+            planWithVisuals,
+            expectedTemplateNames,
           );
         }
+        if (!visualReview.isValid) {
+          throw new Error(
+            `[Stage 3] Visual-plan synchronization failed after ${MAX_VISUAL_RETRIES} attempts: ${visualReview.errors.join('; ')}`,
+          );
+        }
+        review = visualReview;
 
         this.emitStepProgress(
           state,
@@ -819,13 +850,26 @@ export class OrchestratorService {
               (c) => c.name === failure.componentName,
             );
             if (compIndex !== -1) {
-              aiComponents[compIndex] = await this.reactGenerator.fixComponent({
+              const fixed = await this.reactGenerator.fixComponent({
                 component: aiComponents[compIndex],
                 plan: reviewResult.plan,
                 feedback: failure.message,
                 modelConfig: { fixAgent: resolvedModels.fixAgent },
                 logPath,
               });
+              // Re-validate the fixed component before accepting it back
+              try {
+                const revalidated = this.validator.validate([fixed]);
+                aiComponents[compIndex] = revalidated[0];
+              } catch (validationErr: any) {
+                this.logger.warn(
+                  `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr?.message}`,
+                );
+                await this.logToFile(
+                  logPath,
+                  `[Stage 5] Re-validation failed for "${failure.componentName}": ${validationErr?.message}`,
+                );
+              }
             }
           }
         }
