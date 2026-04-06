@@ -59,7 +59,7 @@ export class OrchestratorController {
   constructor(private readonly orchestratorService: OrchestratorService) {}
 
   @Post('run')
-  run(@Body('email') siteId: string) {
+  run(@Body('siteId') siteId: string) {
     return this.orchestratorService.run(siteId);
   }
 

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { captureRegion, getWpSitePages } from '../services/automationService';
 import { runAiProcess } from '../services/AiService';
-import { useUser } from '../context/UserContext';
 
 interface WpPage {
   id: number;
@@ -42,7 +41,6 @@ const Editor: React.FC = () => {
   const location = useLocation();
   const siteUrl: string = location.state?.siteUrl || '';
   const siteId: string = location.state?.siteId || '';
-  const {email} = useUser();
 
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
   const [chatInput, setChatInput] = useState('');

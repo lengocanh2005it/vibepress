@@ -1,13 +1,13 @@
 
 
-export const runAiProcess = async (email: string) => {
+export const runAiProcess = async (siteId: string) => {
     try {
         const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/run`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ email })
+            body: JSON.stringify({ siteId })
         });
         if (!response.ok) {
             throw new Error('Failed to fetch repos');
