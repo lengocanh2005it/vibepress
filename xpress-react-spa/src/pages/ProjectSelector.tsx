@@ -147,7 +147,7 @@ const ProjectSelector: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => navigate('/app/editor', { state: { siteUrl: selectedRepo?.siteUrl } })}
+                onClick={() => navigate('/app/editor', { state: { siteUrl: selectedRepo?.siteUrl, siteId: selectedRepo?.siteId } })}
                 disabled={!selectedRepo}
                 className="inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-[13px] font-bold transition-colors disabled:cursor-not-allowed disabled:bg-[#e8e6df] disabled:text-[#8e9892] bg-[#49704F] text-white hover:bg-[#3f6246]"
               >
