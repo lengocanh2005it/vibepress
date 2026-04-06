@@ -124,7 +124,8 @@ The server already has: getConn(), getPrefix(conn), formatDate() helpers and rou
 /api/menus, /api/products, /api/products/:slug, /api/product-categories,
 /api/store/capabilities, /api/taxonomies, /api/taxonomies/:taxonomy,
 /api/taxonomies/:taxonomy/:term/posts,
-/api/comments GET (?postId= or ?slug=) and POST (body: author, email, content, website?, slug?, postId?, parentId?).
+ /api/comments GET (?postId= or ?slug=), /api/comments/submissions GET (?postId= or ?slug=, clientToken),
+ and /api/comments POST (body: author, email, content, website?, slug?, postId?, parentId?, clientToken).
 
 ## Your task
 Generate ONLY the additional app.get() route handlers below — no imports, no app setup,

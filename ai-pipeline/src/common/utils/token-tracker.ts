@@ -11,22 +11,47 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'mistral-large-latest': { input: 2.0, output: 6.0 },
   'mistral-small-latest': { input: 0.1, output: 0.3 },
   'codestral-latest': { input: 0.3, output: 0.9 },
+  'devstral-2512': { input: 0.4, output: 2.0 },
+  'labs-devstral-small-2512': { input: 0.1, output: 0.3 },
   'open-mistral-nemo': { input: 0.15, output: 0.15 },
 };
 
 export class TokenTracker {
+  private static readonly sessions = new Map<
+    string,
+    {
+      totalInput: number;
+      totalOutput: number;
+      totalCost: number;
+      initialized: boolean;
+      summaryWritten: boolean;
+    }
+  >();
   private readonly logger = new Logger('TokenTracker');
   private logFile: string | undefined;
-  private totalInput = 0;
-  private totalOutput = 0;
-  private totalCost = 0;
+
+  private getSession() {
+    if (!this.logFile) return null;
+    let session = TokenTracker.sessions.get(this.logFile);
+    if (!session) {
+      session = {
+        totalInput: 0,
+        totalOutput: 0,
+        totalCost: 0,
+        initialized: false,
+        summaryWritten: false,
+      };
+      TokenTracker.sessions.set(this.logFile, session);
+    }
+    return session;
+  }
 
   /** Gọi đầu mỗi job để reset bộ đếm và set file log riêng */
   async init(logFile: string): Promise<void> {
     this.logFile = logFile;
-    this.totalInput = 0;
-    this.totalOutput = 0;
-    this.totalCost = 0;
+    const session = this.getSession();
+    if (!session || session.initialized) return;
+
     await writeFile(
       logFile,
       `${'─'.repeat(80)}\n` +
@@ -35,6 +60,8 @@ export class TokenTracker {
         `${'TIMESTAMP'.padEnd(26)}${'COMPONENT'.padEnd(36)} ${'IN'.padStart(7)} ${'OUT'.padStart(7)}  ${'COST (USD)'.padStart(12)}\n` +
         `${'─'.repeat(80)}\n`,
     );
+    session.initialized = true;
+    session.summaryWritten = false;
   }
 
   async track(
@@ -43,14 +70,17 @@ export class TokenTracker {
     outputTokens: number,
     label = '',
   ): Promise<void> {
+    const session = this.getSession();
+    if (!session) return;
+
     const pricing = MODEL_PRICING[model] ?? { input: 1.0, output: 3.0 };
     const costUsd =
       (inputTokens / 1_000_000) * pricing.input +
       (outputTokens / 1_000_000) * pricing.output;
 
-    this.totalInput += inputTokens;
-    this.totalOutput += outputTokens;
-    this.totalCost += costUsd;
+    session.totalInput += inputTokens;
+    session.totalOutput += outputTokens;
+    session.totalCost += costUsd;
 
     const tag = label || model;
     this.logger.log(
@@ -69,24 +99,28 @@ export class TokenTracker {
   }
 
   async writeSummary(): Promise<void> {
+    const session = this.getSession();
+    if (!session || session.summaryWritten) return;
+
     const line =
       `${'─'.repeat(80)}\n` +
       `${''.padEnd(26)}${'TOTAL'.padEnd(36)} ` +
-      `${String(this.totalInput).padStart(7)} ` +
-      `${String(this.totalOutput).padStart(7)}  ` +
-      `$${this.totalCost.toFixed(6).padStart(11)}\n` +
+      `${String(session.totalInput).padStart(7)} ` +
+      `${String(session.totalOutput).padStart(7)}  ` +
+      `$${session.totalCost.toFixed(6).padStart(11)}\n` +
       `${'─'.repeat(80)}\n`;
 
     this.logger.log(
-      `[Total] in=${this.totalInput} out=${this.totalOutput} cost=$${this.totalCost.toFixed(4)}`,
+      `[Total] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
     );
 
     if (this.logFile) {
       await appendFile(this.logFile, line).catch(() => {});
     }
+    session.summaryWritten = true;
   }
 
   getTotalCost(): number {
-    return this.totalCost;
+    return this.getSession()?.totalCost ?? 0;
   }
 }

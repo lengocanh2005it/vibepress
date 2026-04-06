@@ -22,6 +22,16 @@ import type {
   SidebarSection,
   DataNeed,
 } from './visual-plan.schema.js';
+import {
+  COMMENT_INTERFACE,
+  COMMENT_SUBMISSION_INTERFACE,
+  MENU_INTERFACE,
+  MENU_ITEM_INTERFACE,
+  PAGE_INTERFACE,
+  POST_INTERFACE,
+  PRODUCT_INTERFACE,
+  SITE_INFO_INTERFACE,
+} from './api-contract.js';
 
 const PADDING_MAP = {
   none: '',
@@ -154,6 +164,8 @@ export class CodeGeneratorService {
         'post-list',
         'search',
         'sidebar',
+        'hero',
+        'cover',
       ].includes(s.type),
     );
   }
@@ -207,6 +219,24 @@ export class CodeGeneratorService {
       );
     }
     if (supportsCommentForm) {
+      lines.push(
+        `  const [pendingComments, setPendingComments] = useState<CommentSubmission[]>([]);`,
+      );
+      lines.push(`  const [commentClientToken] = useState(() => {`);
+      lines.push(
+        `    if (typeof window === 'undefined') return 'vibepress-comment-client';`,
+      );
+      lines.push(`    const storageKey = 'vibepress-comment-client-token';`);
+      lines.push(
+        `    const existing = window.localStorage.getItem(storageKey);`,
+      );
+      lines.push(`    if (existing) return existing;`);
+      lines.push(
+        `    const created = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : 'vp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);`,
+      );
+      lines.push(`    window.localStorage.setItem(storageKey, created);`);
+      lines.push(`    return created;`);
+      lines.push(`  });`);
       lines.push(`  const [commentAuthor, setCommentAuthor] = useState('');`);
       lines.push(`  const [commentEmail, setCommentEmail] = useState('');`);
       lines.push(`  const [commentContent, setCommentContent] = useState('');`);
@@ -237,6 +267,20 @@ export class CodeGeneratorService {
       lines.push(
         `    setComments(Array.isArray(commentsData) ? commentsData : []);`,
       );
+      lines.push(`  };`);
+      lines.push('');
+    }
+    if (supportsCommentForm) {
+      lines.push(`  const fetchTrackedComments = async () => {`);
+      lines.push(`    if (!slug) return [];`);
+      lines.push(
+        `    const trackedRes = await fetch(\`/api/comments/submissions?slug=\${encodeURIComponent(slug)}&clientToken=\${encodeURIComponent(commentClientToken)}\`);`,
+      );
+      lines.push(
+        `    if (!trackedRes.ok) throw new Error('Comment moderation status not available');`,
+      );
+      lines.push(`    const trackedData = await trackedRes.json();`);
+      lines.push(`    return Array.isArray(trackedData) ? trackedData : [];`);
       lines.push(`  };`);
       lines.push('');
     }
@@ -321,6 +365,91 @@ export class CodeGeneratorService {
     lines.push('');
 
     if (supportsCommentForm) {
+      lines.push(`  useEffect(() => {`);
+      lines.push(`    if (!slug) return;`);
+      lines.push(`    let cancelled = false;`);
+      lines.push(`    setPendingComments([]);`);
+      lines.push(``);
+      lines.push(`    const syncTrackedComments = async () => {`);
+      lines.push(`      try {`);
+      lines.push(
+        `        const trackedComments = await fetchTrackedComments();`,
+      );
+      lines.push(`        if (cancelled) return;`);
+      lines.push(
+        `        const pendingOnly = trackedComments.filter((comment) => comment.moderationStatus === 'pending');`,
+      );
+      lines.push(`        setPendingComments(pendingOnly);`);
+      lines.push(
+        `        if (trackedComments.some((comment) => comment.moderationStatus === 'approved')) {`,
+      );
+      lines.push(`          await fetchComments();`);
+      lines.push(`        }`);
+      lines.push(`      } catch {`);
+      lines.push(
+        `        // Ignore tracking errors so the public comments UI still works.`,
+      );
+      lines.push(`      }`);
+      lines.push(`    };`);
+      lines.push(``);
+      lines.push(`    void syncTrackedComments();`);
+      lines.push(``);
+      lines.push(`    return () => {`);
+      lines.push(`      cancelled = true;`);
+      lines.push(`    };`);
+      lines.push(`  }, [slug, commentClientToken]);`);
+      lines.push(``);
+      lines.push(`  useEffect(() => {`);
+      lines.push(`    if (!slug || pendingComments.length === 0) return;`);
+      lines.push(`    let cancelled = false;`);
+      lines.push(``);
+      lines.push(`    const pollTrackedComments = async () => {`);
+      lines.push(`      try {`);
+      lines.push(
+        `        const trackedComments = await fetchTrackedComments();`,
+      );
+      lines.push(`        if (cancelled) return;`);
+      lines.push(
+        `        const approvedCount = trackedComments.filter((comment) => comment.moderationStatus === 'approved').length;`,
+      );
+      lines.push(
+        `        const rejectedCount = trackedComments.filter((comment) => comment.moderationStatus === 'spam' || comment.moderationStatus === 'trash').length;`,
+      );
+      lines.push(
+        `        const nextPending = trackedComments.filter((comment) => comment.moderationStatus === 'pending');`,
+      );
+      lines.push(`        setPendingComments(nextPending);`);
+      lines.push(`        if (approvedCount > 0) {`);
+      lines.push(`          await fetchComments();`);
+      lines.push(`          if (!cancelled) {`);
+      lines.push(
+        `            setCommentSuccess('Your comment was approved and is now visible.');`,
+      );
+      lines.push(`          }`);
+      lines.push(
+        `        } else if (rejectedCount > 0 && nextPending.length === 0) {`,
+      );
+      lines.push(
+        `          setCommentError('A submitted comment was not approved.');`,
+      );
+      lines.push(`        }`);
+      lines.push(`      } catch {`);
+      lines.push(`        // Ignore temporary polling failures.`);
+      lines.push(`      }`);
+      lines.push(`    };`);
+      lines.push(``);
+      lines.push(`    const intervalId = window.setInterval(() => {`);
+      lines.push(`      void pollTrackedComments();`);
+      lines.push(`    }, 15000);`);
+      lines.push(``);
+      lines.push(`    void pollTrackedComments();`);
+      lines.push(``);
+      lines.push(`    return () => {`);
+      lines.push(`      cancelled = true;`);
+      lines.push(`      window.clearInterval(intervalId);`);
+      lines.push(`    };`);
+      lines.push(`  }, [slug, pendingComments.length, commentClientToken]);`);
+      lines.push(``);
       const authorValue = commentsSection.requireName
         ? 'commentAuthor.trim()'
         : "'Guest'";
@@ -366,6 +495,7 @@ export class CodeGeneratorService {
       lines.push(`          email: ${emailValue},`);
       lines.push(`          content: commentContent.trim(),`);
       lines.push(`          parentId: 0,`);
+      lines.push(`          clientToken: commentClientToken,`);
       lines.push(`        }),`);
       lines.push(`      });`);
       lines.push('');
@@ -376,16 +506,18 @@ export class CodeGeneratorService {
       );
       lines.push(`      }`);
       lines.push('');
-      lines.push(`      setComments((prev) => [...prev, createdComment]);`);
-      lines.push(`      setItem((prev) =>`);
-      lines.push(`        prev`);
+      lines.push(`      setPendingComments((prev) => {`);
       lines.push(
-        `          ? { ...prev, comment_count: (prev.comment_count ?? comments.length) + 1 }`,
+        `        const next = [createdComment, ...prev.filter((comment) => comment.id !== createdComment.id)];`,
       );
-      lines.push(`          : prev,`);
+      lines.push(
+        `        return next.filter((comment) => comment.moderationStatus === 'pending');`,
+      );
       lines.push(`      );`);
       lines.push(`      setCommentContent('');`);
-      lines.push(`      setCommentSuccess('Comment posted successfully.');`);
+      lines.push(
+        `      setCommentSuccess('Comment submitted and awaiting moderation.');`,
+      );
       if (commentsSection.requireName)
         lines.push(`      setCommentAuthor('');`);
       if (commentsSection.requireEmail)
@@ -1023,6 +1155,26 @@ ${this.renderPostContentInner(s, ctx)}
                 </form>
               </div>`
       : '';
+    const pendingBlock = s.showForm
+      ? `
+              {pendingComments.length > 0 ? (
+                <div className="rounded-[24px] border border-black/10 bg-black/5 p-4">
+                  <p className="text-sm font-medium text-[${tc}]">
+                    {pendingComments.length === 1
+                      ? '1 comment is awaiting moderation.'
+                      : \`\${pendingComments.length} comments are awaiting moderation.\`}
+                  </p>
+                  <div className="mt-3 flex flex-col gap-3">
+                    {pendingComments.map((pendingComment) => (
+                      <div key={pendingComment.id} className="rounded-[18px] bg-white/70 px-4 py-3">
+                        <div className="text-sm font-medium text-[${tc}]">{pendingComment.author}</div>
+                        <p className="mt-1 whitespace-pre-line text-sm text-[${p.textMuted}]">{pendingComment.content}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}`
+      : '';
     return `      {/* Comments */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
@@ -1052,7 +1204,7 @@ ${renderCommentCard('reply')}
                 </div>
               ) : (
                 <p className="text-sm text-[${p.textMuted}]">No comments yet.</p>
-              )}${formBlock}
+              )}${pendingBlock}${formBlock}
             </div>
           )}
         </div>
@@ -1285,56 +1437,13 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
 
 // ── Shared TypeScript interfaces injected at top of every component ─────────
 
-const SHARED_INTERFACES = `interface SiteInfo {
-  siteName: string;
-  siteUrl: string;
-  blogDescription: string;
-  adminEmail?: string;
-  language?: string;
-}
-
-interface Comment {
-  id: number;
-  author: string;
-  date: string;
-  content: string;
-  parentId: number;
-  userId: number;
-}
-
-interface Post {
-  id: number;
-  title: string;
-  content: string;
-  excerpt: string;
-  slug: string;
-  type: string;
-  status: string;
-  date: string;
-  author: string;
-  categories: string[];
-  featuredImage: string | null;
-  comments?: Comment[];
-  comment_count?: number;
-}
-
-interface Page {
-  id: number;
-  title: string;
-  content: string;
-  slug: string;
-}
-
-interface MenuItem {
-  id: number;
-  title: string;
-  url: string;
-  order: number;
-  parentId: number;
-}
-
-interface Menu {
-  name: string;
-  slug: string;
-  items: MenuItem[];
-}`;
+const SHARED_INTERFACES = [
+  SITE_INFO_INTERFACE,
+  COMMENT_INTERFACE,
+  COMMENT_SUBMISSION_INTERFACE,
+  POST_INTERFACE,
+  PAGE_INTERFACE,
+  MENU_ITEM_INTERFACE,
+  MENU_INTERFACE,
+  PRODUCT_INTERFACE,
+].join('\n\n');

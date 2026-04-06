@@ -5,6 +5,7 @@ import type {
   DataNeed as VisualDataNeed,
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
+import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-plan.prompt.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -20,6 +21,7 @@ type PlanDataNeed =
   | 'site-info'
   | 'post-detail'
   | 'page-detail'
+  | 'comments'
   | 'authorDetail'
   | 'categoryDetail';
 
@@ -40,6 +42,7 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'site-info',
   'post-detail',
   'page-detail',
+  'comments',
   'authorDetail',
   'categoryDetail',
 ]);
@@ -234,15 +237,6 @@ export class PlanReviewerService {
   }
 
   private alignDataNeeds(plan: PlanResult, warnings: string[]): PlanResult {
-    // When the plan has a shared Header or Footer partial, page components must
-    // NOT include their own navbar/footer sections (Layout wrapper handles them).
-    const hasSharedLayout = plan.some((c) => {
-      const policy = this.inferRoutePolicy(c);
-      return (
-        policy.type === 'partial' && /^(header|footer)/i.test(c.componentName)
-      );
-    });
-
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);
       const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
@@ -276,13 +270,13 @@ export class PlanReviewerService {
         needs.add('posts');
       }
 
-      if (hasSharedLayout && policy.type === 'page') {
+      if (policy.type === 'page') {
         const removedChromeNeeds: PlanDataNeed[] = [];
         if (needs.delete('menus')) removedChromeNeeds.push('menus');
         if (needs.delete('site-info')) removedChromeNeeds.push('site-info');
         if (removedChromeNeeds.length > 0) {
           warnings.push(
-            `Template "${item.templateName}" removed shared layout dataNeeds (${removedChromeNeeds.join(', ')}) because Header/Footer partials own global chrome`,
+            `Template "${item.templateName}" removed page-level chrome dataNeeds (${removedChromeNeeds.join(', ')}) because shared layout partials own global chrome`,
           );
         }
       }
@@ -304,14 +298,13 @@ export class PlanReviewerService {
       }
 
       const next = { ...item, dataNeeds: after };
-      return this.syncVisualPlan(next, warnings, hasSharedLayout);
+      return this.syncVisualPlan(next, warnings);
     });
   }
 
   private syncVisualPlan(
     item: PlanResult[number],
     warnings: string[],
-    hasSharedLayout: boolean = false,
   ): PlanResult[number] {
     if (!item.visualPlan) return item;
 
@@ -319,9 +312,8 @@ export class PlanReviewerService {
       item.isDetail === true && item.dataNeeds.includes('post-detail');
     const allowedPageDetail =
       item.isDetail === true && item.dataNeeds.includes('page-detail');
-    // Strip navbar/footer sections from page components when Layout wrapper manages them
-    const stripLayoutSections = hasSharedLayout && item.type === 'page';
-    const nextSections = item.visualPlan.sections.filter((section) =>
+    const stripLayoutSections = item.type === 'page';
+    const filteredSections = item.visualPlan.sections.filter((section) =>
       this.isSectionAllowed(
         section,
         allowedPostDetail,
@@ -330,6 +322,14 @@ export class PlanReviewerService {
       ),
     );
     const nextDataNeeds = this.toVisualDataNeeds(item.dataNeeds);
+    const sanitizedSections = sanitizeSectionsForContract(filteredSections, {
+      componentType: item.type,
+      route: item.route,
+      isDetail: item.isDetail,
+      dataNeeds: nextDataNeeds,
+      stripLayoutChrome: item.type === 'page',
+    });
+    const nextSections = sanitizedSections.sections;
 
     const sectionsChanged =
       nextSections.length !== item.visualPlan.sections.length ||
@@ -348,6 +348,11 @@ export class PlanReviewerService {
     if (sectionsChanged) {
       warnings.push(
         `Template "${item.templateName}" visualPlan sections were synchronized to match route/detail contract`,
+      );
+    }
+    if (sanitizedSections.adjustments.length > 0) {
+      warnings.push(
+        `Template "${item.templateName}" visualPlan contract sanitization: ${sanitizedSections.adjustments.join('; ')}`,
       );
     }
     if (dataNeedsChanged) {
@@ -370,8 +375,8 @@ export class PlanReviewerService {
     allowedPageDetail: boolean,
     stripLayoutSections: boolean = false,
   ): boolean {
-    // When a shared Layout wrapper provides Header/Footer, page components must
-    // not render their own navbar or footer (would appear twice on screen).
+    // Page components must not render their own navbar or footer; global chrome
+    // belongs to the shared Layout/partial layer, not route components.
     if (
       stripLayoutSections &&
       (section.type === 'navbar' || section.type === 'footer')
@@ -399,6 +404,9 @@ export class PlanReviewerService {
           break;
         case 'page-detail':
           mapped.add('pageDetail');
+          break;
+        case 'comments':
+          mapped.add('comments');
           break;
         case 'posts':
         case 'pages':
@@ -858,6 +866,7 @@ export class PlanReviewerService {
     const order: PlanDataNeed[] = [
       'post-detail',
       'page-detail',
+      'comments',
       'posts',
       'pages',
       'menus',
@@ -870,6 +879,7 @@ export class PlanReviewerService {
     const order: VisualDataNeed[] = [
       'postDetail',
       'pageDetail',
+      'comments',
       'posts',
       'pages',
       'menus',

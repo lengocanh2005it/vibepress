@@ -1,17 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
   ValidatorService,
   type CodeValidationContext,
 } from '../validator/validator.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
+import { FrameGeneratorService } from './frame-generator.service.js';
+import { getComponentStrategy } from '../component-strategy.registry.js';
 import {
   buildComponentPrompt,
   buildSectionPrompt,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
+import {
+  buildFragmentPrompt,
+  FRAGMENT_SYSTEM_PROMPT,
+} from './prompts/fragment.prompt.js';
 import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
@@ -21,7 +28,7 @@ import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { ComponentVisualPlan } from './visual-plan.schema.js';
+import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -62,6 +69,8 @@ export interface ReviewResult {
   component: GeneratedComponent;
   /** true when code was sourced from the deterministic plan path */
   fromVisualPlan: boolean;
+  /** 'deterministic' = CodeGeneratorService only, no LLM TSX gen; 'ai' = LLM was used */
+  generationMode: 'deterministic' | 'ai';
   /** number of AI generation attempts used */
   attempts: number;
   /** raw response from AI for logging */
@@ -83,6 +92,7 @@ export interface ReviewResult {
 @Injectable()
 export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
+  private readonly tokenTracker = new TokenTracker();
   private readonly componentSystemPrompt =
     'You are a senior React + TypeScript + Tailwind engineer. Generate a complete component from the provided migration context and return ONLY raw TSX code.';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
@@ -91,6 +101,7 @@ export class CodeReviewerService {
     private readonly llmFactory: LlmFactoryService,
     private readonly validator: ValidatorService,
     private readonly codeGenerator: CodeGeneratorService,
+    private readonly frameGenerator: FrameGeneratorService,
     private readonly aiLogger?: AiLoggerService,
   ) {}
 
@@ -126,6 +137,10 @@ export class CodeReviewerService {
     let attempts = 0;
     let lastError: string | undefined;
     const cotAttempts: any[] = [];
+    // Set when both AI codegen AND deterministic fallback from the pre-computed
+    // plan have failed. Signals D2 to generate a fresh AI visual plan instead
+    // of running direct-AI with the same broken plan context.
+    let precomputedPlanAllFailed = false;
     let promptContext = this.buildPromptContext(componentPlan, undefined, {
       includeVisualPlan: !forceDirectAi,
     });
@@ -146,6 +161,49 @@ export class CodeReviewerService {
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
       if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
+        if (this.shouldUseDeterministicFirst(componentPlan, componentName)) {
+          const deterministic = await this.tryDeterministicPlan(
+            componentName,
+            componentPlan.visualPlan,
+            validationContext,
+            logPath,
+            'deterministic-first reviewed plan',
+          );
+          if (deterministic.isValid) {
+            this.logger.log(
+              `[reviewer] "${componentName}" ✓ deterministic-first codegen succeeded`,
+            );
+            return {
+              component: {
+                name: componentName,
+                filePath: '',
+                code: deterministic.code,
+              },
+              fromVisualPlan: true,
+              generationMode: 'deterministic',
+              attempts,
+              rawResponse: '',
+            };
+          }
+          // Deterministic-first components must NOT escalate to AI codegen.
+          // Return best-effort code as-is; the build-fix loop will patch any
+          // TypeScript errors without giving AI free rein over the structure.
+          this.logger.warn(
+            `[reviewer] "${componentName}" deterministic-first plan produced invalid code (${deterministic.error}) — returning best-effort, AI generation blocked`,
+          );
+          return {
+            component: {
+              name: componentName,
+              filePath: '',
+              code: deterministic.code,
+            },
+            fromVisualPlan: true,
+            generationMode: 'deterministic',
+            attempts,
+            rawResponse: '',
+          };
+        }
+
         promptContext = this.buildPromptContext(
           componentPlan,
           componentPlan.visualPlan,
@@ -213,6 +271,7 @@ export class CodeReviewerService {
               code,
             },
             fromVisualPlan: true,
+            generationMode: 'ai',
             attempts,
             rawResponse: planned.lastRawOutput || '',
           };
@@ -268,30 +327,46 @@ export class CodeReviewerService {
               code: deterministic.code,
             },
             fromVisualPlan: true,
+            generationMode: 'deterministic',
             attempts,
             rawResponse: '',
           };
         }
         lastError = deterministic.error ?? lastError;
+        precomputedPlanAllFailed = true;
         this.logger.warn(
-          `[reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — falling back to AI paths`,
+          `[reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — skipping direct-AI, requesting fresh visual plan`,
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — falling back to AI paths`,
+          `WARN [reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — skipping direct-AI, requesting fresh visual plan`,
         );
       }
 
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
-      // Only used when no reviewed pre-computed plan is available on round 1,
-      // or after the R3→D1 retry when we want a fresh visual plan.
-      if (!forceDirectAi && (isRetry || !componentPlan?.visualPlan)) {
+      // Used when: no pre-computed plan on round 1, after R3→D1 retry, or when
+      // the pre-computed plan path has failed end-to-end (both AI and deterministic).
+      if (!forceDirectAi && (isRetry || !componentPlan?.visualPlan || precomputedPlanAllFailed)) {
         await this.log(
           logPath,
           isRetry
             ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
-            : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
+            : precomputedPlanAllFailed
+              ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
+              : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
+        const visualDataNeeds = componentPlan
+          ? this.toVisualDataNeeds(componentPlan.dataNeeds)
+          : undefined;
+        const visualContract = componentPlan
+          ? {
+              componentType: componentPlan.type,
+              route: componentPlan.route,
+              isDetail: componentPlan.isDetail,
+              dataNeeds: visualDataNeeds,
+              stripLayoutChrome: componentPlan.type === 'page',
+            }
+          : undefined;
 
         const { systemPrompt: s1System, userPrompt: s1User } =
           buildVisualPlanPrompt({
@@ -299,6 +374,10 @@ export class CodeReviewerService {
             templateSource,
             content,
             tokens,
+            componentType: componentPlan?.type,
+            route: componentPlan?.route,
+            isDetail: componentPlan?.isDetail,
+            dataNeeds: visualDataNeeds,
           });
 
         try {
@@ -312,6 +391,7 @@ export class CodeReviewerService {
           );
           const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName, {
             allowedImageSrcs: extractStaticImageSources(templateSource),
+            contract: visualContract,
           });
           const visualPlan = parsedPlan.plan;
 
@@ -377,6 +457,7 @@ export class CodeReviewerService {
               return {
                 component: { name: componentName, filePath: '', code },
                 fromVisualPlan: true,
+                generationMode: 'ai',
                 attempts,
                 rawResponse: planned.lastRawOutput || '',
               };
@@ -405,6 +486,7 @@ export class CodeReviewerService {
                   code: deterministic.code,
                 },
                 fromVisualPlan: true,
+                generationMode: 'deterministic',
                 attempts,
                 rawResponse: '',
               };
@@ -493,6 +575,7 @@ export class CodeReviewerService {
         return {
           component: { name: componentName, filePath: '', code },
           fromVisualPlan: false,
+          generationMode: 'ai',
           attempts,
           rawResponse: direct.lastRawOutput || '',
         };
@@ -556,6 +639,7 @@ export class CodeReviewerService {
           return {
             component: { name: componentName, filePath: '', code },
             fromVisualPlan: false,
+            generationMode: 'ai',
             attempts,
             rawResponse: '',
           };
@@ -820,6 +904,9 @@ export class CodeReviewerService {
     componentName?: string,
     isSubComponent = false,
   ): CodeValidationContext {
+    const commentSection = componentPlan?.visualPlan?.sections.find(
+      (section) => section.type === 'comments',
+    );
     return {
       componentName,
       route: componentPlan?.route,
@@ -828,7 +915,188 @@ export class CodeReviewerService {
       type: componentPlan?.type,
       isSubComponent,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
+      requireCommentForm:
+        commentSection?.type === 'comments' ? commentSection.showForm : false,
     };
+  }
+
+  private shouldUseDeterministicFirst(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): boolean {
+    if (!componentPlan?.visualPlan) return false;
+    if (componentPlan.route === '*') return true;
+    return getComponentStrategy(componentName).deterministicFirst;
+  }
+
+  private shouldUseFramePath(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): boolean {
+    if (!componentPlan?.dataNeeds || !componentPlan?.type) return false;
+
+    const strategy = getComponentStrategy(componentName);
+    if (strategy.allowFramePath) return true;
+
+    // Default deny: frame+fragment improves syntax stability but tends to
+    // flatten structure and drift away from the original WordPress layout.
+    // Keep it only for narrowly-scoped utility/meta components unless
+    // explicitly allowlisted in the strategy registry.
+    return false;
+  }
+
+  private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
+    const ordered: DataNeed[] = [
+      'postDetail',
+      'pageDetail',
+      'comments',
+      'posts',
+      'pages',
+      'menus',
+      'siteInfo',
+    ];
+    const mapped = new Set<DataNeed>();
+
+    for (const need of dataNeeds ?? []) {
+      switch (need) {
+        case 'site-info':
+          mapped.add('siteInfo');
+          break;
+        case 'post-detail':
+          mapped.add('postDetail');
+          break;
+        case 'page-detail':
+          mapped.add('pageDetail');
+          break;
+        case 'comments':
+          mapped.add('comments');
+          break;
+        case 'posts':
+        case 'pages':
+        case 'menus':
+          mapped.add(need);
+          break;
+      }
+    }
+
+    return ordered.filter((need) => mapped.has(need));
+  }
+
+  // ── D0: Frame + Fragment generation ─────────────────────────────────────────
+  //
+  // Deterministically generates the TypeScript frame (imports, interfaces,
+  // useState, useEffect, loading guard) from the component plan, then asks the
+  // AI to fill in ONLY the JSX return body (~100–200 tokens instead of ~1500).
+  //
+  // On failure the TypeScript compiler is run against the assembled file and
+  // the exact error messages (line/column/code) are fed back to the AI so it
+  // can make a targeted fix instead of regenerating from scratch.
+  //
+  // Falls back to full-file generation (generateComponentWithPlan) when:
+  //  - No dataNeeds or type in the plan (cannot build a frame)
+  //  - Both fragment attempts produce invalid code
+
+  private async generateComponentWithFrame(input: {
+    componentName: string;
+    templateSource: string;
+    modelName: string;
+    componentPlan: ComponentPromptContext;
+    logPath?: string;
+  }): Promise<{
+    code: string;
+    isValid: boolean;
+    attemptsUsed: number;
+    lastError?: string;
+  }> {
+    const { componentName, templateSource, modelName, componentPlan, logPath } =
+      input;
+
+    const frame = this.frameGenerator.generateFrame({
+      componentName,
+      type: componentPlan.type ?? 'page',
+      dataNeeds: componentPlan.dataNeeds ?? [],
+      isDetail: componentPlan.isDetail ?? false,
+      route: componentPlan.route,
+    });
+
+    const availableVariables = this.frameGenerator.describeVariables({
+      type: componentPlan.type ?? 'page',
+      dataNeeds: componentPlan.dataNeeds ?? [],
+      isDetail: componentPlan.isDetail ?? false,
+    });
+
+    const validationContext = this.buildValidationContext(
+      componentPlan,
+      componentName,
+    );
+
+    let lastFragment = '';
+    let lastError = '';
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const userPrompt = buildFragmentPrompt({
+        componentName,
+        availableVariables,
+        templateSource,
+        visualPlan: componentPlan.visualPlan,
+        componentType: componentPlan.type,
+        retryError: attempt > 1 ? lastError : undefined,
+        previousFragment: attempt > 1 ? lastFragment : undefined,
+      });
+
+      const { text: raw } = await this.generateWithRetry(
+        modelName,
+        FRAGMENT_SYSTEM_PROMPT,
+        userPrompt,
+        3,
+        logPath,
+        `${componentName}:fragment:${attempt}`,
+      );
+
+      lastFragment = raw
+        .replace(/^```(?:tsx|jsx|ts|js)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+
+      const assembled = this.frameGenerator.assembleComponent(
+        frame,
+        lastFragment,
+      );
+      const sanitized = this.validator.sanitizeGeneratedCode(assembled);
+      const check = this.validator.checkCodeStructure(
+        sanitized,
+        validationContext,
+      );
+      const code = check.fixedCode ?? sanitized;
+
+      if (check.isValid) {
+        await this.log(
+          logPath,
+          `[reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 ✓`,
+        );
+        return { code, isValid: true, attemptsUsed: attempt };
+      }
+
+      // Prefer TypeScript compiler diagnostics over generic validator message
+      const tsErrors = this.validator.extractTypeScriptErrors(
+        code,
+        componentName,
+      );
+      lastError =
+        tsErrors.length > 0
+          ? tsErrors.join('\n')
+          : (check.error ?? 'unknown validation error');
+
+      this.logger.warn(
+        `[reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 failed: ${lastError}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 failed:\n${lastError}`,
+      );
+    }
+
+    return { code: '', isValid: false, attemptsUsed: 2, lastError };
   }
 
   private async generateComponentWithPlan(input: {
@@ -871,6 +1139,40 @@ export class CodeReviewerService {
       componentPlan,
       componentName,
     );
+
+    // ── D0: Frame + Fragment — try before full-file generation ──────────────
+    // Skipped when the plan lacks enough context to build a frame (no dataNeeds
+    // or no type), or when direct-AI / section-chunk paths explicitly request
+    // full-file output (logLabel === 'direct-ai' has already exhausted D2).
+    if (componentPlan && this.shouldUseFramePath(componentPlan, componentName)) {
+      const frameResult = await this.generateComponentWithFrame({
+        componentName,
+        templateSource,
+        modelName,
+        componentPlan,
+        logPath,
+      });
+      if (frameResult.isValid) {
+        this.logger.log(
+          `[reviewer:frame] "${componentName}" ✓ frame+fragment succeeded (${frameResult.attemptsUsed} attempt(s))`,
+        );
+        return {
+          code: frameResult.code,
+          isValid: true,
+          attemptsUsed: frameResult.attemptsUsed,
+          lastRawOutput: '',
+          cotAttempts: [],
+        };
+      }
+      lastError = frameResult.lastError;
+      this.logger.warn(
+        `[reviewer:frame] "${componentName}" frame+fragment failed (${frameResult.lastError}) — falling back to full-file generation`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:frame] "${componentName}" frame+fragment failed — full-file fallback`,
+      );
+    }
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const userPromptForAttempt = buildComponentPrompt(
@@ -1121,6 +1423,16 @@ export class CodeReviewerService {
           userPrompt,
           maxTokens,
         });
+        const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+        if (tokenLogPath) {
+          await this.tokenTracker.init(tokenLogPath);
+          await this.tokenTracker.track(
+            model,
+            result.inputTokens,
+            result.outputTokens,
+            label ?? model,
+          );
+        }
         if (result.truncated) {
           lastTruncatedResult = {
             text: result.text,
@@ -1206,34 +1518,6 @@ export class CodeReviewerService {
       /^(import |export |const |function |\/\/|\/\*)/m,
     );
     if (codeStart > 0) result = result.slice(codeStart).trim();
-
-    const lastExportIdx = result.lastIndexOf('\nexport default ');
-    if (lastExportIdx !== -1) {
-      const exportSlice = result.slice(lastExportIdx);
-      const exportFirstLine = exportSlice.split('\n')[0];
-      if (/function|=>|\{/.test(exportFirstLine)) {
-        let depth = 0;
-        let opened = false;
-        let endIdx = result.length;
-        for (let i = lastExportIdx; i < result.length; i++) {
-          const ch = result[i];
-          if (ch === '{') {
-            depth++;
-            opened = true;
-          } else if (ch === '}') {
-            depth--;
-            if (opened && depth === 0) {
-              endIdx = i + 1;
-              break;
-            }
-          }
-        }
-        result = result.slice(0, endIdx).trimEnd();
-      } else {
-        const semiIdx = result.indexOf(';', lastExportIdx);
-        if (semiIdx !== -1) result = result.slice(0, semiIdx + 1).trimEnd();
-      }
-    }
     return result;
   }
 

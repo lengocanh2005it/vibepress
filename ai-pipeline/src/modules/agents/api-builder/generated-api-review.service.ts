@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { ApiBuilderResult } from './api-builder.service.js';
@@ -25,6 +26,7 @@ export interface GeneratedApiReviewResult {
 @Injectable()
 export class GeneratedApiReviewService {
   private readonly logger = new Logger(GeneratedApiReviewService.name);
+  private readonly tokenTracker = new TokenTracker();
 
   constructor(private readonly llmFactory: LlmFactoryService) {}
 
@@ -107,13 +109,23 @@ export class GeneratedApiReviewService {
     logPath?: string,
   ): Promise<ApiReviewResult> {
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const { text } = await this.llmFactory.chat({
+      const { text, inputTokens, outputTokens } = await this.llmFactory.chat({
         model: modelName,
         systemPrompt:
           'You are a strict senior backend reviewer. Review generated Express/TypeScript server code against the approved frontend data contract. Return ONLY valid JSON.',
         userPrompt: reviewPrompt,
         maxTokens: 2200,
       });
+      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      if (tokenLogPath) {
+        await this.tokenTracker.init(tokenLogPath);
+        await this.tokenTracker.track(
+          modelName,
+          inputTokens,
+          outputTokens,
+          `backend-review:${attempt}`,
+        );
+      }
 
       const parsed = this.parseReviewResult(text);
       if (parsed) {

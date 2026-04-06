@@ -26,6 +26,7 @@ import { ValidatorService } from '../agents/validator/validator.service.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
+import { TokenTracker } from '../../common/utils/token-tracker.js';
 import {
   PipelineModelConfig,
   RunPipelineDto,
@@ -66,7 +67,9 @@ interface ProgressEventData {
 //                                     → 4_planner  (includes Plan Review inside)
 //  Stage 4+5: React Generator + Code Review Loop
 //                                     → 5_generator (includes D4 AST Validator inside)
-//  Stage 6: Build & Preview           → 6_api_builder, 7_preview_builder
+//  Stage 6: Build & Preview           → 7_api_builder, 8_preview_builder
+//  Stage 7: Visual Compare            → 9_visual_compare
+//  Stage 8: Cleanup + Done            → 10_cleanup, 11_done
 //
 const STEP_META: Record<
   string,
@@ -144,14 +147,22 @@ const STEP_META: Record<
     doneMessage:
       'Preview app assembly, build checks, and runtime smoke tests have passed.',
   },
-  '9_cleanup': {
-    label: 'Clean Temporary Workspace',
+  '9_visual_compare': {
+    label: 'Evaluate Visual Metrics',
     weight: 2,
+    activeMessage:
+      'Comparing the WordPress site and the React preview to compute visual diff metrics and artifacts.',
+    doneMessage:
+      'Visual comparison metrics and diff artifacts have been collected.',
+  },
+  '10_cleanup': {
+    label: 'Clean Temporary Workspace',
+    weight: 1,
     activeMessage:
       'Cleaning temporary repositories, uploads, and generated artifacts from this migration run.',
     doneMessage: 'Temporary workspace cleanup has finished.',
   },
-  '10_done': {
+  '11_done': {
     label: 'Preview Ready',
     weight: 0,
     activeMessage: 'Finalizing preview metadata and completion state.',
@@ -185,6 +196,7 @@ export interface PipelineStatus {
 @Injectable()
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
+  private readonly tokenTracker = new TokenTracker();
   private readonly jobs = new Map<string, PipelineStatus>();
   private readonly progress = new Map<string, ReplaySubject<ProgressEvent>>();
 
@@ -239,11 +251,14 @@ export class OrchestratorService {
         // Stage 4: React Generator (D1 Visual Plan? → D2 Deterministic / D3 AI Fallback → D4 AST Validator)
         // Stage 5: Code Review Loop (R1 Code Reviewer → R2 Plan Match? → R3 Fix Agent → D1)
         { name: '6_generator', status: 'pending' },
-        // Stage 6: Build & Preview (E1 API → E2 Vite → E3 Runtime Instrumentation → E4 Visual Compare)
+        // Stage 6: Build & Preview (E1 API → E2 Vite → E3 Runtime Instrumentation)
         { name: '7_api_builder', status: 'pending' },
         { name: '8_preview_builder', status: 'pending' },
-        { name: '9_cleanup', status: 'pending' },
-        { name: '10_done', status: 'pending' },
+        // Stage 7: Visual Compare (E4)
+        { name: '9_visual_compare', status: 'pending' },
+        // Stage 8: Cleanup + completion
+        { name: '10_cleanup', status: 'pending' },
+        { name: '11_done', status: 'pending' },
       ],
     };
     this.jobs.set(jobId, state);
@@ -363,86 +378,88 @@ export class OrchestratorService {
     // ── Init log file ─────────────────────────────────────────────────────
     await mkdir('./temp/logs', { recursive: true });
     const logPath = join('./temp/logs', `${jobId}.log`);
+    const tokenLogPath = join('./temp/logs', `${jobId}.tokens.log`);
     const pipelineStart = Date.now();
+    await this.tokenTracker.init(tokenLogPath);
     await this.logToFile(logPath, `Pipeline ${jobId} started`);
-
-    // ── Resolve per-step model overrides ─────────────────────────────────
-    // Priority: request-level modelConfig > env vars > agent default.
-    // Format: plain model name (uses global AI_PROVIDER) or "provider/model"
-    // e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
-    const mc: PipelineModelConfig = dto.modelConfig ?? {};
-    const cfgPlanning = this.configService.get<string>(
-      'pipeline.planningModel',
-    );
-    const cfgGenCode = this.configService.get<string>('pipeline.genCodeModel');
-    const cfgReviewCode = this.configService.get<string>(
-      'pipeline.reviewCodeModel',
-    );
-    const cfgBackendReview = this.configService.get<string>(
-      'pipeline.backendReviewModel',
-    );
-    const cfgAiReviewMode = this.configService.get<string>(
-      'pipeline.aiReviewMode',
-      'warn',
-    );
-    const cfgBackendAiReviewMode = this.configService.get<string>(
-      'pipeline.backendAiReviewMode',
-      'warn',
-    );
-    const cfgFixAgent = this.configService.get<string>(
-      'pipeline.fixAgentModel',
-    );
-    const resolvedModels = {
-      planning:
-        mc.planning ??
-        mc.planner ??
-        cfgPlanning ??
-        'mistral/mistral-large-latest',
-      genCode: mc.genCode ?? cfgGenCode ?? 'mistral/codestral-latest',
-      reviewCode: mc.reviewCode ?? mc.codeReviewer ?? cfgReviewCode,
-      backendReview:
-        mc.backendReview ??
-        mc.reviewCode ??
-        mc.codeReviewer ??
-        cfgBackendReview,
-      aiReviewMode: (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
-        | 'warn'
-        | 'blocking',
-      backendAiReviewMode: (cfgBackendAiReviewMode === 'blocking'
-        ? 'blocking'
-        : 'warn') as 'warn' | 'blocking',
-      fixAgent:
-        mc.fixAgent ??
-        mc.reviewCode ??
-        mc.codeReviewer ??
-        cfgFixAgent ??
-        cfgReviewCode,
-    };
-    this.logger.log(
-      `[models] planning="${resolvedModels.planning ?? 'default'}" ` +
-        `genCode="${resolvedModels.genCode ?? 'default'}" ` +
-        `reviewCode="${resolvedModels.reviewCode ?? 'default'}" ` +
-        `backendReview="${resolvedModels.backendReview ?? 'default'}" ` +
-        `aiReviewMode="${resolvedModels.aiReviewMode}" ` +
-        `backendAiReviewMode="${resolvedModels.backendAiReviewMode}" ` +
-        `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
-    );
-
-    // ── Resolve DB credentials ────────────────────────────────────────────
-    let dbCreds: WpDbCredentials;
-
-    if (dto.dbCredentials) {
-      // Mode B: direct credentials
-      await this.sqlService.verifyDirectCredentials(dto.dbCredentials);
-      dbCreds = dto.dbCredentials;
-    } else if (dto.sqlFilePath) {
-      // Mode A: import SQL → shared DB
-      dbCreds = await this.sqlService.importToTempDb(dto.sqlFilePath, jobId);
-    } else {
-      throw new BadRequestException(
-        'No DB source provided (sqlFilePath or dbCredentials)',
+    try {
+      // ── Resolve per-step model overrides ─────────────────────────────────
+      // Priority: request-level modelConfig > env vars > agent default.
+      // Format: plain model name (uses global AI_PROVIDER) or "provider/model"
+      // e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
+      const mc: PipelineModelConfig = dto.modelConfig ?? {};
+      const cfgPlanning = this.configService.get<string>(
+        'pipeline.planningModel',
       );
-    }
+      const cfgGenCode = this.configService.get<string>('pipeline.genCodeModel');
+      const cfgReviewCode = this.configService.get<string>(
+        'pipeline.reviewCodeModel',
+      );
+      const cfgBackendReview = this.configService.get<string>(
+        'pipeline.backendReviewModel',
+      );
+      const cfgAiReviewMode = this.configService.get<string>(
+        'pipeline.aiReviewMode',
+        'warn',
+      );
+      const cfgBackendAiReviewMode = this.configService.get<string>(
+        'pipeline.backendAiReviewMode',
+        'warn',
+      );
+      const cfgFixAgent = this.configService.get<string>(
+        'pipeline.fixAgentModel',
+      );
+      const resolvedModels = {
+        planning:
+          mc.planning ??
+          mc.planner ??
+          cfgPlanning ??
+          'mistral/mistral-large-latest',
+        genCode: mc.genCode ?? cfgGenCode ?? 'mistral/codestral-latest',
+        reviewCode: mc.reviewCode ?? mc.codeReviewer ?? cfgReviewCode,
+        backendReview:
+          mc.backendReview ??
+          mc.reviewCode ??
+          mc.codeReviewer ??
+          cfgBackendReview,
+        aiReviewMode: (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
+          | 'warn'
+          | 'blocking',
+        backendAiReviewMode: (cfgBackendAiReviewMode === 'blocking'
+          ? 'blocking'
+          : 'warn') as 'warn' | 'blocking',
+        fixAgent:
+          mc.fixAgent ??
+          mc.reviewCode ??
+          mc.codeReviewer ??
+          cfgFixAgent ??
+          cfgReviewCode,
+      };
+      this.logger.log(
+        `[models] planning="${resolvedModels.planning ?? 'default'}" ` +
+          `genCode="${resolvedModels.genCode ?? 'default'}" ` +
+          `reviewCode="${resolvedModels.reviewCode ?? 'default'}" ` +
+          `backendReview="${resolvedModels.backendReview ?? 'default'}" ` +
+          `aiReviewMode="${resolvedModels.aiReviewMode}" ` +
+          `backendAiReviewMode="${resolvedModels.backendAiReviewMode}" ` +
+          `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
+      );
+
+      // ── Resolve DB credentials ────────────────────────────────────────────
+      let dbCreds: WpDbCredentials;
+
+      if (dto.dbCredentials) {
+        // Mode B: direct credentials
+        await this.sqlService.verifyDirectCredentials(dto.dbCredentials);
+        dbCreds = dto.dbCredentials;
+      } else if (dto.sqlFilePath) {
+        // Mode A: import SQL → shared DB
+        dbCreds = await this.sqlService.importToTempDb(dto.sqlFilePath, jobId);
+      } else {
+        throw new BadRequestException(
+          'No DB source provided (sqlFilePath or dbCredentials)',
+        );
+      }
 
     const themeGithubToken = this.configService.get<string>(
       'github.wpRepoToken',
@@ -613,7 +630,7 @@ export class OrchestratorService {
           content,
           resolvedModels.planning,
           jobId,
-          { includeVisualPlans: false },
+          { includeVisualPlans: false, logPath },
         );
         this.emitStepProgress(
           state,
@@ -651,7 +668,7 @@ export class OrchestratorService {
             content,
             resolvedModels.planning,
             jobId,
-            { includeVisualPlans: false },
+            { includeVisualPlans: false, logPath },
           );
           review = this.planReviewer.review(plan, expectedTemplateNames);
           this.emitStepProgress(
@@ -744,6 +761,22 @@ export class OrchestratorService {
         );
         let components = this.validator.validate(result.components);
 
+        // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
+        // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
+        // Skipping Stage 5 AI review for them avoids false positives and unnecessary
+        // AI calls on code that follows the contract by construction.
+        const aiComponents = components.filter(
+          (c) => c.generationMode !== 'deterministic',
+        );
+        const deterministicNames = components
+          .filter((c) => c.generationMode === 'deterministic')
+          .map((c) => c.name);
+        if (deterministicNames.length > 0) {
+          this.logger.log(
+            `[Stage 5: AI Generated Code Review] Skipping ${deterministicNames.length} deterministic component(s): ${deterministicNames.join(', ')}`,
+          );
+        }
+
         const MAX_FIX_ATTEMPTS = 2;
         for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
           this.emitStepProgress(
@@ -753,10 +786,10 @@ export class OrchestratorService {
             `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking generated components against the approved contract.`,
           );
           this.logger.log(
-            `[Stage 5: AI Generated Code Review] Reviewing ${components.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
           );
           const review = await this.generatedCodeReview.review({
-            components,
+            components: aiComponents,
             plan: reviewResult.plan,
             modelName: resolvedModels.reviewCode,
             mode: resolvedModels.aiReviewMode,
@@ -782,12 +815,12 @@ export class OrchestratorService {
           );
 
           for (const failure of review.failures) {
-            const compIndex = components.findIndex(
+            const compIndex = aiComponents.findIndex(
               (c) => c.name === failure.componentName,
             );
             if (compIndex !== -1) {
-              components[compIndex] = await this.reactGenerator.fixComponent({
-                component: components[compIndex],
+              aiComponents[compIndex] = await this.reactGenerator.fixComponent({
+                component: aiComponents[compIndex],
                 plan: reviewResult.plan,
                 feedback: failure.message,
                 modelConfig: { fixAgent: resolvedModels.fixAgent },
@@ -795,6 +828,12 @@ export class OrchestratorService {
               });
             }
           }
+        }
+
+        // Merge fixed AI components back into the full list (preserve original order).
+        for (const fixed of aiComponents) {
+          const idx = components.findIndex((c) => c.name === fixed.name);
+          if (idx !== -1) components[idx] = fixed;
         }
 
         this.emitStepProgress(
@@ -910,7 +949,7 @@ export class OrchestratorService {
     // Removed cotEvidence logging
     // Removed cotEvidence logging
 
-    // E2+E3+E4: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3) + Visual Compare (E4)
+    // E2+E3: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3)
     // Mutable component list — allows the build fix-loop below to patch TS errors
     let buildComponents = generationResult.components;
     const MAX_BUILD_FIX_ATTEMPTS = 2;
@@ -993,27 +1032,45 @@ export class OrchestratorService {
     );
     await stepDelay();
 
-    // Bước phụ: Gọi đến tool để evaluate sự tương đồng
+    // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
     let metrics: any = null;
-    try {
-      const response = await axios.post(
-        `${this.configService.get<string>('automation.url', '')}/site/compare`,
-        {
-          wpBaseUrl: 'http://localhost:8000/',
-          reactFeUrl: 'http://localhost:5353',
-          reactBeUrl: 'http://localhost:3775',
-        },
+    await this.runStep(state, '9_visual_compare', logPath, async () => {
+      this.emitStepProgress(
+        state,
+        '9_visual_compare',
+        0.2,
+        'Submitting the WordPress and React preview URLs to the compare service.',
       );
-      metrics = response.data?.result ?? response.data;
-    } catch (err: any) {
-      this.logger.error(
-        `[visual/compare] failed — ${err?.message ?? err}`,
-        err?.response?.data ?? err?.stack,
+      try {
+        const response = await axios.post(
+          `${this.configService.get<string>('automation.url', '')}/site/compare`,
+          {
+            wpBaseUrl: 'http://localhost:8000/',
+            reactFeUrl: 'http://localhost:5353',
+            reactBeUrl: 'http://localhost:3775',
+          },
+        );
+        metrics = response.data?.result ?? response.data;
+      } catch (err: any) {
+        this.logger.error(
+          `[visual/compare] failed — ${err?.message ?? err}`,
+          err?.response?.data ?? err?.stack,
+        );
+      }
+      this.emitStepProgress(
+        state,
+        '9_visual_compare',
+        0.85,
+        metrics
+          ? 'Visual diff metrics are ready and attached to the final preview payload.'
+          : 'Visual compare finished without metrics; pipeline will continue with cleanup.',
       );
-    }
+      return metrics;
+    });
+    await stepDelay();
 
     // Bước 8: Xoá temp/repos và temp/uploads của job này
-    await this.runStep(state, '9_cleanup', logPath, () =>
+    await this.runStep(state, '10_cleanup', logPath, () =>
       this.cleanup.cleanup(jobId),
     );
     await stepDelay();
@@ -1021,7 +1078,7 @@ export class OrchestratorService {
     const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
 
     // Step 9: Migration completion
-    await this.runStep(state, '10_done', logPath, async () => {
+    await this.runStep(state, '11_done', logPath, async () => {
       state.status = 'done';
       state.result = {
         previewDir: preview.previewDir,
@@ -1031,8 +1088,8 @@ export class OrchestratorService {
       // Emit final event with previewUrl from within runStep
       const subject = this.progress.get(jobId);
       subject?.next({
-        step: '10_done',
-        label: STEP_META['10_done'].label,
+        step: '11_done',
+        label: STEP_META['11_done'].label,
         status: 'done',
         percent: 100,
         message: `Migration workflow is complete. Preview is ready. (${totalElapsed}s)`,
@@ -1050,11 +1107,14 @@ export class OrchestratorService {
     subject?.complete();
     setTimeout(() => this.progress.delete(jobId), 60_000);
 
-    this.logger.log(`Pipeline ${jobId} completed in ${totalElapsed}s`);
-    await this.logToFile(
-      logPath,
-      `Pipeline completed — total ${totalElapsed}s`,
-    );
+      this.logger.log(`Pipeline ${jobId} completed in ${totalElapsed}s`);
+      await this.logToFile(
+        logPath,
+        `Pipeline completed — total ${totalElapsed}s`,
+      );
+    } finally {
+      await this.tokenTracker.writeSummary();
+    }
   }
 
   private async resolveThemeDir(
@@ -1218,11 +1278,13 @@ export class OrchestratorService {
    * Parse TypeScript build error output and extract per-component errors.
    * Matches lines like:
    *   src/pages/Page.tsx(132,99): error TS2552: Cannot find name 'post'. Did you mean 'posts'?
+   *   src/components/Sidebar.tsx(68,125): error TS1003: Identifier expected.
    */
   private parseTsBuildErrors(
     errorOutput: string,
   ): Array<{ componentName: string; error: string }> {
-    const pattern = /src\/pages\/(\w+)\.tsx\(\d+,\d+\): error (TS\d+:[^\n]+)/g;
+    const pattern =
+      /src\/(?:pages|components|layouts|partials)\/(\w+)\.tsx\(\d+,\d+\): error (TS\d+:[^\n]+)/g;
     const errMap = new Map<string, string[]>();
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(errorOutput)) !== null) {

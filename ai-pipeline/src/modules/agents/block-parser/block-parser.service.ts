@@ -597,8 +597,12 @@ export class BlockParserService {
   ): string {
     return markup.replace(
       /<!-- wp:template-part \{[^}]*"slug":"([^"]+)"[^}]*\} \/-->/g,
-      (_, slug) =>
-        this.findPartMarkup(slug, partMap) ?? `<!-- part:${slug} not found -->`,
+      (_, slug) => {
+        const partMarkup =
+          this.findPartMarkup(slug, partMap) ??
+          `<!-- part:${slug} not found -->`;
+        return this.wrapResolvedPart(slug, partMarkup);
+      },
     );
   }
 
@@ -629,14 +633,25 @@ export class BlockParserService {
       (_, slug) => {
         const resolvedName = this.findPartName(slug, rawPartMap);
         if (!resolvedName) return `<!-- part:${slug} not found -->`;
-        return this.resolvePartMarkup(
-          resolvedName,
-          rawPartMap,
-          diagnostics,
-          nextStack,
+        return this.wrapResolvedPart(
+          slug,
+          this.resolvePartMarkup(
+            resolvedName,
+            rawPartMap,
+            diagnostics,
+            nextStack,
+          ),
         );
       },
     );
+  }
+
+  private wrapResolvedPart(slug: string, markup: string): string {
+    return [
+      `<!-- vibepress:part:start ${slug} -->`,
+      markup,
+      `<!-- vibepress:part:end ${slug} -->`,
+    ].join('\n');
   }
 
   private findPartMarkup(

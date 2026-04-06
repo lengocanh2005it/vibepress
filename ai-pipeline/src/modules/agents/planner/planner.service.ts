@@ -1,7 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { basename } from 'path';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
+import {
+  wpBlocksToJson,
+  wpJsonToString,
+  type WpNode,
+} from '../../../common/utils/wp-block-to-json.js';
+import {
+  getComponentStrategy,
+  isSharedChromePartialComponent,
+} from '../component-strategy.registry.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import type {
@@ -36,10 +47,16 @@ export interface ComponentPlan {
 
 export type PlanResult = ComponentPlan[];
 
+interface PlanningSourceContext {
+  source: string;
+  sourceAnalysis: string;
+}
+
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
+  private readonly tokenTracker = new TokenTracker();
 
   constructor(
     private readonly llmFactory: LlmFactoryService,
@@ -54,6 +71,7 @@ export class PlannerService {
     jobId?: string,
     options?: {
       includeVisualPlans?: boolean;
+      logPath?: string;
     },
   ): Promise<PlanResult> {
     // Build source map for layer 2 enrichment and Phase B
@@ -68,6 +86,10 @@ export class PlannerService {
 
     const resolvedModel = modelName ?? this.llmFactory.getModel();
     const includeVisualPlans = options?.includeVisualPlans ?? true;
+    const tokenLogPath = options?.logPath?.replace(/\.log$/, '.tokens.log');
+    if (tokenLogPath) {
+      await this.tokenTracker.init(tokenLogPath);
+    }
 
     // Ensure standard routes are generated even when not present in theme templates
     const templates = this.ensureStandardTemplates(allTemplates, theme.type);
@@ -103,6 +125,14 @@ export class PlannerService {
         userPrompt: prompt,
         maxTokens: 4096,
       });
+      if (tokenLogPath) {
+        await this.tokenTracker.track(
+          resolvedModel,
+          inTok,
+          outTok,
+          `planner:${attempt === 1 ? 'phase-a' : `phase-a-retry-${attempt}`}`,
+        );
+      }
 
       lastRaw = raw;
       const parsed = this.tryParseResponseDetailed(raw, templateNames);
@@ -226,6 +256,7 @@ export class PlannerService {
       globalPalette,
       globalTypography,
       resolvedModel,
+      options?.logPath,
     );
   }
 
@@ -283,6 +314,7 @@ export class PlannerService {
     globalPalette: ColorPalette,
     globalTypography: TypographyTokens,
     modelName: string,
+    logPath?: string,
   ): Promise<PlanResult> {
     const concurrency =
       this.configService.get<number>('planner.visualPlanConcurrency') ?? 3;
@@ -313,6 +345,7 @@ export class PlannerService {
             globalTypography,
             plan,
             modelName,
+            logPath,
           ),
         ),
       );
@@ -343,19 +376,66 @@ export class PlannerService {
     globalTypography: TypographyTokens,
     fullPlan: PlanResult,
     modelName: string,
+    logPath?: string,
   ): Promise<PlanResult[number]> {
     let visualPlan: ComponentVisualPlan | undefined;
+    const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
+      componentPlan,
+      content,
+      tokens,
+      globalPalette,
+      globalTypography,
+      fullPlan,
+    );
+    if (deterministicPlan) {
+      this.logger.log(
+        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓`,
+      );
+      return { ...componentPlan, visualPlan: deterministicPlan };
+    }
+    if (this.shouldSkipAiVisualPlan(componentPlan)) {
+      this.logger.log(
+        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+      );
+      return { ...componentPlan, visualPlan: undefined };
+    }
     try {
+      const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+      const planningSource = this.buildPlanningSourceContext(
+        componentPlan,
+        templateSource,
+        fullPlan.some(
+          (item) =>
+            item.type === 'partial' &&
+            isSharedChromePartialComponent(item.componentName),
+        ),
+      );
+      const visualContract = {
+        componentType: componentPlan.type,
+        route: componentPlan.route,
+        isDetail: componentPlan.isDetail,
+        dataNeeds: visualDataNeeds,
+        stripLayoutChrome: componentPlan.type === 'page',
+      } as const;
       const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
         componentName: componentPlan.componentName,
-        templateSource,
+        templateSource: planningSource.source,
         content,
         tokens,
+        componentType: componentPlan.type,
+        route: componentPlan.route,
+        isDetail: componentPlan.isDetail,
+        dataNeeds: visualDataNeeds,
+        sourceAnalysis: planningSource.sourceAnalysis,
       });
-      const allowedImageSrcs = extractStaticImageSources(templateSource);
+      const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';
       let lastReason = 'unknown visual plan parse failure';
       let lastDropped = '';
+      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      if (tokenLogPath) {
+        await this.tokenTracker.init(tokenLogPath);
+      }
 
       for (let attempt = 1; attempt <= 2; attempt++) {
         const prompt =
@@ -367,18 +447,30 @@ export class PlannerService {
                 lastRaw,
               );
 
-        const { text: raw } = await this.llmFactory.chat({
+        const {
+          text: raw,
+          inputTokens: inTok,
+          outputTokens: outTok,
+        } = await this.llmFactory.chat({
           model: modelName,
           systemPrompt,
           userPrompt: prompt,
           maxTokens: 4096,
         });
+        if (tokenLogPath) {
+          await this.tokenTracker.track(
+            modelName,
+            inTok,
+            outTok,
+            `${componentPlan.componentName}:visual-plan:${attempt}`,
+          );
+        }
 
         lastRaw = raw;
         const parsedResult = parseVisualPlanDetailed(
           raw,
           componentPlan.componentName,
-          { allowedImageSrcs },
+          { allowedImageSrcs, contract: visualContract },
         );
         const parsed = parsedResult.plan;
         if (parsed) {
@@ -427,6 +519,115 @@ export class PlannerService {
     }
 
     return { ...componentPlan, visualPlan };
+  }
+
+  private buildDeterministicVisualPlanForComponent(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+    tokens: ThemeTokens | undefined,
+    globalPalette: ColorPalette,
+    globalTypography: TypographyTokens,
+    fullPlan: PlanResult,
+  ): ComponentVisualPlan | undefined {
+    const layout = this.deriveComponentLayout(
+      tokens,
+      componentPlan.componentName,
+      fullPlan,
+    );
+    const dataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+    const base = {
+      componentName: componentPlan.componentName,
+      dataNeeds,
+      palette: globalPalette,
+      typography: globalTypography,
+      layout,
+      blockStyles: tokens?.blockStyles,
+    } as const;
+    const strategy = getComponentStrategy(componentPlan.componentName);
+
+    switch (strategy.kind) {
+      case 'not-found':
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'hero',
+              layout: 'centered',
+              heading: 'Page not found',
+              subheading:
+                'The page you are looking for does not exist or may have moved.',
+              cta: { text: 'Back to home', link: '/' },
+            },
+          ],
+        };
+      case 'header':
+        // When deterministicFirst is false the AI reads the actual WP template
+        // to generate a faithful visual plan — skip the generic navbar stub.
+        if (!strategy.deterministicFirst) return undefined;
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'navbar',
+              sticky: true,
+              menuSlug: content.menus[0]?.slug ?? 'primary',
+            },
+          ],
+        };
+      case 'footer':
+        // Same as header — let AI derive the real layout from the WP template.
+        if (!strategy.deterministicFirst) return undefined;
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'footer',
+              menuColumns: content.menus.slice(0, 3).map((menu) => ({
+                title: menu.name,
+                menuSlug: menu.slug,
+              })),
+            },
+          ],
+        };
+      case 'sidebar':
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'sidebar',
+              title: 'Explore',
+              showSiteInfo: false,
+              showPages: true,
+              showPosts: content.posts.length > 0,
+              maxItems: 6,
+            },
+          ],
+        };
+      case 'breadcrumb':
+        return {
+          ...base,
+          sections: [{ type: 'breadcrumb' }],
+        };
+      case 'comments':
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'comments',
+              showForm: true,
+              requireName: true,
+              requireEmail: false,
+            },
+          ],
+        };
+      default:
+        return undefined;
+    }
+  }
+
+  private shouldSkipAiVisualPlan(componentPlan: PlanResult[number]): boolean {
+    if (componentPlan.type !== 'partial') return false;
+    return getComponentStrategy(componentPlan.componentName).skipAiVisualPlan;
   }
 
   // ── Global typography: deterministic from theme tokens, no AI ────────────
@@ -713,7 +914,8 @@ Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "pag
 - Dedicated Header / Footer / Navigation partials may include "menus"
 - Dedicated Header / Footer partials that render site title or tagline may include "site-info"
 - Ordinary page components MUST NOT request "menus" or "site-info" just because the original WordPress template referenced shared header/footer chrome.
-- If the site has shared Header/Footer/Nav partials, keep global chrome data in those partials only.
+- Global chrome belongs to shared layout partials. Page components MUST NOT own header/footer/navigation data.
+- If a page template has a content sidebar, keep it content-only (recent posts / page links). Do NOT model shared nav menus or site branding inside a page sidebar.
 
 ── UNIQUE ROUTES ──────────────────────────────────────────────────────────────
 Every page component MUST have a different route.
@@ -1128,6 +1330,138 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return ordered;
   }
 
+  private buildPlanningSourceContext(
+    componentPlan: PlanResult[number],
+    templateSource: string,
+    hasSharedLayoutPartials: boolean,
+  ): PlanningSourceContext {
+    const hints: string[] = [];
+    let scopedSource = templateSource;
+
+    if (componentPlan.type === 'page') {
+      scopedSource = this.stripClassicSharedIncludes(scopedSource, hints);
+      scopedSource = this.stripFseSharedTemplateParts(scopedSource, hints);
+    }
+
+    if (this.looksLikeBlockMarkup(scopedSource)) {
+      const bodyNodes = wpBlocksToJson(scopedSource);
+      if (componentPlan.type === 'page' && bodyNodes.length > 0) {
+        const filteredNodes = bodyNodes.filter(
+          (node) => !this.isSharedLayoutBlockNode(node),
+        );
+        if (filteredNodes.length !== bodyNodes.length) {
+          hints.push('removed top-level shared layout blocks from block tree');
+        }
+        if (filteredNodes.length > 0) {
+          scopedSource = wpJsonToString(filteredNodes);
+        } else if (bodyNodes.length > 0) {
+          scopedSource = wpJsonToString(bodyNodes);
+        }
+      } else if (bodyNodes.length > 0) {
+        scopedSource = wpJsonToString(bodyNodes);
+      }
+    }
+
+    const trimmed = scopedSource.trim();
+    const fallbackSource = trimmed.length > 0 ? trimmed : templateSource;
+    const mode = this.looksLikeBlockMarkup(templateSource)
+      ? 'body-only block JSON'
+      : 'body-only markup';
+    const summaryLines = ['## Extracted source scope'];
+    summaryLines.push(`Mode: ${mode}`);
+    summaryLines.push(
+      `Shared Header/Footer partials in overall plan: ${hasSharedLayoutPartials ? 'yes' : 'no'}`,
+    );
+    summaryLines.push(
+      `Component body source narrowed to route-owned content: ${componentPlan.type === 'page' ? 'yes' : 'partial/full-source'}`,
+    );
+    if (hints.length > 0) {
+      summaryLines.push(...hints.map((hint) => `- ${hint}`));
+    }
+
+    return {
+      source: fallbackSource,
+      sourceAnalysis: summaryLines.join('\n'),
+    };
+  }
+
+  private stripClassicSharedIncludes(source: string, hints: string[]): string {
+    return this.stripDelimitedSections(
+      hints,
+      source,
+      /\{\/\*\s*WP: include start → ([^*]+?)\s*\*\/\}/g,
+      (label) => `{/* WP: include end → ${label} */}`,
+      (label) => this.isSharedLayoutLabel(label),
+      (label) => `removed classic shared include "${label}" from page body`,
+    );
+  }
+
+  private stripFseSharedTemplateParts(source: string, hints: string[]): string {
+    return this.stripDelimitedSections(
+      hints,
+      source,
+      /<!--\s*vibepress:part:start\s+([^>]+?)\s*-->/g,
+      (label) => `<!-- vibepress:part:end ${label} -->`,
+      (label) => this.isSharedLayoutLabel(label),
+      (label) => `removed FSE shared template-part "${label}" from page body`,
+    );
+  }
+
+  private stripDelimitedSections(
+    hints: string[],
+    source: string,
+    startPattern: RegExp,
+    endMarkerFor: (label: string) => string,
+    shouldRemove: (label: string) => boolean,
+    hintFor: (label: string) => string,
+  ): string {
+    let result = '';
+    let cursor = 0;
+    const regex = new RegExp(startPattern.source, startPattern.flags);
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(source)) !== null) {
+      const label = String(match[1] ?? '').trim();
+      if (!shouldRemove(label)) continue;
+
+      result += source.slice(cursor, match.index);
+      const endMarker = endMarkerFor(label);
+      const endIdx = source.indexOf(endMarker, regex.lastIndex);
+      if (endIdx === -1) {
+        cursor = regex.lastIndex;
+      } else {
+        cursor = endIdx + endMarker.length;
+        regex.lastIndex = cursor;
+      }
+      hints.push(hintFor(label));
+    }
+
+    result += source.slice(cursor);
+    return result;
+  }
+
+  private isSharedLayoutLabel(label: string): boolean {
+    const name = basename(label.trim()).replace(/\.(php|html)$/i, '');
+    return /^(header|footer)(?:[-_].+)?$/i.test(name);
+  }
+
+  private looksLikeBlockMarkup(source: string): boolean {
+    return source.includes('<!-- wp:');
+  }
+
+  private isSharedLayoutBlockNode(node: WpNode): boolean {
+    if (/^(header|footer|core\/header|core\/footer)$/i.test(node.block)) {
+      return true;
+    }
+    if (
+      node.block === 'template-part' &&
+      this.isSharedLayoutLabel(String(node.params?.slug ?? ''))
+    ) {
+      return true;
+    }
+    return /^(navigation|site-title|site-tagline)$/i.test(node.block);
+  }
+
   private extractTemplateHints(source: string): string {
     const hints: string[] = [];
     if (source.includes('wp:navigation') || source.includes('wp_nav_menu'))
@@ -1160,6 +1494,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const ordered: DataNeed[] = [
       'postDetail',
       'pageDetail',
+      'comments',
       'posts',
       'pages',
       'menus',
@@ -1177,6 +1512,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           break;
         case 'page-detail':
           mapped.add('pageDetail');
+          break;
+        case 'comments':
+          mapped.add('comments');
           break;
         case 'posts':
         case 'pages':

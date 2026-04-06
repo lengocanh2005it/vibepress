@@ -43,6 +43,40 @@ async function getPrefix(
   return rows[0].tableName.replace(/options$/, '');
 }
 
+function normalizeCommentModerationStatus(
+  raw: unknown,
+): 'approved' | 'pending' | 'spam' | 'trash' {
+  const value = String(raw ?? '0').trim();
+  if (value === '1') return 'approved';
+  if (value === 'spam') return 'spam';
+  if (value === 'trash' || value === 'post-trashed') return 'trash';
+  return 'pending';
+}
+
+async function resolvePostId(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  input: { postId?: unknown; slug?: unknown },
+): Promise<number | null> {
+  if (input.postId != null && String(input.postId).trim()) {
+    const numericPostId = Number(input.postId);
+    if (Number.isFinite(numericPostId) && numericPostId > 0) {
+      return numericPostId;
+    }
+  }
+
+  if (typeof input.slug === 'string' && input.slug.trim()) {
+    const [slugRows] = await conn.query<any[]>(
+      `SELECT ID FROM \`${prefix}posts\`
+       WHERE post_name = ? AND post_status = 'publish' LIMIT 1`,
+      [input.slug.trim()],
+    );
+    return slugRows[0]?.ID ?? null;
+  }
+
+  return null;
+}
+
 function parseSerializedPhpStringArray(serialized: string): string[] {
   if (!serialized) return [];
   const result: string[] = [];
@@ -589,18 +623,10 @@ app.get('/api/comments', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
-    let postId: number | null = null;
-
-    if (req.query.postId) {
-      postId = Number(req.query.postId);
-    } else if (req.query.slug) {
-      const [slugRows] = await conn.query<any[]>(
-        `SELECT ID FROM \`${prefix}posts\`
-         WHERE post_name = ? AND post_status = 'publish' LIMIT 1`,
-        [req.query.slug],
-      );
-      postId = slugRows[0]?.ID ?? null;
-    }
+    const postId = await resolvePostId(conn, prefix, {
+      postId: req.query.postId,
+      slug: req.query.slug,
+    });
 
     if (!postId) {
       return res.status(400).json({ error: 'postId or slug query param required' });
@@ -629,13 +655,69 @@ app.get('/api/comments', async (req, res) => {
   }
 });
 
+// Get tracked comment submissions for a post and client token so the React app
+// can poll moderation status after a comment is submitted.
+app.get('/api/comments/submissions', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const clientToken =
+      typeof req.query.clientToken === 'string'
+        ? req.query.clientToken.trim().substring(0, 120)
+        : '';
+
+    if (!clientToken) {
+      return res.status(400).json({ error: 'clientToken query param required' });
+    }
+
+    const postId = await resolvePostId(conn, prefix, {
+      postId: req.query.postId,
+      slug: req.query.slug,
+    });
+    if (!postId) {
+      return res.status(400).json({ error: 'postId or slug query param required' });
+    }
+
+    const [rows] = await conn.query<any[]>(
+      `SELECT c.comment_ID, c.comment_author, c.comment_date,
+              c.comment_content, c.comment_parent, c.user_id, c.comment_approved
+       FROM \`${prefix}comments\` c
+       INNER JOIN \`${prefix}commentmeta\` cm
+         ON cm.comment_id = c.comment_ID
+        AND cm.meta_key = '_vibepress_client_token'
+        AND cm.meta_value = ?
+       WHERE c.comment_post_ID = ?
+       ORDER BY c.comment_date DESC`,
+      [clientToken, postId],
+    );
+
+    res.json(
+      rows.map((r: any) => ({
+        id: r.comment_ID,
+        author: r.comment_author,
+        date: formatDate(r.comment_date),
+        content: r.comment_content,
+        parentId: r.comment_parent ?? 0,
+        userId: r.user_id ?? 0,
+        moderationStatus: normalizeCommentModerationStatus(r.comment_approved),
+      })),
+    );
+  } finally {
+    await conn.end();
+  }
+});
+
 // Submit a new comment for a post
-// Body: { postId?: number, slug?: string, author: string, email: string, content: string, parentId?: number }
+// Body: { postId?: number, slug?: string, author: string, email: string, content: string, website?: string, parentId?: number, clientToken?: string }
 app.post('/api/comments', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
     const { author, email, content, website = '', parentId = 0 } = req.body ?? {};
+    const clientToken =
+      typeof req.body?.clientToken === 'string'
+        ? req.body.clientToken.trim().substring(0, 120)
+        : '';
 
     // Validate required fields
     if (!author || typeof author !== 'string' || !author.trim()) {
@@ -649,36 +731,38 @@ app.post('/api/comments', async (req, res) => {
     }
 
     // Resolve postId from body or slug
-    let postId: number | null = req.body?.postId ? Number(req.body.postId) : null;
-    if (!postId && req.body?.slug) {
-      const [slugRows] = await conn.query<any[]>(
-        `SELECT ID FROM \`${prefix}posts\`
-         WHERE post_name = ? AND post_status = 'publish' LIMIT 1`,
-        [String(req.body.slug).trim()],
-      );
-      postId = slugRows[0]?.ID ?? null;
-    }
+    const postId = await resolvePostId(conn, prefix, {
+      postId: req.body?.postId,
+      slug: req.body?.slug,
+    });
     if (!postId) {
       return res.status(400).json({ error: 'postId or slug is required' });
     }
 
-    // Verify the post actually exists and is published
+    // Verify the post actually exists, is published, and accepts comments.
     const [postRows] = await conn.query<any[]>(
-      `SELECT ID FROM \`${prefix}posts\` WHERE ID = ? AND post_status = 'publish' LIMIT 1`,
+      `SELECT ID, comment_status
+       FROM \`${prefix}posts\`
+       WHERE ID = ? AND post_status = 'publish'
+       LIMIT 1`,
       [postId],
     );
     if (!postRows.length) {
       return res.status(404).json({ error: 'post not found' });
     }
+    if (String(postRows[0]?.comment_status ?? '').trim() !== 'open') {
+      return res.status(403).json({ error: 'comments are closed for this post' });
+    }
 
     const now = new Date();
-    // comment_approved = 1 so comment is immediately visible (matches read endpoint filter)
+    // New comments enter WordPress moderation first. Approved comments become
+    // visible later through GET /api/comments and polling via /api/comments/submissions.
     const [result] = await conn.query<any>(
       `INSERT INTO \`${prefix}comments\`
          (comment_post_ID, comment_author, comment_author_email, comment_author_url,
           comment_content, comment_date, comment_date_gmt, comment_approved,
           comment_parent, comment_type, user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '1', ?, 'comment', 0)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, '0', ?, 'comment', 0)`,
       [
         postId,
         author.trim().substring(0, 245),
@@ -693,19 +777,24 @@ app.post('/api/comments', async (req, res) => {
 
     const commentId = result.insertId;
 
-    // Update comment count on the post
-    await conn.query(
-      `UPDATE \`${prefix}posts\` SET comment_count = comment_count + 1 WHERE ID = ?`,
-      [postId],
-    );
+    if (clientToken) {
+      await conn.query(
+        `INSERT INTO \`${prefix}commentmeta\`
+           (comment_id, meta_key, meta_value)
+         VALUES (?, '_vibepress_client_token', ?)`,
+        [commentId, clientToken],
+      );
+    }
 
-    res.status(201).json({
+    res.status(202).json({
       id: commentId,
       author: author.trim(),
       date: formatDate(now.toISOString()),
       content: content.trim(),
       parentId: Number(parentId) || 0,
       userId: 0,
+      moderationStatus: 'pending',
+      tracked: Boolean(clientToken),
     });
   } finally {
     await conn.end();

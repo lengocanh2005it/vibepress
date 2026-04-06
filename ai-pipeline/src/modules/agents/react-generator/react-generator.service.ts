@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { appendFile } from 'fs/promises';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
-import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
@@ -17,6 +16,7 @@ import {
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
 const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
@@ -56,6 +56,12 @@ export interface GeneratedComponent {
   // When true, preview-builder must NOT create a route for this component.
   // Sub-components are assembled into their parent; they are not standalone pages.
   isSubComponent?: boolean;
+  /**
+   * 'deterministic' = code came from CodeGeneratorService (no AI TSX gen).
+   * 'ai'            = code was produced (fully or partially) by an LLM.
+   * Orchestrator uses this to skip Stage 5 AI review for deterministic components.
+   */
+  generationMode?: 'deterministic' | 'ai';
 }
 
 export interface ReactGenerateResult {
@@ -67,7 +73,6 @@ export interface ReactGenerateResult {
 @Injectable()
 export class ReactGeneratorService {
   private readonly logger = new Logger(ReactGeneratorService.name);
-  private readonly tokenTracker = new TokenTracker();
 
   constructor(
     private readonly llmFactory: LlmFactoryService,
@@ -102,11 +107,6 @@ export class ReactGeneratorService {
     } = input;
 
     this.logger.log(`Generating React components for job: ${jobId}`);
-
-    if (logPath) {
-      const tokenLogPath = logPath.replace(/\.log$/, '.tokens.log');
-      await this.tokenTracker.init(tokenLogPath);
-    }
 
     const defaultModel = this.llmFactory.getModel();
     const codeGeneratorModel = modelConfig?.codeGenerator ?? defaultModel;
@@ -241,8 +241,6 @@ export class ReactGeneratorService {
     this.logger.log(summary);
     await this.logToFile(logPath, summary);
 
-    await this.tokenTracker.writeSummary();
-
     return { jobId, components, outDir: '' };
   }
 
@@ -300,7 +298,10 @@ export class ReactGeneratorService {
       themeType === 'fse'
         ? FSE_CHUNK_THRESHOLD_CHARS
         : CLASSIC_CHUNK_THRESHOLD_CHARS;
-    const preferDirectAi = themeType === 'fse';
+    const preferDirectAi =
+      themeType === 'fse' &&
+      componentPlan?.type === 'partial' &&
+      !getComponentStrategy(componentName).deterministicFirst;
 
     if (themeType === 'classic' || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
@@ -328,7 +329,11 @@ export class ReactGeneratorService {
         );
       }
 
-      return [this.attachPlanContext(result.component, componentPlan)];
+      return [
+        this.attachPlanContext(result.component, componentPlan, {
+          generationMode: result.generationMode,
+        }),
+      ];
     }
 
     // Too large → split into sections (FSE only)
@@ -400,9 +405,16 @@ export class ReactGeneratorService {
       return componentPlan;
     }
 
+    const removedTypes = new Set<string>();
     const sections = componentPlan.visualPlan.sections.filter((section) => {
-      if (hasSharedHeader && section.type === 'navbar') return false;
-      if (hasSharedFooter && section.type === 'footer') return false;
+      if (hasSharedHeader && section.type === 'navbar') {
+        removedTypes.add('navbar');
+        return false;
+      }
+      if (hasSharedFooter && section.type === 'footer') {
+        removedTypes.add('footer');
+        return false;
+      }
       return true;
     });
 
@@ -410,11 +422,28 @@ export class ReactGeneratorService {
       return componentPlan;
     }
 
+    // When navbar/footer are removed, also strip their exclusive data needs
+    // (siteInfo, menus) from the plan — otherwise CodeGeneratorService will
+    // still emit fetches for them and the validator will reject the component.
+    const chromeRemoved =
+      removedTypes.has('navbar') || removedTypes.has('footer');
+    const remainingSectionTypes = new Set(sections.map((s) => s.type));
+    const stillNeedsChrome =
+      remainingSectionTypes.has('navbar') ||
+      remainingSectionTypes.has('footer');
+    const dataNeeds =
+      chromeRemoved && !stillNeedsChrome
+        ? componentPlan.visualPlan.dataNeeds.filter(
+            (n) => n !== 'siteInfo' && n !== 'menus',
+          )
+        : componentPlan.visualPlan.dataNeeds;
+
     return {
       ...componentPlan,
       visualPlan: {
         ...componentPlan.visualPlan,
         sections,
+        dataNeeds,
       },
     };
   }

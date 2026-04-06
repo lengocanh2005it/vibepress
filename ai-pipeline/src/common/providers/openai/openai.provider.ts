@@ -9,6 +9,10 @@ export const OpenAIProvider: Provider = {
   inject: [ConfigService],
   useFactory: (configService: ConfigService) => {
     const apiKey = configService.get<string>('openai.apiKey')!;
-    return new OpenAI({ apiKey });
+    const baseURL = configService.get<string>('openai.baseURL');
+    return new OpenAI({
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+    });
   },
 };

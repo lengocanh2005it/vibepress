@@ -9,6 +9,16 @@ import type { ThemeTokens } from '../../../agents/block-parser/block-parser.serv
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ComponentVisualPlan } from '../visual-plan.schema.js';
+import {
+  API_CONTRACT_SOURCE_PATH,
+  COMMENT_FIELDS,
+  MENU_FIELDS,
+  MENU_ITEM_FIELDS,
+  PAGE_FRONTEND_FIELDS,
+  POST_FIELDS,
+  SITE_INFO_FIELDS,
+  buildCanonicalApiContractNote,
+} from '../api-contract.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
   const result: string[] = [];
@@ -24,6 +34,10 @@ export function extractTexts(nodes: WpNode[]): string[] {
     if (node.children) result.push(...extractTexts(node.children));
   }
   return result.filter((t) => t.trim().length > 0);
+}
+
+function formatContractFields(fields: readonly string[]): string {
+  return fields.join(', ');
 }
 
 const TEMPLATE = readFileSync(
@@ -302,6 +316,7 @@ function buildClassicThemeNote(
   templateSource: string,
   isSingle: boolean,
   isPage: boolean,
+  isPageComponent: boolean = false,
 ): string {
   if (!templateSource.includes('{/* WP:')) return '';
 
@@ -315,17 +330,26 @@ function buildClassicThemeNote(
       ? `- \`{/* WP: loop start */}\` → (Single view) Render the specific \`${isSingle ? 'post' : 'page'}\` properties. NO loop / array map.`
       : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results`;
 
+  // For PAGE components, the shared Layout wrapper handles Header/Footer chrome.
+  // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
+  const headerHint = isPageComponent
+    ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
+    : `- \`{/* WP: <Header /> */}\` → render site name (\`{siteInfo.siteName}\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
+  const footerHint = isPageComponent
+    ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
+    : `- \`{/* WP: <Footer /> */}\` → render site name + fetch \`GET /api/menus\` for footer links`;
+
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
 
 ### What each hint means — follow exactly:
-- \`{/* WP: <Header /> */}\` → render site name (\`{siteInfo.siteName}\`) + fetch \`GET /api/menus\` and render ALL returned nav items
+${headerHint}
 - \`{/* WP: <Navigation /> */}\` → fetch \`GET /api/menus\` and render ALL items — **NEVER write \`{/* No menus available */}\`**
 ${contentHint}
 ${loopHint}
 - \`{/* WP: post.title */}\` → render title from fetched data
 - \`{/* WP: post.excerpt */}\` → render excerpt from fetched data
-- \`{/* WP: <Footer /> */}\` → render site name + fetch \`GET /api/menus\` for footer links
+${footerHint}
 
 ### ⛔ ABSOLUTE PROHIBITIONS for classic PHP themes:
 1. **NEVER invent hero headings** like "Discover Your Next Adventure", "Build Something Amazing", etc. — these are FABRICATIONS
@@ -342,16 +366,16 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   const parts: string[] = [];
 
   parts.push(
-    '## ACTUAL DATA from this site — do NOT invent anything outside this',
+    `## ACTUAL DATA from this site — grounded to ${API_CONTRACT_SOURCE_PATH}`,
   );
   parts.push('');
   parts.push(
     '> Only use fields shown below. Any field not listed here does NOT exist.',
   );
   parts.push(
-    '> Posts have: id, title, content, excerpt, slug, type, status, date, author, categories (string[]), featuredImage.',
+    `> Posts have: ${formatContractFields(POST_FIELDS)}.`,
   );
-  parts.push('> Pages have: id, title, content, slug.');
+  parts.push(`> Pages have: ${formatContractFields(PAGE_FRONTEND_FIELDS)}.`);
   parts.push(
     '> ⛔ Pages do NOT have: excerpt, date, author, categories, featuredImage, comments.',
   );
@@ -363,7 +387,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   // Site info
   parts.push('### Site info (GET /api/site-info)');
   parts.push(
-    `siteName: "${siteInfo.siteName}" | siteUrl: "${siteInfo.siteUrl}" | blogDescription: "${siteInfo.blogDescription}"`,
+    `${SITE_INFO_FIELDS[1]}: "${siteInfo.siteName}" | ${SITE_INFO_FIELDS[0]}: "${siteInfo.siteUrl}" | ${SITE_INFO_FIELDS[2]}: "${siteInfo.blogDescription}"`,
   );
   parts.push('');
 
@@ -403,6 +427,9 @@ export function buildDataGroundingNote(content: DbContentResult): string {
     `### Menus — ${menus.length} total (GET /api/menus)` +
       (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
   );
+  parts.push(
+    `> Menu fields: ${formatContractFields(MENU_FIELDS)} | MenuItem fields: ${formatContractFields(MENU_ITEM_FIELDS)}.`,
+  );
   for (const m of menus) {
     parts.push(
       `  menu slug:"${m.slug}" name:"${m.name}" — ${m.items.length} items`,
@@ -415,9 +442,16 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   }
   if (menus.length === 0) parts.push('  (empty)');
 
+  parts.push('');
+  parts.push(
+    `### Comments contract (GET /api/comments) — fields: ${formatContractFields(COMMENT_FIELDS)}`,
+  );
+  parts.push(
+    'Use `comment.author` and `comment.content` directly; moderation polling uses `/api/comments/submissions`.',
+  );
+
   // Taxonomies — categories, tags, custom
   if (taxonomies && taxonomies.length > 0) {
-    parts.push('');
     parts.push(
       `### Taxonomies — ${taxonomies.length} type(s) (GET /api/taxonomies)`,
     );
@@ -510,7 +544,7 @@ export function buildPlanContextNote(plan?: {
         'Comment fields: `id, author, date, content, parentId (0 = top-level), userId`. ' +
         'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
         'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty. ' +
-        'If the approved comments section includes a reply form, create controlled form state, submit with `POST /api/comments`, and update the local comments state immediately after a successful post (append the new comment or refetch comments). ' +
+        'If the approved comments section includes a reply form, create controlled form state, generate/store a stable `clientToken` in `localStorage`, submit with `POST /api/comments`, show an awaiting-moderation notice, and poll `GET /api/comments/submissions?slug=${slug}&clientToken=${clientToken}` until a submission becomes approved; only then should you refetch `GET /api/comments` so the public list updates. ' +
         'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed.',
     );
   }
@@ -541,6 +575,12 @@ export function buildPlanContextNote(plan?: {
     lines.push(
       '⛔ Do NOT render `siteInfo.siteName`, `siteInfo.blogDescription`, or `menus.find(...)/menus.map(...)` in this page unless the approved plan is specifically for a dedicated layout partial.',
     );
+    lines.push(
+      '⛔ Even if the original WordPress template source contains header/footer/site-title/navigation/footer-column markup or text, IGNORE it for page components. Shared chrome is migrated into dedicated partials and must not be duplicated inside page content.',
+    );
+    lines.push(
+      '⛔ Do NOT hardcode fallback footer columns, copyright text, placeholder nav links, or `No menus available` messages in any page component.',
+    );
   }
 
   // ── UI Rendering Guidelines ────────────────────────────────────────────────
@@ -569,9 +609,15 @@ export function buildPlanContextNote(plan?: {
   );
   lines.push('');
   lines.push('### Layout & Structure');
-  lines.push(
-    '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<header>`, `<footer>`, `<nav>` instead of generic `<div>`.',
-  );
+  if (plan?.type === 'page') {
+    lines.push(
+      '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<nav>` instead of generic `<div>`. ⛔ Do NOT use site-level `<header>` or `<footer>` elements — the shared Layout wrapper provides them.',
+    );
+  } else {
+    lines.push(
+      '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<header>`, `<footer>`, `<nav>` instead of generic `<div>`.',
+    );
+  }
   lines.push(
     '- Implement responsive design: use Tailwind responsive prefixes (`sm:`, `md:`, `lg:`, `xl:`) for mobile-first layouts.',
   );
@@ -759,6 +805,7 @@ export function buildComponentPrompt(
     templateSource,
     isSingle ?? false,
     isPage ?? false,
+    componentPlan?.type === 'page',
   );
   const planContext = [
     buildPlanContextNote(componentPlan),
@@ -798,6 +845,7 @@ ${
       : '';
 
   return TEMPLATE.replace('{{componentName}}', componentName)
+    .replace('{{apiContract}}', buildCanonicalApiContractNote())
     .replace('{{menuContext}}', menuContextNote)
     .replace('{{planContext}}', planContext)
     .replace('{{slugFetchingNote}}', slugFetchingNote)
@@ -856,6 +904,7 @@ export function buildSectionPrompt(input: {
     input.nodesJson,
     isSingle ?? false,
     isPage ?? false,
+    input.componentPlan?.type === 'page',
   );
   const sectionContextNote = `## Section context — CRITICAL
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 
@@ -26,6 +27,7 @@ export interface GeneratedCodeReviewResult {
 @Injectable()
 export class GeneratedCodeReviewService {
   private readonly logger = new Logger(GeneratedCodeReviewService.name);
+  private readonly tokenTracker = new TokenTracker();
 
   constructor(private readonly llmFactory: LlmFactoryService) {}
 
@@ -123,13 +125,23 @@ export class GeneratedCodeReviewService {
     const reviewPrompt = this.buildReviewPrompt(component, contract);
 
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const { text } = await this.llmFactory.chat({
+      const { text, inputTokens, outputTokens } = await this.llmFactory.chat({
         model: modelName,
         systemPrompt:
           'You are a strict senior React reviewer. Review generated TSX against the approved contract. Return ONLY valid JSON.',
         userPrompt: reviewPrompt,
         maxTokens: 2000,
       });
+      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      if (tokenLogPath) {
+        await this.tokenTracker.init(tokenLogPath);
+        await this.tokenTracker.track(
+          modelName,
+          inputTokens,
+          outputTokens,
+          `${component.name}:generated-review:${attempt}`,
+        );
+      }
 
       const parsed = this.parseReviewResult(text);
       if (parsed) {
@@ -270,7 +282,11 @@ ${component.code}
       );
     if (visualSectionTypes.includes('comments'))
       lines.push(
-        '- POST /api/comments is allowed when the approved comments section renders a reply form and should update local comment state after success',
+        '- POST /api/comments is allowed when the approved comments section renders a reply form, but moderated comments should not be appended directly to the public list',
+      );
+    if (visualSectionTypes.includes('comments'))
+      lines.push(
+        '- /api/comments/submissions?slug=${slug}&clientToken=${token} is allowed for moderation polling after a comment is submitted',
       );
     if (
       isDetail &&

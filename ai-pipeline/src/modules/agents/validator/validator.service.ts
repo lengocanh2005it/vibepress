@@ -35,6 +35,7 @@ export interface CodeValidationContext {
   type?: 'page' | 'partial';
   isSubComponent?: boolean;
   allowedRelativeImports?: string[];
+  requireCommentForm?: boolean;
 }
 
 @Injectable()
@@ -360,6 +361,9 @@ export class ValidatorService {
     const isPartialComponent = PARTIAL_PATTERNS.test(
       context.componentName ?? '',
     );
+    const isSharedChromePartial =
+      context.type === 'partial' &&
+      /^(Header|Footer|Navigation|Nav)$/i.test(context.componentName ?? '');
     const isPageComponent =
       context.type === 'page' &&
       context.isSubComponent !== true &&
@@ -369,31 +373,15 @@ export class ValidatorService {
     // so the AI does not need a retry attempt just for a bad type declaration.
     // Runtime usage violations (page.author etc.) are still caught below.
     if (expectsPageDetail) {
-      const pageTypeRegex = /\b(?:interface|type)\s+Page\b[^{]*\{/;
-      const match = code.match(pageTypeRegex);
-      if (match) {
-        const startIdx = match.index!;
-        const openBrace = code.indexOf('{', startIdx);
-        let depth = 0;
-        let closeBrace = -1;
-        for (let i = openBrace; i < code.length; i++) {
-          if (code[i] === '{') depth++;
-          else if (code[i] === '}') {
-            depth--;
-            if (depth === 0) {
-              closeBrace = i;
-              break;
-            }
-          }
-        }
-        if (closeBrace !== -1) {
-          const body = code.slice(openBrace + 1, closeBrace);
-          const BAD_FIELDS =
-            /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b(\??\s*:[^;}\n]+[;,\n]?)?/g;
-          const cleanedBody = body.replace(BAD_FIELDS, '');
-          code =
-            code.slice(0, openBrace + 1) + cleanedBody + code.slice(closeBrace);
-        }
+      const pageType = this.findTypeBody(code, 'Page');
+      if (pageType) {
+        const BAD_FIELDS =
+          /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b(\??\s*:[^;}\n]+[;,\n]?)?/g;
+        const cleanedBody = pageType.body.replace(BAD_FIELDS, '');
+        code =
+          code.slice(0, pageType.openBrace + 1) +
+          cleanedBody +
+          code.slice(pageType.closeBrace);
       }
     }
 
@@ -463,8 +451,9 @@ export class ValidatorService {
           `Page detail contract violated: \`Page.${pageFieldMatch[1]}\` does not exist. A page only exposes \`id, title, content, slug\` in this pipeline.`,
         );
       }
-      const pageInterfaceMatch = code.match(
-        /\b(?:interface|type)\s+Page\b[^{]*\{[\s\S]*?\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b[\s\S]*?\}/,
+      const pageType = this.findTypeBody(code, 'Page');
+      const pageInterfaceMatch = pageType?.body.match(
+        /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
       );
       if (pageInterfaceMatch) {
         violations.push(
@@ -488,6 +477,60 @@ export class ValidatorService {
       if (this.usesSharedChromeData(code)) {
         violations.push(
           'Layout data contract violated: page components must NOT render shared chrome data such as `siteInfo.siteName` or `menus.find(...)/menus.map(...)`. Shared Header/Footer/Navigation partials own that UI.',
+        );
+      }
+      if (/No menus available/i.test(code)) {
+        violations.push(
+          'Layout contract violated: page components must not render shared navigation placeholders such as `No menus available`. Shared Header/Navigation partials own global menus.',
+        );
+      }
+      if (
+        /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
+        /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
+      ) {
+        violations.push(
+          'Layout/content contract violated: page components must not contain placeholder `#` links. Use approved route/content links only; shared footer/navigation links belong to dedicated partials.',
+        );
+      }
+      if (/All rights reserved|©|&copy;/i.test(code)) {
+        violations.push(
+          'Layout contract violated: page components must not render copyright/footer copy. Shared Footer partial owns that content.',
+        );
+      }
+    }
+
+    if (isSharedChromePartial) {
+      if (dataNeeds.has('menus') && !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) && !/\bmenu\.items\b/.test(code)) {
+        violations.push(
+          'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
+        );
+      }
+      if (
+        /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
+        /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Header/Footer/Navigation partials must not emit placeholder `#` links. Render actual links from `/api/menus` or external URLs from data.',
+        );
+      }
+      if (/No menus available/i.test(code)) {
+        violations.push(
+          'Shared chrome contract violated: do not emit `No menus available` placeholders in Header/Footer/Navigation partials. Render the API menus or a structurally empty nav.',
+        );
+      }
+    }
+
+    if (context.requireCommentForm) {
+      const hasCommentPost =
+        /fetch\(\s*['"`]\/api\/comments['"`]\s*,/.test(code) &&
+        /\bmethod\s*:\s*['"`]POST['"`]/.test(code);
+      const hasCommentForm =
+        /<form\b[\s\S]*?>[\s\S]*?(?:<textarea\b|type=["']email["']|type=["']text["'])/.test(
+          code,
+        ) && /onSubmit=\{[^}]+\}/.test(code);
+      if (!hasCommentPost || !hasCommentForm) {
+        violations.push(
+          'Comments contract violated: the approved comments section requires a reply form, but the component does not implement a working comment submission form that POSTs to `/api/comments`.',
         );
       }
     }
@@ -656,6 +699,40 @@ export class ValidatorService {
       isValid: true,
       ...(code !== rawCode ? { fixedCode: code } : {}),
     };
+  }
+
+  /**
+   * Run the TypeScript compiler against a single generated component file and
+   * return up to 10 human-readable error strings (e.g. "src/Archive.tsx:12:5
+   * TS17002: Expected corresponding JSX closing tag for 'div'").
+   *
+   * These errors are fed back to the AI as the retry signal so it knows the
+   * exact line/column/code to fix instead of a generic "validation failed".
+   *
+   * Returns an empty array when the file has no TypeScript errors.
+   */
+  extractTypeScriptErrors(code: string, componentName: string): string[] {
+    const filePath = `${VIRTUAL_ROOT}/src/${componentName}.tsx`;
+    const files = new Map<string, string>();
+    files.set(this.normalizeVirtualPath(filePath), code);
+    files.set(
+      this.normalizeVirtualPath(VIRTUAL_REACT_SHIM_FILE),
+      this.buildReactShim(),
+    );
+
+    const host = this.createVirtualCompilerHost(files);
+    const program = ts.createProgram({
+      rootNames: [this.normalizeVirtualPath(filePath)],
+      options: PREVIEW_COMPILER_OPTIONS,
+      host,
+    });
+
+    return ts
+      .getPreEmitDiagnostics(program)
+      .filter((diag) => !this.shouldIgnoreProjectDiagnostic(diag))
+      .map((diag) => this.formatDiagnostic(diag))
+      .filter(Boolean)
+      .slice(0, 10) as string[];
   }
 
   private checkProjectCompilation(components: GeneratedComponent[]): string[] {
@@ -972,6 +1049,48 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
       /\{\s*menus\b/.test(code)
     );
+  }
+
+  private findTypeBody(
+    code: string,
+    typeName: string,
+  ): {
+    startIdx: number;
+    openBrace: number;
+    closeBrace: number;
+    body: string;
+  } | null {
+    const typeRegex = new RegExp(
+      `\\b(?:interface|type)\\s+${typeName}\\b[^\\{]*\\{`,
+    );
+    const match = code.match(typeRegex);
+    if (!match || match.index == null) return null;
+
+    const startIdx = match.index;
+    const openBrace = code.indexOf('{', startIdx);
+    if (openBrace === -1) return null;
+
+    let depth = 0;
+    let closeBrace = -1;
+    for (let i = openBrace; i < code.length; i++) {
+      if (code[i] === '{') depth++;
+      else if (code[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          closeBrace = i;
+          break;
+        }
+      }
+    }
+
+    if (closeBrace === -1) return null;
+
+    return {
+      startIdx,
+      openBrace,
+      closeBrace,
+      body: code.slice(openBrace + 1, closeBrace),
+    };
   }
 
   private getVirtualComponentFilePath(comp: GeneratedComponent): string {

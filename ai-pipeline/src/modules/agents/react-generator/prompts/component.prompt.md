@@ -1,32 +1,6 @@
-You are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX + Tailwind CSS) that fetches its own data.
+lYou are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX + Tailwind CSS) that fetches its own data.
 
-## API endpoints — relative paths only, NEVER hardcode host
-
-| Endpoint                                    | Returns                                                               |
-| ------------------------------------------- | --------------------------------------------------------------------- |
-| `GET /api/site-info`                        | `{ siteName, siteUrl, blogDescription, adminEmail, language }`        |
-| `GET /api/posts`                            | `Post[]` sorted newest first                                          |
-| `GET /api/posts/:slug`                      | single `Post`                                                         |
-| `GET /api/pages`                            | `Page[]`                                                              |
-| `GET /api/pages/:slug`                      | single `Page`                                                         |
-| `GET /api/menus`                            | `{ name, slug, items: { id, title, url, order, parentId }[] }[]`      |
-| `GET /api/taxonomies`                       | `string[]` — list of taxonomy slugs (e.g. `"category"`, `"post_tag"`) |
-| `GET /api/taxonomies/:taxonomy`             | `Term[]` — terms for that taxonomy                                    |
-| `GET /api/taxonomies/:taxonomy/:term/posts` | `Post[]` — posts filtered by taxonomy + term slug                     |
-| `GET /api/comments?slug=<post-slug>`        | `Comment[]` — approved comments for a post, ordered oldest-first      |
-| `GET /api/comments?postId=<id>`             | same as above, by post ID                                             |
-| `POST /api/comments`                        | create a comment, then update local React comment state immediately   |
-
-**Post fields**: `id, title, content, excerpt, slug, type, status, date, author, categories: string[], featuredImage: string|null`
-**Page fields**: `id, title, content, slug`
-⛔ **Types:** If you write `interface Page { ... }`, it may **only** list those four fields (and optional React helpers). Never add `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments`, or `menuOrder` — those belong to **posts** or other APIs, not `GET /api/pages/:slug`. Do not copy a `Post` interface and rename it to `Page`.
-**Term fields**: `id, name, slug, description, count, parentId`
-**Comment fields**: `id, author, date, content, parentId (0 = top-level), userId` — no avatar field; render initials avatar using `comment.author.charAt(0)`
-If a comment form is present, use controlled React state for the form, submit to `POST /api/comments`, then append/refetch so the new comment appears immediately without a full page reload.
-⛔ `post.tags`, `post.title.rendered`, unlisted fields → `undefined`, runtime error.
-⛔ Pages do NOT have `excerpt`, `date`, `author`, `categories`, `featuredImage`, or `comments`.
-⛔ `site-info` fields: `siteName/siteUrl/blogDescription` — NOT `name/url/description`.
-⛔ `menus` items: `parentId` is `number` (0 = top-level, never `null`) — filter with `item.parentId === 0`.
+{{apiContract}}
 
 {{menuContext}}
 
@@ -99,7 +73,7 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 
 - `useEffect` + `useState`, fetch on mount, show loading/error states
 - Define TypeScript interfaces above the component
-- Ordinary page components must NOT fetch `/api/site-info` or `/api/menus` just to recreate the global header/footer. Keep that data in dedicated `Header` / `Footer` / `Navigation` partials only.
+- ⛔ PAGE components must NEVER fetch `/api/site-info` or `/api/menus`. Those endpoints are owned exclusively by `Header` / `Footer` / `Navigation` partials. If the template JSON contains a `header` or `footer` block, skip it entirely — the shared Layout wrapper already renders it.
 - Menu guard — always use optional chaining:
   ```tsx
   const menu = menus.find(m => m.slug === 'primary') ?? menus[0];
@@ -322,19 +296,19 @@ Post list layout: mirror template structure — row layout → `flex items-basel
 
 Blocks form a hierarchical tree. Parent blocks control layout.
 
-| Block           | Meaning                                       |
-| --------------- | --------------------------------------------- |
-| `group`         | layout container (section)                    |
-| `columns`       | multi-column layout container                 |
-| `column`        | individual column inside `columns`            |
-| `cover`         | hero section with background image            |
-| `media-text`    | image + text split layout                     |
-| `query`         | dynamic list of posts                         |
-| `post-template` | template for each post inside query           |
-| `navigation`    | navigation menu container                     |
-| `header`        | page header (site branding + navigation)      |
-| `footer`        | page footer (links, copyright, alt info)      |
-| `html`          | render raw HTML using dangerouslySetInnerHTML |
+| Block           | Meaning                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `group`         | layout container (section)                                                                                                                 |
+| `columns`       | multi-column layout container                                                                                                              |
+| `column`        | individual column inside `columns`                                                                                                         |
+| `cover`         | hero section with background image                                                                                                         |
+| `media-text`    | image + text split layout                                                                                                                  |
+| `query`         | dynamic list of posts                                                                                                                      |
+| `post-template` | template for each post inside query                                                                                                        |
+| `navigation`    | navigation menu container                                                                                                                  |
+| `header`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<header>` only inside dedicated `Header` partials. |
+| `footer`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<footer>` only inside dedicated `Footer` partials. |
+| `html`          | render raw HTML using dangerouslySetInnerHTML                                                                                              |
 
 ## Block hierarchy — DO NOT FLATTEN
 
@@ -347,8 +321,8 @@ Rules:
 - `column` → child flex item
 - `query` → container for mapped posts
 - `post-template` → wrapper for each post item
-- `header` → top page structure in `<header>`
-- `footer` → bottom page structure in `<footer>`
+- `header` → ⛔ **SKIP in page components** — shared Layout wrapper provides it; render as `<header>` only in dedicated Header partials
+- `footer` → ⛔ **SKIP in page components** — shared Layout wrapper provides it; render as `<footer>` only in dedicated Footer partials
 
 ⛔ NEVER move children outside their parent block.
 ⛔ NEVER flatten nested layout blocks.
@@ -473,10 +447,11 @@ File order must be:
 Before writing code:
 
 1. Identify blocks in the template tree
-2. Determine required API endpoints
-3. Map blocks → React layout
-4. Determine dynamic vs static content
-5. Then generate TSX
+2. If this is a **PAGE component**: remove all `header` and `footer` blocks from consideration — do NOT render them and do NOT fetch `/api/site-info` or `/api/menus` for them
+3. Determine required API endpoints from the remaining blocks only
+4. Map remaining blocks → React layout
+5. Determine dynamic vs static content
+6. Then generate TSX
 
 ## Output
 

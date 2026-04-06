@@ -16,12 +16,34 @@ export function buildVisualPlanPrompt(input: {
   templateSource: string; // pre-parsed block JSON string or PHP markup
   content: DbContentResult;
   tokens?: ThemeTokens;
+  componentType?: 'page' | 'partial';
+  route?: string | null;
+  isDetail?: boolean;
+  dataNeeds?: DataNeed[];
+  sourceAnalysis?: string;
 }): { systemPrompt: string; userPrompt: string } {
-  const { componentName, templateSource, content, tokens } = input;
+  const {
+    componentName,
+    templateSource,
+    content,
+    tokens,
+    componentType,
+    route,
+    isDetail,
+    dataNeeds,
+    sourceAnalysis,
+  } = input;
 
   const palette = buildPaletteHint(tokens);
   const siteCtx = buildSiteContext(content);
   const imageHints = buildImageSourcesHint(templateSource);
+  const contractHint = buildContractHint({
+    componentName,
+    componentType,
+    route,
+    isDetail,
+    dataNeeds,
+  });
 
   const systemPrompt = `You are a WordPress-to-React UI planner.
 Given a WordPress template (block JSON tree or PHP markup) and site context, you output a JSON ComponentVisualPlan describing the visual layout.
@@ -35,7 +57,7 @@ This is a migration plan, NOT a redesign brief.
 \`\`\`typescript
 interface ComponentVisualPlan {
   componentName: string;
-  dataNeeds: Array<'siteInfo' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail'>;
+  dataNeeds: Array<'siteInfo' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
   palette: {
     background: string;  // hex
     surface: string;     // card backgrounds hex
@@ -111,11 +133,18 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
 - When \`pageDetail\` is in dataNeeds: the WordPress page API only exposes \`id, title, content, slug\`. Do not plan UI that requires post-only fields (author, categories, date, excerpt, featured image) on **pages** — those apply to posts only.
+- The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
+- If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
+- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must be content-only: use \`showPages\` and/or \`showPosts\`, but NEVER set \`menuSlug\` or \`showSiteInfo\`.
+- Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
+- Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const userPrompt = `## Component to plan: ${componentName}
 
-${siteCtx}
+${contractHint}
+
+${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${siteCtx}
 
 ${palette}
 
@@ -167,6 +196,32 @@ function buildSiteContext(content: DbContentResult): string {
   );
   lines.push(`Posts in DB: ${content.posts.length}`);
   lines.push(`Pages in DB: ${content.pages.length}`);
+  return lines.join('\n');
+}
+
+function buildContractHint(input: {
+  componentName: string;
+  componentType?: 'page' | 'partial';
+  route?: string | null;
+  isDetail?: boolean;
+  dataNeeds?: DataNeed[];
+}): string {
+  const lines = ['## Approved component contract'];
+  lines.push(`Component: ${input.componentName}`);
+  lines.push(`Type: ${input.componentType ?? 'unspecified'}`);
+  lines.push(`Route: ${input.route ?? 'null'}`);
+  lines.push(`Detail route: ${input.isDetail ? 'yes' : 'no'}`);
+  lines.push(
+    `Allowed dataNeeds: ${input.dataNeeds?.join(', ') || '(none declared)'}`,
+  );
+  if (input.componentType === 'page') {
+    lines.push(
+      'Hard rule: do not plan navbar/footer shared chrome inside this page.',
+    );
+    lines.push(
+      'Hard rule: any sidebar on this page must be content-only, never menu/site info chrome.',
+    );
+  }
   return lines.join('\n');
 }
 
@@ -244,7 +299,16 @@ const VALID_DATA_NEEDS = new Set<string>([
   'menus',
   'postDetail',
   'pageDetail',
+  'comments',
 ]);
+
+export interface VisualPlanContract {
+  componentType?: 'page' | 'partial';
+  route?: string | null;
+  isDetail?: boolean;
+  dataNeeds?: DataNeed[];
+  stripLayoutChrome?: boolean;
+}
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
@@ -489,6 +553,81 @@ export interface VisualPlanParseResult {
   diagnostic?: VisualPlanParseDiagnostic;
 }
 
+export function sanitizeSectionsForContract(
+  sections: SectionPlan[],
+  contract?: VisualPlanContract,
+): { sections: SectionPlan[]; adjustments: string[] } {
+  if (!contract) return { sections, adjustments: [] };
+
+  const adjustments: string[] = [];
+  const allowedNeeds = new Set(contract.dataNeeds ?? []);
+  const allowPostDetail = allowedNeeds.has('postDetail');
+  const allowPageDetail = allowedNeeds.has('pageDetail');
+  const allowComments = allowPostDetail || allowedNeeds.has('comments');
+  const stripLayoutChrome =
+    contract.stripLayoutChrome ?? contract.componentType === 'page';
+
+  const sanitized = sections
+    .map((section) => {
+      if (
+        stripLayoutChrome &&
+        (section.type === 'navbar' || section.type === 'footer')
+      ) {
+        adjustments.push(`removed ${section.type} section from page contract`);
+        return null;
+      }
+
+      if (section.type === 'post-content' && !allowPostDetail) {
+        adjustments.push(
+          'removed post-content section because contract does not allow postDetail',
+        );
+        return null;
+      }
+
+      if (section.type === 'page-content' && !allowPageDetail) {
+        adjustments.push(
+          'removed page-content section because contract does not allow pageDetail',
+        );
+        return null;
+      }
+
+      if (section.type === 'comments' && !allowComments) {
+        adjustments.push(
+          'removed comments section because contract does not allow comments',
+        );
+        return null;
+      }
+
+      if (section.type === 'sidebar' && contract.componentType === 'page') {
+        const next = { ...section };
+        let changed = false;
+        if (next.menuSlug) {
+          delete next.menuSlug;
+          changed = true;
+        }
+        if (next.showSiteInfo) {
+          next.showSiteInfo = false;
+          changed = true;
+        }
+        if (!next.showPages && !next.showPosts) {
+          next.showPages = true;
+          changed = true;
+        }
+        if (changed) {
+          adjustments.push(
+            'sanitized sidebar to remove shared chrome and keep only content widgets',
+          );
+        }
+        return next;
+      }
+
+      return section;
+    })
+    .filter((section): section is SectionPlan => !!section);
+
+  return { sections: sanitized, adjustments };
+}
+
 /**
  * Parse and validate the AI response into a ComponentVisualPlan.
  *
@@ -499,7 +638,7 @@ export interface VisualPlanParseResult {
 export function parseVisualPlanDetailed(
   raw: string,
   componentName: string,
-  options?: { allowedImageSrcs?: string[] },
+  options?: { allowedImageSrcs?: string[]; contract?: VisualPlanContract },
 ): VisualPlanParseResult {
   const cleaned = raw
     .replace(/^```[\w]*\n?/gm, '')
@@ -572,11 +711,17 @@ export function parseVisualPlanDetailed(
     }
   }
 
-  if (sections.length === 0) {
+  const sanitizedSections = sanitizeSectionsForContract(
+    sections,
+    options?.contract,
+  );
+  droppedSections.push(...sanitizedSections.adjustments);
+
+  if (sanitizedSections.sections.length === 0) {
     return {
       plan: null,
       diagnostic: {
-        reason: 'all sections were rejected by validator',
+        reason: 'all sections were rejected by validator or contract sanitizer',
         rawOutput: raw,
         cleanedOutput: cleaned,
         droppedSections,
@@ -584,11 +729,16 @@ export function parseVisualPlanDetailed(
     };
   }
 
-  const dataNeeds: DataNeed[] = Array.isArray(parsed.dataNeeds)
+  const parsedDataNeeds: DataNeed[] = Array.isArray(parsed.dataNeeds)
     ? (parsed.dataNeeds as any[]).filter((d): d is DataNeed =>
         VALID_DATA_NEEDS.has(d),
       )
     : [];
+  const dataNeeds = options?.contract?.dataNeeds?.length
+    ? parsedDataNeeds.filter((need) =>
+        options.contract!.dataNeeds!.includes(need),
+      )
+    : parsedDataNeeds;
 
   // Planner always overrides typography + layout after calling parseVisualPlan.
   // When called directly from CodeReviewerService (fallback path), we inject
@@ -615,7 +765,7 @@ export function parseVisualPlanDetailed(
       componentName,
       dataNeeds,
       palette,
-      sections,
+      sections: sanitizedSections.sections,
       typography,
       layout,
       blockStyles: {},
@@ -632,11 +782,61 @@ export function parseVisualPlan(
 
 function buildJsonRepairCandidates(input: string): string[] {
   const candidates: string[] = [];
+  const pushCandidate = (candidate: string) => {
+    const trimmed = candidate.trim();
+    if (!trimmed || trimmed === input.trim() || candidates.includes(trimmed)) {
+      return;
+    }
+    candidates.push(trimmed);
+  };
 
   const escapedControls = escapeControlCharsInJsonStrings(input);
-  if (escapedControls !== input) candidates.push(escapedControls);
+  pushCandidate(escapedControls);
+
+  const withoutTrailingCommas = removeTrailingCommas(escapedControls);
+  pushCandidate(withoutTrailingCommas);
+
+  const jsObjectLiteral = convertJsObjectLiteralToJson(withoutTrailingCommas);
+  pushCandidate(jsObjectLiteral);
 
   return candidates;
+}
+
+function removeTrailingCommas(input: string): string {
+  return input.replace(/,\s*([}\]])/g, '$1');
+}
+
+function convertJsObjectLiteralToJson(input: string): string {
+  let out = input.trim();
+  out = stripJavaScriptComments(out);
+  out = quoteUnquotedObjectKeys(out);
+  out = convertSingleQuotedStrings(out);
+  out = removeTrailingCommas(out);
+  return out;
+}
+
+function stripJavaScriptComments(input: string): string {
+  return input.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+}
+
+function quoteUnquotedObjectKeys(input: string): string {
+  return input.replace(
+    /([{,]\s*)([A-Za-z_$][A-Za-z0-9_$-]*)(\s*:)/g,
+    '$1"$2"$3',
+  );
+}
+
+function convertSingleQuotedStrings(input: string): string {
+  return input.replace(
+    /'([^'\\]*(?:\\.[^'\\]*)*)'/g,
+    (_match, content: string) => {
+      const normalized = content
+        .replace(/\\'/g, "'")
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+      return JSON.stringify(normalized);
+    },
+  );
 }
 
 function escapeControlCharsInJsonStrings(input: string): string {
