@@ -7,6 +7,7 @@ const SplitView: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const jobId = location.state?.jobId || "";
+  const siteId: string = location.state?.siteId || "";
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
 
@@ -58,11 +59,11 @@ const SplitView: React.FC = () => {
     setPushGitState({ loading: true, githubUrl: null, error: null });
     try {
       const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/deploy/push-git`,
+        `${import.meta.env.VITE_BACKEND_URL}/api/deploy`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId }),
+          body: JSON.stringify({ jobId, siteId }),
         },
       );
       const data = await res.json();

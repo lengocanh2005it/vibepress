@@ -41,6 +41,7 @@ const Editor: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const siteUrl: string = location.state?.siteUrl || '';
+  const siteId: string = location.state?.siteId || '';
   const {email} = useUser();
 
   const [annotationsOpen, setAnnotationsOpen] = useState(true);
@@ -95,12 +96,12 @@ const Editor: React.FC = () => {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Enter' || event.key === 'ArrowRight') {
-        navigate('/app/editor/split-view');
+        navigate('/app/editor/split-view', { state: { siteId } });
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [navigate]);
+  }, [navigate, siteId]);
 
   useEffect(() => {
     if (!siteUrl) return;
@@ -113,11 +114,11 @@ const Editor: React.FC = () => {
     if (!chatInput.trim()) return;
     
     setChatInput('');
-    if(email)
+    if(siteId)
     {
-      runAiProcess(email).then((data)=>{
+      runAiProcess(siteId).then((data)=>{
         console.log('AI process started with job ID:', data.jobId);
-        navigate('/app/editor/split-view', {state: {jobId: data.jobId}});
+        navigate('/app/editor/split-view', { state: { jobId: data.jobId, siteId } });
       })
     }
   };

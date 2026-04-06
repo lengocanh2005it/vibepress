@@ -210,10 +210,10 @@ export class OrchestratorService {
     private readonly httpService: HttpService,
   ) {}
 
-  async run(email: string): Promise<{ jobId: string }> {
+  async run(siteId: string): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
       this.httpService.get(
-        `${this.configService.get<string>('automation.url', '')}/wp/db-info?email=${encodeURIComponent(email)}`,
+        `${this.configService.get<string>('automation.url', '')}/wp/db-info-by-site?siteId=${siteId}`,
       ),
     );
 

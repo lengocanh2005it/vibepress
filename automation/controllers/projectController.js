@@ -508,26 +508,24 @@ function getReposByEmail(req, res) {
   return res.status(200).json({ success: true, email, repos });
 }
 
-function getDBinfoByEmail(req, res) {
-  const email = req.query.email;
+function getDBinfoBySiteId(req, res) {
+  const { siteId } = req.query;
 
-  if (!email) {
-    return res.status(400).json({ success: false, error: "email query param is required" });
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: "siteId query param is required" });
   }
 
   const db = readDb();
-  const site = Object.values(db.wpSites ?? {}).find(
-    (s) => s.adminEmail?.toLowerCase() === email.toLowerCase()
-  );
+  const site = db.wpSites?.[siteId];
 
   if (!site) {
-    return res.status(404).json({ success: false, error: "No site found for this email" });
+    return res.status(404).json({ success: false, error: "No site found for this siteId" });
   }
 
   return res.status(200).json({
     themeGithubUrl: site.wpRepoUrl,
     dbCredentials: {
-      host: "localhost",
+      host: site.dbInfo?.db_host?.split(':')[0] ?? 'localhost',
       port: site.dbInfo?.db_port,
       dbName: site.dbInfo?.db_name,
       password: site.dbInfo?.db_password,
@@ -753,7 +751,7 @@ module.exports = {
   getCommitsByRepo,
   getWpSitePages,
   proxyWpPage,
-  getDBinfoByEmail
+  getDBinfoBySiteId
 };
 
 
