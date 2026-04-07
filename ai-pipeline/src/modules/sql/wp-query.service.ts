@@ -24,6 +24,8 @@ export interface WpPage {
 export interface WpMenu {
   name: string;
   slug: string;
+  /** WordPress theme location slug (e.g. "primary", "footer-about"). null when not assigned. */
+  location: string | null;
   items: WpMenuItem[];
 }
 
@@ -56,16 +58,7 @@ export interface WpPluginInfo {
   source: 'active_plugins' | 'heuristic';
 }
 
-export interface WpCommerceInfo {
-  hasWooCommerce: boolean;
-  mode: 'none' | 'woo-readonly';
-  productsCount: number;
-  productCategoriesCount: number;
-  corePages: string[];
-}
-
 export interface WpSiteCapabilities {
-  wooCommerce: boolean;
   activePluginSlugs: string[];
 }
 
@@ -108,7 +101,6 @@ export interface WpRuntimeFeatures {
   elementorDocuments: WpElementorDocument[];
   customPostTypes: WpCustomPostType[];
   capabilities: WpSiteCapabilities;
-  commerce: WpCommerceInfo;
 }
 
 export interface WpTaxonomyTerm {
@@ -179,6 +171,9 @@ export class WpQueryService {
          WHERE tt.taxonomy = 'nav_menu'`,
       );
 
+      // Build termId → location map from WordPress theme_mods
+      const locationMap = await this.queryNavMenuLocations(conn, prefix);
+
       const result: WpMenu[] = [];
 
       for (const menu of menus) {
@@ -199,6 +194,7 @@ export class WpQueryService {
         result.push({
           name: menu.name,
           slug: menu.slug,
+          location: locationMap.get(menu.term_id) ?? null,
           items: items.map((item) => ({
             id: item.ID,
             title: item.post_title,
@@ -209,9 +205,66 @@ export class WpQueryService {
         });
       }
 
+      // Heuristic fallback: if no location assignments found, infer primary nav
+      // by matching slug patterns, then by item count (largest menu = main nav).
+      if (result.length > 0 && result.every((m) => !m.location)) {
+        const primaryBySlug = result.find((m) =>
+          /^(primary|main|header|navigation|nav|top|menu)/i.test(m.slug),
+        );
+        const primaryBySize = result.reduce((a, b) =>
+          a.items.length >= b.items.length ? a : b,
+        );
+        const primary = primaryBySlug ?? primaryBySize;
+        for (const m of result) {
+          if (m === primary) m.location = 'primary';
+        }
+      }
+
       return result;
     } finally {
       await conn.end();
+    }
+  }
+
+  /**
+   * Read nav_menu_locations from WordPress theme_mods option.
+   * Returns a Map of { termId → locationSlug }.
+   * Returns an empty Map if the option is missing or unparseable.
+   */
+  private async queryNavMenuLocations(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+  ): Promise<Map<number, string>> {
+    try {
+      // Get active stylesheet to find the right theme_mods option
+      const [[stylesheetRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+      );
+      const stylesheet = stylesheetRow?.option_value as string | undefined;
+      if (!stylesheet) return new Map();
+
+      const [[modsRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = ? LIMIT 1`,
+        [`theme_mods_${stylesheet}`],
+      );
+      const serialized = modsRow?.option_value as string | undefined;
+      if (!serialized) return new Map();
+
+      // Parse PHP serialized array to extract nav_menu_locations
+      const parsed = phpUnserializeSimple(serialized);
+      const locations = parsed?.nav_menu_locations as
+        | Record<string, number>
+        | undefined;
+      if (!locations || typeof locations !== 'object') return new Map();
+
+      // Invert: { locationSlug → termId } → Map<termId, locationSlug>
+      const map = new Map<number, string>();
+      for (const [locationSlug, termId] of Object.entries(locations)) {
+        if (termId) map.set(Number(termId), locationSlug);
+      }
+      return map;
+    } catch {
+      return new Map();
     }
   }
 
@@ -342,8 +395,7 @@ export class WpQueryService {
       const prefix = await this.getTablePrefix(conn);
       const [optionRows] = await conn.query<any[]>(
         `SELECT option_name, option_value FROM \`${prefix}options\`
-         WHERE option_name IN ('active_plugins', 'woocommerce_db_version')
-            OR option_name LIKE 'woocommerce_%'
+         WHERE option_name IN ('active_plugins')
             OR option_name LIKE 'elementor_%'
             OR option_name LIKE 'acf_%'
             OR option_name LIKE 'wpseo_%'`,
@@ -368,16 +420,8 @@ export class WpQueryService {
         .filter((name) => name !== 'active_plugins')
         .sort();
 
-      const explicitMetaKeys = [
-        '_elementor_data',
-        '_elementor_css',
-        '_price',
-        '_sku',
-        '_stock_status',
-        '_wc_average_rating',
-      ];
+      const explicitMetaKeys = ['_elementor_data', '_elementor_css'];
       const metaLikeClauses = [
-        'meta_key LIKE ?',
         'meta_key LIKE ?',
         'meta_key LIKE ?',
         'meta_key LIKE ?',
@@ -389,36 +433,13 @@ export class WpQueryService {
             OR ${metaLikeClauses}
          GROUP BY meta_key
          ORDER BY cnt DESC, meta_key ASC`,
-        [
-          ...explicitMetaKeys,
-          'elementor_%',
-          'woocommerce_%',
-          'acf_%',
-          '_acf_%',
-        ],
+        [...explicitMetaKeys, 'elementor_%', 'acf_%', '_acf_%'],
       );
       const metaKeys: WpMetaKeyUsage[] = metaKeyRows.map((row) => ({
         metaKey: String(row.meta_key),
         count: Number(row.cnt),
       }));
 
-      const [productRows] = await conn.query<any[]>(
-        `SELECT COUNT(*) AS total
-         FROM \`${prefix}posts\`
-         WHERE post_type = 'product' AND post_status IN ('publish', 'private')`,
-      );
-      const [productCategoryRows] = await conn.query<any[]>(
-        `SELECT COUNT(*) AS total
-         FROM \`${prefix}term_taxonomy\`
-         WHERE taxonomy = 'product_cat'`,
-      );
-      const [corePageRows] = await conn.query<any[]>(
-        `SELECT post_name
-         FROM \`${prefix}posts\`
-         WHERE post_type = 'page'
-           AND post_status IN ('publish', 'private')
-           AND post_name IN ('shop', 'cart', 'checkout', 'my-account')`,
-      );
       const [shortcodeRows] = await conn.query<any[]>(
         `SELECT post_content
          FROM \`${prefix}posts\`
@@ -439,9 +460,6 @@ export class WpQueryService {
          WHERE p.post_status IN ('publish', 'private')`,
       );
 
-      const productsCount = Number(productRows[0]?.total ?? 0);
-      const productCategoriesCount = Number(productCategoryRows[0]?.total ?? 0);
-      const corePages = corePageRows.map((row) => String(row.post_name));
       const shortcodes = this.collectUsage(
         shortcodeRows.map((row) => String(row.post_content ?? '')),
         /\[([a-z0-9_-]+)/gi,
@@ -461,25 +479,6 @@ export class WpQueryService {
           ),
         }),
       );
-
-      const hasWooByPlugin = plugins.some(
-        (plugin) => plugin.slug === 'woocommerce',
-      );
-      const hasWooByData =
-        !!optionMap.get('woocommerce_db_version') ||
-        productsCount > 0 ||
-        productCategoriesCount > 0 ||
-        corePages.length > 0;
-      const hasWooCommerce = hasWooByPlugin || hasWooByData;
-
-      if (hasWooCommerce && !hasWooByPlugin) {
-        plugins.push({
-          slug: 'woocommerce',
-          pluginFile: 'woocommerce/woocommerce.php',
-          active: true,
-          source: 'heuristic',
-        });
-      }
 
       const activePluginSlugs = Array.from(
         new Set(plugins.map((plugin) => plugin.slug).filter(Boolean)),
@@ -545,15 +544,7 @@ export class WpQueryService {
         elementorDocuments,
         customPostTypes,
         capabilities: {
-          wooCommerce: hasWooCommerce,
           activePluginSlugs,
-        },
-        commerce: {
-          hasWooCommerce,
-          mode: hasWooCommerce ? 'woo-readonly' : 'none',
-          productsCount,
-          productCategoriesCount,
-          corePages,
         },
       };
     } finally {
@@ -673,5 +664,65 @@ export class WpQueryService {
 
     visit(parsed);
     return [...widgetTypes].sort();
+  }
+}
+
+/**
+ * Minimal PHP unserialize for WordPress theme_mods arrays.
+ * Handles nested associative arrays, strings, and integers — enough to
+ * extract nav_menu_locations without an external dependency.
+ *
+ * Returns null on any parse error.
+ */
+function phpUnserializeSimple(input: string): Record<string, any> | null {
+  let pos = 0;
+
+  function readValue(): any {
+    const type = input[pos];
+    pos += 2; // skip "X:"
+    if (type === 'i') {
+      const end = input.indexOf(';', pos);
+      const n = parseInt(input.slice(pos, end), 10);
+      pos = end + 1;
+      return n;
+    }
+    if (type === 's') {
+      const lenEnd = input.indexOf(':', pos);
+      const len = parseInt(input.slice(pos, lenEnd), 10);
+      pos = lenEnd + 2; // skip ':'+"
+      const str = input.slice(pos, pos + len);
+      pos += len + 2; // skip '"' + ';'
+      return str;
+    }
+    if (type === 'a') {
+      const countEnd = input.indexOf(':', pos);
+      const count = parseInt(input.slice(pos, countEnd), 10);
+      pos = countEnd + 2; // skip ':{'
+      const obj: Record<string, any> = {};
+      for (let i = 0; i < count; i++) {
+        const key = readValue();
+        const val = readValue();
+        obj[String(key)] = val;
+      }
+      pos += 1; // skip '}'
+      return obj;
+    }
+    if (type === 'b') {
+      const end = input.indexOf(';', pos);
+      const b = input.slice(pos, end) === '1';
+      pos = end + 1;
+      return b;
+    }
+    if (type === 'N') {
+      pos -= 1; // 'N;' has no value part
+      return null;
+    }
+    return undefined;
+  }
+
+  try {
+    return readValue() as Record<string, any>;
+  } catch {
+    return null;
   }
 }

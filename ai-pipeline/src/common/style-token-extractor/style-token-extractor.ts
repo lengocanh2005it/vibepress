@@ -57,6 +57,51 @@ export function extractStyleCssTokens(
   };
 }
 
+export function buildStyleCssBridge(
+  styleCss: string | undefined,
+  baseTokens?: Partial<ThemeTokens>,
+): string {
+  const extracted = extractStyleCssTokens(styleCss, baseTokens);
+  const tokens: ThemeTokens = {
+    colors: mergeBySlug(baseTokens?.colors ?? [], extracted.colors),
+    fonts: mergeBySlug(baseTokens?.fonts ?? [], extracted.fonts),
+    fontSizes: mergeBySlug(baseTokens?.fontSizes ?? [], extracted.fontSizes),
+    spacing: mergeBySlug(baseTokens?.spacing ?? [], extracted.spacing),
+    defaults: mergeThemeDefaults(baseTokens?.defaults, extracted.defaults),
+    blockStyles: mergeThemeBlockStyles(
+      baseTokens?.blockStyles,
+      extracted.blockStyles,
+    ),
+  };
+
+  const rules = styleCss?.trim() ? parseCssRules(styleCss) : [];
+  const vars = collectVars(rules);
+  const ctx: ResolveContext = {
+    colors: tokens.colors,
+    fonts: tokens.fonts,
+    fontSizes: tokens.fontSizes,
+    spacing: tokens.spacing,
+    vars,
+  };
+
+  const cssRules: CssRule[] = [];
+  const rootDecls = buildBridgeRootDeclarations(vars);
+  if (Object.keys(rootDecls).length > 0) {
+    cssRules.push({ selectors: [':root'], declarations: rootDecls });
+  }
+  cssRules.push(...buildDerivedBridgeRules(tokens));
+  cssRules.push(...buildSafeThemeBridgeRules(rules, ctx));
+
+  const rendered = cssRules
+    .map((rule) => renderCssRule(rule))
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+
+  if (!rendered) return '';
+  return `/* WordPress style bridge */\n${rendered}\n`;
+}
+
 function parseCssRules(input: string): CssRule[] {
   const css = input.replace(/\/\*[\s\S]*?\*\//g, '');
   const rules: CssRule[] = [];
@@ -219,12 +264,15 @@ function extractDefaults(
 
   const headings: NonNullable<ThemeDefaults['headings']> = {};
   let headingColor: string | undefined;
+  let headingFontFamily: string | undefined;
   for (const level of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const) {
     const decls = pickDecls(rules, [new RegExp(`^${level}$`, 'i')]);
     const fontSize = resolveValue(decls?.['font-size'], ctx, 'size');
     const fontWeight = resolveValue(decls?.['font-weight'], ctx, 'plain');
+    const fontFamily = resolveValue(decls?.['font-family'], ctx, 'font');
     const color = resolveValue(decls?.color, ctx, 'color');
     if (!headingColor && color) headingColor = color;
+    if (!headingFontFamily && fontFamily) headingFontFamily = fontFamily;
     if (fontSize || fontWeight) {
       headings[level] = {
         ...(fontSize && { fontSize }),
@@ -275,6 +323,7 @@ function extractDefaults(
     ...(resolveValue(body?.['font-family'], ctx, 'font') && {
       fontFamily: resolveValue(body?.['font-family'], ctx, 'font'),
     }),
+    ...(headingFontFamily && { headingFontFamily }),
     ...(resolveValue(body?.['line-height'], ctx, 'plain') && {
       lineHeight: resolveValue(body?.['line-height'], ctx, 'plain'),
     }),
@@ -305,6 +354,9 @@ function extractDefaults(
         'size',
       ),
     }),
+    ...(normalizePadding(content?.padding, ctx) && {
+      rootPadding: normalizePadding(content?.padding, ctx),
+    }),
     ...(Object.keys(headings).length > 0 && { headings }),
   };
 
@@ -315,32 +367,73 @@ function extractBlockStyles(
   rules: CssRule[],
   ctx: ResolveContext,
 ): Record<string, ThemeBlockStyle> | undefined {
-  const button = pickDecls(rules, [
-    /^button$/i,
-    /^button(?::[\w-]+)?$/i,
-    /^\.button$/i,
-    /^\.btn$/i,
-    /^input\[type=['"]?(submit|button)['"]?\]$/i,
-    /^\.wp-block-button__link$/i,
-  ]);
+  const blockDeclMap: Array<[string, RegExp[]]> = [
+    [
+      'button',
+      [
+        /^button$/i,
+        /^button(?::[\w-]+)?$/i,
+        /^\.button$/i,
+        /^\.btn$/i,
+        /^input\[type=['"]?(submit|button)['"]?\]$/i,
+        /^\.wp-block-button__link$/i,
+        /^\.wp-element-button$/i,
+      ],
+    ],
+    [
+      'image',
+      [
+        /^\.wp-block-image\s+img$/i,
+        /^\.wp-block-post-featured-image\s+img$/i,
+        /^figure\s+img$/i,
+      ],
+    ],
+    [
+      'gallery',
+      [
+        /^\.wp-block-gallery$/i,
+        /^\.wp-block-gallery\s+img$/i,
+        /^\.blocks-gallery-grid$/i,
+      ],
+    ],
+    ['group', [/^\.wp-block-group$/i, /^\.wp-block-group__inner-container$/i]],
+    ['column', [/^\.wp-block-column$/i, /^\.wp-block-columns$/i]],
+    ['cover', [/^\.wp-block-cover$/i, /^\.wp-block-cover__inner-container$/i]],
+    ['quote', [/^\.wp-block-quote$/i, /^blockquote$/i]],
+    ['table', [/^\.wp-block-table\s+table$/i, /^table$/i]],
+  ];
 
-  if (!button) return undefined;
+  const result: Record<string, ThemeBlockStyle> = {};
+  for (const [blockType, patterns] of blockDeclMap) {
+    const decls = pickDecls(rules, patterns);
+    const style = decls ? buildThemeBlockStyle(decls, ctx) : undefined;
+    if (style && Object.keys(style).length > 0) {
+      result[blockType] = style;
+    }
+  }
 
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function buildThemeBlockStyle(
+  decls: Record<string, string>,
+  ctx: ResolveContext,
+): ThemeBlockStyle | undefined {
   const resolved: ThemeBlockStyle = {
-    ...(resolveValue(button.color, ctx, 'color') ||
-    resolveValue(button['background-color'] ?? button.background, ctx, 'color')
+    ...(resolveValue(decls.color, ctx, 'color') ||
+    resolveValue(decls['background-color'] ?? decls.background, ctx, 'color')
       ? {
           color: {
-            ...(resolveValue(button.color, ctx, 'color') && {
-              text: resolveValue(button.color, ctx, 'color'),
+            ...(resolveValue(decls.color, ctx, 'color') && {
+              text: resolveValue(decls.color, ctx, 'color'),
             }),
             ...(resolveValue(
-              button['background-color'] ?? button.background,
+              decls['background-color'] ?? decls.background,
               ctx,
               'color',
             ) && {
               background: resolveValue(
-                button['background-color'] ?? button.background,
+                decls['background-color'] ?? decls.background,
                 ctx,
                 'color',
               ),
@@ -348,58 +441,88 @@ function extractBlockStyles(
           },
         }
       : {}),
-    ...(resolveValue(button['border-radius'], ctx, 'size')
-      ? {
-          border: {
-            radius: resolveValue(button['border-radius'], ctx, 'size'),
-          },
-        }
-      : {}),
-    ...(normalizePadding(button.padding, ctx) ||
-    normalizePadding(button.margin, ctx)
-      ? {
-          spacing: {
-            ...(normalizePadding(button.padding, ctx) && {
-              padding: normalizePadding(button.padding, ctx),
-            }),
-            ...(normalizePadding(button.margin, ctx) && {
-              margin: normalizePadding(button.margin, ctx),
-            }),
-          },
-        }
-      : {}),
-    ...(resolveValue(button['font-size'], ctx, 'size') ||
-    resolveValue(button['font-family'], ctx, 'font') ||
-    resolveValue(button['font-weight'], ctx, 'plain') ||
-    resolveValue(button['letter-spacing'], ctx, 'plain') ||
-    resolveValue(button['line-height'], ctx, 'plain')
+    ...(resolveValue(decls['font-size'], ctx, 'size') ||
+    resolveValue(decls['font-family'], ctx, 'font') ||
+    resolveValue(decls['font-weight'], ctx, 'plain') ||
+    resolveValue(decls['letter-spacing'], ctx, 'plain') ||
+    resolveValue(decls['line-height'], ctx, 'plain')
       ? {
           typography: {
-            ...(resolveValue(button['font-size'], ctx, 'size') && {
-              fontSize: resolveValue(button['font-size'], ctx, 'size'),
+            ...(resolveValue(decls['font-size'], ctx, 'size') && {
+              fontSize: resolveValue(decls['font-size'], ctx, 'size'),
             }),
-            ...(resolveValue(button['font-family'], ctx, 'font') && {
-              fontFamily: resolveValue(button['font-family'], ctx, 'font'),
+            ...(resolveValue(decls['font-family'], ctx, 'font') && {
+              fontFamily: resolveValue(decls['font-family'], ctx, 'font'),
             }),
-            ...(resolveValue(button['font-weight'], ctx, 'plain') && {
-              fontWeight: resolveValue(button['font-weight'], ctx, 'plain'),
+            ...(resolveValue(decls['font-weight'], ctx, 'plain') && {
+              fontWeight: resolveValue(decls['font-weight'], ctx, 'plain'),
             }),
-            ...(resolveValue(button['letter-spacing'], ctx, 'plain') && {
+            ...(resolveValue(decls['letter-spacing'], ctx, 'plain') && {
               letterSpacing: resolveValue(
-                button['letter-spacing'],
+                decls['letter-spacing'],
                 ctx,
                 'plain',
               ),
             }),
-            ...(resolveValue(button['line-height'], ctx, 'plain') && {
-              lineHeight: resolveValue(button['line-height'], ctx, 'plain'),
+            ...(resolveValue(decls['line-height'], ctx, 'plain') && {
+              lineHeight: resolveValue(decls['line-height'], ctx, 'plain'),
+            }),
+          },
+        }
+      : {}),
+    ...(resolveValue(decls['border-radius'], ctx, 'size') ||
+    resolveValue(decls['border-width'], ctx, 'size') ||
+    resolveValue(decls['border-style'], ctx, 'plain') ||
+    resolveValue(decls['border-color'], ctx, 'color')
+      ? {
+          border: {
+            ...(resolveValue(decls['border-radius'], ctx, 'size') && {
+              radius: resolveValue(decls['border-radius'], ctx, 'size'),
+            }),
+            ...(resolveValue(decls['border-width'], ctx, 'size') && {
+              width: resolveValue(decls['border-width'], ctx, 'size'),
+            }),
+            ...(resolveValue(decls['border-style'], ctx, 'plain') && {
+              style: resolveValue(decls['border-style'], ctx, 'plain'),
+            }),
+            ...(resolveValue(decls['border-color'], ctx, 'color') && {
+              color: resolveValue(decls['border-color'], ctx, 'color'),
+            }),
+          },
+        }
+      : {}),
+    ...(normalizePadding(decls.padding, ctx) ||
+    normalizePadding(decls.margin, ctx) ||
+    resolveValue(
+      decls.gap ?? decls['column-gap'] ?? decls['row-gap'],
+      ctx,
+      'size',
+    )
+      ? {
+          spacing: {
+            ...(normalizePadding(decls.padding, ctx) && {
+              padding: normalizePadding(decls.padding, ctx),
+            }),
+            ...(normalizePadding(decls.margin, ctx) && {
+              margin: normalizePadding(decls.margin, ctx),
+            }),
+            ...(resolveValue(
+              decls.gap ?? decls['column-gap'] ?? decls['row-gap'],
+              ctx,
+              'size',
+            ) && {
+              gap: resolveValue(
+                decls.gap ?? decls['column-gap'] ?? decls['row-gap'],
+                ctx,
+                'size',
+              ),
             }),
           },
         }
       : {}),
   };
 
-  return Object.keys(resolved).length > 0 ? { button: resolved } : undefined;
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
 
 function pickDecls(
@@ -483,6 +606,313 @@ function normalizePadding(
     .map((part) => resolveRaw(part, ctx) ?? part)
     .join(' ')
     .trim();
+}
+
+function buildBridgeRootDeclarations(
+  vars: Map<string, string>,
+): Record<string, string> {
+  const declarations: Record<string, string> = {};
+  for (const [name, value] of vars.entries()) {
+    if (!name.startsWith('--')) continue;
+    declarations[name] = value.trim();
+  }
+  return declarations;
+}
+
+function buildDerivedBridgeRules(tokens: ThemeTokens): CssRule[] {
+  const rules: CssRule[] = [];
+  const d = tokens.defaults;
+  if (!d) {
+    rules.push(...buildBlockStyleBridgeRules(tokens.blockStyles));
+    return rules;
+  }
+
+  const bodyDecls: Record<string, string> = {};
+  if (d.bgColor) bodyDecls['background-color'] = d.bgColor;
+  if (d.textColor) bodyDecls.color = d.textColor;
+  if (d.fontFamily) bodyDecls['font-family'] = d.fontFamily;
+  if (d.fontSize) bodyDecls['font-size'] = d.fontSize;
+  if (d.lineHeight) bodyDecls['line-height'] = d.lineHeight;
+  if (Object.keys(bodyDecls).length > 0) {
+    rules.push({ selectors: ['body'], declarations: bodyDecls });
+  }
+
+  const headingDecls: Record<string, string> = {};
+  if (d.headingFontFamily) headingDecls['font-family'] = d.headingFontFamily;
+  if (d.headingColor) headingDecls.color = d.headingColor;
+  if (Object.keys(headingDecls).length > 0) {
+    rules.push({
+      selectors: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+      declarations: headingDecls,
+    });
+  }
+
+  if (d.headings) {
+    for (const [level, style] of Object.entries(d.headings)) {
+      const declarations: Record<string, string> = {};
+      if (style.fontSize) declarations['font-size'] = style.fontSize;
+      if (style.fontWeight) declarations['font-weight'] = style.fontWeight;
+      if (Object.keys(declarations).length > 0) {
+        rules.push({ selectors: [level], declarations });
+      }
+    }
+  }
+
+  if (d.linkColor) {
+    rules.push({
+      selectors: ['a', 'a:visited'],
+      declarations: { color: d.linkColor },
+    });
+  }
+
+  if (d.captionColor) {
+    rules.push({
+      selectors: [
+        'figcaption',
+        '.wp-caption-text',
+        '.gallery-caption',
+        '.blocks-gallery-caption',
+      ],
+      declarations: { color: d.captionColor },
+    });
+  }
+
+  if (d.blockGap) {
+    rules.push({
+      selectors: ['.is-layout-flex', '.wp-block-buttons', '.wp-block-columns'],
+      declarations: { gap: d.blockGap },
+    });
+  }
+
+  if (d.rootPadding) {
+    rules.push({
+      selectors: ['.wp-site-blocks', '.site-content', '.site-main', 'main'],
+      declarations: { padding: d.rootPadding },
+    });
+  }
+
+  if (d.wideWidth) {
+    rules.push({
+      selectors: ['.alignwide'],
+      declarations: {
+        'max-width': d.wideWidth,
+        'margin-left': 'auto',
+        'margin-right': 'auto',
+      },
+    });
+  }
+
+  if (d.contentWidth) {
+    rules.push({
+      selectors: ['.entry-content', '.site-content', '.site-main', 'main'],
+      declarations: {
+        'max-width': d.contentWidth,
+        'margin-left': 'auto',
+        'margin-right': 'auto',
+      },
+    });
+  }
+
+  rules.push(...buildBlockStyleBridgeRules(tokens.blockStyles));
+  return rules;
+}
+
+function buildBlockStyleBridgeRules(
+  blockStyles?: Record<string, ThemeBlockStyle>,
+): CssRule[] {
+  if (!blockStyles) return [];
+
+  const selectorMap: Record<string, string[]> = {
+    button: [
+      '.wp-block-button__link',
+      '.wp-element-button',
+      'button',
+      'input[type="submit"]',
+      'input[type="button"]',
+    ],
+    image: ['.wp-block-image img', '.wp-block-post-featured-image img'],
+    gallery: [
+      '.wp-block-gallery',
+      '.wp-block-gallery img',
+      '.blocks-gallery-grid',
+    ],
+    group: ['.wp-block-group', '.wp-block-group__inner-container'],
+    column: ['.wp-block-column'],
+    cover: ['.wp-block-cover', '.wp-block-cover__inner-container'],
+    quote: ['.wp-block-quote', 'blockquote'],
+    table: ['.wp-block-table table', 'table'],
+  };
+
+  const rules: CssRule[] = [];
+  for (const [blockType, style] of Object.entries(blockStyles)) {
+    const selectors = selectorMap[blockType];
+    if (!selectors?.length) continue;
+
+    const declarations: Record<string, string> = {};
+    if (style.color?.text) declarations.color = style.color.text;
+    if (style.color?.background)
+      declarations['background-color'] = style.color.background;
+    if (style.typography?.fontSize)
+      declarations['font-size'] = style.typography.fontSize;
+    if (style.typography?.fontFamily)
+      declarations['font-family'] = style.typography.fontFamily;
+    if (style.typography?.fontWeight)
+      declarations['font-weight'] = style.typography.fontWeight;
+    if (style.typography?.letterSpacing)
+      declarations['letter-spacing'] = style.typography.letterSpacing;
+    if (style.typography?.lineHeight)
+      declarations['line-height'] = style.typography.lineHeight;
+    if (style.border?.radius)
+      declarations['border-radius'] = style.border.radius;
+    if (style.border?.width) declarations['border-width'] = style.border.width;
+    if (style.border?.style) declarations['border-style'] = style.border.style;
+    if (style.border?.color) declarations['border-color'] = style.border.color;
+    if (style.spacing?.padding) declarations.padding = style.spacing.padding;
+    if (style.spacing?.margin) declarations.margin = style.spacing.margin;
+    if (style.spacing?.gap) declarations.gap = style.spacing.gap;
+
+    if (Object.keys(declarations).length > 0) {
+      rules.push({ selectors, declarations });
+    }
+  }
+
+  return rules;
+}
+
+function buildSafeThemeBridgeRules(
+  rules: CssRule[],
+  ctx: ResolveContext,
+): CssRule[] {
+  const bridgeRules: CssRule[] = [];
+  for (const rule of rules) {
+    const selectors = rule.selectors.filter((selector) =>
+      isSafeBridgeSelector(selector),
+    );
+    if (selectors.length === 0) continue;
+
+    const declarations = pickBridgeDeclarations(rule.declarations, ctx);
+    if (Object.keys(declarations).length === 0) continue;
+
+    bridgeRules.push({ selectors, declarations });
+  }
+  return bridgeRules;
+}
+
+function isSafeBridgeSelector(selector: string): boolean {
+  const normalized = selector.trim();
+  if (!normalized) return false;
+  if (/#/.test(normalized)) return false;
+  if (
+    /\b(admin|customize|woocommerce|elementor|jetpack|tribe-|slick-|swiper-)/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    /(^|[\s>+~])(html|body|:root|main|article|section|figure|figcaption|blockquote|hr|pre|code|table|thead|tbody|tr|th|td|ul|ol|li|p|a|img|button|input|textarea|select|label|form|h[1-6])(?=$|[\s.#:[>+~])/i.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+
+  return /(\.wp-block-|\bwp-element-button\b|\.wp-caption|\.gallery-caption|\.blocks-gallery-caption|\.align(?:wide|full|left|right|center)\b|\.has-[\w-]+\b|\.is-layout-[\w-]+\b|\.wp-site-blocks\b|\.site-main\b|\.site-content\b|\.entry-content\b|\.screen-reader-text\b)/i.test(
+    normalized,
+  );
+}
+
+function pickBridgeDeclarations(
+  declarations: Record<string, string>,
+  ctx: ResolveContext,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [prop, value] of Object.entries(declarations)) {
+    if (!isAllowedBridgeDeclaration(prop, value)) continue;
+    out[prop] = resolveDeclarationValue(value, ctx) ?? value.trim();
+  }
+  return out;
+}
+
+function isAllowedBridgeDeclaration(prop: string, value: string): boolean {
+  if (!value.trim() || /url\(/i.test(value)) return false;
+  if (/^content$/i.test(prop)) return false;
+  return /^(--|color|background(?:-color|-image|-position|-repeat|-size)?|font(?:-family|-size|-weight|-style)?|line-height|letter-spacing|text-(?:align|transform|decoration)|margin(?:-(?:top|right|bottom|left))?|padding(?:-(?:top|right|bottom|left))?|gap|row-gap|column-gap|display|flex(?:-(?:direction|wrap|grow|shrink|basis))?|grid(?:-(?:template-columns|template-rows|auto-flow|column|row))?|justify-(?:content|items|self)|align-(?:content|items|self)|place-(?:content|items|self)|width|min-width|max-width|height|min-height|max-height|border(?:-(?:radius|width|style|color))?|box-shadow|object-(?:fit|position)|aspect-ratio|overflow(?:-[xy])?|list-style(?:-(?:type|position))?|white-space|word-break|clip|clip-path|position|top|right|bottom|left|opacity)$/i.test(
+    prop,
+  );
+}
+
+function resolveDeclarationValue(
+  value: string,
+  ctx: ResolveContext,
+): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(
+    /var\((--[^,\s)]+)(?:,\s*([^)]+))?\)/g,
+    (_match, varName: string, fallback?: string) =>
+      ctx.vars.get(varName)?.trim() ?? fallback?.trim() ?? `var(${varName})`,
+  );
+}
+
+function renderCssRule(rule: CssRule): string {
+  const selectors = rule.selectors
+    .map((selector) => selector.trim())
+    .filter(Boolean);
+  const declarations = Object.entries(rule.declarations)
+    .map(([prop, value]) => `${prop}: ${value};`)
+    .join(' ');
+  if (selectors.length === 0 || !declarations) return '';
+  return `${selectors.join(', ')} { ${declarations} }`;
+}
+
+function mergeThemeDefaults(
+  base?: ThemeDefaults,
+  extra?: ThemeDefaults,
+): ThemeDefaults | undefined {
+  if (!base && !extra) return undefined;
+  return {
+    ...(base ?? {}),
+    ...(extra ?? {}),
+    headings: {
+      ...(base?.headings ?? {}),
+      ...(extra?.headings ?? {}),
+    },
+  };
+}
+
+function mergeThemeBlockStyles(
+  base?: Record<string, ThemeBlockStyle>,
+  extra?: Record<string, ThemeBlockStyle>,
+): Record<string, ThemeBlockStyle> | undefined {
+  if (!base && !extra) return undefined;
+
+  const result: Record<string, ThemeBlockStyle> = { ...(base ?? {}) };
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    result[key] = {
+      ...(result[key] ?? {}),
+      ...value,
+      color: {
+        ...(result[key]?.color ?? {}),
+        ...(value.color ?? {}),
+      },
+      typography: {
+        ...(result[key]?.typography ?? {}),
+        ...(value.typography ?? {}),
+      },
+      border: {
+        ...(result[key]?.border ?? {}),
+        ...(value.border ?? {}),
+      },
+      spacing: {
+        ...(result[key]?.spacing ?? {}),
+        ...(value.spacing ?? {}),
+      },
+    };
+  }
+
+  return result;
 }
 
 function mergeBySlug<T extends { slug: string }>(base: T[], extra: T[]): T[] {

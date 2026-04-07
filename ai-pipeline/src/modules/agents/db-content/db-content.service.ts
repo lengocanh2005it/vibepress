@@ -8,7 +8,6 @@ import {
   WpTaxonomy,
   WpPluginInfo,
   WpSiteCapabilities,
-  WpCommerceInfo,
   WpCustomPostType,
 } from '../../sql/wp-query.service.js';
 import type {
@@ -29,7 +28,6 @@ export interface DbContentResult {
   /** Non-built-in post types registered by plugins, with counts and associated taxonomies */
   customPostTypes: WpCustomPostType[];
   capabilities: WpSiteCapabilities;
-  commerce: WpCommerceInfo;
   detectedPlugins: DetectedPlugin[];
   discovery: PluginDiscoverySummary;
 }
@@ -64,7 +62,6 @@ export class DbContentService {
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ` +
         `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
-        `${runtimeFeatures.capabilities.wooCommerce ? `, WooCommerce (${runtimeFeatures.commerce.productsCount} products)` : ''}` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
 
@@ -77,7 +74,6 @@ export class DbContentService {
       plugins: runtimeFeatures.plugins,
       customPostTypes: runtimeFeatures.customPostTypes,
       capabilities: runtimeFeatures.capabilities,
-      commerce: runtimeFeatures.commerce,
       detectedPlugins: discovery.detectedPlugins,
       discovery: discovery.summary,
     };

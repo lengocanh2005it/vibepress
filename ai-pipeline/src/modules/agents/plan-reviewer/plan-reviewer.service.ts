@@ -17,12 +17,10 @@ export interface PlanReviewResult {
 
 type PlanDataNeed =
   | 'posts'
-  | 'products'
   | 'pages'
   | 'menus'
   | 'site-info'
   | 'post-detail'
-  | 'product-detail'
   | 'page-detail'
   | 'comments'
   | 'categoryDetail';
@@ -39,12 +37,10 @@ const PARTIAL_PATTERNS =
   /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)(?:[-_].+)?$/i;
 const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'posts',
-  'products',
   'pages',
   'menus',
   'site-info',
   'post-detail',
-  'product-detail',
   'page-detail',
   'comments',
   'categoryDetail',
@@ -52,16 +48,7 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
 
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
-const STANDARD_INJECTABLE_TEMPLATES = new Set([
-  'author',
-  'category',
-  'archive-product',
-  'single-product',
-  'taxonomy-product-cat',
-  'taxonomy-product-tag',
-  'cart',
-  'my-account',
-]);
+const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
 
 @Injectable()
 export class PlanReviewerService {
@@ -294,7 +281,6 @@ export class PlanReviewerService {
 
       if (policy.type === 'partial') {
         needs.delete('post-detail');
-        needs.delete('product-detail');
         needs.delete('page-detail');
       }
 
@@ -337,11 +323,6 @@ export class PlanReviewerService {
           needs.delete('page-detail');
         }
       }
-      if (needs.has('product-detail')) {
-        needs.delete('post-detail');
-        needs.delete('page-detail');
-      }
-
       const after = this.orderPlanDataNeeds([...needs]);
       if (!this.haveSameMembers(before, after)) {
         warnings.push(
@@ -362,8 +343,6 @@ export class PlanReviewerService {
 
     const allowedPostDetail =
       item.isDetail === true && item.dataNeeds.includes('post-detail');
-    const allowedProductDetail =
-      item.isDetail === true && item.dataNeeds.includes('product-detail');
     const allowedPageDetail =
       item.isDetail === true && item.dataNeeds.includes('page-detail');
     const stripLayoutSections = item.type === 'page';
@@ -371,7 +350,6 @@ export class PlanReviewerService {
       this.isSectionAllowed(
         section,
         allowedPostDetail,
-        allowedProductDetail,
         allowedPageDetail,
         stripLayoutSections,
       ),
@@ -427,7 +405,6 @@ export class PlanReviewerService {
   private isSectionAllowed(
     section: SectionPlan,
     allowedPostDetail: boolean,
-    allowedProductDetail: boolean,
     allowedPageDetail: boolean,
     stripLayoutSections: boolean = false,
   ): boolean {
@@ -441,9 +418,6 @@ export class PlanReviewerService {
     }
     if (section.type === 'post-content' || section.type === 'comments') {
       return allowedPostDetail;
-    }
-    if (section.type === 'media-text' && allowedProductDetail) {
-      return true;
     }
     if (section.type === 'page-content') {
       return allowedPageDetail;
@@ -461,9 +435,6 @@ export class PlanReviewerService {
         case 'post-detail':
           mapped.add('postDetail');
           break;
-        case 'product-detail':
-          mapped.add('productDetail');
-          break;
         case 'page-detail':
           mapped.add('pageDetail');
           break;
@@ -471,7 +442,6 @@ export class PlanReviewerService {
           mapped.add('comments');
           break;
         case 'posts':
-        case 'products':
         case 'pages':
         case 'menus':
           mapped.add(need);
@@ -867,66 +837,6 @@ export class PlanReviewerService {
       };
     }
 
-    if (/^(shop|archive-product)$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/shop',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: ['products'],
-      };
-    }
-
-    if (/^single-product(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/product/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['product-detail'],
-      };
-    }
-
-    if (/^taxonomy-product-cat(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/product-category/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['products'],
-      };
-    }
-
-    if (/^taxonomy-product-tag(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/product-tag/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['products'],
-      };
-    }
-
-    if (/^cart(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/cart',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: [],
-      };
-    }
-
-    if (/^(my-account|myaccount)(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/my-account',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: [],
-      };
-    }
-
     if (/^single(?:-.+)?$/.test(templateBase)) {
       return {
         type: 'page',
@@ -987,12 +897,10 @@ export class PlanReviewerService {
 
   private orderPlanDataNeeds(dataNeeds: PlanDataNeed[]): PlanDataNeed[] {
     const order: PlanDataNeed[] = [
-      'product-detail',
       'post-detail',
       'page-detail',
       'categoryDetail',
       'comments',
-      'products',
       'posts',
       'pages',
       'menus',
@@ -1003,11 +911,9 @@ export class PlanReviewerService {
 
   private orderVisualDataNeeds(dataNeeds: VisualDataNeed[]): VisualDataNeed[] {
     const order: VisualDataNeed[] = [
-      'productDetail',
       'postDetail',
       'pageDetail',
       'comments',
-      'products',
       'posts',
       'pages',
       'menus',

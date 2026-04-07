@@ -1,24 +1,11 @@
 import { DbContentResult } from '../../db-content/db-content.service.js';
 
 // CPTs and plugins already handled by the static Express template — skip to avoid duplicates
-const TEMPLATE_COVERED_TYPES = new Set(['product']);
+const TEMPLATE_COVERED_TYPES = new Set<string>([]);
 const TEMPLATE_COVERED_PLUGINS = new Set<string>([]);
 
 // Specific SQL instructions for well-known plugins
 const KNOWN_PLUGIN_INSTRUCTIONS: Record<string, string> = {
-  woocommerce: [
-    '- WooCommerce → Read-only storefront routes only:',
-    '  GET /api/products?category=&min_price=&max_price=&search= → all products with filters',
-    '  GET /api/products/:id → single product detail',
-    '  GET /api/products/:id/variations → product variations (size, color, etc)',
-    '  GET /api/product-categories → all WooCommerce categories with product count',
-    '  GET /api/product-categories/:id/products → products in a category',
-    '  GET /api/product-attributes → available attributes (color, size, brand, etc)',
-    '  Do NOT generate cart, checkout, account, payment, or POST commerce routes in this read-only storefront mode',
-    '  Query wp_posts (post_type="product"), wp_postmeta (meta_keys: _price, _stock, _sku, _product_attributes)',
-    '  For variations: query wp_posts (post_type="product_variation", post_parent=product_id)',
-    '  Return product with { id, title, price, currency, description, image, sku, stock, categories[], attributes{} }',
-  ].join('\n'),
   acf: [
     '- ACF → GET /api/posts/:id/fields',
     '  Query wp_postmeta WHERE post_id = ? AND meta_key NOT LIKE "\\_%"',
@@ -120,8 +107,7 @@ export function buildCptRoutesPrompt(content: DbContentResult): string {
 
 The server already has: getConn(), getPrefix(conn), formatDate() helpers and routes for
 /api/site-info, /api/posts, /api/posts/:slug, /api/pages, /api/pages/:slug,
-/api/menus, /api/products, /api/products/:slug, /api/product-categories,
-/api/store/capabilities, /api/taxonomies, /api/taxonomies/:taxonomy,
+/api/menus, /api/taxonomies, /api/taxonomies/:taxonomy,
 /api/taxonomies/:taxonomy/:term/posts,
  /api/comments GET (?postId= or ?slug=), /api/comments/submissions GET (?postId= or ?slug=, clientToken),
  and /api/comments POST (body: author, email, content, website?, slug?, postId?, parentId?, clientToken).
@@ -137,7 +123,6 @@ no app.listen(). The code will be injected directly before app.listen().
 - Route paths MUST be string literals only, e.g. \`app.get('/api/my-plugin/status', async ...)\`. Compute \`prefix\` inside the handler for SQL table names.
 - Query WordPress tables with the dynamic prefix: \`\${prefix}posts\`, \`\${prefix}options\`, etc. Do not hardcode \`wp_\` unless you are certain the site uses the default prefix.
 - Use try/finally with await conn.end() for every handler
-- This pipeline is in WooCommerce read-only storefront mode. Do NOT generate POST commerce handlers, cart mutations, checkout, account, or payment endpoints.
 - JOIN \`postmeta\` to enrich fields where the active plugins suggest extra meta keys
   (e.g. The Events Calendar → _EventStartDate, _EventEndDate; LearnDash → _price, _course_points)
 - Return ONLY route handler code — no markdown fences, no explanation

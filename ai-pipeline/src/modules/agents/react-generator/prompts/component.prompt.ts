@@ -15,7 +15,6 @@ import {
   MENU_ITEM_FIELDS,
   PAGE_FRONTEND_FIELDS,
   POST_FIELDS,
-  PRODUCT_FIELDS,
   SITE_INFO_FIELDS,
   buildCanonicalApiContractNote,
 } from '../api-contract.js';
@@ -67,7 +66,6 @@ const DATA_NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
-  'product-detail': 'productDetail',
 };
 
 export interface ComponentPromptContext {
@@ -158,7 +156,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.contentWidth)
       lines.push(
-        `- Content max-width: \`max-w-[${d.contentWidth}]\` on content wrappers`,
+        `- Content max-width: \`max-w-[${d.contentWidth}]\` on long-form content wrappers only (article/page body, comments, prose). Do NOT use this as the full-page or full-section container by default.`,
       );
     if (d.wideWidth)
       lines.push(
@@ -178,7 +176,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.rootPadding)
       lines.push(
-        `- Root/global padding: \`style={{padding:"${d.rootPadding}"}}\` — apply to the outermost wrapper \`<div>\` of this component (replicates WordPress .wp-site-blocks padding)`,
+        `- Theme root/site padding exists: \`${d.rootPadding}\`. Treat this as a site-shell hint only. Do NOT apply it to every generated component root or page wrapper.`,
       );
     if (d.headings && Object.keys(d.headings).length > 0) {
       lines.push(
@@ -362,7 +360,7 @@ ${footerHint}
 // ── Data Grounding ─────────────────────────────────────────────────────────
 
 export function buildDataGroundingNote(content: DbContentResult): string {
-  const { siteInfo, posts, pages, menus, taxonomies, commerce } = content;
+  const { siteInfo, posts, pages, menus, taxonomies } = content;
   const parts: string[] = [];
 
   parts.push(
@@ -380,12 +378,6 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   parts.push(
     '> ⛔ NEVER render siteName more than once per component — one element only.',
   );
-  if (commerce.mode === 'woo-readonly') {
-    parts.push(
-      `> WooCommerce read-only mode is active. Products are available via \`GET /api/products\` and \`GET /api/products/:slug\`. Do NOT invent checkout, payment, account APIs, cart APIs, or add-to-cart behavior. If cart or my-account pages exist in the source plan, render them only as static/read-only shells with no commerce fetches or mutations.`,
-    );
-    parts.push(`> Product fields: ${formatContractFields(PRODUCT_FIELDS)}.`);
-  }
   parts.push('');
 
   // Site info
@@ -425,16 +417,6 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   if (pages.length > 5) parts.push(`  ... and ${pages.length - 5} more`);
   if (pages.length === 0) parts.push('  (empty)');
   parts.push('');
-  if (commerce.hasWooCommerce) {
-    parts.push(
-      `### WooCommerce storefront — ${commerce.productsCount} products total (read-only mode)`,
-    );
-    parts.push(
-      `GET /api/products, GET /api/products/:slug, GET /api/product-categories`,
-    );
-    parts.push('');
-  }
-
   // Menus full
   parts.push(
     `### Menus — ${menus.length} total (GET /api/menus)` +
@@ -511,18 +493,6 @@ export function buildPlanContextNote(
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
-  const isCartShell = plan.route === '/cart';
-  const isMyAccountShell = plan.route === '/my-account';
-  if (isCartShell || isMyAccountShell) {
-    lines.push(
-      isCartShell
-        ? 'Read-only cart shell contract: render the cart page layout as a static/demo shell from template source only. Do NOT fetch `/api/cart`, do NOT render live cart totals, and do NOT render a working checkout CTA.'
-        : 'Read-only my-account shell contract: render the account layout as a static/demo shell from template source only. Do NOT fetch `/api/account` or `/api/orders`, and do NOT render working login/account mutation flows.',
-    );
-    lines.push(
-      'Shell-page contract: preserve headings, sections, notices, tables, and layout scaffolding from the WooCommerce template source, but keep all controls inert/read-only.',
-    );
-  }
   if (normalizedDataNeeds.includes('postDetail')) {
     lines.push(
       routeHasParams
@@ -555,21 +525,6 @@ export function buildPlanContextNote(
         '\n- Page detail type must be exactly: `interface Page { id: string; title: string; content: string; slug: string; }`',
     );
   }
-  if (normalizedDataNeeds.includes('products')) {
-    lines.push(
-      '⛔ MANDATORY: This component MUST fetch `GET /api/products` and render a product listing — even if the template HTML has no product blocks. The plan has declared `products` as a data need.',
-    );
-    lines.push(
-      "Storefront list contract: `GET /api/products` returns `Product[]` (flat array). Declare `const [products, setProducts] = useState<Product[]>([])` and call `fetch('/api/products').then(r => r.json()).then(setProducts)` inside `useEffect`.",
-    );
-    lines.push(
-      'Product card: render `product.featuredImage` (img), `product.title` (Link to `/product/${product.slug}`), and `product.price`. Use a responsive grid: `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6`.',
-    );
-    lines.push(
-      'Read-only commerce rule: do NOT render cart, checkout, account, quantity pickers, or add-to-cart actions.',
-    );
-  }
-
   // Detect "NoTitle" naming convention — explicit contract to omit the title
   const isNoTitle =
     /no.?title/i.test(componentName ?? '') ||
@@ -581,19 +536,6 @@ export function buildPlanContextNote(
       '⛔ NoTitle contract: Do NOT render the page or post title in any heading element. ' +
         'No `<h1>{item.title}</h1>`, no `<h1>{page.title}</h1>`, no `{post.title}` as a heading. ' +
         'This template explicitly omits the title — render only the body content.',
-    );
-  }
-  if (normalizedDataNeeds.includes('productDetail')) {
-    lines.push(
-      routeHasParams
-        ? 'Detail data contract: fetch the specific product with `/api/products/${slug}` and render that product as a read-only product detail page.'
-        : 'Data contract: this component displays a product and should fetch it from `/api/products/${slug}` inside a `useEffect`.',
-    );
-    lines.push(
-      `WooCommerce Product Detail: fetch from \`/api/products/:slug\` — fields available are ONLY ${formatContractFields(PRODUCT_FIELDS)}.`,
-    );
-    lines.push(
-      'Read-only storefront rule: use `useParams<{ slug: string }>()`, fetch the product by slug, and render image, title, price, description, SKU, and categories when available. Do NOT render add-to-cart buttons, quantity controls, checkout links, account links, or variation/cart logic.',
     );
   }
   if (normalizedDataNeeds.includes('comments')) {
@@ -608,8 +550,7 @@ export function buildPlanContextNote(
   }
   if (
     !normalizedDataNeeds.includes('postDetail') &&
-    !normalizedDataNeeds.includes('pageDetail') &&
-    !normalizedDataNeeds.includes('productDetail')
+    !normalizedDataNeeds.includes('pageDetail')
   ) {
     lines.push(
       'Data contract: do NOT fetch slug-based detail endpoints unless the plan explicitly requires detail data.',
@@ -680,7 +621,7 @@ export function buildPlanContextNote(
     '- Implement responsive design: use Tailwind responsive prefixes (`sm:`, `md:`, `lg:`, `xl:`) for mobile-first layouts.',
   );
   lines.push(
-    '- Container widths: use theme tokens for max-width (e.g., `max-w-[1280px]` from contentWidth), center with `mx-auto`.',
+    '- Container widths: use the planner layout tokens. Full-width sections/chrome use the layout container; long-form article/page bodies use the narrower content container when provided.',
   );
   lines.push(
     '- Spacing: use consistent spacing from theme tokens (blockGap, padding, margins) — avoid arbitrary values.',
@@ -861,11 +802,19 @@ export function buildVisualPlanContextNote(
     );
   }
 
-  // Enforce layout container width from theme tokens
+  // Enforce the distinction between wide section shells and narrow prose bodies.
   if (visualPlan.layout?.containerClass) {
     lines.push('');
     lines.push(
-      `⛔ MANDATORY LAYOUT: The outermost content wrapper MUST use the class "${visualPlan.layout.containerClass}". Do NOT use a different max-width, do NOT use max-w-[620px] or any other narrower constraint.`,
+      `⛔ MANDATORY LAYOUT: Full-width sections, shared chrome, grids, heroes, sidebars, and major page wrappers MUST use the class "${visualPlan.layout.containerClass}". Do NOT shrink those areas to article width.`,
+    );
+  }
+  if (visualPlan.layout?.contentContainerClass) {
+    lines.push(
+      `- Narrow prose containers (article body, page body, comments) should use "${visualPlan.layout.contentContainerClass}" when you need readable text width.`,
+    );
+    lines.push(
+      '⛔ Do NOT wrap the entire page in the prose container unless the whole template is genuinely a single-column article view.',
     );
   }
 
@@ -886,7 +835,6 @@ export function buildComponentPrompt(
   repoManifest?: RepoThemeManifest,
   componentPlan?: ComponentPromptContext,
   retryError?: string,
-  isWooCommerce?: boolean,
 ): string {
   const normalizedDataNeeds = normalizeDataNeeds(componentPlan?.dataNeeds);
   const hasPlanContract =
@@ -950,33 +898,11 @@ ${
     : ''
 }`
       : '';
-  const readOnlyStorefrontNote =
-    normalizedDataNeeds.includes('products') ||
-    normalizedDataNeeds.includes('productDetail')
-      ? `## WooCommerce storefront mode
-- This migration is READ-ONLY storefront mode.
-- Allowed commerce UI: product listing, product cards, product detail, category labels, price display.
-- Forbidden commerce UI: cart, add to cart, buy now, checkout, my account, wishlist, compare, order/payment actions.
-- Forbidden commerce endpoints: anything like \`/api/cart\`, \`/api/checkout\`, or POST commerce actions.`
-      : '';
-
-  const wooClassNote = isWooCommerce
-    ? `\n\n## WooCommerce CSS classes — MANDATORY
-This component has WooCommerce CSS stylesheets injected at runtime via \`<link>\` tags.
-✅ PRESERVE all WooCommerce class names from the PHP template source exactly as-is.
-✅ Use classes like \`woocommerce\`, \`products\`, \`product\`, \`woocommerce-cart\`, \`woocommerce-account\`, \`woocommerce-page\`, \`cart_item\`, \`woocommerce-tabs\` etc.
-⛔ Do NOT replace WooCommerce classes with Tailwind utilities — the injected CSS depends on these class names.
-⛔ Do NOT add Tailwind classes to elements that already carry WooCommerce classes unless it is purely for layout spacing that WooCommerce CSS does not cover.`
-    : '';
-
   return TEMPLATE.replace('{{componentName}}', componentName)
     .replace('{{apiContract}}', buildCanonicalApiContractNote())
     .replace('{{menuContext}}', menuContextNote)
     .replace('{{planContext}}', planContext)
-    .replace(
-      '{{slugFetchingNote}}',
-      `${slugFetchingNote}${readOnlyStorefrontNote ? `\n\n${readOnlyStorefrontNote}` : ''}${wooClassNote}`,
-    )
+    .replace('{{slugFetchingNote}}', slugFetchingNote)
     .replace('{{classicThemeNote}}', classicThemeNote)
     .replace('{{themeTokens}}', buildThemeTokensNote(tokens))
     .replace('{{dataGrounding}}', dataGrounding)

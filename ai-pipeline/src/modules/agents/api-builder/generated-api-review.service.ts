@@ -42,7 +42,6 @@ export class GeneratedApiReviewService {
       | 'posts'
       | 'menus'
       | 'taxonomies'
-      | 'commerce'
     >;
     modelName?: string;
     mode?: 'warn' | 'blocking';
@@ -183,7 +182,6 @@ export class GeneratedApiReviewService {
       | 'posts'
       | 'menus'
       | 'taxonomies'
-      | 'commerce'
     >,
   ): string {
     const requiredDataNeeds = [
@@ -212,7 +210,6 @@ Rules:
   3. generated custom post type or plugin routes that are clearly malformed or disconnected from the contract
   4. server code structure/imports that are likely broken
 - Do NOT flag stylistic preferences.
-- WooCommerce on this pipeline is read-only storefront mode. Do NOT require cart, checkout, account, payment, or POST commerce endpoints.
 - If the backend is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
 
@@ -227,7 +224,6 @@ ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n
   - pages: ${content.pages.length}
   - menus: ${content.menus.length}
   - taxonomies: ${content.taxonomies.length}
-  - commerce products: ${content.commerce.productsCount}
 
 Generated backend files:
 ${api.files

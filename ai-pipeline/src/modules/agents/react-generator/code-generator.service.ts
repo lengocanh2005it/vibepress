@@ -29,7 +29,6 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
-  PRODUCT_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
 
@@ -551,7 +550,6 @@ export class CodeGeneratorService {
     const sectionJsx = this.buildSections(plan, ctx);
     const rootStyle = this.buildStyleAttr({
       fontFamily: ctx.t.bodyFamily,
-      padding: ctx.l.rootPadding,
     });
 
     return `  return (
@@ -562,6 +560,10 @@ ${sectionJsx}
 };
 
 export default ${componentName};`;
+  }
+
+  private contentContainerClass(ctx: RenderCtx): string {
+    return ctx.l.contentContainerClass ?? 'max-w-[800px] mx-auto w-full';
   }
 
   private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
@@ -1110,7 +1112,7 @@ ${menuCols}
     const sectionStyle = this.buildSectionStyleAttr(s);
     return `      {/* Post Content */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
+        <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
 ${this.renderPostContentInner(s, ctx)}
         </div>
       </section>`;
@@ -1177,7 +1179,7 @@ ${this.renderPostContentInner(s, ctx)}
       : '';
     return `      {/* Comments */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
+        <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
           {item && (
             <div className="flex flex-col gap-6">
               <h2 className="${t.h2} font-normal text-[${tc}]">
@@ -1221,7 +1223,7 @@ ${renderCommentCard('reply')}
     const sectionStyle = this.buildSectionStyleAttr(s);
     return `      {/* Page Content */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="mx-auto max-w-[800px] px-4 sm:px-6 lg:px-8">
+        <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
 ${this.renderPageContentInner(s, ctx)}
         </div>
       </section>`;
@@ -1298,8 +1300,8 @@ ${this.renderSidebarCard(s, ctx, 10)}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
-            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0">${mainContent.trim()}</div>`}
-            ${sidebarLeft ? `<div className="min-w-0">${mainContent.trim()}</div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
+            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
+            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
           </div>
         </div>
       </section>`;
@@ -1445,5 +1447,4 @@ const SHARED_INTERFACES = [
   PAGE_INTERFACE,
   MENU_ITEM_INTERFACE,
   MENU_INTERFACE,
-  PRODUCT_INTERFACE,
 ].join('\n\n');

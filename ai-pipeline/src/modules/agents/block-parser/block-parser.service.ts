@@ -199,6 +199,11 @@ export class BlockParserService {
     themeJson: Record<string, any> | null,
     styleCss?: string,
   ): ThemeTokens {
+    // Extraction order:
+    // 1. Read structured presets/defaults from theme.json.
+    // 2. Parse style.css for additional concrete CSS values and selectors.
+    // 3. Merge them into a single ThemeTokens object that downstream planner /
+    //    generator code can consume without caring where a token came from.
     const settings = themeJson?.settings ?? {};
 
     const colors: ThemeTokens['colors'] = (settings.color?.palette ?? []).map(
@@ -229,6 +234,9 @@ export class BlockParserService {
           spacing,
         )
       : undefined;
+    // style.css acts as a supplement/override layer for real rendered theme
+    // defaults, especially when a classic theme does not express everything in
+    // theme.json.
     const cssTokens = extractStyleCssTokens(styleCss, {
       colors,
       fonts,

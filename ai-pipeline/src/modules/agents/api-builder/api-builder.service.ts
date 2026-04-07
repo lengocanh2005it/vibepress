@@ -20,6 +20,33 @@ function assertInjectedRoutesDoNotMisuseGetPrefix(injectedCode: string): void {
   }
 }
 
+function sanitizeGeneratedRouteHandlers(raw: string): string {
+  const stripped = raw
+    .replace(/^```[\w]*\n?/m, '')
+    .replace(/\n?```$/m, '')
+    .trim();
+
+  if (!stripped) return '';
+
+  const firstHandlerStart = stripped.search(
+    /\bapp\.(?:get|post|put|delete|patch)\s*\(/,
+  );
+  const listenStart = stripped.search(/\bapp\.listen\s*\(/);
+
+  let candidate = stripped;
+  if (firstHandlerStart > 0) {
+    candidate = stripped.slice(firstHandlerStart).trim();
+  }
+  if (listenStart !== -1) {
+    const relativeListenStart = candidate.search(/\bapp\.listen\s*\(/);
+    if (relativeListenStart !== -1) {
+      candidate = candidate.slice(0, relativeListenStart).trim();
+    }
+  }
+
+  return candidate.trim();
+}
+
 export interface ApiBuilderResult {
   outDir: string;
   files: { name: string; filePath: string; code: string }[];
@@ -45,7 +72,6 @@ export class ApiBuilderService {
       | 'taxonomies'
       | 'capabilities'
       | 'customPostTypes'
-      | 'commerce'
       | 'detectedPlugins'
     >;
   }): Promise<ApiBuilderResult> {
@@ -59,7 +85,6 @@ export class ApiBuilderService {
 
     // Only generate AI routes for popular plugins that need custom API endpoints
     const PLUGINS_NEEDING_AI_ROUTES = new Set([
-      'woocommerce', // e-commerce functionality
       'contact-form-7', // form submissions
       'wpforms', // form submissions
       'elementor', // dynamic content
@@ -110,6 +135,8 @@ export class ApiBuilderService {
     const prompt = buildCptRoutesPrompt(content as DbContentResult);
     const { text, inputTokens, outputTokens } = await this.llm.chat({
       model: this.llm.getModel(),
+      systemPrompt:
+        'You are an Express + TypeScript backend engineer. Return ONLY raw Express route handler code. No prose, no markdown fences, no comments outside the handlers.',
       userPrompt: prompt,
       maxTokens: 4096,
       temperature: 0,
@@ -125,10 +152,12 @@ export class ApiBuilderService {
       );
     }
 
-    const extraRoutes = text
-      .replace(/^```[\w]*\n?/m, '')
-      .replace(/\n?```$/m, '')
-      .trim();
+    const extraRoutes = sanitizeGeneratedRouteHandlers(text);
+    if (!extraRoutes) {
+      throw new Error(
+        'Generated API routes were empty or did not contain any Express route handlers.',
+      );
+    }
 
     // Inject the generated routes into the template just before app.listen(...)
     const templateCode = await readFile(templateFile, 'utf-8');

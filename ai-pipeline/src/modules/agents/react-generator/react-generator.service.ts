@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { appendFile } from 'fs/promises';
+import { appendFile, mkdir, writeFile } from 'fs/promises';
+import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
@@ -220,10 +221,6 @@ export class ReactGeneratorService {
           );
 
           const t0 = Date.now();
-          const isWooCommerce =
-            /^(archive.?product|single.?product|taxonomy.?product|shop|cart|my.?account|woo)/i.test(
-              componentName,
-            );
           const produced = await this.generateForTemplate({
             componentName,
             rawSource,
@@ -237,7 +234,6 @@ export class ReactGeneratorService {
             repoManifest,
             logPath,
             jobId,
-            isWooCommerce,
           });
           const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
           const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
@@ -248,6 +244,9 @@ export class ReactGeneratorService {
             logPath,
             `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
           );
+          if (jobId) {
+            await this.persistDraftComponents(jobId, produced);
+          }
 
           return { i, produced };
         }),
@@ -286,7 +285,6 @@ export class ReactGeneratorService {
     repoManifest?: RepoThemeManifest;
     logPath?: string;
     jobId?: string;
-    isWooCommerce?: boolean;
   }): Promise<GeneratedComponent[]> {
     const {
       componentName,
@@ -301,7 +299,6 @@ export class ReactGeneratorService {
       repoManifest,
       logPath,
       jobId,
-      isWooCommerce,
     } = input;
 
     const templateSource = rawSource;
@@ -350,7 +347,6 @@ export class ReactGeneratorService {
         componentPlan,
         logPath,
         jobId,
-        isWooCommerce,
       });
 
       if (this.aiLogger && jobId) {
@@ -634,5 +630,32 @@ ${renders}
 
   private looksLikeBlockMarkup(source: string): boolean {
     return source.includes('<!-- wp:');
+  }
+
+  private async persistDraftComponents(
+    jobId: string,
+    components: GeneratedComponent[],
+  ): Promise<void> {
+    const draftRoot = join('temp', 'generated', jobId, 'draft', 'src');
+    const pagesDir = join(draftRoot, 'pages');
+    const componentsDir = join(draftRoot, 'components');
+
+    await mkdir(pagesDir, { recursive: true });
+    await mkdir(componentsDir, { recursive: true });
+
+    await Promise.all(
+      components.map(async (component) => {
+        const isPartial =
+          component.type === 'partial' ||
+          component.isSubComponent === true ||
+          PARTIAL_PATTERNS.test(component.name);
+        const targetDir = isPartial ? componentsDir : pagesDir;
+        await writeFile(
+          join(targetDir, `${component.name}.tsx`),
+          component.code,
+          'utf-8',
+        );
+      }),
+    );
   }
 }

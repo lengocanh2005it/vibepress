@@ -7,11 +7,9 @@
 export type DataNeed =
   | 'siteInfo'
   | 'posts'
-  | 'products'
   | 'pages'
   | 'menus'
   | 'postDetail'
-  | 'productDetail'
   | 'pageDetail'
   | 'comments';
 
@@ -214,11 +212,11 @@ export interface TypographyTokens {
  * Injected by PlannerService — never set by AI.
  */
 export interface LayoutTokens {
-  containerClass: string; // e.g. "max-w-[1280px] mx-auto w-full"
+  containerClass: string; // e.g. "max-w-[1280px] mx-auto w-full" for full-width sections/chrome
+  contentContainerClass?: string; // e.g. "max-w-[800px] mx-auto w-full" for long-form article/page content
   blockGap: string; // Tailwind gap class between sections, e.g. "gap-16"
   contentLayout?: 'single-column' | 'sidebar-right' | 'sidebar-left';
   sidebarWidth?: string; // exact CSS width for sidebar column, e.g. "320px"
-  rootPadding?: string; // exact CSS padding shorthand from theme defaults
   buttonPadding?: string; // exact CSS padding shorthand from theme defaults
   imageRadius?: string; // exact border radius for image-like blocks
   cardRadius?: string; // exact border radius for cards/groups

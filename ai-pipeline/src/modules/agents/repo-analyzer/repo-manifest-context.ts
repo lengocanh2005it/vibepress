@@ -17,12 +17,6 @@ export function buildRepoManifestContextNote(
 
   const lines: string[] = ['## Theme repo source-of-truth hints'];
   const { themeTypeHints } = manifest;
-  const wooPlugin = manifest.plugins.find(
-    (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-  );
-  const activeWooPlugin = manifest.resolvedSource?.activePlugins.find(
-    (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-  );
   const vendorLabel = themeTypeHints.themeVendor
     ? ` (${themeTypeHints.themeVendor})`
     : '';
@@ -141,19 +135,8 @@ export function buildRepoManifestContextNote(
     structuralSignals.push('comments');
   if (manifest.structureHints.containsQueryLoop)
     structuralSignals.push('query-loop');
-  if (manifest.structureHints.containsWooCommerceBlocks)
-    structuralSignals.push('woocommerce-blocks');
   if (structuralSignals.length > 0) {
     lines.push(`Structural signals: ${structuralSignals.join(', ')}`);
-  }
-
-  if (
-    manifest.runtimeHints.hasWooCommerceSupport ||
-    manifest.themeTypeHints.hasWooCommerceTemplates
-  ) {
-    lines.push(
-      'WooCommerce is present in the source theme. Preserve shop/product layout and storefront behavior from the repo. Do not ignore product templates when they exist.',
-    );
   }
 
   if (manifest.themes.length > 0) {
@@ -193,71 +176,6 @@ export function buildRepoManifestContextNote(
         ? `${parentTheme.slug}${parentTheme.relativeDir ? ` → ${parentTheme.relativeDir}` : ''}`
         : `${parentTheme.slug} (missing from repo)`;
       lines.push(`Parent theme: ${parentLabel}`);
-    }
-    if (activeWooPlugin || wooPlugin) {
-      lines.push('## WooCommerce storefront source');
-      const states = [
-        activeWooPlugin?.active ? 'active' : null,
-        activeWooPlugin?.runtimeDetected && !activeWooPlugin.active
-          ? 'runtime-detected'
-          : null,
-        (activeWooPlugin?.presentInRepo ?? !!wooPlugin)
-          ? 'repo-source'
-          : 'missing-source',
-        (activeWooPlugin?.hasTemplatesDir ?? wooPlugin?.hasTemplatesDir)
-          ? 'templates'
-          : null,
-      ].filter(Boolean);
-      lines.push(
-        `WooCommerce: ${states.length > 0 ? `[${states.join(', ')}]` : '[detected]'}`,
-      );
-      if (wooPlugin?.relativeDir) {
-        lines.push(`WooCommerce source dir: ${wooPlugin.relativeDir}`);
-      }
-      if (wooPlugin?.layoutFiles?.length) {
-        lines.push('WooCommerce storefront files:');
-        for (const file of wooPlugin.layoutFiles.slice(0, 10)) {
-          lines.push(`- ${wooPlugin.relativeDir}/${file}`);
-        }
-      }
-      const wooTemplateDirs = Array.from(
-        new Set(
-          (wooPlugin?.layoutFiles ?? [])
-            .map((file) => file.split('/')[0])
-            .filter((dir) => dir && !dir.endsWith('.php')),
-        ),
-      ).sort();
-      if (wooTemplateDirs.length > 0) {
-        lines.push(
-          `WooCommerce template directories present: ${wooTemplateDirs.join(', ')}`,
-        );
-      }
-      if (wooPlugin?.keyRoutes.length) {
-        lines.push(
-          `WooCommerce routes in scope: ${wooPlugin.keyRoutes.join(', ')}`,
-        );
-      }
-      lines.push(
-        'Read-only Woo rule: product/archive/taxonomy pages may use Woo template source directly. Cart and my-account templates may be used only as static/read-only shells unless API support is added later.',
-      );
-    }
-    if (
-      runtimeOnlyPlugins.some(
-        (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-      )
-    ) {
-      lines.push(
-        'WooCommerce is active in runtime but its source folder is missing from the repo.',
-      );
-    }
-    if (
-      repoOnlyPlugins.some(
-        (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-      )
-    ) {
-      lines.push(
-        'WooCommerce source exists in the repo but is not active on the current site.',
-      );
     }
     for (const note of manifest.resolvedSource.notes) {
       lines.push(note);
