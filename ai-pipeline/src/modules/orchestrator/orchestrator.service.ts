@@ -26,6 +26,7 @@ import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js'
 import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
+import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
@@ -43,7 +44,7 @@ import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { TokenTracker } from '../../common/utils/token-tracker.js';
 import { RunPipelineDto } from './orchestrator.controller.js';
-import { WpDbCredentials } from '@/common/types/db-credentials.type.js';
+import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
@@ -174,71 +175,6 @@ const STEP_META: Record<
 
 const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
 
-interface PluginTemplateSpec {
-  templateName: string;
-  aliasNames: string[];
-  mainTemplate: string;
-  relatedTemplates: string[];
-  relatedDirectories: string[];
-}
-
-const WOO_SUPPORT_DIR_FILE_LIMIT = 12;
-
-const WOO_STOREFRONT_TEMPLATE_SPECS: PluginTemplateSpec[] = [
-  {
-    templateName: 'archive-product',
-    aliasNames: ['archive-product', 'shop'],
-    mainTemplate: 'archive-product.php',
-    relatedTemplates: ['content-product.php', 'content-product-cat.php'],
-    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
-  },
-  {
-    templateName: 'single-product',
-    aliasNames: ['single-product'],
-    mainTemplate: 'single-product.php',
-    relatedTemplates: [
-      'content-single-product.php',
-      'single-product-reviews.php',
-    ],
-    relatedDirectories: [
-      'single-product',
-      'global',
-      'notices',
-      'product-form',
-      'parts',
-      'brands',
-    ],
-  },
-  {
-    templateName: 'taxonomy-product-cat',
-    aliasNames: ['taxonomy-product-cat', 'product-category'],
-    mainTemplate: 'taxonomy-product-cat.php',
-    relatedTemplates: ['content-product.php', 'content-product-cat.php'],
-    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
-  },
-  {
-    templateName: 'taxonomy-product-tag',
-    aliasNames: ['taxonomy-product-tag', 'product-tag'],
-    mainTemplate: 'taxonomy-product-tag.php',
-    relatedTemplates: ['content-product.php'],
-    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
-  },
-  {
-    templateName: 'cart',
-    aliasNames: ['cart'],
-    mainTemplate: 'cart/cart.php',
-    relatedTemplates: [],
-    relatedDirectories: ['cart', 'global', 'notices', 'block-notices', 'parts'],
-  },
-  {
-    templateName: 'my-account',
-    aliasNames: ['my-account', 'myaccount'],
-    mainTemplate: 'myaccount/my-account.php',
-    relatedTemplates: [],
-    relatedDirectories: ['myaccount', 'auth', 'global', 'notices', 'parts'],
-  },
-];
-
 export type PipelineStepStatus =
   | 'pending'
   | 'running'
@@ -283,6 +219,7 @@ export class OrchestratorService {
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
     private readonly previewBuilder: PreviewBuilderService,
+    private readonly visualRouteReview: VisualRouteReviewService,
     private readonly validator: ValidatorService,
     private readonly sourceResolver: SourceResolverService,
     private readonly cleanup: CleanupService,
@@ -658,7 +595,6 @@ export class OrchestratorService {
         logPath,
       });
       normalizedTheme = enrichResult.theme;
-      const wooPluginDir = enrichResult.wooPluginDir;
 
       // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
       // All 4 phases + plan review + retry loop are ONE atomic step.
@@ -1085,7 +1021,6 @@ export class OrchestratorService {
                 },
                 dbCreds,
                 themeDir,
-                wooPluginDir,
                 tokens:
                   'tokens' in normalizedTheme
                     ? (normalizedTheme as any).tokens
@@ -1145,20 +1080,111 @@ export class OrchestratorService {
 
       // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
       let metrics: any = null;
+      let visualRouteResults: any[] = [];
       await this.runStep(state, '9_visual_compare', logPath, async () => {
+        const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
+        const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
         this.emitStepProgress(
           state,
           '9_visual_compare',
-          0.2,
-          'Submitting the WordPress and React preview URLs to the compare service.',
+          0.15,
+          'Capturing representative routes and running cheap visual diff gates before AI review.',
+        );
+        const maxVisualFixRounds =
+          this.configService.get<number>('visualReview.maxFixRounds') ?? 1;
+
+        for (let round = 1; round <= maxVisualFixRounds; round++) {
+          visualRouteResults = await this.visualRouteReview.reviewRoutes({
+            jobId,
+            preview,
+            wpBaseUrl,
+            plan: reviewResult.plan,
+            components: buildComponents,
+            content,
+            logPath,
+            modelName: resolvedModels.planning,
+          });
+
+          const actionableResults = visualRouteResults.filter(
+            (result) =>
+              Array.isArray(result.issues) && result.issues.length > 0,
+          );
+          if (actionableResults.length === 0) {
+            await this.logToFile(
+              logPath,
+              `[Stage 9] Visual route review round ${round}: no actionable issues`,
+            );
+            break;
+          }
+
+          this.emitStepProgress(
+            state,
+            '9_visual_compare',
+            0.45,
+            `Visual review round ${round}/${maxVisualFixRounds}: fixing ${actionableResults.length} route(s) with actionable UI drift.`,
+          );
+
+          const feedbackByComponent = new Map<string, string[]>();
+          const routesToSmoke = new Set<string>();
+          for (const result of actionableResults) {
+            routesToSmoke.add(result.route);
+            for (const issue of result.issues) {
+              if (!feedbackByComponent.has(issue.componentName)) {
+                feedbackByComponent.set(issue.componentName, []);
+              }
+              feedbackByComponent
+                .get(issue.componentName)!
+                .push(`[route ${result.route}] ${issue.feedback}`);
+            }
+          }
+
+          let fixedCount = 0;
+          for (const [componentName, feedbacks] of feedbackByComponent) {
+            const idx = buildComponents.findIndex(
+              (c) => c.name === componentName,
+            );
+            if (idx === -1) continue;
+            buildComponents[idx] = await this.reactGenerator.fixComponent({
+              component: buildComponents[idx],
+              plan: reviewResult.plan,
+              feedback: `Visual review feedback:\n${feedbacks.join('\n\n')}`,
+              modelConfig: { fixAgent: resolvedModels.fixAgent },
+              logPath,
+            });
+            fixedCount++;
+          }
+
+          if (fixedCount === 0) {
+            await this.logToFile(
+              logPath,
+              `[Stage 9] Visual route review round ${round}: issues found but no matching components to fix`,
+            );
+            break;
+          }
+
+          await this.previewBuilder.syncGeneratedComponents(
+            preview.previewDir,
+            buildComponents,
+          );
+          await this.validator.assertPreviewBuild(preview.frontendDir);
+          await this.validator.assertPreviewRuntime(preview.previewUrl, [
+            ...routesToSmoke,
+          ]);
+        }
+
+        this.emitStepProgress(
+          state,
+          '9_visual_compare',
+          0.72,
+          'Collecting final whole-site compare metrics after route-level visual fixes.',
         );
         try {
           const response = await axios.post(
             `${this.configService.get<string>('automation.url', '')}/site/compare`,
             {
-              wpBaseUrl: 'http://localhost:8000/',
-              reactFeUrl: 'http://localhost:5353',
-              reactBeUrl: 'http://localhost:3775',
+              wpBaseUrl,
+              reactFeUrl: preview.previewUrl,
+              reactBeUrl,
             },
           );
           metrics = response.data?.result ?? response.data;
@@ -1173,10 +1199,10 @@ export class OrchestratorService {
           '9_visual_compare',
           0.85,
           metrics
-            ? 'Visual diff metrics are ready and attached to the final preview payload.'
-            : 'Visual compare finished without metrics; pipeline will continue with cleanup.',
+            ? 'Route-level visual review finished and final compare metrics are attached.'
+            : 'Route-level visual review finished without final compare metrics; pipeline will continue with cleanup.',
         );
-        return metrics;
+        return { metrics, routeReviews: visualRouteResults };
       });
       await stepDelay();
 
@@ -1195,6 +1221,8 @@ export class OrchestratorService {
           previewDir: preview.previewDir,
           previewUrl: preview.previewUrl,
           dbCreds,
+          visualRouteResults,
+          metrics,
         };
         // Emit final event with previewUrl from within runStep
         const subject = this.progress.get(jobId);
@@ -1293,355 +1321,9 @@ export class OrchestratorService {
     logPath?: string;
   }): Promise<{
     theme: PhpParseResult | BlockParseResult;
-    wooPluginDir?: string;
   }> {
-    const { theme, themeDir, manifest, resolvedSource, logPath } = input;
-    const wooPlugin = this.findActivePluginSource(
-      resolvedSource,
-      'woocommerce',
-    );
-    if (!wooPlugin?.presentInRepo) return { theme };
-
-    const themeSourceDirs = await this.resolveThemeSourceDirs(
-      themeDir,
-      resolvedSource,
-    );
-    const pluginDir = await this.resolveRepoRelativeDir(
-      themeDir,
-      wooPlugin.relativeDir,
-    );
-    if (!pluginDir) {
-      this.logger.warn(
-        `[source-enrichment] WooCommerce is active but plugin source dir could not be resolved from repo path "${wooPlugin.relativeDir ?? 'unknown'}"`,
-      );
-      return { theme };
-    }
-
-    let enrichedTheme: PhpParseResult | BlockParseResult = theme;
-    const injectedTemplates: string[] = [];
-
-    for (const spec of WOO_STOREFRONT_TEMPLATE_SPECS) {
-      if (this.themeHasTemplate(enrichedTheme, spec.aliasNames)) continue;
-
-      const source = await this.resolveWooCommerceTemplateBundle(
-        spec,
-        themeSourceDirs,
-        pluginDir,
-      );
-      if (!source) continue;
-
-      enrichedTheme =
-        enrichedTheme.type === 'classic'
-          ? {
-              ...enrichedTheme,
-              templates: [
-                ...enrichedTheme.templates,
-                { name: spec.templateName, html: source.markup },
-              ],
-            }
-          : {
-              ...enrichedTheme,
-              templates: [
-                ...enrichedTheme.templates,
-                { name: spec.templateName, markup: source.markup },
-              ],
-            };
-
-      injectedTemplates.push(
-        `${spec.templateName} <= ${source.originDescription}`,
-      );
-    }
-
-    if (injectedTemplates.length === 0) return { theme };
-
-    const normalized = await this.normalizer.normalize(enrichedTheme);
-    const note = `Injected WooCommerce storefront template source: ${injectedTemplates.join('; ')}`;
-
-    this.logger.log(`[source-enrichment] ${note}`);
-    if (logPath) {
-      await this.logToFile(logPath, `[source-enrichment] ${note}`);
-    }
-
-    if (normalized.diagnostics) {
-      normalized.diagnostics.warnings.push(note);
-    }
-
-    manifest.sourceOfTruth.notes.push(
-      'WooCommerce storefront templates were injected from theme overrides/plugin source before planning when the active theme did not expose them directly.',
-    );
-
-    return { theme: normalized, wooPluginDir: pluginDir };
-  }
-
-  private findActivePluginSource(
-    resolvedSource: RepoResolvedSourceSummary,
-    slug: string,
-  ): RepoResolvedPluginSource | undefined {
-    return resolvedSource.activePlugins.find(
-      (plugin) =>
-        this.normalizeSourceSlug(plugin.slug) ===
-          this.normalizeSourceSlug(slug) &&
-        (plugin.active || plugin.runtimeDetected),
-    );
-  }
-
-  private async resolveThemeSourceDirs(
-    themeDir: string,
-    resolvedSource: RepoResolvedSourceSummary,
-  ): Promise<string[]> {
-    const dirs = new Set<string>([resolve(themeDir)]);
-
-    for (const theme of resolvedSource.themeChain) {
-      const resolvedDir = await this.resolveRepoRelativeDir(
-        themeDir,
-        theme.relativeDir,
-      );
-      if (resolvedDir) dirs.add(resolve(resolvedDir));
-    }
-
-    return [...dirs];
-  }
-
-  private async resolveWooCommerceTemplateBundle(
-    spec: PluginTemplateSpec,
-    themeSourceDirs: string[],
-    pluginDir: string,
-  ): Promise<{ markup: string; originDescription: string } | null> {
-    const mainSource = await this.resolveWooCommerceTemplateFile(
-      themeSourceDirs,
-      pluginDir,
-      spec.mainTemplate,
-    );
-    if (!mainSource) return null;
-
-    const segments = [
-      `<!-- vibepress:source woocommerce template ${spec.templateName} (${mainSource.sourceType}: ${mainSource.sourcePath}) -->`,
-      this.phpParser.toTemplateMarkup(mainSource.rawSource),
-    ];
-
-    for (const relatedTemplate of spec.relatedTemplates) {
-      const relatedSource = await this.resolveWooCommerceTemplateFile(
-        themeSourceDirs,
-        pluginDir,
-        relatedTemplate,
-      );
-      if (!relatedSource) continue;
-
-      segments.push(
-        `<!-- vibepress:source woocommerce related ${relatedTemplate} (${relatedSource.sourceType}: ${relatedSource.sourcePath}) -->`,
-        this.phpParser.toTemplateMarkup(relatedSource.rawSource),
-      );
-    }
-
-    for (const relatedDirectory of spec.relatedDirectories) {
-      const directoryEntries = await this.resolveWooCommerceTemplateDirectory(
-        themeSourceDirs,
-        pluginDir,
-        relatedDirectory,
-      );
-      for (const entry of directoryEntries) {
-        if (entry.sourcePath === mainSource.sourcePath) continue;
-        segments.push(
-          `<!-- vibepress:source woocommerce directory ${relatedDirectory}/${entry.relativePath} (${entry.sourceType}: ${entry.sourcePath}) -->`,
-          this.phpParser.toTemplateMarkup(entry.rawSource),
-        );
-      }
-    }
-
-    return {
-      markup: segments.join('\n\n').trim(),
-      originDescription: `${mainSource.sourceType}:${mainSource.sourcePath}`,
-    };
-  }
-
-  private async resolveWooCommerceTemplateFile(
-    themeSourceDirs: string[],
-    pluginDir: string,
-    relativeTemplatePath: string,
-  ): Promise<{
-    rawSource: string;
-    sourcePath: string;
-    sourceType: 'theme-override' | 'plugin-template';
-  } | null> {
-    for (const themeSourceDir of themeSourceDirs) {
-      const candidate = join(
-        themeSourceDir,
-        'woocommerce',
-        relativeTemplatePath,
-      );
-      if (!(await this.pathExists(candidate))) continue;
-
-      return {
-        rawSource: await readFile(candidate, 'utf-8'),
-        sourcePath: candidate,
-        sourceType: 'theme-override',
-      };
-    }
-
-    const pluginTemplatePath = join(
-      pluginDir,
-      'templates',
-      relativeTemplatePath,
-    );
-    if (!(await this.pathExists(pluginTemplatePath))) return null;
-
-    return {
-      rawSource: await readFile(pluginTemplatePath, 'utf-8'),
-      sourcePath: pluginTemplatePath,
-      sourceType: 'plugin-template',
-    };
-  }
-
-  private async resolveWooCommerceTemplateDirectory(
-    themeSourceDirs: string[],
-    pluginDir: string,
-    relativeDirectory: string,
-  ): Promise<
-    Array<{
-      relativePath: string;
-      rawSource: string;
-      sourcePath: string;
-      sourceType: 'theme-override' | 'plugin-template';
-    }>
-  > {
-    const selected = new Map<
-      string,
-      {
-        relativePath: string;
-        rawSource: string;
-        sourcePath: string;
-        sourceType: 'theme-override' | 'plugin-template';
-      }
-    >();
-
-    for (const themeSourceDir of themeSourceDirs) {
-      const overrideDir = join(
-        themeSourceDir,
-        'woocommerce',
-        relativeDirectory,
-      );
-      for (const file of await this.walkPhpFiles(overrideDir)) {
-        if (selected.has(file.relativePath)) continue;
-        selected.set(file.relativePath, {
-          relativePath: file.relativePath,
-          rawSource: file.rawSource,
-          sourcePath: file.sourcePath,
-          sourceType: 'theme-override',
-        });
-      }
-    }
-
-    const pluginTemplatesDir = join(pluginDir, 'templates', relativeDirectory);
-    for (const file of await this.walkPhpFiles(pluginTemplatesDir)) {
-      if (selected.has(file.relativePath)) continue;
-      selected.set(file.relativePath, {
-        relativePath: file.relativePath,
-        rawSource: file.rawSource,
-        sourcePath: file.sourcePath,
-        sourceType: 'plugin-template',
-      });
-      if (selected.size >= WOO_SUPPORT_DIR_FILE_LIMIT) break;
-    }
-
-    return [...selected.values()]
-      .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
-      .slice(0, WOO_SUPPORT_DIR_FILE_LIMIT);
-  }
-
-  private async walkPhpFiles(
-    dir: string,
-    baseDir: string = dir,
-  ): Promise<
-    Array<{ relativePath: string; sourcePath: string; rawSource: string }>
-  > {
-    if (!(await this.pathExists(dir))) return [];
-
-    const entries = await readdir(dir, { withFileTypes: true });
-    const results: Array<{
-      relativePath: string;
-      sourcePath: string;
-      rawSource: string;
-    }> = [];
-
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        results.push(...(await this.walkPhpFiles(fullPath, baseDir)));
-        continue;
-      }
-      if (!entry.name.toLowerCase().endsWith('.php')) continue;
-
-      const relativePath = fullPath
-        .slice(baseDir.length)
-        .replace(/^[/\\]/, '')
-        .replace(/\\/g, '/');
-
-      results.push({
-        relativePath,
-        sourcePath: fullPath,
-        rawSource: await readFile(fullPath, 'utf-8'),
-      });
-    }
-
-    return results;
-  }
-
-  private themeHasTemplate(
-    theme: PhpParseResult | BlockParseResult,
-    candidateNames: string[],
-  ): boolean {
-    const normalizedCandidates = new Set(
-      candidateNames.map((name) => this.normalizeTemplateName(name)),
-    );
-    const themeTemplates =
-      theme.type === 'classic'
-        ? theme.templates
-        : [...theme.templates, ...theme.parts];
-
-    return themeTemplates.some((template) =>
-      normalizedCandidates.has(this.normalizeTemplateName(template.name)),
-    );
-  }
-
-  private normalizeTemplateName(value: string): string {
-    return value
-      .trim()
-      .replace(/\.(php|html)$/i, '')
-      .toLowerCase();
-  }
-
-  private normalizeSourceSlug(value: string): string {
-    return value.trim().toLowerCase();
-  }
-
-  private async resolveRepoRelativeDir(
-    themeDir: string,
-    relativeDir: string | undefined,
-  ): Promise<string | undefined> {
-    if (!relativeDir) return undefined;
-
-    let current = resolve(themeDir);
-    for (let depth = 0; depth < 7; depth++) {
-      const candidate = join(current, relativeDir);
-      if (await this.pathExists(candidate)) {
-        return candidate;
-      }
-
-      const parent = dirname(current);
-      if (parent === current) break;
-      current = parent;
-    }
-
-    return undefined;
-  }
-
-  private async pathExists(path: string): Promise<boolean> {
-    try {
-      await stat(path);
-      return true;
-    } catch {
-      return false;
-    }
+    const { theme } = input;
+    return { theme };
   }
 
   private async cloneThemeRepo(
@@ -1776,9 +1458,6 @@ export class OrchestratorService {
       ...(manifest.structureHints.containsSearch ? ['search'] : []),
       ...(manifest.structureHints.containsComments ? ['comments'] : []),
       ...(manifest.structureHints.containsQueryLoop ? ['query-loop'] : []),
-      ...(manifest.structureHints.containsWooCommerceBlocks
-        ? ['woocommerce']
-        : []),
     ];
     const assetCount =
       manifest.assetManifest.images.length +
@@ -1789,7 +1468,7 @@ export class OrchestratorService {
     return [
       `kind=${manifest.themeTypeHints.detectedThemeKind}, themeFiles=${repoResult.totalFiles}, themeInventoryFiles=${repoResult.themeInventoryFiles}, themes=${repoResult.themeCount}, pluginFiles=${repoResult.pluginFiles}, plugins=${repoResult.pluginCount}, templates=${manifest.filesByRole.templates.length}, parts=${manifest.filesByRole.templateParts.length}, patterns=${manifest.filesByRole.patterns.length}, phpTemplates=${manifest.filesByRole.phpTemplates.length}, css=${manifest.filesByRole.styles.length}, assets=${assetCount}`,
       `theme.json: palette=${manifest.themeJsonSummary.paletteCount}, fontFamilies=${manifest.themeJsonSummary.fontFamilyCount}, fontSizes=${manifest.themeJsonSummary.fontSizeCount}, spacing=${manifest.themeJsonSummary.spacingSizeCount}, customTemplates=${manifest.themeJsonSummary.customTemplateCount}`,
-      `runtime: menus=${manifest.runtimeHints.registeredMenus.length}, sidebars=${manifest.runtimeHints.registeredSidebars.length}, supports=${manifest.runtimeHints.themeSupports.join(', ') || 'none'}, woo=${manifest.runtimeHints.hasWooCommerceSupport || manifest.themeTypeHints.hasWooCommerceTemplates ? 'yes' : 'no'}`,
+      `runtime: menus=${manifest.runtimeHints.registeredMenus.length}, sidebars=${manifest.runtimeHints.registeredSidebars.length}, supports=${manifest.runtimeHints.themeSupports.join(', ') || 'none'}`,
       `structure: partRefs=${manifest.structureHints.templatePartRefs.length}, patternRefs=${manifest.structureHints.patternRefs.length}, notableBlocks=${notableBlocks.join(', ') || 'none'}, priorityDirs=${manifest.sourceOfTruth.priorityDirectories.join(', ') || 'root-only'}, themeDirs=${manifest.sourceOfTruth.themeDirectories.join(', ') || 'none'}, pluginDirs=${manifest.sourceOfTruth.pluginDirectories.join(', ') || 'none'}`,
       ...(manifest.resolvedSource
         ? [

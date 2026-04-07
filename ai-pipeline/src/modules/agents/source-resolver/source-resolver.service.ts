@@ -216,32 +216,6 @@ export class SourceResolverService {
       );
     }
 
-    const activeWoo = activePlugins.find(
-      (plugin) => this.normalizeSlug(plugin.slug) === 'woocommerce',
-    );
-    const repoWoo = repoOnlyPlugins.find(
-      (plugin) => this.normalizeSlug(plugin.slug) === 'woocommerce',
-    );
-    const runtimeWoo = runtimeOnlyPlugins.find(
-      (plugin) => this.normalizeSlug(plugin.slug) === 'woocommerce',
-    );
-
-    if (runtimeWoo) {
-      notes.push(
-        'WooCommerce is active in WordPress runtime but its source folder is missing from the repo, so storefront fidelity will be limited.',
-      );
-    }
-    if (repoWoo) {
-      notes.push(
-        'WooCommerce source exists in the repo but WooCommerce is not active on the current site.',
-      );
-    }
-    if (activeWoo?.presentInRepo && activeWoo.hasTemplatesDir) {
-      notes.push(
-        'WooCommerce storefront source is available in the repo. Theme overrides stay highest priority; fallback to WooCommerce templates only when the theme does not define that storefront UI.',
-      );
-    }
-
     return notes;
   }
 

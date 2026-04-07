@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   access,
-  copyFile,
   cp,
   mkdir,
   readFile,
@@ -9,6 +8,7 @@ import {
   stat,
   symlink,
   writeFile,
+  copyFile,
 } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
@@ -20,11 +20,19 @@ import type { PlanResult } from '../planner/planner.service.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
 
+export interface PreviewRouteEntry {
+  route: string;
+  componentName: string;
+}
+
 export interface PreviewBuilderResult {
   jobId: string;
   previewDir: string;
+  frontendDir: string;
   entryPath: string;
   previewUrl: string;
+  apiBaseUrl: string;
+  routeEntries: PreviewRouteEntry[];
   frontendPid?: number;
   serverPid?: number;
 }
@@ -50,13 +58,11 @@ export class PreviewBuilderService {
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
     themeDir?: string;
-    wooPluginDir?: string;
     tokens?: ThemeTokens;
     plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, wooPluginDir, tokens, plan } =
-      input;
+    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -88,32 +94,6 @@ export class PreviewBuilderService {
         destImagesDir,
         destFontsDir,
       );
-    }
-
-    // 2b. Copy WooCommerce CSS assets vào public/woocommerce/css/
-    // Chỉ copy khi pipeline đã inject WooCommerce templates (wooPluginDir có giá trị)
-    let wooCssCount = 0;
-    if (wooPluginDir) {
-      const wooCssSrcDir = join(wooPluginDir, 'assets', 'css');
-      const wooCssDestDir = join(frontendDir, 'public', 'woocommerce', 'css');
-      try {
-        await stat(wooCssSrcDir);
-        await mkdir(wooCssDestDir, { recursive: true });
-        const { readdir: readdirFs } = await import('fs/promises');
-        const cssEntries = await readdirFs(wooCssSrcDir);
-        for (const file of cssEntries) {
-          if (!file.endsWith('.css') || file.endsWith('.min.css')) continue;
-          await copyFile(join(wooCssSrcDir, file), join(wooCssDestDir, file));
-          wooCssCount++;
-        }
-        this.logger.log(
-          `[woocommerce] Copied ${wooCssCount} CSS file(s) to public/woocommerce/css/`,
-        );
-      } catch {
-        this.logger.warn(
-          `[woocommerce] CSS assets dir not found at ${wooCssSrcDir} — skipping`,
-        );
-      }
     }
 
     // 3. Write generated components từ AI (code in memory)
@@ -274,6 +254,7 @@ export class PreviewBuilderService {
     // Tạo routes chỉ cho page components, tránh duplicate paths
     const usedPaths = new Set<string>();
     const routeLines: string[] = [];
+    const routeEntries: PreviewRouteEntry[] = [];
 
     for (const c of pageComponents) {
       const path =
@@ -285,6 +266,7 @@ export class PreviewBuilderService {
       routeLines.push(
         `        <Route path="${path}" element={<${c.name} />} />`,
       );
+      routeEntries.push({ route: path, componentName: c.name });
     }
 
     // Đảm bảo luôn có route "/" — dùng component đầu tiên nếu chưa có
@@ -292,6 +274,10 @@ export class PreviewBuilderService {
       routeLines.unshift(
         `        <Route path="/" element={<${pageComponents[0].name} />} />`,
       );
+      routeEntries.unshift({
+        route: '/',
+        componentName: pageComponents[0].name,
+      });
     }
 
     const routes = routeLines.join('\n');
@@ -360,16 +346,39 @@ ${routesBlock}
     const serverProc = this.spawnDevServer(serverDir);
 
     const previewUrl = `http://localhost:${vitePort}`;
+    const apiBaseUrl = `http://localhost:${apiPort}/api`;
     await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
     return {
       jobId,
       previewDir: rootDir,
+      frontendDir,
       entryPath: join(srcDir, 'main.tsx'),
       previewUrl,
+      apiBaseUrl,
+      routeEntries,
       frontendPid: frontendProc.pid,
       serverPid: serverProc.pid,
     };
+  }
+
+  async syncGeneratedComponents(
+    previewDir: string,
+    components: ReactGenerateResult['components'],
+  ): Promise<void> {
+    const frontendDir = join(previewDir, 'frontend');
+    const srcDir = join(frontendDir, 'src');
+    const componentsDir = join(srcDir, 'components');
+    const pagesDir = join(srcDir, 'pages');
+
+    await mkdir(componentsDir, { recursive: true });
+    await mkdir(pagesDir, { recursive: true });
+
+    for (const comp of components) {
+      const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+      const targetDir = isPartial ? componentsDir : pagesDir;
+      await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+    }
   }
 
   private async applyThemeTokens(
@@ -433,7 +442,6 @@ ${fontEntries}
     const d = tokens.defaults;
     const cssLines: string[] = [];
 
-    // body — background, text color, font, size, line-height
     const bodyProps: string[] = [];
     if (d?.bgColor) bodyProps.push(`background-color: ${d.bgColor}`);
     if (d?.textColor) bodyProps.push(`color: ${d.textColor}`);
@@ -443,7 +451,6 @@ ${fontEntries}
     if (bodyProps.length > 0)
       cssLines.push(`body { ${bodyProps.join('; ')}; }`);
 
-    // h1–h6 — font family + color
     const headingProps: string[] = [];
     if (d?.headingFontFamily)
       headingProps.push(`font-family: ${d.headingFontFamily}`);
@@ -451,7 +458,6 @@ ${fontEntries}
     if (headingProps.length > 0)
       cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
 
-    // per-heading font sizes from theme.json headings map
     if (d?.headings) {
       for (const [level, style] of Object.entries(d.headings)) {
         const hProps: string[] = [];
@@ -462,7 +468,6 @@ ${fontEntries}
       }
     }
 
-    // links
     if (d?.linkColor) cssLines.push(`a { color: ${d.linkColor}; }`);
 
     if (cssLines.length > 0) {

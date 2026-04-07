@@ -27,7 +27,7 @@ export default () => ({
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
     baseURL: process.env.OPENAI_BASE_URL,
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL || 'gpt-5.3-codex',
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,
@@ -63,6 +63,17 @@ export default () => ({
       10,
     ),
     minimalVisualPlan: process.env.PLANNER_MINIMAL_VISUAL_PLAN === 'true',
+    visualReferenceEnabled:
+      process.env.PLANNER_VISUAL_REFERENCE_ENABLED !== 'false',
+    visualWpBaseUrl: process.env.PLANNER_VISUAL_WP_BASE_URL,
+    visualViewportWidth: parseInt(
+      process.env.PLANNER_VISUAL_VIEWPORT_WIDTH ?? '1440',
+      10,
+    ),
+    visualViewportHeight: parseInt(
+      process.env.PLANNER_VISUAL_VIEWPORT_HEIGHT ?? '1400',
+      10,
+    ),
   },
   // Per-step model overrides — format: "provider/model" or plain model name.
   // Preferred env names:
@@ -77,25 +88,37 @@ export default () => ({
     planningModel:
       process.env.PLANNING_MODEL ??
       process.env.PLANNER_MODEL ??
-      'mistral/mistral-large-latest',
-    genCodeModel: process.env.GEN_CODE_MODEL ?? 'mistral/codestral-latest',
+      'openai/gpt-5.4',
+    genCodeModel: process.env.GEN_CODE_MODEL ?? 'openai/gpt-5.3-codex',
     reviewCodeModel:
       process.env.REVIEW_CODE_MODEL ??
       process.env.CODE_REVIEWER_MODEL ??
-      'mistral/mistral-large-latest',
+      'openai/gpt-5.3-codex',
     backendReviewModel:
       process.env.BACKEND_REVIEW_MODEL ??
       process.env.REVIEW_CODE_MODEL ??
       process.env.CODE_REVIEWER_MODEL ??
-      'mistral/mistral-large-latest',
+      'openai/gpt-5.4',
     fixAgentModel:
       process.env.FIX_AGENT_MODEL ??
       process.env.REVIEW_CODE_MODEL ??
       process.env.CODE_REVIEWER_MODEL ??
       process.env.GEN_CODE_MODEL ??
-      'mistral/codestral-latest',
+      'openai/gpt-5.3-codex',
     aiReviewMode: process.env.AI_REVIEW_MODE ?? 'warn',
     backendAiReviewMode: process.env.BACKEND_AI_REVIEW_MODE ?? 'warn',
+  },
+  visualReview: {
+    model:
+      process.env.VISUAL_REVIEW_MODEL ??
+      process.env.PLANNING_MODEL ??
+      process.env.PLANNER_MODEL ??
+      'openai/gpt-5.4',
+    maxRoutes: parseInt(process.env.VISUAL_REVIEW_MAX_ROUTES ?? '4', 10),
+    maxFixRounds: parseInt(process.env.VISUAL_REVIEW_MAX_FIX_ROUNDS ?? '1', 10),
+    minCheapDiffScore: parseFloat(
+      process.env.VISUAL_REVIEW_MIN_CHEAP_DIFF_SCORE ?? '0.18',
+    ),
   },
   github: {
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,

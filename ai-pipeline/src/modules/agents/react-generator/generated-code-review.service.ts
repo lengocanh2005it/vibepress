@@ -270,8 +270,6 @@ ${component.code}
             return 'post-detail';
           case 'pageDetail':
             return 'page-detail';
-          case 'productDetail':
-            return 'product-detail';
           default:
             return value;
         }
@@ -282,19 +280,11 @@ ${component.code}
     if (normalized.has('menus')) lines.push('- /api/menus');
     if (normalized.has('posts') || normalized.has('authorDetail'))
       lines.push('- /api/posts');
-    if (normalized.has('products')) lines.push('- /api/products');
     if (normalized.has('pages')) lines.push('- /api/pages');
     if (normalized.has('post-detail'))
       lines.push('- /api/posts/${slug} only for post-detail routes');
     if (normalized.has('page-detail'))
       lines.push('- /api/pages/${slug} only for page-detail routes');
-    if (normalized.has('product-detail'))
-      lines.push('- /api/products/${slug} only for product-detail routes');
-    if (normalized.has('products') || normalized.has('product-detail')) {
-      lines.push(
-        '- WooCommerce storefront mode is read-only: do NOT require or approve cart, checkout, account, wishlist, or add-to-cart flows.',
-      );
-    }
     if (normalized.has('categoryDetail')) {
       lines.push('- /api/taxonomies/category — list all category terms');
       lines.push(
@@ -322,8 +312,7 @@ ${component.code}
     if (
       isDetail &&
       !normalized.has('post-detail') &&
-      !normalized.has('page-detail') &&
-      !normalized.has('product-detail')
+      !normalized.has('page-detail')
     ) {
       lines.push(
         '- Detail route exists, but only the explicitly declared detail endpoint is allowed',

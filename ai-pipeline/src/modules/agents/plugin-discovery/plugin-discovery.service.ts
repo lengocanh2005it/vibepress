@@ -102,12 +102,6 @@ export class PluginDiscoveryService {
     };
 
     addDetected(
-      'woocommerce',
-      this.detectWooCapabilities(runtimeFeatures, restNamespaces),
-      this.collectWooEvidence(runtimeFeatures, restNamespaces),
-    );
-
-    addDetected(
       'elementor',
       this.detectElementorCapabilities(runtimeFeatures, restNamespaces),
       this.collectElementorEvidence(runtimeFeatures, restNamespaces),
@@ -134,7 +128,6 @@ export class PluginDiscoveryService {
     // Detect any remaining active plugins not caught by the known detectors above
     const detectedSlugs = new Set(detected.map((d) => d.slug));
     const knownPluginSlugs = new Set([
-      'woocommerce',
       'elementor',
       'advanced-custom-fields',
       'advanced-custom-fields-pro',
@@ -159,93 +152,6 @@ export class PluginDiscoveryService {
     }
 
     return detected.sort((a, b) => a.slug.localeCompare(b.slug));
-  }
-
-  private collectWooEvidence(
-    runtimeFeatures: WpRuntimeFeatures,
-    restNamespaces: string[],
-  ): PluginEvidence[] {
-    const evidence: PluginEvidence[] = [];
-    this.pushIf(
-      evidence,
-      runtimeFeatures.plugins.some((plugin) => plugin.slug === 'woocommerce'),
-      {
-        source: 'active_plugins',
-        match: 'woocommerce/woocommerce.php',
-        confidence: 'high',
-      },
-    );
-    this.pushIf(
-      evidence,
-      runtimeFeatures.customPostTypes.some(
-        (item) => item.postType === 'product',
-      ),
-      {
-        source: 'post_types',
-        match: 'product',
-        detail: 'Custom post type with published/private records',
-        confidence: 'high',
-      },
-    );
-    for (const metaKey of [
-      '_price',
-      '_sku',
-      '_stock_status',
-      '_wc_average_rating',
-    ]) {
-      const hit = runtimeFeatures.metaKeys.find(
-        (item) => item.metaKey === metaKey,
-      );
-      this.pushIf(evidence, !!hit, {
-        source: 'meta_keys',
-        match: metaKey,
-        detail: hit ? `${hit.count} rows` : undefined,
-        confidence: 'medium',
-      });
-    }
-    this.pushIf(
-      evidence,
-      runtimeFeatures.optionKeys.some((key) => key.startsWith('woocommerce_')),
-      {
-        source: 'option_keys',
-        match:
-          runtimeFeatures.optionKeys.find((key) =>
-            key.startsWith('woocommerce_'),
-          ) ?? 'woocommerce_*',
-        confidence: 'medium',
-      },
-    );
-    this.pushIf(
-      evidence,
-      runtimeFeatures.shortcodes.some(
-        (item) => item.shortcode === 'woocommerce_cart',
-      ),
-      {
-        source: 'shortcodes',
-        match: 'woocommerce_cart',
-        confidence: 'medium',
-      },
-    );
-    this.pushIf(evidence, restNamespaces.includes('wc/v3'), {
-      source: 'rest_namespaces',
-      match: 'wc/v3',
-      confidence: 'high',
-    });
-    this.pushIf(
-      evidence,
-      runtimeFeatures.blockTypes.some((item) =>
-        item.blockType.startsWith('woocommerce/'),
-      ),
-      {
-        source: 'block_types',
-        match:
-          runtimeFeatures.blockTypes.find((item) =>
-            item.blockType.startsWith('woocommerce/'),
-          )?.blockType ?? 'woocommerce/*',
-        confidence: 'medium',
-      },
-    );
-    return evidence;
   }
 
   private collectElementorEvidence(
@@ -444,41 +350,6 @@ export class PluginDiscoveryService {
       },
     );
     return evidence;
-  }
-
-  private detectWooCapabilities(
-    runtimeFeatures: WpRuntimeFeatures,
-    restNamespaces: string[],
-  ): string[] {
-    const capabilities = ['products'];
-    if (
-      runtimeFeatures.commerce.productCategoriesCount > 0 ||
-      runtimeFeatures.customPostTypes.some((item) =>
-        item.taxonomies.includes('product_cat'),
-      )
-    ) {
-      capabilities.push('product-categories');
-    }
-    if (
-      runtimeFeatures.shortcodes.some(
-        (item) => item.shortcode === 'woocommerce_cart',
-      ) ||
-      runtimeFeatures.commerce.corePages.includes('cart')
-    ) {
-      capabilities.push('cart');
-    }
-    if (
-      runtimeFeatures.shortcodes.some(
-        (item) => item.shortcode === 'woocommerce_checkout',
-      ) ||
-      runtimeFeatures.commerce.corePages.includes('checkout')
-    ) {
-      capabilities.push('checkout');
-    }
-    if (restNamespaces.includes('wc/v3')) {
-      capabilities.push('rest-api');
-    }
-    return capabilities;
   }
 
   private detectElementorCapabilities(

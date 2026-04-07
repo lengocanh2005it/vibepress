@@ -3,7 +3,13 @@ const path = require("path");
 const crypto = require("crypto");
 const axios = require("axios");
 const fse = require("fs-extra");
-const { getTables, getTableRows, dumpFullTable, dumpAllTables, dumpToSql } = require("../services/wpSqlDumpService");
+const {
+  getTables,
+  getTableRows,
+  dumpFullTable,
+  dumpAllTables,
+  dumpToSql,
+} = require("../services/wpSqlDumpService");
 const { createSiteDatabase } = require("../services/railwayDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
@@ -299,21 +305,23 @@ function findSiteBySiteUrl(siteUrl) {
 async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
   await new Promise((r) => setTimeout(r, delayMs));
 
-  const dumpDir  = path.join(__dirname, '..', 'temp_dumps');
+  const dumpDir = path.join(__dirname, "..", "temp_dumps");
   fse.ensureDirSync(dumpDir);
   const dumpPath = path.join(dumpDir, `dump-${siteId}-${Date.now()}.sql`);
 
   try {
     console.log(`[DbSync] start — siteId=${siteId}`);
     const tables = await dumpAllTables(siteUrl, apiKey);
-    const sql    = dumpToSql(tables);
-    fs.writeFileSync(dumpPath, sql, 'utf8');
+    const sql = dumpToSql(tables);
+    fs.writeFileSync(dumpPath, sql, "utf8");
     console.log(`[DbSync] dump saved — ${dumpPath}`);
 
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
-    console.log(`[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+    console.log(
+      `[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`,
+    );
 
-    const db     = readDb();
+    const db = readDb();
     const record = db.wpSites?.[siteId];
     if (record) {
       record.clonedDb = dbInfo;
@@ -523,12 +531,14 @@ function getReposByEmail(req, res) {
   const email = req.query.email;
 
   if (!email) {
-    return res.status(400).json({ success: false, error: "email query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "email query param is required" });
   }
 
   const db = readDb();
   const sites = Object.values(db.wpSites ?? {}).filter(
-    (s) => s.adminEmail?.toLowerCase() === email.toLowerCase()
+    (s) => s.adminEmail?.toLowerCase() === email.toLowerCase(),
   );
 
   const repos = sites.map((s) => ({
@@ -547,19 +557,23 @@ function getDBinfoBySiteId(req, res) {
   const { siteId } = req.query;
 
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId query param is required" });
   }
 
   const db = readDb();
   const site = db.wpSites?.[siteId];
 
   if (!site) {
-    return res.status(404).json({ success: false, error: "No site found for this siteId" });
+    return res
+      .status(404)
+      .json({ success: false, error: "No site found for this siteId" });
   }
 
   return res.status(200).json({
     themeGithubUrl: site.wpRepoUrl,
-    connectionString: site.clonedDb?.connectionString ?? null,
+    dbConnectionString: site.clonedDb?.connectionString ?? null,
   });
 }
 
@@ -570,7 +584,9 @@ function getDBinfoBySiteId(req, res) {
 async function getSqlDumpTables(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
   const db = readDb();
@@ -595,7 +611,9 @@ async function getSqlDumpTables(req, res) {
 async function getSqlDumpRows(req, res) {
   const { siteId, table, offset, limit } = req.query;
   if (!siteId || !table) {
-    return res.status(400).json({ success: false, error: "siteId and table are required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId and table are required" });
   }
 
   const db = readDb();
@@ -605,10 +623,19 @@ async function getSqlDumpRows(req, res) {
   }
 
   try {
-    const data = await getTableRows(site.siteUrl, site.apiKey, table, Number(offset ?? 0), Number(limit ?? 500));
+    const data = await getTableRows(
+      site.siteUrl,
+      site.apiKey,
+      table,
+      Number(offset ?? 0),
+      Number(limit ?? 500),
+    );
     return res.status(200).json(data);
   } catch (e) {
-    console.error(`[SqlDump] getTableRows FAILED — siteId=${siteId} table=${table}:`, e.message);
+    console.error(
+      `[SqlDump] getTableRows FAILED — siteId=${siteId} table=${table}:`,
+      e.message,
+    );
     return res.status(502).json({ success: false, error: e.message });
   }
 }
@@ -620,7 +647,9 @@ async function getSqlDumpRows(req, res) {
 async function getSqlDumpFullTable(req, res) {
   const { siteId, table } = req.query;
   if (!siteId || !table) {
-    return res.status(400).json({ success: false, error: "siteId and table are required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId and table are required" });
   }
 
   const db = readDb();
@@ -633,7 +662,10 @@ async function getSqlDumpFullTable(req, res) {
     const data = await dumpFullTable(site.siteUrl, site.apiKey, table);
     return res.status(200).json(data);
   } catch (e) {
-    console.error(`[SqlDump] dumpFullTable FAILED — siteId=${siteId} table=${table}:`, e.message);
+    console.error(
+      `[SqlDump] dumpFullTable FAILED — siteId=${siteId} table=${table}:`,
+      e.message,
+    );
     return res.status(502).json({ success: false, error: e.message });
   }
 }
@@ -645,7 +677,9 @@ async function getSqlDumpFullTable(req, res) {
 async function getSqlDumpAll(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
   const db = readDb();
@@ -654,7 +688,7 @@ async function getSqlDumpAll(req, res) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
 
-  const dumpDir = path.join(__dirname, '..', 'temp_dumps');
+  const dumpDir = path.join(__dirname, "..", "temp_dumps");
   fse.ensureDirSync(dumpDir);
 
   const filename = `dump-${siteId}-${Date.now()}.sql`;
@@ -663,15 +697,18 @@ async function getSqlDumpAll(req, res) {
   try {
     const tables = await dumpAllTables(site.siteUrl, site.apiKey);
     const sql = dumpToSql(tables);
-    fs.writeFileSync(filepath, sql, 'utf8');
+    fs.writeFileSync(filepath, sql, "utf8");
 
     console.log(`[SqlDump] saved — ${filepath}`);
 
-    res.setHeader('Content-Type', 'application/sql');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/sql");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     return res.status(200).sendFile(filepath);
   } catch (e) {
-    console.error(`[SqlDump] dumpAllTables FAILED — siteId=${siteId}:`, e.message);
+    console.error(
+      `[SqlDump] dumpAllTables FAILED — siteId=${siteId}:`,
+      e.message,
+    );
     return res.status(502).json({ success: false, error: e.message });
   }
 }
@@ -683,29 +720,33 @@ async function getSqlDumpAll(req, res) {
 async function createSiteDb(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
-  const db   = readDb();
+  const db = readDb();
   const site = db.wpSites?.[siteId];
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
 
-  const dumpDir  = path.join(__dirname, '..', 'temp_dumps');
+  const dumpDir = path.join(__dirname, "..", "temp_dumps");
   fse.ensureDirSync(dumpDir);
   const dumpPath = path.join(dumpDir, `dump-${siteId}-${Date.now()}.sql`);
 
   try {
     // 1. Dump SQL từ WP
     const tables = await dumpAllTables(site.siteUrl, site.apiKey);
-    const sql    = dumpToSql(tables);
-    fs.writeFileSync(dumpPath, sql, 'utf8');
+    const sql = dumpToSql(tables);
+    fs.writeFileSync(dumpPath, sql, "utf8");
     console.log(`[CreateDb] dump saved — ${dumpPath}`);
 
     // 2. Tạo database trên Railway và import
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
-    console.log(`[CreateDb] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+    console.log(
+      `[CreateDb] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`,
+    );
 
     // 3. Lưu vào db.json
     const record = db.wpSites[siteId];
@@ -732,13 +773,17 @@ async function getCommitsByRepo(req, res) {
   const perPage = Math.min(Math.max(perPageRaw, 1), 100);
 
   if (!repoUrl) {
-    return res.status(400).json({ success: false, error: "repoUrl query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "repoUrl query param is required" });
   }
 
   // Parse owner/repo từ URL dạng https://github.com/owner/repo
   const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
   if (!match) {
-    return res.status(400).json({ success: false, error: "Invalid GitHub repo URL" });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid GitHub repo URL" });
   }
 
   const [, owner, repo] = match;
@@ -754,7 +799,7 @@ async function getCommitsByRepo(req, res) {
         },
         params: { per_page: perPage, page },
         timeout: 10000,
-      }
+      },
     );
 
     const commits = response.data.map((c) => ({
@@ -798,14 +843,16 @@ async function getWpSitePages(req, res) {
   const { siteUrl } = req.query;
 
   if (!siteUrl) {
-    return res.status(400).json({ success: false, error: "siteUrl query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteUrl query param is required" });
   }
 
   try {
-    const response = await axios.get(
-      `${siteUrl}/wp-json/wp/v2/pages`,
-      { params: { per_page: 100, _fields: "id,title,link,slug,status" }, timeout: 10000 }
-    );
+    const response = await axios.get(`${siteUrl}/wp-json/wp/v2/pages`, {
+      params: { per_page: 100, _fields: "id,title,link,slug,status" },
+      timeout: 10000,
+    });
 
     // Normalize page links to use the same origin as siteUrl.
     // WordPress REST API returns `link` based on its own configured siteurl,
@@ -831,8 +878,6 @@ async function getWpSitePages(req, res) {
       })),
     ];
 
-    
-
     return res.status(200).json({ success: true, pages });
   } catch (error) {
     const status = error.response?.status || 500;
@@ -842,8 +887,6 @@ async function getWpSitePages(req, res) {
     });
   }
 }
-
-
 
 // In-memory cache: siteOrigin → { cookie, expiresAt }
 const WP_SESSION_CACHE = new Map();
@@ -856,16 +899,14 @@ const WP_SESSION_CACHE = new Map();
 async function getWpAuthCookie(siteUrl, apiKey) {
   const cached = WP_SESSION_CACHE.get(siteUrl);
   // Dùng lại cache nếu còn hơn 2 phút
-  if (cached && cached.expiresAt > Date.now() + 2 * 60 * 1000) return cached.cookie;
+  if (cached && cached.expiresAt > Date.now() + 2 * 60 * 1000)
+    return cached.cookie;
 
   try {
-    const res = await axios.get(
-      `${siteUrl}/wp-json/vibepress/v1/auth-cookie`,
-      {
-        headers: { "X-Vibepress-Key": apiKey },
-        timeout: 10000,
-      },
-    );
+    const res = await axios.get(`${siteUrl}/wp-json/vibepress/v1/auth-cookie`, {
+      headers: { "X-Vibepress-Key": apiKey },
+      timeout: 10000,
+    });
 
     const { cookieName, cookieValue, expiresAt } = res.data;
     const cookie = `${cookieName}=${cookieValue}`;
@@ -886,7 +927,9 @@ async function proxyWpPage(req, res) {
   const { url } = req.query;
 
   if (!url) {
-    return res.status(400).json({ success: false, error: "url query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "url query param is required" });
   }
 
   try {
@@ -911,7 +954,10 @@ async function proxyWpPage(req, res) {
     let html = response.data;
 
     // Inject <base> so relative URLs (CSS, JS, images, links) resolve to the WP origin.
-    html = html.replace(/(<head[^>]*>)/i, `$1\n  <base href="${targetUrl.origin}/">`);
+    html = html.replace(
+      /(<head[^>]*>)/i,
+      `$1\n  <base href="${targetUrl.origin}/">`,
+    );
 
     // Build a fresh response — intentionally omits X-Frame-Options and
     // Content-Security-Policy that WordPress/WooCommerce would send.
@@ -943,7 +989,5 @@ module.exports = {
   getSqlDumpRows,
   getSqlDumpFullTable,
   getSqlDumpAll,
-  createSiteDb
+  createSiteDb,
 };
-
-

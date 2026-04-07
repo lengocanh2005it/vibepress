@@ -342,7 +342,6 @@ export class ValidatorService {
     const DATA_NEED_ALIASES: Record<string, string> = {
       'post-detail': 'postDetail',
       'page-detail': 'pageDetail',
-      'product-detail': 'productDetail',
       'site-info': 'siteInfo',
     };
     const violations: string[] = [];
@@ -350,14 +349,9 @@ export class ValidatorService {
       (context.dataNeeds ?? []).map((n) => DATA_NEED_ALIASES[n] ?? n),
     );
     const expectsPostDetail = dataNeeds.has('postDetail');
-    const expectsProducts = dataNeeds.has('products');
     const expectsPageDetail = dataNeeds.has('pageDetail');
-    const expectsProductDetail = dataNeeds.has('productDetail');
     const expectsAnyDetail =
-      context.isDetail === true ||
-      expectsPostDetail ||
-      expectsPageDetail ||
-      expectsProductDetail;
+      context.isDetail === true || expectsPostDetail || expectsPageDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
     const isPartialComponent = PARTIAL_PATTERNS.test(
       context.componentName ?? '',
@@ -369,12 +363,6 @@ export class ValidatorService {
       context.type === 'page' &&
       context.isSubComponent !== true &&
       !isPartialComponent;
-    const isReadOnlyCommerceComponent =
-      expectsProducts ||
-      expectsProductDetail ||
-      /^\/(?:shop|product\/:slug|product-category\/:slug|product-tag\/:slug|cart|my-account)$/.test(
-        context.route ?? '',
-      );
 
     // Pre-processing: deterministically strip post-only fields from `interface Page`
     // so the AI does not need a retry attempt just for a bad type declaration.
@@ -662,11 +650,6 @@ export class ValidatorService {
           'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
-      if (expectsProductDetail && !this.matchesDetailFetch(code, 'products')) {
-        violations.push(
-          'WooCommerce product detail component must fetch the record via `/api/products/${productId}` (or equivalent string concatenation).',
-        );
-      }
       if (
         !dataNeeds.has('postDetail') &&
         this.matchesDetailFetch(code, 'posts')
@@ -681,45 +664,6 @@ export class ValidatorService {
       ) {
         violations.push(
           'Component fetches `/api/pages/${slug}` even though its plan does not require page detail data.',
-        );
-      }
-      if (
-        !dataNeeds.has('productDetail') &&
-        this.matchesDetailFetch(code, 'products')
-      ) {
-        violations.push(
-          'Component fetches `/api/products/...` even though its plan does not require product detail data.',
-        );
-      }
-      if (expectsProducts && !/fetch\(\s*['"`]\/api\/products\b/.test(code)) {
-        violations.push(
-          'Storefront list component must fetch the product collection via `/api/products`.',
-        );
-      }
-    }
-
-    if (isReadOnlyCommerceComponent) {
-      if (
-        /fetch\(\s*['"`]\/api\/(?:cart|checkout|orders?|account)\b/i.test(
-          code,
-        ) ||
-        /fetch\(\s*['"`][^'"`]*\/api\/[^'"`]*(?:cart|checkout|orders?|account)/i.test(
-          code,
-        )
-      ) {
-        violations.push(
-          'WooCommerce read-only contract violated: storefront components must not fetch cart, checkout, account, or order endpoints.',
-        );
-      }
-      if (
-        /<(?:button|a|Link)\b[^>]*>[\s\S]{0,80}(?:Add to Cart|Buy Now|Checkout|My Account)/i.test(
-          code,
-        ) ||
-        /\bto=["']\/(?:cart|checkout|my-account)\b/i.test(code) ||
-        /\bhref=["']\/(?:cart|checkout|my-account)\b/i.test(code)
-      ) {
-        violations.push(
-          'WooCommerce read-only contract violated: storefront demo must not render cart, checkout, account, or add-to-cart actions.',
         );
       }
     }

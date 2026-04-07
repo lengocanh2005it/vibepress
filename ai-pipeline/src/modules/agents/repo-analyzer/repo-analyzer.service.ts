@@ -48,23 +48,6 @@ interface KnownThemeDef {
 
 // ─── Known plugins registry ───────────────────────────────────────────────────
 const KNOWN_PLUGINS: Record<string, KnownPluginDef> = {
-  // E-commerce
-  woocommerce: {
-    type: 'ecommerce',
-    hasTemplates: true,
-    templateDir: 'templates',
-    keyRoutes: [
-      'shop',
-      'cart',
-      'checkout',
-      'my-account',
-      'product',
-      'product-category',
-    ],
-    notes: [
-      'WooCommerce shop/cart/checkout routes must be treated as first-class pages.',
-    ],
-  },
   'easy-digital-downloads': {
     type: 'ecommerce',
     hasTemplates: true,
@@ -164,14 +147,6 @@ const KNOWN_PLUGINS: Record<string, KnownPluginDef> = {
       'Polylang adds language prefixes to URLs — routing must account for this.',
     ],
   },
-  // Membership
-  'woocommerce-memberships': {
-    type: 'membership',
-    hasTemplates: true,
-    templateDir: 'templates',
-    keyRoutes: ['members-area'],
-    notes: [],
-  },
   'paid-memberships-pro': {
     type: 'membership',
     hasTemplates: true,
@@ -207,14 +182,6 @@ const KNOWN_PLUGINS: Record<string, KnownPluginDef> = {
     hasTemplates: true,
     templateDir: 'src/views',
     keyRoutes: ['events', 'event'],
-    notes: [],
-  },
-  // Booking
-  'woocommerce-bookings': {
-    type: 'booking',
-    hasTemplates: true,
-    templateDir: 'templates',
-    keyRoutes: ['booking'],
     notes: [],
   },
   wpamelia: {
@@ -268,14 +235,6 @@ const KNOWN_THEMES: Record<string, KnownThemeDef> = {
   // WordPress default classic themes
   twentytwentyone: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
   twentytwenty: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  // WooCommerce official
-  storefront: {
-    vendor: 'woocommerce',
-    usesPageBuilder: false,
-    notes: [
-      "Storefront is WooCommerce's official theme — woocommerce/ override folder is expected.",
-    ],
-  },
   // Popular multipurpose (classic/hybrid)
   astra: { vendor: 'brainstorm-force', usesPageBuilder: false, notes: [] },
   generatepress: { vendor: 'tom-usborne', usesPageBuilder: false, notes: [] },
@@ -422,7 +381,6 @@ export interface RepoThemeTypeHints {
   hasFunctionsPhp: boolean;
   hasStyleCss: boolean;
   hasTemplatePartsPhp: boolean;
-  hasWooCommerceTemplates: boolean;
   themeSlug: string;
   themeVendor?: string;
   usesPageBuilder: boolean;
@@ -483,7 +441,6 @@ export interface RepoRuntimeHints {
   enqueuedScriptHandles: string[];
   imageSizes: string[];
   editorStyleFiles: string[];
-  hasWooCommerceSupport: boolean;
 }
 
 export interface RepoPatternMeta {
@@ -504,7 +461,6 @@ export interface RepoStructureHints {
   containsSearch: boolean;
   containsComments: boolean;
   containsQueryLoop: boolean;
-  containsWooCommerceBlocks: boolean;
   /** Parsed metadata from PHP header comments in patterns/ files */
   patternMeta: RepoPatternMeta[];
 }
@@ -696,17 +652,6 @@ export class RepoAnalyzerService {
     const hasTemplatePartsPhp = filesByRole.templateParts.some((file) =>
       file.startsWith('template-parts/'),
     );
-    const hasWooCommerceTemplates = fileTree.some(
-      (file) =>
-        file.startsWith('woocommerce/') ||
-        /(^|\/)(archive-product|single-product|cart|checkout|myaccount)\.php$/i.test(
-          file,
-        ) ||
-        /(^|\/)(archive-product|single-product|cart|checkout|my-account)\.html$/i.test(
-          file,
-        ),
-    );
-
     let detectedThemeKind: RepoThemeTypeHints['detectedThemeKind'] = 'unknown';
     if (hasThemeJson && hasTemplatesDir) {
       detectedThemeKind = hasTemplatePartsPhp ? 'hybrid' : 'block';
@@ -725,7 +670,6 @@ export class RepoAnalyzerService {
       hasFunctionsPhp,
       hasStyleCss,
       hasTemplatePartsPhp,
-      hasWooCommerceTemplates,
       themeSlug,
       themeVendor: knownTheme?.vendor,
       usesPageBuilder: knownTheme?.usesPageBuilder ?? false,
@@ -917,7 +861,6 @@ export class RepoAnalyzerService {
       enqueuedScriptHandles: Array.from(enqueuedScriptHandles).sort(),
       imageSizes: Array.from(imageSizes).sort(),
       editorStyleFiles: Array.from(editorStyleFiles).sort(),
-      hasWooCommerceSupport: themeSupports.has('woocommerce'),
     };
   }
 
@@ -1013,9 +956,6 @@ export class RepoAnalyzerService {
       ),
       containsQueryLoop: normalizedBlockTypes.some((block) =>
         ['query', 'query-loop', 'core/query'].includes(block),
-      ),
-      containsWooCommerceBlocks: normalizedBlockTypes.some((block) =>
-        block.startsWith('woocommerce/'),
       ),
       patternMeta,
     };
@@ -1190,9 +1130,6 @@ export class RepoAnalyzerService {
     const pluginLayoutFiles = plugins.flatMap((plugin) =>
       plugin.layoutFiles.map((file) => `${plugin.relativeDir}/${file}`),
     );
-    const wooPlugin = plugins.find(
-      (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-    );
     const notes: string[] = [];
 
     if (
@@ -1217,17 +1154,6 @@ export class RepoAnalyzerService {
     if (styleSources.discoveredFontFamilies.length > 0) {
       notes.push(
         `CSS references ${styleSources.discoveredFontFamilies.length} font family candidate(s).`,
-      );
-    }
-
-    if (runtimeHints.hasWooCommerceSupport) {
-      notes.push(
-        'functions.php declares WooCommerce support, so shop/cart/checkout templates and routes should be treated as first-class inputs.',
-      );
-    }
-    if (wooPlugin) {
-      notes.push(
-        'WooCommerce source is present in the repo. For storefront pages, keep active theme templates first and fall back to WooCommerce templates only when the theme does not define that UI.',
       );
     }
 
@@ -1358,10 +1284,7 @@ export class RepoAnalyzerService {
         ...filesByRole.templateParts,
         ...filesByRole.patterns,
         ...filesByRole.phpTemplates.filter(
-          (file) =>
-            /^templates?\//i.test(file) ||
-            /^views?\//i.test(file) ||
-            /^woocommerce\//i.test(file),
+          (file) => /^templates?\//i.test(file) || /^views?\//i.test(file),
         ),
       ]),
     ).slice(0, 20);
@@ -1389,10 +1312,7 @@ export class RepoAnalyzerService {
       keyRoutes: known?.keyRoutes ?? [],
       pluginNotes: known?.notes ?? [],
       hasTemplatesDir: fileTree.some(
-        (file) =>
-          /^templates?\//i.test(file) ||
-          /^views?\//i.test(file) ||
-          /^woocommerce\//i.test(file),
+        (file) => /^templates?\//i.test(file) || /^views?\//i.test(file),
       ),
       hasAssetsDir: fileTree.some(
         (file) =>

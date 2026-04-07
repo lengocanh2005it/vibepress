@@ -1,7 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { basename } from 'path';
+import { mkdir, readFile } from 'fs/promises';
+import { basename, join } from 'path';
+import OpenAI from 'openai';
+import puppeteer from 'puppeteer';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { OPENAI_CLIENT } from '../../../common/providers/openai/openai.provider.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
@@ -54,6 +58,13 @@ interface PlanningSourceContext {
   sourceAnalysis: string;
 }
 
+interface PlanningVisualReference {
+  route: string;
+  url: string;
+  screenshotPath: string;
+  viewport: string;
+}
+
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
@@ -61,6 +72,7 @@ export class PlannerService {
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
+    @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly aiLogger: AiLoggerService,
@@ -277,6 +289,7 @@ export class PlannerService {
       options?.repoManifest,
       resolvedModel,
       options?.logPath,
+      jobId,
     );
   }
 
@@ -323,6 +336,8 @@ export class PlannerService {
       globalTypography,
       repoManifest,
       resolvedModel,
+      undefined,
+      undefined,
     );
   }
 
@@ -338,6 +353,7 @@ export class PlannerService {
     repoManifest: RepoThemeManifest | undefined,
     modelName: string,
     logPath?: string,
+    jobId?: string,
   ): Promise<PlanResult> {
     const concurrency =
       this.configService.get<number>('planner.visualPlanConcurrency') ?? 3;
@@ -346,41 +362,83 @@ export class PlannerService {
       3000;
 
     const result: PlanResult = new Array(plan.length);
+    const canUseVisualReferences =
+      (this.configService.get<boolean>('planner.visualReferenceEnabled') ??
+        true) &&
+      this.canUseOpenAiVisionModel(modelName);
+    const wpBaseUrl = canUseVisualReferences
+      ? this.resolveWordPressVisualBaseUrl(content.siteInfo.siteUrl)
+      : null;
+    const artifactRoot = wpBaseUrl
+      ? await this.ensurePlannerVisualArtifactRoot(jobId)
+      : null;
+    const visualReferenceCache = new Map<
+      string,
+      PlanningVisualReference | null
+    >();
+    let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
 
-    for (
-      let batchStart = 0;
-      batchStart < plan.length;
-      batchStart += concurrency
-    ) {
-      if (batchStart > 0) {
-        await new Promise((res) => setTimeout(res, batchDelay));
+    if (canUseVisualReferences && !wpBaseUrl) {
+      this.logger.warn(
+        '[Phase C: AI Visual Sections] WordPress visual references enabled, but no valid browser-accessible WP base URL was found; falling back to template-only planning',
+      );
+    }
+
+    if (artifactRoot) {
+      try {
+        browser = await puppeteer.launch({
+          headless: true,
+          args: ['--no-sandbox'],
+        });
+      } catch (err: any) {
+        this.logger.warn(
+          `[Phase C: AI Visual Sections] Failed to launch browser for WordPress screenshots: ${err?.message ?? 'unknown error'}; falling back to template-only planning`,
+        );
       }
+    }
 
-      const batch = plan.slice(batchStart, batchStart + concurrency);
-      const batchResults = await Promise.all(
-        batch.map((componentPlan) =>
-          this.generateVisualPlanForComponent(
-            componentPlan,
-            sourceMap.get(componentPlan.templateName) ?? '',
-            content,
-            tokens,
-            globalPalette,
-            globalTypography,
-            plan,
-            repoManifest,
-            modelName,
-            logPath,
+    try {
+      for (
+        let batchStart = 0;
+        batchStart < plan.length;
+        batchStart += concurrency
+      ) {
+        if (batchStart > 0) {
+          await new Promise((res) => setTimeout(res, batchDelay));
+        }
+
+        const batch = plan.slice(batchStart, batchStart + concurrency);
+        const batchResults = await Promise.all(
+          batch.map((componentPlan) =>
+            this.generateVisualPlanForComponent(
+              componentPlan,
+              sourceMap.get(componentPlan.templateName) ?? '',
+              content,
+              tokens,
+              globalPalette,
+              globalTypography,
+              plan,
+              repoManifest,
+              modelName,
+              logPath,
+              browser,
+              wpBaseUrl,
+              artifactRoot,
+              visualReferenceCache,
+            ),
           ),
-        ),
-      );
+        );
 
-      for (let j = 0; j < batchResults.length; j++) {
-        result[batchStart + j] = batchResults[j];
+        for (let j = 0; j < batchResults.length; j++) {
+          result[batchStart + j] = batchResults[j];
+        }
+
+        this.logger.log(
+          `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+        );
       }
-
-      this.logger.log(
-        `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
-      );
+    } finally {
+      await browser?.close();
     }
 
     const withPlan = result.filter((c) => c.visualPlan).length;
@@ -402,6 +460,10 @@ export class PlannerService {
     repoManifest: RepoThemeManifest | undefined,
     modelName: string,
     logPath?: string,
+    browser?: Awaited<ReturnType<typeof puppeteer.launch>> | null,
+    wpBaseUrl?: string | null,
+    artifactRoot?: string | null,
+    visualReferenceCache?: Map<string, PlanningVisualReference | null>,
   ): Promise<PlanResult[number]> {
     let visualPlan: ComponentVisualPlan | undefined;
     const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
@@ -442,6 +504,14 @@ export class PlannerService {
         dataNeeds: visualDataNeeds,
         stripLayoutChrome: componentPlan.type === 'page',
       } as const;
+      const visualReference = await this.prepareVisualReferenceForComponent(
+        componentPlan,
+        content,
+        browser ?? null,
+        wpBaseUrl ?? null,
+        artifactRoot ?? null,
+        visualReferenceCache,
+      );
       const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
         componentName: componentPlan.componentName,
         templateSource: planningSource.source,
@@ -453,6 +523,13 @@ export class PlannerService {
         isDetail: componentPlan.isDetail,
         dataNeeds: visualDataNeeds,
         sourceAnalysis: planningSource.sourceAnalysis,
+        visualReference: visualReference
+          ? {
+              route: visualReference.route,
+              sourceUrl: visualReference.url,
+              viewport: visualReference.viewport,
+            }
+          : undefined,
       });
       const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';
@@ -477,11 +554,12 @@ export class PlannerService {
           text: raw,
           inputTokens: inTok,
           outputTokens: outTok,
-        } = await this.llmFactory.chat({
+        } = await this.requestVisualPlanCompletion({
           model: modelName,
           systemPrompt,
           userPrompt: prompt,
           maxTokens: 4096,
+          screenshotPath: visualReference?.screenshotPath,
         });
         if (tokenLogPath) {
           await this.tokenTracker.track(
@@ -503,7 +581,6 @@ export class PlannerService {
           const layout = this.deriveComponentLayout(
             tokens,
             componentPlan.componentName,
-            fullPlan,
           );
           visualPlan = {
             ...parsed,
@@ -547,6 +624,289 @@ export class PlannerService {
     return { ...componentPlan, visualPlan };
   }
 
+  private async requestVisualPlanCompletion(input: {
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+    maxTokens: number;
+    screenshotPath?: string;
+  }): Promise<{
+    text: string;
+    inputTokens: number;
+    outputTokens: number;
+    truncated?: boolean;
+  }> {
+    const { model, systemPrompt, userPrompt, maxTokens, screenshotPath } =
+      input;
+    if (!screenshotPath || !this.canUseOpenAiVisionModel(model)) {
+      return this.llmFactory.chat({
+        model,
+        systemPrompt,
+        userPrompt,
+        maxTokens,
+      });
+    }
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.resolveOpenAiModelName(model),
+        temperature: 0,
+        max_completion_tokens: maxTokens,
+        messages: [
+          ...(systemPrompt
+            ? [{ role: 'system' as const, content: systemPrompt }]
+            : []),
+          {
+            role: 'user' as const,
+            content: [
+              { type: 'text' as const, text: userPrompt },
+              {
+                type: 'image_url' as const,
+                image_url: {
+                  url: await this.fileToDataUrl(screenshotPath),
+                  detail: 'high',
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const text = response.choices[0]?.message?.content;
+      const finishReason = response.choices[0]?.finish_reason;
+      if (!text) {
+        throw new Error(
+          `Empty response from ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
+        );
+      }
+
+      return {
+        text,
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+        truncated: finishReason === 'length',
+      };
+    } catch (err: any) {
+      this.logger.warn(
+        `[Phase C: AI Visual Sections] OpenAI multimodal visual-plan call failed (${err?.message ?? 'unknown error'}); retrying without screenshot context`,
+      );
+      return this.llmFactory.chat({
+        model,
+        systemPrompt,
+        userPrompt,
+        maxTokens,
+      });
+    }
+  }
+
+  private canUseOpenAiVisionModel(modelName: string): boolean {
+    const slashIdx = modelName.indexOf('/');
+    if (slashIdx !== -1) {
+      return modelName.slice(0, slashIdx) === 'openai';
+    }
+    return this.llmFactory.getProvider() === 'openai';
+  }
+
+  private resolveOpenAiModelName(modelName: string): string {
+    return modelName.startsWith('openai/')
+      ? modelName.slice('openai/'.length)
+      : modelName;
+  }
+
+  private async prepareVisualReferenceForComponent(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+    browser: Awaited<ReturnType<typeof puppeteer.launch>> | null,
+    wpBaseUrl: string | null,
+    artifactRoot: string | null,
+    visualReferenceCache?: Map<string, PlanningVisualReference | null>,
+  ): Promise<PlanningVisualReference | null> {
+    if (
+      componentPlan.type !== 'page' ||
+      !componentPlan.route ||
+      !browser ||
+      !wpBaseUrl ||
+      !artifactRoot
+    ) {
+      return null;
+    }
+
+    const route = this.resolveConcreteVisualRoute(componentPlan, content);
+    if (!route) return null;
+
+    const cached = visualReferenceCache?.get(route);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const screenshotPath = join(
+      artifactRoot,
+      `${this.routeToArtifactKey(route)}.png`,
+    );
+    const url = new URL(route, wpBaseUrl).toString();
+    const viewport = this.getPlannerVisualViewport();
+
+    try {
+      await this.captureVisualReference(browser, url, screenshotPath, viewport);
+      const reference: PlanningVisualReference = {
+        route,
+        url,
+        screenshotPath,
+        viewport: `${viewport.width}x${viewport.height}`,
+      };
+      visualReferenceCache?.set(route, reference);
+      return reference;
+    } catch (err: any) {
+      this.logger.warn(
+        `[Phase C: AI Visual Sections] Failed to capture WordPress screenshot for "${componentPlan.componentName}" at ${url}: ${err?.message ?? 'unknown error'}`,
+      );
+      visualReferenceCache?.set(route, null);
+      return null;
+    }
+  }
+
+  private async ensurePlannerVisualArtifactRoot(
+    jobId?: string,
+  ): Promise<string> {
+    const root = jobId
+      ? join('temp', 'generated', jobId, 'artifacts', 'planning-visual')
+      : join(
+          'temp',
+          'generated',
+          'planner-visual',
+          `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        );
+    await mkdir(root, { recursive: true });
+    return root;
+  }
+
+  private getPlannerVisualViewport(): { width: number; height: number } {
+    return {
+      width:
+        this.configService.get<number>('planner.visualViewportWidth') ?? 1440,
+      height:
+        this.configService.get<number>('planner.visualViewportHeight') ?? 1400,
+    };
+  }
+
+  private resolveWordPressVisualBaseUrl(siteUrl?: string): string | null {
+    const configured =
+      this.configService.get<string>('planner.visualWpBaseUrl')?.trim() ?? '';
+    const candidate = configured || siteUrl?.trim();
+    if (!candidate) return null;
+
+    try {
+      const url = new URL(candidate);
+      return this.ensureTrailingSlash(url.toString());
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveConcreteVisualRoute(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ): string | null {
+    const routePattern = componentPlan.route;
+    if (!routePattern) return null;
+    if (!routePattern.includes(':')) return routePattern;
+
+    if (
+      routePattern.startsWith('/page/') ||
+      componentPlan.dataNeeds.includes('page-detail')
+    ) {
+      const page = this.findRepresentativePage(componentPlan, content);
+      return page?.slug ? routePattern.replace(':slug', page.slug) : null;
+    }
+    if (
+      routePattern.startsWith('/post/') ||
+      componentPlan.dataNeeds.includes('post-detail')
+    ) {
+      const post = content.posts[0];
+      return post?.slug ? routePattern.replace(':slug', post.slug) : null;
+    }
+    if (routePattern.startsWith('/category/')) {
+      const slug = this.findTaxonomySlug(content, 'category');
+      return slug ? routePattern.replace(':slug', slug) : null;
+    }
+    if (routePattern.startsWith('/tag/')) {
+      const slug = this.findTaxonomySlug(content, 'post_tag');
+      return slug ? routePattern.replace(':slug', slug) : null;
+    }
+
+    return null;
+  }
+
+  private findRepresentativePage(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ): DbContentResult['pages'][number] | undefined {
+    const normalizedTemplate = componentPlan.templateName
+      .replace(/\.(php|html)$/i, '')
+      .toLowerCase();
+
+    const matchingPage = content.pages.find((page) => {
+      const template = (page.template ?? '')
+        .replace(/\.(php|html)$/i, '')
+        .replace(/^templates?\//i, '')
+        .toLowerCase();
+      return template === normalizedTemplate;
+    });
+
+    return matchingPage ?? content.pages[0];
+  }
+
+  private findTaxonomySlug(
+    content: DbContentResult,
+    taxonomy: string,
+  ): string | null {
+    const match = content.taxonomies.find((item) => item.taxonomy === taxonomy);
+    return match?.terms[0]?.slug ?? null;
+  }
+
+  private async captureVisualReference(
+    browser: Awaited<ReturnType<typeof puppeteer.launch>>,
+    url: string,
+    screenshotPath: string,
+    viewport: { width: number; height: number },
+  ): Promise<void> {
+    const page = await browser.newPage();
+    try {
+      await page.setViewport({
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: 1,
+      });
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 45_000 });
+      await page.addStyleTag({
+        content:
+          '#wpadminbar{display:none !important;} html{margin-top:0 !important;} body{margin-top:0 !important;}',
+      });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+    } finally {
+      await page.close();
+    }
+  }
+
+  private async fileToDataUrl(filePath: string): Promise<string> {
+    const buffer = await readFile(filePath);
+    return `data:image/png;base64,${buffer.toString('base64')}`;
+  }
+
+  private routeToArtifactKey(route: string): string {
+    return (
+      route
+        .replace(/^\//, '')
+        .replace(/[^a-z0-9/_-]+/gi, '-')
+        .replace(/\//g, '__') || 'home'
+    );
+  }
+
+  private ensureTrailingSlash(url: string): string {
+    return url.endsWith('/') ? url : `${url}/`;
+  }
+
   private buildDeterministicVisualPlanForComponent(
     componentPlan: PlanResult[number],
     content: DbContentResult,
@@ -558,7 +918,6 @@ export class PlannerService {
     const layout = this.deriveComponentLayout(
       tokens,
       componentPlan.componentName,
-      fullPlan,
     );
     const dataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
     const base = {
@@ -652,12 +1011,6 @@ export class PlannerService {
   }
 
   private shouldSkipAiVisualPlan(componentPlan: PlanResult[number]): boolean {
-    if (
-      componentPlan.dataNeeds.includes('products') ||
-      componentPlan.dataNeeds.includes('product-detail')
-    ) {
-      return true;
-    }
     if (componentPlan.type !== 'partial') return false;
     return getComponentStrategy(componentPlan.componentName).skipAiVisualPlan;
   }
@@ -724,12 +1077,14 @@ export class PlannerService {
     return `rounded-[${normalized}]`;
   }
 
-  // ── Layout tokens: container + includes per component ─────────────────────
+  // ── Layout hints: map extracted theme tokens to generator-friendly classes ─
+  // This step does not parse source theme files directly. It only converts the
+  // already-merged ThemeTokens into a small layout contract that the visual
+  // planner / code generator can reuse consistently.
 
   private deriveComponentLayout(
     tokens: ThemeTokens | undefined,
     componentName: string,
-    allComponents: PlanResult,
   ): LayoutTokens {
     const d: ThemeDefaults = tokens?.defaults ?? {};
     const imageRadius =
@@ -744,10 +1099,15 @@ export class PlannerService {
       tokens?.blockStyles?.column?.spacing?.padding;
     const isSidebarLayout = /WithSidebar$/i.test(componentName);
 
-    const maxW = d.contentWidth
-      ? `max-w-[${d.contentWidth}]`
-      : 'max-w-[1280px]';
-    const containerClass = `${maxW} mx-auto w-full`;
+    // WordPress contentSize is usually the prose/article width, not the outer
+    // shell width for heroes, cards, grids, headers, footers, or sidebars.
+    // Likewise, rootPadding from theme defaults is a site-shell concern and is
+    // intentionally NOT propagated into per-component layout tokens, because it
+    // causes generated pages to double-pad and look unnaturally narrow.
+    const sectionMaxW = d.wideWidth ?? '1280px';
+    const contentMaxW = d.contentWidth ?? '800px';
+    const containerClass = `max-w-[${sectionMaxW}] mx-auto w-full`;
+    const contentContainerClass = `max-w-[${contentMaxW}] mx-auto w-full`;
 
     const blockGap = d.blockGap ? `gap-[${d.blockGap}]` : 'gap-16';
 
@@ -758,10 +1118,10 @@ export class PlannerService {
 
     return {
       containerClass,
+      contentContainerClass,
       blockGap,
       contentLayout: isSidebarLayout ? 'sidebar-right' : 'single-column',
       sidebarWidth: '320px',
-      rootPadding: d.rootPadding,
       buttonPadding: d.buttonPadding,
       imageRadius,
       cardRadius,
@@ -830,23 +1190,6 @@ export class PlannerService {
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'front-page';
       const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
-
-      // WooCommerce product template detection
-      const isProductTemplate =
-        templateBase.includes('product') ||
-        templateBase === 'single-product' ||
-        templateBase.includes('shop') ||
-        templateBase === 'archive-product';
-      if (isProductTemplate || source.includes('woocommerce')) {
-        if (
-          templateBase.includes('single') ||
-          templateBase === 'single-product'
-        ) {
-          needs.add('product-detail');
-        } else {
-          needs.add('products');
-        }
-      }
 
       // FSE block theme
       if (
@@ -926,12 +1269,6 @@ For each template, decide:
 - search → route "/search"
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
-- single-product → route "/product/:slug"   (isDetail: true)
-- shop / archive-product → route "/shop"
-- taxonomy-product-cat → route "/product-category/:slug"   (isDetail: true)
-- taxonomy-product-tag → route "/product-tag/:slug"   (isDetail: true)
-- cart → route "/cart"
-- my-account / myaccount → route "/my-account"
 - page (the default page template) → route "/page/:slug"   (isDetail: true)
 - Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
   e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
@@ -943,15 +1280,11 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "products" | "pages" | "menus" | "site-info" | "post-detail" | "product-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
-- "product-detail" → ONLY for single-product templates (route /product/:slug or /single-product/:slug)
 - "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
 - Page templates MUST use "page-detail" — NEVER "post-detail"
-- Shop / archive-product templates MUST use "products" for read-only storefront listings
-- Product taxonomy storefront pages (taxonomy-product-cat, taxonomy-product-tag) MUST use "products"
-- Read-only WooCommerce mode: NEVER plan checkout, payment, wishlist, add-to-cart, or mutation flows. Cart and my-account templates may be planned only as static/read-only shells when those templates exist in the source.
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
 - Dedicated Header / Footer / Navigation partials may include "menus"
@@ -1024,37 +1357,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
     lines.push('## Runtime capabilities');
     lines.push(
-      `WooCommerce detected: ${content.capabilities.wooCommerce ? 'yes' : 'no'}`,
+      `Active plugins: ${content.capabilities.activePluginSlugs.join(', ') || '(none)'}`,
     );
-    if (content.capabilities.wooCommerce) {
-      lines.push(`Commerce mode: ${content.commerce.mode}`);
-      lines.push(`Published products: ${content.commerce.productsCount}`);
-      lines.push(
-        `Product categories: ${content.commerce.productCategoriesCount}`,
-      );
-      lines.push(
-        `Core commerce pages: ${content.commerce.corePages.join(', ') || '(not found in DB)'}`,
-      );
-      lines.push(
-        'Migration rule: preserve WooCommerce storefront source for product archive/listing, single-product detail, taxonomy product archives, and read-only cart/my-account shells when those templates exist. Do not invent checkout, payment, or mutation flows.',
-      );
-    }
     lines.push('');
-
-    const detectedWoo = content.detectedPlugins.find(
-      (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
-    );
-    if (detectedWoo) {
-      lines.push('## WooCommerce runtime evidence');
-      const evidence = detectedWoo.evidence
-        .slice(0, 6)
-        .map((item) => `${item.source}:${item.match}`)
-        .join(', ');
-      lines.push(
-        `- woocommerce (${detectedWoo.confidence}) capabilities: ${detectedWoo.capabilities.join(', ') || '(none)'} | evidence: ${evidence}`,
-      );
-      lines.push('');
-    }
 
     if (content.discovery.elementorWidgetTypes.length > 0) {
       lines.push('## Elementor widget types in use');
@@ -1237,7 +1542,7 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - Pages must have a non-null route starting with "/"
 - Partials must have route: null, isDetail: false
 - isDetail must be true when route contains :slug
-- Valid dataNeeds values: posts, products, pages, menus, site-info, post-detail, product-detail, page-detail, comments, categoryDetail
+- Valid dataNeeds values: posts, pages, menus, site-info, post-detail, page-detail, comments, categoryDetail
 
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
   }
@@ -1313,28 +1618,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         ),
       );
     }
-    if (content?.commerce.mode === 'woo-readonly') {
-      if (
-        !existingTemplateNames.has('archive-product') &&
-        !existingTemplateNames.has('shop')
-      ) {
-        templates.push(
-          createFallbackTemplate(
-            'archive-product',
-            '<!-- wp:woocommerce/product-collection {"perPage":12} --><div class="wc-block-product-template"><!-- wp:woocommerce/product-image /--><!-- wp:woocommerce/product-title /--><!-- wp:woocommerce/product-price /--></div><!-- /wp:woocommerce/product-collection -->',
-          ),
-        );
-      }
-      if (!existingTemplateNames.has('single-product')) {
-        templates.push(
-          createFallbackTemplate(
-            'single-product',
-            '<div class="single-product"><div class="product-summary"><!-- Product detail fallback --></div></div>',
-          ),
-        );
-      }
-    }
-
     return templates;
   }
 
@@ -1365,30 +1648,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         dataNeeds = ['page-detail'];
         route = '/:slug';
         isDetail = true;
-      } else if (name.toLowerCase() === 'archive-product') {
-        dataNeeds = ['products'];
-        route = '/shop';
-      } else if (name.toLowerCase() === 'single-product') {
-        dataNeeds = ['product-detail'];
-        route = '/product/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'taxonomy-product-cat') {
-        dataNeeds = ['products'];
-        route = '/product-category/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'taxonomy-product-tag') {
-        dataNeeds = ['products'];
-        route = '/product-tag/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'cart') {
-        route = '/cart';
-        dataNeeds = [];
-      } else if (
-        name.toLowerCase() === 'my-account' ||
-        name.toLowerCase() === 'myaccount'
-      ) {
-        route = '/my-account';
-        dataNeeds = [];
       }
 
       return {
@@ -1611,10 +1870,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private toVisualDataNeeds(dataNeeds: string[]): DataNeed[] {
     const ordered: DataNeed[] = [
       'postDetail',
-      'productDetail',
       'pageDetail',
       'comments',
-      'products',
       'posts',
       'pages',
       'menus',
@@ -1630,9 +1887,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         case 'post-detail':
           mapped.add('postDetail');
           break;
-        case 'product-detail':
-          mapped.add('productDetail');
-          break;
         case 'page-detail':
           mapped.add('pageDetail');
           break;
@@ -1640,7 +1894,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           mapped.add('comments');
           break;
         case 'posts':
-        case 'products':
         case 'pages':
         case 'menus':
           mapped.add(need);

@@ -52,7 +52,7 @@ Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href tar
 
 ⛔ MANDATORY CONTRACT — violating this causes a runtime ReferenceError:
 
-1. List every API endpoint you will call based on the template blocks **AND the Component plan `Data needed` field**. If the plan says `products`, you MUST fetch `/api/products` even when the template has no product blocks.
+1. List every API endpoint you will call based on the template blocks **AND the Component plan `Data needed` field**.
 2. Declare ONE `useState` per variable BEFORE writing any JSX.
 3. Fetch ALL of them together in a single `Promise.all` inside `useEffect`.
 4. NEVER use `menus`, `posts`, `pages`, `siteInfo` in JSX unless you declared `useState` for it above.
@@ -364,42 +364,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                     |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                     |
 
-`block: "query"` → check Component plan `Data needed` first:
-- If plan contains `products` → fetch `/api/products`, map over `product` items (see WooCommerce product loop below)
-- Otherwise → fetch `/api/posts`, map over `post` items (default)
-
-**WooCommerce product blocks** — any of these triggers `GET /api/products`:
-
-| block                                    | render                                                                                      |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `woocommerce/product-query`              | fetch `/api/products`, render product grid                                                  |
-| `woocommerce/product-collection`         | fetch `/api/products`, render product grid                                                  |
-| `woocommerce/products-by-category`       | fetch `/api/products?category=<slug>`, render product grid                                  |
-| `woocommerce/all-products`               | fetch `/api/products`, render product grid                                                  |
-| `woocommerce/product-title`              | `<Link to={'/product/'+product.slug}>{product.title}</Link>`                                |
-| `woocommerce/product-image`              | `{product.featuredImage && <img src={product.featuredImage} alt={product.title} />}`        |
-| `woocommerce/product-price`              | `<span>{product.price}</span>`                                                              |
-| `woocommerce/product-rating`             | omit (no rating data in API)                                                                |
-
-Product loop pattern (use when plan has `products` or template has any `woocommerce/*` product block):
-
-```tsx
-const [products, setProducts] = useState<Product[]>([]);
-useEffect(() => {
-  fetch('/api/products').then(r => r.json()).then(setProducts);
-}, []);
-
-// In JSX:
-{products.map(product => (
-  <article key={product.id}>
-    {product.featuredImage && <img src={product.featuredImage} alt={product.title} className="w-full object-cover" />}
-    <Link to={'/product/' + product.slug}>{product.title}</Link>
-    {product.price && <span>{product.price}</span>}
-  </article>
-))}
-```
-
-`block: "query"` (non-WooCommerce) → fetch `/api/posts`, map over results:
+`block: "query"` → fetch `/api/posts`, map over `post` results:
 
 | inner block           | render                                                                      |
 | --------------------- | --------------------------------------------------------------------------- |

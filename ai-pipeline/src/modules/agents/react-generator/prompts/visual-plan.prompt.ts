@@ -24,6 +24,11 @@ export function buildVisualPlanPrompt(input: {
   isDetail?: boolean;
   dataNeeds?: DataNeed[];
   sourceAnalysis?: string;
+  visualReference?: {
+    route: string;
+    sourceUrl: string;
+    viewport: string;
+  };
 }): { systemPrompt: string; userPrompt: string } {
   const {
     componentName,
@@ -36,6 +41,7 @@ export function buildVisualPlanPrompt(input: {
     isDetail,
     dataNeeds,
     sourceAnalysis,
+    visualReference,
   } = input;
 
   const palette = buildPaletteHint(tokens);
@@ -50,6 +56,7 @@ export function buildVisualPlanPrompt(input: {
     isDetail,
     dataNeeds,
   });
+  const visualReferenceHint = buildVisualReferenceHint(visualReference);
 
   const systemPrompt = `You are a WordPress-to-React UI planner.
 Given a WordPress template (block JSON tree or PHP markup) and site context, you output a JSON ComponentVisualPlan describing the visual layout.
@@ -63,7 +70,7 @@ This is a migration plan, NOT a redesign brief.
 \`\`\`typescript
 interface ComponentVisualPlan {
   componentName: string;
-  dataNeeds: Array<'siteInfo' | 'posts' | 'products' | 'pages' | 'menus' | 'postDetail' | 'productDetail' | 'pageDetail' | 'comments'>;
+  dataNeeds: Array<'siteInfo' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
   palette: {
     background: string;  // hex
     surface: string;     // card backgrounds hex
@@ -150,6 +157,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 
 ${contractHint}
 
+${visualReferenceHint ? `${visualReferenceHint}\n\n` : ''}
+
 ${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${repoContext ? `${repoContext}\n\n` : ''}${patternHints ? `${patternHints}\n\n` : ''}${siteCtx}
 
 ${palette}
@@ -201,13 +210,6 @@ function buildSiteContext(content: DbContentResult): string {
     `Menus: ${content.menus.map((m) => `${m.name} (slug: ${m.slug})`).join(', ') || '(none)'}`,
   );
   lines.push(`Posts in DB: ${content.posts.length}`);
-  lines.push(`WooCommerce mode: ${content.commerce.mode}`);
-  if (content.commerce.hasWooCommerce) {
-    lines.push(`Products in DB: ${content.commerce.productsCount}`);
-    lines.push(
-      `Product categories in DB: ${content.commerce.productCategoriesCount}`,
-    );
-  }
   lines.push(`Pages in DB: ${content.pages.length}`);
   return lines.join('\n');
 }
@@ -236,6 +238,21 @@ function buildContractHint(input: {
     );
   }
   return lines.join('\n');
+}
+
+function buildVisualReferenceHint(visualReference?: {
+  route: string;
+  sourceUrl: string;
+  viewport: string;
+}): string {
+  if (!visualReference) return '';
+
+  return [
+    '## Live WordPress visual reference',
+    `A live screenshot of the real WordPress page is attached for route \`${visualReference.route}\` (${visualReference.sourceUrl}) at viewport ${visualReference.viewport}.`,
+    'Use that screenshot to preserve visible section grouping, spacing rhythm, content density, image treatment, and overall layout order.',
+    'The screenshot is a visual reference only. The approved component contract and template source remain authoritative for data, routing, and what may be rendered.',
+  ].join('\n');
 }
 
 function buildPatternSuggestionsHint(repoManifest?: RepoThemeManifest): string {
@@ -326,11 +343,9 @@ const VALID_SECTION_TYPES = new Set<string>([
 const VALID_DATA_NEEDS = new Set<string>([
   'siteInfo',
   'posts',
-  'products',
   'pages',
   'menus',
   'postDetail',
-  'productDetail',
   'pageDetail',
   'comments',
 ]);
@@ -788,7 +803,8 @@ export function parseVisualPlanDetailed(
   };
 
   const layout = {
-    containerClass: 'max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8',
+    containerClass: 'max-w-[1280px] mx-auto w-full',
+    contentContainerClass: 'max-w-[800px] mx-auto w-full',
     blockGap: 'gap-16',
     includes: [] as string[],
   };

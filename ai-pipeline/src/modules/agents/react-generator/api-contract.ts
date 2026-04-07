@@ -66,22 +66,6 @@ export const COMMENT_SUBMISSION_FIELDS = [
   'moderationStatus',
 ] as const;
 
-export const PRODUCT_FIELDS = [
-  'id',
-  'title',
-  'content',
-  'excerpt',
-  'slug',
-  'status',
-  'date',
-  'sku',
-  'price',
-  'regularPrice',
-  'salePrice',
-  'featuredImage',
-  'categories',
-] as const;
-
 export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; categories: string[]; featuredImage: string | null; }`;
 export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; }`;
 export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; adminEmail: string; language: string; }`;
@@ -90,7 +74,6 @@ export const MENU_INTERFACE = `interface Menu { name: string; slug: string; item
 export const TERM_INTERFACE = `interface Term { id: number; name: string; slug: string; description: string; count: number; parentId: number; }`;
 export const COMMENT_INTERFACE = `interface Comment { id: number; author: string; date: string; content: string; parentId: number; userId: number; }`;
 export const COMMENT_SUBMISSION_INTERFACE = `interface CommentSubmission extends Comment { moderationStatus: 'approved' | 'pending' | 'spam' | 'trash'; }`;
-export const PRODUCT_INTERFACE = `interface Product { id: number; title: string; content: string; excerpt: string; slug: string; status: string; date: string; sku: string; price: string | null; regularPrice: string | null; salePrice: string | null; featuredImage: string | null; categories: string[]; }`;
 
 function formatFieldList(fields: readonly string[]): string {
   return fields.map((field) => `\`${field}\``).join(', ');
@@ -114,8 +97,6 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - \`GET /api/comments?slug=<post-slug>\` or \`?postId=<id>\` → Comment[]
 - \`GET /api/comments/submissions?...&clientToken=...\` → CommentSubmission[]
 - \`POST /api/comments\` → creates a moderated comment submission
-- \`GET /api/products\` → Product[] (flat array, not wrapped)
-- \`GET /api/products/:slug\` → Product
 
 ### Entity fields
 - SiteInfo: ${formatFieldList(SITE_INFO_FIELDS)}
@@ -126,7 +107,6 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - Term: ${formatFieldList(TERM_FIELDS)}
 - Comment: ${formatFieldList(COMMENT_FIELDS)}
 - CommentSubmission: ${formatFieldList(COMMENT_SUBMISSION_FIELDS)}
-- Product: ${formatFieldList(PRODUCT_FIELDS)}
 
 ### Non-negotiable constraints
 - Do NOT invent GraphQL or WordPress wrapper fields such as \`.node\`, \`.nodes\`, \`.edges\`, or \`.rendered\`.

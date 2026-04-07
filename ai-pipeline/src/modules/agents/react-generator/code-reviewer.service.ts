@@ -46,8 +46,6 @@ export interface ReviewInput {
   componentPlan?: PlanResult[number];
   logPath?: string;
   jobId?: string;
-  /** When true, AI is instructed to preserve WooCommerce class names from the PHP template. */
-  isWooCommerce?: boolean;
 }
 
 export interface SectionReviewInput {
@@ -130,7 +128,6 @@ export class CodeReviewerService {
       componentPlan,
       logPath,
       jobId,
-      isWooCommerce,
     } = input;
 
     // MAX_ROUNDS implements R3 → D1 in the pipeline diagram:
@@ -241,7 +238,6 @@ export class CodeReviewerService {
           logPath,
           logLabel: 'precomputed-plan',
           systemPrompt: componentSystemPrompt,
-          isWooCommerce,
         });
         attempts += planned.attemptsUsed;
         code = planned.code;
@@ -436,7 +432,6 @@ export class CodeReviewerService {
               logPath,
               logLabel: 'visual-plan',
               systemPrompt: componentSystemPrompt,
-              isWooCommerce,
             });
             attempts += planned.attemptsUsed;
             code = planned.code;
@@ -557,7 +552,6 @@ export class CodeReviewerService {
         logPath,
         logLabel: 'direct-ai',
         systemPrompt: componentSystemPrompt,
-        isWooCommerce,
       });
       attempts += direct.attemptsUsed;
       code = direct.code;
@@ -1139,7 +1133,6 @@ export class CodeReviewerService {
     logLabel: string;
     systemPrompt: string;
     maxAttempts?: number;
-    isWooCommerce?: boolean;
   }): Promise<{
     code: string;
     isValid: boolean;
@@ -1161,7 +1154,6 @@ export class CodeReviewerService {
       logLabel,
       systemPrompt,
       maxAttempts = 3,
-      isWooCommerce,
     } = input;
 
     let code = '';
@@ -1223,7 +1215,6 @@ export class CodeReviewerService {
         attempt > 1
           ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
           : undefined,
-        isWooCommerce,
       );
       const {
         text: raw,
