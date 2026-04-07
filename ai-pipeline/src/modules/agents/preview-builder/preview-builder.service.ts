@@ -92,7 +92,7 @@ export class PreviewBuilderService {
 
     // 2b. Copy WooCommerce CSS assets vào public/woocommerce/css/
     // Chỉ copy khi pipeline đã inject WooCommerce templates (wooPluginDir có giá trị)
-    const wooCssFiles: string[] = [];
+    let wooCssCount = 0;
     if (wooPluginDir) {
       const wooCssSrcDir = join(wooPluginDir, 'assets', 'css');
       const wooCssDestDir = join(frontendDir, 'public', 'woocommerce', 'css');
@@ -104,10 +104,10 @@ export class PreviewBuilderService {
         for (const file of cssEntries) {
           if (!file.endsWith('.css') || file.endsWith('.min.css')) continue;
           await copyFile(join(wooCssSrcDir, file), join(wooCssDestDir, file));
-          wooCssFiles.push(file);
+          wooCssCount++;
         }
         this.logger.log(
-          `[woocommerce] Copied ${wooCssFiles.length} CSS file(s) to public/woocommerce/css/`,
+          `[woocommerce] Copied ${wooCssCount} CSS file(s) to public/woocommerce/css/`,
         );
       } catch {
         this.logger.warn(
@@ -135,11 +135,6 @@ export class PreviewBuilderService {
           header: hasSharedHeader,
           footer: hasSharedFooter,
         });
-      }
-
-      // Inject WooCommerce CSS <link> tags vào đầu các component liên quan WooCommerce
-      if (wooCssFiles.length > 0 && this.isWooCommerceComponent(comp.name)) {
-        comp.code = this.injectWooCssLinks(comp.code, wooCssFiles);
       }
 
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
@@ -727,22 +722,5 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
-  }
-
-  private isWooCommerceComponent(name: string): boolean {
-    return /^(archive.?product|single.?product|taxonomy.?product|shop|cart|my.?account|woo)/i.test(
-      name,
-    );
-  }
-
-  private injectWooCssLinks(code: string, cssFiles: string[]): string {
-    const linkTags = cssFiles
-      .map(
-        (f) => `      <link rel="stylesheet" href="/woocommerce/css/${f}" />`,
-      )
-      .join('\n');
-
-    // Insert after the first `return (` or `return(` in the component's render
-    return code.replace(/(\breturn\s*\([\s\n]*)/, `$1\n${linkTags}\n`);
   }
 }

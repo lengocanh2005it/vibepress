@@ -1814,6 +1814,8 @@ export class OrchestratorService {
       );
     }
 
+    console.log(dto);
+
     if (
       typeof dto.themeGithubUrl !== 'string' ||
       dto.themeGithubUrl.trim().length === 0
