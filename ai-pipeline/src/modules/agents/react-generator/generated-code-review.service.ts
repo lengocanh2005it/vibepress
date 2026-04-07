@@ -59,6 +59,7 @@ export class GeneratedCodeReviewService {
       const review = await this.reviewComponent(
         component,
         contract,
+        plan,
         resolvedModel,
         logPath,
       );
@@ -119,10 +120,11 @@ export class GeneratedCodeReviewService {
   private async reviewComponent(
     component: GeneratedComponent,
     contract: PlanResult[number] | null,
+    plan: PlanResult,
     modelName: string,
     logPath?: string,
   ): Promise<CodeReviewResult> {
-    const reviewPrompt = this.buildReviewPrompt(component, contract);
+    const reviewPrompt = this.buildReviewPrompt(component, contract, plan);
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       const { text, inputTokens, outputTokens } = await this.llmFactory.chat({
@@ -132,7 +134,7 @@ export class GeneratedCodeReviewService {
         userPrompt: reviewPrompt,
         maxTokens: 2000,
       });
-      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
       if (tokenLogPath) {
         await this.tokenTracker.init(tokenLogPath);
         await this.tokenTracker.track(
@@ -190,6 +192,7 @@ export class GeneratedCodeReviewService {
   private buildReviewPrompt(
     component: GeneratedComponent,
     contract: PlanResult[number] | null,
+    plan: PlanResult,
   ): string {
     const dataNeeds = contract?.dataNeeds ?? component.dataNeeds ?? [];
     const route = contract?.route ?? component.route ?? null;
@@ -200,6 +203,7 @@ export class GeneratedCodeReviewService {
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
     const visualSections =
       visualSectionTypes.length > 0 ? visualSectionTypes.join(', ') : '(none)';
+    const knownRoutes = this.buildKnownRoutesLines(plan);
 
     return `Review this generated React component against its approved contract.
 
@@ -228,6 +232,8 @@ Rules:
 - Do NOT fail only because fetched data is unused unless it clearly indicates a wrong endpoint or broken logic.
 - Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, or obviously different wrapper structure from the approved plan.
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
+- Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
+- Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - If the component is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
 
@@ -239,6 +245,8 @@ Approved contract:
 - dataNeeds: ${dataNeeds.length > 0 ? dataNeeds.join(', ') : '(none)'}
 - description: ${description}
 - approved visual sections: ${visualSections}
+- known app routes:
+${knownRoutes}
 - allowed API expectations:
 ${this.buildApiContractLines(dataNeeds, isDetail, visualSectionTypes)}
 
@@ -262,6 +270,8 @@ ${component.code}
             return 'post-detail';
           case 'pageDetail':
             return 'page-detail';
+          case 'productDetail':
+            return 'product-detail';
           default:
             return value;
         }
@@ -270,28 +280,50 @@ ${component.code}
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
     if (normalized.has('menus')) lines.push('- /api/menus');
-    if (normalized.has('posts')) lines.push('- /api/posts');
+    if (normalized.has('posts') || normalized.has('authorDetail'))
+      lines.push('- /api/posts');
+    if (normalized.has('products')) lines.push('- /api/products');
     if (normalized.has('pages')) lines.push('- /api/pages');
     if (normalized.has('post-detail'))
       lines.push('- /api/posts/${slug} only for post-detail routes');
     if (normalized.has('page-detail'))
       lines.push('- /api/pages/${slug} only for page-detail routes');
-    if (visualSectionTypes.includes('comments'))
+    if (normalized.has('product-detail'))
+      lines.push('- /api/products/${slug} only for product-detail routes');
+    if (normalized.has('products') || normalized.has('product-detail')) {
+      lines.push(
+        '- WooCommerce storefront mode is read-only: do NOT require or approve cart, checkout, account, wishlist, or add-to-cart flows.',
+      );
+    }
+    if (normalized.has('categoryDetail')) {
+      lines.push('- /api/taxonomies/category — list all category terms');
+      lines.push(
+        '- /api/taxonomies/category/:slug/posts — posts in a category',
+      );
+    }
+    if (normalized.has('authorDetail')) {
+      lines.push(
+        '- Author archive fetches /api/posts and filters client-side by matching post.author against the URL :slug. No dedicated /api/authors endpoint exists.',
+      );
+    }
+    const hasComments =
+      normalized.has('comments') || visualSectionTypes.includes('comments');
+    if (hasComments) {
       lines.push(
         '- /api/comments?slug=${slug} is allowed because comments are in the approved sections',
       );
-    if (visualSectionTypes.includes('comments'))
       lines.push(
         '- POST /api/comments is allowed when the approved comments section renders a reply form, but moderated comments should not be appended directly to the public list',
       );
-    if (visualSectionTypes.includes('comments'))
       lines.push(
         '- /api/comments/submissions?slug=${slug}&clientToken=${token} is allowed for moderation polling after a comment is submitted',
       );
+    }
     if (
       isDetail &&
       !normalized.has('post-detail') &&
-      !normalized.has('page-detail')
+      !normalized.has('page-detail') &&
+      !normalized.has('product-detail')
     ) {
       lines.push(
         '- Detail route exists, but only the explicitly declared detail endpoint is allowed',
@@ -300,6 +332,14 @@ ${component.code}
     if (lines.length === 0)
       lines.push('- No data fetch is required by contract');
     return lines.join('\n');
+  }
+
+  private buildKnownRoutesLines(plan: PlanResult): string {
+    const lines = plan
+      .filter((item) => item.type !== 'partial' && item.route)
+      .map((item) => `- ${item.componentName}: ${item.route}`);
+
+    return lines.length > 0 ? lines.join('\n') : '- (none)';
   }
 
   private getBlockingIssues(

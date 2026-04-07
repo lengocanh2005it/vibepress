@@ -2,7 +2,7 @@ import type { ComponentVisualPlan } from '../visual-plan.schema.js';
 import { buildFlatRestSchemaNote } from '../api-contract.js';
 
 export const FRAGMENT_SYSTEM_PROMPT =
-  'You are a React TSX layout expert. Write only the JSX body block — no imports, no function declaration, no export default. Output raw JSX starting with a single root element.';
+  'You are a React TSX layout expert for WordPress migrations. Write only the JSX body block — no imports, no function declaration, no export default. Output raw JSX starting with a single root element.';
 
 /**
  * Builds the short user prompt for JSX-fragment-only generation.
@@ -78,7 +78,9 @@ ${buildFlatRestSchemaNote(availableVariables)}
 ## Strict rules:
 - Output ONE JSX fragment only — no imports, no \`export default\`, no function wrapper
 - Start with a SINGLE root element: \`<main>\`, \`<section>\`, \`<header>\`, or \`<footer>\`
-- Tailwind CSS classes only — no CSS imports, no \`style.foo\`
+- No CSS imports, no \`style.foo\`
+- Use Tailwind utilities only — do not assume WordPress theme CSS exists at runtime.
+- Recreate the source layout faithfully with semantic wrappers, spacing, and widths from the template and theme tokens.
 - \`<Link to="...">\` for internal paths (already imported)
 - Do NOT add \`useState\`, \`useEffect\`, \`fetch\`, or \`useParams\` — they are in the frame
 - Do NOT reference undeclared runtime variables such as \`node\`, \`nodes\`, \`block\`, \`attrs\`, or \`children\`

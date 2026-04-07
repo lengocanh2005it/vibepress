@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createConnection } from 'mysql2/promise';
-import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
+import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
 export interface WpPost {
   id: number;
@@ -44,6 +44,11 @@ export interface WpSiteInfo {
   tablePrefix: string;
 }
 
+export interface WpThemeRuntimeConfig {
+  stylesheet: string;
+  template: string;
+}
+
 export interface WpPluginInfo {
   slug: string;
   pluginFile: string;
@@ -53,6 +58,7 @@ export interface WpPluginInfo {
 
 export interface WpCommerceInfo {
   hasWooCommerce: boolean;
+  mode: 'none' | 'woo-readonly';
   productsCount: number;
   productCategoriesCount: number;
   corePages: string[];
@@ -126,8 +132,8 @@ export class WpQueryService {
 
   constructor() {}
 
-  async getPosts(creds: WpDbCredentials): Promise<WpPost[]> {
-    const conn = await this.createConnection(creds);
+  async getPosts(connectionString: string): Promise<WpPost[]> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
@@ -141,8 +147,8 @@ export class WpQueryService {
     }
   }
 
-  async getPages(creds: WpDbCredentials): Promise<WpPage[]> {
-    const conn = await this.createConnection(creds);
+  async getPages(connectionString: string): Promise<WpPage[]> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
@@ -160,8 +166,8 @@ export class WpQueryService {
     }
   }
 
-  async getMenus(creds: WpDbCredentials): Promise<WpMenu[]> {
-    const conn = await this.createConnection(creds);
+  async getMenus(connectionString: string): Promise<WpMenu[]> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
 
@@ -214,8 +220,8 @@ export class WpQueryService {
    * Includes built-in taxonomies (category, post_tag) and any custom ones registered by plugins/themes.
    * Only fetches taxonomies that have at least one published post attached.
    */
-  async getTaxonomies(creds: WpDbCredentials): Promise<WpTaxonomy[]> {
-    const conn = await this.createConnection(creds);
+  async getTaxonomies(connectionString: string): Promise<WpTaxonomy[]> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
 
@@ -268,21 +274,36 @@ export class WpQueryService {
     }
   }
 
-  async getActiveTheme(creds: WpDbCredentials): Promise<string> {
-    const conn = await this.createConnection(creds);
+  async getActiveTheme(connectionString: string): Promise<string> {
+    const runtime = await this.getThemeRuntimeConfig(connectionString);
+    return runtime.stylesheet;
+  }
+
+  async getThemeRuntimeConfig(
+    connectionString: string,
+  ): Promise<WpThemeRuntimeConfig> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
-        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+        `SELECT option_name, option_value FROM \`${prefix}options\`
+         WHERE option_name IN ('stylesheet', 'template')`,
       );
-      return rows[0]?.option_value ?? '';
+      const optionMap = new Map<string, string>();
+      for (const row of rows) {
+        optionMap.set(String(row.option_name), String(row.option_value ?? ''));
+      }
+      return {
+        stylesheet: optionMap.get('stylesheet') ?? '',
+        template: optionMap.get('template') ?? '',
+      };
     } finally {
       await conn.end();
     }
   }
 
-  async getSiteInfo(creds: WpDbCredentials): Promise<WpSiteInfo> {
-    const conn = await this.createConnection(creds);
+  async getSiteInfo(connectionString: string): Promise<WpSiteInfo> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
       const keys = [
@@ -313,8 +334,10 @@ export class WpQueryService {
     }
   }
 
-  async getRuntimeFeatures(creds: WpDbCredentials): Promise<WpRuntimeFeatures> {
-    const conn = await this.createConnection(creds);
+  async getRuntimeFeatures(
+    connectionString: string,
+  ): Promise<WpRuntimeFeatures> {
+    const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
       const [optionRows] = await conn.query<any[]>(
@@ -527,6 +550,7 @@ export class WpQueryService {
         },
         commerce: {
           hasWooCommerce,
+          mode: hasWooCommerce ? 'woo-readonly' : 'none',
           productsCount,
           productCategoriesCount,
           corePages,
@@ -550,13 +574,14 @@ export class WpQueryService {
     return tableName.replace(/options$/, '');
   }
 
-  private async createConnection(creds: WpDbCredentials) {
+  private async createConnection(connectionString: string) {
+    const creds = parseDbConnectionString(connectionString);
     return createConnection({
       host: creds.host,
       port: creds.port,
       user: creds.user,
       password: creds.password,
-      database: creds.dbName,
+      database: creds.database,
     });
   }
 

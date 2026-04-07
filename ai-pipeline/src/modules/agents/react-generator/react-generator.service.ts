@@ -9,6 +9,7 @@ import { BlockParseResult } from '../block-parser/block-parser.service.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
   wpBlocksToJson,
   wpJsonToString,
@@ -88,6 +89,7 @@ export class ReactGeneratorService {
     theme: PhpParseResult | BlockParseResult;
     content: DbContentResult;
     plan?: PlanResult;
+    repoManifest?: RepoThemeManifest;
     jobId?: string;
     logPath?: string;
     /** Per-step model overrides. undefined fields fall back to llmFactory.getModel(). */
@@ -101,6 +103,7 @@ export class ReactGeneratorService {
       theme,
       content,
       plan,
+      repoManifest,
       jobId = 'unknown',
       logPath,
       modelConfig,
@@ -113,7 +116,7 @@ export class ReactGeneratorService {
     const reviewCodeModel = modelConfig?.reviewCode ?? codeGeneratorModel;
     const fixAgentModel = modelConfig?.fixAgent ?? reviewCodeModel;
 
-    const systemPrompt = buildPlanPrompt(theme, content);
+    const systemPrompt = buildPlanPrompt(theme, content, repoManifest);
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
 
     const pagesCount = theme.templates.length;
@@ -166,70 +169,94 @@ export class ReactGeneratorService {
       (item) => item.type === 'partial' && /^footer/i.test(item.componentName),
     );
 
-    for (let i = 0; i < templates.length; i++) {
-      const tpl = templates[i];
-      const componentName = this.toComponentName(tpl.name);
-      const rawSource = (tpl.markup ?? tpl.html ?? '') as string;
-      const counter = `[${i + 1}/${total}]`;
-      const rawComponentPlan = plan?.find(
-        (p) => p.templateName === tpl.name || p.componentName === componentName,
-      );
-      const componentPlan = this.stripSharedLayoutSectionsFromPlan(
-        rawComponentPlan,
-        hasSharedHeader,
-        hasSharedFooter,
-      );
-      const folder =
-        componentPlan?.type === 'partial'
-          ? 'src/components'
-          : componentPlan?.type === 'page'
-            ? 'src/pages'
-            : PARTIAL_PATTERNS.test(componentName)
-              ? 'src/components'
-              : 'src/pages';
+    const delay =
+      this.configService.get<number>('reactGenerator.delayBetweenComponents') ??
+      10000;
+    const concurrency =
+      this.configService.get<number>('reactGenerator.generationConcurrency') ??
+      1;
 
-      this.logger.log(
-        `${counter} Generating "${componentName}.tsx" → ${folder}/`,
-      );
-      await this.logToFile(
-        logPath,
-        `${counter} Generating "${componentName}.tsx" → ${folder}/`,
-      );
-
-      const t0 = Date.now();
-      const produced = await this.generateForTemplate({
-        componentName,
-        rawSource,
-        codeGeneratorModel,
-        fixAgentModel,
-        systemPrompt,
-        content,
-        tokens,
-        themeType: theme.type,
-        componentPlan,
-        logPath,
-        jobId,
-      });
-      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-      const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
-
-      this.logger.log(
-        `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-      );
-      await this.logToFile(
-        logPath,
-        `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-      );
-
-      components.push(...produced);
-
-      if (i < templates.length - 1) {
-        const delay =
-          this.configService.get<number>(
-            'reactGenerator.delayBetweenComponents',
-          ) ?? 5000;
+    for (
+      let batchStart = 0;
+      batchStart < templates.length;
+      batchStart += concurrency
+    ) {
+      if (batchStart > 0) {
         await this.logToFile(logPath, `Rate-limit delay: ${delay / 1000}s`);
         await new Promise((res) => setTimeout(res, delay));
+      }
+
+      const batch = templates.slice(batchStart, batchStart + concurrency);
+      const batchResults = await Promise.all(
+        batch.map(async (tpl, batchIdx) => {
+          const i = batchStart + batchIdx;
+          const componentName = this.toComponentName(tpl.name);
+          const rawSource = (tpl.markup ?? tpl.html ?? '') as string;
+          const counter = `[${i + 1}/${total}]`;
+          const rawComponentPlan = plan?.find(
+            (p) =>
+              p.templateName === tpl.name || p.componentName === componentName,
+          );
+          const componentPlan = this.stripSharedLayoutSectionsFromPlan(
+            rawComponentPlan,
+            hasSharedHeader,
+            hasSharedFooter,
+          );
+          const folder =
+            componentPlan?.type === 'partial'
+              ? 'src/components'
+              : componentPlan?.type === 'page'
+                ? 'src/pages'
+                : PARTIAL_PATTERNS.test(componentName)
+                  ? 'src/components'
+                  : 'src/pages';
+
+          this.logger.log(
+            `${counter} Generating "${componentName}.tsx" → ${folder}/`,
+          );
+          await this.logToFile(
+            logPath,
+            `${counter} Generating "${componentName}.tsx" → ${folder}/`,
+          );
+
+          const t0 = Date.now();
+          const isWooCommerce =
+            /^(archive.?product|single.?product|taxonomy.?product|shop|cart|my.?account|woo)/i.test(
+              componentName,
+            );
+          const produced = await this.generateForTemplate({
+            componentName,
+            rawSource,
+            codeGeneratorModel,
+            fixAgentModel,
+            systemPrompt,
+            content,
+            tokens,
+            themeType: theme.type,
+            componentPlan,
+            repoManifest,
+            logPath,
+            jobId,
+            isWooCommerce,
+          });
+          const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+          const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
+          this.logger.log(
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
+          );
+          await this.logToFile(
+            logPath,
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
+          );
+
+          return { i, produced };
+        }),
+      );
+
+      // Preserve original template order when merging batch results
+      batchResults.sort((a, b) => a.i - b.i);
+      for (const { produced } of batchResults) {
+        components.push(...produced);
       }
     }
 
@@ -256,8 +283,10 @@ export class ReactGeneratorService {
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
     componentPlan?: PlanResult[number];
+    repoManifest?: RepoThemeManifest;
     logPath?: string;
     jobId?: string;
+    isWooCommerce?: boolean;
   }): Promise<GeneratedComponent[]> {
     const {
       componentName,
@@ -269,13 +298,15 @@ export class ReactGeneratorService {
       tokens,
       themeType,
       componentPlan,
+      repoManifest,
       logPath,
       jobId,
+      isWooCommerce,
     } = input;
 
     const templateSource = rawSource;
     const templateNodes =
-      themeType === 'fse'
+      themeType === 'fse' && this.looksLikeBlockMarkup(templateSource)
         ? this.styleResolver.resolve(wpBlocksToJson(templateSource), tokens)
         : undefined;
 
@@ -298,12 +329,14 @@ export class ReactGeneratorService {
       themeType === 'fse'
         ? FSE_CHUNK_THRESHOLD_CHARS
         : CLASSIC_CHUNK_THRESHOLD_CHARS;
+    const canSplitIntoSections =
+      themeType === 'fse' && !!filteredNodes && filteredNodes.length > 0;
     const preferDirectAi =
       themeType === 'fse' &&
       componentPlan?.type === 'partial' &&
       !getComponentStrategy(componentName).deterministicFirst;
 
-    if (themeType === 'classic' || promptSourceLength <= chunkThreshold) {
+    if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
         componentName,
         templateSource: promptTemplateSource,
@@ -313,9 +346,11 @@ export class ReactGeneratorService {
         systemPrompt,
         content,
         tokens,
+        repoManifest,
         componentPlan,
         logPath,
         jobId,
+        isWooCommerce,
       });
 
       if (this.aiLogger && jobId) {
@@ -352,39 +387,48 @@ export class ReactGeneratorService {
 
     this.logger.log(`Template ${componentName}: ${chunks.length} sections`);
 
-    const subComponents: GeneratedComponent[] = [];
+    const sectionResults: GeneratedComponent[] = new Array(chunks.length);
     const delay =
       this.configService.get<number>('reactGenerator.delayBetweenComponents') ??
-      5000;
+      10000;
+    const sectionConcurrency =
+      this.configService.get<number>('reactGenerator.sectionConcurrency') ?? 1;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const sectionName = `${componentName}Section${i + 1}`;
-      const nodesJson = wpJsonToString(chunks[i]);
-
-      // ── Delegate section review to CodeReviewerService ────────────────────
-      const section = await this.codeReviewer.reviewSection({
-        sectionName,
-        parentName: componentName,
-        sectionIndex: i,
-        totalSections: chunks.length,
-        nodesJson,
-        modelName: codeGeneratorModel,
-        fixAgentModel,
-        preferDirectAi,
-        systemPrompt,
-        content,
-        tokens,
-        componentPlan,
-        logPath,
-        jobId,
-      });
-
-      subComponents.push(section);
-
-      if (i < chunks.length - 1) {
+    for (
+      let batchStart = 0;
+      batchStart < chunks.length;
+      batchStart += sectionConcurrency
+    ) {
+      if (batchStart > 0) {
         await new Promise((res) => setTimeout(res, delay));
       }
+      const batchIndices = Array.from(
+        { length: Math.min(sectionConcurrency, chunks.length - batchStart) },
+        (_, j) => batchStart + j,
+      );
+      await Promise.all(
+        batchIndices.map(async (i) => {
+          sectionResults[i] = await this.codeReviewer.reviewSection({
+            sectionName: `${componentName}Section${i + 1}`,
+            parentName: componentName,
+            sectionIndex: i,
+            totalSections: chunks.length,
+            nodesJson: wpJsonToString(chunks[i]),
+            modelName: codeGeneratorModel,
+            fixAgentModel,
+            preferDirectAi,
+            systemPrompt,
+            content,
+            tokens,
+            repoManifest,
+            componentPlan,
+            logPath,
+            jobId,
+          });
+        }),
+      );
     }
+    const subComponents = sectionResults;
 
     const assemblyCode = this.buildAssemblyCode(componentName, subComponents);
     return [
@@ -586,5 +630,9 @@ ${renders}
       .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
       .join('');
     return /^\d/.test(name) ? `Page${name}` : name;
+  }
+
+  private looksLikeBlockMarkup(source: string): boolean {
+    return source.includes('<!-- wp:');
   }
 }

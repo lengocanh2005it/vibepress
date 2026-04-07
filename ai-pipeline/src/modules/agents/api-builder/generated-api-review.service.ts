@@ -116,7 +116,7 @@ export class GeneratedApiReviewService {
         userPrompt: reviewPrompt,
         maxTokens: 2200,
       });
-      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
       if (tokenLogPath) {
         await this.tokenTracker.init(tokenLogPath);
         await this.tokenTracker.track(
@@ -212,6 +212,7 @@ Rules:
   3. generated custom post type or plugin routes that are clearly malformed or disconnected from the contract
   4. server code structure/imports that are likely broken
 - Do NOT flag stylistic preferences.
+- WooCommerce on this pipeline is read-only storefront mode. Do NOT require cart, checkout, account, payment, or POST commerce endpoints.
 - If the backend is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
 

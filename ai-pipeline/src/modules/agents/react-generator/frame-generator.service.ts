@@ -5,6 +5,7 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
+  PRODUCT_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
 
@@ -53,14 +54,17 @@ export class FrameGeneratorService {
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
     const hasPageDetail = needs.has('pageDetail') && isDetail;
+    const hasProductDetail = needs.has('productDetail') && isDetail;
     const hasPosts = needs.has('posts');
     const hasPages = needs.has('pages');
+    const hasProducts = needs.has('products');
     const hasMenus = needs.has('menus');
     const hasSiteInfo = needs.has('siteInfo');
     const hasComments = needs.has('comments') && isDetail;
 
     const needsPost = hasPostDetail || hasPosts;
     const needsPage = hasPageDetail || hasPages;
+    const needsProduct = hasProductDetail || hasProducts;
 
     const lines: string[] = [];
 
@@ -80,6 +84,9 @@ export class FrameGeneratorService {
     if (needsPage) {
       lines.push(PAGE_INTERFACE);
     }
+    if (needsProduct) {
+      lines.push(PRODUCT_INTERFACE);
+    }
     if (hasMenus) {
       lines.push(MENU_ITEM_INTERFACE);
       lines.push(MENU_INTERFACE);
@@ -90,7 +97,14 @@ export class FrameGeneratorService {
     if (hasComments) {
       lines.push(COMMENT_INTERFACE);
     }
-    if (needsPost || needsPage || hasMenus || hasSiteInfo || hasComments) {
+    if (
+      needsPost ||
+      needsPage ||
+      needsProduct ||
+      hasMenus ||
+      hasSiteInfo ||
+      hasComments
+    ) {
       lines.push('');
     }
 
@@ -113,6 +127,13 @@ export class FrameGeneratorService {
     } else if (hasPages) {
       lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     }
+    if (hasProductDetail) {
+      lines.push(
+        `  const [product, setProduct] = useState<Product | null>(null);`,
+      );
+    } else if (hasProducts) {
+      lines.push(`  const [products, setProducts] = useState<Product[]>([]);`);
+    }
     if (hasMenus) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
@@ -131,6 +152,8 @@ export class FrameGeneratorService {
       hasPosts,
       hasPageDetail,
       hasPages,
+      hasProductDetail,
+      hasProducts,
       hasMenus,
       hasSiteInfo,
       hasComments,
@@ -172,11 +195,19 @@ export class FrameGeneratorService {
       lines.push(
         `  if (!page) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
       );
+    } else if (hasProductDetail) {
+      lines.push(
+        `  if (!product) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
+      );
     } else if (hasSiteInfo && type === 'partial') {
       lines.push(`  if (!siteInfo) return null;`);
     } else if (hasPosts) {
       lines.push(
         `  if (!posts.length) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
+      );
+    } else if (hasProducts) {
+      lines.push(
+        `  if (!products.length) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
       );
     }
 
@@ -218,6 +249,9 @@ export class FrameGeneratorService {
     else if (needs.has('posts')) vars.push('`posts: Post[]`');
     if (hasPageDetail) vars.push('`page: Page | null`');
     else if (needs.has('pages')) vars.push('`pages: Page[]`');
+    if (needs.has('productDetail') && isDetail)
+      vars.push('`product: Product | null`');
+    else if (needs.has('products')) vars.push('`products: Product[]`');
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
     if (needs.has('siteInfo')) vars.push('`siteInfo: SiteInfo | null`');
     if (needs.has('comments') && isDetail) vars.push('`comments: Comment[]`');
@@ -241,6 +275,8 @@ export class FrameGeneratorService {
     hasPosts: boolean;
     hasPageDetail: boolean;
     hasPages: boolean;
+    hasProductDetail: boolean;
+    hasProducts: boolean;
     hasMenus: boolean;
     hasSiteInfo: boolean;
     hasComments: boolean;
@@ -258,6 +294,12 @@ export class FrameGeneratorService {
       fetches.push({ setter: 'setPage', url: '`/api/pages/${slug}`' });
     } else if (flags.hasPages) {
       fetches.push({ setter: 'setPages', url: `'/api/pages'` });
+    }
+
+    if (flags.hasProductDetail) {
+      fetches.push({ setter: 'setProduct', url: '`/api/products/${slug}`' });
+    } else if (flags.hasProducts) {
+      fetches.push({ setter: 'setProducts', url: `'/api/products'` });
     }
 
     if (flags.hasMenus) {

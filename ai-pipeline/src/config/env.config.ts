@@ -45,7 +45,15 @@ export default () => ({
   },
   reactGenerator: {
     delayBetweenComponents: parseInt(
-      process.env.REACT_GEN_DELAY_MS ?? '5000',
+      process.env.REACT_GEN_DELAY_MS ?? '10000',
+      10,
+    ),
+    generationConcurrency: parseInt(
+      process.env.REACT_GEN_CONCURRENCY ?? '1',
+      10,
+    ),
+    sectionConcurrency: parseInt(
+      process.env.REACT_GEN_SECTION_CONCURRENCY ?? '1',
       10,
     ),
   },

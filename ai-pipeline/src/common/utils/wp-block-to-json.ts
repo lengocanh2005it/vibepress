@@ -220,7 +220,12 @@ function parseBlocks(markup: string): WpNode[] {
           }),
         );
       } else {
-        nodes.push(compact({ block: blockName, params }));
+        nodes.push(
+          compact({
+            block: blockName,
+            params,
+          }),
+        );
       }
       continue;
     }
@@ -355,10 +360,32 @@ function buildNode(
     // identify which WP menu corresponds to this navigation block (by matching item
     // labels/slugs). The AI must still ALWAYS fetch from GET /api/menus and render
     // dynamic content — never render navigation-link children as static <a> tags.
-    return compact({ block: blockName, params, children });
+
+    // For cover blocks: lift background image URL, overlay color, and minHeight to
+    // top-level fields even when the cover has nested children. These fields live in
+    // params.url / params.overlayColor / params.customOverlayColor / params.minHeight
+    // and would be stripped by pruneParams (since 'url' etc. are not in USEFUL_PARAM_KEYS).
+    // Without lifting them here, the AI never sees the background image of real hero
+    // sections and renders the block without the correct visual treatment.
+    const coverExtras: Partial<WpNode> = {};
+    if (blockName === 'cover') {
+      if (params?.url) coverExtras.src = params.url as string;
+      if (params?.customOverlayColor) {
+        coverExtras.overlayColor = params.customOverlayColor as string;
+      } else if (params?.overlayColor) {
+        coverExtras.overlayColor = params.overlayColor as string;
+      }
+      if (params?.minHeight) coverExtras.minHeight = String(params.minHeight);
+    }
+    return compact({
+      block: blockName,
+      params,
+      ...coverExtras,
+      children,
+    });
   }
 
-  // For wp:cover — lift background image URL to top-level src
+  // For wp:cover (leaf, no nested blocks) — lift background image URL to top-level src
   const coverSrc =
     blockName === 'cover' && params?.url ? { src: params.url as string } : {};
 

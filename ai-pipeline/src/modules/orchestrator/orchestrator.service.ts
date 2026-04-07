@@ -1,11 +1,17 @@
-import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import type { AgentResult } from '@/common/types/pipeline.type.js';
 import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
-import { join } from 'path';
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from 'fs/promises';
+import { dirname, join, resolve } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,21 +22,29 @@ import { CleanupService } from '../agents/cleanup/cleanup.service.js';
 import { DbContentService } from '../agents/db-content/db-content.service.js';
 import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
 import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
+import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
 import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
+import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
+import type {
+  RepoResolvedPluginSource,
+  RepoResolvedSourceSummary,
+  RepoThemeManifest,
+} from '../agents/repo-analyzer/repo-analyzer.service.js';
+import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
 import { ValidatorService } from '../agents/validator/validator.service.js';
+import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { TokenTracker } from '../../common/utils/token-tracker.js';
-import {
-  PipelineModelConfig,
-  RunPipelineDto,
-} from './orchestrator.controller.js';
+import { RunPipelineDto } from './orchestrator.controller.js';
+import { WpDbCredentials } from '@/common/types/db-credentials.type.js';
+import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
@@ -59,18 +73,6 @@ interface ProgressEventData {
   };
 }
 
-// ── Pipeline steps aligned with the 6-stage flow diagram ─────────────────
-//
-//  Stage 1: Repository Analysis       → 1_repo_analyzer, 2_theme_parser
-//  Stage 2: WordPress Content Graph   → 3_content_graph
-//  Stage 3: Planner (C1→C2→C3→C4→C5→C6 loop)
-//                                     → 4_planner  (includes Plan Review inside)
-//  Stage 4+5: React Generator + Code Review Loop
-//                                     → 5_generator (includes D4 AST Validator inside)
-//  Stage 6: Build & Preview           → 7_api_builder, 8_preview_builder
-//  Stage 7: Visual Compare            → 9_visual_compare
-//  Stage 8: Cleanup + Done            → 10_cleanup, 11_done
-//
 const STEP_META: Record<
   string,
   {
@@ -172,6 +174,71 @@ const STEP_META: Record<
 
 const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
 
+interface PluginTemplateSpec {
+  templateName: string;
+  aliasNames: string[];
+  mainTemplate: string;
+  relatedTemplates: string[];
+  relatedDirectories: string[];
+}
+
+const WOO_SUPPORT_DIR_FILE_LIMIT = 12;
+
+const WOO_STOREFRONT_TEMPLATE_SPECS: PluginTemplateSpec[] = [
+  {
+    templateName: 'archive-product',
+    aliasNames: ['archive-product', 'shop'],
+    mainTemplate: 'archive-product.php',
+    relatedTemplates: ['content-product.php', 'content-product-cat.php'],
+    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
+  },
+  {
+    templateName: 'single-product',
+    aliasNames: ['single-product'],
+    mainTemplate: 'single-product.php',
+    relatedTemplates: [
+      'content-single-product.php',
+      'single-product-reviews.php',
+    ],
+    relatedDirectories: [
+      'single-product',
+      'global',
+      'notices',
+      'product-form',
+      'parts',
+      'brands',
+    ],
+  },
+  {
+    templateName: 'taxonomy-product-cat',
+    aliasNames: ['taxonomy-product-cat', 'product-category'],
+    mainTemplate: 'taxonomy-product-cat.php',
+    relatedTemplates: ['content-product.php', 'content-product-cat.php'],
+    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
+  },
+  {
+    templateName: 'taxonomy-product-tag',
+    aliasNames: ['taxonomy-product-tag', 'product-tag'],
+    mainTemplate: 'taxonomy-product-tag.php',
+    relatedTemplates: ['content-product.php'],
+    relatedDirectories: ['loop', 'global', 'notices', 'parts', 'brands'],
+  },
+  {
+    templateName: 'cart',
+    aliasNames: ['cart'],
+    mainTemplate: 'cart/cart.php',
+    relatedTemplates: [],
+    relatedDirectories: ['cart', 'global', 'notices', 'block-notices', 'parts'],
+  },
+  {
+    templateName: 'my-account',
+    aliasNames: ['my-account', 'myaccount'],
+    mainTemplate: 'myaccount/my-account.php',
+    relatedTemplates: [],
+    relatedDirectories: ['myaccount', 'auth', 'global', 'notices', 'parts'],
+  },
+];
+
 export type PipelineStepStatus =
   | 'pending'
   | 'running'
@@ -217,6 +284,7 @@ export class OrchestratorService {
     private readonly generatedApiReview: GeneratedApiReviewService,
     private readonly previewBuilder: PreviewBuilderService,
     private readonly validator: ValidatorService,
+    private readonly sourceResolver: SourceResolverService,
     private readonly cleanup: CleanupService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
@@ -376,22 +444,20 @@ export class OrchestratorService {
     state: PipelineStatus,
   ): Promise<void> {
     // ── Init log file ─────────────────────────────────────────────────────
-    await mkdir('./temp/logs', { recursive: true });
-    const logPath = join('./temp/logs', `${jobId}.log`);
-    const tokenLogPath = join('./temp/logs', `${jobId}.tokens.log`);
+    const jobLogDir = join('./temp/logs', jobId);
+    await mkdir(join(jobLogDir, 'tokens'), { recursive: true });
+    const logPath = join(jobLogDir, 'pipeline.log');
+    const tokenLogPath = join(jobLogDir, 'tokens', 'total.tokens.log');
     const pipelineStart = Date.now();
     await this.tokenTracker.init(tokenLogPath);
     await this.logToFile(logPath, `Pipeline ${jobId} started`);
     try {
-      // ── Resolve per-step model overrides ─────────────────────────────────
-      // Priority: request-level modelConfig > env vars > agent default.
-      // Format: plain model name (uses global AI_PROVIDER) or "provider/model"
-      // e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
-      const mc: PipelineModelConfig = dto.modelConfig ?? {};
       const cfgPlanning = this.configService.get<string>(
         'pipeline.planningModel',
       );
-      const cfgGenCode = this.configService.get<string>('pipeline.genCodeModel');
+      const cfgGenCode = this.configService.get<string>(
+        'pipeline.genCodeModel',
+      );
       const cfgReviewCode = this.configService.get<string>(
         'pipeline.reviewCodeModel',
       );
@@ -410,30 +476,17 @@ export class OrchestratorService {
         'pipeline.fixAgentModel',
       );
       const resolvedModels = {
-        planning:
-          mc.planning ??
-          mc.planner ??
-          cfgPlanning ??
-          'mistral/mistral-large-latest',
-        genCode: mc.genCode ?? cfgGenCode ?? 'mistral/codestral-latest',
-        reviewCode: mc.reviewCode ?? mc.codeReviewer ?? cfgReviewCode,
-        backendReview:
-          mc.backendReview ??
-          mc.reviewCode ??
-          mc.codeReviewer ??
-          cfgBackendReview,
+        planning: cfgPlanning ?? 'mistral/mistral-large-latest',
+        genCode: cfgGenCode ?? 'mistral/codestral-latest',
+        reviewCode: cfgReviewCode,
+        backendReview: cfgBackendReview,
         aiReviewMode: (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
           | 'warn'
           | 'blocking',
         backendAiReviewMode: (cfgBackendAiReviewMode === 'blocking'
           ? 'blocking'
           : 'warn') as 'warn' | 'blocking',
-        fixAgent:
-          mc.fixAgent ??
-          mc.reviewCode ??
-          mc.codeReviewer ??
-          cfgFixAgent ??
-          cfgReviewCode,
+        fixAgent: cfgFixAgent ?? cfgReviewCode,
       };
       this.logger.log(
         `[models] planning="${resolvedModels.planning ?? 'default'}" ` +
@@ -445,47 +498,35 @@ export class OrchestratorService {
           `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
       );
 
-      // ── Resolve DB credentials ────────────────────────────────────────────
-      let dbCreds: WpDbCredentials;
+      const { dbConnectionString, themeGithubUrl } = dto;
+      const dbCreds = this.toWpDbCredentials(dbConnectionString);
 
-      if (dto.dbCredentials) {
-        // Mode B: direct credentials
-        await this.sqlService.verifyDirectCredentials(dto.dbCredentials);
-        dbCreds = dto.dbCredentials;
-      } else if (dto.sqlFilePath) {
-        // Mode A: import SQL → shared DB
-        dbCreds = await this.sqlService.importToTempDb(dto.sqlFilePath, jobId);
-      } else {
-        throw new BadRequestException(
-          'No DB source provided (sqlFilePath or dbCredentials)',
-        );
-      }
+      await this.sqlService.verifyDirectCredentials(dbConnectionString);
 
-    const themeGithubToken = this.configService.get<string>(
-      'github.wpRepoToken',
-      '',
-    );
+      const themeGithubToken = this.configService.get<string>(
+        'github.wpRepoToken',
+        '',
+      );
 
-    // Helper to add delay between steps for better log visibility
-    const stepDelay = () => new Promise((resolve) => setTimeout(resolve, 500));
+      // Helper to add delay between steps for better log visibility
+      const stepDelay = () =>
+        new Promise((resolve) => setTimeout(resolve, 500));
 
-    // ── Pipeline steps ────────────────────────────────────────────────────
+      // ── Pipeline steps ────────────────────────────────────────────────────
 
-    // Bước 1: Clone repo (nếu có GitHub URL) và phân tích cấu trúc theme
-    const repoResult = await this.runStep(
-      state,
-      '1_repo_analyzer',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '1_repo_analyzer',
-          0.1,
-          'Resolving the theme source input and preparing repository analysis.',
-        );
-        let resolvedDir = dto.themeDir;
+      // Bước 1: Clone repo (nếu có GitHub URL) và phân tích cấu trúc theme
+      const repoResult = await this.runStep(
+        state,
+        '1_repo_analyzer',
+        logPath,
+        async () => {
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.1,
+            'Resolving the theme source input and preparing repository analysis.',
+          );
 
-        if (!resolvedDir && dto.themeGithubUrl) {
           this.emitStepProgress(
             state,
             '1_repo_analyzer',
@@ -493,9 +534,8 @@ export class OrchestratorService {
             'Cloning the WordPress theme repository from GitHub.',
           );
           const repoRoot = await this.cloneThemeRepo(
-            dto.themeGithubUrl,
+            themeGithubUrl,
             themeGithubToken,
-            dto.themeGithubBranch ?? 'main',
             jobId,
           );
           this.emitStepProgress(
@@ -504,652 +544,679 @@ export class OrchestratorService {
             0.7,
             'Repository cloned. Resolving the active theme directory from WordPress data.',
           );
-          resolvedDir = await this.resolveThemeDir(repoRoot, dbCreds);
-        }
-
-        if (!resolvedDir)
-          throw new BadRequestException('No theme source provided');
-
-        this.emitStepProgress(
-          state,
-          '1_repo_analyzer',
-          0.9,
-          'Scanning theme folders, templates, and structural entry points.',
-        );
-        return this.repoAnalyzer.analyze(resolvedDir);
-      },
-    );
-    const themeDir = repoResult.themeDir;
-    await stepDelay();
-
-    // Bước 2: Parse theme (classic PHP vs FSE block)
-    const parsedTheme = await this.runStep(
-      state,
-      '2_theme_parser',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '2_theme_parser',
-          0.15,
-          'Detecting whether the source theme is classic PHP or block-based FSE.',
-        );
-        const detection = await this.themeDetector.detect(themeDir!);
-        this.emitStepProgress(
-          state,
-          '2_theme_parser',
-          0.55,
-          detection.type === 'fse'
-            ? 'Parsing block templates and template parts from the FSE theme.'
-            : 'Parsing PHP templates, partials, and WordPress template hints from the classic theme.',
-        );
-        return detection.type === 'fse'
-          ? this.blockParser.parse(themeDir!)
-          : this.phpParser.parse(themeDir!);
-      },
-    );
-    await stepDelay();
-
-    // Record evidence AC1, AC2, AC3, AC7
-    // Removed cotEvidence logging
-
-    // Bước 3: Normalize & Clean HTML
-    const normalizedTheme = await this.runStep(
-      state,
-      '3_normalizer',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '3_normalizer',
-          0.25,
-          'Cleaning parsed template source and removing noisy markup before planning.',
-        );
-        const result = await this.normalizer.normalize(parsedTheme);
-        this.emitStepProgress(
-          state,
-          '3_normalizer',
-          0.8,
-          'Normalized source is ready for route and component planning.',
-        );
-        return result;
-      },
-    );
-    await stepDelay();
-
-    // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
-    // B1: Content Graph Builder — posts, pages, menus, categories, tags, custom taxonomies
-    const content = await this.runStep(
-      state,
-      '4_content_graph',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '4_content_graph',
-          0.15,
-          'Querying WordPress tables for site info, pages, posts, menus, and taxonomies.',
-        );
-        const result = await this.dbContent.extract(dbCreds);
-        this.emitStepProgress(
-          state,
-          '4_content_graph',
-          0.75,
-          'Combining runtime capabilities, plugin discovery, and extracted content into one content graph.',
-        );
-        return result;
-      },
-    );
-    await stepDelay();
-
-    // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
-    // All 4 phases + plan review + retry loop are ONE atomic step.
-    // Per diagram: C4 (Plan Review) and C5 (Plan Valid?) live INSIDE the Planner subgraph.
-    const MAX_PLAN_RETRIES = 3;
-    const expectedTemplateNames =
-      normalizedTheme.type === 'classic'
-        ? normalizedTheme.templates.map((t) => t.name)
-        : [...normalizedTheme.templates, ...normalizedTheme.parts].map(
-            (t) => t.name,
+          const resolvedDir = await this.resolveThemeDir(
+            repoRoot,
+            dbConnectionString,
           );
-    const reviewResult = await this.runStep(
-      state,
-      '5_planner',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '5_planner',
-          0.08,
-          'Building the first component architecture pass from normalized theme source and WordPress content.',
-        );
-        // Phase A (C1): AI Architecture Plan
-        // Phase B (C2): Component Graph Builder — enrichPlan() deterministic
-        let plan = await this.planner.plan(
-          normalizedTheme,
-          content,
-          resolvedModels.planning,
-          jobId,
-          { includeVisualPlans: false, logPath },
-        );
-        this.emitStepProgress(
-          state,
-          '5_planner',
-          0.4,
-          `Initial architecture plan created for ${plan.length} component contract(s). Running consistency review before visual sections are generated.`,
-        );
 
-        // Phase D (C4): Plan Review / Consistency Check
-        let review = this.planReviewer.review(plan, expectedTemplateNames);
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.9,
+            'Scanning theme folders, templates, and structural entry points.',
+          );
+          const repoAnalysis = await this.repoAnalyzer.analyze(resolvedDir);
+          await this.recordRepoAnalysis(jobLogDir, logPath, repoAnalysis);
+          return repoAnalysis;
+        },
+      );
+      const themeDir = repoResult.themeDir;
+      await stepDelay();
 
-        // C5 → C6 retry loop: if plan invalid, loop back to C1
-        for (
-          let attempt = 2;
-          attempt <= MAX_PLAN_RETRIES && !review.isValid;
-          attempt++
-        ) {
-          this.logger.warn(
-            `[${jobId}] [Stage 3: Phase D] Plan invalid (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${review.errors.join('; ')} — retrying Phases A→C`,
+      // Bước 2: Parse theme (classic PHP vs FSE block)
+      const parsedTheme = await this.runStep(
+        state,
+        '2_theme_parser',
+        logPath,
+        async () => {
+          this.emitStepProgress(
+            state,
+            '2_theme_parser',
+            0.15,
+            'Detecting whether the source theme is classic PHP or block-based FSE.',
           );
-          await this.logToFile(
-            logPath,
-            `[Stage 3: C6 Retry] attempt ${attempt}: ${review.errors.join('; ')}`,
+          const detection = await this.themeDetector.detect(themeDir!);
+          this.emitStepProgress(
+            state,
+            '2_theme_parser',
+            0.55,
+            detection.type === 'fse'
+              ? 'Parsing block templates and template parts from the FSE theme.'
+              : 'Parsing PHP templates, partials, and WordPress template hints from the classic theme.',
           );
+          return detection.type === 'fse'
+            ? this.blockParser.parse(themeDir!)
+            : this.phpParser.parse(themeDir!);
+        },
+      );
+      await stepDelay();
+
+      // Record evidence AC1, AC2, AC3, AC7
+      // Removed cotEvidence logging
+
+      // Bước 3: Normalize & Clean HTML
+      let normalizedTheme = await this.runStep(
+        state,
+        '3_normalizer',
+        logPath,
+        async () => {
+          this.emitStepProgress(
+            state,
+            '3_normalizer',
+            0.25,
+            'Cleaning parsed template source and removing noisy markup before planning.',
+          );
+          const result = await this.normalizer.normalize(parsedTheme);
+          this.emitStepProgress(
+            state,
+            '3_normalizer',
+            0.8,
+            'Normalized source is ready for route and component planning.',
+          );
+          return result;
+        },
+      );
+      await stepDelay();
+
+      // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
+      // B1: Content Graph Builder — posts, pages, menus, categories, tags, custom taxonomies
+      const content = await this.runStep(
+        state,
+        '4_content_graph',
+        logPath,
+        async () => {
+          this.emitStepProgress(
+            state,
+            '4_content_graph',
+            0.15,
+            'Querying WordPress tables for site info, pages, posts, menus, and taxonomies.',
+          );
+          const result = await this.dbContent.extract(dbConnectionString);
+          this.emitStepProgress(
+            state,
+            '4_content_graph',
+            0.75,
+            'Combining runtime capabilities, plugin discovery, and extracted content into one content graph.',
+          );
+          return result;
+        },
+      );
+      await stepDelay();
+
+      const resolvedSource = await this.sourceResolver.resolve({
+        manifest: repoResult.themeManifest,
+        dbConnectionString,
+        content,
+      });
+      repoResult.themeManifest.resolvedSource = resolvedSource;
+      await this.recordRepoAnalysis(jobLogDir, logPath, repoResult);
+      const enrichResult = await this.enrichThemeWithPluginTemplates({
+        theme: normalizedTheme,
+        themeDir,
+        manifest: repoResult.themeManifest,
+        resolvedSource,
+        logPath,
+      });
+      normalizedTheme = enrichResult.theme;
+      const wooPluginDir = enrichResult.wooPluginDir;
+
+      // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
+      // All 4 phases + plan review + retry loop are ONE atomic step.
+      // Per diagram: C4 (Plan Review) and C5 (Plan Valid?) live INSIDE the Planner subgraph.
+      const MAX_PLAN_RETRIES = 3;
+      const expectedTemplateNames =
+        normalizedTheme.type === 'classic'
+          ? normalizedTheme.templates.map((t) => t.name)
+          : [...normalizedTheme.templates, ...normalizedTheme.parts].map(
+              (t) => t.name,
+            );
+      const reviewResult = await this.runStep(
+        state,
+        '5_planner',
+        logPath,
+        async () => {
           this.emitStepProgress(
             state,
             '5_planner',
-            0.35,
-            `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: rebuilding routes, data needs, and visual sections after review feedback.`,
+            0.08,
+            'Building the first component architecture pass from normalized theme source and WordPress content.',
           );
-
-          // C6 → C1: reset and re-run Phases A, B, C
-          plan = await this.planner.plan(
+          // Phase A (C1): AI Architecture Plan
+          // Phase B (C2): Component Graph Builder — enrichPlan() deterministic
+          let plan = await this.planner.plan(
             normalizedTheme,
             content,
             resolvedModels.planning,
             jobId,
-            { includeVisualPlans: false, logPath },
-          );
-          review = this.planReviewer.review(plan, expectedTemplateNames);
-          this.emitStepProgress(
-            state,
-            '5_planner',
-            0.55,
-            `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: re-running consistency review on the regenerated architecture plan.`,
-          );
-        }
-
-        if (!review.isValid) {
-          throw new Error(
-            `[Stage 3] Plan still invalid after ${MAX_PLAN_RETRIES} attempts: ${review.errors.join('; ')}`,
-          );
-        }
-
-        this.emitStepProgress(
-          state,
-          '5_planner',
-          0.72,
-          'Architecture review passed. Generating visual sections from the reviewed route map and data contracts.',
-        );
-        const MAX_VISUAL_RETRIES = 2;
-        let planWithVisuals = await this.planner.attachVisualPlans(
-          normalizedTheme,
-          content,
-          review.plan,
-          resolvedModels.planning,
-        );
-        let visualReview = this.planReviewer.review(
-          planWithVisuals,
-          expectedTemplateNames,
-        );
-        for (
-          let vAttempt = 2;
-          vAttempt <= MAX_VISUAL_RETRIES && !visualReview.isValid;
-          vAttempt++
-        ) {
-          this.logger.warn(
-            `[${jobId}] [Stage 3: Visual Plan] Review failed (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualReview.errors.join('; ')} — retrying attachVisualPlans`,
-          );
-          await this.logToFile(
-            logPath,
-            `[Stage 3: Visual Plan Retry] attempt ${vAttempt}: ${visualReview.errors.join('; ')}`,
+            {
+              includeVisualPlans: false,
+              logPath,
+              repoManifest: repoResult.themeManifest,
+            },
           );
           this.emitStepProgress(
             state,
             '5_planner',
-            0.82,
-            `Visual plan retry ${vAttempt}/${MAX_VISUAL_RETRIES}: regenerating visual sections after consistency check failed.`,
+            0.4,
+            `Initial architecture plan created for ${plan.length} component contract(s). Running consistency review before visual sections are generated.`,
           );
-          planWithVisuals = await this.planner.attachVisualPlans(
+
+          // Phase D (C4): Plan Review / Consistency Check
+          let review = this.planReviewer.review(
+            plan,
+            expectedTemplateNames,
+            repoResult.themeManifest,
+          );
+
+          // C5 → C6 retry loop: if plan invalid, loop back to C1
+          for (
+            let attempt = 2;
+            attempt <= MAX_PLAN_RETRIES && !review.isValid;
+            attempt++
+          ) {
+            this.logger.warn(
+              `[${jobId}] [Stage 3: Phase D] Plan invalid (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${review.errors.join('; ')} — retrying Phases A→C`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 3: C6 Retry] attempt ${attempt}: ${review.errors.join('; ')}`,
+            );
+            this.emitStepProgress(
+              state,
+              '5_planner',
+              0.35,
+              `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: rebuilding routes, data needs, and visual sections after review feedback.`,
+            );
+
+            // C6 → C1: reset and re-run Phases A, B, C
+            plan = await this.planner.plan(
+              normalizedTheme,
+              content,
+              resolvedModels.planning,
+              jobId,
+              {
+                includeVisualPlans: false,
+                logPath,
+                repoManifest: repoResult.themeManifest,
+                planReviewErrors: review.errors,
+              },
+            );
+            review = this.planReviewer.review(
+              plan,
+              expectedTemplateNames,
+              repoResult.themeManifest,
+            );
+            this.emitStepProgress(
+              state,
+              '5_planner',
+              0.55,
+              `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: re-running consistency review on the regenerated architecture plan.`,
+            );
+          }
+
+          if (!review.isValid) {
+            throw new Error(
+              `[Stage 3] Plan still invalid after ${MAX_PLAN_RETRIES} attempts: ${review.errors.join('; ')}`,
+            );
+          }
+
+          this.emitStepProgress(
+            state,
+            '5_planner',
+            0.72,
+            'Architecture review passed. Generating visual sections from the reviewed route map and data contracts.',
+          );
+          const MAX_VISUAL_RETRIES = 2;
+          let planWithVisuals = await this.planner.attachVisualPlans(
             normalizedTheme,
             content,
             review.plan,
             resolvedModels.planning,
+            repoResult.themeManifest,
           );
-          visualReview = this.planReviewer.review(
+          let visualReview = this.planReviewer.review(
             planWithVisuals,
             expectedTemplateNames,
+            repoResult.themeManifest,
           );
-        }
-        if (!visualReview.isValid) {
-          throw new Error(
-            `[Stage 3] Visual-plan synchronization failed after ${MAX_VISUAL_RETRIES} attempts: ${visualReview.errors.join('; ')}`,
+          for (
+            let vAttempt = 2;
+            vAttempt <= MAX_VISUAL_RETRIES && !visualReview.isValid;
+            vAttempt++
+          ) {
+            this.logger.warn(
+              `[${jobId}] [Stage 3: Visual Plan] Review failed (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualReview.errors.join('; ')} — retrying attachVisualPlans`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 3: Visual Plan Retry] attempt ${vAttempt}: ${visualReview.errors.join('; ')}`,
+            );
+            this.emitStepProgress(
+              state,
+              '5_planner',
+              0.82,
+              `Visual plan retry ${vAttempt}/${MAX_VISUAL_RETRIES}: regenerating visual sections after consistency check failed.`,
+            );
+            planWithVisuals = await this.planner.attachVisualPlans(
+              normalizedTheme,
+              content,
+              review.plan,
+              resolvedModels.planning,
+              repoResult.themeManifest,
+            );
+            visualReview = this.planReviewer.review(
+              planWithVisuals,
+              expectedTemplateNames,
+              repoResult.themeManifest,
+            );
+          }
+          if (!visualReview.isValid) {
+            throw new Error(
+              `[Stage 3] Visual-plan synchronization failed after ${MAX_VISUAL_RETRIES} attempts: ${visualReview.errors.join('; ')}`,
+            );
+          }
+          review = visualReview;
+
+          this.emitStepProgress(
+            state,
+            '5_planner',
+            0.92,
+            'Planner review passed. Route map, data contracts, and visual sections are locked in.',
           );
-        }
-        review = visualReview;
+          return review;
+        },
+      );
+      await stepDelay();
 
-        this.emitStepProgress(
-          state,
-          '5_planner',
-          0.92,
-          'Planner review passed. Route map, data contracts, and visual sections are locked in.',
-        );
-        return review;
-      },
-    );
-    await stepDelay();
+      // Removed cotEvidence logging for planning
 
-    // Removed cotEvidence logging for planning
-
-    // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
-    // Flow inside this step:
-    //   1. AI code generation per component
-    //   2. Rule-based validator cleanup / contract checks
-    //   3. AI generated-code review across the finished component set
-    const generationResult = await this.runStep(
-      state,
-      '6_generator',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '6_generator',
-          0.08,
-          'Generating React components from the approved visual plans.',
-        );
-        // Stage 4+5 core: generate + code review per component
-        const result = await this.reactGenerator.generate({
-          theme: normalizedTheme,
-          content,
-          plan: reviewResult.plan,
-          jobId,
-          logPath,
-          modelConfig: {
-            codeGenerator: resolvedModels.genCode,
-            reviewCode: resolvedModels.reviewCode,
-            fixAgent: resolvedModels.fixAgent,
-          },
-        });
-
-        this.logger.log(
-          `[Stage 4: D4 Validator] Validating & cleaning ${result.components.length} components`,
-        );
-        this.emitStepProgress(
-          state,
-          '6_generator',
-          0.45,
-          `Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
-        );
-        let components = this.validator.validate(result.components);
-
-        // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
-        // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
-        // Skipping Stage 5 AI review for them avoids false positives and unnecessary
-        // AI calls on code that follows the contract by construction.
-        const aiComponents = components.filter(
-          (c) => c.generationMode !== 'deterministic',
-        );
-        const deterministicNames = components
-          .filter((c) => c.generationMode === 'deterministic')
-          .map((c) => c.name);
-        if (deterministicNames.length > 0) {
-          this.logger.log(
-            `[Stage 5: AI Generated Code Review] Skipping ${deterministicNames.length} deterministic component(s): ${deterministicNames.join(', ')}`,
-          );
-        }
-
-        const MAX_FIX_ATTEMPTS = 2;
-        for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+      // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
+      // Flow inside this step:
+      //   1. AI code generation per component
+      //   2. Rule-based validator cleanup / contract checks
+      //   3. AI generated-code review across the finished component set
+      const generationResult = await this.runStep(
+        state,
+        '6_generator',
+        logPath,
+        async () => {
           this.emitStepProgress(
             state,
             '6_generator',
-            0.65,
-            `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking generated components against the approved contract.`,
+            0.08,
+            'Generating React components from the approved visual plans.',
           );
-          this.logger.log(
-            `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
-          );
-          const review = await this.generatedCodeReview.review({
-            components: aiComponents,
+          // Stage 4+5 core: generate + code review per component
+          const result = await this.reactGenerator.generate({
+            theme: normalizedTheme,
+            content,
             plan: reviewResult.plan,
-            modelName: resolvedModels.reviewCode,
-            mode: resolvedModels.aiReviewMode,
+            repoManifest: repoResult.themeManifest,
+            jobId,
+            logPath,
+            modelConfig: {
+              codeGenerator: resolvedModels.genCode,
+              reviewCode: resolvedModels.reviewCode,
+              fixAgent: resolvedModels.fixAgent,
+            },
+          });
+
+          this.logger.log(
+            `[Stage 4: D4 Validator] Validating & cleaning ${result.components.length} components`,
+          );
+          this.emitStepProgress(
+            state,
+            '6_generator',
+            0.45,
+            `Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
+          );
+          let components = this.validator.validate(result.components);
+
+          // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
+          // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
+          // Skipping Stage 5 AI review for them avoids false positives and unnecessary
+          // AI calls on code that follows the contract by construction.
+          const aiComponents = components.filter(
+            (c) => c.generationMode !== 'deterministic',
+          );
+          const deterministicNames = components
+            .filter((c) => c.generationMode === 'deterministic')
+            .map((c) => c.name);
+          if (deterministicNames.length > 0) {
+            this.logger.log(
+              `[Stage 5: AI Generated Code Review] Skipping ${deterministicNames.length} deterministic component(s): ${deterministicNames.join(', ')}`,
+            );
+          }
+
+          const MAX_FIX_ATTEMPTS = 2;
+          for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.65,
+              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking generated components against the approved contract.`,
+            );
+            this.logger.log(
+              `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            );
+            const review = await this.generatedCodeReview.review({
+              components: aiComponents,
+              plan: reviewResult.plan,
+              modelName: resolvedModels.reviewCode,
+              mode: resolvedModels.aiReviewMode,
+              logPath,
+            });
+
+            if (review.success || review.failures.length === 0) {
+              break;
+            }
+
+            this.logger.warn(
+              `[Stage 5: AI Generated Code Review] ${review.failures.length} components failed review. Attempting auto-fix.`,
+            );
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.82,
+              `Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 5] ${review.failures.length} components failed review. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            );
+
+            // Fixes are independent — run all in parallel, then apply results.
+            const fixResults = await Promise.all(
+              review.failures.map(async (failure) => {
+                const compIndex = aiComponents.findIndex(
+                  (c) => c.name === failure.componentName,
+                );
+                if (compIndex === -1) return null;
+                const fixed = await this.reactGenerator.fixComponent({
+                  component: aiComponents[compIndex],
+                  plan: reviewResult.plan,
+                  feedback: failure.message,
+                  modelConfig: { fixAgent: resolvedModels.fixAgent },
+                  logPath,
+                });
+                try {
+                  const revalidated = this.validator.validate([fixed]);
+                  return { compIndex, component: revalidated[0] };
+                } catch (validationErr: any) {
+                  this.logger.warn(
+                    `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr?.message}`,
+                  );
+                  await this.logToFile(
+                    logPath,
+                    `[Stage 5] Re-validation failed for "${failure.componentName}": ${validationErr?.message}`,
+                  );
+                  return null;
+                }
+              }),
+            );
+            for (const r of fixResults) {
+              if (r) aiComponents[r.compIndex] = r.component;
+            }
+          }
+
+          // Merge fixed AI components back into the full list (preserve original order).
+          for (const fixed of aiComponents) {
+            const idx = components.findIndex((c) => c.name === fixed.name);
+            if (idx !== -1) components[idx] = fixed;
+          }
+
+          this.emitStepProgress(
+            state,
+            '6_generator',
+            0.94,
+            'React generation, validation, and repair loops have finished successfully.',
+          );
+          return { ...result, components };
+        },
+      );
+      await stepDelay();
+
+      // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
+      await this.runStep(state, '7_api_builder', logPath, async () => {
+        this.emitStepProgress(
+          state,
+          '7_api_builder',
+          0.15,
+          'Building the Express preview API template and injecting required routes.',
+        );
+        let api = await this.apiBuilder.build({
+          jobId,
+          dbName: dbCreds.dbName,
+          logPath,
+          content,
+        });
+        this.emitStepProgress(
+          state,
+          '7_api_builder',
+          0.55,
+          'Running backend review to verify API coverage matches the generated frontend contracts.',
+        );
+
+        const MAX_FIX_ATTEMPTS = 2;
+        for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+          this.logger.log(
+            `[Stage 6: AI Generated Backend Review] Reviewing ${api.files.length} backend file(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+          );
+          const review = await this.generatedApiReview.review({
+            api,
+            plan: reviewResult.plan,
+            content,
+            modelName: resolvedModels.backendReview,
+            mode: resolvedModels.backendAiReviewMode,
             logPath,
           });
 
-          if (review.success || review.failures.length === 0) {
+          if (review.success || !review.blockingMessage) {
             break;
           }
 
           this.logger.warn(
-            `[Stage 5: AI Generated Code Review] ${review.failures.length} components failed review. Attempting auto-fix.`,
+            `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
           );
           this.emitStepProgress(
             state,
-            '6_generator',
-            0.82,
-            `Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
+            '7_api_builder',
+            0.78,
+            `Backend auto-fix ${attempt}/${MAX_FIX_ATTEMPTS}: repairing generated API code from review feedback.`,
           );
           await this.logToFile(
             logPath,
-            `[Stage 5] ${review.failures.length} components failed review. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
           );
 
-          for (const failure of review.failures) {
-            const compIndex = aiComponents.findIndex(
-              (c) => c.name === failure.componentName,
-            );
-            if (compIndex !== -1) {
-              const fixed = await this.reactGenerator.fixComponent({
-                component: aiComponents[compIndex],
-                plan: reviewResult.plan,
-                feedback: failure.message,
-                modelConfig: { fixAgent: resolvedModels.fixAgent },
-                logPath,
-              });
-              // Re-validate the fixed component before accepting it back
-              try {
-                const revalidated = this.validator.validate([fixed]);
-                aiComponents[compIndex] = revalidated[0];
-              } catch (validationErr: any) {
-                this.logger.warn(
-                  `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr?.message}`,
-                );
-                await this.logToFile(
-                  logPath,
-                  `[Stage 5] Re-validation failed for "${failure.componentName}": ${validationErr?.message}`,
-                );
-              }
-            }
-          }
+          api = await this.apiBuilder.fixApi({
+            result: api,
+            feedback: review.blockingMessage,
+            modelName: resolvedModels.fixAgent,
+            logPath,
+          });
         }
 
-        // Merge fixed AI components back into the full list (preserve original order).
-        for (const fixed of aiComponents) {
-          const idx = components.findIndex((c) => c.name === fixed.name);
-          if (idx !== -1) components[idx] = fixed;
-        }
-
-        this.emitStepProgress(
-          state,
-          '6_generator',
-          0.94,
-          'React generation, validation, and repair loops have finished successfully.',
-        );
-        return { ...result, components };
-      },
-    );
-    await stepDelay();
-
-    // ── Write generated TSX files to localOutputDir for local inspection ─────
-    if (dto.localOutputDir) {
-      const pagesOut = join(dto.localOutputDir, 'pages');
-      const componentsOut = join(dto.localOutputDir, 'components');
-      await mkdir(pagesOut, { recursive: true });
-      await mkdir(componentsOut, { recursive: true });
-
-      const PARTIAL_PATTERNS =
-        /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
-      for (const comp of generationResult.components) {
-        const isPartial =
-          PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
-        const targetDir = isPartial ? componentsOut : pagesOut;
-        await writeFile(
-          join(targetDir, `${comp.name}.tsx`),
-          comp.code,
-          'utf-8',
-        );
-      }
-
-      const totalFiles = generationResult.components.length;
-      this.logger.log(
-        `[${jobId}] Written ${totalFiles} TSX files → ${dto.localOutputDir}`,
-      );
-      await this.logToFile(
-        logPath,
-        `Written ${totalFiles} TSX files → ${dto.localOutputDir}`,
-      );
-    }
-
-    // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
-    await this.runStep(state, '7_api_builder', logPath, async () => {
-      this.emitStepProgress(
-        state,
-        '7_api_builder',
-        0.15,
-        'Building the Express preview API template and injecting required routes.',
-      );
-      let api = await this.apiBuilder.build({
-        jobId,
-        dbName: dbCreds.dbName,
-        content,
-      });
-      this.emitStepProgress(
-        state,
-        '7_api_builder',
-        0.55,
-        'Running backend review to verify API coverage matches the generated frontend contracts.',
-      );
-
-      const MAX_FIX_ATTEMPTS = 2;
-      for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-        this.logger.log(
-          `[Stage 6: AI Generated Backend Review] Reviewing ${api.files.length} backend file(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
-        );
-        const review = await this.generatedApiReview.review({
-          api,
-          plan: reviewResult.plan,
-          content,
-          modelName: resolvedModels.backendReview,
-          mode: resolvedModels.backendAiReviewMode,
-          logPath,
-        });
-
-        if (review.success || !review.blockingMessage) {
-          break;
-        }
-
-        this.logger.warn(
-          `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
-        );
         this.emitStepProgress(
           state,
           '7_api_builder',
-          0.78,
-          `Backend auto-fix ${attempt}/${MAX_FIX_ATTEMPTS}: repairing generated API code from review feedback.`,
+          0.93,
+          'Preview API layer is ready for the runtime preview environment.',
         );
-        await this.logToFile(
-          logPath,
-          `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
-        );
+        return api;
+      });
+      await stepDelay();
+      // Removed cotEvidence logging
+      // Removed cotEvidence logging
 
-        api = await this.apiBuilder.fixApi({
-          result: api,
-          feedback: review.blockingMessage,
-          modelName: resolvedModels.fixAgent,
-          logPath,
-        });
-      }
+      // E2+E3: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3)
+      // Mutable component list — allows the build fix-loop below to patch TS errors
+      let buildComponents = generationResult.components;
+      const MAX_BUILD_FIX_ATTEMPTS = 2;
 
-      this.emitStepProgress(
+      const preview = await this.runStep(
         state,
-        '7_api_builder',
-        0.93,
-        'Preview API layer is ready for the runtime preview environment.',
-      );
-      return api;
-    });
-    await stepDelay();
-    // Removed cotEvidence logging
-    // Removed cotEvidence logging
-
-    // E2+E3: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3)
-    // Mutable component list — allows the build fix-loop below to patch TS errors
-    let buildComponents = generationResult.components;
-    const MAX_BUILD_FIX_ATTEMPTS = 2;
-
-    const preview = await this.runStep(
-      state,
-      '8_preview_builder',
-      logPath,
-      async () => {
-        this.emitStepProgress(
-          state,
-          '8_preview_builder',
-          0.08,
-          'Copying the React preview template, writing generated pages, and preparing environment files.',
-        );
-        for (
-          let attempt = 1;
-          attempt <= MAX_BUILD_FIX_ATTEMPTS + 1;
-          attempt++
-        ) {
-          try {
-            this.emitStepProgress(
-              state,
-              '8_preview_builder',
-              0.38,
-              `Preview build attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS + 1}: installing dependencies, building, and starting dev servers.`,
-            );
-            return await this.previewBuilder.build({
-              jobId,
-              components: { ...generationResult, components: buildComponents },
-              dbCreds,
-              themeDir,
-              tokens:
-                'tokens' in normalizedTheme
-                  ? (normalizedTheme as any).tokens
-                  : undefined,
-              plan: reviewResult.plan,
-            });
-          } catch (err: any) {
-            const errMsg: string = err?.message ?? String(err);
-            const isBuildFail = errMsg.includes(
-              '[validator] Preview build failed:',
-            );
-            if (!isBuildFail || attempt > MAX_BUILD_FIX_ATTEMPTS) throw err;
-
-            const tsErrors = this.parseTsBuildErrors(errMsg);
-            if (tsErrors.length === 0) throw err;
-
-            this.logger.warn(
-              `[Stage 8: Build Fix] ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}).`,
-            );
-            this.emitStepProgress(
-              state,
-              '8_preview_builder',
-              0.7,
-              `Preview build fix ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}: repairing ${tsErrors.length} TypeScript build issue(s).`,
-            );
-            await this.logToFile(
-              logPath,
-              `[Stage 8] Build failed with ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS})`,
-            );
-
-            for (const { componentName, error } of tsErrors) {
-              const idx = buildComponents.findIndex(
-                (c) => c.name === componentName,
+        '8_preview_builder',
+        logPath,
+        async () => {
+          this.emitStepProgress(
+            state,
+            '8_preview_builder',
+            0.08,
+            'Copying the React preview template, writing generated pages, and preparing environment files.',
+          );
+          for (
+            let attempt = 1;
+            attempt <= MAX_BUILD_FIX_ATTEMPTS + 1;
+            attempt++
+          ) {
+            try {
+              this.emitStepProgress(
+                state,
+                '8_preview_builder',
+                0.38,
+                `Preview build attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS + 1}: installing dependencies, building, and starting dev servers.`,
               );
-              if (idx === -1) continue;
-              buildComponents[idx] = await this.reactGenerator.fixComponent({
-                component: buildComponents[idx],
+              return await this.previewBuilder.build({
+                jobId,
+                components: {
+                  ...generationResult,
+                  components: buildComponents,
+                },
+                dbCreds,
+                themeDir,
+                wooPluginDir,
+                tokens:
+                  'tokens' in normalizedTheme
+                    ? (normalizedTheme as any).tokens
+                    : undefined,
                 plan: reviewResult.plan,
-                feedback: `TypeScript build error:\n${error}`,
-                modelConfig: { fixAgent: resolvedModels.fixAgent },
-                logPath,
               });
+            } catch (err: any) {
+              const errMsg: string = err?.message ?? String(err);
+              const isBuildFail = errMsg.includes(
+                '[validator] Preview build failed:',
+              );
+              if (!isBuildFail || attempt > MAX_BUILD_FIX_ATTEMPTS) throw err;
+
+              const tsErrors = this.parseTsBuildErrors(errMsg);
+              if (tsErrors.length === 0) throw err;
+
+              this.logger.warn(
+                `[Stage 8: Build Fix] ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}).`,
+              );
+              this.emitStepProgress(
+                state,
+                '8_preview_builder',
+                0.7,
+                `Preview build fix ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}: repairing ${tsErrors.length} TypeScript build issue(s).`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 8] Build failed with ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS})`,
+              );
+
+              // All TS errors are independent — fix in parallel, then apply.
+              const buildFixes = await Promise.all(
+                tsErrors.map(async ({ componentName, error }) => {
+                  const idx = buildComponents.findIndex(
+                    (c) => c.name === componentName,
+                  );
+                  if (idx === -1) return null;
+                  const fixed = await this.reactGenerator.fixComponent({
+                    component: buildComponents[idx],
+                    plan: reviewResult.plan,
+                    feedback: `TypeScript build error:\n${error}`,
+                    modelConfig: { fixAgent: resolvedModels.fixAgent },
+                    logPath,
+                  });
+                  return { idx, fixed };
+                }),
+              );
+              for (const r of buildFixes) {
+                if (r) buildComponents[r.idx] = r.fixed;
+              }
             }
           }
-        }
-        throw new Error('[Stage 8] Build fix-loop exhausted all attempts');
-      },
-    );
-    await stepDelay();
-
-    // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
-    let metrics: any = null;
-    await this.runStep(state, '9_visual_compare', logPath, async () => {
-      this.emitStepProgress(
-        state,
-        '9_visual_compare',
-        0.2,
-        'Submitting the WordPress and React preview URLs to the compare service.',
-      );
-      try {
-        const response = await axios.post(
-          `${this.configService.get<string>('automation.url', '')}/site/compare`,
-          {
-            wpBaseUrl: 'http://localhost:8000/',
-            reactFeUrl: 'http://localhost:5353',
-            reactBeUrl: 'http://localhost:3775',
-          },
-        );
-        metrics = response.data?.result ?? response.data;
-      } catch (err: any) {
-        this.logger.error(
-          `[visual/compare] failed — ${err?.message ?? err}`,
-          err?.response?.data ?? err?.stack,
-        );
-      }
-      this.emitStepProgress(
-        state,
-        '9_visual_compare',
-        0.85,
-        metrics
-          ? 'Visual diff metrics are ready and attached to the final preview payload.'
-          : 'Visual compare finished without metrics; pipeline will continue with cleanup.',
-      );
-      return metrics;
-    });
-    await stepDelay();
-
-    // Bước 8: Xoá temp/repos và temp/uploads của job này
-    await this.runStep(state, '10_cleanup', logPath, () =>
-      this.cleanup.cleanup(jobId),
-    );
-    await stepDelay();
-
-    const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
-
-    // Step 9: Migration completion
-    await this.runStep(state, '11_done', logPath, async () => {
-      state.status = 'done';
-      state.result = {
-        previewDir: preview.previewDir,
-        previewUrl: preview.previewUrl,
-        dbCreds,
-      };
-      // Emit final event with previewUrl from within runStep
-      const subject = this.progress.get(jobId);
-      subject?.next({
-        step: '11_done',
-        label: STEP_META['11_done'].label,
-        status: 'done',
-        percent: 100,
-        message: `Migration workflow is complete. Preview is ready. (${totalElapsed}s)`,
-        data: {
-          previewUrl: preview.previewUrl,
-          metrics,
+          throw new Error('[Stage 8] Build fix-loop exhausted all attempts');
         },
-      });
-      return { success: true, previewUrl: preview.previewUrl, metrics };
-    });
-    await stepDelay();
+      );
+      await stepDelay();
 
-    // Complete the SSE stream after runStep finishes
-    const subject = this.progress.get(jobId);
-    subject?.complete();
-    setTimeout(() => this.progress.delete(jobId), 60_000);
+      // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
+      let metrics: any = null;
+      await this.runStep(state, '9_visual_compare', logPath, async () => {
+        this.emitStepProgress(
+          state,
+          '9_visual_compare',
+          0.2,
+          'Submitting the WordPress and React preview URLs to the compare service.',
+        );
+        try {
+          const response = await axios.post(
+            `${this.configService.get<string>('automation.url', '')}/site/compare`,
+            {
+              wpBaseUrl: 'http://localhost:8000/',
+              reactFeUrl: 'http://localhost:5353',
+              reactBeUrl: 'http://localhost:3775',
+            },
+          );
+          metrics = response.data?.result ?? response.data;
+        } catch (err: any) {
+          this.logger.error(
+            `[visual/compare] failed — ${err?.message ?? err}`,
+            err?.response?.data ?? err?.stack,
+          );
+        }
+        this.emitStepProgress(
+          state,
+          '9_visual_compare',
+          0.85,
+          metrics
+            ? 'Visual diff metrics are ready and attached to the final preview payload.'
+            : 'Visual compare finished without metrics; pipeline will continue with cleanup.',
+        );
+        return metrics;
+      });
+      await stepDelay();
+
+      // Bước 8: Xoá temp/repos và temp/uploads của job này
+      await this.runStep(state, '10_cleanup', logPath, () =>
+        this.cleanup.cleanup(jobId),
+      );
+      await stepDelay();
+
+      const totalElapsed = ((Date.now() - pipelineStart) / 1000).toFixed(1);
+
+      // Step 9: Migration completion
+      await this.runStep(state, '11_done', logPath, async () => {
+        state.status = 'done';
+        state.result = {
+          previewDir: preview.previewDir,
+          previewUrl: preview.previewUrl,
+          dbCreds,
+        };
+        // Emit final event with previewUrl from within runStep
+        const subject = this.progress.get(jobId);
+        subject?.next({
+          step: '11_done',
+          label: STEP_META['11_done'].label,
+          status: 'done',
+          percent: 100,
+          message: `Migration workflow is complete. Preview is ready. (${totalElapsed}s)`,
+          data: {
+            previewUrl: preview.previewUrl,
+            metrics,
+          },
+        });
+        return { success: true, previewUrl: preview.previewUrl, metrics };
+      });
+      await stepDelay();
+
+      // Complete the SSE stream after runStep finishes
+      const subject = this.progress.get(jobId);
+      subject?.complete();
+      setTimeout(() => this.progress.delete(jobId), 60_000);
 
       this.logger.log(`Pipeline ${jobId} completed in ${totalElapsed}s`);
       await this.logToFile(
@@ -1163,21 +1230,31 @@ export class OrchestratorService {
 
   private async resolveThemeDir(
     repoRoot: string,
-    dbCreds: WpDbCredentials,
+    dbConnectionString: string,
   ): Promise<string> {
-    const themesDir = join(repoRoot, 'themes');
+    // Thử theo thứ tự: <root>/themes/ rồi <root>/wp-content/themes/
+    const themesdirCandidates = [
+      join(repoRoot, 'themes'),
+      join(repoRoot, 'wp-content', 'themes'),
+    ];
 
-    // Không có thư mục themes/ → dùng root như cũ
-    try {
-      await stat(themesDir);
-    } catch {
-      return repoRoot;
+    let themesDir: string | undefined;
+    for (const candidate of themesdirCandidates) {
+      try {
+        await stat(candidate);
+        themesDir = candidate;
+        break;
+      } catch {
+        // try next
+      }
     }
+
+    if (!themesDir) return repoRoot;
 
     // Query active theme slug từ WP DB (wp_options.stylesheet)
     let activeSlug: string | undefined;
     try {
-      activeSlug = await this.wpQuery.getActiveTheme(dbCreds);
+      activeSlug = await this.wpQuery.getActiveTheme(dbConnectionString);
     } catch (err: any) {
       this.logger.warn(`Could not query active theme from DB: ${err.message}`);
     }
@@ -1208,10 +1285,368 @@ export class OrchestratorService {
     return repoRoot;
   }
 
+  private async enrichThemeWithPluginTemplates(input: {
+    theme: PhpParseResult | BlockParseResult;
+    themeDir: string;
+    manifest: RepoThemeManifest;
+    resolvedSource: RepoResolvedSourceSummary;
+    logPath?: string;
+  }): Promise<{
+    theme: PhpParseResult | BlockParseResult;
+    wooPluginDir?: string;
+  }> {
+    const { theme, themeDir, manifest, resolvedSource, logPath } = input;
+    const wooPlugin = this.findActivePluginSource(
+      resolvedSource,
+      'woocommerce',
+    );
+    if (!wooPlugin?.presentInRepo) return { theme };
+
+    const themeSourceDirs = await this.resolveThemeSourceDirs(
+      themeDir,
+      resolvedSource,
+    );
+    const pluginDir = await this.resolveRepoRelativeDir(
+      themeDir,
+      wooPlugin.relativeDir,
+    );
+    if (!pluginDir) {
+      this.logger.warn(
+        `[source-enrichment] WooCommerce is active but plugin source dir could not be resolved from repo path "${wooPlugin.relativeDir ?? 'unknown'}"`,
+      );
+      return { theme };
+    }
+
+    let enrichedTheme: PhpParseResult | BlockParseResult = theme;
+    const injectedTemplates: string[] = [];
+
+    for (const spec of WOO_STOREFRONT_TEMPLATE_SPECS) {
+      if (this.themeHasTemplate(enrichedTheme, spec.aliasNames)) continue;
+
+      const source = await this.resolveWooCommerceTemplateBundle(
+        spec,
+        themeSourceDirs,
+        pluginDir,
+      );
+      if (!source) continue;
+
+      enrichedTheme =
+        enrichedTheme.type === 'classic'
+          ? {
+              ...enrichedTheme,
+              templates: [
+                ...enrichedTheme.templates,
+                { name: spec.templateName, html: source.markup },
+              ],
+            }
+          : {
+              ...enrichedTheme,
+              templates: [
+                ...enrichedTheme.templates,
+                { name: spec.templateName, markup: source.markup },
+              ],
+            };
+
+      injectedTemplates.push(
+        `${spec.templateName} <= ${source.originDescription}`,
+      );
+    }
+
+    if (injectedTemplates.length === 0) return { theme };
+
+    const normalized = await this.normalizer.normalize(enrichedTheme);
+    const note = `Injected WooCommerce storefront template source: ${injectedTemplates.join('; ')}`;
+
+    this.logger.log(`[source-enrichment] ${note}`);
+    if (logPath) {
+      await this.logToFile(logPath, `[source-enrichment] ${note}`);
+    }
+
+    if (normalized.diagnostics) {
+      normalized.diagnostics.warnings.push(note);
+    }
+
+    manifest.sourceOfTruth.notes.push(
+      'WooCommerce storefront templates were injected from theme overrides/plugin source before planning when the active theme did not expose them directly.',
+    );
+
+    return { theme: normalized, wooPluginDir: pluginDir };
+  }
+
+  private findActivePluginSource(
+    resolvedSource: RepoResolvedSourceSummary,
+    slug: string,
+  ): RepoResolvedPluginSource | undefined {
+    return resolvedSource.activePlugins.find(
+      (plugin) =>
+        this.normalizeSourceSlug(plugin.slug) ===
+          this.normalizeSourceSlug(slug) &&
+        (plugin.active || plugin.runtimeDetected),
+    );
+  }
+
+  private async resolveThemeSourceDirs(
+    themeDir: string,
+    resolvedSource: RepoResolvedSourceSummary,
+  ): Promise<string[]> {
+    const dirs = new Set<string>([resolve(themeDir)]);
+
+    for (const theme of resolvedSource.themeChain) {
+      const resolvedDir = await this.resolveRepoRelativeDir(
+        themeDir,
+        theme.relativeDir,
+      );
+      if (resolvedDir) dirs.add(resolve(resolvedDir));
+    }
+
+    return [...dirs];
+  }
+
+  private async resolveWooCommerceTemplateBundle(
+    spec: PluginTemplateSpec,
+    themeSourceDirs: string[],
+    pluginDir: string,
+  ): Promise<{ markup: string; originDescription: string } | null> {
+    const mainSource = await this.resolveWooCommerceTemplateFile(
+      themeSourceDirs,
+      pluginDir,
+      spec.mainTemplate,
+    );
+    if (!mainSource) return null;
+
+    const segments = [
+      `<!-- vibepress:source woocommerce template ${spec.templateName} (${mainSource.sourceType}: ${mainSource.sourcePath}) -->`,
+      this.phpParser.toTemplateMarkup(mainSource.rawSource),
+    ];
+
+    for (const relatedTemplate of spec.relatedTemplates) {
+      const relatedSource = await this.resolveWooCommerceTemplateFile(
+        themeSourceDirs,
+        pluginDir,
+        relatedTemplate,
+      );
+      if (!relatedSource) continue;
+
+      segments.push(
+        `<!-- vibepress:source woocommerce related ${relatedTemplate} (${relatedSource.sourceType}: ${relatedSource.sourcePath}) -->`,
+        this.phpParser.toTemplateMarkup(relatedSource.rawSource),
+      );
+    }
+
+    for (const relatedDirectory of spec.relatedDirectories) {
+      const directoryEntries = await this.resolveWooCommerceTemplateDirectory(
+        themeSourceDirs,
+        pluginDir,
+        relatedDirectory,
+      );
+      for (const entry of directoryEntries) {
+        if (entry.sourcePath === mainSource.sourcePath) continue;
+        segments.push(
+          `<!-- vibepress:source woocommerce directory ${relatedDirectory}/${entry.relativePath} (${entry.sourceType}: ${entry.sourcePath}) -->`,
+          this.phpParser.toTemplateMarkup(entry.rawSource),
+        );
+      }
+    }
+
+    return {
+      markup: segments.join('\n\n').trim(),
+      originDescription: `${mainSource.sourceType}:${mainSource.sourcePath}`,
+    };
+  }
+
+  private async resolveWooCommerceTemplateFile(
+    themeSourceDirs: string[],
+    pluginDir: string,
+    relativeTemplatePath: string,
+  ): Promise<{
+    rawSource: string;
+    sourcePath: string;
+    sourceType: 'theme-override' | 'plugin-template';
+  } | null> {
+    for (const themeSourceDir of themeSourceDirs) {
+      const candidate = join(
+        themeSourceDir,
+        'woocommerce',
+        relativeTemplatePath,
+      );
+      if (!(await this.pathExists(candidate))) continue;
+
+      return {
+        rawSource: await readFile(candidate, 'utf-8'),
+        sourcePath: candidate,
+        sourceType: 'theme-override',
+      };
+    }
+
+    const pluginTemplatePath = join(
+      pluginDir,
+      'templates',
+      relativeTemplatePath,
+    );
+    if (!(await this.pathExists(pluginTemplatePath))) return null;
+
+    return {
+      rawSource: await readFile(pluginTemplatePath, 'utf-8'),
+      sourcePath: pluginTemplatePath,
+      sourceType: 'plugin-template',
+    };
+  }
+
+  private async resolveWooCommerceTemplateDirectory(
+    themeSourceDirs: string[],
+    pluginDir: string,
+    relativeDirectory: string,
+  ): Promise<
+    Array<{
+      relativePath: string;
+      rawSource: string;
+      sourcePath: string;
+      sourceType: 'theme-override' | 'plugin-template';
+    }>
+  > {
+    const selected = new Map<
+      string,
+      {
+        relativePath: string;
+        rawSource: string;
+        sourcePath: string;
+        sourceType: 'theme-override' | 'plugin-template';
+      }
+    >();
+
+    for (const themeSourceDir of themeSourceDirs) {
+      const overrideDir = join(
+        themeSourceDir,
+        'woocommerce',
+        relativeDirectory,
+      );
+      for (const file of await this.walkPhpFiles(overrideDir)) {
+        if (selected.has(file.relativePath)) continue;
+        selected.set(file.relativePath, {
+          relativePath: file.relativePath,
+          rawSource: file.rawSource,
+          sourcePath: file.sourcePath,
+          sourceType: 'theme-override',
+        });
+      }
+    }
+
+    const pluginTemplatesDir = join(pluginDir, 'templates', relativeDirectory);
+    for (const file of await this.walkPhpFiles(pluginTemplatesDir)) {
+      if (selected.has(file.relativePath)) continue;
+      selected.set(file.relativePath, {
+        relativePath: file.relativePath,
+        rawSource: file.rawSource,
+        sourcePath: file.sourcePath,
+        sourceType: 'plugin-template',
+      });
+      if (selected.size >= WOO_SUPPORT_DIR_FILE_LIMIT) break;
+    }
+
+    return [...selected.values()]
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+      .slice(0, WOO_SUPPORT_DIR_FILE_LIMIT);
+  }
+
+  private async walkPhpFiles(
+    dir: string,
+    baseDir: string = dir,
+  ): Promise<
+    Array<{ relativePath: string; sourcePath: string; rawSource: string }>
+  > {
+    if (!(await this.pathExists(dir))) return [];
+
+    const entries = await readdir(dir, { withFileTypes: true });
+    const results: Array<{
+      relativePath: string;
+      sourcePath: string;
+      rawSource: string;
+    }> = [];
+
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...(await this.walkPhpFiles(fullPath, baseDir)));
+        continue;
+      }
+      if (!entry.name.toLowerCase().endsWith('.php')) continue;
+
+      const relativePath = fullPath
+        .slice(baseDir.length)
+        .replace(/^[/\\]/, '')
+        .replace(/\\/g, '/');
+
+      results.push({
+        relativePath,
+        sourcePath: fullPath,
+        rawSource: await readFile(fullPath, 'utf-8'),
+      });
+    }
+
+    return results;
+  }
+
+  private themeHasTemplate(
+    theme: PhpParseResult | BlockParseResult,
+    candidateNames: string[],
+  ): boolean {
+    const normalizedCandidates = new Set(
+      candidateNames.map((name) => this.normalizeTemplateName(name)),
+    );
+    const themeTemplates =
+      theme.type === 'classic'
+        ? theme.templates
+        : [...theme.templates, ...theme.parts];
+
+    return themeTemplates.some((template) =>
+      normalizedCandidates.has(this.normalizeTemplateName(template.name)),
+    );
+  }
+
+  private normalizeTemplateName(value: string): string {
+    return value
+      .trim()
+      .replace(/\.(php|html)$/i, '')
+      .toLowerCase();
+  }
+
+  private normalizeSourceSlug(value: string): string {
+    return value.trim().toLowerCase();
+  }
+
+  private async resolveRepoRelativeDir(
+    themeDir: string,
+    relativeDir: string | undefined,
+  ): Promise<string | undefined> {
+    if (!relativeDir) return undefined;
+
+    let current = resolve(themeDir);
+    for (let depth = 0; depth < 7; depth++) {
+      const candidate = join(current, relativeDir);
+      if (await this.pathExists(candidate)) {
+        return candidate;
+      }
+
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+
+    return undefined;
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await stat(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async cloneThemeRepo(
     repoUrl: string,
     token: string | undefined,
-    branch: string,
     jobId: string,
   ): Promise<string> {
     const destDir = join('./temp/repos', jobId);
@@ -1222,13 +1657,19 @@ export class OrchestratorService {
       : repoUrl;
 
     this.logger.log(`Cloning theme repo: ${repoUrl} → ${destDir}`);
-    await simpleGit().clone(cloneUrl, destDir, [
-      '--depth',
-      '1',
-      '--branch',
-      branch,
-    ]);
+    await simpleGit().clone(cloneUrl, destDir, ['--depth', '1']);
     return destDir;
+  }
+
+  private toWpDbCredentials(connectionString: string): WpDbCredentials {
+    const creds = parseDbConnectionString(connectionString);
+    return {
+      host: creds.host,
+      port: creds.port,
+      dbName: creds.database,
+      user: creds.user,
+      password: creds.password,
+    };
   }
 
   private async runStep<T>(
@@ -1309,13 +1750,83 @@ export class OrchestratorService {
     }
   }
 
+  private async recordRepoAnalysis(
+    jobLogDir: string,
+    logPath: string,
+    repoResult: RepoAnalyzeResult,
+  ): Promise<void> {
+    await writeFile(
+      join(jobLogDir, 'repo-manifest.json'),
+      JSON.stringify(repoResult.themeManifest, null, 2),
+      'utf-8',
+    );
+
+    for (const line of this.buildRepoAnalysisSummaryLines(repoResult)) {
+      this.logger.log(`[RepoAnalyzer] ${line}`);
+      await this.logToFile(logPath, `[RepoAnalyzer] ${line}`);
+    }
+  }
+
+  private buildRepoAnalysisSummaryLines(
+    repoResult: RepoAnalyzeResult,
+  ): string[] {
+    const manifest = repoResult.themeManifest;
+    const notableBlocks = [
+      ...(manifest.structureHints.containsNavigation ? ['navigation'] : []),
+      ...(manifest.structureHints.containsSearch ? ['search'] : []),
+      ...(manifest.structureHints.containsComments ? ['comments'] : []),
+      ...(manifest.structureHints.containsQueryLoop ? ['query-loop'] : []),
+      ...(manifest.structureHints.containsWooCommerceBlocks
+        ? ['woocommerce']
+        : []),
+    ];
+    const assetCount =
+      manifest.assetManifest.images.length +
+      manifest.assetManifest.fonts.length +
+      manifest.assetManifest.svg.length +
+      manifest.assetManifest.video.length;
+
+    return [
+      `kind=${manifest.themeTypeHints.detectedThemeKind}, themeFiles=${repoResult.totalFiles}, themeInventoryFiles=${repoResult.themeInventoryFiles}, themes=${repoResult.themeCount}, pluginFiles=${repoResult.pluginFiles}, plugins=${repoResult.pluginCount}, templates=${manifest.filesByRole.templates.length}, parts=${manifest.filesByRole.templateParts.length}, patterns=${manifest.filesByRole.patterns.length}, phpTemplates=${manifest.filesByRole.phpTemplates.length}, css=${manifest.filesByRole.styles.length}, assets=${assetCount}`,
+      `theme.json: palette=${manifest.themeJsonSummary.paletteCount}, fontFamilies=${manifest.themeJsonSummary.fontFamilyCount}, fontSizes=${manifest.themeJsonSummary.fontSizeCount}, spacing=${manifest.themeJsonSummary.spacingSizeCount}, customTemplates=${manifest.themeJsonSummary.customTemplateCount}`,
+      `runtime: menus=${manifest.runtimeHints.registeredMenus.length}, sidebars=${manifest.runtimeHints.registeredSidebars.length}, supports=${manifest.runtimeHints.themeSupports.join(', ') || 'none'}, woo=${manifest.runtimeHints.hasWooCommerceSupport || manifest.themeTypeHints.hasWooCommerceTemplates ? 'yes' : 'no'}`,
+      `structure: partRefs=${manifest.structureHints.templatePartRefs.length}, patternRefs=${manifest.structureHints.patternRefs.length}, notableBlocks=${notableBlocks.join(', ') || 'none'}, priorityDirs=${manifest.sourceOfTruth.priorityDirectories.join(', ') || 'root-only'}, themeDirs=${manifest.sourceOfTruth.themeDirectories.join(', ') || 'none'}, pluginDirs=${manifest.sourceOfTruth.pluginDirectories.join(', ') || 'none'}`,
+      ...(manifest.resolvedSource
+        ? [
+            `resolved: activeTheme=${manifest.resolvedSource.activeTheme.slug}${manifest.resolvedSource.parentTheme ? `, parentTheme=${manifest.resolvedSource.parentTheme.slug}` : ''}, activePlugins=${manifest.resolvedSource.activePlugins.length}, runtimeOnlyPlugins=${manifest.resolvedSource.runtimeOnlyPlugins.length}, repoOnlyPlugins=${manifest.resolvedSource.repoOnlyPlugins.length}`,
+          ]
+        : []),
+    ];
+  }
+
   private validateDto(dto: RunPipelineDto): void {
-    const hasTheme = dto.themeGithubUrl || dto.themeDir;
-    const hasDb = dto.sqlFilePath || dto.dbCredentials;
-    if (!hasTheme)
-      throw new BadRequestException('Provide themeGithubUrl or themeDir');
-    if (!hasDb)
-      throw new BadRequestException('Provide sqlFilePath or dbCredentials');
+    if (!dto || typeof dto !== 'object' || Array.isArray(dto)) {
+      throw new BadRequestException(
+        'RunPipelineDto must be an object with themeGithubUrl and dbConnectionString',
+      );
+    }
+
+    const allowedKeys = new Set(['themeGithubUrl', 'dbConnectionString']);
+    const extraKeys = Object.keys(dto).filter((key) => !allowedKeys.has(key));
+    if (extraKeys.length > 0) {
+      throw new BadRequestException(
+        `Only themeGithubUrl and dbConnectionString are allowed. Extra fields: ${extraKeys.join(', ')}`,
+      );
+    }
+
+    if (
+      typeof dto.themeGithubUrl !== 'string' ||
+      dto.themeGithubUrl.trim().length === 0
+    ) {
+      throw new BadRequestException('themeGithubUrl is required');
+    }
+
+    if (
+      typeof dto.dbConnectionString !== 'string' ||
+      dto.dbConnectionString.trim().length === 0
+    ) {
+      throw new BadRequestException('dbConnectionString is required');
+    }
   }
 
   /**

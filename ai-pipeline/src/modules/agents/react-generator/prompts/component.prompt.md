@@ -25,9 +25,20 @@ Internal link paths:
 
 - Single post → `to={'/post/' + post.slug}`
 - Single page → `to={'/page/' + page.slug}`
-- Archive → `to="/archive"`
-- Category → `to={'/category/' + slug}`
+- Archive / blog index → `to="/archive"`
+- Category archive → `to={'/category/' + category.slug}`
+- Tag archive → `to={'/tag/' + tag.slug}`
+- Author archive → `to={'/author/' + author.slug}`
 - Home → `to="/"`
+
+**Sidebar / widget link patterns** (use these — NEVER `href="#"`):
+- "View all posts" / "Read more" in a post list → `to={'/post/' + post.slug}`
+- "All categories" link → `to="/archive"`
+- Category item in widget → `to={'/category/' + cat.slug}`
+- Recent post item → `to={'/post/' + post.slug}`
+- If the target URL is truly unknown → **omit the link entirely**, render plain text instead of `href="#"`
+
+⛔ `href="#"` and `to="#"` are NEVER acceptable — they will be rejected at validation. When a URL is not determinable from template data or API, render without a link wrapper.
 
 Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href target="_blank" rel="noopener noreferrer">`.
 
@@ -41,7 +52,7 @@ Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href tar
 
 ⛔ MANDATORY CONTRACT — violating this causes a runtime ReferenceError:
 
-1. List every API endpoint you will call based on the template blocks.
+1. List every API endpoint you will call based on the template blocks **AND the Component plan `Data needed` field**. If the plan says `products`, you MUST fetch `/api/products` even when the template has no product blocks.
 2. Declare ONE `useState` per variable BEFORE writing any JSX.
 3. Fetch ALL of them together in a single `Promise.all` inside `useEffect`.
 4. NEVER use `menus`, `posts`, `pages`, `siteInfo` in JSX unless you declared `useState` for it above.
@@ -74,10 +85,17 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 - `useEffect` + `useState`, fetch on mount, show loading/error states
 - Define TypeScript interfaces above the component
 - ⛔ PAGE components must NEVER fetch `/api/site-info` or `/api/menus`. Those endpoints are owned exclusively by `Header` / `Footer` / `Navigation` partials. If the template JSON contains a `header` or `footer` block, skip it entirely — the shared Layout wrapper already renders it.
-- Menu guard — always use optional chaining:
+- Menu guard — always use optional chaining. Each menu object now includes a `location` field (the WP theme location slug, e.g. `"primary"`, `"footer-about"`, or `null` if unassigned):
   ```tsx
-  const menu = menus.find(m => m.slug === 'primary') ?? menus[0];
-  {menu?.items?.map(item => (...))}
+  // Header/Navigation — use the primary location menu
+  const navMenu = menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0];
+  {navMenu?.items?.map(item => (...))}
+
+  // Footer — exclude the primary nav menu by location AND by slug (slug fallback
+  // handles sites where nav_menu_locations is not configured in WordPress)
+  const footerMenus = menus.filter(m => m.location !== 'primary' && m.slug !== 'primary');
+  // Fallback: if every menu matched (custom slugs), skip the first one (assumed primary nav)
+  const displayMenus = footerMenus.length > 0 ? footerMenus : menus.slice(1);
   ```
 
 ## Content — two sources only
@@ -97,6 +115,61 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 ⛔ Invented content: testimonial quotes, names, job titles must come exactly from template `text` fields
 ⛔ Footer nav: fetch `/api/menus`, group by menu → columns — NEVER hardcode links
 
+**Footer multi-menu rendering — MANDATORY pattern when there are multiple menus:**
+
+Each menu from `/api/menus` has shape: `{ name: string, slug: string, location: string | null, items: { id, title, url, order, parentId }[] }`.
+
+- `location` = WP theme location slug (e.g. `"primary"` = main nav, `"footer-about"`, `"social"`, etc.)
+- The **Header/Navigation** component owns the `location === "primary"` menu
+- The **Footer** component must use all menus where `location !== "primary"` — these are the actual footer menus
+
+```tsx
+// ✅ Correct — Footer uses only non-primary menus (the real footer menus)
+interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }
+interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }
+
+const [menus, setMenus] = useState<Menu[]>([]);
+useEffect(() => {
+  fetch('/api/menus').then(r => r.json()).then(setMenus);
+}, []);
+
+// Exclude the primary navigation menu (used by Header).
+// Check location first; fall back to slug when nav_menu_locations is not configured in WP.
+const footerMenus = menus.filter(m => m.location !== 'primary' && m.slug !== 'primary');
+// Fallback: if every menu matches (e.g. custom slug), skip the first menu (assumed to be primary nav)
+const displayMenus = footerMenus.length > 0 ? footerMenus : menus.slice(1);
+
+// In JSX — each footer menu becomes a column:
+<div className="flex flex-wrap gap-8">
+  {displayMenus.map(menu => (
+    <div key={menu.slug}>
+      <h3 className="font-bold mb-4">{menu.name}</h3>
+      <ul className="flex flex-col gap-2">
+        {(menu.items ?? []).map(item => (
+          <li key={item.id}>
+            {item.url.startsWith('http') ? (
+              <a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a>
+            ) : (
+              <Link to={item.url}>{item.title}</Link>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  ))}
+</div>
+
+// ❌ Wrong — renders ALL menus including the primary nav menu in the footer
+{menus.map(menu => (...))}
+
+// ❌ Wrong — hardcoded slug breaks if WP menu slugs differ from display names
+const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
+```
+
+⛔ NEVER render the `location === "primary"` or `slug === "primary"` menu in the Footer — that belongs to the Header
+⛔ NEVER filter menus by hardcoded slug name — always use the `location` field
+⛔ NEVER skip `menu.items` rendering — always map over `(menu.items ?? [])` even if you're unsure items exist
+
 {{dataGrounding}}
 
 {{imageSources}}
@@ -110,7 +183,12 @@ Functional component, no props, export default. Import React/useState/useEffect.
 
 ### Tailwind-only styling
 
-⛔ No CSS imports. No `wp-block-*`, `alignwide`, `is-layout-*` classes. All layout via Tailwind + minimal `style={{}}` for `backgroundImage`, `fontFamily`, `flexBasis`, dynamic values only.
+Use Tailwind utilities to recreate the original WordPress layout as closely as possible.
+
+✅ Preserve the original block order, section density, spacing, and widths from the template source.
+✅ Translate template spacing/typography values into explicit Tailwind utilities.
+✅ Keep wrappers simple and deterministic; use semantic HTML plus Tailwind utilities.
+⛔ No CSS imports inside generated components.
 ⛔ No CSS vars in Tailwind: `gap-[var(--foo)]` → BROKEN. Resolve to `gap-[24px]` first.
 ⛔ No bare numeric classes: `gap-1rem` → INVALID. Always `gap-[1rem]`.
 ⛔ HARD RULE: Tailwind arbitrary values using `min()`, `max()`, or `clamp()` must be fully compact inside the parentheses.
@@ -135,9 +213,9 @@ Functional component, no props, export default. Import React/useState/useEffect.
 | `margin` {top/right/bottom/left}  | `mt-[t] mr-[r] mb-[b] ml-[l]`                                         |
 | `minHeight`                       | `min-h-[value]`                                                       |
 | `textAlign`                       | `text-left/center/right`                                              |
-| `align: "full"`                   | `w-full`                                                              |
-| `align: "wide"`                   | `mx-auto w-full max-w-[wide-from-theme]`                              |
-| `align: center/absent`            | `mx-auto w-full max-w-[content-from-theme]`                           |
+| `align: "full"`                   | full-bleed section wrapper, e.g. `w-full`                              |
+| `align: "wide"`                   | wide container, e.g. `max-w-[1280px] mx-auto`                          |
+| `align: center/absent`            | normal content container using theme widths                            |
 | `borderRadius`                    | `rounded-[value]` — resolve CSS vars; if unresolvable, omit           |
 | `columnWidth` e.g. `"33.33%"`     | `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}`                |
 | `overlayColor` on cover           | `style={{backgroundColor:'#hex'}}` on overlay div                     |
@@ -147,7 +225,8 @@ Functional component, no props, export default. Import React/useState/useEffect.
 
 ### Theme tokens
 
-- Root wrapper: set bg/text colors, lineHeight only — `style={{lineHeight:"..."}}`. ⛔ NO `fontFamily` on root wrapper — body/heading fonts are injected via global CSS automatically. ⛔ NO horizontal/vertical padding on root wrapper — each section handles its own padding.
+- Root wrapper: use theme tokens to reproduce the WordPress layout with Tailwind classes.
+- Body/heading fonts should come from the provided theme tokens and inline `fontFamily` only when needed.
 - Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
 - **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
 - Headings: exact token size/weight per level (`text-[3rem] font-[700]`)
@@ -161,22 +240,32 @@ Functional component, no props, export default. Import React/useState/useEffect.
 ```tsx
 <div
   style={{
-    backgroundImage: `url('${src}')`,
+    backgroundImage: node.src ? `url('${node.src}')` : undefined,
     backgroundSize: 'cover',
     backgroundPosition: 'center',
-    minHeight: minHeight ?? '500px',
+    minHeight: node.minHeight ?? '500px',
   }}
   className="relative w-full flex items-center justify-center"
 >
   <div
-    className="absolute inset-0 bg-black"
-    style={{ opacity: (dimRatio ?? 0) / 100 }}
+    className="absolute inset-0"
+    style={{
+      backgroundColor: node.overlayColor ?? '#000000',
+      opacity: (node.params?.dimRatio ?? 50) / 100,
+    }}
   />
   <div className="relative z-10 flex flex-col items-center text-center px-6 py-16">
     {/* children */}
   </div>
 </div>
 ```
+
+**Cover overlay rules — read `dimRatio` and `overlayColor` exactly from the node:**
+- `node.src` — background image URL (may be undefined if cover has no image → render as plain colored section)
+- `node.overlayColor` — overlay hex or slug (may be a light color like `#ffffff` or `white` → results in a near-white section with text on top, NOT a dark photo overlay)
+- `node.params?.dimRatio` — overlay opacity 0-100. **If `dimRatio` is 0 → `opacity: 0` (no overlay, image shows fully). If `dimRatio` is 100 with a white `overlayColor` → section looks like a plain white background with text.**
+- ⛔ NEVER default overlay to black with 50% opacity when the node provides a different `overlayColor` or `dimRatio`
+- ✅ If `node.overlayColor` is `'white'` or `'#ffffff'` and `dimRatio` >= 80 → render as `bg-white` section (the image is hidden by the overlay, WordPress renders it the same way)
 
 ### Other rules
 
@@ -261,7 +350,7 @@ Content from EXACTLY one of: (1) template JSON `text`/`src`/`href` fields, or (2
 
 ## Template JSON
 
-Pre-parsed block tree. Each node: `block` type, `text`, `src`, `href`, `children`.
+Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `text`, `src`, `href`, `children`.
 
 | block                   | render                                                                                                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -275,7 +364,42 @@ Pre-parsed block tree. Each node: `block` type, `text`, `src`, `href`, `children
 | `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                     |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                     |
 
-`block: "query"` → fetch `/api/posts`, map over results:
+`block: "query"` → check Component plan `Data needed` first:
+- If plan contains `products` → fetch `/api/products`, map over `product` items (see WooCommerce product loop below)
+- Otherwise → fetch `/api/posts`, map over `post` items (default)
+
+**WooCommerce product blocks** — any of these triggers `GET /api/products`:
+
+| block                                    | render                                                                                      |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `woocommerce/product-query`              | fetch `/api/products`, render product grid                                                  |
+| `woocommerce/product-collection`         | fetch `/api/products`, render product grid                                                  |
+| `woocommerce/products-by-category`       | fetch `/api/products?category=<slug>`, render product grid                                  |
+| `woocommerce/all-products`               | fetch `/api/products`, render product grid                                                  |
+| `woocommerce/product-title`              | `<Link to={'/product/'+product.slug}>{product.title}</Link>`                                |
+| `woocommerce/product-image`              | `{product.featuredImage && <img src={product.featuredImage} alt={product.title} />}`        |
+| `woocommerce/product-price`              | `<span>{product.price}</span>`                                                              |
+| `woocommerce/product-rating`             | omit (no rating data in API)                                                                |
+
+Product loop pattern (use when plan has `products` or template has any `woocommerce/*` product block):
+
+```tsx
+const [products, setProducts] = useState<Product[]>([]);
+useEffect(() => {
+  fetch('/api/products').then(r => r.json()).then(setProducts);
+}, []);
+
+// In JSX:
+{products.map(product => (
+  <article key={product.id}>
+    {product.featuredImage && <img src={product.featuredImage} alt={product.title} className="w-full object-cover" />}
+    <Link to={'/product/' + product.slug}>{product.title}</Link>
+    {product.price && <span>{product.price}</span>}
+  </article>
+))}
+```
+
+`block: "query"` (non-WooCommerce) → fetch `/api/posts`, map over results:
 
 | inner block           | render                                                                      |
 | --------------------- | --------------------------------------------------------------------------- |

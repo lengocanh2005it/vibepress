@@ -3,6 +3,8 @@ import { join } from 'path';
 import { DbContentResult } from '../../../agents/db-content/db-content.service.js';
 import { PhpParseResult } from '../../../agents/php-parser/php-parser.service.js';
 import { BlockParseResult } from '../../../agents/block-parser/block-parser.service.js';
+import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
+import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 
 const TEMPLATE = readFileSync(
   join(
@@ -15,13 +17,14 @@ const TEMPLATE = readFileSync(
 export function buildPlanPrompt(
   theme: PhpParseResult | BlockParseResult,
   content: DbContentResult,
+  repoManifest?: RepoThemeManifest,
 ): string {
   const templateNames =
     theme.type === 'classic'
       ? theme.templates.map((t) => t.name)
       : [...theme.templates, ...theme.parts].map((t) => t.name);
 
-  return TEMPLATE.replace('{{siteName}}', content.siteInfo.siteName)
+  const base = TEMPLATE.replace('{{siteName}}', content.siteInfo.siteName)
     .replace('{{siteUrl}}', content.siteInfo.siteUrl)
     .replace('{{blogDescription}}', content.siteInfo.blogDescription)
     .replace(
@@ -44,4 +47,7 @@ export function buildPlanPrompt(
         .map((m) => `- ${m.name}: ${m.items.length} items`)
         .join('\n'),
     );
+
+  const repoContext = buildRepoManifestContextNote(repoManifest);
+  return repoContext ? `${base}\n\n${repoContext}` : base;
 }

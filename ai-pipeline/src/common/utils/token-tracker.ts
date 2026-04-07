@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { appendFile, writeFile } from 'fs/promises';
+import { dirname, join } from 'path';
 
 // Pricing per 1M tokens (USD)
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
@@ -16,23 +17,25 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'open-mistral-nemo': { input: 0.15, output: 0.15 },
 };
 
-export class TokenTracker {
-  private static readonly sessions = new Map<
-    string,
-    {
-      totalInput: number;
-      totalOutput: number;
-      totalCost: number;
-      initialized: boolean;
-      summaryWritten: boolean;
-    }
-  >();
-  private readonly logger = new Logger('TokenTracker');
-  private logFile: string | undefined;
+type TokenPhase = 'plan' | 'gen' | 'review' | 'fix';
+type TokenSession = {
+  totalInput: number;
+  totalOutput: number;
+  totalCost: number;
+  initialized: boolean;
+  summaryWritten: boolean;
+};
 
-  private getSession() {
-    if (!this.logFile) return null;
-    let session = TokenTracker.sessions.get(this.logFile);
+const TOKEN_PHASES: TokenPhase[] = ['plan', 'gen', 'review', 'fix'];
+
+export class TokenTracker {
+  private static readonly sessions = new Map<string, TokenSession>();
+  private readonly logger = new Logger('TokenTracker');
+  private baseLogFile: string | undefined;
+
+  private getSession(logFile: string | undefined) {
+    if (!logFile) return null;
+    let session = TokenTracker.sessions.get(logFile);
     if (!session) {
       session = {
         totalInput: 0,
@@ -41,21 +44,42 @@ export class TokenTracker {
         initialized: false,
         summaryWritten: false,
       };
-      TokenTracker.sessions.set(this.logFile, session);
+      TokenTracker.sessions.set(logFile, session);
     }
     return session;
   }
 
-  /** Gọi đầu mỗi job để reset bộ đếm và set file log riêng */
-  async init(logFile: string): Promise<void> {
-    this.logFile = logFile;
-    const session = this.getSession();
+  private buildPhaseLogFile(phase: TokenPhase): string | undefined {
+    if (!this.baseLogFile) return undefined;
+    return join(dirname(this.baseLogFile), `${phase}.tokens.log`);
+  }
+
+  private getAllLogFiles(): string[] {
+    if (!this.baseLogFile) return [];
+    return [
+      this.baseLogFile,
+      ...TOKEN_PHASES.map((phase) => this.buildPhaseLogFile(phase)).filter(
+        Boolean,
+      ),
+    ] as string[];
+  }
+
+  static getTokenLogPath(logPath: string | undefined): string | undefined {
+    if (!logPath) return undefined;
+    return join(dirname(logPath), 'tokens', 'total.tokens.log');
+  }
+
+  private async ensureLogInitialized(
+    logFile: string,
+    title = 'TOKEN USAGE LOG',
+  ): Promise<void> {
+    const session = this.getSession(logFile);
     if (!session || session.initialized) return;
 
     await writeFile(
       logFile,
       `${'─'.repeat(80)}\n` +
-        `TOKEN USAGE LOG  ${new Date().toISOString()}\n` +
+        `${title}  ${new Date().toISOString()}\n` +
         `${'─'.repeat(80)}\n` +
         `${'TIMESTAMP'.padEnd(26)}${'COMPONENT'.padEnd(36)} ${'IN'.padStart(7)} ${'OUT'.padStart(7)}  ${'COST (USD)'.padStart(12)}\n` +
         `${'─'.repeat(80)}\n`,
@@ -64,14 +88,53 @@ export class TokenTracker {
     session.summaryWritten = false;
   }
 
-  async track(
+  private classifyPhase(label: string): TokenPhase | null {
+    const normalized = label.toLowerCase().trim();
+    if (!normalized) return null;
+
+    if (
+      normalized.startsWith('planner:') ||
+      /:visual-plan:\d+$/.test(normalized)
+    ) {
+      return 'plan';
+    }
+
+    if (
+      normalized.startsWith('backend-fix') ||
+      /(^|:)(autofix|fix-agent|fix)(:|$)/.test(normalized)
+    ) {
+      return 'fix';
+    }
+
+    if (
+      normalized.startsWith('backend-review:') ||
+      normalized.includes(':generated-review:')
+    ) {
+      return 'review';
+    }
+
+    if (
+      normalized.startsWith('backend-gen') ||
+      normalized.includes(':precomputed-plan') ||
+      normalized.includes(':direct-ai') ||
+      normalized.includes(':fragment:') ||
+      /:visual-plan(?::|$)/.test(normalized)
+    ) {
+      return 'gen';
+    }
+
+    return null;
+  }
+
+  private async appendEntry(
+    logFile: string,
     model: string,
     inputTokens: number,
     outputTokens: number,
-    label = '',
-  ): Promise<void> {
-    const session = this.getSession();
-    if (!session) return;
+    tag: string,
+  ): Promise<number> {
+    const session = this.getSession(logFile);
+    if (!session) return 0;
 
     const pricing = MODEL_PRICING[model] ?? { input: 1.0, output: 3.0 };
     const costUsd =
@@ -82,45 +145,85 @@ export class TokenTracker {
     session.totalOutput += outputTokens;
     session.totalCost += costUsd;
 
+    const line =
+      `${new Date().toISOString()}  ` +
+      `${tag.padEnd(36)} ` +
+      `${String(inputTokens).padStart(7)} ` +
+      `${String(outputTokens).padStart(7)}  ` +
+      `$${costUsd.toFixed(6).padStart(11)}\n`;
+    await appendFile(logFile, line).catch(() => {});
+    return costUsd;
+  }
+
+  /** Gọi đầu mỗi job để reset bộ đếm và set file log riêng */
+  async init(logFile: string): Promise<void> {
+    this.baseLogFile = logFile;
+    await this.ensureLogInitialized(logFile, 'TOKEN USAGE LOG [TOTAL]');
+    for (const phase of TOKEN_PHASES) {
+      const phaseFile = this.buildPhaseLogFile(phase);
+      if (!phaseFile) continue;
+      await this.ensureLogInitialized(
+        phaseFile,
+        `TOKEN USAGE LOG [${phase.toUpperCase()}]`,
+      );
+    }
+  }
+
+  async track(
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    label = '',
+  ): Promise<void> {
     const tag = label || model;
+    if (!this.baseLogFile) return;
+
+    const costUsd = await this.appendEntry(
+      this.baseLogFile,
+      model,
+      inputTokens,
+      outputTokens,
+      tag,
+    );
+
+    const phase = this.classifyPhase(tag);
+    const phaseFile = phase ? this.buildPhaseLogFile(phase) : undefined;
+    if (phaseFile) {
+      await this.appendEntry(phaseFile, model, inputTokens, outputTokens, tag);
+    }
+
     this.logger.log(
       `[${tag}] in=${inputTokens} out=${outputTokens} cost=$${costUsd.toFixed(6)}`,
     );
-
-    if (this.logFile) {
-      const line =
-        `${new Date().toISOString()}  ` +
-        `${tag.padEnd(36)} ` +
-        `${String(inputTokens).padStart(7)} ` +
-        `${String(outputTokens).padStart(7)}  ` +
-        `$${costUsd.toFixed(6).padStart(11)}\n`;
-      await appendFile(this.logFile, line).catch(() => {});
-    }
   }
 
   async writeSummary(): Promise<void> {
-    const session = this.getSession();
-    if (!session || session.summaryWritten) return;
+    for (const logFile of this.getAllLogFiles()) {
+      const session = this.getSession(logFile);
+      if (!session || session.summaryWritten) continue;
 
-    const line =
-      `${'─'.repeat(80)}\n` +
-      `${''.padEnd(26)}${'TOTAL'.padEnd(36)} ` +
-      `${String(session.totalInput).padStart(7)} ` +
-      `${String(session.totalOutput).padStart(7)}  ` +
-      `$${session.totalCost.toFixed(6).padStart(11)}\n` +
-      `${'─'.repeat(80)}\n`;
+      const line =
+        `${'─'.repeat(80)}\n` +
+        `${''.padEnd(26)}${'TOTAL'.padEnd(36)} ` +
+        `${String(session.totalInput).padStart(7)} ` +
+        `${String(session.totalOutput).padStart(7)}  ` +
+        `$${session.totalCost.toFixed(6).padStart(11)}\n` +
+        `${'─'.repeat(80)}\n`;
 
-    this.logger.log(
-      `[Total] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
-    );
-
-    if (this.logFile) {
-      await appendFile(this.logFile, line).catch(() => {});
+      const phaseName =
+        logFile === this.baseLogFile
+          ? 'Total'
+          : (logFile.match(/\.([a-z]+)\.tokens\.log$/)?.[1]?.toUpperCase() ??
+            'UNKNOWN');
+      this.logger.log(
+        `[${phaseName}] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
+      );
+      await appendFile(logFile, line).catch(() => {});
+      session.summaryWritten = true;
     }
-    session.summaryWritten = true;
   }
 
   getTotalCost(): number {
-    return this.getSession()?.totalCost ?? 0;
+    return this.getSession(this.baseLogFile)?.totalCost ?? 0;
   }
 }

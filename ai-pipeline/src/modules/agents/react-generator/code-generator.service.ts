@@ -513,7 +513,7 @@ export class CodeGeneratorService {
       lines.push(
         `        return next.filter((comment) => comment.moderationStatus === 'pending');`,
       );
-      lines.push(`      );`);
+      lines.push(`      });`);
       lines.push(`      setCommentContent('');`);
       lines.push(
         `      setCommentSuccess('Comment submitted and awaiting moderation.');`,

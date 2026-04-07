@@ -27,6 +27,7 @@ import {
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
 
@@ -41,9 +42,12 @@ export interface ReviewInput {
   systemPrompt: string;
   content: DbContentResult;
   tokens?: ThemeTokens;
+  repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
   logPath?: string;
   jobId?: string;
+  /** When true, AI is instructed to preserve WooCommerce class names from the PHP template. */
+  isWooCommerce?: boolean;
 }
 
 export interface SectionReviewInput {
@@ -60,6 +64,7 @@ export interface SectionReviewInput {
   systemPrompt?: string;
   content: DbContentResult;
   tokens?: ThemeTokens;
+  repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
   logPath?: string;
   jobId?: string;
@@ -118,12 +123,14 @@ export class CodeReviewerService {
       modelName,
       fixAgentModel = modelName,
       preferDirectAi = false,
-      systemPrompt: _systemPrompt,
+      systemPrompt: upstreamSystemPrompt,
       content,
       tokens,
+      repoManifest,
       componentPlan,
       logPath,
       jobId,
+      isWooCommerce,
     } = input;
 
     // MAX_ROUNDS implements R3 → D1 in the pipeline diagram:
@@ -141,6 +148,12 @@ export class CodeReviewerService {
     // plan have failed. Signals D2 to generate a fresh AI visual plan instead
     // of running direct-AI with the same broken plan context.
     let precomputedPlanAllFailed = false;
+    const componentSystemPrompt = [
+      upstreamSystemPrompt?.trim(),
+      this.componentSystemPrompt,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     let promptContext = this.buildPromptContext(componentPlan, undefined, {
       includeVisualPlan: !forceDirectAi,
     });
@@ -223,9 +236,12 @@ export class CodeReviewerService {
           modelName,
           content,
           tokens,
+          repoManifest,
           componentPlan: promptContext,
           logPath,
           logLabel: 'precomputed-plan',
+          systemPrompt: componentSystemPrompt,
+          isWooCommerce,
         });
         attempts += planned.attemptsUsed;
         code = planned.code;
@@ -346,7 +362,10 @@ export class CodeReviewerService {
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
       // Used when: no pre-computed plan on round 1, after R3→D1 retry, or when
       // the pre-computed plan path has failed end-to-end (both AI and deterministic).
-      if (!forceDirectAi && (isRetry || !componentPlan?.visualPlan || precomputedPlanAllFailed)) {
+      if (
+        !forceDirectAi &&
+        (isRetry || !componentPlan?.visualPlan || precomputedPlanAllFailed)
+      ) {
         await this.log(
           logPath,
           isRetry
@@ -374,6 +393,7 @@ export class CodeReviewerService {
             templateSource,
             content,
             tokens,
+            repoManifest,
             componentType: componentPlan?.type,
             route: componentPlan?.route,
             isDetail: componentPlan?.isDetail,
@@ -411,9 +431,12 @@ export class CodeReviewerService {
               modelName,
               content,
               tokens,
+              repoManifest,
               componentPlan: promptContext,
               logPath,
               logLabel: 'visual-plan',
+              systemPrompt: componentSystemPrompt,
+              isWooCommerce,
             });
             attempts += planned.attemptsUsed;
             code = planned.code;
@@ -529,9 +552,12 @@ export class CodeReviewerService {
         modelName,
         content,
         tokens,
+        repoManifest,
         componentPlan: promptContext,
         logPath,
         logLabel: 'direct-ai',
+        systemPrompt: componentSystemPrompt,
+        isWooCommerce,
       });
       attempts += direct.attemptsUsed;
       code = direct.code;
@@ -713,6 +739,7 @@ export class CodeReviewerService {
       systemPrompt = '',
       content,
       tokens,
+      repoManifest,
       componentPlan,
       logPath,
       jobId,
@@ -733,6 +760,7 @@ export class CodeReviewerService {
       siteInfo: content.siteInfo,
       menus: content.menus,
       tokens,
+      repoManifest,
       content,
       componentPlan: promptContext,
     });
@@ -1105,10 +1133,13 @@ export class CodeReviewerService {
     modelName: string;
     content: DbContentResult;
     tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
     componentPlan?: ComponentPromptContext;
     logPath?: string;
     logLabel: string;
+    systemPrompt: string;
     maxAttempts?: number;
+    isWooCommerce?: boolean;
   }): Promise<{
     code: string;
     isValid: boolean;
@@ -1124,10 +1155,13 @@ export class CodeReviewerService {
       modelName,
       content,
       tokens,
+      repoManifest,
       componentPlan,
       logPath,
       logLabel,
+      systemPrompt,
       maxAttempts = 3,
+      isWooCommerce,
     } = input;
 
     let code = '';
@@ -1144,7 +1178,10 @@ export class CodeReviewerService {
     // Skipped when the plan lacks enough context to build a frame (no dataNeeds
     // or no type), or when direct-AI / section-chunk paths explicitly request
     // full-file output (logLabel === 'direct-ai' has already exhausted D2).
-    if (componentPlan && this.shouldUseFramePath(componentPlan, componentName)) {
+    if (
+      componentPlan &&
+      this.shouldUseFramePath(componentPlan, componentName)
+    ) {
       const frameResult = await this.generateComponentWithFrame({
         componentName,
         templateSource,
@@ -1181,10 +1218,12 @@ export class CodeReviewerService {
         content.siteInfo,
         content,
         tokens,
+        repoManifest,
         componentPlan,
         attempt > 1
           ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
           : undefined,
+        isWooCommerce,
       );
       const {
         text: raw,
@@ -1192,7 +1231,7 @@ export class CodeReviewerService {
         outputTokens: outTok,
       } = await this.generateWithRetry(
         modelName,
-        this.componentSystemPrompt,
+        systemPrompt,
         userPromptForAttempt,
         5,
         logPath,
@@ -1208,7 +1247,7 @@ export class CodeReviewerService {
       cotAttempts.push({
         attemptNumber: attempt,
         promptSent: {
-          system: this.componentSystemPrompt,
+          system: systemPrompt,
           user: userPromptForAttempt,
         },
         response: raw,
@@ -1423,7 +1462,7 @@ export class CodeReviewerService {
           userPrompt,
           maxTokens,
         });
-        const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+        const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
         if (tokenLogPath) {
           await this.tokenTracker.init(tokenLogPath);
           await this.tokenTracker.track(

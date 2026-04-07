@@ -59,7 +59,7 @@ export class AiLoggerService {
    * Log toàn bộ Chain of Thought process (tất cả attempts, validations, fixes)
    */
   async logCotProcess(entry: CotLogEntry): Promise<void> {
-    const logDir = join('./temp/logs', entry.jobId, 'ai-logs');
+    const logDir = join('./temp/logs', entry.jobId, 'ai-logs', entry.step);
     await mkdir(logDir, { recursive: true });
 
     // Tạo tên file với component name nếu có, để log từng component riêng
@@ -88,7 +88,7 @@ export class AiLoggerService {
     success: boolean,
     error?: string,
   ): Promise<void> {
-    const logDir = join('./temp/logs', jobId, 'ai-logs');
+    const logDir = join('./temp/logs', jobId, 'ai-logs', step);
     await mkdir(logDir, { recursive: true });
 
     const entry: AiLogEntry = {

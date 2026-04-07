@@ -1,11 +1,10 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
-import {
-  stripTags,
-  wpBlocksToJson,
-} from '../../../../common/utils/wp-block-to-json.js';
+import { stripTags } from '../../../../common/utils/wp-block-to-json.js';
 import type { ThemeTokens } from '../../../agents/block-parser/block-parser.service.js';
+import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
+import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ComponentVisualPlan } from '../visual-plan.schema.js';
@@ -16,6 +15,7 @@ import {
   MENU_ITEM_FIELDS,
   PAGE_FRONTEND_FIELDS,
   POST_FIELDS,
+  PRODUCT_FIELDS,
   SITE_INFO_FIELDS,
   buildCanonicalApiContractNote,
 } from '../api-contract.js';
@@ -362,7 +362,7 @@ ${footerHint}
 // ── Data Grounding ─────────────────────────────────────────────────────────
 
 export function buildDataGroundingNote(content: DbContentResult): string {
-  const { siteInfo, posts, pages, menus, taxonomies } = content;
+  const { siteInfo, posts, pages, menus, taxonomies, commerce } = content;
   const parts: string[] = [];
 
   parts.push(
@@ -372,9 +372,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   parts.push(
     '> Only use fields shown below. Any field not listed here does NOT exist.',
   );
-  parts.push(
-    `> Posts have: ${formatContractFields(POST_FIELDS)}.`,
-  );
+  parts.push(`> Posts have: ${formatContractFields(POST_FIELDS)}.`);
   parts.push(`> Pages have: ${formatContractFields(PAGE_FRONTEND_FIELDS)}.`);
   parts.push(
     '> ⛔ Pages do NOT have: excerpt, date, author, categories, featuredImage, comments.',
@@ -382,6 +380,12 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   parts.push(
     '> ⛔ NEVER render siteName more than once per component — one element only.',
   );
+  if (commerce.mode === 'woo-readonly') {
+    parts.push(
+      `> WooCommerce read-only mode is active. Products are available via \`GET /api/products\` and \`GET /api/products/:slug\`. Do NOT invent checkout, payment, account APIs, cart APIs, or add-to-cart behavior. If cart or my-account pages exist in the source plan, render them only as static/read-only shells with no commerce fetches or mutations.`,
+    );
+    parts.push(`> Product fields: ${formatContractFields(PRODUCT_FIELDS)}.`);
+  }
   parts.push('');
 
   // Site info
@@ -421,6 +425,15 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   if (pages.length > 5) parts.push(`  ... and ${pages.length - 5} more`);
   if (pages.length === 0) parts.push('  (empty)');
   parts.push('');
+  if (commerce.hasWooCommerce) {
+    parts.push(
+      `### WooCommerce storefront — ${commerce.productsCount} products total (read-only mode)`,
+    );
+    parts.push(
+      `GET /api/products, GET /api/products/:slug, GET /api/product-categories`,
+    );
+    parts.push('');
+  }
 
   // Menus full
   parts.push(
@@ -474,12 +487,15 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   return parts.join('\n');
 }
 
-export function buildPlanContextNote(plan?: {
-  description?: string;
-  dataNeeds?: string[];
-  route?: string | null;
-  type?: 'page' | 'partial';
-}): string {
+export function buildPlanContextNote(
+  plan?: {
+    description?: string;
+    dataNeeds?: string[];
+    route?: string | null;
+    type?: 'page' | 'partial';
+  },
+  componentName?: string,
+): string {
   if (!plan) return '';
   const lines: string[] = ['## Component plan'];
   const normalizedDataNeeds = normalizeDataNeeds(plan.dataNeeds);
@@ -495,6 +511,18 @@ export function buildPlanContextNote(plan?: {
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
+  const isCartShell = plan.route === '/cart';
+  const isMyAccountShell = plan.route === '/my-account';
+  if (isCartShell || isMyAccountShell) {
+    lines.push(
+      isCartShell
+        ? 'Read-only cart shell contract: render the cart page layout as a static/demo shell from template source only. Do NOT fetch `/api/cart`, do NOT render live cart totals, and do NOT render a working checkout CTA.'
+        : 'Read-only my-account shell contract: render the account layout as a static/demo shell from template source only. Do NOT fetch `/api/account` or `/api/orders`, and do NOT render working login/account mutation flows.',
+    );
+    lines.push(
+      'Shell-page contract: preserve headings, sections, notices, tables, and layout scaffolding from the WooCommerce template source, but keep all controls inert/read-only.',
+    );
+  }
   if (normalizedDataNeeds.includes('postDetail')) {
     lines.push(
       routeHasParams
@@ -511,6 +539,9 @@ export function buildPlanContextNote(plan?: {
             'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
     );
     lines.push(
+      '⛔ API endpoint contract: ONLY `/api/pages/${slug}` is allowed. Do NOT call `/api/pages` (the list endpoint) under any circumstances — not for the main content, not for sidebar links, not for related pages.',
+    );
+    lines.push(
       '⛔ Page Detail Contract: a page has NO `author`, `categories`, `date`, `excerpt`, `featuredImage`, or `comments`. Use ONLY `id, title, content, slug`.',
     );
     lines.push(
@@ -524,18 +555,45 @@ export function buildPlanContextNote(plan?: {
         '\n- Page detail type must be exactly: `interface Page { id: string; title: string; content: string; slug: string; }`',
     );
   }
+  if (normalizedDataNeeds.includes('products')) {
+    lines.push(
+      '⛔ MANDATORY: This component MUST fetch `GET /api/products` and render a product listing — even if the template HTML has no product blocks. The plan has declared `products` as a data need.',
+    );
+    lines.push(
+      "Storefront list contract: `GET /api/products` returns `Product[]` (flat array). Declare `const [products, setProducts] = useState<Product[]>([])` and call `fetch('/api/products').then(r => r.json()).then(setProducts)` inside `useEffect`.",
+    );
+    lines.push(
+      'Product card: render `product.featuredImage` (img), `product.title` (Link to `/product/${product.slug}`), and `product.price`. Use a responsive grid: `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6`.',
+    );
+    lines.push(
+      'Read-only commerce rule: do NOT render cart, checkout, account, quantity pickers, or add-to-cart actions.',
+    );
+  }
+
+  // Detect "NoTitle" naming convention — explicit contract to omit the title
+  const isNoTitle =
+    /no.?title/i.test(componentName ?? '') ||
+    /without.{0,20}title|no.{0,10}title|omit.{0,10}title/i.test(
+      plan?.description ?? '',
+    );
+  if (isNoTitle) {
+    lines.push(
+      '⛔ NoTitle contract: Do NOT render the page or post title in any heading element. ' +
+        'No `<h1>{item.title}</h1>`, no `<h1>{page.title}</h1>`, no `{post.title}` as a heading. ' +
+        'This template explicitly omits the title — render only the body content.',
+    );
+  }
   if (normalizedDataNeeds.includes('productDetail')) {
     lines.push(
       routeHasParams
-        ? 'Detail data contract: fetch the specific product with `/api/products/${productId}` (or by slug) and render that product, including variations and related products.'
-        : 'Data contract: this component displays a product and should fetch it from `/api/products/${productId}` inside a `useEffect`.',
+        ? 'Detail data contract: fetch the specific product with `/api/products/${slug}` and render that product as a read-only product detail page.'
+        : 'Data contract: this component displays a product and should fetch it from `/api/products/${slug}` inside a `useEffect`.',
     );
     lines.push(
-      'WooCommerce Product Detail: fetch from `/api/products/:id` — returns { id, title, price, currency, description, image, sku, stock, categories[], attributes{}, variations[] }.',
+      `WooCommerce Product Detail: fetch from \`/api/products/:slug\` — fields available are ONLY ${formatContractFields(PRODUCT_FIELDS)}.`,
     );
     lines.push(
-      'If the URL has a parameter like `:productId`, use `useParams()` to extract it and fetch the product. ' +
-        'Show product images, price, description, attributes (size, color, etc), variations selector, stock status, and "Add to Cart" button.',
+      'Read-only storefront rule: use `useParams<{ slug: string }>()`, fetch the product by slug, and render image, title, price, description, SKU, and categories when available. Do NOT render add-to-cart buttons, quantity controls, checkout links, account links, or variation/cart logic.',
     );
   }
   if (normalizedDataNeeds.includes('comments')) {
@@ -765,6 +823,52 @@ export function buildVisualPlanContextNote(
     lines.push(`Declared data needs: ${visualPlan.dataNeeds.join(', ')}`);
   }
 
+  // Strict section whitelist — prevents AI from inventing extra sections
+  if (visualPlan.sections?.length > 0) {
+    const sectionTypes = visualPlan.sections
+      .map((s) => `"${s.type}"`)
+      .join(', ');
+    lines.push('');
+    lines.push(
+      `⛔ STRICT SECTION CONTRACT: Generate ONLY these section types in this exact order: ${sectionTypes}.`,
+    );
+    lines.push(
+      '⛔ Do NOT add newsletter, testimonial, hero, cover, card-grid, pricing, features, call-to-action, or ANY other section type not listed above — even if you think it would improve the design.',
+    );
+    lines.push(
+      '⛔ If you are tempted to add a section that is not in the list above, STOP and omit it entirely.',
+    );
+  }
+
+  const sidebarSection = visualPlan.sections?.find((s) => s.type === 'sidebar');
+  if (sidebarSection?.type === 'sidebar') {
+    lines.push('');
+    lines.push('## Sidebar contract — MANDATORY');
+    lines.push(
+      'Treat the `sidebar` section as a constrained data widget area, not a free-design area.',
+    );
+    lines.push(
+      `Allowed sidebar sources from the approved plan: showPages=${sidebarSection.showPages}, showPosts=${sidebarSection.showPosts}, showSiteInfo=${sidebarSection.showSiteInfo}, menuSlug=${sidebarSection.menuSlug ?? 'none'}.`,
+    );
+    lines.push(
+      '⛔ Do NOT invent extra sidebar widgets such as "Useful Links", "Resources", "Quick Links", social links, footer-style columns, or author bio blocks unless they are explicitly present in the template source or directly supported by approved API data above.',
+    );
+    lines.push(
+      '⛔ If a URL is not present in the template source or API data, do NOT wrap the text in `<Link>` or `<a>`. Render plain text/spans instead.',
+    );
+    lines.push(
+      '⛔ NEVER emit `to="#"`, `href="#"`, or any placeholder route in a sidebar widget.',
+    );
+  }
+
+  // Enforce layout container width from theme tokens
+  if (visualPlan.layout?.containerClass) {
+    lines.push('');
+    lines.push(
+      `⛔ MANDATORY LAYOUT: The outermost content wrapper MUST use the class "${visualPlan.layout.containerClass}". Do NOT use a different max-width, do NOT use max-w-[620px] or any other narrower constraint.`,
+    );
+  }
+
   lines.push('Visual plan JSON:');
   lines.push('```json');
   lines.push(JSON.stringify(visualPlan, null, 2));
@@ -779,8 +883,10 @@ export function buildComponentPrompt(
   siteInfo: WpSiteInfo,
   content?: DbContentResult,
   tokens?: ThemeTokens,
+  repoManifest?: RepoThemeManifest,
   componentPlan?: ComponentPromptContext,
   retryError?: string,
+  isWooCommerce?: boolean,
 ): string {
   const normalizedDataNeeds = normalizeDataNeeds(componentPlan?.dataNeeds);
   const hasPlanContract =
@@ -808,8 +914,9 @@ export function buildComponentPrompt(
     componentPlan?.type === 'page',
   );
   const planContext = [
-    buildPlanContextNote(componentPlan),
+    buildPlanContextNote(componentPlan, componentName),
     buildVisualPlanContextNote(componentPlan?.visualPlan),
+    buildRepoManifestContextNote(repoManifest),
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -843,12 +950,33 @@ ${
     : ''
 }`
       : '';
+  const readOnlyStorefrontNote =
+    normalizedDataNeeds.includes('products') ||
+    normalizedDataNeeds.includes('productDetail')
+      ? `## WooCommerce storefront mode
+- This migration is READ-ONLY storefront mode.
+- Allowed commerce UI: product listing, product cards, product detail, category labels, price display.
+- Forbidden commerce UI: cart, add to cart, buy now, checkout, my account, wishlist, compare, order/payment actions.
+- Forbidden commerce endpoints: anything like \`/api/cart\`, \`/api/checkout\`, or POST commerce actions.`
+      : '';
+
+  const wooClassNote = isWooCommerce
+    ? `\n\n## WooCommerce CSS classes — MANDATORY
+This component has WooCommerce CSS stylesheets injected at runtime via \`<link>\` tags.
+✅ PRESERVE all WooCommerce class names from the PHP template source exactly as-is.
+✅ Use classes like \`woocommerce\`, \`products\`, \`product\`, \`woocommerce-cart\`, \`woocommerce-account\`, \`woocommerce-page\`, \`cart_item\`, \`woocommerce-tabs\` etc.
+⛔ Do NOT replace WooCommerce classes with Tailwind utilities — the injected CSS depends on these class names.
+⛔ Do NOT add Tailwind classes to elements that already carry WooCommerce classes unless it is purely for layout spacing that WooCommerce CSS does not cover.`
+    : '';
 
   return TEMPLATE.replace('{{componentName}}', componentName)
     .replace('{{apiContract}}', buildCanonicalApiContractNote())
     .replace('{{menuContext}}', menuContextNote)
     .replace('{{planContext}}', planContext)
-    .replace('{{slugFetchingNote}}', slugFetchingNote)
+    .replace(
+      '{{slugFetchingNote}}',
+      `${slugFetchingNote}${readOnlyStorefrontNote ? `\n\n${readOnlyStorefrontNote}` : ''}${wooClassNote}`,
+    )
     .replace('{{classicThemeNote}}', classicThemeNote)
     .replace('{{themeTokens}}', buildThemeTokensNote(tokens))
     .replace('{{dataGrounding}}', dataGrounding)
@@ -873,6 +1001,7 @@ export function buildSectionPrompt(input: {
   siteInfo: WpSiteInfo;
   menus: WpMenu[];
   tokens?: ThemeTokens;
+  repoManifest?: RepoThemeManifest;
   componentPlan?: ComponentPromptContext;
   retryError?: string;
   content?: DbContentResult;
@@ -916,6 +1045,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
     sectionContextNote,
     buildPlanContextNote(input.componentPlan),
     buildVisualPlanContextNote(input.componentPlan?.visualPlan),
+    buildRepoManifestContextNote(input.repoManifest),
   ]
     .filter(Boolean)
     .join('\n\n');

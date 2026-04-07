@@ -3,9 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createConnection } from 'mysql2/promise';
 import { readFile } from 'fs/promises';
 import { randomBytes } from 'crypto';
-import { WpDbCredentials } from '@/common/types/db-credentials.type.js';
-
-export type { WpDbCredentials };
+import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
 @Injectable()
 export class SqlService {
@@ -13,15 +11,14 @@ export class SqlService {
 
   constructor(private readonly configService: ConfigService) {}
 
-  // Mode A: Import file .sql vào DB tạm, trả về credentials để shared với React app
-  async importToTempDb(
-    filePath: string,
-    jobId: string,
-  ): Promise<WpDbCredentials> {
+  // Mode A: Import file .sql vào DB tạm, trả về connection string để shared với React app
+  async importToTempDb(filePath: string, jobId: string): Promise<string> {
     const short = jobId.replace(/-/g, '').slice(0, 12);
     const dbName = `wp_${short}`;
     const dbUser = `u_${short}`;
     const dbPassword = randomBytes(16).toString('hex');
+    const host = this.configService.get<string>('db.host')!;
+    const port = this.configService.get<number>('db.port')!;
 
     const conn = await this.createAdminConnection();
     try {
@@ -51,41 +48,37 @@ export class SqlService {
     }
 
     // DB giữ lại làm Shared DB cho React app — không drop sau pipeline
-    return {
-      host: this.configService.get<string>('db.host')!,
-      port: this.configService.get<number>('db.port')!,
-      dbName,
-      user: dbUser,
-      password: dbPassword,
-    };
+    return `mysql://${dbUser}:${dbPassword}@${host}:${port}/${dbName}`;
   }
 
-  // Mode B: User cung cấp credentials trực tiếp — verify connection rồi trả về
-  async verifyDirectCredentials(creds: WpDbCredentials): Promise<void> {
+  // Mode B: User cung cấp connection string trực tiếp — verify connection rồi trả về
+  async verifyDirectCredentials(connectionString: string): Promise<void> {
+    const creds = parseDbConnectionString(connectionString);
     const conn = await createConnection({
       host: creds.host,
       port: creds.port,
       user: creds.user,
       password: creds.password,
-      database: creds.dbName,
+      database: creds.database,
     });
     await conn.ping();
     await conn.end();
     this.logger.log(
-      `Direct DB connection verified: ${creds.host}/${creds.dbName}`,
+      `Direct DB connection verified: ${creds.host}/${creds.database}`,
     );
   }
 
   // Cleanup Mode A DB khi cần (gọi thủ công, không auto-drop)
-  async dropDb(creds: WpDbCredentials & { dbUser?: string }): Promise<void> {
+  async dropDb(connectionString: string, dbUser?: string): Promise<void> {
+    const creds = parseDbConnectionString(connectionString);
     const conn = await this.createAdminConnection();
     try {
-      await conn.query(`DROP DATABASE IF EXISTS \`${creds.dbName}\``);
-      if (creds.dbUser) {
-        await conn.query(`DROP USER IF EXISTS '${creds.dbUser}'@'%'`);
+      await conn.query(`DROP DATABASE IF EXISTS \`${creds.database}\``);
+      if (dbUser) {
+        await conn.query(`DROP USER IF EXISTS '${dbUser}'@'%'`);
         await conn.query(`FLUSH PRIVILEGES`);
       }
-      this.logger.log(`Dropped DB: ${creds.dbName}`);
+      this.logger.log(`Dropped DB: ${creds.database}`);
     } finally {
       await conn.end();
     }

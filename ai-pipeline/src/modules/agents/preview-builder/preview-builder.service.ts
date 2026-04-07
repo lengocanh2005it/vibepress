@@ -50,11 +50,13 @@ export class PreviewBuilderService {
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
     themeDir?: string;
+    wooPluginDir?: string;
     tokens?: ThemeTokens;
     plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
+    const { jobId, components, dbCreds, themeDir, wooPluginDir, tokens, plan } =
+      input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -88,6 +90,32 @@ export class PreviewBuilderService {
       );
     }
 
+    // 2b. Copy WooCommerce CSS assets vào public/woocommerce/css/
+    // Chỉ copy khi pipeline đã inject WooCommerce templates (wooPluginDir có giá trị)
+    const wooCssFiles: string[] = [];
+    if (wooPluginDir) {
+      const wooCssSrcDir = join(wooPluginDir, 'assets', 'css');
+      const wooCssDestDir = join(frontendDir, 'public', 'woocommerce', 'css');
+      try {
+        await stat(wooCssSrcDir);
+        await mkdir(wooCssDestDir, { recursive: true });
+        const { readdir: readdirFs } = await import('fs/promises');
+        const cssEntries = await readdirFs(wooCssSrcDir);
+        for (const file of cssEntries) {
+          if (!file.endsWith('.css') || file.endsWith('.min.css')) continue;
+          await copyFile(join(wooCssSrcDir, file), join(wooCssDestDir, file));
+          wooCssFiles.push(file);
+        }
+        this.logger.log(
+          `[woocommerce] Copied ${wooCssFiles.length} CSS file(s) to public/woocommerce/css/`,
+        );
+      } catch {
+        this.logger.warn(
+          `[woocommerce] CSS assets dir not found at ${wooCssSrcDir} — skipping`,
+        );
+      }
+    }
+
     // 3. Write generated components từ AI (code in memory)
     // Relink WordPress image URLs từ /wp-content/uploads/ sang local /assets/images/
     for (const comp of components.components) {
@@ -107,6 +135,11 @@ export class PreviewBuilderService {
           header: hasSharedHeader,
           footer: hasSharedFooter,
         });
+      }
+
+      // Inject WooCommerce CSS <link> tags vào đầu các component liên quan WooCommerce
+      if (wooCssFiles.length > 0 && this.isWooCommerceComponent(comp.name)) {
+        comp.code = this.injectWooCssLinks(comp.code, wooCssFiles);
       }
 
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
@@ -167,6 +200,17 @@ export class PreviewBuilderService {
       const headerJsx = headerComp ? `      <${headerComp.name} />` : '';
       const footerJsx = footerComp ? `      <${footerComp.name} />` : '';
 
+      // Apply theme root background/text color so Layout wrapper matches the WP site
+      const rootStyleParts: string[] = [];
+      if (tokens?.defaults?.bgColor)
+        rootStyleParts.push(`backgroundColor: '${tokens.defaults.bgColor}'`);
+      if (tokens?.defaults?.textColor)
+        rootStyleParts.push(`color: '${tokens.defaults.textColor}'`);
+      const rootStyle =
+        rootStyleParts.length > 0
+          ? ` style={{${rootStyleParts.join(', ')}}}`
+          : '';
+
       const layoutLines = [
         `import React from 'react';`,
         headerImport,
@@ -174,7 +218,7 @@ export class PreviewBuilderService {
         ``,
         `export default function Layout({ children }: { children: React.ReactNode }) {`,
         `  return (`,
-        `    <div className="min-h-screen flex flex-col">`,
+        `    <div className="min-h-screen flex flex-col"${rootStyle}>`,
         headerJsx,
         `      <main className="flex-1">{children}</main>`,
         footerJsx,
@@ -389,14 +433,43 @@ ${fontEntries}
       );
     }
 
-    // 3. Inject font-family into index.css so components inherit without inline styles
-    const bodyFont = tokens.defaults?.fontFamily;
-    const headingFont = tokens.defaults?.headingFontFamily;
+    // 3. Inject theme design tokens into index.css so all components inherit
+    //    without relying solely on AI-generated inline styles.
+    const d = tokens.defaults;
     const cssLines: string[] = [];
-    if (bodyFont) cssLines.push(`body { font-family: ${bodyFont}; }`);
-    if (headingFont) {
-      cssLines.push(`h1, h2, h3, h4, h5, h6 { font-family: ${headingFont}; }`);
+
+    // body — background, text color, font, size, line-height
+    const bodyProps: string[] = [];
+    if (d?.bgColor) bodyProps.push(`background-color: ${d.bgColor}`);
+    if (d?.textColor) bodyProps.push(`color: ${d.textColor}`);
+    if (d?.fontFamily) bodyProps.push(`font-family: ${d.fontFamily}`);
+    if (d?.fontSize) bodyProps.push(`font-size: ${d.fontSize}`);
+    if (d?.lineHeight) bodyProps.push(`line-height: ${d.lineHeight}`);
+    if (bodyProps.length > 0)
+      cssLines.push(`body { ${bodyProps.join('; ')}; }`);
+
+    // h1–h6 — font family + color
+    const headingProps: string[] = [];
+    if (d?.headingFontFamily)
+      headingProps.push(`font-family: ${d.headingFontFamily}`);
+    if (d?.headingColor) headingProps.push(`color: ${d.headingColor}`);
+    if (headingProps.length > 0)
+      cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
+
+    // per-heading font sizes from theme.json headings map
+    if (d?.headings) {
+      for (const [level, style] of Object.entries(d.headings)) {
+        const hProps: string[] = [];
+        if (style.fontSize) hProps.push(`font-size: ${style.fontSize}`);
+        if (style.fontWeight) hProps.push(`font-weight: ${style.fontWeight}`);
+        if (hProps.length > 0)
+          cssLines.push(`${level} { ${hProps.join('; ')}; }`);
+      }
     }
+
+    // links
+    if (d?.linkColor) cssLines.push(`a { color: ${d.linkColor}; }`);
+
     if (cssLines.length > 0) {
       const cssPath = join(frontendDir, 'src', 'index.css');
       const existingCss = await readFile(cssPath, 'utf-8');
@@ -654,5 +727,22 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
+  }
+
+  private isWooCommerceComponent(name: string): boolean {
+    return /^(archive.?product|single.?product|taxonomy.?product|shop|cart|my.?account|woo)/i.test(
+      name,
+    );
+  }
+
+  private injectWooCssLinks(code: string, cssFiles: string[]): string {
+    const linkTags = cssFiles
+      .map(
+        (f) => `      <link rel="stylesheet" href="/woocommerce/css/${f}" />`,
+      )
+      .join('\n');
+
+    // Insert after the first `return (` or `return(` in the component's render
+    return code.replace(/(\breturn\s*\([\s\n]*)/, `$1\n${linkTags}\n`);
   }
 }

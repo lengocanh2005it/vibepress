@@ -25,6 +25,8 @@ import {
   extractStaticImageSources,
   parseVisualPlanDetailed,
 } from '../react-generator/prompts/visual-plan.prompt.js';
+import { buildRepoManifestContextNote } from '../repo-analyzer/repo-manifest-context.js';
+import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type {
   ComponentVisualPlan,
   ColorPalette,
@@ -72,6 +74,9 @@ export class PlannerService {
     options?: {
       includeVisualPlans?: boolean;
       logPath?: string;
+      repoManifest?: RepoThemeManifest;
+      /** Errors from the previous plan-review pass — injected into the Phase A prompt so the LLM knows what to fix. */
+      planReviewErrors?: string[];
     },
   ): Promise<PlanResult> {
     // Build source map for layer 2 enrichment and Phase B
@@ -86,13 +91,17 @@ export class PlannerService {
 
     const resolvedModel = modelName ?? this.llmFactory.getModel();
     const includeVisualPlans = options?.includeVisualPlans ?? true;
-    const tokenLogPath = options?.logPath?.replace(/\.log$/, '.tokens.log');
+    const tokenLogPath = TokenTracker.getTokenLogPath(options?.logPath);
     if (tokenLogPath) {
       await this.tokenTracker.init(tokenLogPath);
     }
 
     // Ensure standard routes are generated even when not present in theme templates
-    const templates = this.ensureStandardTemplates(allTemplates, theme.type);
+    const templates = this.ensureStandardTemplates(
+      allTemplates,
+      theme.type,
+      content,
+    );
     const templateNames = templates.map((t) => t.name);
 
     // ── Phase A: architecture plan ─────────────────────────────────────────
@@ -101,7 +110,17 @@ export class PlannerService {
     );
 
     const systemPrompt = this.buildSystemPrompt();
-    const userPrompt = this.buildUserPrompt(theme, content, templateNames);
+    const userPrompt = options?.planReviewErrors?.length
+      ? this.buildValidationFeedbackPrompt(
+          options.planReviewErrors,
+          templateNames,
+        )
+      : this.buildUserPrompt(
+          theme,
+          content,
+          templateNames,
+          options?.repoManifest,
+        );
 
     let plan: PlanResult | null = null;
     let lastError = 'unknown parse failure';
@@ -255,6 +274,7 @@ export class PlannerService {
       tokens,
       globalPalette,
       globalTypography,
+      options?.repoManifest,
       resolvedModel,
       options?.logPath,
     );
@@ -265,6 +285,7 @@ export class PlannerService {
     content: DbContentResult,
     plan: PlanResult,
     modelName?: string,
+    repoManifest?: RepoThemeManifest,
   ): Promise<PlanResult> {
     const skipVisualPlan =
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
@@ -300,6 +321,7 @@ export class PlannerService {
       tokens,
       globalPalette,
       globalTypography,
+      repoManifest,
       resolvedModel,
     );
   }
@@ -313,6 +335,7 @@ export class PlannerService {
     tokens: ThemeTokens | undefined,
     globalPalette: ColorPalette,
     globalTypography: TypographyTokens,
+    repoManifest: RepoThemeManifest | undefined,
     modelName: string,
     logPath?: string,
   ): Promise<PlanResult> {
@@ -344,6 +367,7 @@ export class PlannerService {
             globalPalette,
             globalTypography,
             plan,
+            repoManifest,
             modelName,
             logPath,
           ),
@@ -375,6 +399,7 @@ export class PlannerService {
     globalPalette: ColorPalette,
     globalTypography: TypographyTokens,
     fullPlan: PlanResult,
+    repoManifest: RepoThemeManifest | undefined,
     modelName: string,
     logPath?: string,
   ): Promise<PlanResult[number]> {
@@ -422,6 +447,7 @@ export class PlannerService {
         templateSource: planningSource.source,
         content,
         tokens,
+        repoManifest,
         componentType: componentPlan.type,
         route: componentPlan.route,
         isDetail: componentPlan.isDetail,
@@ -432,7 +458,7 @@ export class PlannerService {
       let lastRaw = '';
       let lastReason = 'unknown visual plan parse failure';
       let lastDropped = '';
-      const tokenLogPath = logPath?.replace(/\.log$/, '.tokens.log');
+      const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
       if (tokenLogPath) {
         await this.tokenTracker.init(tokenLogPath);
       }
@@ -626,6 +652,12 @@ export class PlannerService {
   }
 
   private shouldSkipAiVisualPlan(componentPlan: PlanResult[number]): boolean {
+    if (
+      componentPlan.dataNeeds.includes('products') ||
+      componentPlan.dataNeeds.includes('product-detail')
+    ) {
+      return true;
+    }
     if (componentPlan.type !== 'partial') return false;
     return getComponentStrategy(componentPlan.componentName).skipAiVisualPlan;
   }
@@ -806,12 +838,13 @@ export class PlannerService {
         templateBase.includes('shop') ||
         templateBase === 'archive-product';
       if (isProductTemplate || source.includes('woocommerce')) {
-        needs.add('woocommerce');
         if (
-          isProductTemplate &&
-          (templateBase.includes('single') || templateBase === 'single-product')
+          templateBase.includes('single') ||
+          templateBase === 'single-product'
         ) {
-          needs.add('product-detail'); // Single product page needs product data
+          needs.add('product-detail');
+        } else {
+          needs.add('products');
         }
       }
 
@@ -893,6 +926,12 @@ For each template, decide:
 - search → route "/search"
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
+- single-product → route "/product/:slug"   (isDetail: true)
+- shop / archive-product → route "/shop"
+- taxonomy-product-cat → route "/product-category/:slug"   (isDetail: true)
+- taxonomy-product-tag → route "/product-tag/:slug"   (isDetail: true)
+- cart → route "/cart"
+- my-account / myaccount → route "/my-account"
 - page (the default page template) → route "/page/:slug"   (isDetail: true)
 - Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
   e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
@@ -904,11 +943,15 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "products" | "pages" | "menus" | "site-info" | "post-detail" | "product-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
+- "product-detail" → ONLY for single-product templates (route /product/:slug or /single-product/:slug)
 - "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
 - Page templates MUST use "page-detail" — NEVER "post-detail"
+- Shop / archive-product templates MUST use "products" for read-only storefront listings
+- Product taxonomy storefront pages (taxonomy-product-cat, taxonomy-product-tag) MUST use "products"
+- Read-only WooCommerce mode: NEVER plan checkout, payment, wishlist, add-to-cart, or mutation flows. Cart and my-account templates may be planned only as static/read-only shells when those templates exist in the source.
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
 - Dedicated Header / Footer / Navigation partials may include "menus"
@@ -946,6 +989,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     theme: PhpParseResult | BlockParseResult,
     content: DbContentResult,
     _templateNames: string[],
+    repoManifest?: RepoThemeManifest,
   ): string {
     const lines: string[] = [];
     const templates =
@@ -958,6 +1002,12 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       `Type: ${theme.type === 'fse' ? 'Full Site Editing (Block)' : 'Classic PHP'}`,
     );
     lines.push('');
+
+    const repoContext = buildRepoManifestContextNote(repoManifest);
+    if (repoContext) {
+      lines.push(repoContext);
+      lines.push('');
+    }
 
     lines.push('## Templates to plan (name → key block types found inside):');
     for (const t of templates) {
@@ -974,12 +1024,10 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
     lines.push('## Runtime capabilities');
     lines.push(
-      `Active plugins: ${content.capabilities.activePluginSlugs.join(', ') || '(none detected)'}`,
-    );
-    lines.push(
       `WooCommerce detected: ${content.capabilities.wooCommerce ? 'yes' : 'no'}`,
     );
     if (content.capabilities.wooCommerce) {
+      lines.push(`Commerce mode: ${content.commerce.mode}`);
       lines.push(`Published products: ${content.commerce.productsCount}`);
       lines.push(
         `Product categories: ${content.commerce.productCategoriesCount}`,
@@ -987,20 +1035,24 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       lines.push(
         `Core commerce pages: ${content.commerce.corePages.join(', ') || '(not found in DB)'}`,
       );
+      lines.push(
+        'Migration rule: preserve WooCommerce storefront source for product archive/listing, single-product detail, taxonomy product archives, and read-only cart/my-account shells when those templates exist. Do not invent checkout, payment, or mutation flows.',
+      );
     }
     lines.push('');
 
-    if (content.detectedPlugins.length > 0) {
-      lines.push('## Detected plugins');
-      for (const plugin of content.detectedPlugins) {
-        const evidence = plugin.evidence
-          .slice(0, 4)
-          .map((item) => `${item.source}:${item.match}`)
-          .join(', ');
-        lines.push(
-          `- ${plugin.slug} (${plugin.confidence}) capabilities: ${plugin.capabilities.join(', ') || '(none)'} | evidence: ${evidence}`,
-        );
-      }
+    const detectedWoo = content.detectedPlugins.find(
+      (plugin) => plugin.slug.toLowerCase() === 'woocommerce',
+    );
+    if (detectedWoo) {
+      lines.push('## WooCommerce runtime evidence');
+      const evidence = detectedWoo.evidence
+        .slice(0, 6)
+        .map((item) => `${item.source}:${item.match}`)
+        .join(', ');
+      lines.push(
+        `- woocommerce (${detectedWoo.confidence}) capabilities: ${detectedWoo.capabilities.join(', ') || '(none)'} | evidence: ${evidence}`,
+      );
       lines.push('');
     }
 
@@ -1170,6 +1222,26 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     return `${this.rawOutputDivider}${raw || '(empty)'}\n----- RAW OUTPUT END -----`;
   }
 
+  private buildValidationFeedbackPrompt(
+    errors: string[],
+    templateNames: string[],
+  ): string {
+    return `Your previous plan failed validation with these errors:
+
+${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}
+
+Templates that MUST be planned: ${templateNames.join(', ')}
+
+Fix all of the above errors and return a corrected JSON array. Key rules:
+- Every template must appear exactly once
+- Pages must have a non-null route starting with "/"
+- Partials must have route: null, isDetail: false
+- isDetail must be true when route contains :slug
+- Valid dataNeeds values: posts, products, pages, menus, site-info, post-detail, product-detail, page-detail, comments, categoryDetail
+
+Return ONLY a valid JSON array — no markdown fences, no explanation.`;
+  }
+
   private buildRetryPrompt(badRaw: string, templateNames: string[]): string {
     const preview = badRaw.slice(0, 500);
     return `Your previous response could not be parsed as a valid JSON array.
@@ -1207,6 +1279,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private ensureStandardTemplates(
     templates: Array<{ name: string; html?: string; markup?: string }>,
     themeType: 'classic' | 'fse',
+    content?: DbContentResult,
   ): Array<{ name: string; html?: string; markup?: string }> {
     const existingTemplateNames = new Set(
       templates.map((t) => t.name.toLowerCase()),
@@ -1240,6 +1313,27 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         ),
       );
     }
+    if (content?.commerce.mode === 'woo-readonly') {
+      if (
+        !existingTemplateNames.has('archive-product') &&
+        !existingTemplateNames.has('shop')
+      ) {
+        templates.push(
+          createFallbackTemplate(
+            'archive-product',
+            '<!-- wp:woocommerce/product-collection {"perPage":12} --><div class="wc-block-product-template"><!-- wp:woocommerce/product-image /--><!-- wp:woocommerce/product-title /--><!-- wp:woocommerce/product-price /--></div><!-- /wp:woocommerce/product-collection -->',
+          ),
+        );
+      }
+      if (!existingTemplateNames.has('single-product')) {
+        templates.push(
+          createFallbackTemplate(
+            'single-product',
+            '<div class="single-product"><div class="product-summary"><!-- Product detail fallback --></div></div>',
+          ),
+        );
+      }
+    }
 
     return templates;
   }
@@ -1260,7 +1354,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       let isDetail = false;
 
       if (name.toLowerCase() === 'author') {
-        dataNeeds = ['authorDetail', 'posts'];
+        dataNeeds = ['posts'];
         route = '/author/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'category') {
@@ -1271,6 +1365,30 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         dataNeeds = ['page-detail'];
         route = '/:slug';
         isDetail = true;
+      } else if (name.toLowerCase() === 'archive-product') {
+        dataNeeds = ['products'];
+        route = '/shop';
+      } else if (name.toLowerCase() === 'single-product') {
+        dataNeeds = ['product-detail'];
+        route = '/product/:slug';
+        isDetail = true;
+      } else if (name.toLowerCase() === 'taxonomy-product-cat') {
+        dataNeeds = ['products'];
+        route = '/product-category/:slug';
+        isDetail = true;
+      } else if (name.toLowerCase() === 'taxonomy-product-tag') {
+        dataNeeds = ['products'];
+        route = '/product-tag/:slug';
+        isDetail = true;
+      } else if (name.toLowerCase() === 'cart') {
+        route = '/cart';
+        dataNeeds = [];
+      } else if (
+        name.toLowerCase() === 'my-account' ||
+        name.toLowerCase() === 'myaccount'
+      ) {
+        route = '/my-account';
+        dataNeeds = [];
       }
 
       return {
@@ -1309,8 +1427,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     for (const name of missingTemplateNames) {
       const fallback = fallbackByTemplate.get(name);
       if (!fallback) continue;
-      this.logger.warn(
-        `[Phase A] Injecting fallback component for missing template "${name}" → "${fallback.componentName}"`,
+      this.logger.log(
+        `[Phase A] Injecting deterministic fallback component for missing template "${name}" → "${fallback.componentName}"`,
       );
     }
 
@@ -1493,8 +1611,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private toVisualDataNeeds(dataNeeds: string[]): DataNeed[] {
     const ordered: DataNeed[] = [
       'postDetail',
+      'productDetail',
       'pageDetail',
       'comments',
+      'products',
       'posts',
       'pages',
       'menus',
@@ -1510,6 +1630,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         case 'post-detail':
           mapped.add('postDetail');
           break;
+        case 'product-detail':
+          mapped.add('productDetail');
+          break;
         case 'page-detail':
           mapped.add('pageDetail');
           break;
@@ -1517,6 +1640,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           mapped.add('comments');
           break;
         case 'posts':
+        case 'products':
         case 'pages':
         case 'menus':
           mapped.add(need);

@@ -17,6 +17,7 @@ import { CleanupModule } from '../agents/cleanup/cleanup.module.js';
 import { ThemeModule } from '../theme/theme.module.js';
 import { AiLoggerModule } from '../ai-logger/ai-logger.module.js';
 import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
+import { SourceResolverModule } from '../agents/source-resolver/source-resolver.module.js';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
     CleanupModule,
     AiLoggerModule,
     NormalizerModule,
+    SourceResolverModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService],

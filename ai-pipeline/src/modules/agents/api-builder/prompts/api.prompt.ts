@@ -7,15 +7,14 @@ const TEMPLATE_COVERED_PLUGINS = new Set<string>([]);
 // Specific SQL instructions for well-known plugins
 const KNOWN_PLUGIN_INSTRUCTIONS: Record<string, string> = {
   woocommerce: [
-    '- WooCommerce → Comprehensive e-commerce routes:',
+    '- WooCommerce → Read-only storefront routes only:',
     '  GET /api/products?category=&min_price=&max_price=&search= → all products with filters',
-    '  GET /api/products/:id → single product with variations, attributes, related products',
+    '  GET /api/products/:id → single product detail',
     '  GET /api/products/:id/variations → product variations (size, color, etc)',
     '  GET /api/product-categories → all WooCommerce categories with product count',
     '  GET /api/product-categories/:id/products → products in a category',
     '  GET /api/product-attributes → available attributes (color, size, brand, etc)',
-    '  GET /api/cart → cart contents (from wp_options with serialized _woocommerce_cart_hash)',
-    '  POST /api/cart/add → add item to cart',
+    '  Do NOT generate cart, checkout, account, payment, or POST commerce routes in this read-only storefront mode',
     '  Query wp_posts (post_type="product"), wp_postmeta (meta_keys: _price, _stock, _sku, _product_attributes)',
     '  For variations: query wp_posts (post_type="product_variation", post_parent=product_id)',
     '  Return product with { id, title, price, currency, description, image, sku, stock, categories[], attributes{} }',
@@ -138,6 +137,7 @@ no app.listen(). The code will be injected directly before app.listen().
 - Route paths MUST be string literals only, e.g. \`app.get('/api/my-plugin/status', async ...)\`. Compute \`prefix\` inside the handler for SQL table names.
 - Query WordPress tables with the dynamic prefix: \`\${prefix}posts\`, \`\${prefix}options\`, etc. Do not hardcode \`wp_\` unless you are certain the site uses the default prefix.
 - Use try/finally with await conn.end() for every handler
+- This pipeline is in WooCommerce read-only storefront mode. Do NOT generate POST commerce handlers, cart mutations, checkout, account, or payment endpoints.
 - JOIN \`postmeta\` to enrich fields where the active plugins suggest extra meta keys
   (e.g. The Events Calendar → _EventStartDate, _EventEndDate; LearnDash → _price, _course_points)
 - Return ONLY route handler code — no markdown fences, no explanation

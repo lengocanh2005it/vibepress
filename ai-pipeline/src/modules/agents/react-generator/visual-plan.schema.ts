@@ -7,9 +7,11 @@
 export type DataNeed =
   | 'siteInfo'
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'postDetail'
+  | 'productDetail'
   | 'pageDetail'
   | 'comments';
 

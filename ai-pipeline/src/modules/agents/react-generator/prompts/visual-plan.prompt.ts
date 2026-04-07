@@ -1,5 +1,7 @@
 import type { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ThemeTokens } from '../../block-parser/block-parser.service.js';
+import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
+import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import type {
   ColorPalette,
   ComponentVisualPlan,
@@ -16,6 +18,7 @@ export function buildVisualPlanPrompt(input: {
   templateSource: string; // pre-parsed block JSON string or PHP markup
   content: DbContentResult;
   tokens?: ThemeTokens;
+  repoManifest?: RepoThemeManifest;
   componentType?: 'page' | 'partial';
   route?: string | null;
   isDetail?: boolean;
@@ -27,6 +30,7 @@ export function buildVisualPlanPrompt(input: {
     templateSource,
     content,
     tokens,
+    repoManifest,
     componentType,
     route,
     isDetail,
@@ -37,6 +41,8 @@ export function buildVisualPlanPrompt(input: {
   const palette = buildPaletteHint(tokens);
   const siteCtx = buildSiteContext(content);
   const imageHints = buildImageSourcesHint(templateSource);
+  const repoContext = buildRepoManifestContextNote(repoManifest);
+  const patternHints = buildPatternSuggestionsHint(repoManifest);
   const contractHint = buildContractHint({
     componentName,
     componentType,
@@ -57,7 +63,7 @@ This is a migration plan, NOT a redesign brief.
 \`\`\`typescript
 interface ComponentVisualPlan {
   componentName: string;
-  dataNeeds: Array<'siteInfo' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
+  dataNeeds: Array<'siteInfo' | 'posts' | 'products' | 'pages' | 'menus' | 'postDetail' | 'productDetail' | 'pageDetail' | 'comments'>;
   palette: {
     background: string;  // hex
     surface: string;     // card backgrounds hex
@@ -144,7 +150,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 
 ${contractHint}
 
-${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${siteCtx}
+${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${repoContext ? `${repoContext}\n\n` : ''}${patternHints ? `${patternHints}\n\n` : ''}${siteCtx}
 
 ${palette}
 
@@ -195,6 +201,13 @@ function buildSiteContext(content: DbContentResult): string {
     `Menus: ${content.menus.map((m) => `${m.name} (slug: ${m.slug})`).join(', ') || '(none)'}`,
   );
   lines.push(`Posts in DB: ${content.posts.length}`);
+  lines.push(`WooCommerce mode: ${content.commerce.mode}`);
+  if (content.commerce.hasWooCommerce) {
+    lines.push(`Products in DB: ${content.commerce.productsCount}`);
+    lines.push(
+      `Product categories in DB: ${content.commerce.productCategoriesCount}`,
+    );
+  }
   lines.push(`Pages in DB: ${content.pages.length}`);
   return lines.join('\n');
 }
@@ -221,6 +234,24 @@ function buildContractHint(input: {
     lines.push(
       'Hard rule: any sidebar on this page must be content-only, never menu/site info chrome.',
     );
+  }
+  return lines.join('\n');
+}
+
+function buildPatternSuggestionsHint(repoManifest?: RepoThemeManifest): string {
+  const patterns = repoManifest?.structureHints.patternMeta;
+  if (!patterns || patterns.length === 0) return '';
+
+  const lines = [
+    '## Available theme patterns',
+    'These patterns are declared by the theme. When the template source references one of these slugs via wp:pattern, use it to inform your section type choice instead of inventing a new section.',
+  ];
+  for (const p of patterns.slice(0, 15)) {
+    const cats = p.categories.length > 0 ? ` [${p.categories.join(', ')}]` : '';
+    lines.push(`- ${p.slug}: "${p.title}"${cats}`);
+  }
+  if (patterns.length > 15) {
+    lines.push(`- ... and ${patterns.length - 15} more`);
   }
   return lines.join('\n');
 }
@@ -295,9 +326,11 @@ const VALID_SECTION_TYPES = new Set<string>([
 const VALID_DATA_NEEDS = new Set<string>([
   'siteInfo',
   'posts',
+  'products',
   'pages',
   'menus',
   'postDetail',
+  'productDetail',
   'pageDetail',
   'comments',
 ]);

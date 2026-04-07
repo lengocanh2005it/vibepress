@@ -3,6 +3,7 @@ import { cp, readFile, writeFile } from 'fs/promises';
 import { join, resolve } from 'path';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { buildCptRoutesPrompt } from './prompts/api.prompt.js';
 
 const TEMPLATE_DIR = resolve('templates/express-server');
@@ -27,12 +28,14 @@ export interface ApiBuilderResult {
 @Injectable()
 export class ApiBuilderService {
   private readonly logger = new Logger(ApiBuilderService.name);
+  private readonly tokenTracker = new TokenTracker();
 
   constructor(private readonly llm: LlmFactoryService) {}
 
   async build(input: {
     jobId?: string;
     dbName: string;
+    logPath?: string;
     content: Pick<
       DbContentResult,
       | 'siteInfo'
@@ -46,7 +49,7 @@ export class ApiBuilderService {
       | 'detectedPlugins'
     >;
   }): Promise<ApiBuilderResult> {
-    const { jobId = 'unknown', content } = input;
+    const { jobId = 'unknown', content, logPath } = input;
     const outDir = join('./temp/generated', jobId, 'server');
 
     this.logger.log(`Copying Express server template for job: ${jobId}`);
@@ -105,12 +108,22 @@ export class ApiBuilderService {
 
     // Ask LLM to generate ONLY the extra routes for custom post types
     const prompt = buildCptRoutesPrompt(content as DbContentResult);
-    const { text } = await this.llm.chat({
+    const { text, inputTokens, outputTokens } = await this.llm.chat({
       model: this.llm.getModel(),
       userPrompt: prompt,
       maxTokens: 4096,
       temperature: 0,
     });
+    const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
+    if (tokenLogPath) {
+      await this.tokenTracker.init(tokenLogPath);
+      await this.tokenTracker.track(
+        this.llm.getModel(),
+        inputTokens,
+        outputTokens,
+        'backend-gen:routes',
+      );
+    }
 
     const extraRoutes = text
       .replace(/^```[\w]*\n?/m, '')
@@ -153,6 +166,7 @@ export class ApiBuilderService {
   }): Promise<ApiBuilderResult> {
     const { result, feedback, modelName } = input;
     const resolvedModel = modelName ?? this.llm.getModel();
+    const tokenLogPath = TokenTracker.getTokenLogPath(input.logPath);
 
     this.logger.log(`[api-fixer] Auto-fixing backend based on review feedback`);
 
@@ -160,13 +174,22 @@ export class ApiBuilderService {
     const indexFile = result.files.find((f) => f.name === 'index.ts');
     if (!indexFile) return result;
 
-    const { text } = await this.llm.chat({
+    const { text, inputTokens, outputTokens } = await this.llm.chat({
       model: resolvedModel,
       systemPrompt:
         'You are an Express/TypeScript expert. Fix the reported issue in the server code. Return ONLY the complete corrected code, no explanation.',
       userPrompt: `The following Express server code has a review failure: ${feedback}\n\nFix it and return the complete corrected code:\n\`\`\`ts\n${indexFile.code}\n\`\`\``,
       maxTokens: 4096,
     });
+    if (tokenLogPath) {
+      await this.tokenTracker.init(tokenLogPath);
+      await this.tokenTracker.track(
+        resolvedModel,
+        inputTokens,
+        outputTokens,
+        'backend-fix:1',
+      );
+    }
 
     const fixedCode = text
       .replace(/^```[\w]*\n?/m, '')

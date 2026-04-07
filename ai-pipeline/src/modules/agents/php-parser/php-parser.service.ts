@@ -118,6 +118,10 @@ export class PhpParserService {
     };
   }
 
+  toTemplateMarkup(source: string): string {
+    return this.stripPhp(source);
+  }
+
   private async buildPhpSourceMap(themeDir: string): Promise<PhpSourceMap> {
     const map = new Map<string, string>();
     await this.walkPhpFiles(themeDir, themeDir, map);

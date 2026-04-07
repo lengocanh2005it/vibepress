@@ -176,7 +176,7 @@ export class LlmFactoryService {
       systemPrompt,
       userPrompt,
       maxTokens = 8192,
-      temperature = 1,
+      temperature = 0,
     } = params;
 
     const response = await this.openai.chat.completions.create({

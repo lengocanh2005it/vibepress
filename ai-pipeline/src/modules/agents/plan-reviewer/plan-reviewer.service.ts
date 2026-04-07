@@ -6,6 +6,7 @@ import type {
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
 import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-plan.prompt.js';
+import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -16,13 +17,14 @@ export interface PlanReviewResult {
 
 type PlanDataNeed =
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'site-info'
   | 'post-detail'
+  | 'product-detail'
   | 'page-detail'
   | 'comments'
-  | 'authorDetail'
   | 'categoryDetail';
 
 interface RoutePolicy {
@@ -37,28 +39,53 @@ const PARTIAL_PATTERNS =
   /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)(?:[-_].+)?$/i;
 const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'posts',
+  'products',
   'pages',
   'menus',
   'site-info',
   'post-detail',
+  'product-detail',
   'page-detail',
   'comments',
-  'authorDetail',
   'categoryDetail',
 ]);
 
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
-const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
+const STANDARD_INJECTABLE_TEMPLATES = new Set([
+  'author',
+  'category',
+  'archive-product',
+  'single-product',
+  'taxonomy-product-cat',
+  'taxonomy-product-tag',
+  'cart',
+  'my-account',
+]);
 
 @Injectable()
 export class PlanReviewerService {
   private readonly logger = new Logger(PlanReviewerService.name);
 
-  review(plan: PlanResult, expectedTemplateNames: string[]): PlanReviewResult {
+  review(
+    plan: PlanResult,
+    expectedTemplateNames: string[],
+    repoManifest?: RepoThemeManifest,
+  ): PlanReviewResult {
     const warnings: string[] = [];
     const errors: string[] = [];
     let reviewed = [...plan];
+
+    // Pre-pass: enforce partial type for template parts with known area assignments.
+    // theme.json templateParts declarations are authoritative — if theme.json says
+    // "header" is area:header, the component must be a partial regardless of what the AI planned.
+    if (repoManifest?.themeJsonSummary.templatePartAreas.length) {
+      reviewed = this.applyManifestAreaHints(
+        reviewed,
+        repoManifest.themeJsonSummary.templatePartAreas,
+        warnings,
+      );
+    }
 
     reviewed = this.resolveDuplicateHomePages(reviewed, warnings);
     reviewed = this.normalizeComponentNames(reviewed, warnings);
@@ -94,6 +121,26 @@ export class PlanReviewerService {
     }
 
     return { plan: reviewed, warnings, errors, isValid: errors.length === 0 };
+  }
+
+  private applyManifestAreaHints(
+    plan: PlanResult,
+    templatePartAreas: { name: string; title: string; area: string }[],
+    warnings: string[],
+  ): PlanResult {
+    const knownPartials = new Set(
+      templatePartAreas.map((p) => p.name.toLowerCase()),
+    );
+    return plan.map((item) => {
+      const base = item.templateName
+        .replace(/\.(php|html)$/i, '')
+        .toLowerCase();
+      if (!knownPartials.has(base) || item.type === 'partial') return item;
+      warnings.push(
+        `Template "${item.templateName}" is declared as a template part in theme.json → enforced as partial`,
+      );
+      return { ...item, type: 'partial', route: null, isDetail: false };
+    });
   }
 
   private normalizeComponentNames(
@@ -247,6 +294,7 @@ export class PlanReviewerService {
 
       if (policy.type === 'partial') {
         needs.delete('post-detail');
+        needs.delete('product-detail');
         needs.delete('page-detail');
       }
 
@@ -289,6 +337,10 @@ export class PlanReviewerService {
           needs.delete('page-detail');
         }
       }
+      if (needs.has('product-detail')) {
+        needs.delete('post-detail');
+        needs.delete('page-detail');
+      }
 
       const after = this.orderPlanDataNeeds([...needs]);
       if (!this.haveSameMembers(before, after)) {
@@ -310,6 +362,8 @@ export class PlanReviewerService {
 
     const allowedPostDetail =
       item.isDetail === true && item.dataNeeds.includes('post-detail');
+    const allowedProductDetail =
+      item.isDetail === true && item.dataNeeds.includes('product-detail');
     const allowedPageDetail =
       item.isDetail === true && item.dataNeeds.includes('page-detail');
     const stripLayoutSections = item.type === 'page';
@@ -317,6 +371,7 @@ export class PlanReviewerService {
       this.isSectionAllowed(
         section,
         allowedPostDetail,
+        allowedProductDetail,
         allowedPageDetail,
         stripLayoutSections,
       ),
@@ -372,6 +427,7 @@ export class PlanReviewerService {
   private isSectionAllowed(
     section: SectionPlan,
     allowedPostDetail: boolean,
+    allowedProductDetail: boolean,
     allowedPageDetail: boolean,
     stripLayoutSections: boolean = false,
   ): boolean {
@@ -385,6 +441,9 @@ export class PlanReviewerService {
     }
     if (section.type === 'post-content' || section.type === 'comments') {
       return allowedPostDetail;
+    }
+    if (section.type === 'media-text' && allowedProductDetail) {
+      return true;
     }
     if (section.type === 'page-content') {
       return allowedPageDetail;
@@ -402,6 +461,9 @@ export class PlanReviewerService {
         case 'post-detail':
           mapped.add('postDetail');
           break;
+        case 'product-detail':
+          mapped.add('productDetail');
+          break;
         case 'page-detail':
           mapped.add('pageDetail');
           break;
@@ -409,6 +471,7 @@ export class PlanReviewerService {
           mapped.add('comments');
           break;
         case 'posts':
+        case 'products':
         case 'pages':
         case 'menus':
           mapped.add(need);
@@ -780,7 +843,7 @@ export class PlanReviewerService {
         route: '/category/:slug',
         routeMode: 'hard',
         isDetail: true,
-        requiredDataNeeds: ['posts'],
+        requiredDataNeeds: ['categoryDetail', 'posts'],
       };
     }
 
@@ -801,6 +864,66 @@ export class PlanReviewerService {
         routeMode: 'hard',
         isDetail: true,
         requiredDataNeeds: ['posts'],
+      };
+    }
+
+    if (/^(shop|archive-product)$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/shop',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['products'],
+      };
+    }
+
+    if (/^single-product(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/product/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['product-detail'],
+      };
+    }
+
+    if (/^taxonomy-product-cat(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/product-category/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['products'],
+      };
+    }
+
+    if (/^taxonomy-product-tag(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/product-tag/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['products'],
+      };
+    }
+
+    if (/^cart(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/cart',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: [],
+      };
+    }
+
+    if (/^(my-account|myaccount)(?:-.+)?$/.test(templateBase)) {
+      return {
+        type: 'page',
+        route: '/my-account',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: [],
       };
     }
 
@@ -864,9 +987,12 @@ export class PlanReviewerService {
 
   private orderPlanDataNeeds(dataNeeds: PlanDataNeed[]): PlanDataNeed[] {
     const order: PlanDataNeed[] = [
+      'product-detail',
       'post-detail',
       'page-detail',
+      'categoryDetail',
       'comments',
+      'products',
       'posts',
       'pages',
       'menus',
@@ -877,9 +1003,11 @@ export class PlanReviewerService {
 
   private orderVisualDataNeeds(dataNeeds: VisualDataNeed[]): VisualDataNeed[] {
     const order: VisualDataNeed[] = [
+      'productDetail',
       'postDetail',
       'pageDetail',
       'comments',
+      'products',
       'posts',
       'pages',
       'menus',

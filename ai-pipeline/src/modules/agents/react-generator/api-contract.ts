@@ -31,12 +31,7 @@ export const PAGE_BACKEND_FIELDS = [
   'template',
 ] as const;
 
-export const PAGE_FRONTEND_FIELDS = [
-  'id',
-  'title',
-  'content',
-  'slug',
-] as const;
+export const PAGE_FRONTEND_FIELDS = ['id', 'title', 'content', 'slug'] as const;
 
 export const MENU_ITEM_FIELDS = [
   'id',
@@ -119,7 +114,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - \`GET /api/comments?slug=<post-slug>\` or \`?postId=<id>\` → Comment[]
 - \`GET /api/comments/submissions?...&clientToken=...\` → CommentSubmission[]
 - \`POST /api/comments\` → creates a moderated comment submission
-- \`GET /api/products\` → Product[]
+- \`GET /api/products\` → Product[] (flat array, not wrapped)
 - \`GET /api/products/:slug\` → Product
 
 ### Entity fields

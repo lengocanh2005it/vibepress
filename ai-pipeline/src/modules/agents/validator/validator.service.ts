@@ -350,6 +350,7 @@ export class ValidatorService {
       (context.dataNeeds ?? []).map((n) => DATA_NEED_ALIASES[n] ?? n),
     );
     const expectsPostDetail = dataNeeds.has('postDetail');
+    const expectsProducts = dataNeeds.has('products');
     const expectsPageDetail = dataNeeds.has('pageDetail');
     const expectsProductDetail = dataNeeds.has('productDetail');
     const expectsAnyDetail =
@@ -368,6 +369,12 @@ export class ValidatorService {
       context.type === 'page' &&
       context.isSubComponent !== true &&
       !isPartialComponent;
+    const isReadOnlyCommerceComponent =
+      expectsProducts ||
+      expectsProductDetail ||
+      /^\/(?:shop|product\/:slug|product-category\/:slug|product-tag\/:slug|cart|my-account)$/.test(
+        context.route ?? '',
+      );
 
     // Pre-processing: deterministically strip post-only fields from `interface Page`
     // so the AI does not need a retry attempt just for a bad type declaration.
@@ -488,8 +495,13 @@ export class ValidatorService {
         /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
         /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
       ) {
+        const snippets = this.findPlaceholderLinkSnippets(code);
+        const detail =
+          snippets.length > 0
+            ? ` Offending snippet(s): ${snippets.join(' | ')}`
+            : '';
         violations.push(
-          'Layout/content contract violated: page components must not contain placeholder `#` links. Use approved route/content links only; shared footer/navigation links belong to dedicated partials.',
+          `Layout/content contract violated: page components must not contain placeholder \`#\` links. Use approved route/content links only; shared footer/navigation links belong to dedicated partials.${detail}`,
         );
       }
       if (/All rights reserved|©|&copy;/i.test(code)) {
@@ -510,7 +522,11 @@ export class ValidatorService {
         /<Link\b[^>]*\bto=\{["']\/["']\}[^>]*>[\s\S]*siteInfo\??\.siteName[\s\S]*<\/Link>/.test(
           code,
         );
-      if (dataNeeds.has('menus') && !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) && !/\bmenu\.items\b/.test(code)) {
+      if (
+        dataNeeds.has('menus') &&
+        !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) &&
+        !/\bmenu\.items\b/.test(code)
+      ) {
         violations.push(
           'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
         );
@@ -524,8 +540,13 @@ export class ValidatorService {
         /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
         /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
       ) {
+        const snippets = this.findPlaceholderLinkSnippets(code);
+        const detail =
+          snippets.length > 0
+            ? ` Offending snippet(s): ${snippets.join(' | ')}`
+            : '';
         violations.push(
-          'Shared chrome contract violated: Header/Footer/Navigation partials must not emit placeholder `#` links. Render actual links from `/api/menus` or external URLs from data.',
+          `Shared chrome contract violated: Header/Footer/Navigation partials must not emit placeholder \`#\` links. Render actual links from \`/api/menus\` or external URLs from data.${detail}`,
         );
       }
       if (/No menus available/i.test(code)) {
@@ -668,6 +689,37 @@ export class ValidatorService {
       ) {
         violations.push(
           'Component fetches `/api/products/...` even though its plan does not require product detail data.',
+        );
+      }
+      if (expectsProducts && !/fetch\(\s*['"`]\/api\/products\b/.test(code)) {
+        violations.push(
+          'Storefront list component must fetch the product collection via `/api/products`.',
+        );
+      }
+    }
+
+    if (isReadOnlyCommerceComponent) {
+      if (
+        /fetch\(\s*['"`]\/api\/(?:cart|checkout|orders?|account)\b/i.test(
+          code,
+        ) ||
+        /fetch\(\s*['"`][^'"`]*\/api\/[^'"`]*(?:cart|checkout|orders?|account)/i.test(
+          code,
+        )
+      ) {
+        violations.push(
+          'WooCommerce read-only contract violated: storefront components must not fetch cart, checkout, account, or order endpoints.',
+        );
+      }
+      if (
+        /<(?:button|a|Link)\b[^>]*>[\s\S]{0,80}(?:Add to Cart|Buy Now|Checkout|My Account)/i.test(
+          code,
+        ) ||
+        /\bto=["']\/(?:cart|checkout|my-account)\b/i.test(code) ||
+        /\bhref=["']\/(?:cart|checkout|my-account)\b/i.test(code)
+      ) {
+        violations.push(
+          'WooCommerce read-only contract violated: storefront demo must not render cart, checkout, account, or add-to-cart actions.',
         );
       }
     }
@@ -949,13 +1001,39 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private isIdentifierUsed(ident: string, body: string): boolean {
+    const escapedIdent = this.escapeRegExp(ident);
+
+    if (
+      /^[A-Z]/.test(ident) &&
+      new RegExp(`<${escapedIdent}(?=[\\s>/])`).test(body)
+    ) {
+      return true;
+    }
+
+    if (
+      /^use[A-Z]/.test(ident) &&
+      new RegExp(`\\b${escapedIdent}\\s*(?:<[^>]+>)?\\s*\\(`).test(body)
+    ) {
+      return true;
+    }
+
+    if (ident === 'Link' && /<Link(?=[\s>/])/.test(body)) return true;
+    if (ident === 'NavLink' && /<NavLink(?=[\s>/])/.test(body)) return true;
+    if (ident === 'useParams' && /\buseParams\s*(?:<[^>]+>)?\s*\(/.test(body)) {
+      return true;
+    }
+
     // Use word-boundary regex so "useState" doesn't match "useStateExtra"
     const sanitizedBody = body
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/\/\/.*$/gm, ' ')
       .replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
-    const re = new RegExp(`\\b${ident}\\b`);
+    const re = new RegExp(`\\b${escapedIdent}\\b`);
     return re.test(sanitizedBody);
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   private findInvalidRelativeImport(
@@ -1041,14 +1119,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     resource: 'posts' | 'pages' | 'products',
   ): boolean {
     const patterns = [
+      // Template literal: `/api/posts/${slug}` or `/api/posts/${encodeURIComponent(slug)}`
       new RegExp(
-        String.raw`fetch\(\s*\`/api/${resource}/\$\{(?:slug|productId)\}\``,
+        String.raw`fetch\(\s*\`/api/${resource}/\$\{[^}]*(?:slug|productId)[^}]*\}\``,
       ),
+      // String concat: '/api/posts/' + slug or '/api/posts/' + encodeURIComponent(slug)
+      new RegExp(String.raw`fetch\(\s*['"]/api/${resource}/['"]\s*\+`),
+      // Unusual single/double-quoted string with ${…}: '/api/posts/${slug}'
       new RegExp(
-        String.raw`fetch\(\s*['"]/api/${resource}/['"]\s*\+\s*(?:slug|productId)`,
-      ),
-      new RegExp(
-        String.raw`fetch\(\s*['"]/api/${resource}/\$\{(?:slug|productId)\}['"]`,
+        String.raw`fetch\(\s*['"]/api/${resource}/\$\{[^}]*(?:slug|productId)[^}]*\}['"]`,
       ),
     ];
     return patterns.some((pattern) => pattern.test(code));
@@ -1064,6 +1143,31 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
       /\{\s*menus\b/.test(code)
     );
+  }
+
+  private findPlaceholderLinkSnippets(code: string, max = 3): string[] {
+    const snippets: string[] = [];
+    const tagPattern =
+      /<(?:Link|a)\b[^>]*(?:to|href)\s*=\s*(?:["']#["']|\{["']#["']\})[^>]*>[\s\S]*?<\/(?:Link|a)>/g;
+
+    for (const match of code.matchAll(tagPattern)) {
+      const raw = match[0]?.replace(/\s+/g, ' ').trim();
+      if (!raw) continue;
+      snippets.push(raw.length > 160 ? `${raw.slice(0, 157)}...` : raw);
+      if (snippets.length >= max) return snippets;
+    }
+
+    for (const line of code.split('\n')) {
+      const trimmed = line.trim();
+      if (/(?:\bto=|\bhref=)\s*(?:["']#["']|\{["']#["']\})/.test(trimmed)) {
+        snippets.push(
+          trimmed.length > 160 ? `${trimmed.slice(0, 157)}...` : trimmed,
+        );
+        if (snippets.length >= max) break;
+      }
+    }
+
+    return snippets;
   }
 
   private findTypeBody(
