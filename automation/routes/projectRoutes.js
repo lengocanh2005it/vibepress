@@ -1,6 +1,6 @@
 const express = require('express');
 const upload = require('../middlewares/uploadMiddleware');
-const { createProject, getProjectById, uploadTheme, registerWpSite, getToken, syncComplete, getReposByEmail, getCommitsByRepo, getWpSitePages, proxyWpPage, getDBinfoBySiteId } = require('../controllers/projectController');
+const { createProject, getProjectById, uploadTheme, registerWpSite, getToken, syncComplete, getReposByEmail, getCommitsByRepo, getWpSitePages, proxyWpPage, getDBinfoBySiteId, getSqlDumpTables, getSqlDumpRows, getSqlDumpFullTable, getSqlDumpAll, createSiteDb } = require('../controllers/projectController');
 
 const router = express.Router();
 
@@ -15,5 +15,10 @@ router.get('/wp/commits', getCommitsByRepo);
 router.get('/wp/site-pages', getWpSitePages);
 router.get('/wp/proxy', proxyWpPage);
 router.get('/wp/db-info-by-site', getDBinfoBySiteId);
+router.get('/wp/sql-dump/tables', getSqlDumpTables);
+router.get('/wp/sql-dump/full', getSqlDumpFullTable);
+router.get('/wp/sql-dump/all', getSqlDumpAll);
+router.get('/wp/sql-dump', getSqlDumpRows);
+router.post('/wp/create-db', createSiteDb);
 
 module.exports = router;

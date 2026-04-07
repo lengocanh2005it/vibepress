@@ -13,6 +13,13 @@ const VERCEL_TOKEN = process.env.VERCEL_TOKEN || null;
 const RENDER_API_KEY = process.env.RENDER_API_KEY || null;
 const RENDER_OWNER_ID = process.env.RENDER_OWNER_ID || null;
 
+const RAILWAY_DB = {
+  host:     process.env.RAILWAY_HOST,
+  port:     parseInt(process.env.RAILWAY_PORT ),
+  user:     process.env.RAILWAY_USERNAME  ,
+  password: process.env.RAILWAY_PASSWORD  ,
+};
+
 const BASE_DIR = __dirname + '/..';
 const DB_FILE = path.join(BASE_DIR, 'db.json');
 const TEMP_ROOT = path.join(BASE_DIR, 'temp_workspaces');
@@ -39,5 +46,6 @@ module.exports = {
 	DB_FILE,
 	TEMP_ROOT,
 	UPLOAD_ROOT,
+	RAILWAY_DB,
 	corsOptions,
 };
