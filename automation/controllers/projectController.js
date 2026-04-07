@@ -3,6 +3,8 @@ const path = require("path");
 const crypto = require("crypto");
 const axios = require("axios");
 const fse = require("fs-extra");
+const { getTables, getTableRows, dumpFullTable, dumpAllTables, dumpToSql } = require("../services/wpSqlDumpService");
+const { createSiteDatabase } = require("../services/railwayDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
 const {
@@ -10,7 +12,6 @@ const {
   GITHUB_OWNER,
   GIT_AUTHOR_NAME,
   GIT_AUTHOR_EMAIL,
-  AI_PIPELINE_URL,
   DB_FILE,
   TEMP_ROOT,
   UPLOAD_ROOT,
@@ -292,8 +293,42 @@ function findSiteBySiteUrl(siteUrl) {
 }
 
 // -------------------------------------------------------
+// Helper: dump SQL từ WP rồi import vào Railway (chạy background)
+// Delay để plugin kịp lưu apiKey trước khi ta gọi endpoint dump
+// -------------------------------------------------------
+async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
+  await new Promise((r) => setTimeout(r, delayMs));
+
+  const dumpDir  = path.join(__dirname, '..', 'temp_dumps');
+  fse.ensureDirSync(dumpDir);
+  const dumpPath = path.join(dumpDir, `dump-${siteId}-${Date.now()}.sql`);
+
+  try {
+    console.log(`[DbSync] start — siteId=${siteId}`);
+    const tables = await dumpAllTables(siteUrl, apiKey);
+    const sql    = dumpToSql(tables);
+    fs.writeFileSync(dumpPath, sql, 'utf8');
+    console.log(`[DbSync] dump saved — ${dumpPath}`);
+
+    const dbInfo = await createSiteDatabase(siteId, dumpPath);
+    console.log(`[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+
+    const db     = readDb();
+    const record = db.wpSites?.[siteId];
+    if (record) {
+      record.clonedDb = dbInfo;
+      writeDb(db);
+    }
+  } catch (e) {
+    console.error(`[DbSync] FAILED — siteId=${siteId}:`, e.message);
+  } finally {
+    if (fs.existsSync(dumpPath)) fs.unlinkSync(dumpPath);
+  }
+}
+
+// -------------------------------------------------------
 // POST /api/wp/register
-// Nhận từ WP plugin: siteUrl, siteName, wpVersion, adminEmail, dbInfo
+// Nhận từ WP plugin: siteUrl, siteName, wpVersion, adminEmail
 // Trả về: { apiKey, githubToken, githubRepo }
 // -------------------------------------------------------
 async function registerWpSite(req, res) {
@@ -302,10 +337,9 @@ async function registerWpSite(req, res) {
     siteName: req.body?.siteName,
     wpVersion: req.body?.wpVersion,
     adminEmail: req.body?.adminEmail,
-    hasDbInfo: !!req.body?.dbInfo,
   });
 
-  const { siteUrl, siteName, wpVersion, adminEmail, dbInfo } = req.body ?? {};
+  const { siteUrl, siteName, wpVersion, adminEmail } = req.body ?? {};
 
   if (!siteUrl) {
     console.warn(`[WP] register FAILED — siteUrl missing`);
@@ -335,7 +369,6 @@ async function registerWpSite(req, res) {
       wpVersion ?? existingSite.wpVersion;
     db.wpSites[existingSite.siteId].adminEmail =
       adminEmail ?? existingSite.adminEmail;
-    db.wpSites[existingSite.siteId].dbInfo = dbInfo ?? existingSite.dbInfo;
     db.wpSites[existingSite.siteId].updatedAt = new Date().toISOString();
     writeDb(db);
 
@@ -346,12 +379,14 @@ async function registerWpSite(req, res) {
     console.log(
       `[WP] register (reconnect) OK — siteUrl=${siteUrl} repo=${existingSite.wpRepoUrl}`,
     );
-    return res.status(200).json({
+    res.status(200).json({
       apiKey,
       githubToken: GITHUB_TOKEN,
       githubRepo,
       isFirstConnect: false,
     });
+    triggerDbSync(existingSite.siteId, siteUrl, apiKey);
+    return;
   }
 
   // FIRST CONNECT — tạo GitHub repo mới
@@ -382,7 +417,6 @@ async function registerWpSite(req, res) {
     siteName: siteName ?? null,
     wpVersion: wpVersion ?? null,
     adminEmail: adminEmail ?? null,
-    dbInfo: dbInfo ?? null,
     apiKey,
     wpRepoName: wpRepo.name,
     wpRepoUrl: wpRepo.htmlUrl,
@@ -395,12 +429,13 @@ async function registerWpSite(req, res) {
   );
 
   const githubRepo = wpRepo.htmlUrl.replace("https://github.com/", "");
-  return res.status(200).json({
+  res.status(200).json({
     apiKey,
     githubToken: GITHUB_TOKEN,
     githubRepo,
     isFirstConnect: true,
   });
+  triggerDbSync(siteId, siteUrl, apiKey);
 }
 
 // -------------------------------------------------------
@@ -524,14 +559,166 @@ function getDBinfoBySiteId(req, res) {
 
   return res.status(200).json({
     themeGithubUrl: site.wpRepoUrl,
-    dbCredentials: {
-      host: site.dbInfo?.db_host?.split(':')[0] ?? 'localhost',
-      port: site.dbInfo?.db_port,
-      dbName: site.dbInfo?.db_name,
-      password: site.dbInfo?.db_password,
-      user: site.dbInfo?.db_user,
-    },
+    connectionString: site.clonedDb?.connectionString ?? null,
   });
+}
+
+// -------------------------------------------------------
+// GET /api/wp/sql-dump/tables?siteId=xxx
+// Trả về danh sách tables + row count + schema
+// -------------------------------------------------------
+async function getSqlDumpTables(req, res) {
+  const { siteId } = req.query;
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: "siteId is required" });
+  }
+
+  const db = readDb();
+  const site = db.wpSites?.[siteId];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Site not found" });
+  }
+
+  try {
+    const data = await getTables(site.siteUrl, site.apiKey);
+    return res.status(200).json(data);
+  } catch (e) {
+    console.error(`[SqlDump] getTables FAILED — siteId=${siteId}:`, e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
+}
+
+// -------------------------------------------------------
+// GET /api/wp/sql-dump?siteId=xxx&table=wp_posts&offset=0&limit=500
+// Trả về rows của 1 table, có phân trang
+// -------------------------------------------------------
+async function getSqlDumpRows(req, res) {
+  const { siteId, table, offset, limit } = req.query;
+  if (!siteId || !table) {
+    return res.status(400).json({ success: false, error: "siteId and table are required" });
+  }
+
+  const db = readDb();
+  const site = db.wpSites?.[siteId];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Site not found" });
+  }
+
+  try {
+    const data = await getTableRows(site.siteUrl, site.apiKey, table, Number(offset ?? 0), Number(limit ?? 500));
+    return res.status(200).json(data);
+  } catch (e) {
+    console.error(`[SqlDump] getTableRows FAILED — siteId=${siteId} table=${table}:`, e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
+}
+
+// -------------------------------------------------------
+// GET /api/wp/sql-dump/full?siteId=xxx&table=wp_posts
+// Dump toàn bộ 1 table (tự động phân trang)
+// -------------------------------------------------------
+async function getSqlDumpFullTable(req, res) {
+  const { siteId, table } = req.query;
+  if (!siteId || !table) {
+    return res.status(400).json({ success: false, error: "siteId and table are required" });
+  }
+
+  const db = readDb();
+  const site = db.wpSites?.[siteId];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Site not found" });
+  }
+
+  try {
+    const data = await dumpFullTable(site.siteUrl, site.apiKey, table);
+    return res.status(200).json(data);
+  } catch (e) {
+    console.error(`[SqlDump] dumpFullTable FAILED — siteId=${siteId} table=${table}:`, e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
+}
+
+// -------------------------------------------------------
+// GET /api/wp/sql-dump/all?siteId=xxx
+// Dump toàn bộ database — lưu file .sql vào temp_dumps/, trả về đường dẫn
+// -------------------------------------------------------
+async function getSqlDumpAll(req, res) {
+  const { siteId } = req.query;
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: "siteId is required" });
+  }
+
+  const db = readDb();
+  const site = db.wpSites?.[siteId];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Site not found" });
+  }
+
+  const dumpDir = path.join(__dirname, '..', 'temp_dumps');
+  fse.ensureDirSync(dumpDir);
+
+  const filename = `dump-${siteId}-${Date.now()}.sql`;
+  const filepath = path.join(dumpDir, filename);
+
+  try {
+    const tables = await dumpAllTables(site.siteUrl, site.apiKey);
+    const sql = dumpToSql(tables);
+    fs.writeFileSync(filepath, sql, 'utf8');
+
+    console.log(`[SqlDump] saved — ${filepath}`);
+
+    res.setHeader('Content-Type', 'application/sql');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).sendFile(filepath);
+  } catch (e) {
+    console.error(`[SqlDump] dumpAllTables FAILED — siteId=${siteId}:`, e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
+}
+
+// -------------------------------------------------------
+// POST /api/wp/create-db?siteId=xxx
+// Dump SQL từ WP → tạo database trên Railway → lưu connection string vào db.json
+// -------------------------------------------------------
+async function createSiteDb(req, res) {
+  const { siteId } = req.query;
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: "siteId is required" });
+  }
+
+  const db   = readDb();
+  const site = db.wpSites?.[siteId];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Site not found" });
+  }
+
+  const dumpDir  = path.join(__dirname, '..', 'temp_dumps');
+  fse.ensureDirSync(dumpDir);
+  const dumpPath = path.join(dumpDir, `dump-${siteId}-${Date.now()}.sql`);
+
+  try {
+    // 1. Dump SQL từ WP
+    const tables = await dumpAllTables(site.siteUrl, site.apiKey);
+    const sql    = dumpToSql(tables);
+    fs.writeFileSync(dumpPath, sql, 'utf8');
+    console.log(`[CreateDb] dump saved — ${dumpPath}`);
+
+    // 2. Tạo database trên Railway và import
+    const dbInfo = await createSiteDatabase(siteId, dumpPath);
+    console.log(`[CreateDb] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+
+    // 3. Lưu vào db.json
+    const record = db.wpSites[siteId];
+    if (record) {
+      record.clonedDb = dbInfo;
+      writeDb(db);
+    }
+
+    return res.status(200).json({ success: true, clonedDb: dbInfo });
+  } catch (e) {
+    console.error(`[CreateDb] FAILED — siteId=${siteId}:`, e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
 }
 
 // -------------------------------------------------------
@@ -751,7 +938,12 @@ module.exports = {
   getCommitsByRepo,
   getWpSitePages,
   proxyWpPage,
-  getDBinfoBySiteId
+  getDBinfoBySiteId,
+  getSqlDumpTables,
+  getSqlDumpRows,
+  getSqlDumpFullTable,
+  getSqlDumpAll,
+  createSiteDb
 };
 
 

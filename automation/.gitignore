@@ -4,3 +4,4 @@
 /.env
 /db.json
 /artifacts
+/temp_dumps

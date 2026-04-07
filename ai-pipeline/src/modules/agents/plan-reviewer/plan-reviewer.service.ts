@@ -49,7 +49,7 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
 
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
-const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
+const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category','page']);
 
 @Injectable()
 export class PlanReviewerService {
