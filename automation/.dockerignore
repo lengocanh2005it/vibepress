@@ -1,0 +1,8 @@
+node_modules
+temp_workspaces
+temp_dumps
+uploads
+artifacts
+db.json
+.env*
+*.log

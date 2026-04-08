@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
-import { getRepoByEmail, getCommitHistory } from '../services/automationService';
+import { getMyRepos, getCommitHistory } from '../services/automationService';
 
 interface Repository {
   siteId: string;
@@ -29,7 +29,7 @@ interface CommitPagination {
 
 const ProjectSelector: React.FC = () => {
   const navigate = useNavigate();
-  const { email } = useUser();
+  const { token } = useUser();
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
   const [commitHistory, setCommitHistory] = useState<Commit[]>([]);
@@ -42,11 +42,11 @@ const ProjectSelector: React.FC = () => {
   });
 
   useEffect(() => {
-    if (!email) return;
-    getRepoByEmail(email)
+    if (!token) return;
+    getMyRepos(token)
       .then(data => setRepositories(data))
       .catch(err => console.error('Error fetching repos:', err));
-  }, [email]);
+  }, [token]);
 
   useEffect(() => {
     if (!selectedRepo) return;
@@ -102,7 +102,7 @@ const ProjectSelector: React.FC = () => {
             })
           ) : (
             <p className="text-[#8e9892] text-[13px] px-2">
-              {email ? 'Đang tải repositories...' : 'Vui lòng đăng nhập để xem repositories.'}
+              {token ? 'Đang tải repositories...' : 'Vui lòng đăng nhập để xem repositories.'}
             </p>
           )}
 

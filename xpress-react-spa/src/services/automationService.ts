@@ -1,6 +1,8 @@
-export const getRepoByEmail = async (email: string) => {
+export const getMyRepos = async (token: string) => {
   try {
-    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/repos?email=${encodeURIComponent(email)}`);
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/repos`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!response.ok) {
       throw new Error('Failed to fetch repos');
     }

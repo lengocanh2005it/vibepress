@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { PORT, corsOptions } = require('./config/constants');
 const systemRoutes = require('./routes/systemRoutes');
+const authRoutes = require('./routes/authRoutes');
 const projectRoutes = require('./routes/projectRoutes');
 const visualRoutes = require('./routes/visualRoutes');
 const lighthouseRoutes = require('./routes/lighthouseRoutes');
@@ -19,6 +20,7 @@ app.use(cors(corsOptions));
 app.options('/{*splat}', cors(corsOptions));
 
 app.use('/', systemRoutes);
+app.use('/api', authRoutes);
 app.use('/api', projectRoutes);
 app.use('/api', visualRoutes);
 app.use('/api', lighthouseRoutes);

@@ -1,0 +1,77 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: vibepress_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-vibepress_root}
+      MYSQL_DATABASE: ${MYSQL_DB:-vibepress}
+      MYSQL_USER: ${MYSQL_USER:-vibepress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-vibepress_pass}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: ./automation
+      dockerfile: Dockerfile
+    container_name: vibepress_app
+    restart: unless-stopped
+    env_file: ./automation/.env
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: ${MYSQL_DB:-vibepress}
+      MYSQL_USER: ${MYSQL_USER:-vibepress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-vibepress_pass}
+      MYSQL_ROOT_USER: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-vibepress_root}
+    ports:
+      - "5000:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./automation/uploads:/app/uploads
+      - ./automation/artifacts:/app/artifacts
+      - ./automation/temp_dumps:/app/temp_dumps
+      - ./automation/temp_workspaces:/app/temp_workspaces
+
+  ai_pipeline:
+    build:
+      context: ./ai-pipeline
+      dockerfile: Dockerfile
+    container_name: vibepress_ai_pipeline
+    restart: unless-stopped
+    env_file: ./ai-pipeline/.env
+    ports:
+      - "3001:3001"
+
+  frontend:
+    build:
+      context: ./xpress-react-spa
+      dockerfile: Dockerfile
+      args:
+        VITE_BACKEND_URL: ""
+        VITE_BACKEND_AI_URL: /ai-api
+        VITE_WP_URL: ""
+    container_name: vibepress_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - app
+      - ai_pipeline
+
+volumes:
+  mysql_data:
