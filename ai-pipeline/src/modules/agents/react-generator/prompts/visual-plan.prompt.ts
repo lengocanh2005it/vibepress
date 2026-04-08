@@ -29,6 +29,9 @@ export function buildVisualPlanPrompt(input: {
     sourceUrl: string;
     viewport: string;
   };
+  /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
+   *  AI must preserve this order and only fill in missing content fields. */
+  draftSections?: SectionPlan[];
 }): { systemPrompt: string; userPrompt: string } {
   const {
     componentName,
@@ -42,6 +45,7 @@ export function buildVisualPlanPrompt(input: {
     dataNeeds,
     sourceAnalysis,
     visualReference,
+    draftSections,
   } = input;
 
   const palette = buildPaletteHint(tokens);
@@ -133,6 +137,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 
 ## Rules
 - Preserve the original WordPress layout hierarchy and reading order as closely as possible.
+- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections unless a live screenshot contradicts the listed order.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
 - Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
@@ -153,6 +158,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
+  const draftHint = buildDraftSectionsHint(draftSections);
+
   const userPrompt = `## Component to plan: ${componentName}
 
 ${contractHint}
@@ -165,7 +172,7 @@ ${palette}
 
 ${imageHints}
 
-## Template source
+${draftHint ? `${draftHint}\n\n` : ''}## Template source
 
 ${templateSource}
 
@@ -177,6 +184,23 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
+  if (!draftSections || draftSections.length === 0) return '';
+
+  const lines = [
+    '## Detected section order (deterministic, from WordPress block tree)',
+    'The following sections were detected in the EXACT order they appear in the WordPress template.',
+    'You MUST preserve this order in the `sections` array.',
+    'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+    'You MUST NOT reorder, merge, split, or drop sections unless a live screenshot explicitly contradicts this list.',
+    '',
+    '```json',
+    JSON.stringify(draftSections, null, 2),
+    '```',
+  ];
+  return lines.join('\n');
+}
 
 function buildPaletteHint(tokens?: ThemeTokens): string {
   if (!tokens?.defaults) return '';

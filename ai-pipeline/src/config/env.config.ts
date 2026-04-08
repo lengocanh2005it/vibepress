@@ -58,6 +58,8 @@ export default () => ({
     ),
   },
   planner: {
+    agentEnabled: process.env.PLANNER_AGENT_ENABLED !== 'false',
+    agentMaxRounds: parseInt(process.env.PLANNER_AGENT_MAX_ROUNDS ?? '6', 10),
     visualPlanConcurrency: parseInt(
       process.env.PLANNER_VISUAL_CONCURRENCY ?? '3',
       10,

@@ -6,6 +6,8 @@ import type {
 
 export interface StyleTokenExtractionResult {
   colors: ThemeTokens['colors'];
+  gradients: NonNullable<ThemeTokens['gradients']>;
+  shadows: NonNullable<ThemeTokens['shadows']>;
   fonts: ThemeTokens['fonts'];
   fontSizes: ThemeTokens['fontSizes'];
   spacing: ThemeTokens['spacing'];
@@ -31,7 +33,14 @@ export function extractStyleCssTokens(
   baseTokens?: Partial<ThemeTokens>,
 ): StyleTokenExtractionResult {
   if (!styleCss?.trim()) {
-    return { colors: [], fonts: [], fontSizes: [], spacing: [] };
+    return {
+      colors: [],
+      gradients: [],
+      shadows: [],
+      fonts: [],
+      fontSizes: [],
+      spacing: [],
+    };
   }
 
   const rules = parseCssRules(styleCss);
@@ -49,6 +58,8 @@ export function extractStyleCssTokens(
 
   return {
     colors: inferred.colors,
+    gradients: inferred.gradients,
+    shadows: inferred.shadows,
     fonts: inferred.fonts,
     fontSizes: inferred.fontSizes,
     spacing: inferred.spacing,
@@ -64,6 +75,8 @@ export function buildStyleCssBridge(
   const extracted = extractStyleCssTokens(styleCss, baseTokens);
   const tokens: ThemeTokens = {
     colors: mergeBySlug(baseTokens?.colors ?? [], extracted.colors),
+    gradients: mergeBySlug(baseTokens?.gradients ?? [], extracted.gradients),
+    shadows: mergeBySlug(baseTokens?.shadows ?? [], extracted.shadows),
     fonts: mergeBySlug(baseTokens?.fonts ?? [], extracted.fonts),
     fontSizes: mergeBySlug(baseTokens?.fontSizes ?? [], extracted.fontSizes),
     spacing: mergeBySlug(baseTokens?.spacing ?? [], extracted.spacing),
@@ -190,6 +203,8 @@ function collectVars(rules: CssRule[]): Map<string, string> {
 
 function inferTokensFromVars(vars: Map<string, string>) {
   const colors: ThemeTokens['colors'] = [];
+  const gradients: NonNullable<ThemeTokens['gradients']> = [];
+  const shadows: NonNullable<ThemeTokens['shadows']> = [];
   const fonts: ThemeTokens['fonts'] = [];
   const fontSizes: ThemeTokens['fontSizes'] = [];
   const spacing: ThemeTokens['spacing'] = [];
@@ -197,6 +212,16 @@ function inferTokensFromVars(vars: Map<string, string>) {
   for (const [name, value] of vars.entries()) {
     const slug = slugify(name);
     if (!slug) continue;
+
+    if (isGradient(value)) {
+      gradients.push({ slug, value: value.trim() });
+      continue;
+    }
+
+    if (isShadow(value)) {
+      shadows.push({ slug, value: value.trim() });
+      continue;
+    }
 
     if (isColor(value)) {
       colors.push({ slug, value: value.trim() });
@@ -219,6 +244,8 @@ function inferTokensFromVars(vars: Map<string, string>) {
 
   return {
     colors: dedupeBySlug(colors),
+    gradients: dedupeBySlug(gradients),
+    shadows: dedupeBySlug(shadows),
     fonts: dedupeBySlug(fonts),
     fontSizes: dedupeBySlug(fontSizes),
     spacing: dedupeBySlug(spacing),
@@ -326,6 +353,15 @@ function extractDefaults(
     ...(headingFontFamily && { headingFontFamily }),
     ...(resolveValue(body?.['line-height'], ctx, 'plain') && {
       lineHeight: resolveValue(body?.['line-height'], ctx, 'plain'),
+    }),
+    ...(resolveValue(body?.['letter-spacing'], ctx, 'plain') && {
+      letterSpacing: resolveValue(body?.['letter-spacing'], ctx, 'plain'),
+    }),
+    ...(resolveValue(body?.['text-transform'], ctx, 'plain') && {
+      textTransform: resolveValue(body?.['text-transform'], ctx, 'plain'),
+    }),
+    ...(resolveValue(button?.['box-shadow'], ctx, 'plain') && {
+      buttonBoxShadow: resolveValue(button?.['box-shadow'], ctx, 'plain'),
     }),
     ...(resolveValue(content?.['max-width'] ?? content?.width, ctx, 'size') && {
       contentWidth: resolveValue(
@@ -445,7 +481,8 @@ function buildThemeBlockStyle(
     resolveValue(decls['font-family'], ctx, 'font') ||
     resolveValue(decls['font-weight'], ctx, 'plain') ||
     resolveValue(decls['letter-spacing'], ctx, 'plain') ||
-    resolveValue(decls['line-height'], ctx, 'plain')
+    resolveValue(decls['line-height'], ctx, 'plain') ||
+    resolveValue(decls['text-transform'], ctx, 'plain')
       ? {
           typography: {
             ...(resolveValue(decls['font-size'], ctx, 'size') && {
@@ -466,6 +503,13 @@ function buildThemeBlockStyle(
             }),
             ...(resolveValue(decls['line-height'], ctx, 'plain') && {
               lineHeight: resolveValue(decls['line-height'], ctx, 'plain'),
+            }),
+            ...(resolveValue(decls['text-transform'], ctx, 'plain') && {
+              textTransform: resolveValue(
+                decls['text-transform'],
+                ctx,
+                'plain',
+              ),
             }),
           },
         }
@@ -520,6 +564,9 @@ function buildThemeBlockStyle(
           },
         }
       : {}),
+    ...(resolveValue(decls['box-shadow'], ctx, 'plain') && {
+      shadow: resolveValue(decls['box-shadow'], ctx, 'plain'),
+    }),
   };
 
   return Object.keys(resolved).length > 0 ? resolved : undefined;
@@ -633,6 +680,8 @@ function buildDerivedBridgeRules(tokens: ThemeTokens): CssRule[] {
   if (d.fontFamily) bodyDecls['font-family'] = d.fontFamily;
   if (d.fontSize) bodyDecls['font-size'] = d.fontSize;
   if (d.lineHeight) bodyDecls['line-height'] = d.lineHeight;
+  if (d.letterSpacing) bodyDecls['letter-spacing'] = d.letterSpacing;
+  if (d.textTransform) bodyDecls['text-transform'] = d.textTransform;
   if (Object.keys(bodyDecls).length > 0) {
     rules.push({ selectors: ['body'], declarations: bodyDecls });
   }
@@ -713,6 +762,19 @@ function buildDerivedBridgeRules(tokens: ThemeTokens): CssRule[] {
     });
   }
 
+  if (d.buttonBoxShadow) {
+    rules.push({
+      selectors: [
+        '.wp-block-button__link',
+        '.wp-element-button',
+        'button',
+        'input[type="submit"]',
+        'input[type="button"]',
+      ],
+      declarations: { 'box-shadow': d.buttonBoxShadow },
+    });
+  }
+
   rules.push(...buildBlockStyleBridgeRules(tokens.blockStyles));
   return rules;
 }
@@ -762,6 +824,9 @@ function buildBlockStyleBridgeRules(
       declarations['letter-spacing'] = style.typography.letterSpacing;
     if (style.typography?.lineHeight)
       declarations['line-height'] = style.typography.lineHeight;
+    if (style.typography?.textTransform)
+      declarations['text-transform'] = style.typography.textTransform;
+    if (style.shadow) declarations['box-shadow'] = style.shadow;
     if (style.border?.radius)
       declarations['border-radius'] = style.border.radius;
     if (style.border?.width) declarations['border-width'] = style.border.width;
@@ -966,5 +1031,19 @@ function isSize(value: string): boolean {
     /^clamp\(.+\)$/.test(v) ||
     /^min\(.+\)$/.test(v) ||
     /^max\(.+\)$/.test(v)
+  );
+}
+
+function isGradient(value: string): boolean {
+  return /^(linear|radial|conic)-gradient\(/i.test(value.trim());
+}
+
+function isShadow(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  if (v === 'none') return false;
+  // box-shadow: <offset-x> <offset-y> [blur] [spread] [color] [, ...]
+  // Must have at least two length values (px/rem/em/0) and optionally a color
+  return /^(?:inset\s+)?-?\d[\d.]*(?:px|rem|em)?\s+-?\d[\d.]*(?:px|rem|em)?(\s+-?\d[\d.]*(?:px|rem|em)?)*(\s+(?:#[0-9a-f]{3,8}|rgba?\(|hsla?\(|[a-z]+))?/.test(
+    v,
   );
 }

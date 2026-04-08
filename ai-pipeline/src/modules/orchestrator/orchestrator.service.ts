@@ -46,6 +46,19 @@ import { TokenTracker } from '../../common/utils/token-tracker.js';
 import { RunPipelineDto } from './orchestrator.controller.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
+import { PrepareInputsStage } from './stages/prepare-inputs.stage.js';
+import { PlanningStage } from './stages/planning.stage.js';
+import { GenerationStage } from './stages/generation.stage.js';
+import { PreviewAssemblyStage } from './stages/preview-assembly.stage.js';
+import { VisualCompareStage } from './stages/visual-compare.stage.js';
+import { FinalizeStage } from './stages/finalize.stage.js';
+import { PlannerAgentRuntimeService } from './planner-agent/planner-agent-runtime.service.js';
+import type {
+  CompletionEventPayload,
+  OrchestratorStageRuntime,
+  PipelineExecutionContext,
+  PipelineResolvedModels,
+} from './stages/pipeline-stage.types.js';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
@@ -223,6 +236,7 @@ export class OrchestratorService {
     private readonly validator: ValidatorService,
     private readonly sourceResolver: SourceResolverService,
     private readonly cleanup: CleanupService,
+    private readonly plannerAgentRuntime: PlannerAgentRuntimeService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
@@ -375,7 +389,7 @@ export class OrchestratorService {
     }
   }
 
-  private async executePipeline(
+  private async executePipelineLegacy(
     jobId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
@@ -1254,6 +1268,183 @@ export class OrchestratorService {
     } finally {
       await this.tokenTracker.writeSummary();
     }
+  }
+
+  private async executePipeline(
+    jobId: string,
+    dto: RunPipelineDto,
+    state: PipelineStatus,
+  ): Promise<void> {
+    const jobLogDir = join('./temp/logs', jobId);
+    await mkdir(join(jobLogDir, 'tokens'), { recursive: true });
+    const logPath = join(jobLogDir, 'pipeline.log');
+    const tokenLogPath = join(jobLogDir, 'tokens', 'total.tokens.log');
+    const pipelineStart = Date.now();
+    await this.tokenTracker.init(tokenLogPath);
+    await this.logToFile(logPath, `Pipeline ${jobId} started`);
+
+    try {
+      const context: PipelineExecutionContext = {
+        jobId,
+        dto,
+        state,
+        jobLogDir,
+        logPath,
+        pipelineStart,
+        resolvedModels: this.resolvePipelineModels(),
+        dbCreds: this.toWpDbCredentials(dto.dbConnectionString),
+        themeGithubToken: this.configService.get<string>(
+          'github.wpRepoToken',
+          '',
+        ),
+      };
+      const runtime = this.createStageRuntime();
+
+      let currentContext = context;
+      currentContext = await new PrepareInputsStage().run(
+        currentContext,
+        runtime,
+      );
+      currentContext = await new PlanningStage().run(currentContext, runtime);
+      currentContext = await new GenerationStage().run(currentContext, runtime);
+      currentContext = await new PreviewAssemblyStage().run(
+        currentContext,
+        runtime,
+      );
+      currentContext = await new VisualCompareStage().run(
+        currentContext,
+        runtime,
+      );
+      currentContext = await new FinalizeStage().run(currentContext, runtime);
+
+      this.logger.log(
+        `Pipeline ${jobId} completed in ${currentContext.totalElapsed}s`,
+      );
+      await this.logToFile(
+        logPath,
+        `Pipeline completed — total ${currentContext.totalElapsed}s`,
+      );
+    } finally {
+      await this.tokenTracker.writeSummary();
+    }
+  }
+
+  private resolvePipelineModels(): PipelineResolvedModels {
+    const cfgPlanning = this.configService.get<string>(
+      'pipeline.planningModel',
+    );
+    const cfgGenCode = this.configService.get<string>('pipeline.genCodeModel');
+    const cfgReviewCode = this.configService.get<string>(
+      'pipeline.reviewCodeModel',
+    );
+    const cfgBackendReview = this.configService.get<string>(
+      'pipeline.backendReviewModel',
+    );
+    const cfgAiReviewMode = this.configService.get<string>(
+      'pipeline.aiReviewMode',
+      'warn',
+    );
+    const cfgBackendAiReviewMode = this.configService.get<string>(
+      'pipeline.backendAiReviewMode',
+      'warn',
+    );
+    const cfgFixAgent = this.configService.get<string>(
+      'pipeline.fixAgentModel',
+    );
+    const resolvedModels: PipelineResolvedModels = {
+      planning: cfgPlanning ?? 'mistral/mistral-large-latest',
+      genCode: cfgGenCode ?? 'mistral/codestral-latest',
+      reviewCode: cfgReviewCode,
+      backendReview: cfgBackendReview,
+      aiReviewMode: cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn',
+      backendAiReviewMode:
+        cfgBackendAiReviewMode === 'blocking' ? 'blocking' : 'warn',
+      fixAgent: cfgFixAgent ?? cfgReviewCode,
+    };
+
+    this.logger.log(
+      `[models] planning="${resolvedModels.planning ?? 'default'}" ` +
+        `genCode="${resolvedModels.genCode ?? 'default'}" ` +
+        `reviewCode="${resolvedModels.reviewCode ?? 'default'}" ` +
+        `backendReview="${resolvedModels.backendReview ?? 'default'}" ` +
+        `aiReviewMode="${resolvedModels.aiReviewMode}" ` +
+        `backendAiReviewMode="${resolvedModels.backendAiReviewMode}" ` +
+        `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
+    );
+
+    return resolvedModels;
+  }
+
+  private createStageRuntime(): OrchestratorStageRuntime {
+    return {
+      logger: this.logger,
+      configService: this.configService,
+      sqlService: this.sqlService,
+      wpQuery: this.wpQuery,
+      themeDetector: this.themeDetector,
+      repoAnalyzer: this.repoAnalyzer,
+      phpParser: this.phpParser,
+      blockParser: this.blockParser,
+      normalizer: this.normalizer,
+      dbContent: this.dbContent,
+      planner: this.planner,
+      planReviewer: this.planReviewer,
+      reactGenerator: this.reactGenerator,
+      generatedCodeReview: this.generatedCodeReview,
+      apiBuilder: this.apiBuilder,
+      generatedApiReview: this.generatedApiReview,
+      previewBuilder: this.previewBuilder,
+      visualRouteReview: this.visualRouteReview,
+      validator: this.validator,
+      sourceResolver: this.sourceResolver,
+      cleanup: this.cleanup,
+      plannerAgentRuntime: this.plannerAgentRuntime,
+      runStep: this.runStep.bind(this),
+      emitStepProgress: this.emitStepProgress.bind(this),
+      logToFile: this.logToFile.bind(this),
+      cloneThemeRepo: this.cloneThemeRepo.bind(this),
+      resolveThemeDir: this.resolveThemeDir.bind(this),
+      recordRepoAnalysis: this.recordRepoAnalysis.bind(this),
+      enrichThemeWithPluginTemplates:
+        this.enrichThemeWithPluginTemplates.bind(this),
+      parseTsBuildErrors: this.parseTsBuildErrors.bind(this),
+      delayBetweenSteps: this.delayBetweenSteps.bind(this),
+      emitCompletion: this.emitCompletion.bind(this),
+      completeProgress: this.completeProgress.bind(this),
+      scheduleProgressCleanup: this.scheduleProgressCleanup.bind(this),
+      getStepMeta: this.getStepMeta.bind(this),
+      getProgressStream: (nextJobId: string) => this.progress.get(nextJobId),
+    };
+  }
+
+  private delayBetweenSteps(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  private emitCompletion(
+    state: PipelineStatus,
+    payload: CompletionEventPayload,
+  ): void {
+    const subject = this.progress.get(state.jobId);
+    subject?.next({
+      step: '11_done',
+      label: STEP_META['11_done'].label,
+      status: 'done',
+      percent: 100,
+      message: `Migration workflow is complete. Preview is ready. (${payload.totalElapsed}s)`,
+      data: {
+        previewUrl: payload.previewUrl,
+        metrics: payload.metrics as any,
+      },
+    });
+  }
+
+  private completeProgress(jobId: string): void {
+    this.progress.get(jobId)?.complete();
+  }
+
+  private scheduleProgressCleanup(jobId: string): void {
+    setTimeout(() => this.progress.delete(jobId), 60_000);
   }
 
   private async resolveThemeDir(

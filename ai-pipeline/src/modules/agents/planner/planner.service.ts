@@ -13,6 +13,7 @@ import {
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
+import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -512,6 +513,22 @@ export class PlannerService {
         artifactRoot ?? null,
         visualReferenceCache,
       );
+      // Deterministically parse the WordPress block tree to get an ordered
+      // draft of sections. This is injected into the prompt as a hard-ordered
+      // skeleton so AI only needs to fill in content, not infer layout order.
+      const draftSections = (() => {
+        if (componentPlan.type !== 'page') return undefined;
+        try {
+          const rawMarkup = templateSource;
+          if (!rawMarkup) return undefined;
+          const nodes = wpBlocksToJson(rawMarkup);
+          const draft = mapWpNodesToDraftSections(nodes);
+          return draft.length > 0 ? draft : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+
       const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
         componentName: componentPlan.componentName,
         templateSource: planningSource.source,
@@ -530,6 +547,7 @@ export class PlannerService {
               viewport: visualReference.viewport,
             }
           : undefined,
+        draftSections,
       });
       const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';

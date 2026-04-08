@@ -120,6 +120,8 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       tokens.fontSizes.length === 0 &&
       tokens.colors.length === 0 &&
       tokens.spacing.length === 0 &&
+      (tokens.gradients?.length ?? 0) === 0 &&
+      (tokens.shadows?.length ?? 0) === 0 &&
       !tokens.defaults)
   )
     return '';
@@ -153,6 +155,18 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     if (d.lineHeight)
       lines.push(
         `- Default line height: use \`style={{lineHeight:"${d.lineHeight}"}}\` on root wrapper`,
+      );
+    if (d.letterSpacing)
+      lines.push(
+        `- Default letter spacing: use \`style={{letterSpacing:"${d.letterSpacing}"}}\` on root wrapper`,
+      );
+    if (d.textTransform)
+      lines.push(
+        `- Default text transform: \`${d.textTransform}\` on body text`,
+      );
+    if (d.buttonBoxShadow)
+      lines.push(
+        `- Button box shadow: use \`style={{boxShadow:"${d.buttonBoxShadow}"}}\` on buttons`,
       );
     if (d.contentWidth)
       lines.push(
@@ -227,6 +241,22 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     }
   }
 
+  if (tokens.gradients && tokens.gradients.length > 0) {
+    lines.push(
+      '**Gradients** — use `style={{background:"<value>"}}` for gradient backgrounds:',
+    );
+    for (const g of tokens.gradients) {
+      lines.push(`- slug \`${g.slug}\` → \`${g.value}\``);
+    }
+  }
+
+  if (tokens.shadows && tokens.shadows.length > 0) {
+    lines.push('**Shadows** — use `style={{boxShadow:"<value>"}}`:');
+    for (const s of tokens.shadows) {
+      lines.push(`- slug \`${s.slug}\` → \`${s.value}\``);
+    }
+  }
+
   if (tokens.spacing.length > 0) {
     lines.push(
       '**Spacing** — when template uses `var:preset|spacing|N` or `var(--wp--preset--spacing--N)`, use Tailwind arbitrary value `p-[size]` / `py-[size]` / `px-[size]` / `gap-[size]`:',
@@ -257,6 +287,10 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
         parts.push(`tracking \`tracking-[${style.typography.letterSpacing}]\``);
       if (style.typography?.lineHeight)
         parts.push(`leading \`leading-[${style.typography.lineHeight}]\``);
+      if (style.typography?.textTransform)
+        parts.push(`text-transform \`${style.typography.textTransform}\``);
+      if (style.shadow)
+        parts.push(`box-shadow \`style={{boxShadow:"${style.shadow}"}}\``);
       if (style.border?.radius)
         parts.push(`rounded \`rounded-[${style.border.radius}]\``);
       if (style.border?.width)
