@@ -3,14 +3,8 @@ const path = require("path");
 const crypto = require("crypto");
 const axios = require("axios");
 const fse = require("fs-extra");
-const {
-  getTables,
-  getTableRows,
-  dumpFullTable,
-  dumpAllTables,
-  dumpToSql,
-} = require("../services/wpSqlDumpService");
-const { createSiteDatabase } = require("../services/railwayDbService");
+const { getTables, getTableRows, dumpFullTable, dumpAllTables, dumpToSql } = require("../services/wpSqlDumpService");
+const { createSiteDatabase, syncPostToRailway, deletePostFromRailway } = require("../services/railwayDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
 const {
@@ -763,6 +757,52 @@ async function createSiteDb(req, res) {
 }
 
 // -------------------------------------------------------
+// POST /api/wp/notify-content-change
+// Plugin gọi sau save_post / before_delete_post (non-blocking).
+// Backend fetch post data từ plugin rồi REPLACE INTO / DELETE trên Railway.
+// -------------------------------------------------------
+async function notifyContentChange(req, res) {
+  const apiKey = req.headers['x-vibepress-key'];
+  const { siteUrl, postId, action } = req.body ?? {};
+
+  if (!postId || !siteUrl) {
+    return res.status(400).json({ success: false, error: 'siteUrl and postId are required' });
+  }
+
+  const db   = readDb();
+  const site = Object.values(db.wpSites ?? {}).find(s => s.siteUrl === siteUrl && s.apiKey === apiKey);
+  if (!site) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  // Trả ngay để plugin không bị block
+  res.status(202).json({ success: true });
+
+  try {
+    if (action === 'delete') {
+      await deletePostFromRailway(site.siteId, postId);
+      console.log(`[ContentSync] deleted postId=${postId} from Railway — siteId=${site.siteId}`);
+      return;
+    }
+
+    // Fetch post data từ plugin endpoint
+    const response = await axios.get(
+      `${siteUrl}/wp-json/vibepress/v1/post-data`,
+      {
+        params:  { post_id: postId },
+        headers: { 'X-Vibepress-Key': site.apiKey },
+        timeout: 15000,
+      }
+    );
+
+    await syncPostToRailway(site.siteId, response.data);
+    console.log(`[ContentSync] synced postId=${postId} to Railway — siteId=${site.siteId}`);
+  } catch (e) {
+    console.error(`[ContentSync] FAILED postId=${postId} siteId=${site.siteId}:`, e.message);
+  }
+}
+
+// -------------------------------------------------------
 // GET /api/wp/commits?repoUrl=https://github.com/owner/repo
 // Trả về lịch sử commit của repo từ GitHub API
 // -------------------------------------------------------
@@ -923,6 +963,42 @@ async function getWpAuthCookie(siteUrl, apiKey) {
   }
 }
 
+// -------------------------------------------------------
+// GET /api/wp/proxy-asset?url=<full-url>
+// Proxy bất kỳ static asset (font, CSS, JS, image) từ WP với CORS headers.
+// Frontend dùng: /api/wp/proxy-asset?url=http://localhost:8000/wp-content/...
+// -------------------------------------------------------
+async function proxyWpAsset(req, res) {
+  const { url } = req.query;
+  if (!url) {
+    return res.status(400).json({ success: false, error: "url is required" });
+  }
+
+  try {
+    new URL(url); // validate
+  } catch {
+    return res.status(400).json({ success: false, error: "invalid url" });
+  }
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 15000,
+      responseType: "arraybuffer",
+      maxRedirects: 5,
+    });
+
+    const contentType = response.headers["content-type"] || "application/octet-stream";
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Content-Type", contentType);
+    return res.status(200).send(Buffer.from(response.data));
+  } catch (e) {
+    const status = e.response?.status || 502;
+    return res.status(status).json({ success: false, error: e.message });
+  }
+}
+
 async function proxyWpPage(req, res) {
   const { url } = req.query;
 
@@ -984,6 +1060,8 @@ module.exports = {
   getCommitsByRepo,
   getWpSitePages,
   proxyWpPage,
+  proxyWpAsset,
+  notifyContentChange,
   getDBinfoBySiteId,
   getSqlDumpTables,
   getSqlDumpRows,

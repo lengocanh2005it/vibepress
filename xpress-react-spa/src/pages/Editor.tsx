@@ -318,7 +318,7 @@ const Editor: React.FC = () => {
           <div className="w-full h-full relative">
             {selectedPageUrl ? (
               <iframe
-                src={`${import.meta.env.VITE_BACKEND_URL}/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`}
+                src={`/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`}
                 className="w-full h-full border-none"
                 title="Site Preview"
               />

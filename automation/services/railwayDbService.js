@@ -82,4 +82,64 @@ async function dropSiteDatabase(siteId) {
   }
 }
 
-module.exports = { createSiteDatabase, dropSiteDatabase };
+/**
+ * Sync incremental data cho 1 post vào Railway DB.
+ * Nhận data từ plugin endpoint /wp-json/vibepress/v1/post-data
+ * rồi REPLACE INTO các bảng wp_posts, wp_postmeta, wp_term_relationships.
+ *
+ * @param {string} siteId
+ * @param {{ posts, postmeta, term_relationships }} postData
+ */
+async function syncPostToRailway(siteId, postData) {
+  const dbName = `site_${siteId.replace(/-/g, '_')}`;
+  const conn   = await getConnection();
+
+  try {
+    await conn.query(`USE \`${dbName}\`;`);
+    await conn.query(`SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION';`);
+    await conn.query('SET FOREIGN_KEY_CHECKS=0;');
+
+    // Helper: REPLACE INTO từ array of row objects
+    async function replaceRows(table, rows) {
+      if (!rows || rows.length === 0) return;
+      for (const row of rows) {
+        const cols   = Object.keys(row).map(c => `\`${c}\``).join(', ');
+        const placeholders = Object.keys(row).map(() => '?').join(', ');
+        const vals   = Object.values(row);
+        await conn.query(`REPLACE INTO \`${table}\` (${cols}) VALUES (${placeholders})`, vals);
+      }
+    }
+
+    await replaceRows('wp_posts',              postData.posts);
+    await replaceRows('wp_postmeta',           postData.postmeta);
+    await replaceRows('wp_term_relationships', postData.term_relationships);
+
+    await conn.query('SET FOREIGN_KEY_CHECKS=1;');
+  } finally {
+    await conn.end();
+  }
+}
+
+/**
+ * Xóa 1 post và toàn bộ meta/term_relationships khỏi Railway DB.
+ *
+ * @param {string} siteId
+ * @param {number} postId
+ */
+async function deletePostFromRailway(siteId, postId) {
+  const dbName = `site_${siteId.replace(/-/g, '_')}`;
+  const conn   = await getConnection();
+
+  try {
+    await conn.query(`USE \`${dbName}\`;`);
+    await conn.query('SET FOREIGN_KEY_CHECKS=0;');
+    await conn.query('DELETE FROM `wp_posts` WHERE ID = ?',              [postId]);
+    await conn.query('DELETE FROM `wp_postmeta` WHERE post_id = ?',      [postId]);
+    await conn.query('DELETE FROM `wp_term_relationships` WHERE object_id = ?', [postId]);
+    await conn.query('SET FOREIGN_KEY_CHECKS=1;');
+  } finally {
+    await conn.end();
+  }
+}
+
+module.exports = { createSiteDatabase, dropSiteDatabase, syncPostToRailway, deletePostFromRailway };
