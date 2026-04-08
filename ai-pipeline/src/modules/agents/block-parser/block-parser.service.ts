@@ -15,6 +15,9 @@ export interface ThemeDefaults {
   fontFamily?: string;
   headingFontFamily?: string;
   lineHeight?: string;
+  letterSpacing?: string;
+  textTransform?: string;
+  buttonBoxShadow?: string;
   contentWidth?: string;
   wideWidth?: string;
   buttonBorderRadius?: string;
@@ -39,6 +42,7 @@ export interface ThemeBlockStyle {
     fontWeight?: string;
     letterSpacing?: string;
     lineHeight?: string;
+    textTransform?: string;
   };
   border?: {
     radius?: string;
@@ -47,10 +51,13 @@ export interface ThemeBlockStyle {
     color?: string;
   };
   spacing?: { padding?: string; margin?: string; gap?: string };
+  shadow?: string;
 }
 
 export interface ThemeTokens {
   colors: { slug: string; value: string }[];
+  gradients?: { slug: string; value: string }[];
+  shadows?: { slug: string; value: string }[];
   fonts: { slug: string; family: string; name: string }[];
   fontSizes: { slug: string; size: string }[];
   spacing: { slug: string; size: string }[];
@@ -210,6 +217,14 @@ export class BlockParserService {
       (c: any) => ({ slug: c.slug, value: c.color }),
     );
 
+    const gradients: NonNullable<ThemeTokens['gradients']> = (
+      settings.color?.gradients ?? []
+    ).map((g: any) => ({ slug: g.slug, value: g.gradient }));
+
+    const shadows: NonNullable<ThemeTokens['shadows']> = (
+      settings.shadow?.presets ?? []
+    ).map((s: any) => ({ slug: s.slug, value: s.shadow }));
+
     const fonts: ThemeTokens['fonts'] = (
       settings.typography?.fontFamilies ?? []
     ).map((f: any) => ({ slug: f.slug, family: f.fontFamily, name: f.name }));
@@ -239,6 +254,8 @@ export class BlockParserService {
     // theme.json.
     const cssTokens = extractStyleCssTokens(styleCss, {
       colors,
+      gradients,
+      shadows,
       fonts,
       fontSizes,
       spacing,
@@ -246,6 +263,8 @@ export class BlockParserService {
 
     return {
       colors: this.mergeBySlug(colors, cssTokens.colors),
+      gradients: this.mergeBySlug(gradients, cssTokens.gradients ?? []),
+      shadows: this.mergeBySlug(shadows, cssTokens.shadows ?? []),
       fonts: this.mergeBySlug(fonts, cssTokens.fonts),
       fontSizes: this.mergeBySlug(fontSizes, cssTokens.fontSizes),
       spacing: this.mergeBySlug(spacing, cssTokens.spacing),
@@ -367,6 +386,12 @@ export class BlockParserService {
       fonts,
     );
     const lineHeight = styles.typography?.lineHeight as string | undefined;
+    const letterSpacing = styles.typography?.letterSpacing as
+      | string
+      | undefined;
+    const textTransform = styles.typography?.textTransform as
+      | string
+      | undefined;
     const blockGap = resolveSp(styles.spacing?.blockGap);
     const contentWidth = settings.layout?.contentSize as string | undefined;
     const wideWidth = settings.layout?.wideSize as string | undefined;
@@ -441,6 +466,8 @@ export class BlockParserService {
       !fontFamily &&
       !headingFontFamily &&
       !lineHeight &&
+      !letterSpacing &&
+      !textTransform &&
       !contentWidth &&
       !wideWidth &&
       !buttonBorderRadius &&
@@ -464,6 +491,8 @@ export class BlockParserService {
       ...(headingFontFamily &&
         headingFontFamily !== fontFamily && { headingFontFamily }),
       ...(lineHeight && { lineHeight }),
+      ...(letterSpacing && { letterSpacing }),
+      ...(textTransform && { textTransform }),
       ...(contentWidth && { contentWidth }),
       ...(wideWidth && { wideWidth }),
       ...(buttonBorderRadius && { buttonBorderRadius }),
@@ -509,13 +538,24 @@ export class BlockParserService {
         | string
         | undefined;
       const lineHeight = style.typography?.lineHeight as string | undefined;
-      if (fontSize || fontFamily || fontWeight || letterSpacing || lineHeight)
+      const textTransform = style.typography?.textTransform as
+        | string
+        | undefined;
+      if (
+        fontSize ||
+        fontFamily ||
+        fontWeight ||
+        letterSpacing ||
+        lineHeight ||
+        textTransform
+      )
         resolved.typography = {
           ...(fontSize && { fontSize }),
           ...(fontFamily && { fontFamily }),
           ...(fontWeight && { fontWeight }),
           ...(letterSpacing && { letterSpacing }),
           ...(lineHeight && { lineHeight }),
+          ...(textTransform && { textTransform }),
         };
 
       const borderRadius = this.normalizeSpacingShorthand(
