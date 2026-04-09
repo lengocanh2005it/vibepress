@@ -29,6 +29,7 @@ import type { PreviewBuilderResult } from '../agents/preview-builder/preview-bui
 import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type {
@@ -207,6 +208,11 @@ interface JobRuntimeControl {
   preview?: PreviewBuilderResult;
 }
 
+interface PendingPipelineRun {
+  siteId: string;
+  editRequest?: PipelineEditRequestDto;
+}
+
 class PipelineControlError extends Error {
   constructor(
     public readonly kind: 'stopped' | 'deleted',
@@ -252,18 +258,6 @@ export class OrchestratorService {
     siteId: string,
     editRequest?: PipelineEditRequestDto,
   ): Promise<{ jobId: string }> {
-    const response = await lastValueFrom(
-      this.httpService.get(
-        `${this.configService.get<string>('automation.url', '')}/wp/db-info-by-site?siteId=${siteId}`,
-      ),
-    );
-
-    const dto: RunPipelineDto = editRequest
-      ? { ...response.data, editRequest }
-      : response.data;
-
-    this.validateDto(dto);
-
     const jobId = uuidv4();
     const state: PipelineStatus = {
       jobId,
@@ -300,25 +294,27 @@ export class OrchestratorService {
       finalized: false,
     });
 
-    this.executePipelineLegacy(jobId, dto, state).catch((err) => {
-      if (err instanceof PipelineControlError) {
-        void this.finalizeControlledTermination(jobId, state, err);
-        return;
-      }
+    this.executePipelineLegacy(jobId, { siteId, editRequest }, state).catch(
+      (err) => {
+        if (err instanceof PipelineControlError) {
+          void this.finalizeControlledTermination(jobId, state, err);
+          return;
+        }
 
-      state.status = 'error';
-      state.error = err.message;
-      const subject = this.progress.get(jobId);
-      subject?.next({
-        step: 'error',
-        label: 'Pipeline Error',
-        status: 'error',
-        percent: 0,
-        message: `AI workflow stopped because of an error: ${err.message}`,
-      });
-      subject?.complete();
-      this.logger.error(`Pipeline ${jobId} failed:`, err);
-    });
+        state.status = 'error';
+        state.error = err.message;
+        const subject = this.progress.get(jobId);
+        subject?.next({
+          step: 'error',
+          label: 'Pipeline Error',
+          status: 'error',
+          percent: 0,
+          message: `AI workflow stopped because of an error: ${err.message}`,
+        });
+        subject?.complete();
+        this.logger.error(`Pipeline ${jobId} failed:`, err);
+      },
+    );
 
     return { jobId };
   }
@@ -579,7 +575,7 @@ export class OrchestratorService {
 
   private async executePipelineLegacy(
     jobId: string,
-    dto: RunPipelineDto,
+    input: PendingPipelineRun,
     state: PipelineStatus,
   ): Promise<void> {
     // ── Init log file ─────────────────────────────────────────────────────
@@ -639,11 +635,6 @@ export class OrchestratorService {
           `fixAgent="${resolvedModels.fixAgent ?? 'default'}"`,
       );
 
-      const { dbConnectionString, themeGithubUrl } = dto;
-      const dbCreds = this.toWpDbCredentials(dbConnectionString);
-
-      await this.sqlService.verifyDirectCredentials(dbConnectionString);
-
       const themeGithubToken = this.configService.get<string>(
         'github.wpRepoToken',
         '',
@@ -655,7 +646,7 @@ export class OrchestratorService {
       // ── Pipeline steps ────────────────────────────────────────────────────
 
       // Bước 1: Clone repo (nếu có GitHub URL) và phân tích cấu trúc theme
-      const repoResult = await this.runStep(
+      const repoBootstrap = await this.runStep(
         state,
         '1_repo_analyzer',
         logPath,
@@ -663,8 +654,80 @@ export class OrchestratorService {
           this.emitStepProgress(
             state,
             '1_repo_analyzer',
-            0.1,
-            'Resolving the theme source input and preparing repository analysis.',
+            0.05,
+            'Resolving site bootstrap data from the automation service.',
+          );
+          const dto = await this.retryWithBackoff({
+            jobId,
+            label: 'automation bootstrap fetch',
+            attempts: 3,
+            initialDelayMs: 1_000,
+            fn: async () => {
+              const response = await lastValueFrom(
+                this.httpService.get(
+                  `${this.configService.get<string>('automation.url', '')}/wp/db-info-by-site?siteId=${input.siteId}`,
+                ),
+              );
+
+              return input.editRequest
+                ? { ...response.data, editRequest: input.editRequest }
+                : response.data;
+            },
+            onRetry: async (attempt, err) => {
+              const message = this.describeError(err);
+              this.logger.warn(
+                `[Stage 1: Bootstrap] Automation bootstrap fetch failed (attempt ${attempt}/3): ${message}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 1: Bootstrap] Automation bootstrap fetch failed (attempt ${attempt}/3): ${message}`,
+              );
+              this.emitStepProgress(
+                state,
+                '1_repo_analyzer',
+                0.08,
+                `Automation bootstrap retry ${attempt}/3 after error: ${message}`,
+              );
+            },
+          });
+          this.validateDto(dto);
+          const dbCreds = this.toWpDbCredentials(dto.dbConnectionString);
+
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.18,
+            'Verifying direct WordPress database connectivity before repository analysis.',
+          );
+          await this.retryWithBackoff({
+            jobId,
+            label: 'database credential verification',
+            attempts: 3,
+            initialDelayMs: 1_000,
+            fn: () => this.sqlService.verifyDirectCredentials(dto.dbConnectionString),
+            onRetry: async (attempt, err) => {
+              const message = this.describeError(err);
+              this.logger.warn(
+                `[Stage 1: Bootstrap] Database verification failed (attempt ${attempt}/3): ${message}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 1: Bootstrap] Database verification failed (attempt ${attempt}/3): ${message}`,
+              );
+              this.emitStepProgress(
+                state,
+                '1_repo_analyzer',
+                0.24,
+                `Database verification retry ${attempt}/3 after error: ${message}`,
+              );
+            },
+          });
+
+          this.emitStepProgress(
+            state,
+            '1_repo_analyzer',
+            0.3,
+            'Bootstrap data is ready. Preparing repository analysis.',
           );
 
           this.emitStepProgress(
@@ -673,11 +736,29 @@ export class OrchestratorService {
             0.35,
             'Cloning the WordPress theme repository from GitHub.',
           );
-          const repoRoot = await this.cloneThemeRepo(
-            themeGithubUrl,
-            themeGithubToken,
+          const repoRoot = await this.retryWithBackoff({
             jobId,
-          );
+            label: 'theme repository clone',
+            attempts: 3,
+            initialDelayMs: 1_500,
+            fn: () => this.cloneThemeRepo(dto.themeGithubUrl, themeGithubToken, jobId),
+            onRetry: async (attempt, err) => {
+              const message = this.describeError(err);
+              this.logger.warn(
+                `[Stage 1: Repository] Theme clone failed (attempt ${attempt}/3): ${message}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 1: Repository] Theme clone failed (attempt ${attempt}/3): ${message}`,
+              );
+              this.emitStepProgress(
+                state,
+                '1_repo_analyzer',
+                0.42,
+                `Repository clone retry ${attempt}/3 after error: ${message}`,
+              );
+            },
+          });
           this.emitStepProgress(
             state,
             '1_repo_analyzer',
@@ -686,7 +767,7 @@ export class OrchestratorService {
           );
           const resolvedDir = await this.resolveThemeDir(
             repoRoot,
-            dbConnectionString,
+            dto.dbConnectionString,
           );
 
           this.emitStepProgress(
@@ -697,9 +778,17 @@ export class OrchestratorService {
           );
           const repoAnalysis = await this.repoAnalyzer.analyze(resolvedDir);
           await this.recordRepoAnalysis(jobLogDir, logPath, repoAnalysis);
-          return repoAnalysis;
+          return {
+            dto,
+            dbCreds,
+            repoResult: repoAnalysis,
+          };
         },
       );
+      const dto = repoBootstrap.dto;
+      const dbCreds = repoBootstrap.dbCreds;
+      const repoResult = repoBootstrap.repoResult;
+      const { dbConnectionString } = dto;
       const themeDir = repoResult.themeDir;
       await stepDelay();
 
@@ -760,7 +849,7 @@ export class OrchestratorService {
 
       // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
       // B1: Content Graph Builder — posts, pages, menus, categories, tags, custom taxonomies
-      const content = await this.runStep(
+      const contentGraph = await this.runStep(
         state,
         '4_content_graph',
         logPath,
@@ -775,29 +864,39 @@ export class OrchestratorService {
           this.emitStepProgress(
             state,
             '4_content_graph',
-            0.75,
+            0.55,
             'Combining runtime capabilities, plugin discovery, and extracted content into one content graph.',
           );
-          return result;
+          const resolvedSource = await this.sourceResolver.resolve({
+            manifest: repoResult.themeManifest,
+            dbConnectionString,
+            content: result,
+          });
+          repoResult.themeManifest.resolvedSource = resolvedSource;
+          await this.recordRepoAnalysis(jobLogDir, logPath, repoResult);
+          this.emitStepProgress(
+            state,
+            '4_content_graph',
+            0.8,
+            'Merging resolved plugin/theme source information back into the normalized theme.',
+          );
+          const enrichResult = await this.enrichThemeWithPluginTemplates({
+            theme: normalizedTheme,
+            themeDir,
+            manifest: repoResult.themeManifest,
+            resolvedSource,
+            logPath,
+          });
+          return {
+            content: result,
+            resolvedSource,
+            normalizedTheme: enrichResult.theme,
+          };
         },
       );
+      const content = contentGraph.content;
+      normalizedTheme = contentGraph.normalizedTheme;
       await stepDelay();
-
-      const resolvedSource = await this.sourceResolver.resolve({
-        manifest: repoResult.themeManifest,
-        dbConnectionString,
-        content,
-      });
-      repoResult.themeManifest.resolvedSource = resolvedSource;
-      await this.recordRepoAnalysis(jobLogDir, logPath, repoResult);
-      const enrichResult = await this.enrichThemeWithPluginTemplates({
-        theme: normalizedTheme,
-        themeDir,
-        manifest: repoResult.themeManifest,
-        resolvedSource,
-        logPath,
-      });
-      normalizedTheme = enrichResult.theme;
 
       // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
       // All 4 phases + plan review + retry loop are ONE atomic step.
@@ -1428,14 +1527,17 @@ export class OrchestratorService {
             }
           }
 
+          const candidateComponents = this.cloneGeneratedComponents(
+            buildComponents,
+          );
           let fixedCount = 0;
           for (const [componentName, feedbacks] of feedbackByComponent) {
-            const idx = buildComponents.findIndex(
+            const idx = candidateComponents.findIndex(
               (c) => c.name === componentName,
             );
             if (idx === -1) continue;
-            buildComponents[idx] = await this.reactGenerator.fixComponent({
-              component: buildComponents[idx],
+            candidateComponents[idx] = await this.reactGenerator.fixComponent({
+              component: candidateComponents[idx],
               plan: reviewResult.plan,
               feedback: `Visual review feedback:\n${feedbacks.join('\n\n')}`,
               modelConfig: { fixAgent: resolvedModels.fixAgent },
@@ -1452,14 +1554,42 @@ export class OrchestratorService {
             break;
           }
 
-          await this.previewBuilder.syncGeneratedComponents(
-            preview.previewDir,
-            buildComponents,
-          );
-          await this.validator.assertPreviewBuild(preview.frontendDir);
-          await this.validator.assertPreviewRuntime(preview.previewUrl, [
-            ...routesToSmoke,
-          ]);
+          try {
+            await this.previewBuilder.syncGeneratedComponents(
+              preview.previewDir,
+              candidateComponents,
+            );
+            await this.validator.assertPreviewBuild(preview.frontendDir);
+            await this.validator.assertPreviewRuntime(preview.previewUrl, [
+              ...routesToSmoke,
+            ]);
+            buildComponents = candidateComponents;
+          } catch (err: any) {
+            const message = this.describeError(err);
+            this.logger.warn(
+              `[Stage 9] Visual route review round ${round} produced invalid code. Rolling back candidate fixes. Error: ${message}`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 9] Visual route review round ${round} rollback: ${message}`,
+            );
+            try {
+              await this.previewBuilder.syncGeneratedComponents(
+                preview.previewDir,
+                buildComponents,
+              );
+            } catch (rollbackErr: any) {
+              const rollbackMessage = this.describeError(rollbackErr);
+              this.logger.warn(
+                `[Stage 9] Rollback sync failed after visual review error: ${rollbackMessage}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 9] Rollback sync failed after visual review error: ${rollbackMessage}`,
+              );
+            }
+            break;
+          }
         }
 
         this.emitStepProgress(
@@ -1497,7 +1627,7 @@ export class OrchestratorService {
       await stepDelay();
 
       // Bước 8: Xoá temp/repos và temp/uploads của job này
-      await this.runStep(state, '10_cleanup', logPath, () =>
+      await this.runNonBlockingStep(state, '10_cleanup', logPath, () =>
         this.cleanup.cleanup(jobId),
       );
       await stepDelay();
@@ -1734,6 +1864,128 @@ export class OrchestratorService {
         `Step ${name} ERROR (${elapsed}s): ${err.message}`,
       );
       throw err;
+    }
+  }
+
+  private async runNonBlockingStep<T>(
+    state: PipelineStatus,
+    name: string,
+    logPath: string,
+    fn: () => Promise<T>,
+  ): Promise<T | undefined> {
+    this.assertJobActive(state.jobId);
+
+    const step = state.steps.find((s) => s.name === name)!;
+    const meta = this.getStepMeta(name);
+    const subject = this.progress.get(state.jobId);
+    const t0 = Date.now();
+
+    step.status = 'running';
+    subject?.next({
+      step: name,
+      label: meta.label,
+      status: 'running',
+      percent: this.calcPercentBefore(name),
+      message: meta.activeMessage,
+    });
+
+    try {
+      const result = await fn();
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      step.status = 'done';
+      subject?.next({
+        step: name,
+        label: meta.label,
+        status: 'done',
+        percent: this.calcPercentThrough(name),
+        message: `${meta.doneMessage} (${elapsed}s)`,
+      });
+      await this.logToFile(logPath, `Step ${name} done (${elapsed}s)`);
+      return result;
+    } catch (err: any) {
+      if (err instanceof PipelineControlError) {
+        throw err;
+      }
+
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      const message = this.describeError(err);
+      step.status = 'done';
+      step.error = message;
+      subject?.next({
+        step: name,
+        label: meta.label,
+        status: 'done',
+        percent: this.calcPercentThrough(name),
+        message: `${meta.label} completed with warning: ${message}`,
+      });
+      this.logger.warn(
+        `[${state.jobId}] Step ${name} warning (${elapsed}s): ${message}`,
+      );
+      await this.logToFile(
+        logPath,
+        `Step ${name} WARNING (${elapsed}s): ${message}`,
+      );
+      return undefined;
+    }
+  }
+
+  private async retryWithBackoff<T>(input: {
+    jobId: string;
+    label: string;
+    attempts: number;
+    fn: () => Promise<T>;
+    initialDelayMs?: number;
+    onRetry?: (attempt: number, err: unknown) => Promise<void> | void;
+  }): Promise<T> {
+    const {
+      jobId,
+      label,
+      attempts,
+      fn,
+      initialDelayMs = 1_000,
+      onRetry,
+    } = input;
+
+    let delayMs = initialDelayMs;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      this.assertJobActive(jobId);
+      try {
+        return await fn();
+      } catch (err) {
+        if (err instanceof PipelineControlError) {
+          throw err;
+        }
+        lastError = err;
+        if (attempt >= attempts) break;
+        await onRetry?.(attempt, err);
+        await this.delayWithControl(jobId, delayMs);
+        delayMs *= 2;
+      }
+    }
+
+    throw (
+      lastError ??
+      new Error(`${label} failed after ${attempts} attempt(s)`)
+    );
+  }
+
+  private cloneGeneratedComponents(
+    components: GeneratedComponent[],
+  ): GeneratedComponent[] {
+    return components.map((component) => ({
+      ...component,
+      dataNeeds: component.dataNeeds ? [...component.dataNeeds] : undefined,
+    }));
+  }
+
+  private describeError(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
     }
   }
 
