@@ -215,8 +215,6 @@ function parseBlocks(markup: string): WpNode[] {
     remaining = remaining.slice(fullMatch.length);
 
     if (selfClosing) {
-      // Skip site-logo — not renderable without WP media; site-title already shows the name
-      if (blockName === 'site-logo') continue;
       // navigation-link: lift label/url to semantic fields so AI can use them as static links
       if (blockName === 'navigation-link' && params?.label) {
         nodes.push(
