@@ -665,9 +665,7 @@ ${renders}
     const needs = new Set(componentPlan?.dataNeeds ?? []);
     const visit = (node: WpNode) => {
       const block = node.block.replace(/^core\//, '');
-      if (
-        ['site-title', 'site-tagline', 'site-logo'].includes(block)
-      ) {
+      if (['site-title', 'site-tagline', 'site-logo'].includes(block)) {
         needs.add('siteInfo');
       }
       if (block === 'navigation') {

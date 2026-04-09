@@ -63,6 +63,35 @@ function slugify(input) {
     .slice(0, 30);
 }
 
+function buildReachableUrlCandidates(rawUrl) {
+  const candidates = [];
+  if (!rawUrl) return candidates;
+  candidates.push(rawUrl);
+
+  const rewritten = rawUrl.replace(
+    /http(s?):\/\/(localhost|127\.0\.0\.1)/,
+    (_, scheme) => `http${scheme}://host.docker.internal`,
+  );
+
+  if (rewritten !== rawUrl) candidates.push(rewritten);
+  return [...new Set(candidates)];
+}
+
+async function axiosGetWithFallback(rawUrl, config = {}) {
+  const candidates = buildReachableUrlCandidates(rawUrl);
+  let lastError;
+
+  for (const candidate of candidates) {
+    try {
+      return await axios.get(candidate, config);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError;
+}
+
 function assertGithubConfigured() {
   if (!GITHUB_TOKEN) {
     throw new Error("Missing GITHUB_TOKEN in environment variables");
@@ -839,14 +868,10 @@ async function getWpSitePages(req, res) {
       .json({ success: false, error: "siteUrl query param is required" });
   }
 
-  // Inside Docker, 'localhost' refers to the container itself.
-  // Replace with host.docker.internal so the request reaches the host machine.
-  const resolvedUrl = siteUrl.replace(/http(s?):\/\/(localhost|127\.0\.0\.1)/, (_, s, _host) => `http${s}://host.docker.internal`);
-
   try {
-    const response = await axios.get(`${resolvedUrl}/wp-json/wp/v2/pages`, {
+    const response = await axiosGetWithFallback(`${siteUrl}/wp-json/wp/v2/pages`, {
       params: { per_page: 100, _fields: "id,title,link,slug,status" },
-      timeout: 10000,
+      timeout: 15000,
     });
 
     // Normalize page links to use the same origin as siteUrl.
@@ -898,9 +923,9 @@ async function getWpAuthCookie(siteUrl, apiKey) {
     return cached.cookie;
 
   try {
-    const res = await axios.get(`${siteUrl}/wp-json/vibepress/v1/auth-cookie`, {
+    const res = await axiosGetWithFallback(`${siteUrl}/wp-json/vibepress/v1/auth-cookie`, {
       headers: { "X-Vibepress-Key": apiKey },
-      timeout: 10000,
+      timeout: 15000,
     });
 
     const { cookieName, cookieValue, expiresAt } = res.data;
@@ -936,8 +961,7 @@ async function proxyWpAsset(req, res) {
   }
 
   try {
-    const internalUrl = url.replace(/http(s?):\/\/(localhost|127\.0\.0\.1)/, (_, s) => `http${s}://host.docker.internal`);
-    const response = await axios.get(internalUrl, {
+    const response = await axiosGetWithFallback(url, {
       timeout: 15000,
       responseType: "arraybuffer",
       maxRedirects: 5,
@@ -969,15 +993,14 @@ async function proxyWpPage(req, res) {
 
     // Lấy auth cookie từ plugin Vibepress — plugin tự sinh, không cần password.
     // Giúp WooCommerce pages (Tài khoản, Thanh toán…) render đúng nội dung.
-    const site = findSiteBySiteUrl(targetUrl.origin);
+    const site = await findSiteBySiteUrl(targetUrl.origin);
     const extraHeaders = {};
     if (site?.apiKey) {
       const authCookie = await getWpAuthCookie(targetUrl.origin, site.apiKey);
       if (authCookie) extraHeaders["Cookie"] = authCookie;
     }
 
-    const internalUrl = url.replace(/http(s?):\/\/(localhost|127\.0\.0\.1)/, (_, s) => `http${s}://host.docker.internal`);
-    const response = await axios.get(internalUrl, {
+    const response = await axiosGetWithFallback(url, {
       timeout: 15000,
       responseType: "text",
       maxRedirects: 5,
