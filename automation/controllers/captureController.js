@@ -25,11 +25,8 @@ async function captureRegion(req, res) {
 
   const filename = `capture-${Date.now()}.png`;
   const filePath = path.join(CAPTURES_DIR, filename);
-  const requestHost = req.get('host');
-  const baseUrl = `${req.protocol}://${requestHost}`;
-  const targetUrl = proxyUrl
-    ? new URL(proxyUrl, baseUrl).toString()
-    : pageUrl;
+  // Playwright chạy trên server nên truy cập thẳng WordPress, không cần qua proxy
+  const targetUrl = pageUrl;
   const viewportWidth = Math.max(
     1,
     Math.round(Number(viewport?.width) || 1280),
