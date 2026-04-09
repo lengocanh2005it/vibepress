@@ -23,7 +23,7 @@ export interface CaptureViewport {
 }
 
 export interface CaptureAssetResponse {
-  provider: string;
+  provider: 'local' | 'cloudinary' | 'imagekit';
   fileName: string;
   originalPath: string;
   url: string;
@@ -35,6 +35,7 @@ export interface CaptureAssetResponse {
   format?: string;
   createdAt?: string;
   fileId?: string;
+  filePath?: string;
 }
 
 export const captureRegion = async (

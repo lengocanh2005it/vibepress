@@ -18,10 +18,38 @@ export interface AiEditRequestPayload {
         id: string;
         note?: string;
         sourcePageUrl?: string;
+        captureContext?: {
+            capturedAt?: string;
+            iframeSrc?: string;
+            viewport?: {
+                width: number;
+                height: number;
+                scrollX?: number;
+                scrollY?: number;
+                dpr?: number;
+            };
+        };
+        selection?: {
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            coordinateSpace?: 'iframe-viewport' | 'iframe-document';
+        };
         asset: {
+            provider: 'local' | 'cloudinary' | 'imagekit';
+            fileName: string;
             publicUrl: string;
             storagePath?: string;
+            originalPath?: string;
             mimeType?: 'image/png' | 'image/jpeg' | 'image/webp';
+            bytes?: number;
+            width?: number;
+            height?: number;
+            createdAt?: string;
+            providerAssetId?: string;
+            providerAssetPath?: string;
+            format?: string;
         };
     }>;
 }
