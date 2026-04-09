@@ -31,6 +31,7 @@ import {
   POST_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
+import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 
 const PADDING_MAP = {
   none: '',
@@ -47,6 +48,21 @@ interface RenderCtx {
   t: TypographyTokens;
   l: LayoutTokens;
   b?: Record<string, BlockStyleToken>;
+}
+
+interface BlockFaithfulPartialInput {
+  componentName: string;
+  nodes: WpNode[];
+  dataNeeds: string[];
+  palette?: ColorPalette;
+  typography?: TypographyTokens;
+  layout?: LayoutTokens;
+  blockStyles?: Record<string, BlockStyleToken>;
+}
+
+interface BlockFaithfulRenderState {
+  navIndex: number;
+  componentKind: 'header' | 'footer';
 }
 
 @Injectable()
@@ -79,6 +95,167 @@ export class CodeGeneratorService {
     return [imports, interfaces, stateAndFetch, body]
       .filter(Boolean)
       .join('\n\n');
+  }
+
+  generateBlockFaithfulPartial(input: BlockFaithfulPartialInput): string {
+    const {
+      componentName,
+      nodes,
+      dataNeeds,
+      palette,
+      typography,
+      layout,
+      blockStyles,
+    } = input;
+    const effectiveDataNeeds = Array.from(new Set(dataNeeds));
+    const needsSiteInfo = effectiveDataNeeds.includes('siteInfo');
+    const needsMenus = effectiveDataNeeds.includes('menus');
+    const ctx: RenderCtx = {
+      p: palette ?? {
+        background: '#ffffff',
+        surface: '#ffffff',
+        text: '#111111',
+        textMuted: '#666666',
+        accent: '#111111',
+        accentText: '#ffffff',
+        dark: '#111111',
+        darkText: '#ffffff',
+      },
+      t: typography ?? {
+        headingFamily: 'inherit',
+        bodyFamily: 'inherit',
+        h1: 'text-[2.5rem] leading-tight',
+        h2: 'text-[2rem] leading-snug',
+        h3: 'text-[1.5rem] leading-snug',
+        body: 'text-[1rem]',
+        small: 'text-sm',
+        buttonRadius: 'rounded-md',
+      },
+      l: layout ?? {
+        containerClass: 'max-w-[1280px] mx-auto w-full',
+        contentContainerClass: 'max-w-[800px] mx-auto w-full',
+        blockGap: 'gap-8',
+        includes: [],
+      },
+      b: blockStyles,
+    };
+    const renderState: BlockFaithfulRenderState = {
+      navIndex: 0,
+      componentKind: /^footer/i.test(componentName) ? 'footer' : 'header',
+    };
+    const rootTag = renderState.componentKind === 'footer' ? 'footer' : 'header';
+    const fragment = this.renderBlockFaithfulNodes(nodes, ctx, renderState, 3);
+    const lines: string[] = [
+      "import React, { useEffect, useState } from 'react';",
+      '',
+      SHARED_INTERFACES,
+      '',
+      `const ${componentName}: React.FC = () => {`,
+    ];
+
+    if (needsSiteInfo) {
+      lines.push(
+        `  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);`,
+      );
+    }
+    if (needsMenus) {
+      lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
+    }
+    if (needsSiteInfo || needsMenus) {
+      lines.push('');
+      lines.push('  useEffect(() => {');
+      lines.push('    (async () => {');
+      if (needsSiteInfo && needsMenus) {
+        lines.push('      const [siteInfoRes, menusRes] = await Promise.all([');
+        lines.push("        fetch('/api/site-info'),");
+        lines.push("        fetch('/api/menus'),");
+        lines.push('      ]);');
+        lines.push('      setSiteInfo(await siteInfoRes.json());');
+        lines.push('      setMenus(await menusRes.json());');
+      } else if (needsSiteInfo) {
+        lines.push("      const siteInfoRes = await fetch('/api/site-info');");
+        lines.push('      setSiteInfo(await siteInfoRes.json());');
+      } else {
+        lines.push("      const menusRes = await fetch('/api/menus');");
+        lines.push('      setMenus(await menusRes.json());');
+      }
+      lines.push('    })();');
+      lines.push('  }, []);');
+    }
+
+    if (needsMenus) {
+      lines.push('');
+      lines.push(
+        '  const navigationMenus = menus.filter((menu) => Array.isArray(menu.items));',
+      );
+      lines.push(
+        '  const resolveNavigationMenu = (index: number) => navigationMenus[index] ?? navigationMenus[0] ?? null;',
+      );
+      lines.push(
+        '  const renderMenuItems = (items: MenuItem[], parentId = 0, vertical = false): React.ReactNode =>',
+      );
+      lines.push('    items');
+      lines.push('      .filter((item) => item.parentId === parentId)');
+      lines.push('      .sort((a, b) => a.order - b.order)');
+      lines.push('      .map((item) => {');
+      lines.push(
+        '        const hasChildren = items.some((child) => child.parentId === item.id);',
+      );
+      lines.push('        return (');
+      lines.push(
+        '          <li key={item.id} className={vertical ? "flex flex-col gap-2" : "relative"}>',
+      );
+      lines.push(
+        '            <a href={toAppPath(item.url)} className="transition-opacity hover:opacity-75">',
+      );
+      lines.push('              {item.title}');
+      lines.push('            </a>');
+      lines.push('            {hasChildren ? (');
+      lines.push(
+        '              <ul className={vertical ? "pl-4 flex flex-col gap-2" : "pl-4 mt-2 flex flex-col gap-2"}>',
+      );
+      lines.push('                {renderMenuItems(items, item.id, true)}');
+      lines.push('              </ul>');
+      lines.push('            ) : null}');
+      lines.push('          </li>');
+      lines.push('        );');
+      lines.push('      });');
+    }
+
+    lines.push('');
+    lines.push('  const toAppPath = (url?: string) => {');
+    lines.push("    if (!url) return '#';");
+    lines.push('    try {');
+    lines.push('      if (!siteInfo?.siteUrl) return url;');
+    lines.push('      const site = new URL(siteInfo.siteUrl);');
+    lines.push('      const resolved = new URL(url, siteInfo.siteUrl);');
+    lines.push('      if (resolved.origin === site.origin) {');
+    lines.push(
+      "        return `${resolved.pathname}${resolved.search}${resolved.hash}` || '/';",
+    );
+    lines.push('      }');
+    lines.push('      return url;');
+    lines.push('    } catch {');
+    lines.push('      return url;');
+    lines.push('    }');
+    lines.push('  };');
+
+    if (needsSiteInfo) {
+      lines.push('');
+      lines.push('  if (!siteInfo) return null;');
+    }
+
+    lines.push('');
+    lines.push('  return (');
+    lines.push(`    <${rootTag} className="w-full">`);
+    if (fragment) lines.push(fragment);
+    lines.push(`    </${rootTag}>`);
+    lines.push('  );');
+    lines.push('};');
+    lines.push('');
+    lines.push(`export default ${componentName};`);
+
+    return lines.join('\n');
   }
 
   /**
@@ -1513,6 +1690,366 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
       padding: section.paddingStyle,
       margin: section.marginStyle,
     };
+  }
+
+  private renderBlockFaithfulNodes(
+    nodes: WpNode[],
+    ctx: RenderCtx,
+    state: BlockFaithfulRenderState,
+    depth: number,
+  ): string {
+    return nodes
+      .map((node) => this.renderBlockFaithfulNode(node, ctx, state, depth))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private renderBlockFaithfulNode(
+    node: WpNode,
+    ctx: RenderCtx,
+    state: BlockFaithfulRenderState,
+    depth: number,
+  ): string {
+    const block = node.block.replace(/^core\//, '');
+    const indent = '  '.repeat(depth);
+    const childIndent = '  '.repeat(depth + 1);
+    const children = node.children?.length
+      ? this.renderBlockFaithfulNodes(node.children, ctx, state, depth + 1)
+      : '';
+
+    if (block === 'template-part') return children;
+
+    switch (block) {
+      case 'group': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'group'),
+          this.buildWpLayoutStyle(node),
+        );
+        return `${indent}<div className="w-full"${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'columns': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'columns', 'group'),
+          this.buildWpColumnsStyle(node),
+        );
+        return `${indent}<div className="w-full min-w-0"${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'column': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'column', 'group'),
+        );
+        return `${indent}<div className="min-w-0"${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'navigation':
+        return this.renderBlockFaithfulNavigation(node, ctx, state, depth);
+      case 'navigation-link': {
+        const href = node.href ?? '#';
+        return `${indent}<a href={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}${node.text ?? href}
+${indent}</a>`;
+      }
+      case 'site-title':
+        return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="font-semibold transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+${childIndent}{siteInfo?.siteName}
+${indent}</a>`;
+      case 'site-tagline':
+        return `${indent}<p className="text-sm"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
+${childIndent}{siteInfo?.blogDescription}
+${indent}</p>`;
+      case 'site-logo': {
+        const width = node.params?.width
+          ? this.normalizeCssLength(String(node.params.width))
+          : undefined;
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'site-logo', 'image'),
+          width ? { width, maxWidth: '100%' } : {},
+        );
+        if (node.src) {
+          return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="inline-flex items-center"${styleAttr}>
+${childIndent}<img src="${node.src}" alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto w-full object-contain" />
+${indent}</a>`;
+        }
+        return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="inline-flex items-center font-semibold transition-opacity hover:opacity-75"${styleAttr}>
+${childIndent}{siteInfo?.siteName}
+${indent}</a>`;
+      }
+      case 'heading': {
+        const level = Math.min(Math.max(node.level ?? 2, 1), 6);
+        const tag = `h${level}`;
+        if (node.html && !node.text) {
+          return `${indent}<${tag}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+        }
+        return `${indent}<${tag}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
+${childIndent}${node.text ?? ''}
+${indent}</${tag}>`;
+      }
+      case 'paragraph': {
+        if (node.html && !node.text) {
+          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+        }
+        return `${indent}<p${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
+${childIndent}${node.text ?? ''}
+${indent}</p>`;
+      }
+      case 'buttons': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'buttons'),
+          {
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: node.gap ?? '0.75rem',
+          },
+        );
+        return `${indent}<div${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'button': {
+        const href = node.href ?? '#';
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'button'),
+        );
+        return `${indent}<a href={toAppPath(${JSON.stringify(href)})} className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+${childIndent}${node.text ?? href}
+${indent}</a>`;
+      }
+      case 'image': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'image', 'gallery'),
+          {
+            width: node.width ? `${node.width}px` : undefined,
+            height: node.height ? `${node.height}px` : undefined,
+          },
+        );
+        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}" className="h-auto max-w-full object-contain"${styleAttr} />`;
+      }
+      case 'search': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'search'),
+          {
+            display: 'flex',
+            alignItems: 'center',
+            gap: node.gap ?? '0.5rem',
+          },
+        );
+        return `${indent}<form role="search"${styleAttr}>
+${childIndent}<input type="search" placeholder="Search..." className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
+${childIndent}<button type="submit" className="border border-black/20 px-4 py-2">Search</button>
+${indent}</form>`;
+      }
+      case 'social-links': {
+        const styleAttr = this.buildWpNodeStyleAttr(
+          node,
+          this.pickBlockStyle(ctx, 'social-links'),
+          {
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: node.gap ?? '0.75rem',
+          },
+        );
+        return `${indent}<div${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'social-link': {
+        const service = String(node.params?.service ?? node.text ?? 'Social');
+        const href = String(node.params?.url ?? node.href ?? '#');
+        return `${indent}<a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+${childIndent}${service}
+${indent}</a>`;
+      }
+      case 'separator':
+        return `${indent}<hr className="w-full border-0 border-t border-current/20"${this.buildWpNodeStyleAttr(node)} />`;
+      case 'spacer': {
+        const height = this.normalizeCssLength(
+          String(node.params?.height ?? node.params?.style?.spacing?.height ?? '2rem'),
+        );
+        return `${indent}<div aria-hidden="true"${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
+      }
+      default: {
+        if (children) {
+          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>
+${children}
+${indent}</div>`;
+        }
+        if (node.html) {
+          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+        }
+        if (node.text) {
+          return `${indent}<span${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
+        }
+        return '';
+      }
+    }
+  }
+
+  private renderBlockFaithfulNavigation(
+    node: WpNode,
+    ctx: RenderCtx,
+    state: BlockFaithfulRenderState,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth);
+    const menuIndex = state.navIndex++;
+    const isVertical =
+      node.params?.layout?.orientation === 'vertical' ||
+      state.componentKind === 'footer';
+    const menuVar = `resolveNavigationMenu(${menuIndex})`;
+    const listClass = isVertical
+      ? 'flex flex-col gap-2'
+      : 'flex flex-wrap items-center gap-4';
+    return `${indent}<nav${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  {${menuVar} ? (
+${indent}    <ul className="${listClass}">
+${indent}      {renderMenuItems(${menuVar}.items, 0, ${isVertical ? 'true' : 'false'})}
+${indent}    </ul>
+${indent}  ) : null}
+${indent}</nav>`;
+  }
+
+  private buildWpNodeStyleAttr(
+    node: WpNode,
+    preset?: BlockStyleToken,
+    extra: Record<string, string | number | undefined> = {},
+  ): string {
+    return this.buildStyleAttr({
+      ...this.blockStyleToStyleMap(preset),
+      ...this.wpNodeToStyleMap(node),
+      ...extra,
+    });
+  }
+
+  private blockStyleToStyleMap(
+    style?: BlockStyleToken,
+  ): Record<string, string | number | undefined> {
+    const styleMap: Record<string, string | number | undefined> = {};
+    if (style?.color?.background) styleMap.backgroundColor = style.color.background;
+    if (style?.color?.text) styleMap.color = style.color.text;
+    if (style?.typography?.fontSize) styleMap.fontSize = style.typography.fontSize;
+    if (style?.typography?.fontFamily)
+      styleMap.fontFamily = style.typography.fontFamily;
+    if (style?.typography?.fontWeight)
+      styleMap.fontWeight = style.typography.fontWeight;
+    if (style?.typography?.letterSpacing)
+      styleMap.letterSpacing = style.typography.letterSpacing;
+    if (style?.typography?.lineHeight)
+      styleMap.lineHeight = style.typography.lineHeight;
+    if (style?.typography?.textTransform)
+      styleMap.textTransform = style.typography.textTransform;
+    if (style?.border?.radius) styleMap.borderRadius = style.border.radius;
+    if (style?.border?.width) styleMap.borderWidth = style.border.width;
+    if (style?.border?.style) styleMap.borderStyle = style.border.style;
+    if (style?.border?.color) styleMap.borderColor = style.border.color;
+    if (style?.spacing?.padding) styleMap.padding = style.spacing.padding;
+    if (style?.spacing?.margin) styleMap.margin = style.spacing.margin;
+    if (style?.spacing?.gap) styleMap.gap = style.spacing.gap;
+    return styleMap;
+  }
+
+  private wpNodeToStyleMap(
+    node: WpNode,
+  ): Record<string, string | number | undefined> {
+    return {
+      ...(node.bgColor ? { backgroundColor: node.bgColor } : {}),
+      ...(node.textColor ? { color: node.textColor } : {}),
+      ...(node.padding ? { padding: this.boxSpacingToCss(node.padding) } : {}),
+      ...(node.margin ? { margin: this.boxSpacingToCss(node.margin) } : {}),
+      ...(node.gap ? { gap: node.gap } : {}),
+      ...(node.borderRadius ? { borderRadius: node.borderRadius } : {}),
+      ...(node.minHeight ? { minHeight: node.minHeight } : {}),
+      ...(node.typography?.fontSize ? { fontSize: node.typography.fontSize } : {}),
+      ...(node.typography?.fontFamily
+        ? { fontFamily: node.typography.fontFamily }
+        : {}),
+      ...(node.typography?.fontWeight
+        ? { fontWeight: node.typography.fontWeight }
+        : {}),
+      ...(node.typography?.letterSpacing
+        ? { letterSpacing: node.typography.letterSpacing }
+        : {}),
+      ...(node.typography?.lineHeight
+        ? { lineHeight: node.typography.lineHeight }
+        : {}),
+      ...(node.typography?.textTransform
+        ? { textTransform: node.typography.textTransform }
+        : {}),
+    };
+  }
+
+  private buildWpLayoutStyle(
+    node: WpNode,
+  ): Record<string, string | number | undefined> {
+    const layout = node.params?.layout as Record<string, any> | undefined;
+    if (!layout) return {};
+    const style: Record<string, string | number | undefined> = {};
+    if (layout.type === 'flex') {
+      style.display = 'flex';
+      style.flexDirection =
+        layout.orientation === 'vertical' ? 'column' : 'row';
+      if (layout.justifyContent)
+        style.justifyContent = String(layout.justifyContent);
+      if (layout.verticalAlignment)
+        style.alignItems = String(layout.verticalAlignment);
+      if (layout.flexWrap === false || layout.flexWrap === 'nowrap') {
+        style.flexWrap = 'nowrap';
+      } else {
+        style.flexWrap = 'wrap';
+      }
+    }
+    return style;
+  }
+
+  private buildWpColumnsStyle(
+    node: WpNode,
+  ): Record<string, string | number | undefined> {
+    const cols =
+      node.children?.filter(
+        (child) =>
+          child.block === 'column' || child.block === 'core/column',
+      ) ?? [];
+    const widths = cols
+      .map((col) => this.normalizeCssLength(col.columnWidth))
+      .filter((value): value is string => !!value);
+    return {
+      display: 'grid',
+      gridTemplateColumns:
+        widths.length === cols.length && widths.length > 0
+          ? widths.join(' ')
+          : `repeat(${Math.max(cols.length, 1)}, minmax(0, 1fr))`,
+      alignItems: 'start',
+    };
+  }
+
+  private boxSpacingToCss(
+    box: NonNullable<WpNode['padding']>,
+  ): string {
+    const { top = '0', right = top, bottom = top, left = right } = box;
+    if (top === right && top === bottom && top === left) return top;
+    if (top === bottom && right === left) return `${top} ${right}`;
+    return `${top} ${right} ${bottom} ${left}`;
+  }
+
+  private normalizeCssLength(value?: string): string | undefined {
+    if (!value) return undefined;
+    const normalized = value.trim();
+    if (!normalized) return undefined;
+    return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
   }
 }
 
