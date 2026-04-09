@@ -2,6 +2,7 @@ const path = require('path');
 const fse = require('fs-extra');
 const { chromium } = require('playwright');
 const { UPLOAD_ROOT } = require('../config/constants');
+const { uploadCaptureAsset } = require('../services/imageUploadService');
 
 const CAPTURES_DIR = path.join(UPLOAD_ROOT, 'captures');
 fse.ensureDirSync(CAPTURES_DIR);
@@ -92,11 +93,19 @@ async function captureRegion(req, res) {
       },
     });
 
+    const localPublicUrl = `${req.protocol}://${req.get('host')}/captures/${filename}`;
+    const asset = await uploadCaptureAsset(filePath, filename, localPublicUrl, {
+      width: clipWidth,
+      height: clipHeight,
+    });
+
     return res.status(200).json({
       success: true,
       filePath: `/captures/${filename}`,
+      fileName: filename,
       comment: comment ?? '',
       pageUrl,
+      asset,
     });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
