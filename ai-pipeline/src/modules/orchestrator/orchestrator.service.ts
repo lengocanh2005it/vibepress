@@ -6,12 +6,11 @@ import axios from 'axios';
 import {
   appendFile,
   mkdir,
-  readFile,
   readdir,
   stat,
   writeFile,
 } from 'fs/promises';
-import { dirname, join, resolve } from 'path';
+import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
@@ -32,7 +31,6 @@ import { ReactGeneratorService } from '../agents/react-generator/react-generator
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type {
-  RepoResolvedPluginSource,
   RepoResolvedSourceSummary,
   RepoThemeManifest,
 } from '../agents/repo-analyzer/repo-analyzer.service.js';
@@ -269,7 +267,7 @@ export class OrchestratorService {
     this.jobs.set(jobId, state);
     this.progress.set(jobId, this.createProgressStream());
 
-    this.executePipeline(jobId, dto, state).catch((err) => {
+    this.executePipelineLegacy(jobId, dto, state).catch((err) => {
       state.status = 'error';
       state.error = err.message;
       const subject = this.progress.get(jobId);
@@ -375,7 +373,7 @@ export class OrchestratorService {
     }
   }
 
-  private async executePipeline(
+  private async executePipelineLegacy(
     jobId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,

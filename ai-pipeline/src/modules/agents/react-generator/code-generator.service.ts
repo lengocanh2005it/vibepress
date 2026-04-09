@@ -608,7 +608,7 @@ export default ${componentName};`;
   private renderSection(section: SectionPlan, ctx: RenderCtx): string {
     const bg = section.background ?? ctx.p.background;
     const tc = section.textColor ?? ctx.p.text;
-    const py = PADDING_MAP[section.padding ?? 'lg'];
+    const py = this.sectionPaddingClass(section);
 
     switch (section.type) {
       case 'navbar':
@@ -670,6 +670,17 @@ export default ${componentName};`;
       margin: section.marginStyle,
       ...extra,
     });
+  }
+
+  private sectionPaddingClass(section: SectionPlan): string {
+    if (section.paddingStyle) return '';
+    return PADDING_MAP[section.padding ?? 'lg'];
+  }
+
+  private buildSectionGapStyleAttr(section: SectionPlan): string {
+    return section.gapStyle
+      ? this.buildStyleAttr({ gap: section.gapStyle })
+      : '';
   }
 
   private exactRadiusClass(value?: string): string {
@@ -739,6 +750,8 @@ export default ${componentName};`;
       styleMap.letterSpacing = style.typography.letterSpacing;
     if (style?.typography?.lineHeight)
       styleMap.lineHeight = style.typography.lineHeight;
+    if (style?.typography?.textTransform)
+      styleMap.textTransform = style.typography.textTransform;
     if (style?.border?.radius) styleMap.borderRadius = style.border.radius;
     if (style?.border?.width) styleMap.borderWidth = style.border.width;
     if (style?.border?.style) styleMap.borderStyle = style.border.style;
@@ -747,6 +760,39 @@ export default ${componentName};`;
     if (style?.spacing?.margin) styleMap.margin = style.spacing.margin;
     if (style?.spacing?.gap) styleMap.gap = style.spacing.gap;
     return this.buildStyleAttr(styleMap);
+  }
+
+  private buildTypographyStyleAttr(
+    ...styles: Array<BlockStyleToken['typography'] | undefined>
+  ): string {
+    const styleMap: Record<string, string | number | undefined> = {};
+    for (const style of styles) {
+      if (!style) continue;
+      if (style.fontSize) styleMap.fontSize = style.fontSize;
+      if (style.fontFamily) styleMap.fontFamily = style.fontFamily;
+      if (style.fontWeight) styleMap.fontWeight = style.fontWeight;
+      if (style.letterSpacing) styleMap.letterSpacing = style.letterSpacing;
+      if (style.lineHeight) styleMap.lineHeight = style.lineHeight;
+      if (style.textTransform) styleMap.textTransform = style.textTransform;
+    }
+    return this.buildStyleAttr(styleMap);
+  }
+
+  private responsiveGridColumnsClass(
+    columnCount: number,
+    columnWidths?: string[],
+    breakpoint: 'md' | 'lg' = 'lg',
+  ): string {
+    const defaults = `grid-cols-1 sm:grid-cols-2 ${columnCount >= 3 ? 'lg:grid-cols-3' : ''} ${columnCount === 4 ? 'xl:grid-cols-4' : ''}`;
+    if (!columnWidths || columnWidths.length !== columnCount) return defaults;
+    const tracks = columnWidths
+      .map((value) => value.trim().replace(/\s+/g, ''))
+      .filter(Boolean)
+      .join('_');
+    if (!tracks) return defaults;
+    const base =
+      columnCount === 2 ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2';
+    return `${base} ${breakpoint}:grid-cols-[${tracks}]`;
   }
 
   // ── Section renderers ─────────────────────────────────────────────────────
@@ -772,7 +818,7 @@ export default ${componentName};`;
     return `      {/* Navbar */}
       <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          <div className="flex items-center justify-between py-4">
+          <div className="flex items-center justify-between py-4"${this.buildSectionGapStyleAttr(s)}>
             <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
             <nav className="hidden md:flex items-center gap-6">
               {menus.find(m => m.slug === '${s.menuSlug}')?.items
@@ -793,6 +839,14 @@ export default ${componentName};`;
   private renderHero(s: HeroSection, ctx: RenderCtx, py: string): string {
     const { p, t, l } = ctx;
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
+    const headingStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'heading')?.typography,
+      s.headingStyle,
+    );
+    const subheadingStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'paragraph')?.typography,
+      s.subheadingStyle,
+    );
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
@@ -814,10 +868,10 @@ export default ${componentName};`;
       return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${l.containerClass}">
-          <div className="flex flex-col md:flex-row gap-8 items-center">
+          <div className="flex flex-col md:flex-row gap-8 items-center"${this.buildSectionGapStyleAttr(s)}>
             <div className="flex-1 flex flex-col gap-4">
-              <h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>
-              ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]">${s.subheading}</p>` : ''}
+              <h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>
+              ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
               ${cta}
             </div>${image}
           </div>
@@ -828,9 +882,9 @@ export default ${componentName};`;
     return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${l.containerClass}">
-          <div className="flex flex-col ${isCenter ? 'items-center text-center' : 'items-start'} gap-6 max-w-[640px] ${isCenter ? 'mx-auto' : ''}">
-            <h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>
-            ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]">${s.subheading}</p>` : ''}
+          <div className="flex flex-col ${isCenter ? 'items-center text-center' : 'items-start'} gap-6 max-w-[640px] ${isCenter ? 'mx-auto' : ''}"${this.buildSectionGapStyleAttr(s)}>
+            <h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>
+            ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
           </div>${image}
         </div>
@@ -841,6 +895,14 @@ export default ${componentName};`;
     const { p, t } = ctx;
     const tc = s.textColor ?? '#ffffff';
     const imageRadius = this.imageRadiusClass(ctx);
+    const headingStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'heading')?.typography,
+      s.headingStyle,
+    );
+    const subheadingStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'paragraph')?.typography,
+      s.subheadingStyle,
+    );
     const styleAttr = this.buildSectionStyleAttr(s, {
       backgroundImage: `url("${s.imageSrc}")`,
       backgroundSize: 'cover',
@@ -859,9 +921,9 @@ export default ${componentName};`;
         className="relative w-full flex items-center justify-center ${imageRadius}"
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
-        <div className="relative z-10 w-full flex flex-col ${align} gap-4 px-4 sm:px-6 lg:px-8 py-16">
-          ${s.heading ? `<h1 className="${t.h1} font-normal text-[${tc}]">${s.heading}</h1>` : ''}
-          ${s.subheading ? `<p className="text-lg text-white/80">${s.subheading}</p>` : ''}
+        <div className="relative z-10 w-full flex flex-col ${align} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.buildSectionGapStyleAttr(s)}>
+          ${s.heading ? `<h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>` : ''}
+          ${s.subheading ? `<p className="text-lg text-white/80"${subheadingStyle}>${s.subheading}</p>` : ''}
           ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
         </div>
       </section>`;
@@ -901,7 +963,7 @@ export default ${componentName};`;
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-8">${s.title}</h2>` : ''}
-          <div className="${gridClass}">
+          <div className="${gridClass}"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
 ${postCard}
             ))}
@@ -942,7 +1004,10 @@ ${postCard}
       { padding: l.cardPadding },
       true,
     );
-    const colClass = `grid-cols-1 sm:grid-cols-2 ${s.columns >= 3 ? 'lg:grid-cols-3' : ''} ${s.columns === 4 ? 'xl:grid-cols-4' : ''}`;
+    const colClass = this.responsiveGridColumnsClass(
+      s.columns,
+      s.columnWidths,
+    );
     const cards = s.cards
       .map(
         (
@@ -959,7 +1024,7 @@ ${postCard}
         <div className="${l.containerClass}">
           ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-4">${s.title}</h2>` : ''}
           ${s.subtitle ? `<p className="text-[${p.textMuted}] mb-8">${s.subtitle}</p>` : ''}
-          <div className="grid ${colClass} gap-6">
+          <div className="grid ${colClass} gap-6"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
         </div>
@@ -977,11 +1042,24 @@ ${cards}
     const sectionStyle = this.buildSectionStyleAttr(s);
     const imageRadius = this.imageRadiusClass(ctx);
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
+    const headingStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'heading')?.typography,
+      s.headingStyle,
+    );
+    const bodyStyle = this.buildTypographyStyleAttr(
+      this.pickBlockStyle(ctx, 'paragraph')?.typography,
+      s.bodyStyle,
+    );
+    const layoutClass =
+      s.columnWidths?.length === 2
+        ? `grid grid-cols-1 ${this.responsiveGridColumnsClass(2, s.columnWidths, 'md')} gap-8 items-center`
+        : 'flex flex-col md:flex-row gap-8 items-center';
     const imgFirst = s.imagePosition === 'left';
-    const imgEl = `<div className="flex-1"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
-    const textEl = `<div className="flex-1 flex flex-col gap-4">
-            ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]">${s.heading}</h2>` : ''}
-            ${s.body ? `<p className="text-[${p.textMuted}]">${s.body}</p>` : ''}
+    const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
+    const imgEl = `<div className="${itemWrapper}"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
+    const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
+            ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.body ? `<p className="text-[${p.textMuted}]"${bodyStyle}>${s.body}</p>` : ''}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${p.textMuted}]">${li}</li>`).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
@@ -989,7 +1067,7 @@ ${cards}
     return `      {/* Media + Text */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          <div className="flex flex-col md:flex-row gap-8 items-center">
+          <div className="${layoutClass}"${this.buildSectionGapStyleAttr(s)}>
             ${imgFirst ? `${imgEl}\n            ${textEl}` : `${textEl}\n            ${imgEl}`}
           </div>
         </div>
@@ -1012,7 +1090,7 @@ ${cards}
     return `      {/* Testimonial */}
       <section className="w-full ${py}"${styleAttr}>
         <div className="max-w-[720px] mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col items-center text-center gap-8">
+          <div className="flex flex-col items-center text-center gap-8"${this.buildSectionGapStyleAttr(s)}>
             <p className="${t.h3} font-normal leading-snug">"{s.quote}"</p>
             <div className="flex flex-col items-center gap-1">
               ${s.authorAvatar ? `<img src="${s.authorAvatar}" alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
@@ -1037,13 +1115,13 @@ ${cards}
     const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
     const cardStyle = this.buildBlockStyleAttr(
       cardStylePreset,
-      { padding: l.cardPadding },
+      { padding: l.cardPadding, gap: s.gapStyle },
       true,
     );
     const inner =
       s.layout === 'card'
         ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 max-w-[560px] mx-auto text-center flex flex-col gap-4"${cardStyle}>`
-        : `<div className="flex flex-col items-center text-center gap-4">`;
+        : `<div className="flex flex-col items-center text-center gap-4"${this.buildSectionGapStyleAttr(s)}>`;
 
     return `      {/* Newsletter */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -1090,7 +1168,7 @@ ${cards}
     return `      {/* Footer */}
       <footer className="bg-[${bg}] border-t border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass} py-12">
-          <div className="grid grid-cols-1 md:grid-cols-${Math.min(4, s.menuColumns.length + 1)} gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-${Math.min(4, s.menuColumns.length + 1)} gap-8"${this.buildSectionGapStyleAttr(s)}>
             <div className="flex flex-col gap-3">
               <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
               <p className="text-sm text-[${p.textMuted}]">${s.brandDescription ? s.brandDescription : '{siteInfo?.blogDescription}'}</p>
@@ -1181,7 +1259,7 @@ ${this.renderPostContentInner(s, ctx)}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
           {item && (
-            <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
               <h2 className="${t.h2} font-normal text-[${tc}]">
                 {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
               </h2>
@@ -1242,7 +1320,7 @@ ${this.renderPageContentInner(s, ctx)}
             <input type="search" placeholder="Search..." className="flex-1 border border-black/20 ${t.buttonRadius} px-4 py-2 bg-transparent text-[${tc}]" />
             <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
           </div>
-          <div className="mt-8 flex flex-col gap-4">
+          <div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
             ))}
@@ -1283,7 +1361,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
   ): string {
     const { p } = ctx;
     const bg = mainSection.background ?? p.background;
-    const py = PADDING_MAP[mainSection.padding ?? 'lg'];
+    const py = this.sectionPaddingClass(mainSection);
     const sectionStyle = this.buildSectionStyleAttr(mainSection);
     const mainContent =
       mainSection.type === 'post-content'
@@ -1294,6 +1372,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       gridTemplateColumns: sidebarLeft
         ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
+      gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
     });
 
     return `      {/* Main Content With Sidebar */}
@@ -1327,7 +1406,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       : '';
 
     return `          {item && (
-            <article className="flex flex-col gap-6">
+            <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
               ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               ${metaBlock}
               <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
@@ -1342,7 +1421,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const { p, t } = ctx;
     const tc = s.textColor ?? p.text;
     return `          {item && (
-            <article className="flex flex-col gap-6">
+            <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
               ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
             </article>
@@ -1359,7 +1438,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
     const paddingStyle = this.buildBlockStyleAttr(
       cardStylePreset,
-      { padding: l.cardPadding },
+      { padding: l.cardPadding, gap: s.gapStyle },
       true,
     );
     const titleBlock = s.title

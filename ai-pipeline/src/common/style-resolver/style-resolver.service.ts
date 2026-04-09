@@ -28,9 +28,19 @@ export class StyleResolverService {
       ? new Map<string, string>(tokens.colors.map((c) => [c.slug, c.value]))
       : null;
 
+    const fontMap = tokens?.fonts?.length
+      ? new Map<string, string>(tokens.fonts.map((f) => [f.slug, f.family]))
+      : null;
+
+    const fontSizeMap = tokens?.fontSizes?.length
+      ? new Map<string, string>(tokens.fontSizes.map((s) => [s.slug, s.size]))
+      : null;
+
     let result = nodes;
     if (spacingMap) result = this.resolveSpacing(result, spacingMap);
     if (colorMap) result = this.resolveColors(result, colorMap);
+    if (fontMap || fontSizeMap)
+      result = this.resolveTypography(result, fontMap, fontSizeMap);
     return result;
   }
 
@@ -109,5 +119,70 @@ export class StyleResolverService {
       if (out.children) out.children = this.resolveColors(out.children, map);
       return out;
     });
+  }
+
+  private resolveTypography(
+    nodes: WpNode[],
+    fontMap: Map<string, string> | null,
+    fontSizeMap: Map<string, string> | null,
+  ): WpNode[] {
+    return nodes.map((node) => {
+      const out: WpNode = { ...node };
+
+      if (out.fontFamily && fontMap) {
+        out.fontFamily = this.resolveFontFamilyVar(out.fontFamily, fontMap);
+      }
+
+      if (out.typography) {
+        out.typography = {
+          ...out.typography,
+          ...(out.typography.fontFamily && fontMap
+            ? {
+                fontFamily: this.resolveFontFamilyVar(
+                  out.typography.fontFamily,
+                  fontMap,
+                ),
+              }
+            : {}),
+          ...(out.typography.fontSize && fontSizeMap
+            ? {
+                fontSize: this.resolveFontSizeVar(
+                  out.typography.fontSize,
+                  fontSizeMap,
+                ),
+              }
+            : {}),
+        };
+      }
+
+      if (out.children)
+        out.children = this.resolveTypography(
+          out.children,
+          fontMap,
+          fontSizeMap,
+        );
+      return out;
+    });
+  }
+
+  private resolveFontFamilyVar(
+    value: string,
+    map: Map<string, string>,
+  ): string {
+    const trimmed = value.trim();
+    const shorthand = trimmed.match(/var:preset\|font-family\|([^|)\s]+)/);
+    if (shorthand) return map.get(shorthand[1]) ?? value;
+    const cssVar = trimmed.match(/var\(--wp--preset--font-family--([^)]+)\)/);
+    if (cssVar) return map.get(cssVar[1]) ?? value;
+    return trimmed;
+  }
+
+  private resolveFontSizeVar(value: string, map: Map<string, string>): string {
+    const trimmed = value.trim();
+    const shorthand = trimmed.match(/var:preset\|font-size\|([^|)\s]+)/);
+    if (shorthand) return map.get(shorthand[1]) ?? value;
+    const cssVar = trimmed.match(/var\(--wp--preset--font-size--([^)]+)\)/);
+    if (cssVar) return map.get(cssVar[1]) ?? value;
+    return trimmed;
   }
 }

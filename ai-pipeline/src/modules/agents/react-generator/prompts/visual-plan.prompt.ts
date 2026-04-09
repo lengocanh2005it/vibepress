@@ -29,6 +29,9 @@ export function buildVisualPlanPrompt(input: {
     sourceUrl: string;
     viewport: string;
   };
+  /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
+   *  AI must preserve this order and only fill in missing content fields. */
+  draftSections?: SectionPlan[];
 }): { systemPrompt: string; userPrompt: string } {
   const {
     componentName,
@@ -42,6 +45,7 @@ export function buildVisualPlanPrompt(input: {
     dataNeeds,
     sourceAnalysis,
     visualReference,
+    draftSections,
   } = input;
 
   const palette = buildPaletteHint(tokens);
@@ -87,9 +91,19 @@ interface ComponentVisualPlan {
 
 Every section also supports optional exact spacing fields from the template:
 \`\`\`
-{ paddingStyle?: string, marginStyle?: string }
+{ paddingStyle?: string, marginStyle?: string, gapStyle?: string }
 \`\`\`
 Use them when the template source exposes real spacing values and you can preserve them exactly.
+
+Typography and exact column-ratio metadata may also appear when the template exposes them:
+\`\`\`
+{
+  headingStyle?: { fontSize?, fontFamily?, fontWeight?, letterSpacing?, lineHeight?, textTransform? },
+  subheadingStyle?: { fontSize?, fontFamily?, fontWeight?, letterSpacing?, lineHeight?, textTransform? },
+  bodyStyle?: { fontSize?, fontFamily?, fontWeight?, letterSpacing?, lineHeight?, textTransform? },
+  columnWidths?: string[]
+}
+\`\`\`
 
 ## Available section types
 
@@ -115,11 +129,11 @@ Use them when the template source exposes real spacing values and you can preser
 
 \`\`\`
 navbar:       { sticky, menuSlug, cta? }
-hero:         { layout: centered|left|split, heading, subheading?, cta?, image? }
-cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, cta?, contentAlign }
+hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, image? }
+cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage }
-card-grid:    { title?, subtitle?, columns: 2|3|4, cards: [{heading,body}] }
-media-text:   { imageSrc, imageAlt, imagePosition: left|right, heading?, body?, listItems?, cta? }
+card-grid:    { title?, subtitle?, columns: 2|3|4, columnWidths?, cards: [{heading,body}] }
+media-text:   { imageSrc, imageAlt, imagePosition: left|right, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta? }
 testimonial:  { quote, authorName, authorTitle?, authorAvatar? }
 newsletter:   { heading, subheading?, buttonText, layout: centered|card }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
@@ -133,6 +147,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 
 ## Rules
 - Preserve the original WordPress layout hierarchy and reading order as closely as possible.
+- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections unless a live screenshot contradicts the listed order.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
 - Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
@@ -141,7 +156,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - If a section has a background image, use the exact \`src\` from the template.
 - Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
-- Preserve exact padding/margin from the template when visible by filling \`paddingStyle\` / \`marginStyle\` with concrete CSS shorthand values.
+- Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
+- Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
@@ -152,6 +168,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
+
+  const draftHint = buildDraftSectionsHint(draftSections);
 
   const userPrompt = `## Component to plan: ${componentName}
 
@@ -165,7 +183,7 @@ ${palette}
 
 ${imageHints}
 
-## Template source
+${draftHint ? `${draftHint}\n\n` : ''}## Template source
 
 ${templateSource}
 
@@ -177,6 +195,23 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
+  if (!draftSections || draftSections.length === 0) return '';
+
+  const lines = [
+    '## Detected section order (deterministic, from WordPress block tree)',
+    'The following sections were detected in the EXACT order they appear in the WordPress template.',
+    'You MUST preserve this order in the `sections` array.',
+    'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+    'You MUST NOT reorder, merge, split, or drop sections unless a live screenshot explicitly contradicts this list.',
+    '',
+    '```json',
+    JSON.stringify(draftSections, null, 2),
+    '```',
+  ];
+  return lines.join('\n');
+}
 
 function buildPaletteHint(tokens?: ThemeTokens): string {
   if (!tokens?.defaults) return '';
@@ -430,6 +465,28 @@ function validateSectionDetailed(
   }
   if (typeof raw.paddingStyle !== 'string') delete raw.paddingStyle;
   if (typeof raw.marginStyle !== 'string') delete raw.marginStyle;
+  if (typeof raw.gapStyle !== 'string') delete raw.gapStyle;
+  for (const key of [
+    'headingStyle',
+    'subheadingStyle',
+    'bodyStyle',
+  ] as const) {
+    const value = sanitizeTypographyStyle(raw[key]);
+    if (value) raw[key] = value;
+    else delete raw[key];
+  }
+  if (Array.isArray(raw.columnWidths)) {
+    raw.columnWidths = raw.columnWidths.filter(
+      (value: unknown): value is string =>
+        typeof value === 'string' && value.trim().length > 0,
+    );
+    raw.columnWidths = raw.columnWidths.map((value: string) =>
+      normalizeCssLengthString(value),
+    );
+    if (raw.columnWidths.length === 0) delete raw.columnWidths;
+  } else {
+    delete raw.columnWidths;
+  }
 
   // eslint-disable-next-line default-case
   switch (type) {
@@ -461,6 +518,7 @@ function validateSectionDetailed(
       }
       if (typeof raw.dimRatio !== 'number') raw.dimRatio = 50;
       if (typeof raw.minHeight !== 'string') raw.minHeight = '400px';
+      else raw.minHeight = normalizeCssLengthString(raw.minHeight);
       if (!['center', 'left', 'right'].includes(raw.contentAlign))
         raw.contentAlign = 'center';
       break;
@@ -935,4 +993,47 @@ function escapeControlCharsInJsonStrings(input: string): string {
   }
 
   return out;
+}
+
+function sanitizeTypographyStyle(
+  value: unknown,
+):
+  | {
+      fontSize?: string;
+      fontFamily?: string;
+      fontWeight?: string;
+      letterSpacing?: string;
+      lineHeight?: string;
+      textTransform?: string;
+    }
+  | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const next = {
+    ...(typeof raw.fontSize === 'string' && raw.fontSize.trim()
+      ? { fontSize: raw.fontSize }
+      : {}),
+    ...(typeof raw.fontFamily === 'string' && raw.fontFamily.trim()
+      ? { fontFamily: raw.fontFamily }
+      : {}),
+    ...(typeof raw.fontWeight === 'string' && raw.fontWeight.trim()
+      ? { fontWeight: raw.fontWeight }
+      : {}),
+    ...(typeof raw.letterSpacing === 'string' && raw.letterSpacing.trim()
+      ? { letterSpacing: raw.letterSpacing }
+      : {}),
+    ...(typeof raw.lineHeight === 'string' && raw.lineHeight.trim()
+      ? { lineHeight: raw.lineHeight }
+      : {}),
+    ...(typeof raw.textTransform === 'string' && raw.textTransform.trim()
+      ? { textTransform: raw.textTransform }
+      : {}),
+  };
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function normalizeCssLengthString(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return value;
+  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
 }

@@ -32,6 +32,7 @@ export interface BlockStyleToken {
     fontWeight?: string;
     letterSpacing?: string;
     lineHeight?: string;
+    textTransform?: string;
   };
   border?: {
     radius?: string;
@@ -46,6 +47,8 @@ export interface BlockStyleToken {
   };
 }
 
+export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
@@ -54,6 +57,7 @@ interface BaseSection {
   padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl';
   paddingStyle?: string; // exact CSS shorthand from template, e.g. "2rem 1.5rem"
   marginStyle?: string; // exact CSS shorthand from template
+  gapStyle?: string; // exact CSS gap between direct children inside the section
 }
 
 export interface NavbarSection extends BaseSection {
@@ -68,6 +72,8 @@ export interface HeroSection extends BaseSection {
   layout: 'centered' | 'left' | 'split';
   heading: string;
   subheading?: string;
+  headingStyle?: TypographyStyle;
+  subheadingStyle?: TypographyStyle;
   cta?: { text: string; link: string };
   image?: { src: string; alt: string; position: 'right' | 'below' };
 }
@@ -79,6 +85,8 @@ export interface CoverSection extends BaseSection {
   minHeight: string; // e.g. "500px"
   heading?: string;
   subheading?: string;
+  headingStyle?: TypographyStyle;
+  subheadingStyle?: TypographyStyle;
   cta?: { text: string; link: string };
   contentAlign: 'center' | 'left' | 'right';
 }
@@ -99,6 +107,7 @@ export interface CardGridSection extends BaseSection {
   title?: string;
   subtitle?: string;
   columns: 2 | 3 | 4;
+  columnWidths?: string[];
   cards: { heading: string; body: string }[];
 }
 
@@ -107,8 +116,11 @@ export interface MediaTextSection extends BaseSection {
   imageSrc: string;
   imageAlt: string;
   imagePosition: 'left' | 'right';
+  columnWidths?: string[];
   heading?: string;
   body?: string;
+  headingStyle?: TypographyStyle;
+  bodyStyle?: TypographyStyle;
   listItems?: string[];
   cta?: { text: string; link: string };
 }
