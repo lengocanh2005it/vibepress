@@ -1009,7 +1009,89 @@ export class OrchestratorService {
             0.45,
             `Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
           );
-          let components = this.validator.validate(result.components);
+          const MAX_VALIDATION_FIX_ATTEMPTS = 2;
+          let validation = this.validator.collectValidationIssues(
+            result.components,
+          );
+          let components = validation.components;
+
+          for (
+            let attempt = 1;
+            validation.failures.length > 0 &&
+            attempt <= MAX_VALIDATION_FIX_ATTEMPTS;
+            attempt++
+          ) {
+            this.logger.warn(
+              `[Stage 4: D4 Validator] ${validation.failures.length} component(s) failed validation. Attempting auto-fix (attempt ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS}).`,
+            );
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.55,
+              `Validator fix ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS}: repairing ${validation.failures.length} component contract issue(s).`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 4: D4 Validator] ${validation.failures.length} component(s) failed validation. Attempting auto-fix (attempt ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS})`,
+            );
+
+            const fixResults = await Promise.all(
+              validation.failures.map(async (failure) => {
+                const compIndex = components.findIndex(
+                  (c) => c.name === failure.component.name,
+                );
+                if (compIndex === -1) return null;
+
+                const fixed = await this.reactGenerator.fixComponent({
+                  component: components[compIndex],
+                  plan: reviewResult.plan,
+                  feedback:
+                    `Validator contract error for component "${failure.component.name}":\n` +
+                    `${failure.error}\n\n` +
+                    'Return a complete corrected TSX component that satisfies the validator rules.',
+                  modelConfig: { fixAgent: resolvedModels.fixAgent },
+                  logPath,
+                });
+                const revalidated = this.validator.collectValidationIssues([
+                  fixed,
+                ]);
+                if (revalidated.failures.length > 0) {
+                  const retryError = revalidated.failures[0]?.error;
+                  this.logger.warn(
+                    `[Stage 4: D4 Validator] Re-validation failed for "${failure.component.name}" after fix. Error: ${retryError}`,
+                  );
+                  await this.logToFile(
+                    logPath,
+                    `[Stage 4: D4 Validator] Re-validation failed for "${failure.component.name}" after fix: ${retryError}`,
+                  );
+                  return null;
+                }
+
+                return {
+                  compIndex,
+                  component: revalidated.components[0],
+                };
+              }),
+            );
+
+            for (const fixResult of fixResults) {
+              if (fixResult) components[fixResult.compIndex] = fixResult.component;
+            }
+
+            validation = this.validator.collectValidationIssues(components);
+            components = validation.components;
+          }
+
+          if (validation.failures.length > 0) {
+            throw new Error(
+              `[validator] Generated component validation failed after auto-fix:\n${validation.failures
+                .map(
+                  (failure) =>
+                    `Component "${failure.component.name}": ${failure.error}`,
+                )
+                .join('\n')}`,
+            );
+          }
 
           // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
@@ -1078,19 +1160,20 @@ export class OrchestratorService {
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
                 });
-                try {
-                  const revalidated = this.validator.validate([fixed]);
-                  return { compIndex, component: revalidated[0] };
-                } catch (validationErr: any) {
+                const revalidated =
+                  this.validator.collectValidationIssues([fixed]);
+                if (revalidated.failures.length > 0) {
+                  const validationErr = revalidated.failures[0]?.error;
                   this.logger.warn(
-                    `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr?.message}`,
+                    `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr}`,
                   );
                   await this.logToFile(
                     logPath,
-                    `[Stage 5] Re-validation failed for "${failure.componentName}": ${validationErr?.message}`,
+                    `[Stage 5] Re-validation failed for "${failure.componentName}": ${validationErr}`,
                   );
                   return null;
                 }
+                return { compIndex, component: revalidated.components[0] };
               }),
             );
             for (const r of fixResults) {

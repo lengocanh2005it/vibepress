@@ -23,6 +23,16 @@ interface Capture {
   asset?: CaptureAssetResponse;
   comment: string;
   pageUrl: string;
+  iframeSrc?: string;
+  capturedAt: string;
+  viewport: CaptureViewport;
+  selection: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    coordinateSpace: "iframe-viewport";
+  };
 }
 
 interface SelectionRect {
@@ -189,13 +199,34 @@ const Editor: React.FC = () => {
         id: capture.id,
         note: capture.comment,
         sourcePageUrl: capture.pageUrl,
+        captureContext: {
+          capturedAt: capture.capturedAt,
+          iframeSrc: capture.iframeSrc,
+          viewport: capture.viewport,
+        },
+        selection: capture.selection,
         asset: {
+          provider: capture.asset?.provider || "local",
+          fileName:
+            capture.asset?.fileName ||
+            capture.fileName ||
+            capture.filePath.split("/").pop() ||
+            `${capture.id}.png`,
           publicUrl: getCaptureDisplayUrl(capture),
           storagePath: capture.filePath,
+          originalPath: capture.asset?.originalPath,
           mimeType: getCaptureMimeType(capture),
+          bytes: capture.asset?.bytes,
+          width: capture.asset?.width,
+          height: capture.asset?.height,
+          createdAt: capture.asset?.createdAt,
+          providerAssetId: capture.asset?.publicId || capture.asset?.fileId,
+          providerAssetPath: capture.asset?.filePath,
+          format: capture.asset?.format,
         },
-      }))
+      })),
     };
+
     console.log("Sending AI request with body:", requestBody);
     try {
       const data = await runAiProcess(siteId, requestBody);
@@ -362,12 +393,14 @@ const Editor: React.FC = () => {
     setIsSubmittingCapture(true);
     try {
       const previewSrc = `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`;
+      const relativeRect = getRelativeRect(selection);
+      const captureViewport = getCaptureViewport();
       const result = await captureRegion(
         selectedPageUrl,
         previewSrc,
-        getRelativeRect(selection),
+        relativeRect,
         captureComment,
-        getCaptureViewport(),
+        captureViewport,
       );
       setCaptures((prev) => [
         ...prev,
@@ -378,6 +411,13 @@ const Editor: React.FC = () => {
           asset: result.asset,
           comment: captureComment,
           pageUrl: selectedPageUrl,
+          iframeSrc: previewSrc,
+          capturedAt: new Date().toISOString(),
+          viewport: captureViewport,
+          selection: {
+            ...relativeRect,
+            coordinateSpace: "iframe-viewport",
+          },
         },
       ]);
     } finally {

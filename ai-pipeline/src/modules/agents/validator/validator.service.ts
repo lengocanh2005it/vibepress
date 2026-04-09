@@ -38,6 +38,16 @@ export interface CodeValidationContext {
   requireCommentForm?: boolean;
 }
 
+export interface ComponentValidationFailure {
+  component: GeneratedComponent;
+  error: string;
+}
+
+export interface ComponentValidationResult {
+  components: GeneratedComponent[];
+  failures: ComponentValidationFailure[];
+}
+
 @Injectable()
 export class ValidatorService {
   private readonly logger = new Logger(ValidatorService.name);
@@ -48,14 +58,31 @@ export class ValidatorService {
    * - Fail fast on structural/semantic issues before preview build
    */
   validate(components: GeneratedComponent[]): GeneratedComponent[] {
-    const generatedComponentNames = components.map((comp) => comp.name);
+    const result = this.collectValidationIssues(components);
+    if (result.failures.length > 0) {
+      throw new Error(
+        `[validator] Generated component validation failed:\n${result.failures
+          .map(
+            (failure) =>
+              `Component "${failure.component.name}": ${failure.error}`,
+          )
+          .join('\n')}`,
+      );
+    }
 
+    return result.components;
+  }
+
+  collectValidationIssues(
+    components: GeneratedComponent[],
+  ): ComponentValidationResult {
+    const generatedComponentNames = components.map((comp) => comp.name);
     const normalized = components.map((comp) => {
       const code = this.sanitizeGeneratedCode(comp.code);
       return { ...comp, code };
     });
+    const failures: ComponentValidationFailure[] = [];
 
-    const componentErrors: string[] = [];
     for (const comp of normalized) {
       const check = this.checkCodeStructure(comp.code, {
         componentName: comp.name,
@@ -69,17 +96,18 @@ export class ValidatorService {
         ),
       });
       if (!check.isValid) {
-        componentErrors.push(`Component "${comp.name}": ${check.error}`);
+        failures.push({
+          component: comp,
+          error: check.error ?? 'Unknown validation error',
+        });
+        continue;
+      }
+      if (check.fixedCode) {
+        comp.code = check.fixedCode;
       }
     }
 
-    if (componentErrors.length > 0) {
-      throw new Error(
-        `[validator] Generated component validation failed:\n${componentErrors.join('\n')}`,
-      );
-    }
-
-    return normalized;
+    return { components: normalized, failures };
   }
 
   async assertPreviewBuild(frontendDir: string): Promise<void> {
