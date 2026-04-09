@@ -72,6 +72,13 @@ export interface PipelineEditRequestDto {
   language?: string;
   pageContext?: PipelineEditPageContextDto;
   capture?: PipelineEditCaptureDto;
+  captures?: Array<{
+    id: string;
+    filePath: string;
+    url: string;
+    comment?: string;
+    pageUrl?: string;
+  }>;
   targetHint?: PipelineEditTargetHintDto;
   constraints?: PipelineEditConstraintsDto;
 }
@@ -87,8 +94,11 @@ export class OrchestratorController {
   constructor(private readonly orchestratorService: OrchestratorService) {}
 
   @Post('run')
-  run(@Body('siteId') siteId: string) {
-    return this.orchestratorService.run(siteId);
+  run(
+    @Body('siteId') siteId: string,
+    @Body('editRequest') editRequest?: PipelineEditRequestDto,
+  ) {
+    return this.orchestratorService.run(siteId, editRequest);
   }
 
   @Get('status/:jobId')

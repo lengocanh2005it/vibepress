@@ -34,7 +34,18 @@ export const captureRegion = async (
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pageUrl, proxyUrl, rect, comment, viewport }),
   });
-  if (!response.ok) throw new Error('Failed to capture region');
+  if (!response.ok) {
+    let errorMessage = 'Failed to capture region';
+    try {
+      const errorData = await response.json();
+      if (typeof errorData?.error === 'string' && errorData.error.trim()) {
+        errorMessage = errorData.error;
+      }
+    } catch {
+      // Fall back to the generic message when the backend response is not JSON.
+    }
+    throw new Error(errorMessage);
+  }
   return response.json() as Promise<{ success: boolean; filePath: string; comment: string; pageUrl: string }>;
 };
 

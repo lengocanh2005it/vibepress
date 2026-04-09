@@ -46,6 +46,7 @@ const Editor: React.FC = () => {
   const siteId: string = location.state?.siteId || "";
 
   const [annotationsOpen, setAnnotationsOpen] = useState(false);
+  const [sitePagesOpen, setSitePagesOpen] = useState(true);
   const [chatInput, setChatInput] = useState("");
   const [activeTarget, setActiveTarget] = useState<string | null>(null);
   const [commentText, setCommentText] = useState("");
@@ -60,15 +61,12 @@ const Editor: React.FC = () => {
   const [showCommentPopup, setShowCommentPopup] = useState(false);
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [selectedCaptureIds, setSelectedCaptureIds] = useState<string[]>([]);
+  const [chatCaptures, setChatCaptures] = useState<Capture[]>([]);
   const [previewCapture, setPreviewCapture] = useState<Capture | null>(null);
   const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
+  const [isSendingAiRequest, setIsSendingAiRequest] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [chatTags, setChatTags] = useState<string[]>([
-    "Refactor Header",
-    "Optimize SEO",
-    "Translate to VN",
-    "Check Dependencies",
-  ]);
+  const [capturesOpen, setCapturesOpen] = useState(true);
   const overlayRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -122,17 +120,67 @@ const Editor: React.FC = () => {
       .catch(() => setWpPages([]));
   }, [siteUrl]);
 
-  const sendChatMessage = () => {
-    if (!chatInput.trim()) return;
+  const cancelCaptureFlow = () => {
+    setIsCapturing(false);
+    setSelection(null);
+    setShowCommentPopup(false);
+    setCaptureComment("");
+    setIsDragging(false);
+  };
 
-    setChatInput("");
-    if (siteId) {
-      runAiProcess(siteId).then((data) => {
-        console.log("AI process started with job ID:", data.jobId);
-        navigate("/app/editor/split-view", {
-          state: { jobId: data.jobId, siteId },
-        });
+  useEffect(() => {
+    if (!isCapturing && !showCommentPopup) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        cancelCaptureFlow();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isCapturing, showCommentPopup]);
+
+  const getDefaultAiPrompt = () => {
+    if (chatCaptures.length === 0) return "";
+    return "Apply the requested changes from the attached captures. Preserve everything else unless a broader update is required.";
+  };
+
+  const sendChatMessage = async () => {
+    const trimmedPrompt = chatInput.trim();
+    const userPrompt = trimmedPrompt || getDefaultAiPrompt();
+
+    if (!siteId || (!userPrompt && chatCaptures.length === 0)) return;
+
+    setIsSendingAiRequest(true);
+    try {
+      const data = await runAiProcess(siteId, {
+        userPrompt,
+        language: "en",
+        pageContext: {
+          reactUrl: window.location.href,
+          reactRoute: window.location.pathname,
+          wordpressUrl: selectedPageUrl,
+          iframeSrc: previewSrc,
+          viewport: getCaptureViewport(),
+        },
+        captures: chatCaptures.map((capture) => ({
+          id: capture.id,
+          filePath: capture.filePath,
+          url: `${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`,
+          comment: capture.comment,
+          pageUrl: capture.pageUrl,
+        })),
       });
+
+      setChatInput("");
+      setChatCaptures([]);
+      console.log("AI process started with job ID:", data.jobId);
+      navigate("/app/editor/split-view", {
+        state: { jobId: data.jobId, siteId },
+      });
+    } finally {
+      setIsSendingAiRequest(false);
     }
   };
 
@@ -187,6 +235,42 @@ const Editor: React.FC = () => {
     setIsDragging(false);
     const r = getRelativeRect(selection);
     if (r.width > 10 && r.height > 10) setShowCommentPopup(true);
+  };
+
+  const getCommentPopupPosition = (rect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => {
+    const popupWidth = 288;
+    const popupHeight = 212;
+    const margin = 12;
+    const overlayWidth = Math.max(
+      popupWidth + margin * 2,
+      Math.round(overlayRef.current?.clientWidth || window.innerWidth),
+    );
+    const overlayHeight = Math.max(
+      popupHeight + margin * 2,
+      Math.round(overlayRef.current?.clientHeight || window.innerHeight),
+    );
+
+    const left = Math.min(
+      Math.max(margin, rect.x),
+      overlayWidth - popupWidth - margin,
+    );
+
+    const preferredBelow = rect.y + rect.height + 8;
+    const preferredAbove = rect.y - popupHeight - 8;
+    const top =
+      preferredBelow + popupHeight <= overlayHeight - margin
+        ? preferredBelow
+        : Math.max(margin, preferredAbove);
+
+    return {
+      left,
+      top: Math.min(top, overlayHeight - popupHeight - margin),
+    };
   };
 
   const getCaptureViewport = (): CaptureViewport => {
@@ -284,12 +368,68 @@ const Editor: React.FC = () => {
     setCaptures((prev) =>
       prev.filter((capture) => !selectedCaptureIds.includes(capture.id)),
     );
+    setChatCaptures((prev) =>
+      prev.filter((capture) => !selectedCaptureIds.includes(capture.id)),
+    );
+    setSelectedCaptureIds([]);
+  };
+
+  const handleSaveCapturesToChat = () => {
+    if (selectedCaptureIds.length === 0) return;
+
+    const capturesToSave = captures.filter((capture) =>
+      selectedCaptureIds.includes(capture.id),
+    );
+
+    if (capturesToSave.length === 0) return;
+
+    setChatCaptures((prev) => {
+      const merged = [...prev];
+      for (const capture of capturesToSave) {
+        if (!merged.some((item) => item.id === capture.id)) {
+          merged.push(capture);
+        }
+      }
+      return merged;
+    });
+
+    setIsChatOpen(true);
+  };
+
+  const handleRemoveChatCapture = (captureId: string) => {
+    setChatCaptures((prev) => prev.filter((capture) => capture.id !== captureId));
+    setSelectedCaptureIds((prev) => prev.filter((id) => id !== captureId));
+  };
+
+  const handleClearChatCaptures = () => {
+    const chatCaptureIds = chatCaptures.map((capture) => capture.id);
+    setChatCaptures([]);
+    setSelectedCaptureIds((prev) =>
+      prev.filter((id) => !chatCaptureIds.includes(id)),
+    );
+  };
+
+  const handleSelectAllCaptures = () => {
+    setSelectedCaptureIds(captures.map((capture) => capture.id));
+  };
+
+  const handleClearCaptureSelection = () => {
     setSelectedCaptureIds([]);
   };
 
   const previewSrc = selectedPageUrl
     ? `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`
     : "";
+  const selectedPage = wpPages.find((page) => page.link === selectedPageUrl);
+  const selectedPageLabel =
+    selectedPage?.title?.trim() ||
+    selectedPageUrl.replace(/^https?:\/\//, "").replace(/\/$/, "") ||
+    "Current page";
+  const selectedPageMeta = selectedPage?.slug
+    ? `/${selectedPage.slug}`
+    : selectedPageUrl;
+  const canSendChatMessage =
+    !!siteId && (!!chatInput.trim() || chatCaptures.length > 0) && !isSendingAiRequest;
 
   return (
     <div className="flex flex-col h-screen bg-[#FAF7F0] font-body text-[#233227] overflow-hidden">
@@ -341,163 +481,212 @@ const Editor: React.FC = () => {
       {/* Main Work Area */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left Sidebar: Site Pages */}
-        <aside className="w-64 shrink-0 bg-[#FAF7F0] border-r border-[#e8e6df] flex flex-col z-10">
-          <div className="p-6">
-            <h2 className="font-headline text-[20px] font-bold text-[#1a2b21] mb-1">
-              Site Pages
-            </h2>
-            <p className="text-[#5c6860] text-[13px]">
-              Select a page to edit layout.
-            </p>
-          </div>
-
-          <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
-            {wpPages.length > 0 ? (
-              <>
-                {wpPages.map((page) => {
-                  const isActive = selectedPageUrl === page.link;
-                  return (
-                    <div
-                      key={page.id}
-                      onClick={() => setSelectedPageUrl(page.link)}
-                      className={`rounded-2xl p-4 flex flex-col gap-2 cursor-pointer transition-colors ${isActive ? "border-2 border-[#49704F] bg-[#FAF7F0] shadow-sm" : "bg-white border border-[#e8e6df] hover:border-[#dcd9ce]"}`}
-                    >
-                      {isActive && (
-                        <div className="self-end bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">
-                          Editing
-                        </div>
-                      )}
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`material-symbols-outlined text-[18px] ${isActive ? "text-[#49704F]" : "text-[#8e9892]"}`}
-                        >
-                          article
-                        </span>
-                        <span className="font-bold text-[#233227] text-[14px]">
-                          {page.title}
-                        </span>
-                      </div>
-                      <span className="font-mono text-[10px] text-[#8e9892]">
-                        /{page.slug}
-                      </span>
-                    </div>
-                  );
-                })}
-              </>
-            ) : (
-              <>
-                {/* Active Page (static fallback) */}
-                <div className="bg-[#FAF7F0] border-2 border-[#49704F] rounded-2xl p-4 flex flex-col gap-2 relative shadow-sm cursor-pointer">
-                  <div className="absolute top-4 right-4 bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">
-                    Editing
+        <aside
+          className={`relative shrink-0 overflow-hidden bg-[#FAF7F0] z-10 transition-[width] duration-300 ease-in-out ${sitePagesOpen ? "w-64 border-r border-[#e8e6df]" : "w-14 border-r border-[#e8e6df]"}`}
+        >
+          {sitePagesOpen ? (
+            <div className="flex h-full w-64 flex-col transition-opacity duration-200 opacity-100">
+              <div className="p-6">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="font-headline text-[20px] font-bold text-[#1a2b21] mb-1">
+                      Site Pages
+                    </h2>
+                    <p className="text-[#5c6860] text-[13px]">
+                      Select a page to edit layout.
+                    </p>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-[#49704F] text-[18px]">
-                      home
+                  <button
+                    type="button"
+                    onClick={() => setSitePagesOpen(false)}
+                    title="Hide site pages"
+                    aria-label="Hide site pages"
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">
+                      left_panel_close
                     </span>
-                    <span className="font-bold text-[#233227] text-[14px]">
-                      Home
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
-                    <span className="material-symbols-outlined text-[13px]">
-                      history
-                    </span>
-                    Saved 2m ago
-                  </div>
+                  </button>
                 </div>
+              </div>
 
-                {/* Inactive Pages (static fallback) */}
-                {["Blog", "About Us", "Services", "Contact"].map(
-                  (page, idx) => (
+              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
+                {wpPages.length > 0 ? (
+                  <>
+                    {wpPages.map((page) => {
+                      const isActive = selectedPageUrl === page.link;
+                      return (
+                        <div
+                          key={page.id}
+                          onClick={() => setSelectedPageUrl(page.link)}
+                          className={`rounded-2xl p-4 flex flex-col gap-2 cursor-pointer transition-colors ${isActive ? "border-2 border-[#49704F] bg-[#FAF7F0] shadow-sm" : "bg-white border border-[#e8e6df] hover:border-[#dcd9ce]"}`}
+                        >
+                          {isActive && (
+                            <div className="self-end bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">
+                              Editing
+                            </div>
+                          )}
+                          <div className="flex items-center gap-3">
+                            <span
+                              className={`material-symbols-outlined text-[18px] ${isActive ? "text-[#49704F]" : "text-[#8e9892]"}`}
+                            >
+                              article
+                            </span>
+                            <span className="font-bold text-[#233227] text-[14px]">
+                              {page.title}
+                            </span>
+                          </div>
+                          <span className="font-mono text-[10px] text-[#8e9892]">
+                            /{page.slug}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </>
+                ) : (
+                  <>
                     <div
-                      key={idx}
-                      className="bg-white border border-[#e8e6df] rounded-2xl p-4 flex flex-col gap-2 hover:border-[#dcd9ce] transition-colors cursor-pointer"
+                      className="bg-[#FAF7F0] border-2 border-[#49704F] rounded-2xl p-4 flex flex-col gap-2 relative shadow-sm cursor-pointer"
                     >
+                      <div className="absolute top-4 right-4 bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">
+                        Editing
+                      </div>
                       <div className="flex items-center gap-3">
-                        <span className="material-symbols-outlined text-[#8e9892] text-[18px]">
-                          {page === "Blog"
-                            ? "article"
-                            : page === "About Us"
-                              ? "info"
-                              : page === "Services"
-                                ? "build"
-                                : "mail"}
+                        <span className="material-symbols-outlined text-[#49704F] text-[18px]">
+                          home
                         </span>
                         <span className="font-bold text-[#233227] text-[14px]">
-                          {page}
+                          Home
                         </span>
                       </div>
-                      {page === "Blog" && (
-                        <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
-                          <span className="material-symbols-outlined text-[13px]">
-                            history
-                          </span>{" "}
-                          Updated 5h ago
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
+                        <span className="material-symbols-outlined text-[13px]">
+                          history
+                        </span>
+                        Saved 2m ago
+                      </div>
                     </div>
-                  ),
-                )}
-              </>
-            )}
 
-            <button className="w-full mt-4 bg-transparent border-2 border-dashed border-[#dcd9ce] rounded-full py-3 flex items-center justify-center gap-2 text-[#233227] font-bold text-[13px] hover:bg-[#e8e6df]/30 transition-colors">
-              <span className="material-symbols-outlined text-[18px]">
-                add_circle
-              </span>{" "}
-              Add new page
-            </button>
-          </div>
+                    {["Blog", "About Us", "Services", "Contact"].map(
+                      (page, idx) => (
+                        <div
+                          key={idx}
+                          className="bg-white border border-[#e8e6df] rounded-2xl p-4 flex flex-col gap-2 hover:border-[#dcd9ce] transition-colors cursor-pointer"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="material-symbols-outlined text-[#8e9892] text-[18px]">
+                              {page === "Blog"
+                                ? "article"
+                                : page === "About Us"
+                                  ? "info"
+                                  : page === "Services"
+                                    ? "build"
+                                    : "mail"}
+                            </span>
+                            <span className="font-bold text-[#233227] text-[14px]">
+                              {page}
+                            </span>
+                          </div>
+                          {page === "Blog" && (
+                            <div className="flex items-center gap-1.5 text-[11px] text-[#5c6860] mt-1">
+                              <span className="material-symbols-outlined text-[13px]">
+                                history
+                              </span>{" "}
+                              Updated 5h ago
+                            </div>
+                          )}
+                        </div>
+                      ),
+                    )}
+                  </>
+                )}
+
+                <button className="w-full mt-4 bg-transparent border-2 border-dashed border-[#dcd9ce] rounded-full py-3 flex items-center justify-center gap-2 text-[#233227] font-bold text-[13px] hover:bg-[#e8e6df]/30 transition-colors">
+                  <span className="material-symbols-outlined text-[18px]">
+                    add_circle
+                  </span>{" "}
+                  Add new page
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-full w-14 items-start justify-center pt-6">
+              <button
+                type="button"
+                onClick={() => setSitePagesOpen(true)}
+                title="Show site pages"
+                aria-label="Show site pages"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  left_panel_open
+                </span>
+              </button>
+            </div>
+          )}
         </aside>
 
         {/* Center Canvas */}
-        <main className="flex-1 bg-[#e8e6df]/50 relative flex justify-center overflow-hidden">
+        <main className="min-w-0 flex-1 bg-[#e8e6df]/50 flex flex-col overflow-hidden">
           {/* Toolbar */}
-          <div className="absolute top-6 right-6 z-20 flex gap-2">
-            <button
-              onClick={() => {
-                setIsCapturing((c) => !c);
-                setSelection(null);
-                setShowCommentPopup(false);
-              }}
-              className={`text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 transition-colors ${isCapturing ? "bg-red-500 hover:bg-red-600 text-white" : "bg-white border border-[#e8e6df] text-[#233227] hover:bg-[#f0ece4]"}`}
-            >
-              <span className="material-symbols-outlined text-[16px]">
-                {isCapturing ? "close" : "crop"}
-              </span>
-              {isCapturing ? "Huỷ" : "Capture"}
-            </button>
-            {captures.length > 0 && (
-              <button
-                onClick={() => {
-                  const newTags = captures
-                    .map((c) => c.comment)
-                    .filter(Boolean);
-                  setChatTags((prev) => [...prev, ...newTags]);
-                  setCaptures([]);
-                  setSelectedCaptureIds([]);
-                }}
-                className="bg-[#e1ecd6] text-[#49704F] border border-[#c2d9b5] text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 hover:bg-[#d2e0c6] transition-colors"
-              >
-                <span className="material-symbols-outlined text-[16px]">
-                  save
-                </span>{" "}
-                Save
-              </button>
-            )}
-            <button
-              onClick={() => setAnnotationsOpen(!annotationsOpen)}
-              className="bg-[#49704F] text-white text-[13px] font-bold px-4 py-2 rounded-full shadow-md flex items-center gap-2 hover:bg-[#346E56] transition-colors"
-            >
-              <span className="material-symbols-outlined text-[16px]">
-                {annotationsOpen ? "dock_to_right" : "comment_bank"}
-              </span>
-              {annotationsOpen ? "Đóng notes" : "Stakeholder Notes"}
-            </button>
+          <div className="shrink-0 border-b border-[#e8e6df] bg-[#f6f1e8] px-6 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 flex items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#e0dacd] bg-white text-[#49704F]">
+                  <span className="material-symbols-outlined text-[18px]">
+                    language
+                  </span>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#7a866f]">
+                    Current Preview
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <p className="max-w-[280px] truncate text-[15px] font-bold text-[#233227]">
+                      {selectedPageLabel}
+                    </p>
+                    {selectedCaptureIds.length > 0 && (
+                      <span className="rounded-full border border-[#d8e2d1] bg-[#edf4e8] px-2.5 py-1 text-[11px] font-bold text-[#49704F]">
+                        {selectedCaptureIds.length} selected
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 max-w-[360px] truncate text-[12px] text-[#72806f]">
+                    {selectedPageMeta}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  onClick={() => {
+                    if (isCapturing || showCommentPopup) {
+                      cancelCaptureFlow();
+                      return;
+                    }
+                    setIsCapturing(true);
+                  }}
+                  className={`text-[13px] font-bold px-4 py-2 rounded-full shadow-sm flex items-center gap-2 transition-colors ${isCapturing ? "bg-red-500 hover:bg-red-600 text-white" : "bg-white border border-[#e8e6df] text-[#233227] hover:bg-[#f0ece4]"}`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">
+                    {isCapturing ? "close" : "crop"}
+                  </span>
+                  {isCapturing ? "Cancel" : "Capture"}
+                </button>
+                <button
+                  onClick={() => setAnnotationsOpen(!annotationsOpen)}
+                  className="bg-[#49704F] text-white text-[13px] font-bold px-4 py-2 rounded-full shadow-sm flex items-center gap-2 hover:bg-[#346E56] transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[16px]">
+                    {annotationsOpen ? "dock_to_right" : "comment_bank"}
+                  </span>
+                  {annotationsOpen ? "Close notes" : "Stakeholder Notes"}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="w-full h-full relative">
+          <div className="w-full flex-1 relative">
             {selectedPageUrl ? (
               <iframe
                 ref={iframeRef}
@@ -507,260 +696,390 @@ const Editor: React.FC = () => {
               />
             ) : (
               <div className="flex items-center justify-center h-full text-[#8e9892] text-sm">
-                Không có siteUrl. Hãy chọn một trang từ Project Selector.
+                No site URL found. Select a page from the Project Selector.
               </div>
             )}
-          </div>
 
-          {/* Capture overlay */}
-          {isCapturing && (
-            <div
-              ref={overlayRef}
-              className="absolute inset-0 z-30"
-              style={{ cursor: "crosshair", background: "rgba(0,0,0,0.15)" }}
-              onMouseDown={handleOverlayMouseDown}
-              onMouseMove={handleOverlayMouseMove}
-              onMouseUp={handleOverlayMouseUp}
-            >
-              {selection &&
-                (() => {
-                  const r = getRelativeRect(selection);
-                  return (
-                    <div
-                      className="absolute border-2 border-[#49704F] bg-[#49704F]/10"
-                      style={{
-                        left: r.x,
-                        top: r.y,
-                        width: r.width,
-                        height: r.height,
-                        pointerEvents: "none",
-                      }}
-                    />
-                  );
-                })()}
-            </div>
-          )}
+            {/* Capture overlay */}
+            {isCapturing && (
+              <div
+                ref={overlayRef}
+                className="absolute inset-0 z-30"
+                style={{ cursor: "crosshair", background: "rgba(0,0,0,0.15)" }}
+                onMouseDown={handleOverlayMouseDown}
+                onMouseMove={handleOverlayMouseMove}
+                onMouseUp={handleOverlayMouseUp}
+              >
+                {selection &&
+                  (() => {
+                    const r = getRelativeRect(selection);
+                    return (
+                      <div
+                        className="absolute border-2 border-[#49704F] bg-[#49704F]/10"
+                        style={{
+                          left: r.x,
+                          top: r.y,
+                          width: r.width,
+                          height: r.height,
+                          pointerEvents: "none",
+                        }}
+                      />
+                    );
+                  })()}
+              </div>
+            )}
 
-          {/* Comment popup after capture */}
-          {showCommentPopup &&
-            selection &&
-            (() => {
-              const r = getRelativeRect(selection);
-              return (
-                <div
-                  className="absolute z-40 bg-white rounded-2xl shadow-xl border border-[#e8e6df] p-4 w-72"
-                  style={{
-                    left: Math.min(r.x, window.innerWidth - 300),
-                    top: r.y + r.height + 8,
-                  }}
+            {/* Comment popup after capture */}
+            {showCommentPopup &&
+              selection &&
+              (() => {
+                const r = getRelativeRect(selection);
+                const popupPosition = getCommentPopupPosition(r);
+                return (
+                  <div
+                    className="absolute z-40 bg-white rounded-2xl shadow-xl border border-[#e8e6df] p-4 w-72"
+                    style={{
+                      left: popupPosition.left,
+                      top: popupPosition.top,
+                    }}
                   onClick={(e) => e.stopPropagation()}
                 >
                   <p className="text-[13px] font-bold text-[#233227] mb-2">
-                    Thêm comment cho vùng này
+                    Describe the change for this area
                   </p>
                   <textarea
                     autoFocus
                     value={captureComment}
                     onChange={(e) => setCaptureComment(e.target.value)}
-                    placeholder="Nhập comment..."
+                    placeholder="Describe the edit request..."
                     className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
                   />
                   <div className="flex gap-2 justify-end">
                     <button
-                      onClick={() => {
-                        setShowCommentPopup(false);
-                        setSelection(null);
-                      }}
+                      onClick={cancelCaptureFlow}
                       className="text-[#5c6860] text-[12px] font-bold px-3 py-1.5 rounded-lg hover:bg-[#e8e6df]/50"
                     >
-                      Huỷ
+                      Cancel
                     </button>
                     <button
                       onClick={handleSaveCapture}
                       disabled={isSubmittingCapture}
                       className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
                     >
-                      {isSubmittingCapture ? "Đang chụp..." : "Lưu"}
+                      {isSubmittingCapture ? "Saving..." : "Save"}
                     </button>
                   </div>
                 </div>
-              );
-            })()}
+                );
+              })()}
+          </div>
 
           {/* Preview chat toggle + collapsible chat panel */}
-          <div className="absolute right-6 bottom-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
-            {isChatOpen && (
-              <div className="max-w-[600px] max-h-[70vh] bg-white border border-[#d4d8d1] rounded-3xl shadow-xl backdrop-blur-md overflow-hidden pointer-events-auto">
+          {!previewCapture && (
+            <div className="absolute right-6 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none">
+              {isChatOpen && (
+              <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
                 <div className="p-3 border-b border-[#e5e8df]">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                      <h3 className="font-semibold text-sm text-[#2e3e2f]">
-                        Live Chat
-                      </h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsChatOpen(false)}
-                      className="text-[11px] text-[#7a836f] hover:text-[#233227] transition-colors"
-                    >
-                      Thu gọn
-                    </button>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                    <h3 className="font-semibold text-sm text-[#2e3e2f]">
+                      Live Chat
+                    </h3>
                   </div>
-                  <p className="mt-2 text-[12px] text-[#5e6a5f]">
-                    Gợi ý: refactor header, tối ưu SEO, chuyển ngôn ngữ, kiểm
-                    tra Dependency
-                  </p>
                 </div>
 
-                <div className="p-3 flex flex-wrap gap-2">
-                  {chatTags.map((tag) => (
-                    <button
-                      key={tag}
-                      onClick={() => setChatInput(tag)}
-                      className="text-[11px] text-[#3f593b] bg-[#eff7ee] border border-[#d8e8d3] px-3 py-1.5 rounded-full hover:bg-[#e0f0df] transition-colors"
-                    >
-                      {tag}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="p-3 border-t border-[#e5e8df] flex gap-2 items-center">
-                  <input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") sendChatMessage();
-                    }}
-                    className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
-                    placeholder="Nhập câu hỏi AI (enter gửi)..."
-                  />
-                  <button
-                    onClick={sendChatMessage}
-                    className="h-10 w-10 rounded-full bg-primary text-white flex items-center justify-center hover:bg-[#356944] transition-colors"
-                  >
-                    <span className="material-symbols-outlined">send</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setIsChatOpen((prev) => !prev)}
-              className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white shadow-lg flex items-center gap-2 hover:bg-[#346E56] transition-colors"
-            >
-              <span className="material-symbols-outlined text-[18px]">
-                {isChatOpen ? "close" : "auto_awesome"}
-              </span>
-              <span className="text-[12px] font-bold">
-                {isChatOpen ? "Đóng chat" : "Mở chat AI"}
-              </span>
-            </button>
-          </div>
-        </main>
-
-        {/* Right Sidebar: Captures */}
-        <aside className="w-[360px] shrink-0 bg-[#FAF7F0] border-l border-[#e8e6df] flex flex-col z-10">
-          <div className="p-6 pb-4 border-b border-[#e8e6df]">
-            <div className="flex justify-between items-center mb-1">
-              <h2 className="font-headline text-[18px] font-bold text-[#1a2b21]">
-                Captures
-              </h2>
-              <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full border border-[#cfe2cf]">
-                {captures.length} Saved
-              </span>
-            </div>
-            <p className="text-[#5c6860] text-[13px]">
-              Visual snippets saved from the current preview.
-            </p>
-          </div>
-
-          <div className="flex-1 overflow-y-auto min-h-0">
-            {captures.length > 0 ? (
-              <div className="h-full flex flex-col">
-                {selectedCaptureIds.length > 0 && (
-                  <div className="px-4 py-4 border-b border-[#e8e6df] bg-[#faf7f0]">
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-[#d9e3d1] bg-white px-3 py-2">
-                      <p className="text-[12px] font-bold text-[#3d5641]">
-                        Đã chọn {selectedCaptureIds.length} capture
+                {chatCaptures.length > 0 && (
+                  <div className="flex-1 overflow-hidden p-3">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#6d7d68]">
+                        Attached Captures
                       </p>
                       <button
                         type="button"
-                        onClick={handleDeleteSelectedCaptures}
-                        className="inline-flex items-center gap-1 rounded-full bg-[#a94f46] px-3 py-1.5 text-[11px] font-bold text-white hover:bg-[#913d35] transition-colors"
+                        onClick={handleClearChatCaptures}
+                        className="text-[11px] font-bold text-[#7a836f] hover:text-[#233227] transition-colors"
                       >
-                        <span className="material-symbols-outlined text-[14px]">
-                          delete
-                        </span>
-                        Xoá
+                        Clear all
                       </button>
+                    </div>
+                    <div className="max-h-[320px] overflow-y-auto pr-1">
+                      <div className="flex flex-wrap items-start gap-3">
+                      {chatCaptures.map((capture) => (
+                        <div
+                          key={capture.id}
+                          className="relative w-[140px] overflow-hidden rounded-2xl border border-[#d9e3d1] bg-white"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setPreviewCapture(capture)}
+                            className="block w-full text-left"
+                          >
+                            <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
+                              <img
+                                src={`${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`}
+                                alt="chat capture"
+                                className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
+                              />
+                            </div>
+                            <div className="px-2 py-2">
+                              <p
+                                className="overflow-hidden text-[11px] leading-relaxed text-[#556255]"
+                                style={{
+                                  display: "-webkit-box",
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: "vertical",
+                                }}
+                              >
+                                {capture.comment || "No edit request"}
+                              </p>
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveChatCapture(capture.id)}
+                            className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors"
+                            aria-label="Remove attached capture"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">
+                              close
+                            </span>
+                          </button>
+                        </div>
+                      ))}
+                      </div>
                     </div>
                   </div>
                 )}
 
-                <div className="flex-1 overflow-y-auto px-4 py-4">
-                  <div className="space-y-4">
-                    {captures.map((cap) => (
-                      <div
-                        key={cap.id}
-                        className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] ring-2 ring-[#49704F]/15" : "border-[#e4e0d4]"}`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => toggleCaptureSelection(cap.id)}
-                          className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}
-                          aria-label={
-                            selectedCaptureIds.includes(cap.id)
-                              ? "Bỏ chọn capture"
-                              : "Chọn capture"
-                          }
-                        >
-                          <span className="material-symbols-outlined text-[16px]">
-                            check
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setPreviewCapture(cap)}
-                          className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left"
-                        >
-                          <img
-                            src={`${import.meta.env.VITE_BACKEND_URL}${cap.filePath}`}
-                            alt="capture"
-                            className="block w-full h-auto rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
-                          />
-                        </button>
-                        <div className="space-y-1 px-4 py-3">
-                          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">
-                            Capture
-                          </p>
-                          <p className="text-[13px] leading-relaxed text-[#556255]">
-                            {cap.comment || "Chưa có ghi chú cho vùng này."}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
+                {chatCaptures.length === 0 && (
+                  <div className="border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
+                    <p className="text-[12px] leading-relaxed text-[#6b7568]">
+                      No captures attached yet. Save a selection from the preview
+                      to send visual context.
+                    </p>
+                  </div>
+                )}
+
+                <div className="p-3 border-t border-[#e5e8df]">
+                  <div className="flex gap-2 items-center">
+                  <input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && canSendChatMessage) void sendChatMessage();
+                    }}
+                    className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
+                    placeholder="Ask AI anything (press Enter to send)..."
+                  />
+                  <button
+                    onClick={() => void sendChatMessage()}
+                    disabled={!canSendChatMessage}
+                    className="h-10 w-10 rounded-full bg-primary disabled:opacity-50 text-white flex items-center justify-center hover:bg-[#356944] transition-colors"
+                  >
+                    <span className="material-symbols-outlined">
+                      {isSendingAiRequest ? "progress_activity" : "send"}
+                    </span>
+                  </button>
                   </div>
                 </div>
               </div>
-            ) : (
-              <div className="m-4 rounded-2xl border border-dashed border-[#d6ddd0] bg-white/70 px-5 py-8 text-center">
-                <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#eef3e8] text-[#49704F]">
-                  <span className="material-symbols-outlined text-[20px]">
-                    crop
-                  </span>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsChatOpen((prev) => !prev)}
+                className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white flex items-center gap-2 hover:bg-[#346E56] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">
+                  {isChatOpen ? "close" : "auto_awesome"}
+                </span>
+                <span className="text-[12px] font-bold">
+                  {isChatOpen ? "Close chat" : "Open AI chat"}
+                </span>
+              </button>
+            </div>
+          )}
+        </main>
+
+        {/* Right Sidebar: Captures */}
+        <aside
+          className={`relative shrink-0 overflow-hidden bg-[#FAF7F0] z-10 transition-[width] duration-300 ease-in-out ${capturesOpen ? "w-[360px] border-l border-[#e8e6df]" : "w-14 border-l border-[#e8e6df]"}`}
+        >
+          {capturesOpen ? (
+            <div className="flex h-full w-[360px] flex-col transition-opacity duration-200 opacity-100">
+              <div className="p-6 pb-4 border-b border-[#e8e6df]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <h2 className="font-headline text-[18px] font-bold text-[#1a2b21]">
+                        Captures
+                      </h2>
+                      <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full border border-[#cfe2cf]">
+                        {captures.length} Saved
+                      </span>
+                    </div>
+                    <p className="text-[#5c6860] text-[13px]">
+                      Visual snippets saved from the current preview.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCapturesOpen(false)}
+                    title="Hide captures"
+                    aria-label="Hide captures"
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">
+                      right_panel_close
+                    </span>
+                  </button>
                 </div>
-                <p className="text-[13px] font-bold text-[#233227]">
-                  Chưa có capture nào
-                </p>
-                <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">
-                  Chọn vùng trên preview rồi lưu lại. Capture sẽ xuất hiện ở đây
-                  để dùng cho AI và review sau đó.
-                </p>
               </div>
-            )}
-          </div>
+
+              <div className="flex-1 overflow-y-auto min-h-0">
+                {captures.length > 0 ? (
+                  <div className="h-full flex flex-col">
+                    {captures.length > 1 && (
+                      <div className="px-4 pt-4">
+                        <div className="flex items-center justify-end gap-3">
+                          {selectedCaptureIds.length < captures.length ? (
+                            <button
+                              type="button"
+                              onClick={handleSelectAllCaptures}
+                              className="text-[12px] font-bold text-[#49704F] hover:text-[#2f5840] transition-colors"
+                            >
+                              Select all
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleClearCaptureSelection}
+                              className="text-[12px] font-bold text-[#7a836f] hover:text-[#233227] transition-colors"
+                            >
+                              Clear selection
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedCaptureIds.length > 0 && (
+                      <div className="border-b border-[#e8e6df] bg-[#faf7f0] px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="inline-flex items-center gap-2 rounded-full border border-[#dde3d8] bg-white px-3 py-1.5">
+                            <span className="material-symbols-outlined text-[15px] text-[#49704F]">
+                              check_circle
+                            </span>
+                            <p className="text-[12px] font-bold text-[#4f5b50]">
+                              {selectedCaptureIds.length} selected
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleSaveCapturesToChat}
+                              className="inline-flex items-center gap-1 rounded-full border border-[#cfe0c5] bg-white px-3 py-1.5 text-[11px] font-bold text-[#49704F] hover:bg-[#f3f8ef] transition-colors"
+                            >
+                              <span className="material-symbols-outlined text-[14px]">
+                                forum
+                              </span>
+                              Add to Chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleDeleteSelectedCaptures}
+                              className="inline-flex items-center gap-1 rounded-full border border-[#e3c3bc] bg-white px-3 py-1.5 text-[11px] font-bold text-[#a94f46] hover:bg-[#fbf2f0] transition-colors"
+                            >
+                              <span className="material-symbols-outlined text-[14px]">
+                                delete
+                              </span>
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex-1 overflow-y-auto px-4 py-4">
+                      <div className="space-y-4">
+                        {captures.map((cap) => (
+                          <div
+                            key={cap.id}
+                            className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#cfd7cb] bg-[#fcfdfb]" : "border-[#e4e0d4]"}`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => toggleCaptureSelection(cap.id)}
+                              className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}
+                              aria-label={
+                                selectedCaptureIds.includes(cap.id)
+                                  ? "Deselect capture"
+                                  : "Select capture"
+                              }
+                            >
+                              <span className="material-symbols-outlined text-[16px]">
+                                check
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPreviewCapture(cap)}
+                              className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left"
+                            >
+                              <div className="flex h-36 items-center justify-center">
+                                <img
+                                  src={`${import.meta.env.VITE_BACKEND_URL}${cap.filePath}`}
+                                  alt="capture"
+                                  className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
+                                />
+                              </div>
+                            </button>
+                            <div className="space-y-1 px-4 py-3">
+                              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">
+                                Edit Request
+                              </p>
+                              <p className="text-[13px] leading-relaxed text-[#556255]">
+                                {cap.comment || "No edit request provided."}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="m-4 rounded-2xl border border-dashed border-[#d6ddd0] bg-white/70 px-5 py-8 text-center">
+                    <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#eef3e8] text-[#49704F]">
+                      <span className="material-symbols-outlined text-[20px]">
+                        crop
+                      </span>
+                    </div>
+                    <p className="text-[13px] font-bold text-[#233227]">
+                      No captures yet
+                    </p>
+                    <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">
+                      Select an area in the preview and save it. Captures will
+                      appear here for AI context and later review.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-full w-14 items-start justify-center pt-6">
+              <button
+                type="button"
+                onClick={() => setCapturesOpen(true)}
+                title="Show captures"
+                aria-label="Show captures"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  right_panel_open
+                </span>
+              </button>
+            </div>
+          )}
         </aside>
 
         {/* Stakeholder annotations drawer */}
@@ -899,7 +1218,7 @@ const Editor: React.FC = () => {
 
         {previewCapture && (
           <div
-            className="absolute inset-0 z-40 flex items-center justify-center bg-[#233227]/70 p-6 backdrop-blur-sm"
+            className="absolute inset-0 z-50 flex items-center justify-center bg-[#233227]/70 p-6 backdrop-blur-sm"
             onClick={() => setPreviewCapture(null)}
           >
             <div
@@ -912,7 +1231,7 @@ const Editor: React.FC = () => {
                     Capture Preview
                   </p>
                   <p className="mt-1 text-[13px] text-[#5c6860]">
-                    {previewCapture.comment || "Không có ghi chú cho capture này."}
+                    {previewCapture.comment || "No edit request for this capture."}
                   </p>
                 </div>
                 <button
