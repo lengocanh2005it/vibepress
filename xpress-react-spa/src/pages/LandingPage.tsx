@@ -15,7 +15,18 @@ const LandingPage: React.FC = () => {
 
   const copyApiKey = () => {
     if (!user?.apiKey) return;
-    navigator.clipboard.writeText(user.apiKey);
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(user.apiKey);
+    } else {
+      const el = document.createElement("textarea");
+      el.value = user.apiKey;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
     setApiKeyCopied(true);
     setTimeout(() => setApiKeyCopied(false), 2000);
   };

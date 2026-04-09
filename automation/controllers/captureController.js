@@ -51,7 +51,7 @@ async function captureRegion(req, res) {
       deviceScaleFactor: dpr,
     });
     const page = await context.newPage();
-    await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 20000 });
+    await page.goto(targetUrl, { waitUntil: 'load', timeout: 60000 });
 
     if (scrollX > 0 || scrollY > 0) {
       await page.evaluate(
