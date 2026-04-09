@@ -41,7 +41,10 @@ import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { TokenTracker } from '../../common/utils/token-tracker.js';
-import { RunPipelineDto } from './orchestrator.controller.js';
+import {
+  PipelineEditRequestDto,
+  RunPipelineDto,
+} from './orchestrator.controller.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
@@ -225,14 +228,19 @@ export class OrchestratorService {
     private readonly httpService: HttpService,
   ) {}
 
-  async run(siteId: string): Promise<{ jobId: string }> {
+  async run(
+    siteId: string,
+    editRequest?: PipelineEditRequestDto,
+  ): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
       this.httpService.get(
         `${this.configService.get<string>('automation.url', '')}/wp/db-info-by-site?siteId=${siteId}`,
       ),
     );
 
-    const dto = response.data;
+    const dto: RunPipelineDto = editRequest
+      ? { ...response.data, editRequest }
+      : response.data;
 
     this.validateDto(dto);
 
@@ -1483,7 +1491,11 @@ export class OrchestratorService {
       );
     }
 
-    const allowedKeys = new Set(['themeGithubUrl', 'dbConnectionString']);
+    const allowedKeys = new Set([
+      'themeGithubUrl',
+      'dbConnectionString',
+      'editRequest',
+    ]);
     const extraKeys = Object.keys(dto).filter((key) => !allowedKeys.has(key));
     if (extraKeys.length > 0) {
       throw new BadRequestException(

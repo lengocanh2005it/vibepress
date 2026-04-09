@@ -61,38 +61,27 @@ async function captureRegion(req, res) {
       await page.waitForTimeout(150);
     }
 
-    const pageBounds = await page.evaluate(() => ({
-      width: Math.max(
-        document.documentElement.scrollWidth,
-        document.body?.scrollWidth ?? 0,
-      ),
-      height: Math.max(
-        document.documentElement.scrollHeight,
-        document.body?.scrollHeight ?? 0,
-      ),
-    }));
-
-    const clipX = Math.max(0, Math.round(x + scrollX));
-    const clipY = Math.max(0, Math.round(y + scrollY));
-    if (clipX >= pageBounds.width || clipY >= pageBounds.height) {
+    const clipX = Math.max(0, Math.round(x));
+    const clipY = Math.max(0, Math.round(y));
+    if (clipX >= viewportWidth || clipY >= viewportHeight) {
       return res.status(400).json({
         success: false,
-        error: 'Capture rectangle is outside the rendered page bounds',
+        error: 'Capture rectangle is outside the visible viewport',
       });
     }
     const clipWidth = Math.min(
       Math.max(1, Math.round(width)),
-      Math.max(1, pageBounds.width - clipX),
+      Math.max(1, viewportWidth - clipX),
     );
     const clipHeight = Math.min(
       Math.max(1, Math.round(height)),
-      Math.max(1, pageBounds.height - clipY),
+      Math.max(1, viewportHeight - clipY),
     );
 
     if (clipWidth <= 0 || clipHeight <= 0) {
       return res.status(400).json({
         success: false,
-        error: 'Capture rectangle is outside the rendered page bounds',
+        error: 'Capture rectangle is outside the visible viewport',
       });
     }
 
