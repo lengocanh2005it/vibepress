@@ -24,7 +24,9 @@ function loadFromStorage(): { user: AuthUser | null; token: string | null } {
     if (token && raw) {
       return { user: JSON.parse(raw), token };
     }
-  } catch {}
+  } catch (error) {
+    console.error('Error loading user data from storage:', error);
+  }
   return { user: null, token: null };
 }
 

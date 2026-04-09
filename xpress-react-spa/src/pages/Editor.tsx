@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useRef } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import React, { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { runAiProcess } from "../services/AiService";
 import {
   captureRegion,
   getWpSitePages,
   type CaptureAssetResponse,
   type CaptureViewport,
 } from "../services/automationService";
-import { runAiProcess } from "../services/AiService";
 
 interface WpPage {
   id: number;
@@ -174,28 +174,31 @@ const Editor: React.FC = () => {
     if (!siteId || (!userPrompt && chatCaptures.length === 0)) return;
 
     setIsSendingAiRequest(true);
-    try {
-      const data = await runAiProcess(siteId, {
-        prompt: userPrompt,
-        language: "en",
-        pageContext: {
-          reactUrl: window.location.href,
-          reactRoute: window.location.pathname,
-          wordpressUrl: selectedPageUrl,
-          iframeSrc: previewSrc,
-          viewport: getCaptureViewport(),
+
+    const requestBody = {
+      prompt: userPrompt,
+      language: "en",
+      pageContext: {
+        reactUrl: window.location.href,
+        reactRoute: window.location.pathname,
+        wordpressUrl: selectedPageUrl,
+        iframeSrc: previewSrc,
+        viewport: getCaptureViewport(),
+      },
+      attachments: chatCaptures.map((capture) => ({
+        id: capture.id,
+        note: capture.comment,
+        sourcePageUrl: capture.pageUrl,
+        asset: {
+          publicUrl: getCaptureDisplayUrl(capture),
+          storagePath: capture.filePath,
+          mimeType: getCaptureMimeType(capture),
         },
-        attachments: chatCaptures.map((capture) => ({
-          id: capture.id,
-          note: capture.comment,
-          sourcePageUrl: capture.pageUrl,
-          asset: {
-            publicUrl: getCaptureDisplayUrl(capture),
-            storagePath: capture.filePath,
-            mimeType: getCaptureMimeType(capture),
-          },
-        })),
-      });
+      }))
+    };
+    console.log("Sending AI request with body:", requestBody);
+    try {
+      const data = await runAiProcess(siteId, requestBody);
 
       setChatInput("");
       setChatCaptures([]);
@@ -326,7 +329,9 @@ const Editor: React.FC = () => {
       return {
         width: Math.max(
           1,
-          Math.round(docEl?.clientWidth || frameWindow?.innerWidth || fallbackWidth),
+          Math.round(
+            docEl?.clientWidth || frameWindow?.innerWidth || fallbackWidth,
+          ),
         ),
         height: Math.max(
           1,
@@ -336,7 +341,10 @@ const Editor: React.FC = () => {
         ),
         scrollX: Math.max(0, Math.round(frameWindow?.scrollX || 0)),
         scrollY: Math.max(0, Math.round(frameWindow?.scrollY || 0)),
-        dpr: Math.max(1, frameWindow?.devicePixelRatio || window.devicePixelRatio || 1),
+        dpr: Math.max(
+          1,
+          frameWindow?.devicePixelRatio || window.devicePixelRatio || 1,
+        ),
       };
     } catch {
       return {
@@ -423,7 +431,9 @@ const Editor: React.FC = () => {
   };
 
   const handleRemoveChatCapture = (captureId: string) => {
-    setChatCaptures((prev) => prev.filter((capture) => capture.id !== captureId));
+    setChatCaptures((prev) =>
+      prev.filter((capture) => capture.id !== captureId),
+    );
     setSelectedCaptureIds((prev) => prev.filter((id) => id !== captureId));
   };
 
@@ -455,7 +465,9 @@ const Editor: React.FC = () => {
     ? `/${selectedPage.slug}`
     : selectedPageUrl;
   const canSendChatMessage =
-    !!siteId && (!!chatInput.trim() || chatCaptures.length > 0) && !isSendingAiRequest;
+    !!siteId &&
+    (!!chatInput.trim() || chatCaptures.length > 0) &&
+    !isSendingAiRequest;
 
   return (
     <div className="flex flex-col h-screen bg-[#FAF7F0] font-body text-[#233227] overflow-hidden">
@@ -571,9 +583,7 @@ const Editor: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <div
-                      className="bg-[#FAF7F0] border-2 border-[#49704F] rounded-2xl p-4 flex flex-col gap-2 relative shadow-sm cursor-pointer"
-                    >
+                    <div className="bg-[#FAF7F0] border-2 border-[#49704F] rounded-2xl p-4 flex flex-col gap-2 relative shadow-sm cursor-pointer">
                       <div className="absolute top-4 right-4 bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full">
                         Editing
                       </div>
@@ -768,34 +778,34 @@ const Editor: React.FC = () => {
                       left: popupPosition.left,
                       top: popupPosition.top,
                     }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <p className="text-[13px] font-bold text-[#233227] mb-2">
-                    Describe the change for this area
-                  </p>
-                  <textarea
-                    autoFocus
-                    value={captureComment}
-                    onChange={(e) => setCaptureComment(e.target.value)}
-                    placeholder="Describe the edit request..."
-                    className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
-                  />
-                  <div className="flex gap-2 justify-end">
-                    <button
-                      onClick={cancelCaptureFlow}
-                      className="text-[#5c6860] text-[12px] font-bold px-3 py-1.5 rounded-lg hover:bg-[#e8e6df]/50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleSaveCapture}
-                      disabled={isSubmittingCapture}
-                      className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
-                    >
-                      {isSubmittingCapture ? "Saving..." : "Save"}
-                    </button>
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <p className="text-[13px] font-bold text-[#233227] mb-2">
+                      Describe the change for this area
+                    </p>
+                    <textarea
+                      autoFocus
+                      value={captureComment}
+                      onChange={(e) => setCaptureComment(e.target.value)}
+                      placeholder="Describe the edit request..."
+                      className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={cancelCaptureFlow}
+                        className="text-[#5c6860] text-[12px] font-bold px-3 py-1.5 rounded-lg hover:bg-[#e8e6df]/50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleSaveCapture}
+                        disabled={isSubmittingCapture}
+                        className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
+                      >
+                        {isSubmittingCapture ? "Saving..." : "Save"}
+                      </button>
+                    </div>
                   </div>
-                </div>
                 );
               })()}
           </div>
@@ -804,111 +814,114 @@ const Editor: React.FC = () => {
           {!previewCapture && (
             <div className="absolute right-6 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none">
               {isChatOpen && (
-              <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
-                <div className="p-3 border-b border-[#e5e8df]">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                    <h3 className="font-semibold text-sm text-[#2e3e2f]">
-                      Live Chat
-                    </h3>
-                  </div>
-                </div>
-
-                {chatCaptures.length > 0 && (
-                  <div className="flex-1 overflow-hidden p-3">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#6d7d68]">
-                        Attached Captures
-                      </p>
-                      <button
-                        type="button"
-                        onClick={handleClearChatCaptures}
-                        className="text-[11px] font-bold text-[#7a836f] hover:text-[#233227] transition-colors"
-                      >
-                        Clear all
-                      </button>
+                <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
+                  <div className="p-3 border-b border-[#e5e8df]">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                      <h3 className="font-semibold text-sm text-[#2e3e2f]">
+                        Live Chat
+                      </h3>
                     </div>
-                    <div className="max-h-[320px] overflow-y-auto pr-1">
-                      <div className="flex flex-wrap items-start gap-3">
-                      {chatCaptures.map((capture) => (
-                        <div
-                          key={capture.id}
-                          className="relative w-[140px] overflow-hidden rounded-2xl border border-[#d9e3d1] bg-white"
+                  </div>
+
+                  {chatCaptures.length > 0 && (
+                    <div className="flex-1 overflow-hidden p-3">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#6d7d68]">
+                          Attached Captures
+                        </p>
+                        <button
+                          type="button"
+                          onClick={handleClearChatCaptures}
+                          className="text-[11px] font-bold text-[#7a836f] hover:text-[#233227] transition-colors"
                         >
-                          <button
-                            type="button"
-                            onClick={() => setPreviewCapture(capture)}
-                            className="block w-full text-left"
-                          >
-                            <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
-                              <img
-                                src={getCaptureDisplayUrl(capture)}
-                                alt="chat capture"
-                                className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
-                              />
-                            </div>
-                            <div className="px-2 py-2">
-                              <p
-                                className="overflow-hidden text-[11px] leading-relaxed text-[#556255]"
-                                style={{
-                                  display: "-webkit-box",
-                                  WebkitLineClamp: 2,
-                                  WebkitBoxOrient: "vertical",
-                                }}
+                          Clear all
+                        </button>
+                      </div>
+                      <div className="max-h-[320px] overflow-y-auto pr-1">
+                        <div className="flex flex-wrap items-start gap-3">
+                          {chatCaptures.map((capture) => (
+                            <div
+                              key={capture.id}
+                              className="relative w-[140px] overflow-hidden rounded-2xl border border-[#d9e3d1] bg-white"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setPreviewCapture(capture)}
+                                className="block w-full text-left"
                               >
-                                {capture.comment || "No edit request"}
-                              </p>
+                                <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
+                                  <img
+                                    src={getCaptureDisplayUrl(capture)}
+                                    alt="chat capture"
+                                    className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
+                                  />
+                                </div>
+                                <div className="px-2 py-2">
+                                  <p
+                                    className="overflow-hidden text-[11px] leading-relaxed text-[#556255]"
+                                    style={{
+                                      display: "-webkit-box",
+                                      WebkitLineClamp: 2,
+                                      WebkitBoxOrient: "vertical",
+                                    }}
+                                  >
+                                    {capture.comment || "No edit request"}
+                                  </p>
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleRemoveChatCapture(capture.id)
+                                }
+                                className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors"
+                                aria-label="Remove attached capture"
+                              >
+                                <span className="material-symbols-outlined text-[14px]">
+                                  close
+                                </span>
+                              </button>
                             </div>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveChatCapture(capture.id)}
-                            className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors"
-                            aria-label="Remove attached capture"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">
-                              close
-                            </span>
-                          </button>
+                          ))}
                         </div>
-                      ))}
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {chatCaptures.length === 0 && (
-                  <div className="border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
-                    <p className="text-[12px] leading-relaxed text-[#6b7568]">
-                      No captures attached yet. Save a selection from the preview
-                      to send visual context.
-                    </p>
-                  </div>
-                )}
+                  {chatCaptures.length === 0 && (
+                    <div className="border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
+                      <p className="text-[12px] leading-relaxed text-[#6b7568]">
+                        No captures attached yet. Save a selection from the
+                        preview to send visual context.
+                      </p>
+                    </div>
+                  )}
 
-                <div className="p-3 border-t border-[#e5e8df]">
-                  <div className="flex gap-2 items-center">
-                  <input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && canSendChatMessage) void sendChatMessage();
-                    }}
-                    className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
-                    placeholder="Ask AI anything (press Enter to send)..."
-                  />
-                  <button
-                    onClick={() => void sendChatMessage()}
-                    disabled={!canSendChatMessage}
-                    className="h-10 w-10 rounded-full bg-primary disabled:opacity-50 text-white flex items-center justify-center hover:bg-[#356944] transition-colors"
-                  >
-                    <span className="material-symbols-outlined">
-                      {isSendingAiRequest ? "progress_activity" : "send"}
-                    </span>
-                  </button>
+                  <div className="p-3 border-t border-[#e5e8df]">
+                    <div className="flex gap-2 items-center">
+                      <input
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && canSendChatMessage)
+                            void sendChatMessage();
+                        }}
+                        className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
+                        placeholder="Ask AI anything (press Enter to send)..."
+                      />
+                      <button
+                        onClick={() => void sendChatMessage()}
+                        disabled={!canSendChatMessage}
+                        className="h-10 w-10 rounded-full bg-primary disabled:opacity-50 text-white flex items-center justify-center hover:bg-[#356944] transition-colors"
+                      >
+                        <span className="material-symbols-outlined">
+                          {isSendingAiRequest ? "progress_activity" : "send"}
+                        </span>
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
               )}
 
               <button
@@ -1054,10 +1067,10 @@ const Editor: React.FC = () => {
                             >
                               <div className="flex h-36 items-center justify-center">
                                 <img
-                                src={getCaptureDisplayUrl(cap)}
-                                alt="capture"
-                                className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
-                              />
+                                  src={getCaptureDisplayUrl(cap)}
+                                  alt="capture"
+                                  className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
+                                />
                               </div>
                             </button>
                             <div className="space-y-1 px-4 py-3">
@@ -1257,7 +1270,8 @@ const Editor: React.FC = () => {
                     Capture Preview
                   </p>
                   <p className="mt-1 text-[13px] text-[#5c6860]">
-                    {previewCapture.comment || "No edit request for this capture."}
+                    {previewCapture.comment ||
+                      "No edit request for this capture."}
                   </p>
                 </div>
                 <button

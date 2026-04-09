@@ -81,6 +81,17 @@ const LandingPage: React.FC = () => {
     }
   };
 
+  const startNow=()=>{
+    if(user)
+    {
+        navigate('/app/onboarding');
+    }
+    else
+    {
+        openModal()
+    }
+  }
+
   return (
     <div className="antialiased overflow-x-hidden font-body bg-[#faf6f0] text-[#2e3230] leading-[1.6]">
       {/* TopNavBar */}
@@ -110,12 +121,6 @@ const LandingPage: React.FC = () => {
                       <button onClick={() => openModal('register')} className="border border-[#4a7c59] text-[#4a7c59] px-4 py-1.5 rounded-lg font-semibold text-sm hover:bg-[#4a7c59]/5 transition-colors">Đăng ký</button>
                     </div>
                   )}
-                  <button 
-                    onClick={() => navigate('/app/onboarding')}
-                    className="bg-[#4a7c59] text-white px-5 py-2 rounded-lg font-semibold text-sm hover:opacity-90 transition-opacity active:scale-95 duration-150"
-                  >
-                    Get Started
-                  </button>
               </div>
           </div>
       </div>
@@ -134,7 +139,7 @@ const LandingPage: React.FC = () => {
                   </p>
                   <div className="flex flex-col sm:flex-row gap-4">
                       <button 
-                        onClick={() => navigate('/app/onboarding')}
+                        onClick={() => startNow()}
                         className="bg-[#4a7c59] text-white px-8 py-4 rounded-xl font-bold text-lg shadow-lg hover:opacity-90 transition-all flex items-center justify-center gap-2"
                       >
                           Làm mới Website của bạn ngay
