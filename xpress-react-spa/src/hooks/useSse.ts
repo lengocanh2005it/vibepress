@@ -100,12 +100,12 @@ export interface UseSseState {
 /**
  * Hook để subscribe vào SSE stream từ orchestrator backend
  * @param jobId - Job ID của pipeline
- * @param apiUrl - Base URL của API (default: http://localhost:3000)
+ * @param apiUrl - Base URL của API (default: /ai-api — nginx proxy tới ai_pipeline:3001)
  * @returns State và reconnect function
  */
 export function useSse(
   jobId: string,
-  apiUrl: string = "http://localhost:3001",
+  apiUrl: string = "/ai-api",
 ) {
   const [state, setState] = useState<UseSseState>({
     isConnected: false,
