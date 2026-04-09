@@ -25,6 +25,7 @@ import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js'
 import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
+import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
 import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
@@ -181,7 +182,8 @@ export type PipelineStepStatus =
   | 'running'
   | 'done'
   | 'error'
-  | 'skipped';
+  | 'skipped'
+  | 'stopped';
 
 export interface PipelineStep {
   name: string;
@@ -191,10 +193,27 @@ export interface PipelineStep {
 
 export interface PipelineStatus {
   jobId: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'stopping' | 'stopped' | 'done' | 'error' | 'deleted';
   steps: PipelineStep[];
   result?: any;
   error?: string;
+}
+
+interface JobRuntimeControl {
+  stopRequested: boolean;
+  deleteRequested: boolean;
+  finalized: boolean;
+  logPath?: string;
+  preview?: PreviewBuilderResult;
+}
+
+class PipelineControlError extends Error {
+  constructor(
+    public readonly kind: 'stopped' | 'deleted',
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 @Injectable()
@@ -203,6 +222,7 @@ export class OrchestratorService {
   private readonly tokenTracker = new TokenTracker();
   private readonly jobs = new Map<string, PipelineStatus>();
   private readonly progress = new Map<string, ReplaySubject<ProgressEvent>>();
+  private readonly controls = new Map<string, JobRuntimeControl>();
 
   constructor(
     private readonly sqlService: SqlService,
@@ -274,8 +294,18 @@ export class OrchestratorService {
     };
     this.jobs.set(jobId, state);
     this.progress.set(jobId, this.createProgressStream());
+    this.controls.set(jobId, {
+      stopRequested: false,
+      deleteRequested: false,
+      finalized: false,
+    });
 
     this.executePipelineLegacy(jobId, dto, state).catch((err) => {
+      if (err instanceof PipelineControlError) {
+        void this.finalizeControlledTermination(jobId, state, err);
+        return;
+      }
+
       state.status = 'error';
       state.error = err.message;
       const subject = this.progress.get(jobId);
@@ -302,6 +332,84 @@ export class OrchestratorService {
         error: 'Job not found',
       }
     );
+  }
+
+  async stop(jobId: string): Promise<PipelineStatus> {
+    const state = this.jobs.get(jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${jobId}" not found`);
+    }
+    if (
+      state.status === 'done' ||
+      state.status === 'error' ||
+      state.status === 'stopped' ||
+      state.status === 'deleted'
+    ) {
+      return state;
+    }
+
+    const control = this.controls.get(jobId);
+    if (control) {
+      control.stopRequested = true;
+      await this.stopPreviewProcesses(control.preview);
+    }
+    state.status = 'stopping';
+
+    const subject = this.progress.get(jobId);
+    subject?.next({
+      step: 'system',
+      label: 'Pipeline Stop Requested',
+      status: 'running',
+      percent: 0,
+      message:
+        'Stop was requested. The pipeline will halt at the next safe checkpoint.',
+    });
+
+    return state;
+  }
+
+  async delete(jobId: string): Promise<{ jobId: string; deleted: boolean }> {
+    const state = this.jobs.get(jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${jobId}" not found`);
+    }
+
+    const control = this.controls.get(jobId);
+    if (control) {
+      control.stopRequested = true;
+      control.deleteRequested = true;
+      await this.stopPreviewProcesses(control.preview);
+    }
+
+    if (state.status !== 'running' && state.status !== 'stopping') {
+      await this.cleanup.cleanupAll(jobId);
+      this.jobs.delete(jobId);
+      this.controls.delete(jobId);
+      const subject = this.progress.get(jobId);
+      subject?.next({
+        step: 'system',
+        label: 'Pipeline Deleted',
+        status: 'done',
+        percent: 100,
+        message: 'Pipeline state and temporary artifacts were deleted.',
+      });
+      subject?.complete();
+      this.progress.delete(jobId);
+      return { jobId, deleted: true };
+    }
+
+    state.status = 'stopping';
+    const subject = this.progress.get(jobId);
+    subject?.next({
+      step: 'system',
+      label: 'Pipeline Delete Requested',
+      status: 'running',
+      percent: 0,
+      message:
+        'Delete was requested. The pipeline will stop, clean up artifacts, and remove its state.',
+    });
+
+    return { jobId, deleted: true };
   }
 
   getProgressStream(jobId: string): ReplaySubject<ProgressEvent> {
@@ -353,6 +461,8 @@ export class OrchestratorService {
     message: string,
     data?: ProgressEventData,
   ): void {
+    this.assertJobActive(state.jobId);
+
     const meta = this.getStepMeta(name);
     const subject = this.progress.get(state.jobId);
     const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
@@ -371,6 +481,92 @@ export class OrchestratorService {
       message,
       data,
     });
+  }
+
+  private assertJobActive(jobId: string): void {
+    const control = this.controls.get(jobId);
+    if (!control) return;
+    if (control.deleteRequested) {
+      throw new PipelineControlError(
+        'deleted',
+        'Pipeline was deleted by the user',
+      );
+    }
+    if (control.stopRequested) {
+      throw new PipelineControlError(
+        'stopped',
+        'Pipeline was stopped by the user',
+      );
+    }
+  }
+
+  private async delayWithControl(jobId: string, ms: number): Promise<void> {
+    const intervalMs = 100;
+    let remaining = ms;
+    while (remaining > 0) {
+      this.assertJobActive(jobId);
+      const slice = Math.min(intervalMs, remaining);
+      await new Promise((resolve) => setTimeout(resolve, slice));
+      remaining -= slice;
+    }
+  }
+
+  private async stopPreviewProcesses(
+    preview?: Pick<PreviewBuilderResult, 'frontendPid' | 'serverPid'>,
+  ): Promise<void> {
+    if (!preview) return;
+    await Promise.all([
+      this.cleanup.terminateProcessTree(preview.frontendPid),
+      this.cleanup.terminateProcessTree(preview.serverPid),
+    ]);
+  }
+
+  private async finalizeControlledTermination(
+    jobId: string,
+    state: PipelineStatus,
+    err: PipelineControlError,
+  ): Promise<void> {
+    const control = this.controls.get(jobId);
+    if (control?.finalized) return;
+    if (control) control.finalized = true;
+
+    await this.stopPreviewProcesses(control?.preview);
+
+    const subject = this.progress.get(jobId);
+    if (err.kind === 'deleted') {
+      state.status = 'deleted';
+      state.error = err.message;
+      subject?.next({
+        step: 'system',
+        label: 'Pipeline Deleted',
+        status: 'done',
+        percent: 100,
+        message: 'Pipeline execution was deleted. Temporary artifacts are being removed.',
+      });
+      await this.cleanup.cleanupAll(jobId);
+      subject?.complete();
+      this.jobs.delete(jobId);
+      this.controls.delete(jobId);
+      this.progress.delete(jobId);
+      return;
+    }
+
+    state.status = 'stopped';
+    state.error = err.message;
+    for (const step of state.steps) {
+      if (step.status === 'running') {
+        step.status = 'stopped';
+        step.error = err.message;
+      }
+    }
+    subject?.next({
+      step: 'system',
+      label: 'Pipeline Stopped',
+      status: 'done',
+      percent: 100,
+      message: 'Pipeline execution was stopped by the user.',
+    });
+    subject?.complete();
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
@@ -392,6 +588,8 @@ export class OrchestratorService {
     const logPath = join(jobLogDir, 'pipeline.log');
     const tokenLogPath = join(jobLogDir, 'tokens', 'total.tokens.log');
     const pipelineStart = Date.now();
+    const control = this.controls.get(jobId);
+    if (control) control.logPath = logPath;
     await this.tokenTracker.init(tokenLogPath);
     await this.logToFile(logPath, `Pipeline ${jobId} started`);
     try {
@@ -452,8 +650,7 @@ export class OrchestratorService {
       );
 
       // Helper to add delay between steps for better log visibility
-      const stepDelay = () =>
-        new Promise((resolve) => setTimeout(resolve, 500));
+      const stepDelay = () => this.delayWithControl(jobId, 500);
 
       // ── Pipeline steps ────────────────────────────────────────────────────
 
@@ -1082,6 +1279,10 @@ export class OrchestratorService {
           throw new Error('[Stage 8] Build fix-loop exhausted all attempts');
         },
       );
+      const runtimeControl = this.controls.get(jobId);
+      if (runtimeControl) {
+        runtimeControl.preview = preview;
+      }
       await stepDelay();
 
       // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
@@ -1251,6 +1452,8 @@ export class OrchestratorService {
       const subject = this.progress.get(jobId);
       subject?.complete();
       setTimeout(() => this.progress.delete(jobId), 60_000);
+      const finalControl = this.controls.get(jobId);
+      if (finalControl) finalControl.finalized = true;
 
       this.logger.log(`Pipeline ${jobId} completed in ${totalElapsed}s`);
       await this.logToFile(
@@ -1366,6 +1569,8 @@ export class OrchestratorService {
     logPath: string,
     fn: () => Promise<T | AgentResult<T>>,
   ): Promise<T> {
+    this.assertJobActive(state.jobId);
+
     const step = state.steps.find((s) => s.name === name)!;
     if (step.status === 'skipped') return undefined as T;
 
@@ -1385,6 +1590,7 @@ export class OrchestratorService {
     const t0 = Date.now();
     try {
       const result = await fn();
+      this.assertJobActive(state.jobId);
       let data: T;
 
       // Handle AgentResult artifact
@@ -1419,6 +1625,16 @@ export class OrchestratorService {
       await this.logToFile(logPath, `Step ${name} done (${elapsed}s)`);
       return data;
     } catch (err: any) {
+      if (err instanceof PipelineControlError) {
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+        step.status = 'stopped';
+        step.error = err.message;
+        await this.logToFile(
+          logPath,
+          `Step ${name} STOPPED (${elapsed}s): ${err.message}`,
+        );
+        throw err;
+      }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       step.status = 'error';
       step.error = err.message;

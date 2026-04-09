@@ -1,13 +1,5 @@
-export interface AiEditRequestCapture {
-    id: string;
-    filePath: string;
-    url: string;
-    comment: string;
-    pageUrl: string;
-}
-
 export interface AiEditRequestPayload {
-    userPrompt: string;
+    prompt: string;
     language?: string;
     pageContext?: {
         reactUrl?: string;
@@ -22,7 +14,16 @@ export interface AiEditRequestPayload {
             dpr: number;
         };
     };
-    captures?: AiEditRequestCapture[];
+    attachments?: Array<{
+        id: string;
+        note?: string;
+        sourcePageUrl?: string;
+        asset: {
+            publicUrl: string;
+            storagePath?: string;
+            mimeType?: 'image/png' | 'image/jpeg' | 'image/webp';
+        };
+    }>;
 }
 
 export const runAiProcess = async (

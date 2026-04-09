@@ -22,6 +22,21 @@ export interface CaptureViewport {
   dpr: number;
 }
 
+export interface CaptureAssetResponse {
+  provider: string;
+  fileName: string;
+  originalPath: string;
+  url: string;
+  bytes: number;
+  mimeType: string;
+  width?: number;
+  height?: number;
+  publicId?: string;
+  format?: string;
+  createdAt?: string;
+  fileId?: string;
+}
+
 export const captureRegion = async (
   pageUrl: string,
   proxyUrl: string,
@@ -46,7 +61,14 @@ export const captureRegion = async (
     }
     throw new Error(errorMessage);
   }
-  return response.json() as Promise<{ success: boolean; filePath: string; comment: string; pageUrl: string }>;
+  return response.json() as Promise<{
+    success: boolean;
+    filePath: string;
+    fileName: string;
+    comment: string;
+    pageUrl: string;
+    asset?: CaptureAssetResponse;
+  }>;
 };
 
 export const getWpSitePages = async (siteUrl: string) => {

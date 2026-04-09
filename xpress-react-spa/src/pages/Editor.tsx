@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import {
   captureRegion,
   getWpSitePages,
+  type CaptureAssetResponse,
   type CaptureViewport,
 } from "../services/automationService";
 import { runAiProcess } from "../services/AiService";
@@ -18,6 +19,8 @@ interface WpPage {
 interface Capture {
   id: string;
   filePath: string;
+  fileName?: string;
+  asset?: CaptureAssetResponse;
   comment: string;
   pageUrl: string;
 }
@@ -146,6 +149,24 @@ const Editor: React.FC = () => {
     return "Apply the requested changes from the attached captures. Preserve everything else unless a broader update is required.";
   };
 
+  const getCaptureDisplayUrl = (capture: Capture) =>
+    capture.asset?.url ||
+    `${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`;
+
+  const getCaptureMimeType = (
+    capture: Capture,
+  ): "image/png" | "image/jpeg" | "image/webp" => {
+    const mimeType = capture.asset?.mimeType;
+    if (
+      mimeType === "image/png" ||
+      mimeType === "image/jpeg" ||
+      mimeType === "image/webp"
+    ) {
+      return mimeType;
+    }
+    return "image/png";
+  };
+
   const sendChatMessage = async () => {
     const trimmedPrompt = chatInput.trim();
     const userPrompt = trimmedPrompt || getDefaultAiPrompt();
@@ -155,7 +176,7 @@ const Editor: React.FC = () => {
     setIsSendingAiRequest(true);
     try {
       const data = await runAiProcess(siteId, {
-        userPrompt,
+        prompt: userPrompt,
         language: "en",
         pageContext: {
           reactUrl: window.location.href,
@@ -164,12 +185,15 @@ const Editor: React.FC = () => {
           iframeSrc: previewSrc,
           viewport: getCaptureViewport(),
         },
-        captures: chatCaptures.map((capture) => ({
+        attachments: chatCaptures.map((capture) => ({
           id: capture.id,
-          filePath: capture.filePath,
-          url: `${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`,
-          comment: capture.comment,
-          pageUrl: capture.pageUrl,
+          note: capture.comment,
+          sourcePageUrl: capture.pageUrl,
+          asset: {
+            publicUrl: getCaptureDisplayUrl(capture),
+            storagePath: capture.filePath,
+            mimeType: getCaptureMimeType(capture),
+          },
         })),
       });
 
@@ -342,6 +366,8 @@ const Editor: React.FC = () => {
         {
           id: Date.now().toString(),
           filePath: result.filePath,
+          fileName: result.fileName,
+          asset: result.asset,
           comment: captureComment,
           pageUrl: selectedPageUrl,
         },
@@ -816,7 +842,7 @@ const Editor: React.FC = () => {
                           >
                             <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
                               <img
-                                src={`${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`}
+                                src={getCaptureDisplayUrl(capture)}
                                 alt="chat capture"
                                 className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
                               />
@@ -1028,10 +1054,10 @@ const Editor: React.FC = () => {
                             >
                               <div className="flex h-36 items-center justify-center">
                                 <img
-                                  src={`${import.meta.env.VITE_BACKEND_URL}${cap.filePath}`}
-                                  alt="capture"
-                                  className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
-                                />
+                                src={getCaptureDisplayUrl(cap)}
+                                alt="capture"
+                                className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
+                              />
                               </div>
                             </button>
                             <div className="space-y-1 px-4 py-3">
@@ -1246,7 +1272,7 @@ const Editor: React.FC = () => {
               </div>
               <div className="max-h-[80vh] overflow-auto bg-[#f7f4ec] p-5">
                 <img
-                  src={`${import.meta.env.VITE_BACKEND_URL}${previewCapture.filePath}`}
+                  src={getCaptureDisplayUrl(previewCapture)}
                   alt="capture preview"
                   className="mx-auto block max-w-full rounded-[22px] border border-[#ebe5d7] bg-white"
                 />

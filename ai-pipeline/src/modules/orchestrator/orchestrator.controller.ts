@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, Sse } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Sse,
+} from '@nestjs/common';
 import { Observable, map } from 'rxjs';
 import { OrchestratorService } from './orchestrator.service.js';
 
@@ -18,10 +26,10 @@ export interface PipelineCaptureBBoxDto {
   coordinateSpace?: 'iframe-viewport' | 'iframe-document';
 }
 
-export interface PipelineScreenshotDto {
+export interface PipelineCaptureAssetDto {
+  publicUrl: string;
+  storagePath?: string;
   mimeType?: 'image/png' | 'image/jpeg' | 'image/webp';
-  base64?: string;
-  url?: string;
 }
 
 export interface PipelineDomTargetDto {
@@ -45,11 +53,12 @@ export interface PipelineEditPageContextDto {
   viewport?: PipelineViewportDto;
 }
 
-export interface PipelineEditCaptureDto {
-  bbox?: PipelineCaptureBBoxDto;
-  fullPageScreenshot?: PipelineScreenshotDto;
-  croppedScreenshot?: PipelineScreenshotDto;
-  selectedText?: string;
+export interface PipelineCaptureAttachmentDto {
+  id: string;
+  note?: string;
+  sourcePageUrl?: string;
+  asset: PipelineCaptureAssetDto;
+  selection?: PipelineCaptureBBoxDto;
   domTarget?: PipelineDomTargetDto;
 }
 
@@ -68,19 +77,42 @@ export interface PipelineEditConstraintsDto {
 }
 
 export interface PipelineEditRequestDto {
-  userPrompt: string;
+  prompt: string;
   language?: string;
   pageContext?: PipelineEditPageContextDto;
-  capture?: PipelineEditCaptureDto;
+  attachments?: PipelineCaptureAttachmentDto[];
+  targetHint?: PipelineEditTargetHintDto;
+  constraints?: PipelineEditConstraintsDto;
+}
+
+interface LegacyPipelineEditRequestDto {
+  userPrompt?: string;
+  language?: string;
+  pageContext?: PipelineEditPageContextDto;
+  capture?: {
+    bbox?: PipelineCaptureBBoxDto;
+    croppedScreenshot?: {
+      url?: string;
+      mimeType?: 'image/png' | 'image/jpeg' | 'image/webp';
+    };
+    domTarget?: PipelineDomTargetDto;
+  };
   captures?: Array<{
     id: string;
-    filePath: string;
-    url: string;
+    filePath?: string;
+    url?: string;
     comment?: string;
     pageUrl?: string;
+    bbox?: PipelineCaptureBBoxDto;
+    domTarget?: PipelineDomTargetDto;
   }>;
   targetHint?: PipelineEditTargetHintDto;
   constraints?: PipelineEditConstraintsDto;
+}
+
+export interface RunPipelineRequestDto {
+  siteId: string;
+  editRequest?: PipelineEditRequestDto | LegacyPipelineEditRequestDto;
 }
 
 export interface RunPipelineDto {
@@ -94,10 +126,13 @@ export class OrchestratorController {
   constructor(private readonly orchestratorService: OrchestratorService) {}
 
   @Post('run')
-  run(
-    @Body('siteId') siteId: string,
-    @Body('editRequest') editRequest?: PipelineEditRequestDto,
-  ) {
+  run(@Body() body: RunPipelineRequestDto) {
+    const siteId = body?.siteId?.trim();
+    if (!siteId) {
+      throw new BadRequestException('siteId is required');
+    }
+
+    const editRequest = this.normalizeEditRequest(body.editRequest);
     return this.orchestratorService.run(siteId, editRequest);
   }
 
@@ -106,10 +141,69 @@ export class OrchestratorController {
     return this.orchestratorService.getStatus(jobId);
   }
 
+  @Post('stop/:jobId')
+  stop(@Param('jobId') jobId: string) {
+    return this.orchestratorService.stop(jobId);
+  }
+
+  @Post('delete/:jobId')
+  delete(@Param('jobId') jobId: string) {
+    return this.orchestratorService.delete(jobId);
+  }
+
   @Sse('progress/:jobId')
   progress(@Param('jobId') jobId: string): Observable<MessageEvent> {
     return this.orchestratorService
       .getProgressStream(jobId)
       .pipe(map((event) => ({ data: event }) as MessageEvent));
+  }
+
+  private normalizeEditRequest(
+    raw?: PipelineEditRequestDto | LegacyPipelineEditRequestDto,
+  ): PipelineEditRequestDto | undefined {
+    if (!raw) return undefined;
+
+    if ('prompt' in raw) {
+      return raw;
+    }
+
+    const legacy = raw as LegacyPipelineEditRequestDto;
+    const attachments: PipelineCaptureAttachmentDto[] = [];
+
+    if (Array.isArray(legacy.captures)) {
+      for (const capture of legacy.captures) {
+        if (!capture?.id || !capture.url) continue;
+        attachments.push({
+          id: capture.id,
+          note: capture.comment,
+          sourcePageUrl: capture.pageUrl,
+          asset: {
+            publicUrl: capture.url,
+            storagePath: capture.filePath,
+          },
+          selection: capture.bbox,
+          domTarget: capture.domTarget,
+        });
+      }
+    } else if (legacy.capture?.croppedScreenshot?.url) {
+      attachments.push({
+        id: 'legacy-capture',
+        asset: {
+          publicUrl: legacy.capture.croppedScreenshot.url,
+          mimeType: legacy.capture.croppedScreenshot.mimeType,
+        },
+        selection: legacy.capture.bbox,
+        domTarget: legacy.capture.domTarget,
+      });
+    }
+
+    return {
+      prompt: legacy.userPrompt ?? '',
+      language: legacy.language,
+      pageContext: legacy.pageContext,
+      attachments,
+      targetHint: legacy.targetHint,
+      constraints: legacy.constraints,
+    };
   }
 }
