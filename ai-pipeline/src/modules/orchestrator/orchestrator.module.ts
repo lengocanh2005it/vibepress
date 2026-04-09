@@ -18,8 +18,6 @@ import { ThemeModule } from '../theme/theme.module.js';
 import { AiLoggerModule } from '../ai-logger/ai-logger.module.js';
 import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 import { SourceResolverModule } from '../agents/source-resolver/source-resolver.module.js';
-import { PlannerAgentRuntimeService } from './planner-agent/planner-agent-runtime.service.js';
-import { PlannerToolRegistryService } from './planner-agent/planner-tool-registry.service.js';
 
 @Module({
   imports: [
@@ -42,10 +40,6 @@ import { PlannerToolRegistryService } from './planner-agent/planner-tool-registr
     SourceResolverModule,
   ],
   controllers: [OrchestratorController],
-  providers: [
-    OrchestratorService,
-    PlannerAgentRuntimeService,
-    PlannerToolRegistryService,
-  ],
+  providers: [OrchestratorService],
 })
 export class OrchestratorModule {}

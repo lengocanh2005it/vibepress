@@ -14,6 +14,7 @@
 import type { WpNode } from './wp-block-to-json.js';
 import type {
   SectionPlan,
+  TypographyStyle,
   NavbarSection,
   HeroSection,
   CoverSection,
@@ -36,27 +37,30 @@ import type {
  * AI-only planning).
  */
 export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
-  const sections: SectionPlan[] = [];
-  for (const node of nodes) {
-    const mapped = mapNode(node, nodes);
-    if (mapped) sections.push(mapped);
-  }
-  return sections;
+  return mapNodes(nodes, nodes);
 }
 
 // ── Per-node dispatch ───────────────────────────────────────────────────────
 
-function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan | null {
+function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
+  const sections: SectionPlan[] = [];
+  for (const node of nodes) {
+    sections.push(...mapNode(node, siblings));
+  }
+  return sections;
+}
+
+function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   const block = node.block;
 
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
-    return mapTemplatePart(node);
+    return toMappedSections(mapTemplatePart(node), node);
   }
 
   // Navigation / site header chrome
   if (block === 'core/navigation' || block === 'navigation') {
-    return mapNavigation(node);
+    return toMappedSections(mapNavigation(node), node);
   }
 
   // Group acting as a page-level wrapper — recurse into children
@@ -69,33 +73,33 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan | null {
 
   // Cover block (hero with background image)
   if (block === 'core/cover' || block === 'cover') {
-    return mapCover(node);
+    return toMappedSections(mapCover(node), node);
   }
 
   // Query / post loop
   if (block === 'core/query' || block === 'query') {
-    return mapQuery(node);
+    return toMappedSections(mapQuery(node), node);
   }
 
   // Columns: media-text or card-grid depending on content
   if (block === 'core/columns' || block === 'columns') {
-    return mapColumns(node);
+    return toMappedSections(mapColumns(node), node);
   }
 
   // Post / page content placeholder blocks
   if (block === 'core/post-content' || block === 'post-content') {
-    return mapPostContent(node);
+    return toMappedSections(mapPostContent(node), node);
   }
   if (block === 'core/page-list' || block === 'core/pages' || block === 'page-list') {
     // Treat as page-content placeholder
     const s: PageContentSection = { type: 'page-content', showTitle: true };
-    return s;
+    return toMappedSections(s, node);
   }
 
   // Search
   if (block === 'core/search' || block === 'search') {
     const s: SearchSection = { type: 'search' };
-    return s;
+    return toMappedSections(s, node);
   }
 
   // Separator / spacer — skip, not a section
@@ -105,7 +109,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan | null {
     block === 'core/spacer' ||
     block === 'spacer'
   ) {
-    return null;
+    return [];
   }
 
   // Standalone heading at root level that looks like a hero heading
@@ -113,10 +117,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan | null {
     (block === 'core/heading' || block === 'heading') &&
     node.level === 1
   ) {
-    return mapStandaloneH1(node);
+    return toMappedSections(mapStandaloneH1(node), node);
   }
 
-  return null;
+  return [];
 }
 
 // ── template-part ───────────────────────────────────────────────────────────
@@ -180,7 +184,7 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   // If it has a background image and dimRatio it's a cover/hero
   const src = node.src ?? '';
   const dimRatio = (node.params?.dimRatio as number | undefined) ?? 50;
-  const minHeight = node.minHeight ?? '400px';
+  const minHeight = normalizeCssLength(node.minHeight) ?? '400px';
   const contentAlign =
     (node.params?.contentPosition as string | undefined)?.includes('left')
       ? 'left'
@@ -199,8 +203,14 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
     // Lift heading/subheading from children
     const headingNode = findFirstByBlock(node.children ?? [], ['core/heading', 'heading']);
     if (headingNode?.text) s.heading = headingNode.text;
+    if (headingNode?.typography || headingNode?.fontFamily) {
+      s.headingStyle = toTypographyStyle(headingNode);
+    }
     const paraNode = findFirstByBlock(node.children ?? [], ['core/paragraph', 'paragraph']);
     if (paraNode?.text) s.subheading = paraNode.text;
+    if (paraNode?.typography || paraNode?.fontFamily) {
+      s.subheadingStyle = toTypographyStyle(paraNode);
+    }
     const btnNode = findFirstByBlock(node.children ?? [], [
       'core/button', 'button', 'core/buttons', 'buttons',
     ]);
@@ -216,32 +226,34 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   };
   const h = findFirstByBlock(node.children ?? [], ['core/heading', 'heading']);
   if (h?.text) s.heading = h.text;
+  if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   const p = findFirstByBlock(node.children ?? [], ['core/paragraph', 'paragraph']);
   if (p?.text) s.subheading = p.text;
+  if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   return s;
 }
 
 // ── group block ─────────────────────────────────────────────────────────────
 
-function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan | null {
+function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   const children = node.children ?? [];
-  if (children.length === 0) return null;
+  if (children.length === 0) return [];
 
   // Group acting as a hero: has heading + paragraph (+ optional button)
   if (isHeroGroup(children)) {
-    return buildHeroFromChildren(node, children);
+    return toMappedSections(buildHeroFromChildren(node, children), node);
   }
 
   // Group acting as a 2-column media-text layout
   if (isMediaTextGroup(children)) {
-    return buildMediaTextFromColumns(children);
+    return toMappedSections(buildMediaTextFromColumns(children), node);
   }
 
   // Group with a query inside → defer to query mapper
   const queryChild = children.find(
     (c) => c.block === 'core/query' || c.block === 'query',
   );
-  if (queryChild) return mapQuery(queryChild);
+  if (queryChild) return toMappedSections(mapQuery(queryChild), node);
 
   // Group with a search block
   const searchChild = children.find(
@@ -251,17 +263,15 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan | null {
     const s: SearchSection = { type: 'search' };
     const headingChild = findFirstByBlock(children, ['core/heading', 'heading']);
     if (headingChild?.text) s.title = headingChild.text;
-    return s;
+    return toMappedSections(s, node);
   }
 
-  // Nested group that contains further sub-sections — recurse
-  const nestedSections: SectionPlan[] = [];
-  for (const child of children) {
-    const mapped = mapNode(child, children);
-    if (mapped) nestedSections.push(mapped);
+  // Nested group that contains further sub-sections — recurse and keep them all.
+  const nestedSections = mapNodes(children, children);
+  if (nestedSections.length === 1) {
+    return [applyNodePresentation(nestedSections[0], node)];
   }
-  // Return only the first one to avoid duplicating sections
-  return nestedSections[0] ?? null;
+  return nestedSections;
 }
 
 // ── query block (post list) ─────────────────────────────────────────────────
@@ -329,6 +339,10 @@ function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
     columns: colCount,
     cards,
   };
+  const columnWidths = cols
+    .map((col) => normalizeCssLength(col.columnWidth))
+    .filter((value): value is string => !!value);
+  if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   return s;
 }
 
@@ -351,11 +365,42 @@ function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
 // ── standalone H1 ───────────────────────────────────────────────────────────
 
 function mapStandaloneH1(node: WpNode): HeroSection {
-  return {
+  const hero: HeroSection = {
     type: 'hero',
     layout: node.textAlign === 'center' ? 'centered' : 'left',
     heading: node.text ?? '',
   };
+  if (node.typography || node.fontFamily) {
+    hero.headingStyle = toTypographyStyle(node);
+  }
+  return hero;
+}
+
+function toMappedSections(
+  section: SectionPlan | null,
+  node: WpNode,
+): SectionPlan[] {
+  if (!section) return [];
+  return [applyNodePresentation(section, node)];
+}
+
+function applyNodePresentation<T extends SectionPlan>(
+  section: T,
+  node: WpNode,
+): T {
+  const next: T = { ...section };
+  if (node.bgColor && !next.background) next.background = node.bgColor;
+  if (node.textColor && !next.textColor) next.textColor = node.textColor;
+  if (node.padding && !next.paddingStyle) {
+    next.paddingStyle = boxSpacingToCss(node.padding);
+  }
+  if (node.margin && !next.marginStyle) {
+    next.marginStyle = boxSpacingToCss(node.margin);
+  }
+  if (node.gap && !next.gapStyle) {
+    next.gapStyle = node.gap;
+  }
+  return next;
 }
 
 // ── helpers: recognise group intent ────────────────────────────────────────
@@ -406,7 +451,9 @@ function buildHeroFromChildren(
     layout,
     heading: h?.text ?? '',
   };
+  if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   if (p?.text) s.subheading = p.text;
+  if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   if (img?.src) s.image = { src: img.src, alt: img.alt ?? '', position: 'right' };
   if (groupNode.padding) {
@@ -470,8 +517,14 @@ function buildMediaTextFromColumns(
     imageAlt: imgNode.alt ?? '',
     imagePosition: imgInFirst ? 'left' : 'right',
   };
+  const columnWidths = cols
+    .map((col) => normalizeCssLength(col.columnWidth))
+    .filter((value): value is string => !!value);
+  if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   if (h?.text) s.heading = h.text;
+  if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   if (p?.text) s.body = p.text;
+  if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
   if (listItems.length > 0) s.listItems = listItems;
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   return s;
@@ -511,4 +564,36 @@ function boxSpacingToCss(
   if (top === right && top === bottom && top === left) return top;
   if (top === bottom && right === left) return `${top} ${right}`;
   return `${top} ${right} ${bottom} ${left}`;
+}
+
+function normalizeCssLength(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function toTypographyStyle(node?: WpNode): TypographyStyle | undefined {
+  if (!node) return undefined;
+  const typography: TypographyStyle = {
+    ...(node.typography?.fontSize && { fontSize: node.typography.fontSize }),
+    ...(node.typography?.fontFamily && {
+      fontFamily: node.typography.fontFamily,
+    }),
+    ...(node.fontFamily &&
+      !node.typography?.fontFamily && { fontFamily: node.fontFamily }),
+    ...(node.typography?.fontWeight && {
+      fontWeight: node.typography.fontWeight,
+    }),
+    ...(node.typography?.letterSpacing && {
+      letterSpacing: node.typography.letterSpacing,
+    }),
+    ...(node.typography?.lineHeight && {
+      lineHeight: node.typography.lineHeight,
+    }),
+    ...(node.typography?.textTransform && {
+      textTransform: node.typography.textTransform,
+    }),
+  };
+  return Object.keys(typography).length > 0 ? typography : undefined;
 }

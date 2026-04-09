@@ -136,6 +136,13 @@ function normalizeBoxSpacing(
   return { top, right, bottom, left };
 }
 
+function normalizeCssLength(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  if (!normalized) return undefined;
+  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
 function splitCssShorthand(value: string): string[] {
   const parts: string[] = [];
   let current = '';
@@ -270,17 +277,19 @@ function parseBlocks(markup: string): WpNode[] {
     const normalizedPadding = normalizeBoxSpacing(pad);
     if (normalizedPadding) node.padding = normalizedPadding;
     // Lift minHeight (cover/group blocks)
-    if (params?.minHeight) node.minHeight = String(params.minHeight);
+    if (params?.minHeight) node.minHeight = normalizeCssLength(params.minHeight);
     // Lift inline typography from params.style.typography
     const typo = params?.style?.typography;
-    if (typo) {
+    if (typo || params?.fontSize) {
       const t: WpNode['typography'] = {};
-      if (typo.letterSpacing) t.letterSpacing = typo.letterSpacing as string;
-      if (typo.textTransform) t.textTransform = typo.textTransform as string;
-      if (typo.lineHeight) t.lineHeight = typo.lineHeight as string;
-      if (typo.fontSize) t.fontSize = typo.fontSize as string;
-      if (typo.fontWeight) t.fontWeight = typo.fontWeight as string;
-      if (typo.fontFamily) t.fontFamily = typo.fontFamily as string;
+      if (typo?.letterSpacing) t.letterSpacing = typo.letterSpacing as string;
+      if (typo?.textTransform) t.textTransform = typo.textTransform as string;
+      if (typo?.lineHeight) t.lineHeight = typo.lineHeight as string;
+      if (typo?.fontSize) t.fontSize = typo.fontSize as string;
+      else if (params?.fontSize)
+        t.fontSize = `var:preset|font-size|${String(params.fontSize)}`;
+      if (typo?.fontWeight) t.fontWeight = typo.fontWeight as string;
+      if (typo?.fontFamily) t.fontFamily = typo.fontFamily as string;
       if (Object.keys(t).length > 0) node.typography = t;
     }
     // Lift margin from params.style.spacing.margin
@@ -375,7 +384,8 @@ function buildNode(
       } else if (params?.overlayColor) {
         coverExtras.overlayColor = params.overlayColor as string;
       }
-      if (params?.minHeight) coverExtras.minHeight = String(params.minHeight);
+      if (params?.minHeight)
+        coverExtras.minHeight = normalizeCssLength(params.minHeight);
     }
     return compact({
       block: blockName,
