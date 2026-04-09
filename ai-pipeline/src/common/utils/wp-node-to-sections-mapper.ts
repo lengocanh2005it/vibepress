@@ -64,10 +64,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   }
 
   // Group acting as a page-level wrapper — recurse into children
-  if (
-    (block === 'core/group' || block === 'group') &&
-    node.children?.length
-  ) {
+  if ((block === 'core/group' || block === 'group') && node.children?.length) {
     return mapGroup(node, siblings);
   }
 
@@ -90,7 +87,11 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/post-content' || block === 'post-content') {
     return toMappedSections(mapPostContent(node), node);
   }
-  if (block === 'core/page-list' || block === 'core/pages' || block === 'page-list') {
+  if (
+    block === 'core/page-list' ||
+    block === 'core/pages' ||
+    block === 'page-list'
+  ) {
     // Treat as page-content placeholder
     const s: PageContentSection = { type: 'page-content', showTitle: true };
     return toMappedSections(s, node);
@@ -113,10 +114,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   }
 
   // Standalone heading at root level that looks like a hero heading
-  if (
-    (block === 'core/heading' || block === 'heading') &&
-    node.level === 1
-  ) {
+  if ((block === 'core/heading' || block === 'heading') && node.level === 1) {
     return toMappedSections(mapStandaloneH1(node), node);
   }
 
@@ -126,7 +124,9 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 // ── template-part ───────────────────────────────────────────────────────────
 
 function mapTemplatePart(node: WpNode): SectionPlan | null {
-  const slug: string = (node.params?.slug ?? node.params?.theme ?? '') as string;
+  const slug: string = (node.params?.slug ??
+    node.params?.theme ??
+    '') as string;
   const slugL = slug.toLowerCase();
 
   if (slugL.includes('header') || slugL.includes('nav')) {
@@ -185,12 +185,13 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   const src = node.src ?? '';
   const dimRatio = (node.params?.dimRatio as number | undefined) ?? 50;
   const minHeight = normalizeCssLength(node.minHeight) ?? '400px';
-  const contentAlign =
-    (node.params?.contentPosition as string | undefined)?.includes('left')
-      ? 'left'
-      : (node.params?.contentPosition as string | undefined)?.includes('right')
-        ? 'right'
-        : 'center';
+  const contentAlign = (
+    node.params?.contentPosition as string | undefined
+  )?.includes('left')
+    ? 'left'
+    : (node.params?.contentPosition as string | undefined)?.includes('right')
+      ? 'right'
+      : 'center';
 
   if (src) {
     const s: CoverSection = {
@@ -201,20 +202,30 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
       contentAlign,
     };
     // Lift heading/subheading from children
-    const headingNode = findFirstByBlock(node.children ?? [], ['core/heading', 'heading']);
+    const headingNode = findFirstByBlock(node.children ?? [], [
+      'core/heading',
+      'heading',
+    ]);
     if (headingNode?.text) s.heading = headingNode.text;
     if (headingNode?.typography || headingNode?.fontFamily) {
       s.headingStyle = toTypographyStyle(headingNode);
     }
-    const paraNode = findFirstByBlock(node.children ?? [], ['core/paragraph', 'paragraph']);
+    const paraNode = findFirstByBlock(node.children ?? [], [
+      'core/paragraph',
+      'paragraph',
+    ]);
     if (paraNode?.text) s.subheading = paraNode.text;
     if (paraNode?.typography || paraNode?.fontFamily) {
       s.subheadingStyle = toTypographyStyle(paraNode);
     }
     const btnNode = findFirstByBlock(node.children ?? [], [
-      'core/button', 'button', 'core/buttons', 'buttons',
+      'core/button',
+      'button',
+      'core/buttons',
+      'buttons',
     ]);
-    if (btnNode?.text) s.cta = { text: btnNode.text, link: btnNode.href ?? '#' };
+    if (btnNode?.text)
+      s.cta = { text: btnNode.text, link: btnNode.href ?? '#' };
     return s;
   }
 
@@ -227,7 +238,10 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   const h = findFirstByBlock(node.children ?? [], ['core/heading', 'heading']);
   if (h?.text) s.heading = h.text;
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  const p = findFirstByBlock(node.children ?? [], ['core/paragraph', 'paragraph']);
+  const p = findFirstByBlock(node.children ?? [], [
+    'core/paragraph',
+    'paragraph',
+  ]);
   if (p?.text) s.subheading = p.text;
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   return s;
@@ -261,7 +275,10 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   );
   if (searchChild) {
     const s: SearchSection = { type: 'search' };
-    const headingChild = findFirstByBlock(children, ['core/heading', 'heading']);
+    const headingChild = findFirstByBlock(children, [
+      'core/heading',
+      'heading',
+    ]);
     if (headingChild?.text) s.title = headingChild.text;
     return toMappedSections(s, node);
   }
@@ -305,16 +322,18 @@ function mapQuery(node: WpNode): PostListSection {
 // ── columns block ───────────────────────────────────────────────────────────
 
 function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
-  const cols = node.children?.filter(
-    (c) => c.block === 'core/column' || c.block === 'column',
-  ) ?? [];
+  const cols =
+    node.children?.filter(
+      (c) => c.block === 'core/column' || c.block === 'column',
+    ) ?? [];
 
   if (cols.length === 0) return null;
 
   // 2-col: check if one side is image and other is text → media-text
   if (cols.length === 2) {
     const hasImage = cols.some(
-      (c) => findFirstByBlock(flattenChildren(c), ['core/image', 'image']) !== null,
+      (c) =>
+        findFirstByBlock(flattenChildren(c), ['core/image', 'image']) !== null,
     );
     if (hasImage) {
       return buildMediaTextFromColumns(cols);
@@ -322,14 +341,22 @@ function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
   }
 
   // Otherwise: card-grid
-  const cards = cols.map((col) => {
-    const h = findFirstByBlock(flattenChildren(col), ['core/heading', 'heading']);
-    const p = findFirstByBlock(flattenChildren(col), ['core/paragraph', 'paragraph']);
-    return {
-      heading: h?.text ?? '',
-      body: p?.text ?? '',
-    };
-  }).filter((c) => c.heading || c.body);
+  const cards = cols
+    .map((col) => {
+      const h = findFirstByBlock(flattenChildren(col), [
+        'core/heading',
+        'heading',
+      ]);
+      const p = findFirstByBlock(flattenChildren(col), [
+        'core/paragraph',
+        'paragraph',
+      ]);
+      return {
+        heading: h?.text ?? '',
+        body: p?.text ?? '',
+      };
+    })
+    .filter((c) => c.heading || c.body);
 
   if (cards.length === 0) return null;
 
@@ -438,9 +465,7 @@ function buildHeroFromChildren(
       c.block === 'core/buttons' ||
       c.block === 'buttons',
   );
-  const img = flat.find(
-    (c) => c.block === 'core/image' || c.block === 'image',
-  );
+  const img = flat.find((c) => c.block === 'core/image' || c.block === 'image');
 
   const align = groupNode.textAlign ?? groupNode.params?.textAlign ?? 'left';
   const layout: HeroSection['layout'] =
@@ -455,7 +480,8 @@ function buildHeroFromChildren(
   if (p?.text) s.subheading = p.text;
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
-  if (img?.src) s.image = { src: img.src, alt: img.alt ?? '', position: 'right' };
+  if (img?.src)
+    s.image = { src: img.src, alt: img.alt ?? '', position: 'right' };
   if (groupNode.padding) {
     s.paddingStyle = boxSpacingToCss(groupNode.padding);
   }
@@ -493,16 +519,24 @@ function buildMediaTextFromColumns(
     // Fallback to card-grid
     const cards = cols.map((col) => {
       const flat = flattenChildren(col);
-      const h = flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
-      const p = flat.find((c) => c.block === 'core/paragraph' || c.block === 'paragraph');
+      const h = flat.find(
+        (c) => c.block === 'core/heading' || c.block === 'heading',
+      );
+      const p = flat.find(
+        (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+      );
       return { heading: h?.text ?? '', body: p?.text ?? '' };
     });
     return { type: 'card-grid', columns: 2, cards };
   }
 
   const textFlat = imgInFirst ? flat1 : flat0;
-  const h = textFlat.find((c) => c.block === 'core/heading' || c.block === 'heading');
-  const p = textFlat.find((c) => c.block === 'core/paragraph' || c.block === 'paragraph');
+  const h = textFlat.find(
+    (c) => c.block === 'core/heading' || c.block === 'heading',
+  );
+  const p = textFlat.find(
+    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+  );
   const btn = textFlat.find(
     (c) => c.block === 'core/button' || c.block === 'button',
   );
@@ -532,10 +566,7 @@ function buildMediaTextFromColumns(
 
 // ── low-level helpers ───────────────────────────────────────────────────────
 
-function findFirstByBlock(
-  nodes: WpNode[],
-  blocks: string[],
-): WpNode | null {
+function findFirstByBlock(nodes: WpNode[], blocks: string[]): WpNode | null {
   for (const node of nodes) {
     if (blocks.includes(node.block)) return node;
     if (node.children?.length) {
@@ -557,9 +588,7 @@ function flattenChildren(node: WpNode): WpNode[] {
   return result;
 }
 
-function boxSpacingToCss(
-  box: NonNullable<WpNode['padding']>,
-): string {
+function boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
   const { top = '0', right = top, bottom = top, left = right } = box;
   if (top === right && top === bottom && top === left) return top;
   if (top === bottom && right === left) return `${top} ${right}`;

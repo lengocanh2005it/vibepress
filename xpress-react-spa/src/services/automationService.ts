@@ -14,15 +14,25 @@ export const getMyRepos = async (token: string) => {
   }
 };
 
+export interface CaptureViewport {
+  width: number;
+  height: number;
+  scrollX: number;
+  scrollY: number;
+  dpr: number;
+}
+
 export const captureRegion = async (
   pageUrl: string,
+  proxyUrl: string,
   rect: { x: number; y: number; width: number; height: number },
-  comment: string
+  comment: string,
+  viewport: CaptureViewport,
 ) => {
   const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/capture`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pageUrl, rect, comment }),
+    body: JSON.stringify({ pageUrl, proxyUrl, rect, comment, viewport }),
   });
   if (!response.ok) throw new Error('Failed to capture region');
   return response.json() as Promise<{ success: boolean; filePath: string; comment: string; pageUrl: string }>;

@@ -9,6 +9,7 @@ import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
+import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
@@ -80,6 +81,7 @@ export class ReactGeneratorService {
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
+    private readonly codeGenerator: CodeGeneratorService,
     private readonly codeReviewer: CodeReviewerService,
     private readonly aiLogger: AiLoggerService,
   ) {}
@@ -317,6 +319,43 @@ export class ReactGeneratorService {
       templateNodes && !isHeaderOrFooterPartial
         ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
         : templateNodes;
+
+    if (
+      this.shouldUseBlockFaithfulSharedPartial(
+        componentName,
+        componentPlan,
+        filteredNodes,
+      )
+    ) {
+      const blockFaithfulDataNeeds = this.inferBlockFaithfulDataNeeds(
+        componentName,
+        componentPlan,
+        filteredNodes ?? [],
+      );
+      const code = this.codeGenerator.generateBlockFaithfulPartial({
+        componentName,
+        nodes: filteredNodes ?? [],
+        dataNeeds: blockFaithfulDataNeeds,
+        palette: componentPlan?.visualPlan?.palette,
+        typography: componentPlan?.visualPlan?.typography,
+        layout: componentPlan?.visualPlan?.layout,
+        blockStyles: tokens?.blockStyles,
+      });
+      await this.logToFile(
+        logPath,
+        `[block-faithful] "${componentName}": generated directly from WordPress block tree (${(filteredNodes ?? []).length} top-level nodes)`,
+      );
+      return [
+        this.attachPlanContext(
+          { name: componentName, filePath: '', code },
+          componentPlan,
+          {
+            generationMode: 'deterministic',
+            dataNeeds: blockFaithfulDataNeeds,
+          },
+        ),
+      ];
+    }
 
     const promptTemplateSource = filteredNodes
       ? wpJsonToString(filteredNodes)
@@ -603,6 +642,44 @@ ${renders}
       type: componentPlan?.type ?? component.type,
       ...overrides,
     };
+  }
+
+  private shouldUseBlockFaithfulSharedPartial(
+    componentName: string,
+    componentPlan: PlanResult[number] | undefined,
+    nodes: WpNode[] | undefined,
+  ): boolean {
+    return !!(
+      componentPlan?.type === 'partial' &&
+      /^(header|footer)/i.test(componentName) &&
+      nodes &&
+      nodes.length > 0
+    );
+  }
+
+  private inferBlockFaithfulDataNeeds(
+    componentName: string,
+    componentPlan: PlanResult[number] | undefined,
+    nodes: WpNode[],
+  ): string[] {
+    const needs = new Set(componentPlan?.dataNeeds ?? []);
+    const visit = (node: WpNode) => {
+      const block = node.block.replace(/^core\//, '');
+      if (
+        ['site-title', 'site-tagline', 'site-logo'].includes(block)
+      ) {
+        needs.add('siteInfo');
+      }
+      if (block === 'navigation') {
+        needs.add('menus');
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    if (/^(header|footer)/i.test(componentName)) {
+      needs.add('siteInfo');
+    }
+    return Array.from(needs);
   }
 
   // ── File logger ────────────────────────────────────────────────────────────
