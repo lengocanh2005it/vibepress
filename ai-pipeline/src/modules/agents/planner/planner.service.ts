@@ -14,6 +14,7 @@ import {
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -38,6 +39,7 @@ import type {
   DataNeed,
   TypographyTokens,
   LayoutTokens,
+  SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
 
 export interface ComponentPlan {
@@ -77,6 +79,7 @@ export class PlannerService {
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly aiLogger: AiLoggerService,
+    private readonly styleResolver: StyleResolverService,
   ) {}
 
   async plan(
@@ -517,11 +520,13 @@ export class PlannerService {
       // draft of sections. This is injected into the prompt as a hard-ordered
       // skeleton so AI only needs to fill in content, not infer layout order.
       const draftSections = (() => {
-        if (componentPlan.type !== 'page') return undefined;
         try {
           const rawMarkup = templateSource;
           if (!rawMarkup) return undefined;
-          const nodes = wpBlocksToJson(rawMarkup);
+          const nodes = this.styleResolver.resolve(
+            wpBlocksToJson(rawMarkup),
+            tokens,
+          );
           const draft = mapWpNodesToDraftSections(nodes);
           return draft.length > 0 ? draft : undefined;
         } catch {
@@ -607,6 +612,10 @@ export class PlannerService {
             typography: globalTypography,
             layout,
             blockStyles: tokens?.blockStyles,
+            sections: this.mergeDraftSectionPresentation(
+              parsed.sections,
+              draftSections,
+            ),
           };
           this.logger.log(
             `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt})`,
@@ -1543,6 +1552,86 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
   private formatRawOutput(raw: string): string {
     return `${this.rawOutputDivider}${raw || '(empty)'}\n----- RAW OUTPUT END -----`;
+  }
+
+  private mergeDraftSectionPresentation(
+    sections: SectionPlan[],
+    draftSections?: SectionPlan[],
+  ): SectionPlan[] {
+    if (!draftSections?.length) return sections;
+    return sections.map((section, index) =>
+      this.mergeDraftSection(section, draftSections[index]),
+    );
+  }
+
+  private mergeDraftSection(
+    section: SectionPlan,
+    draft?: SectionPlan,
+  ): SectionPlan {
+    if (!draft || draft.type !== section.type) return section;
+
+    const mergedBase = {
+      ...section,
+      ...(draft.background ? { background: draft.background } : {}),
+      ...(draft.textColor ? { textColor: draft.textColor } : {}),
+      ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
+      ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
+      ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+    };
+
+    switch (section.type) {
+      case 'hero': {
+        const heroDraft = draft as typeof section;
+        return {
+          ...mergedBase,
+          ...(heroDraft.headingStyle
+            ? { headingStyle: heroDraft.headingStyle }
+            : {}),
+          ...(heroDraft.subheadingStyle
+            ? { subheadingStyle: heroDraft.subheadingStyle }
+            : {}),
+        } as SectionPlan;
+      }
+      case 'cover': {
+        const coverDraft = draft as typeof section;
+        return {
+          ...mergedBase,
+          minHeight: coverDraft.minHeight ?? section.minHeight,
+          ...(coverDraft.headingStyle
+            ? { headingStyle: coverDraft.headingStyle }
+            : {}),
+          ...(coverDraft.subheadingStyle
+            ? { subheadingStyle: coverDraft.subheadingStyle }
+            : {}),
+        } as SectionPlan;
+      }
+      case 'card-grid': {
+        const cardGridDraft = draft as typeof section;
+        return {
+          ...mergedBase,
+          ...(cardGridDraft.columnWidths
+            ? { columnWidths: cardGridDraft.columnWidths }
+            : {}),
+        } as SectionPlan;
+      }
+      case 'media-text': {
+        const mediaTextDraft = draft as typeof section;
+        return {
+          ...mergedBase,
+          ...(mediaTextDraft.columnWidths
+            ? { columnWidths: mediaTextDraft.columnWidths }
+            : {}),
+          ...(mediaTextDraft.headingStyle
+            ? { headingStyle: mediaTextDraft.headingStyle }
+            : {}),
+          ...(mediaTextDraft.bodyStyle
+            ? { bodyStyle: mediaTextDraft.bodyStyle }
+            : {}),
+        } as SectionPlan;
+      }
+      default:
+        return mergedBase as SectionPlan;
+    }
   }
 
   private buildValidationFeedbackPrompt(
