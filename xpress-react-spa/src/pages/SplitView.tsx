@@ -164,6 +164,17 @@ const SplitView: React.FC = () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [completionEvent, sse.connectionState]);
+  const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
+
+  const handleDeletePipeline = async () => {
+    setDeleteState({ loading: true, done: false });
+    try {
+      await fetch(`/ai-api/pipeline/delete/${jobId}`, { method: "POST" });
+      setDeleteState({ loading: false, done: true });
+    } catch {
+      setDeleteState({ loading: false, done: false });
+    }
+  };
 
   const [pushGitState, setPushGitState] = useState<{
     loading: boolean;
@@ -241,7 +252,7 @@ const SplitView: React.FC = () => {
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
             <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
               Job: {jobId.slice(0, 8)}...
             </span>
@@ -253,6 +264,16 @@ const SplitView: React.FC = () => {
             >
               {connectionBadge.label}
             </span>
+            {sse.isConnected && !deleteState.done && (
+              <button
+                onClick={handleDeletePipeline}
+                disabled={deleteState.loading}
+                className="text-xs font-mono px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>stop_circle</span>
+                {deleteState.loading ? "Stopping..." : "Stop"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -441,7 +462,21 @@ const SplitView: React.FC = () => {
         </div>
 
         <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center">
-          {completionEvent?.data?.previewUrl ? (
+          {deleteState.done ? (
+            <div className="text-center space-y-4">
+              <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">
+                <span className="material-symbols-outlined text-red-400 text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>stop_circle</span>
+              </div>
+              <p className="text-on-surface font-medium">Pipeline đã tạm dừng</p>
+              <p className="text-xs text-on-surface-variant">Tất cả tiến trình đã được dừng lại và artifacts đã được xóa.</p>
+              <button
+                onClick={() => navigate("/app/projects")}
+                className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-medium"
+              >
+                Quay về trang dự án
+              </button>
+            </div>
+          ) : completionEvent?.data?.previewUrl ? (
             <iframe
               src={completionEvent.data?.previewUrl || ""}
               title="Live Preview"

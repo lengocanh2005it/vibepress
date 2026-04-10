@@ -727,7 +727,6 @@ const Editor: React.FC = () => {
   const siteUrl: string = location.state?.siteUrl || "";
   const siteId: string = location.state?.siteId || "";
 
-  const [annotationsOpen, setAnnotationsOpen] = useState(false);
   const [sitePagesOpen, setSitePagesOpen] = useState(true);
   const [chatInput, setChatInput] = useState("");
   const [activeTarget, setActiveTarget] = useState<string | null>(null);
@@ -747,9 +746,10 @@ const Editor: React.FC = () => {
   const [previewCapture, setPreviewCapture] = useState<Capture | null>(null);
   const [isSubmittingCapture, setIsSubmittingCapture] = useState(false);
   const [isSendingAiRequest, setIsSendingAiRequest] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(false);
   const [capturesOpen, setCapturesOpen] = useState(true);
   const previewVersionRef = useRef(Date.now());
+  const [rightTab, setRightTab] = useState<"captures" | "notes">("captures");
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -997,7 +997,10 @@ const Editor: React.FC = () => {
         wordpressRoute:
           resolveWordPressRoute(primaryPage?.route, selectedPageUrl) ||
           toRoutePath(selectedPageUrl),
-        pageTitle: primaryPage?.title || selectedPage?.title?.trim() || undefined,
+        pageTitle:
+          primaryPage?.title ||
+          wpPages.find((page) => page.link === selectedPageUrl)?.title?.trim() ||
+          undefined,
       },
       ...(capturesForAi.length > 0
         ? {
@@ -1447,6 +1450,7 @@ const Editor: React.FC = () => {
         },
         ...prev,
       ]);
+      console.log("Capture saved:", captures);
     } finally {
       setIsSubmittingCapture(false);
       setShowCommentPopup(false);
@@ -1538,14 +1542,6 @@ const Editor: React.FC = () => {
   const previewSrc = selectedPageUrl
     ? `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}&vpv=${previewVersionRef.current}`
     : "";
-  const selectedPage = wpPages.find((page) => page.link === selectedPageUrl);
-  const selectedPageLabel =
-    selectedPage?.title?.trim() ||
-    selectedPageUrl.replace(/^https?:\/\//, "").replace(/\/$/, "") ||
-    "Current page";
-  const selectedPageMeta = selectedPage?.slug
-    ? `/${selectedPage.slug}`
-    : selectedPageUrl;
   const isCaptureMode = chatCaptures.length > 0;
   const helperLanguage = detectRequestLanguage(
     chatInput,
@@ -1612,7 +1608,6 @@ const Editor: React.FC = () => {
           </div>
         </div>
       </header>
-
       {/* Main Work Area */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left Sidebar: Site Pages */}
@@ -1761,65 +1756,7 @@ const Editor: React.FC = () => {
 
         {/* Center Canvas */}
         <main className="min-w-0 flex-1 bg-[#e8e6df]/50 flex flex-col overflow-hidden">
-          {/* Toolbar */}
-          <div className="shrink-0 border-b border-[#e8e6df] bg-[#f6f1e8] px-6 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0 flex items-center gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#e0dacd] bg-white text-[#49704F]">
-                  <span className="material-symbols-outlined text-[18px]">
-                    language
-                  </span>
-                </div>
-                <div className="min-w-0">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#7a866f]">
-                    Current Preview
-                  </p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <p className="max-w-[280px] truncate text-[15px] font-bold text-[#233227]">
-                      {selectedPageLabel}
-                    </p>
-                    {selectedCaptureIds.length > 0 && (
-                      <span className="rounded-full border border-[#d8e2d1] bg-[#edf4e8] px-2.5 py-1 text-[11px] font-bold text-[#49704F]">
-                        {selectedCaptureIds.length} selected
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-0.5 max-w-[360px] truncate text-[12px] text-[#72806f]">
-                    {selectedPageMeta}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap justify-end gap-2">
-                <button
-                  onClick={() => {
-                    if (isCapturing || showCommentPopup) {
-                      cancelCaptureFlow();
-                      return;
-                    }
-                    setIsCapturing(true);
-                  }}
-                  className={`text-[13px] font-bold px-4 py-2 rounded-full shadow-sm flex items-center gap-2 transition-colors ${isCapturing ? "bg-red-500 hover:bg-red-600 text-white" : "bg-white border border-[#e8e6df] text-[#233227] hover:bg-[#f0ece4]"}`}
-                >
-                  <span className="material-symbols-outlined text-[16px]">
-                    {isCapturing ? "close" : "crop"}
-                  </span>
-                  {isCapturing ? "Cancel" : "Capture"}
-                </button>
-                <button
-                  onClick={() => setAnnotationsOpen(!annotationsOpen)}
-                  className="bg-[#49704F] text-white text-[13px] font-bold px-4 py-2 rounded-full shadow-sm flex items-center gap-2 hover:bg-[#346E56] transition-colors"
-                >
-                  <span className="material-symbols-outlined text-[16px]">
-                    {annotationsOpen ? "dock_to_right" : "comment_bank"}
-                  </span>
-                  {annotationsOpen ? "Close notes" : "Stakeholder Notes"}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="w-full flex-1 relative">
+          <div className="w-full flex-1 relative min-h-0">
             {selectedPageUrl ? (
               <iframe
                 ref={iframeRef}
@@ -1907,7 +1844,7 @@ const Editor: React.FC = () => {
               })()}
           </div>
 
-          {/* Preview chat toggle + collapsible chat panel */}
+          {/* Floating chat button + panel */}
           {!previewCapture && (
             <div className="absolute right-6 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none">
               {isChatOpen && (
@@ -1915,9 +1852,7 @@ const Editor: React.FC = () => {
                   <div className="shrink-0 p-3 border-b border-[#e5e8df]">
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                      <h3 className="font-semibold text-sm text-[#2e3e2f]">
-                        Live Chat
-                      </h3>
+                      <h3 className="font-semibold text-sm text-[#2e3e2f]">Live Chat</h3>
                     </div>
                   </div>
 
@@ -1948,36 +1883,16 @@ const Editor: React.FC = () => {
                                 className="block w-full text-left"
                               >
                                 <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
-                                  <img
-                                    src={getCaptureDisplayUrl(capture)}
-                                    alt="chat capture"
-                                    className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
-                                  />
+                                  <img src={getCaptureDisplayUrl(capture)} alt="chat capture" className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain" />
                                 </div>
                                 <div className="px-2 py-2">
-                                  <p
-                                    className="overflow-hidden text-[11px] leading-relaxed text-[#556255]"
-                                    style={{
-                                      display: "-webkit-box",
-                                      WebkitLineClamp: 2,
-                                      WebkitBoxOrient: "vertical",
-                                    }}
-                                  >
+                                  <p className="overflow-hidden text-[11px] leading-relaxed text-[#556255]" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
                                     {capture.comment || "No edit request"}
                                   </p>
                                 </div>
                               </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleRemoveChatCapture(capture.id)
-                                }
-                                className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors"
-                                aria-label="Remove attached capture"
-                              >
-                                <span className="material-symbols-outlined text-[14px]">
-                                  close
-                                </span>
+                              <button type="button" onClick={() => handleRemoveChatCapture(capture.id)} className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors" aria-label="Remove attached capture">
+                                <span className="material-symbols-outlined text-[14px]">close</span>
                               </button>
                             </div>
                           ))}
@@ -2037,336 +1952,174 @@ const Editor: React.FC = () => {
                 </div>
               )}
 
-              <button
-                type="button"
-                onClick={() => setIsChatOpen((prev) => !prev)}
-                className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white flex items-center gap-2 hover:bg-[#346E56] transition-colors"
-              >
-                <span className="material-symbols-outlined text-[18px]">
-                  {isChatOpen ? "close" : "auto_awesome"}
-                </span>
-                <span className="text-[12px] font-bold">
-                  {isChatOpen ? "Close chat" : "Open AI chat"}
-                </span>
+              <button type="button" onClick={() => setIsChatOpen((prev) => !prev)} className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white flex items-center gap-2 hover:bg-[#346E56] transition-colors">
+                <span className="material-symbols-outlined text-[18px]">{isChatOpen ? "close" : "auto_awesome"}</span>
+                <span className="text-[12px] font-bold">{isChatOpen ? "Close chat" : "Open AI chat"}</span>
               </button>
             </div>
           )}
         </main>
 
-        {/* Right Sidebar: Captures */}
+        {/* Right Sidebar: Captures + Notes tabs */}
         <aside
           className={`relative shrink-0 overflow-hidden bg-[#FAF7F0] z-10 transition-[width] duration-300 ease-in-out ${capturesOpen ? "w-[360px] border-l border-[#e8e6df]" : "w-14 border-l border-[#e8e6df]"}`}
         >
           {capturesOpen ? (
             <div className="flex h-full w-[360px] flex-col transition-opacity duration-200 opacity-100">
-              <div className="p-6 pb-4 border-b border-[#e8e6df]">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <h2 className="font-headline text-[18px] font-bold text-[#1a2b21]">
-                        Captures
-                      </h2>
-                      <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full border border-[#cfe2cf]">
-                        {captures.length} Saved
-                      </span>
-                    </div>
-                    <p className="text-[#5c6860] text-[13px]">
-                      Visual snippets saved from the current preview.
-                    </p>
-                  </div>
+              {/* Tab header */}
+              <div className="shrink-0 flex items-center border-b border-[#e8e6df] bg-[#FAF7F0]">
+                <button
+                  type="button"
+                  onClick={() => setRightTab("captures")}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[13px] font-bold border-b-2 transition-colors ${rightTab === "captures" ? "border-[#49704F] text-[#49704F]" : "border-transparent text-[#8e9892] hover:text-[#233227]"}`}
+                >
+                  <span className="material-symbols-outlined text-[15px]">crop</span>
+                  Capture
+                  {captures.length > 0 && (
+                    <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold px-1.5 py-0.5 rounded-full">{captures.length}</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRightTab("notes")}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[13px] font-bold border-b-2 transition-colors ${rightTab === "notes" ? "border-[#49704F] text-[#49704F]" : "border-transparent text-[#8e9892] hover:text-[#233227]"}`}
+                >
+                  <span className="material-symbols-outlined text-[15px]">comment_bank</span>
+                  Notes
+                  {annotations.length > 0 && (
+                    <span className="bg-[#e8d5a1] text-[#7a5e18] text-[9px] font-bold px-1.5 py-0.5 rounded-full">{annotations.length}</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCapturesOpen(false)}
+                  title="Hide panel"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center mr-2 rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+                >
+                  <span className="material-symbols-outlined text-[16px]">right_panel_close</span>
+                </button>
+              </div>
+
+              {/* Captures tab — header action */}
+              {rightTab === "captures" && (
+                <div className="shrink-0 px-4 py-3 border-b border-[#e8e6df] flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => setCapturesOpen(false)}
-                    title="Hide captures"
-                    aria-label="Hide captures"
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+                    onClick={() => { if (isCapturing || showCommentPopup) { cancelCaptureFlow(); } else { setIsCapturing(true); } }}
+                    className={`text-[12px] font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${isCapturing ? "bg-red-500 text-white" : "bg-[#49704F] text-white hover:bg-[#346E56]"}`}
                   >
-                    <span className="material-symbols-outlined text-[16px]">
-                      right_panel_close
-                    </span>
+                    <span className="material-symbols-outlined text-[14px]">{isCapturing ? "close" : "crop"}</span>
+                    {isCapturing ? "Cancel" : "New Capture"}
                   </button>
+                  {selectedCaptureIds.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      <button type="button" onClick={handleSaveCapturesToChat} className="inline-flex items-center gap-1 rounded-full border border-[#cfe0c5] bg-white px-2.5 py-1 text-[11px] font-bold text-[#49704F] hover:bg-[#f3f8ef]">
+                        <span className="material-symbols-outlined text-[13px]">forum</span>Add to Chat
+                      </button>
+                      <button type="button" onClick={handleDeleteSelectedCaptures} className="inline-flex items-center gap-1 rounded-full border border-[#e3c3bc] bg-white px-2.5 py-1 text-[11px] font-bold text-[#a94f46] hover:bg-[#fbf2f0]">
+                        <span className="material-symbols-outlined text-[13px]">delete</span>Delete
+                      </button>
+                    </div>
+                  )}
                 </div>
-              </div>
+              )}
 
-              <div className="flex-1 overflow-y-auto min-h-0">
-                {captures.length > 0 ? (
-                  <div className="h-full flex flex-col">
-                    {captures.length > 1 && (
-                      <div className="px-4 pt-4">
-                        <div className="flex items-center justify-end gap-3">
+              {/* Captures tab content */}
+              {rightTab === "captures" && (
+                <div className="flex-1 overflow-y-auto min-h-0">
+                  {captures.length > 0 ? (
+                    <div className="px-4 py-4 space-y-4">
+                      {captures.length > 1 && (
+                        <div className="flex justify-end">
                           {selectedCaptureIds.length < captures.length ? (
-                            <button
-                              type="button"
-                              onClick={handleSelectAllCaptures}
-                              className="text-[12px] font-bold text-[#49704F] hover:text-[#2f5840] transition-colors"
-                            >
-                              Select all
-                            </button>
+                            <button type="button" onClick={handleSelectAllCaptures} className="text-[12px] font-bold text-[#49704F] hover:text-[#2f5840]">Select all</button>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={handleClearCaptureSelection}
-                              className="text-[12px] font-bold text-[#7a836f] hover:text-[#233227] transition-colors"
-                            >
-                              Clear selection
-                            </button>
+                            <button type="button" onClick={handleClearCaptureSelection} className="text-[12px] font-bold text-[#7a836f] hover:text-[#233227]">Clear selection</button>
                           )}
                         </div>
+                      )}
+                      {captures.map((cap) => (
+                        <div key={cap.id} className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#cfd7cb] bg-[#fcfdfb]" : "border-[#e4e0d4]"}`}>
+                          <button type="button" onClick={() => toggleCaptureSelection(cap.id)} className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}>
+                            <span className="material-symbols-outlined text-[16px]">check</span>
+                          </button>
+                          <button type="button" onClick={() => setPreviewCapture(cap)} className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left">
+                            <div className="flex h-36 items-center justify-center">
+                              <img src={getCaptureDisplayUrl(cap)} alt="capture" className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain" />
+                            </div>
+                          </button>
+                          <div className="space-y-1 px-4 py-3">
+                            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">Edit Request</p>
+                            <p className="text-[13px] leading-relaxed text-[#556255]">{cap.comment || "No edit request provided."}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="m-4 rounded-2xl border border-dashed border-[#d6ddd0] bg-white/70 px-5 py-8 text-center">
+                      <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#eef3e8] text-[#49704F]">
+                        <span className="material-symbols-outlined text-[20px]">crop</span>
                       </div>
-                    )}
+                      <p className="text-[13px] font-bold text-[#233227]">No captures yet</p>
+                      <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">Select an area in the preview and save it. Captures will appear here for AI context and later review.</p>
+                    </div>
+                  )}
+                </div>
+              )}
 
-                    {selectedCaptureIds.length > 0 && (
-                      <div className="border-b border-[#e8e6df] bg-[#faf7f0] px-4 py-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="inline-flex items-center gap-2 rounded-full border border-[#dde3d8] bg-white px-3 py-1.5">
-                            <span className="material-symbols-outlined text-[15px] text-[#49704F]">
-                              check_circle
-                            </span>
-                            <p className="text-[12px] font-bold text-[#4f5b50]">
-                              {selectedCaptureIds.length} selected
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={handleSaveCapturesToChat}
-                              className="inline-flex items-center gap-1 rounded-full border border-[#cfe0c5] bg-white px-3 py-1.5 text-[11px] font-bold text-[#49704F] hover:bg-[#f3f8ef] transition-colors"
-                            >
-                              <span className="material-symbols-outlined text-[14px]">
-                                forum
-                              </span>
-                              Add to Chat
-                            </button>
-                            <button
-                              type="button"
-                              onClick={handleDeleteSelectedCaptures}
-                              className="inline-flex items-center gap-1 rounded-full border border-[#e3c3bc] bg-white px-3 py-1.5 text-[11px] font-bold text-[#a94f46] hover:bg-[#fbf2f0] transition-colors"
-                            >
-                              <span className="material-symbols-outlined text-[14px]">
-                                delete
-                              </span>
-                              Delete
-                            </button>
-                          </div>
+              {/* Notes tab content */}
+              {rightTab === "notes" && (
+                <div className="flex-1 flex flex-col min-h-0">
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+                    {activeTarget && (
+                      <div className="bg-white border border-[#49704F]/50 ring-2 ring-[#49704F]/20 rounded-2xl p-4 shadow-sm mb-4">
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="material-symbols-outlined text-[#49704F] text-[16px]">add_comment</span>
+                          <span className="text-[12px] font-bold text-[#49704F]">Comment on {activeTarget.replace("-", " ")}</span>
+                        </div>
+                        <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Type your feedback here..." className="w-full bg-[#FAF7F0] border border-[#e8e6df] rounded-lg p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3" autoFocus />
+                        <div className="flex justify-end gap-2">
+                          <button onClick={() => { setActiveTarget(null); setCommentText(""); }} className="text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#e8e6df]/50">Cancel</button>
+                          <button onClick={handleAddComment} disabled={!commentText.trim()} className="bg-[#49704F] disabled:opacity-50 text-white text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#346E56]">Save</button>
                         </div>
                       </div>
                     )}
-
-                    <div className="flex-1 overflow-y-auto px-4 py-4">
-                      <div className="space-y-4">
-                        {captures.map((cap) => (
-                          <div
-                            key={cap.id}
-                            className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#cfd7cb] bg-[#fcfdfb]" : "border-[#e4e0d4]"}`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => toggleCaptureSelection(cap.id)}
-                              className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}
-                              aria-label={
-                                selectedCaptureIds.includes(cap.id)
-                                  ? "Deselect capture"
-                                  : "Select capture"
-                              }
-                            >
-                              <span className="material-symbols-outlined text-[16px]">
-                                check
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setPreviewCapture(cap)}
-                              className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left"
-                            >
-                              <div className="flex h-36 items-center justify-center">
-                                <img
-                                  src={getCaptureDisplayUrl(cap)}
-                                  alt="capture"
-                                  className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
-                                />
-                              </div>
-                            </button>
-                            <div className="space-y-1 px-4 py-3">
-                              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">
-                                Edit Request
-                              </p>
-                              <p className="text-[13px] leading-relaxed text-[#556255]">
-                                {cap.comment || "No edit request provided."}
-                              </p>
+                    {annotations.map((ann) => (
+                      <div key={ann.id} className="relative group">
+                        <div className="absolute -left-2 top-0 w-6 h-6 rounded-full border-2 border-white bg-[#49704F] text-white flex items-center justify-center font-bold text-[10px] z-10">{ann.id}</div>
+                        <div className={`bg-white border rounded-2xl p-5 ml-2 shadow-sm transition-colors ${activeTarget === ann.targetId ? "border-[#49704F] ring-1 ring-[#49704F]" : "border-[#e8e6df]"}`}>
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className={`w-8 h-8 rounded-full ${ann.colorClasses} flex items-center justify-center text-[11px] font-bold`}>{ann.initials}</div>
+                            <div className="leading-tight">
+                              <p className="text-[13px] font-bold text-[#233227]">{ann.author}</p>
+                              <p className="text-[10px] text-[#8e9892]">{ann.time}</p>
                             </div>
                           </div>
-                        ))}
+                          <p className="text-[13px] text-[#5c6860] leading-relaxed mb-4">"{ann.content}"</p>
+                          <div className="flex gap-2">
+                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">Reply</button>
+                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">Resolve</button>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    ))}
                   </div>
-                ) : (
-                  <div className="m-4 rounded-2xl border border-dashed border-[#d6ddd0] bg-white/70 px-5 py-8 text-center">
-                    <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#eef3e8] text-[#49704F]">
-                      <span className="material-symbols-outlined text-[20px]">
-                        crop
-                      </span>
-                    </div>
-                    <p className="text-[13px] font-bold text-[#233227]">
-                      No captures yet
-                    </p>
-                    <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">
-                      Select an area in the preview and save it. Captures will
-                      appear here for AI context and later review.
-                    </p>
+                  <div className="shrink-0 p-4 border-t border-[#e8e6df]">
+                    <button onClick={() => { if (!activeTarget) setActiveTarget("block-1"); }} className="w-full bg-[#49704F] text-white text-[13px] font-bold py-3 rounded-full flex items-center justify-center gap-2 hover:bg-[#346E56] shadow-sm">
+                      <span className="material-symbols-outlined text-[16px]">add_comment</span> New Annotation
+                    </button>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex h-full w-14 items-start justify-center pt-6">
-              <button
-                type="button"
-                onClick={() => setCapturesOpen(true)}
-                title="Show captures"
-                aria-label="Show captures"
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
-              >
-                <span className="material-symbols-outlined text-[16px]">
-                  right_panel_open
-                </span>
+              <button type="button" onClick={() => setCapturesOpen(true)} title="Show panel" className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]">
+                <span className="material-symbols-outlined text-[16px]">right_panel_open</span>
               </button>
             </div>
           )}
         </aside>
-
-        {/* Stakeholder annotations drawer */}
-        {annotationsOpen && (
-          <>
-            <div
-              className="absolute inset-0 z-20 bg-[#233227]/12 backdrop-blur-[1px]"
-              onClick={() => setAnnotationsOpen(false)}
-            />
-            <aside className="absolute inset-y-0 right-0 z-30 w-[360px] bg-[#FAF7F0] border-l border-[#e8e6df] flex flex-col shadow-2xl transition-all duration-300">
-              <div className="p-6 pb-4 border-b border-[#e8e6df]">
-                <div className="flex justify-between items-start gap-3 mb-1">
-                  <div>
-                    <h2 className="font-headline text-[18px] font-bold text-[#1a2b21]">
-                      Stakeholder Notes
-                    </h2>
-                    <p className="mt-1 text-[#5c6860] text-[13px]">
-                      Feedback from{" "}
-                      <span className="font-bold text-[#233227]">
-                        stakeholders
-                      </span>
-                      .
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="bg-[#e8d5a1] bg-opacity-40 text-[#7a5e18] text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded-full border border-[#dcd9ce]">
-                      {annotations.length} Open
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setAnnotationsOpen(false)}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-[#dcd9ce] bg-white text-[#5c6860] hover:text-[#233227] hover:bg-[#f4f1ea] transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">
-                        close
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
-                {activeTarget && (
-                  <div className="bg-white border border-[#49704F]/50 ring-2 ring-[#49704F]/20 rounded-2xl p-4 shadow-sm relative z-20 mb-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className="material-symbols-outlined text-[#49704F] text-[16px]">
-                        add_comment
-                      </span>
-                      <span className="text-[12px] font-bold text-[#49704F]">
-                        Comment on {activeTarget.replace("-", " ")}
-                      </span>
-                    </div>
-                    <textarea
-                      value={commentText}
-                      onChange={(e) => setCommentText(e.target.value)}
-                      placeholder="Type your feedback here..."
-                      className="w-full bg-[#FAF7F0] border border-[#e8e6df] rounded-lg p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
-                      autoFocus
-                    />
-                    <div className="flex justify-end gap-2">
-                      <button
-                        onClick={() => {
-                          setActiveTarget(null);
-                          setCommentText("");
-                        }}
-                        className="text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#e8e6df]/50 transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleAddComment}
-                        disabled={!commentText.trim()}
-                        className="bg-[#49704F] disabled:opacity-50 text-white text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#346E56] transition-colors"
-                      >
-                        Save
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {annotations.map((ann) => (
-                  <div key={ann.id} className="relative group">
-                    <div className="absolute -left-2 top-0 w-6 h-6 rounded-full border-2 border-white bg-[#49704F] text-white flex items-center justify-center font-bold text-[10px] z-10">
-                      {ann.id}
-                    </div>
-                    <div
-                      className={`bg-white border rounded-2xl p-5 ml-2 shadow-sm transition-colors ${activeTarget === ann.targetId ? "border-[#49704F] ring-1 ring-[#49704F]" : "border-[#e8e6df]"}`}
-                    >
-                      <div className="flex items-center gap-3 mb-3">
-                        <div
-                          className={`w-8 h-8 rounded-full ${ann.colorClasses} flex items-center justify-center text-[11px] font-bold`}
-                        >
-                          {ann.initials}
-                        </div>
-                        <div className="leading-tight">
-                          <p className="text-[13px] font-bold text-[#233227]">
-                            {ann.author}
-                          </p>
-                          <p className="text-[10px] text-[#8e9892]">
-                            {ann.time}
-                          </p>
-                        </div>
-                      </div>
-                      <p className="text-[13px] text-[#5c6860] leading-relaxed mb-4">
-                        "{ann.content}"
-                      </p>
-                      <div className="flex gap-2">
-                        <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce] transition-colors">
-                          Reply
-                        </button>
-                        <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce] transition-colors">
-                          Resolve
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="p-4 border-t border-[#e8e6df]">
-                <button
-                  onClick={() => {
-                    if (!activeTarget) setActiveTarget("block-1");
-                  }}
-                  className="w-full bg-[#49704F] text-white text-[13px] font-bold py-3 rounded-full flex items-center justify-center gap-2 hover:bg-[#346E56] transition-colors shadow-sm"
-                >
-                  <span className="material-symbols-outlined text-[16px]">
-                    add_comment
-                  </span>{" "}
-                  New Annotation
-                </button>
-              </div>
-            </aside>
-          </>
-        )}
 
         {previewCapture && (
           <div

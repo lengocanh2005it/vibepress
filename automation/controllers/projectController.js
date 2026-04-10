@@ -12,6 +12,7 @@ const {
 } = require("../services/wpSqlDumpService");
 const {
   createSiteDatabase,
+  dropSiteDatabase,
   syncPostToLocalDb,
   deletePostFromLocalDb,
 } = require("../services/siteDbService");
@@ -416,6 +417,7 @@ async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
     fs.writeFileSync(dumpPath, sql, "utf8");
     console.log(`[DbSync] dump saved — ${dumpPath}`);
 
+    await dropSiteDatabase(siteId);
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
     console.log(
       `[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`,
