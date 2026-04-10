@@ -163,7 +163,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
-- When \`pageDetail\` is in dataNeeds: the WordPress page API only exposes \`id, title, content, slug\`. Do not plan UI that requires post-only fields (author, categories, date, excerpt, featured image) on **pages** — those apply to posts only.
+- When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
 - The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
 - If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
 - If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must be content-only: use \`showPages\` and/or \`showPosts\`, but NEVER set \`menuSlug\` or \`showSiteInfo\`.

@@ -11,6 +11,24 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = Number(process.env.API_PORT) || 3100;
+const DEFAULT_POSTS_PER_PAGE = 10;
+const MAX_POSTS_PER_PAGE = 50;
+const BUILTIN_POST_TYPES = new Set([
+  'attachment',
+  'revision',
+  'nav_menu_item',
+  'custom_css',
+  'customize_changeset',
+  'oembed_cache',
+  'user_request',
+  'wp_block',
+  'wp_template',
+  'wp_template_part',
+  'wp_global_styles',
+  'wp_navigation',
+  'wp_font_face',
+  'wp_font_family',
+]);
 
 function formatDate(mysqlDate: string | Date | null): string {
   if (!mysqlDate) return '';
@@ -20,6 +38,438 @@ function formatDate(mysqlDate: string | Date | null): string {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+function rewriteWpContentAssetUrls(html: string | null | undefined): string {
+  if (!html) return '';
+  return String(html).replace(
+    /https?:\/\/[^"'\s)]+(\/wp-content\/[^"'\s)]+)/gi,
+    (_, relativePath: string) => relativePath,
+  );
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#039;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function generateExcerpt(
+  explicitExcerpt: string | null | undefined,
+  contentHtml: string | null | undefined,
+): string {
+  const trimmedExcerpt = String(explicitExcerpt ?? '').trim();
+  if (trimmedExcerpt) return trimmedExcerpt;
+
+  const plainText = decodeHtmlEntities(
+    String(contentHtml ?? '')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/\[[^\]]+\]/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+
+  if (!plainText) return '';
+
+  const words = plainText.split(/\s+/);
+  if (words.length <= 55) return plainText;
+  return `${words.slice(0, 55).join(' ')}...`;
+}
+
+function stripGutenbergBlockComments(html: string): string {
+  return html.replace(/<!--\s*\/?wp:[\s\S]*?-->/gi, '');
+}
+
+function parseBlockAttrs(raw: string | undefined): Record<string, any> {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function replaceAsync(
+  input: string,
+  pattern: RegExp,
+  replacer: (
+    match: RegExpExecArray,
+  ) => Promise<string>,
+): Promise<string> {
+  let result = '';
+  let lastIndex = 0;
+  pattern.lastIndex = 0;
+
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(input)) !== null) {
+    result += input.slice(lastIndex, match.index);
+    result += await replacer(match);
+    lastIndex = match.index + match[0].length;
+  }
+
+  result += input.slice(lastIndex);
+  return result;
+}
+
+async function renderLatestPostsBlock(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  attrs: Record<string, any>,
+): Promise<string> {
+  const requestedLimit = Number(attrs.postsToShow ?? attrs.posts_to_show ?? 5);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(Math.max(requestedLimit, 1), 12)
+    : 5;
+  const showDate = !!attrs.displayPostDate;
+  const order = String(attrs.order ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+  const orderBy = String(attrs.orderBy ?? 'date');
+  const orderBySql =
+    orderBy === 'title'
+      ? 'p.post_title'
+      : orderBy === 'modified'
+        ? 'p.post_modified'
+        : orderBy === 'id'
+          ? 'p.ID'
+          : 'p.post_date';
+  const [rows] = await conn.query<any[]>(
+    `SELECT p.ID, p.post_title, p.post_name, p.post_date
+     FROM \`${prefix}posts\` p
+     WHERE p.post_type = 'post' AND p.post_status = 'publish'
+     ORDER BY ${orderBySql} ${order}
+     LIMIT ?`,
+    [limit],
+  );
+
+  return `<ul class="wp-block-latest-posts">${rows
+    .map(
+      (row) =>
+        `<li><a href="/post/${row.post_name}">${row.post_title}</a>${
+          showDate
+            ? ` <time datetime="${new Date(row.post_date).toISOString()}">${formatDate(row.post_date)}</time>`
+            : ''
+        }</li>`,
+    )
+    .join('')}</ul>`;
+}
+
+async function renderTermListBlock(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  taxonomy: 'category' | 'post_tag',
+  className: string,
+  hrefBase: string,
+): Promise<string> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT t.name, t.slug, tt.count
+     FROM \`${prefix}terms\` t
+     INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
+     WHERE tt.taxonomy = ? AND tt.count > 0
+     ORDER BY t.name ASC`,
+    [taxonomy],
+  );
+
+  if (taxonomy === 'post_tag') {
+    return `<div class="${className}">${rows
+      .map(
+        (row) =>
+          `<a href="${hrefBase}/${row.slug}" class="wp-block-tag-cloud-link">${row.name}</a>`,
+      )
+      .join(' ')}</div>`;
+  }
+
+  return `<ul class="${className}">${rows
+    .map(
+      (row) =>
+        `<li><a href="${hrefBase}/${row.slug}">${row.name}</a></li>`,
+    )
+    .join('')}</ul>`;
+}
+
+async function renderArchivesBlock(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<string> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT YEAR(post_date) AS year, MONTH(post_date) AS month, COUNT(*) AS count
+     FROM \`${prefix}posts\`
+     WHERE post_type = 'post' AND post_status = 'publish'
+     GROUP BY YEAR(post_date), MONTH(post_date)
+     ORDER BY YEAR(post_date) DESC, MONTH(post_date) DESC
+     LIMIT 12`,
+  );
+
+  return `<ul class="wp-block-archives-list">${rows
+    .map((row) => {
+      const monthLabel = new Date(
+        Number(row.year),
+        Number(row.month) - 1,
+        1,
+      ).toLocaleDateString('en-US', {
+        month: 'long',
+        year: 'numeric',
+      });
+      return `<li><a href="/archive?month=${row.year}-${String(row.month).padStart(2, '0')}">${monthLabel}</a> (${row.count})</li>`;
+    })
+    .join('')}</ul>`;
+}
+
+async function renderDynamicGutenbergBlock(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  blockName: string,
+  attrs: Record<string, any>,
+): Promise<string | null> {
+  switch (blockName) {
+    case 'core/latest-posts':
+    case 'latest-posts':
+      return renderLatestPostsBlock(conn, prefix, attrs);
+    case 'core/categories':
+    case 'categories':
+      return renderTermListBlock(
+        conn,
+        prefix,
+        'category',
+        'wp-block-categories-list',
+        '/category',
+      );
+    case 'core/tag-cloud':
+    case 'tag-cloud':
+      return renderTermListBlock(
+        conn,
+        prefix,
+        'post_tag',
+        'wp-block-tag-cloud',
+        '/tag',
+      );
+    case 'core/archives':
+    case 'archives':
+      return renderArchivesBlock(conn, prefix);
+    default:
+      return null;
+  }
+}
+
+async function normalizeRichContent(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  html: string | null | undefined,
+): Promise<string> {
+  if (!html) return '';
+
+  let normalized = rewriteWpContentAssetUrls(html);
+  normalized = await replaceAsync(
+    normalized,
+    /<!--\s*wp:([a-z0-9/-]+)(?:\s+(\{[\s\S]*?\}))?\s*\/-->/gi,
+    async (match) => {
+      const blockName = String(match[1] ?? '').toLowerCase();
+      const attrs = parseBlockAttrs(match[2]);
+      const rendered = await renderDynamicGutenbergBlock(
+        conn,
+        prefix,
+        blockName,
+        attrs,
+      );
+      return rendered ?? '';
+    },
+  );
+
+  return stripGutenbergBlockComments(normalized).trim();
+}
+
+function splitTermList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return String(raw)
+    .split(', ')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function taxonomyNamesSubquery(prefix: string, taxonomy: string): string {
+  return `(SELECT GROUP_CONCAT(DISTINCT t.name ORDER BY t.name SEPARATOR ', ')
+           FROM \`${prefix}term_relationships\` tr2
+           INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+           INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+           WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
+}
+
+function parsePositiveInt(raw: unknown, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function parsePostsPaginationQuery(req: express.Request) {
+  const page = parsePositiveInt(req.query.page, 1);
+  const perPage = Math.min(
+    parsePositiveInt(req.query.perPage, DEFAULT_POSTS_PER_PAGE),
+    MAX_POSTS_PER_PAGE,
+  );
+  return {
+    page,
+    perPage,
+    offset: (page - 1) * perPage,
+  };
+}
+
+function applyPostsPaginationHeaders(
+  res: express.Response,
+  total: number,
+  page: number,
+  perPage: number,
+) {
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  res.setHeader('X-WP-Total', String(total));
+  res.setHeader('X-WP-TotalPages', String(totalPages));
+  res.setHeader('X-WP-CurrentPage', String(Math.min(page, totalPages)));
+  res.setHeader('X-WP-PerPage', String(perPage));
+}
+
+async function getApiPostTypes(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<string[]> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT DISTINCT post_type
+     FROM \`${prefix}posts\`
+     WHERE post_status = 'publish'`,
+  );
+  return rows
+    .map((row) => String(row.post_type ?? ''))
+    .filter((postType) => postType && !BUILTIN_POST_TYPES.has(postType))
+    .sort();
+}
+
+async function getPostTypeSummaries(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+) {
+  const publicTypes = await getApiPostTypes(conn, prefix);
+  if (publicTypes.length === 0) return [];
+  const [countRows] = await conn.query<any[]>(
+    `SELECT post_type, COUNT(*) AS cnt
+     FROM \`${prefix}posts\`
+     WHERE post_status = 'publish'
+       AND post_type IN (${publicTypes.map(() => '?').join(', ')})
+     GROUP BY post_type
+     ORDER BY post_type ASC`,
+    publicTypes,
+  );
+  const [taxonomyRows] = await conn.query<any[]>(
+    `SELECT DISTINCT p.post_type, tt.taxonomy
+     FROM \`${prefix}posts\` p
+     INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
+     INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+     WHERE p.post_status = 'publish'
+       AND p.post_type IN (${publicTypes.map(() => '?').join(', ')})
+       AND tt.taxonomy NOT IN ('nav_menu', 'link_category', 'post_format')
+     ORDER BY p.post_type ASC, tt.taxonomy ASC`,
+    publicTypes,
+  );
+
+  const taxonomyMap = new Map<string, string[]>();
+  for (const row of taxonomyRows) {
+    const key = String(row.post_type ?? '');
+    const list = taxonomyMap.get(key) ?? [];
+    list.push(String(row.taxonomy ?? ''));
+    taxonomyMap.set(key, list);
+  }
+
+  return countRows.map((row) => ({
+    postType: String(row.post_type),
+    count: Number(row.cnt),
+    taxonomies: taxonomyMap.get(String(row.post_type)) ?? [],
+  }));
+}
+
+function normalizeRequestedPostTypes(
+  raw: unknown,
+  availableTypes: string[],
+  defaults: string[],
+): string[] {
+  const requested = typeof raw === 'string' ? raw.trim() : '';
+  if (!requested) return defaults;
+  if (requested === 'all') return availableTypes;
+  const requestedTypes = requested
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const filtered = requestedTypes.filter((value) => availableTypes.includes(value));
+  return filtered.length > 0 ? filtered : defaults;
+}
+
+function buildPostTypeWhereClause(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  postTypes: string[],
+): string {
+  if (postTypes.length === 0) return `AND 1 = 0`;
+  return `AND p.post_type IN (${postTypes.map((type) => conn.escape(type)).join(', ')})`;
+}
+
+async function serializePost(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  r: any,
+) {
+  return {
+    id: r.ID,
+    title: r.post_title,
+    content: await normalizeRichContent(conn, prefix, r.post_content),
+    excerpt: generateExcerpt(r.post_excerpt, r.post_content),
+    slug: r.post_name,
+    type: r.post_type,
+    status: r.post_status,
+    date: formatDate(r.post_date),
+    author: r.author_name ?? '',
+    authorSlug: r.author_slug ?? '',
+    categories: splitTermList(r.categories),
+    tags: splitTermList(r.tags),
+    featuredImage: r.featured_image ?? null,
+  };
+}
+
+async function serializePage(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  r: any,
+) {
+  return {
+    id: r.ID,
+    title: r.post_title,
+    content: await normalizeRichContent(conn, prefix, r.post_content),
+    slug: r.post_name,
+    parentId: Number(r.post_parent ?? 0),
+    menuOrder: r.menu_order,
+    template: r.template ?? '',
+    featuredImage: r.featured_image ?? null,
+  };
+}
+
+async function serializePostRows(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  rows: any[],
+) {
+  const result = [];
+  for (const row of rows) {
+    result.push(await serializePost(conn, prefix, row));
+  }
+  return result;
+}
+
+async function serializePageRows(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  rows: any[],
+) {
+  const result = [];
+  for (const row of rows) {
+    result.push(await serializePage(conn, prefix, row));
+  }
+  return result;
 }
 
 async function getConn() {
@@ -189,8 +639,7 @@ app.get('/api/site-info', async (req, res) => {
       siteName: opts['blogname'] ?? '',
       blogDescription: opts['blogdescription'] ?? '',
       logoUrl:
-        process.env.SITE_LOGO_URL ||
-        (await resolveCustomLogoUrl(conn, prefix)),
+        process.env.SITE_LOGO_URL || (await resolveCustomLogoUrl(conn, prefix)),
       adminEmail: opts['admin_email'] ?? '',
       language: opts['WPLANG'] ?? 'en',
     });
@@ -203,38 +652,49 @@ app.get('/api/posts', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
+    const availablePostTypes = await getApiPostTypes(conn, prefix);
+    const selectedPostTypes = normalizeRequestedPostTypes(
+      req.query.type,
+      availablePostTypes,
+      ['post'],
+    );
+    const authorSlug =
+      typeof req.query.author === 'string' ? req.query.author : null;
+    const authorFilter = authorSlug
+      ? `AND u.user_nicename = ${conn.escape(authorSlug)}`
+      : '';
+    const typeFilter = buildPostTypeWhereClause(conn, selectedPostTypes);
+    const { page, perPage, offset } = parsePostsPaginationQuery(req);
+    const [[countRow]] = await conn.query<any[]>(
+      `SELECT COUNT(*) AS total
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter}`,
+    );
+    applyPostsPaginationHeaders(
+      res,
+      Number(countRow?.total ?? 0),
+      page,
+      perPage,
+    );
     const [rows] = await conn.query<any[]>(
       `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
               p.post_date,
               u.display_name AS author_name,
+              u.user_nicename AS author_slug,
               img.guid AS featured_image,
-              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
-               FROM \`${prefix}term_relationships\` tr2
-               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
-               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
-               WHERE tt2.taxonomy = 'category' AND tr2.object_id = p.ID) AS categories
+              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
-       WHERE p.post_type = 'post' AND p.post_status = 'publish'
-       ORDER BY p.post_date DESC`,
+       WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter}
+       ORDER BY p.post_date DESC
+       LIMIT ? OFFSET ?`,
+      [perPage, offset],
     );
-    res.json(
-      rows.map((r) => ({
-        id: r.ID,
-        title: r.post_title,
-        content: r.post_content,
-        excerpt: r.post_excerpt,
-        slug: r.post_name,
-        type: r.post_type,
-        status: r.post_status,
-        date: formatDate(r.post_date),
-        author: r.author_name ?? '',
-        categories: r.categories ? r.categories.split(', ') : [],
-        featuredImage: r.featured_image ?? null,
-      })),
-    );
+    res.json(await serializePostRows(conn, prefix, rows));
   } finally {
     await conn.end();
   }
@@ -244,38 +704,30 @@ app.get('/api/posts/:slug', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
+    const availablePostTypes = await getApiPostTypes(conn, prefix);
+    const selectedPostTypes = normalizeRequestedPostTypes(
+      req.query.type,
+      availablePostTypes,
+      availablePostTypes,
+    );
+    const typeFilter = buildPostTypeWhereClause(conn, selectedPostTypes);
     const [rows] = await conn.query<any[]>(
       `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
               p.post_date,
               u.display_name AS author_name,
+              u.user_nicename AS author_slug,
               img.guid AS featured_image,
-              (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
-               FROM \`${prefix}term_relationships\` tr2
-               INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
-               INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
-               WHERE tt2.taxonomy = 'category' AND tr2.object_id = p.ID) AS categories
+              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
-       WHERE p.post_name = ? AND p.post_status = 'publish' LIMIT 1`,
+       WHERE p.post_name = ? AND p.post_status = 'publish' ${typeFilter} LIMIT 1`,
       [req.params.slug],
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const r = rows[0];
-    res.json({
-      id: r.ID,
-      title: r.post_title,
-      content: r.post_content,
-      excerpt: r.post_excerpt,
-      slug: r.post_name,
-      type: r.post_type,
-      status: r.post_status,
-      date: formatDate(r.post_date),
-      author: r.author_name ?? '',
-      categories: r.categories ? r.categories.split(', ') : [],
-      featuredImage: r.featured_image ?? null,
-    });
+    res.json(await serializePost(conn, prefix, rows[0]));
   } finally {
     await conn.end();
   }
@@ -286,23 +738,18 @@ app.get('/api/pages/:slug', async (req, res) => {
   try {
     const prefix = await getPrefix(conn);
     const [rows] = await conn.query<any[]>(
-      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.menu_order,
-              COALESCE(pm.meta_value, '') AS template
+      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
+              COALESCE(pm.meta_value, '') AS template,
+              img.guid AS featured_image
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        WHERE p.post_type = 'page' AND p.post_status = 'publish' AND p.post_name = ? LIMIT 1`,
       [req.params.slug],
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const r = rows[0];
-    res.json({
-      id: r.ID,
-      title: r.post_title,
-      content: r.post_content,
-      slug: r.post_name,
-      menuOrder: r.menu_order,
-      template: r.template,
-    });
+    res.json(await serializePage(conn, prefix, rows[0]));
   } finally {
     await conn.end();
   }
@@ -313,23 +760,103 @@ app.get('/api/pages', async (req, res) => {
   try {
     const prefix = await getPrefix(conn);
     const [rows] = await conn.query<any[]>(
-      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.menu_order,
-              COALESCE(pm.meta_value, '') AS template
+      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
+              COALESCE(pm.meta_value, '') AS template,
+              img.guid AS featured_image
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        WHERE p.post_type = 'page' AND p.post_status = 'publish'
        ORDER BY p.menu_order`,
     );
-    res.json(
-      rows.map((r) => ({
-        id: r.ID,
-        title: r.post_title,
-        content: r.post_content,
-        slug: r.post_name,
-        menuOrder: r.menu_order,
-        template: r.template,
-      })),
+    res.json(await serializePageRows(conn, prefix, rows));
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/post-types', async (_req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    res.json(await getPostTypeSummaries(conn, prefix));
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/post-types/:postType/posts', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const availablePostTypes = await getApiPostTypes(conn, prefix);
+    if (!availablePostTypes.includes(req.params.postType)) {
+      return res.status(404).json({ error: 'Post type not found' });
+    }
+    const typeFilter = buildPostTypeWhereClause(conn, [req.params.postType]);
+    const { page, perPage, offset } = parsePostsPaginationQuery(req);
+    const [[countRow]] = await conn.query<any[]>(
+      `SELECT COUNT(*) AS total
+       FROM \`${prefix}posts\` p
+       WHERE p.post_status = 'publish' ${typeFilter}`,
     );
+    applyPostsPaginationHeaders(
+      res,
+      Number(countRow?.total ?? 0),
+      page,
+      perPage,
+    );
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
+              p.post_date,
+              u.display_name AS author_name,
+              u.user_nicename AS author_slug,
+              img.guid AS featured_image,
+              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE p.post_status = 'publish' ${typeFilter}
+       ORDER BY p.post_date DESC
+       LIMIT ? OFFSET ?`,
+      [perPage, offset],
+    );
+    res.json(await serializePostRows(conn, prefix, rows));
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/post-types/:postType/:slug', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const availablePostTypes = await getApiPostTypes(conn, prefix);
+    if (!availablePostTypes.includes(req.params.postType)) {
+      return res.status(404).json({ error: 'Post type not found' });
+    }
+    const typeFilter = buildPostTypeWhereClause(conn, [req.params.postType]);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
+              p.post_date,
+              u.display_name AS author_name,
+              u.user_nicename AS author_slug,
+              img.guid AS featured_image,
+              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+       WHERE p.post_name = ? AND p.post_status = 'publish' ${typeFilter}
+       LIMIT 1`,
+      [req.params.slug],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(await serializePost(conn, prefix, rows[0]));
   } finally {
     await conn.end();
   }
@@ -360,8 +887,23 @@ function parseNavMenuLocations(serialized: string): Map<number, string> {
  */
 function parseNavigationBlockItems(
   content: string,
-): { id: number; title: string; url: string; order: number; parentId: number }[] {
-  const items: { id: number; title: string; url: string; order: number; parentId: number }[] = [];
+  siteUrl?: string | null,
+): {
+  id: number;
+  title: string;
+  url: string;
+  order: number;
+  parentId: number;
+  target: string | null;
+}[] {
+  const items: {
+    id: number;
+    title: string;
+    url: string;
+    order: number;
+    parentId: number;
+    target: string | null;
+  }[] = [];
   const pattern = /<!--\s*wp:navigation-link\s+(\{[^}]*\})\s*(?:\/-->|-->)/g;
   let match;
   let order = 0;
@@ -371,8 +913,9 @@ function parseNavigationBlockItems(
         label?: string;
         url?: string;
         id?: number;
+        opensInNewTab?: boolean;
       };
-      const url = normalizeMenuUrl(attrs.url ?? '');
+      const url = normalizeMenuUrl(attrs.url ?? '', siteUrl);
       if (attrs.label && url) {
         items.push({
           id: attrs.id ?? 0,
@@ -380,6 +923,7 @@ function parseNavigationBlockItems(
           url,
           order: order++,
           parentId: 0,
+          target: attrs.opensInNewTab ? '_blank' : null,
         });
       }
     } catch {
@@ -389,20 +933,29 @@ function parseNavigationBlockItems(
   return items;
 }
 
-function normalizeMenuUrl(raw: string): string {
+function normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
   if (!raw) return '';
+  const trimmed = raw.trim();
   try {
-    // If it's an absolute URL, extract the pathname
-    if (raw.startsWith('http://') || raw.startsWith('https://')) {
-      const u = new URL(raw);
-      raw = u.pathname;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      const url = new URL(trimmed);
+      if (siteUrl) {
+        try {
+          const site = new URL(siteUrl);
+          if (url.origin !== site.origin) return trimmed;
+        } catch {
+          // invalid site URL — fall back to pathname rewrite
+        }
+      }
+      raw = `${url.pathname}${url.search}${url.hash}`;
+    } else {
+      raw = trimmed;
     }
   } catch {
     // not a valid URL — treat as relative path
+    raw = trimmed;
   }
-  return raw
-    .replace(/^\/pages\//, '/page/')
-    .replace(/^\/posts\//, '/post/');
+  return raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -432,6 +985,7 @@ app.get('/api/menus', async (req, res) => {
             url: `/page/${p.post_name}`,
             order: p.menu_order || idx,
             parentId: 0,
+            target: null,
           })),
         },
       ]);
@@ -446,17 +1000,24 @@ app.get('/api/menus', async (req, res) => {
       termToLocation = parseNavMenuLocations(locRows[0].option_value as string);
     }
 
+    const [[siteUrlRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'siteurl' LIMIT 1`,
+    );
+    const siteUrl = (siteUrlRow?.option_value as string | undefined) ?? null;
+
     const result = [];
     for (const menu of menus) {
       const [items] = await conn.query<any[]>(
         `SELECT p.ID, p.post_title, p.menu_order,
                 url_meta.meta_value AS url,
-                parent_meta.meta_value AS parent_id
+                parent_meta.meta_value AS parent_id,
+                target_meta.meta_value AS target
          FROM \`${prefix}posts\` p
          INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
          INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
          LEFT JOIN \`${prefix}postmeta\` url_meta ON url_meta.post_id = p.ID AND url_meta.meta_key = '_menu_item_url'
          LEFT JOIN \`${prefix}postmeta\` parent_meta ON parent_meta.post_id = p.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
+         LEFT JOIN \`${prefix}postmeta\` target_meta ON target_meta.post_id = p.ID AND target_meta.meta_key = '_menu_item_target'
          WHERE tt.term_id = ? AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'
          ORDER BY p.menu_order`,
         [menu.term_id],
@@ -468,9 +1029,10 @@ app.get('/api/menus', async (req, res) => {
         items: items.map((i) => ({
           id: i.ID,
           title: i.post_title,
-          url: normalizeMenuUrl(i.url ?? ''),
+          url: normalizeMenuUrl(i.url ?? '', siteUrl),
           order: i.menu_order,
           parentId: parseInt(i.parent_id ?? '0', 10),
+          target: i.target?.trim() ? i.target : null,
         })),
       });
     }
@@ -483,7 +1045,10 @@ app.get('/api/menus', async (req, res) => {
        ORDER BY p.ID`,
     );
     for (const navPost of wpNavPosts) {
-      const items = parseNavigationBlockItems(navPost.post_content ?? '');
+      const items = parseNavigationBlockItems(
+        navPost.post_content ?? '',
+        siteUrl,
+      );
       if (items.length > 0) {
         result.push({
           name: navPost.post_title || navPost.post_name,
@@ -555,11 +1120,30 @@ app.get('/api/taxonomies/:taxonomy/:term/posts', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
+    const { page, perPage, offset } = parsePostsPaginationQuery(req);
+    const [[countRow]] = await conn.query<any[]>(
+      `SELECT COUNT(*) AS total
+       FROM \`${prefix}posts\` p
+       INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
+       INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+       INNER JOIN \`${prefix}terms\` t ON t.term_id = tt.term_id
+       WHERE tt.taxonomy = ? AND t.slug = ? AND p.post_status = 'publish'`,
+      [req.params.taxonomy, req.params.term],
+    );
+    applyPostsPaginationHeaders(
+      res,
+      Number(countRow?.total ?? 0),
+      page,
+      perPage,
+    );
     const [rows] = await conn.query<any[]>(
       `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name,
               p.post_type, p.post_status, p.post_date,
               u.display_name AS author_name,
-              img.guid AS featured_image
+              u.user_nicename AS author_slug,
+              img.guid AS featured_image,
+              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
        INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
@@ -568,23 +1152,11 @@ app.get('/api/taxonomies/:taxonomy/:term/posts', async (req, res) => {
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
        WHERE tt.taxonomy = ? AND t.slug = ? AND p.post_status = 'publish'
-       ORDER BY p.post_date DESC`,
-      [req.params.taxonomy, req.params.term],
+       ORDER BY p.post_date DESC
+       LIMIT ? OFFSET ?`,
+      [req.params.taxonomy, req.params.term, perPage, offset],
     );
-    res.json(
-      rows.map((r: any) => ({
-        id: r.ID,
-        title: r.post_title,
-        content: r.post_content,
-        excerpt: r.post_excerpt,
-        slug: r.post_name,
-        type: r.post_type,
-        status: r.post_status,
-        date: formatDate(r.post_date),
-        author: r.author_name ?? '',
-        featuredImage: r.featured_image ?? null,
-      })),
-    );
+    res.json(await serializePostRows(conn, prefix, rows));
   } finally {
     await conn.end();
   }
@@ -603,7 +1175,9 @@ app.get('/api/comments', async (req, res) => {
     });
 
     if (!postId) {
-      return res.status(400).json({ error: 'postId or slug query param required' });
+      return res
+        .status(400)
+        .json({ error: 'postId or slug query param required' });
     }
 
     const [rows] = await conn.query<any[]>(
@@ -641,7 +1215,9 @@ app.get('/api/comments/submissions', async (req, res) => {
         : '';
 
     if (!clientToken) {
-      return res.status(400).json({ error: 'clientToken query param required' });
+      return res
+        .status(400)
+        .json({ error: 'clientToken query param required' });
     }
 
     const postId = await resolvePostId(conn, prefix, {
@@ -649,7 +1225,9 @@ app.get('/api/comments/submissions', async (req, res) => {
       slug: req.query.slug,
     });
     if (!postId) {
-      return res.status(400).json({ error: 'postId or slug query param required' });
+      return res
+        .status(400)
+        .json({ error: 'postId or slug query param required' });
     }
 
     const [rows] = await conn.query<any[]>(
@@ -687,7 +1265,13 @@ app.post('/api/comments', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
-    const { author, email, content, website = '', parentId = 0 } = req.body ?? {};
+    const {
+      author,
+      email,
+      content,
+      website = '',
+      parentId = 0,
+    } = req.body ?? {};
     const clientToken =
       typeof req.body?.clientToken === 'string'
         ? req.body.clientToken.trim().substring(0, 120)
@@ -697,7 +1281,11 @@ app.post('/api/comments', async (req, res) => {
     if (!author || typeof author !== 'string' || !author.trim()) {
       return res.status(400).json({ error: 'author is required' });
     }
-    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    if (
+      !email ||
+      typeof email !== 'string' ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+    ) {
       return res.status(400).json({ error: 'valid email is required' });
     }
     if (!content || typeof content !== 'string' || !content.trim()) {
@@ -725,7 +1313,9 @@ app.post('/api/comments', async (req, res) => {
       return res.status(404).json({ error: 'post not found' });
     }
     if (String(postRows[0]?.comment_status ?? '').trim() !== 'open') {
-      return res.status(403).json({ error: 'comments are closed for this post' });
+      return res
+        .status(403)
+        .json({ error: 'comments are closed for this post' });
     }
 
     const now = new Date();
@@ -770,6 +1360,53 @@ app.post('/api/comments', async (req, res) => {
       moderationStatus: 'pending',
       tracked: Boolean(clientToken),
     });
+  } finally {
+    await conn.end();
+  }
+});
+
+// Parse wp_template_part 'footer' block content into structured columns.
+// Extracts <!-- wp:heading --> + <!-- wp:navigation-link --> sequences.
+function parseFooterBlocks(
+  content: string,
+): Array<{ heading: string; links: Array<{ label: string; url: string }> }> {
+  const columns: Array<{
+    heading: string;
+    links: Array<{ label: string; url: string }>;
+  }> = [];
+  const parts = content.split(/(?=<!--\s*wp:heading)/);
+  for (const part of parts) {
+    const headingMatch =
+      /<!--\s*wp:heading[^>]*-->\s*<[^>]+>([^<]+)<\/[^>]+>/.exec(part);
+    if (!headingMatch) continue;
+    const heading = headingMatch[1].trim();
+    const links: Array<{ label: string; url: string }> = [];
+    let m: RegExpExecArray | null;
+    const re = /<!--\s*wp:navigation-link\s+(\{[^}]+\})/g;
+    while ((m = re.exec(part)) !== null) {
+      try {
+        const attrs = JSON.parse(m[1]);
+        if (attrs.label)
+          links.push({ label: attrs.label, url: attrs.url ?? '#' });
+      } catch {
+        /* skip malformed */
+      }
+    }
+    if (links.length > 0) columns.push({ heading, links });
+  }
+  return columns;
+}
+
+app.get('/api/footer-links', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [[row]] = await conn.query<any[]>(
+      `SELECT post_content FROM \`${prefix}posts\`
+       WHERE post_type = 'wp_template_part' AND post_name = 'footer' AND post_status = 'publish' LIMIT 1`,
+    );
+    if (!row?.post_content) return res.json([]);
+    res.json(parseFooterBlocks(row.post_content));
   } finally {
     await conn.end();
   }

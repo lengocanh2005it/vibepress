@@ -360,7 +360,7 @@ function buildClassicThemeNote(
   const loopHint =
     isSingle || isPage
       ? `- \`{/* WP: loop start */}\` → (Single view) Render the specific \`${isSingle ? 'post' : 'page'}\` properties. NO loop / array map.`
-      : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts\` and map over results`;
+      : `- \`{/* WP: loop start */}\` → fetch \`GET /api/posts?page=<n>&perPage=<n>\` (or the appropriate archive variant) and map over results. Paginated responses still return \`Post[]\`; page metadata comes from response headers.`;
 
   // For PAGE components, the shared Layout wrapper handles Header/Footer chrome.
   // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
@@ -465,7 +465,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
     );
     for (const item of m.items) {
       parts.push(
-        `    - id:${item.id} parentId:${item.parentId} title:"${item.title}" url:"${item.url}"`,
+        `    - id:${item.id} parentId:${item.parentId} title:"${item.title}" url:"${item.url}" target:"${item.target ?? ''}"`,
       );
     }
   }
@@ -543,20 +543,20 @@ export function buildPlanContextNote(
             'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
     );
     lines.push(
-      '⛔ API endpoint contract: ONLY `/api/pages/${slug}` is allowed. Do NOT call `/api/pages` (the list endpoint) under any circumstances — not for the main content, not for sidebar links, not for related pages.',
+      '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup. You MAY call `/api/pages` additionally when the design needs page hierarchy, breadcrumbs, or related-page navigation.',
     );
     lines.push(
-      '⛔ Page Detail Contract: a page has NO `author`, `categories`, `date`, `excerpt`, `featuredImage`, or `comments`. Use ONLY `id, title, content, slug`.',
+      '⛔ Page Detail Contract: a page has NO `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`. Use page fields from the approved contract only.',
     );
     lines.push(
-      '⛔ If you declare `interface Page`, it must ONLY have those 4 fields. Do NOT use `Post` type for pages.',
+      '⛔ If you declare `interface Page`, it must match the approved Page contract exactly. Do NOT use `Post` type for pages.',
     );
     lines.push(
-      '⛔ In ANY output, do not reference page fields outside of `id`, `title`, `content`, `slug`.' +
-        '\n- Reject and rewrite if you detect: `page.author`, `page.categories`, `page.date`, `page.excerpt`, `page.featuredImage`, `page.comments`.' +
-        '\n- If the template shows an <img> element, render it from existing page content markup or via a separate visual section; do NOT use `page.featuredImage`.' +
+      '⛔ In ANY output, do not reference post-only page fields.' +
+        '\n- Reject and rewrite if you detect: `page.author`, `page.categories`, `page.tags`, `page.date`, `page.excerpt`, `page.comments`.' +
+        '\n- `page.featuredImage`, `page.parentId`, `page.menuOrder`, and `page.template` are allowed when the design actually needs them.' +
         '\n- If you need post-only metadata, use `Post` type in `postDetail` components, not `Page`.' +
-        '\n- Page detail type must be exactly: `interface Page { id: string; title: string; content: string; slug: string; }`',
+        '\n- Page detail type must match the canonical Page interface from the API contract.',
     );
   }
   // Detect "NoTitle" naming convention — explicit contract to omit the title
@@ -911,7 +911,7 @@ export function buildComponentPrompt(
           : ''
       }${
         /Page detail contract|interface Page|post-only field/i.test(retryError)
-          ? '\n\n**Page type:** `interface Page` must declare ONLY `{ id, title, content, slug }` — remove `author`, `categories`, `date`, `excerpt`, `featuredImage`, `comments` from it. Do NOT access `page.author` or `pageDetail.author`. Sidebar/list items (recent posts, etc.) must use a separate `interface Post` — using `item.author` inside a `posts.map()` is fine.'
+          ? '\n\n**Page type:** `interface Page` must match the canonical contract — remove post-only fields like `author`, `categories`, `tags`, `date`, `excerpt`, and `comments`. `page.featuredImage`, `page.parentId`, `page.menuOrder`, and `page.template` are allowed. Do NOT access `page.author` or `pageDetail.author`. Sidebar/list items (recent posts, etc.) must use a separate `interface Post` — using `item.author` inside a `posts.map()` is fine.'
           : ''
       }`
     : '';
@@ -928,8 +928,8 @@ export function buildComponentPrompt(
 - Always render \`${isSingle ? 'post' : 'page'}.title\` as a heading (e.g. \`<h1>{${isSingle ? 'post' : 'page'}.title}</h1>\`) above the content — do NOT skip it. \`title\` is a plain string, not an object
 ${
   isPage
-    ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`date\`, \`excerpt\`, \`featuredImage\`, \`comments\`.
-- \`interface Page\` (MANDATORY for pages) must list only \`id, title, content, slug\`.
+    ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, \`comments\`.
+- \`interface Page\` (MANDATORY for pages) must match the canonical Page contract from the API note.
 - Use \`item: Page | null\` state, not \`Post\`.`
     : ''
 }`

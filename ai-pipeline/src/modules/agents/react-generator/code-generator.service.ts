@@ -31,6 +31,7 @@ import {
   POST_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 
 const PADDING_MAP = {
@@ -40,9 +41,6 @@ const PADDING_MAP = {
   lg: 'py-16 lg:py-24',
   xl: 'py-24 lg:py-32',
 };
-const PARTIAL_PATTERNS =
-  /^(Header|Footer|Sidebar|Nav|Navigation|Searchform|Comments|Comment|PostMeta|Post-Meta|Widget|Breadcrumb|Pagination|Loop|ContentNone|NoResults|Functions)/i;
-
 interface RenderCtx {
   p: ColorPalette;
   t: TypographyTokens;
@@ -280,7 +278,7 @@ export class CodeGeneratorService {
         '            {isInternalPath(item.url) ? (',
       );
       lines.push(
-        '              <Link to={toAppPath(item.url)} className="transition-opacity hover:opacity-75">',
+        '              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
       lines.push(
         '                {item.title}',
@@ -292,7 +290,7 @@ export class CodeGeneratorService {
         '            ) : (',
       );
       lines.push(
-        '              <a href={item.url} className="transition-opacity hover:opacity-75">',
+        '              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
@@ -403,17 +401,20 @@ export class CodeGeneratorService {
     const routerParts: string[] = [];
     if (needsRouter) routerParts.push('Link');
     if (needsParams) routerParts.push('useParams');
+    if (this.needsPagination(plan)) routerParts.push('useSearchParams');
     if (routerParts.length > 0) {
       lines.push(
-        `import { ${routerParts.join(', ')} } from 'react-router-dom';`,
+        `import { ${Array.from(new Set(routerParts)).join(', ')} } from 'react-router-dom';`,
       );
     }
     // Import shared partial components (Header, Footer, etc.) from layout plan
-    const currentFolder = PARTIAL_PATTERNS.test(plan.componentName)
+    const currentFolder = isPartialComponentName(plan.componentName)
       ? 'components'
       : 'pages';
     for (const name of plan.layout.includes) {
-      const targetFolder = PARTIAL_PATTERNS.test(name) ? 'components' : 'pages';
+      const targetFolder = isPartialComponentName(name)
+        ? 'components'
+        : 'pages';
       const importPath =
         currentFolder === targetFolder
           ? `./${name}`
@@ -445,6 +446,10 @@ export class CodeGeneratorService {
     );
   }
 
+  private needsPagination(plan: ComponentVisualPlan): boolean {
+    return plan.dataNeeds.includes('posts');
+  }
+
   // ── State + fetch ─────────────────────────────────────────────────────────
 
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
@@ -464,8 +469,29 @@ export class CodeGeneratorService {
       lines.push(
         `  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);`,
       );
-    if (dataNeeds.includes('posts'))
+    if (dataNeeds.includes('posts')) {
+      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
+      );
+      lines.push(`  const perPage = 10;`);
+      lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
+      lines.push(
+        `  const updatePage = (nextPage: number) => {`,
+      );
+      lines.push(
+        `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
+      );
+      lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
+      lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
+      lines.push(`    else nextParams.set('page', String(safePage));`);
+      lines.push(`    setSearchParams(nextParams);`);
+      lines.push(
+        `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
+      );
+      lines.push(`  };`);
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
+    }
     if (dataNeeds.includes('pages'))
       lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     if (dataNeeds.includes('menus'))
@@ -566,8 +592,12 @@ export class CodeGeneratorService {
       setters.push(`setSiteInfo(await res0.json());`);
     }
     if (dataNeeds.includes('posts')) {
-      fetches.push(`fetch('/api/posts')`);
-      setters.push(`setPosts(await res${fetches.length - 1}.json());`);
+      fetches.push(
+        `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\`)`,
+      );
+      setters.push(
+        `const postsData = await res${fetches.length - 1}.json(); setPosts(Array.isArray(postsData) ? postsData : []); setTotalPages(Number(res${fetches.length - 1}.headers.get('X-WP-TotalPages') ?? '1'));`,
+      );
     }
     if (dataNeeds.includes('pages')) {
       fetches.push(`fetch('/api/pages')`);
@@ -626,6 +656,8 @@ export class CodeGeneratorService {
 
     if (dataNeeds.includes('postDetail') || dataNeeds.includes('pageDetail')) {
       lines.push(`  }, [slug]);`);
+    } else if (dataNeeds.includes('posts')) {
+      lines.push(`  }, [currentPage]);`);
     } else {
       lines.push(`  }, []);`);
     }
@@ -1093,9 +1125,15 @@ export default ${componentName};`;
               {menus.find(m => m.slug === '${s.menuSlug}')?.items
                 .filter(i => i.parentId === 0)
                 .map(item => (
-                  <Link key={item.id} to={item.url} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">
-                    {item.title}
-                  </Link>
+                  isInternalPath(item.url) ? (
+                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">
+                      {item.title}
+                    </Link>
+                  ) : (
+                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">
+                      {item.title}
+                    </a>
+                  )
                 ))}
             </nav>
             <div className="flex items-center gap-4">${cta}
@@ -1237,6 +1275,27 @@ export default ${componentName};`;
 ${postCard}
             ))}
           </div>
+          {totalPages > 1 && (
+            <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]">
+              <button
+                type="button"
+                onClick={() => updatePage(currentPage - 1)}
+                disabled={currentPage <= 1}
+                className="border border-black/15 px-4 py-2 ${t.buttonRadius} transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <span>Page {currentPage} of {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => updatePage(currentPage + 1)}
+                disabled={currentPage >= totalPages}
+                className="border border-black/15 px-4 py-2 ${t.buttonRadius} transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       </section>`;
   }
@@ -1422,9 +1481,15 @@ ${cards}
                 {menus.find(m => m.slug === '${col.menuSlug}')?.items
                   .filter(i => i.parentId === 0)
                   .map(item => (
-                    <Link key={item.id} to={item.url} className="text-sm text-[${p.textMuted}] hover:text-[${p.accent}] transition-colors">
-                      {item.title}
-                    </Link>
+                    isInternalPath(item.url) ? (
+                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-sm text-[${p.textMuted}] hover:text-[${p.accent}] transition-colors">
+                        {item.title}
+                      </Link>
+                    ) : (
+                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-sm text-[${p.textMuted}] hover:text-[${p.accent}] transition-colors">
+                        {item.title}
+                      </a>
+                    )
                   ))}
               </nav>
             </div>`,
@@ -1591,6 +1656,27 @@ ${this.renderPageContentInner(s, ctx)}
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
             ))}
           </div>
+          {totalPages > 1 && (
+            <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]">
+              <button
+                type="button"
+                onClick={() => updatePage(currentPage - 1)}
+                disabled={currentPage <= 1}
+                className="border border-black/15 px-4 py-2 ${t.buttonRadius} transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <span>Page {currentPage} of {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => updatePage(currentPage + 1)}
+                disabled={currentPage >= totalPages}
+                className="border border-black/15 px-4 py-2 ${t.buttonRadius} transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       </section>`;
   }

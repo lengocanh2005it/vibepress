@@ -9,6 +9,7 @@ import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
@@ -30,10 +31,6 @@ const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
 const FSE_CHUNK_THRESHOLD_CHARS = 80_000;
 // Target size per section chunk
 const CHUNK_TARGET_CHARS = 15_000;
-// Component names matching these patterns are placed in src/components (partials), not src/pages
-const PARTIAL_PATTERNS =
-  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
-
 /**
  * Returns true for top-level block nodes that represent the shared site header
  * or footer (template-part with header/footer slug, or direct header/footer blocks).
@@ -150,19 +147,18 @@ export class ReactGeneratorService {
     const createFallbackTemplate = (name: string, body: string) =>
       theme.type === 'classic' ? { name, html: body } : { name, markup: body };
 
-    if (!existingTemplateNames.has('author')) {
+    // Per WordPress template hierarchy: author/category/tag fall back to archive.php.
+    // Inject a single 'archive' fallback instead of separate author/category templates.
+    const hasArchiveVariant =
+      existingTemplateNames.has('archive') ||
+      existingTemplateNames.has('author') ||
+      existingTemplateNames.has('category');
+
+    if (!hasArchiveVariant) {
       templates.push(
         createFallbackTemplate(
-          'author',
-          '<div><!-- Author template fallback --></div>',
-        ),
-      );
-    }
-    if (!existingTemplateNames.has('category')) {
-      templates.push(
-        createFallbackTemplate(
-          'category',
-          '<div><!-- Category template fallback --></div>',
+          'archive',
+          '<div><!-- Archive fallback: lists posts filtered by category, author, or tag --></div>',
         ),
       );
     }
@@ -222,7 +218,7 @@ export class ReactGeneratorService {
               ? 'src/components'
               : componentPlan?.type === 'page'
                 ? 'src/pages'
-                : PARTIAL_PATTERNS.test(componentName)
+                : isPartialComponentName(componentName)
                   ? 'src/components'
                   : 'src/pages';
 
@@ -779,7 +775,7 @@ ${renders}
         const isPartial =
           component.type === 'partial' ||
           component.isSubComponent === true ||
-          PARTIAL_PATTERNS.test(component.name);
+          isPartialComponentName(component.name);
         const targetDir = isPartial ? componentsDir : pagesDir;
         await writeFile(
           join(targetDir, `${component.name}.tsx`),

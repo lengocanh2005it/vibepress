@@ -17,6 +17,7 @@ import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sect
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -1314,7 +1315,7 @@ For each template, decide:
 - front-page → route "/"
 - home → route "/" ONLY when no front-page template exists; otherwise route "/blog"
  - index → route "/" ONLY when neither front-page nor home exists; otherwise route "/index"
-- archive → route "/archive"  (category/tag/date archives — NOT the blog homepage)
+- archive → route "/archive"  (WordPress archive fallback: handles category/tag/author/date archives — App.tsx will register alias routes /category/:slug, /author/:slug, /tag/:slug pointing to this component)
 - search → route "/search"
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
@@ -1544,7 +1545,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     // Standard templates injected synthetically — AI doesn't need to produce them.
     // Small numbers of other omissions are also tolerated because the planner
     // can inject deterministic fallback components after Phase A.
-    const INJECTABLE_STANDARDS = new Set(['author', 'category']);
+    // 'archive' is injected when neither archive/author/category exist in the theme.
+    const INJECTABLE_STANDARDS = new Set(['archive']);
     const missingRequired = missing.filter((n) => !INJECTABLE_STANDARDS.has(n));
     const maxInjectableMissing = Math.max(
       1,
@@ -1735,22 +1737,21 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     );
 
     // Ensure standard routes are generated even when not present in theme templates.
+    // Per WordPress template hierarchy: author/category/tag pages fall back to archive.php.
+    // So we inject a single 'archive' fallback instead of separate author/category templates.
     const createFallbackTemplate = (name: string, body: string) =>
       themeType === 'classic' ? { name, html: body } : { name, markup: body };
 
-    if (!existingTemplateNames.has('author')) {
+    const hasArchiveVariant =
+      existingTemplateNames.has('archive') ||
+      existingTemplateNames.has('author') ||
+      existingTemplateNames.has('category');
+
+    if (!hasArchiveVariant) {
       templates.push(
         createFallbackTemplate(
-          'author',
-          '<div class="author-page"><h1>Author: {author.name}</h1><div class="author-bio">{author.description}</div><div class="author-posts"><!-- List of author posts --></div></div>',
-        ),
-      );
-    }
-    if (!existingTemplateNames.has('category')) {
-      templates.push(
-        createFallbackTemplate(
-          'category',
-          '<div class="category-page"><h1>Category: {category.name}</h1><div class="category-description">{category.description}</div><div class="category-posts"><!-- List of category posts --></div></div>',
+          'archive',
+          '<div><!-- Archive fallback: lists posts filtered by category, author, or tag --></div>',
         ),
       );
     }
@@ -1766,12 +1767,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   private buildFallbackPlan(templateNames: string[]): PlanResult {
-    const PARTIAL_PATTERNS =
-      /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
     return templateNames.map((name) => {
       const componentName = this.toComponentName(name);
-      const isPartial = PARTIAL_PATTERNS.test(componentName);
+      const isPartial = isPartialComponentName(componentName);
 
       // Determine appropriate data needs based on template type
       let dataNeeds: string[] = ['posts'];
@@ -1780,12 +1778,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : `/${componentName.toLowerCase()}`;
       let isDetail = false;
 
-      if (name.toLowerCase() === 'author') {
+      if (name.toLowerCase() === 'archive') {
+        dataNeeds = ['posts'];
+        route = '/archive';
+        isDetail = false;
+      } else if (name.toLowerCase() === 'author') {
         dataNeeds = ['posts'];
         route = '/author/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'category') {
-        dataNeeds = ['categoryDetail', 'posts'];
+        dataNeeds = ['posts'];
         route = '/category/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'page') {
