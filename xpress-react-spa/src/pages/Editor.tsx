@@ -957,7 +957,11 @@ const Editor: React.FC = () => {
     note: capture.comment,
     sourcePageUrl: capture.pageUrl,
     captureContext: {
+      capturedAt: capture.capturedAt,
+      iframeSrc: capture.iframeSrc,
+      viewport: capture.viewport,
       page: {
+        url: capture.pageUrl,
         route: resolveWordPressRoute(capture.page.route, capture.pageUrl),
         title: capture.page.title,
       },
@@ -967,6 +971,8 @@ const Editor: React.FC = () => {
       },
     },
     selection: capture.selection,
+    geometry: capture.geometry,
+    ...(capture.domTarget ? { domTarget: capture.domTarget } : {}),
     ...(capture.targetNode ? { targetNode: capture.targetNode } : {}),
     asset: {
       provider: capture.asset?.provider || "local",
@@ -988,6 +994,7 @@ const Editor: React.FC = () => {
     capturesForAi: Capture[],
   ) => {
     const primaryPage = capturesForAi[0]?.page;
+    const primaryCapture = capturesForAi[0];
 
     return {
       ...(prompt ? { prompt } : {}),
@@ -997,10 +1004,18 @@ const Editor: React.FC = () => {
         wordpressRoute:
           resolveWordPressRoute(primaryPage?.route, selectedPageUrl) ||
           toRoutePath(selectedPageUrl),
+        iframeSrc: primaryCapture?.iframeSrc,
         pageTitle:
           primaryPage?.title ||
           wpPages.find((page) => page.link === selectedPageUrl)?.title?.trim() ||
           undefined,
+        viewport: primaryCapture?.viewport,
+        document: primaryPage
+          ? {
+              width: primaryPage.documentWidth,
+              height: primaryPage.documentHeight,
+            }
+          : undefined,
       },
       ...(capturesForAi.length > 0
         ? {

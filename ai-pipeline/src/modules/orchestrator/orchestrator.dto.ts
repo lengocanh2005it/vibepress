@@ -85,13 +85,21 @@ export interface PipelineCaptureTargetNodeDto {
 }
 
 export interface PipelineClientEditPageContextDto {
+  reactUrl?: string;
+  reactRoute?: string;
   wordpressUrl?: string;
   wordpressRoute?: string | null;
+  iframeSrc?: string;
   pageTitle?: string;
+  viewport?: PipelineViewportDto;
+  document?: PipelineDocumentDimensionsDto;
 }
 
 export interface PipelineClientAttachmentCaptureContextDto {
-  page?: Pick<PipelineCapturePageContextDto, 'route' | 'title'>;
+  capturedAt?: string;
+  iframeSrc?: string;
+  viewport?: PipelineViewportDto;
+  page?: Pick<PipelineCapturePageContextDto, 'url' | 'route' | 'title'>;
   document?: PipelineDocumentDimensionsDto;
 }
 
@@ -110,6 +118,8 @@ export interface PipelineClientCaptureAttachmentDto {
   sourcePageUrl?: string;
   captureContext?: PipelineClientAttachmentCaptureContextDto;
   selection?: PipelineCaptureBBoxDto;
+  geometry?: PipelineCaptureGeometryDto;
+  domTarget?: PipelineDomTargetDto;
   targetNode?: PipelineCaptureTargetNodeDto;
   asset: PipelineClientCaptureAssetDto;
 }
