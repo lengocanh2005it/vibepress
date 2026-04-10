@@ -146,7 +146,7 @@ const SplitView: React.FC = () => {
             >
               {sse.isConnected ? "Connected" : "Disconnected"}
             </span>
-            {!completionEvent && !deleteState.done && (
+            {sse.isConnected && !deleteState.done && (
               <button
                 onClick={handleDeletePipeline}
                 disabled={deleteState.loading}
@@ -330,7 +330,21 @@ const SplitView: React.FC = () => {
         </div>
 
         <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center">
-          {completionEvent?.data?.previewUrl ? (
+          {deleteState.done ? (
+            <div className="text-center space-y-4">
+              <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">
+                <span className="material-symbols-outlined text-red-400 text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>stop_circle</span>
+              </div>
+              <p className="text-on-surface font-medium">Pipeline đã tạm dừng</p>
+              <p className="text-xs text-on-surface-variant">Tất cả tiến trình đã được dừng lại và artifacts đã được xóa.</p>
+              <button
+                onClick={() => navigate("/app/projects")}
+                className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-medium"
+              >
+                Quay về trang dự án
+              </button>
+            </div>
+          ) : completionEvent?.data?.previewUrl ? (
             <iframe
               src={completionEvent.data?.previewUrl || ""}
               title="Live Preview"
