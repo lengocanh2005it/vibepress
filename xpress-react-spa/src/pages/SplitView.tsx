@@ -49,6 +49,18 @@ const SplitView: React.FC = () => {
   const completionEvent = getCompletionEvent();
   const latestEvent = sse.currentEvent;
 
+  const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
+
+  const handleDeletePipeline = async () => {
+    setDeleteState({ loading: true, done: false });
+    try {
+      await fetch(`/ai-api/pipeline/delete/${jobId}`, { method: "POST" });
+      setDeleteState({ loading: false, done: true });
+    } catch {
+      setDeleteState({ loading: false, done: false });
+    }
+  };
+
   const [pushGitState, setPushGitState] = useState<{
     loading: boolean;
     githubUrl: string | null;
@@ -125,7 +137,7 @@ const SplitView: React.FC = () => {
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
             <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
               Job: {jobId.slice(0, 8)}...
             </span>
@@ -134,6 +146,16 @@ const SplitView: React.FC = () => {
             >
               {sse.isConnected ? "Connected" : "Disconnected"}
             </span>
+            {!completionEvent && !deleteState.done && (
+              <button
+                onClick={handleDeletePipeline}
+                disabled={deleteState.loading}
+                className="text-xs font-mono px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>stop_circle</span>
+                {deleteState.loading ? "Stopping..." : "Stop"}
+              </button>
+            )}
           </div>
         </div>
 
