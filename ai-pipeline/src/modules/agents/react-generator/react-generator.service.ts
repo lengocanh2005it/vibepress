@@ -5,6 +5,7 @@ import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -82,6 +83,7 @@ export class ReactGeneratorService {
     private readonly styleResolver: StyleResolverService,
     private readonly codeGenerator: CodeGeneratorService,
     private readonly codeReviewer: CodeReviewerService,
+    private readonly capturePlanning: CapturePlanningService,
     private readonly aiLogger: AiLoggerService,
   ) {}
 
@@ -382,6 +384,12 @@ export class ReactGeneratorService {
       themeType === 'fse' &&
       componentPlan?.type === 'partial' &&
       !getComponentStrategy(componentName).deterministicFirst;
+    const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
+      request: editRequest,
+      componentName,
+      route: componentPlan?.route,
+      maxAttachments: 3,
+    });
 
     if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
@@ -395,7 +403,7 @@ export class ReactGeneratorService {
         tokens,
         repoManifest,
         componentPlan,
-        editRequestContextNote: buildEditRequestContextNote(editRequest, {
+        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
           audience: 'codegen',
           componentName,
           route: componentPlan?.route,
@@ -473,11 +481,14 @@ export class ReactGeneratorService {
             tokens,
             repoManifest,
             componentPlan,
-            editRequestContextNote: buildEditRequestContextNote(editRequest, {
-              audience: 'section',
-              componentName,
-              route: componentPlan?.route,
-            }),
+            editRequestContextNote: buildEditRequestContextNote(
+              scopedEditRequest,
+              {
+                audience: 'section',
+                componentName,
+                route: componentPlan?.route,
+              },
+            ),
             logPath,
             jobId,
           });
@@ -557,6 +568,8 @@ export class ReactGeneratorService {
     modelConfig?: { fixAgent?: string };
     logPath?: string;
     fixMode?: 'full' | 'syntax-only';
+    visionImageUrls?: string[];
+    visionContextNote?: string;
   }): Promise<GeneratedComponent> {
     const {
       component,
@@ -565,6 +578,8 @@ export class ReactGeneratorService {
       modelConfig,
       logPath,
       fixMode = 'full',
+      visionImageUrls,
+      visionContextNote,
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
@@ -603,9 +618,12 @@ export class ReactGeneratorService {
     const fixedCode = await this.codeReviewer.selfFix(
       fixAgentModel,
       component.code,
-      effectiveFeedback,
+      visionContextNote
+        ? `${effectiveFeedback}\n\n${visionContextNote}`
+        : effectiveFeedback,
       logPath,
       component.name,
+      visionImageUrls,
     );
 
     return this.attachPlanContext(

@@ -5,42 +5,34 @@ import type {
 } from '../orchestrator/orchestrator.dto.js';
 import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
+import {
+  CapturePlanningService,
+} from './capture-planning.service.js';
+import type { CaptureSectionMatch } from './capture-section-matcher.service.js';
+import { CaptureSectionMatcherService } from './capture-section-matcher.service.js';
 
 export interface PostMigrationEditTask {
   componentName: string;
   route?: string | null;
   feedback: string;
   source: 'prompt' | 'capture' | 'mixed';
+  attachments: PipelineCaptureAttachmentDto[];
+  sectionMatches: CaptureSectionMatch[];
   matchedAttachmentIds: string[];
   debugSummary: string;
 }
 
 @Injectable()
 export class EditRequestPhaseService {
+  constructor(
+    private readonly capturePlanning: CapturePlanningService,
+    private readonly captureSectionMatcher: CaptureSectionMatcherService,
+  ) {}
+
   buildPlanningRequest(
     request?: PipelineEditRequestDto,
   ): PipelineEditRequestDto | undefined {
-    if (!request) return undefined;
-
-    const hasMeaningfulPlanningContext = Boolean(
-      request.prompt ||
-        request.language ||
-        request.pageContext ||
-        request.targetHint ||
-        request.constraints,
-    );
-
-    if (!hasMeaningfulPlanningContext) {
-      return undefined;
-    }
-
-    return compactObject({
-      prompt: request.prompt,
-      language: request.language,
-      pageContext: request.pageContext,
-      targetHint: request.targetHint,
-      constraints: request.constraints,
-    });
+    return this.capturePlanning.buildPlanningRequest(request);
   }
 
   buildPostMigrationEditTasks(input: {
@@ -88,6 +80,11 @@ export class EditRequestPhaseService {
       const componentPlan = planByComponent.get(componentName);
       const attachments = attachmentsByComponent.get(componentName) ?? [];
       const promptIncluded = promptTargetComponents.has(componentName);
+      const sectionMatches = this.captureSectionMatcher.matchComponentSections({
+        componentPlan,
+        attachments,
+        request,
+      });
 
       return {
         componentName,
@@ -98,6 +95,7 @@ export class EditRequestPhaseService {
           componentRoute: componentPlan?.route,
           promptIncluded,
           attachments,
+          sectionMatches,
         }),
         source:
           promptIncluded && attachments.length > 0
@@ -105,6 +103,8 @@ export class EditRequestPhaseService {
             : promptIncluded
               ? 'prompt'
               : 'capture',
+        attachments,
+        sectionMatches,
         matchedAttachmentIds: attachments.map((attachment) => attachment.id),
         debugSummary: this.buildTaskDebugSummary({
           request,
@@ -112,6 +112,7 @@ export class EditRequestPhaseService {
           componentRoute: componentPlan?.route,
           promptIncluded,
           attachments,
+          sectionMatches,
         }),
       };
     });
@@ -179,8 +180,16 @@ export class EditRequestPhaseService {
     componentRoute?: string | null;
     promptIncluded: boolean;
     attachments: PipelineCaptureAttachmentDto[];
+    sectionMatches: CaptureSectionMatch[];
   }): string {
-    const { request, componentName, componentRoute, promptIncluded, attachments } = input;
+    const {
+      request,
+      componentName,
+      componentRoute,
+      promptIncluded,
+      attachments,
+      sectionMatches,
+    } = input;
     const lines = [
       'This component was generated as part of the full-site baseline migration.',
       'Apply only the focused post-migration refinements that clearly belong to this component.',
@@ -224,6 +233,18 @@ export class EditRequestPhaseService {
       );
     }
 
+    if (sectionMatches.length > 0) {
+      lines.push('Matched target sections:');
+      for (const match of sectionMatches.slice(0, 4)) {
+        lines.push(
+          `- attachment=${match.attachmentId} -> section[${match.sectionIndex}] ${match.sectionType} (score=${match.score}, via ${match.reasons.join(', ')})`,
+        );
+      }
+      lines.push(
+        'Prefer localized edits inside the matched section(s). Preserve nearby sections unless the captures explicitly show they should change too.',
+      );
+    }
+
     lines.push(
       'Return a complete corrected TSX component with these refinements applied only where the evidence matches this component.',
     );
@@ -237,9 +258,16 @@ export class EditRequestPhaseService {
     componentRoute?: string | null;
     promptIncluded: boolean;
     attachments: PipelineCaptureAttachmentDto[];
+    sectionMatches: CaptureSectionMatch[];
   }): string {
-    const { request, componentName, componentRoute, promptIncluded, attachments } =
-      input;
+    const {
+      request,
+      componentName,
+      componentRoute,
+      promptIncluded,
+      attachments,
+      sectionMatches,
+    } = input;
 
     const parts = [
       `component=${componentName}`,
@@ -295,6 +323,18 @@ export class EditRequestPhaseService {
             }
             return `{${attachmentParts.join(', ')}}`;
           })
+          .join(' ')}`,
+      );
+    }
+
+    if (sectionMatches.length > 0) {
+      parts.push(
+        `sections=${sectionMatches
+          .slice(0, 4)
+          .map(
+            (match) =>
+              `{attachment=${match.attachmentId},index=${match.sectionIndex},type=${match.sectionType},score=${match.score}}`,
+          )
           .join(' ')}`,
       );
     }

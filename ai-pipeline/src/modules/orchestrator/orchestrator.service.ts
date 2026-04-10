@@ -23,6 +23,7 @@ import type { PreviewBuilderResult } from '../agents/preview-builder/preview-bui
 import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type {
@@ -229,6 +230,7 @@ export class OrchestratorService {
     private readonly planner: PlannerService,
     private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
+    private readonly sectionEdit: SectionEditService,
     private readonly generatedCodeReview: GeneratedCodeReviewService,
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
@@ -1287,29 +1289,36 @@ export class OrchestratorService {
               );
               if (componentIndex === -1) continue;
 
-              const fixed = await this.reactGenerator.fixComponent({
-                component: components[componentIndex],
+              const fixedResult = await this.sectionEdit.applyFocusedTask({
+                task,
+                request: dto.editRequest,
                 plan: reviewResult.plan,
-                feedback: task.feedback,
+                components,
                 modelConfig: { fixAgent: resolvedModels.fixAgent },
                 logPath,
               });
+              if (!fixedResult) continue;
               const revalidated = this.validator.collectValidationIssues([
-                fixed,
+                fixedResult.component,
               ]);
               if (revalidated.failures.length > 0) {
                 const validationErr = revalidated.failures[0]?.error;
                 this.logger.warn(
-                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${task.componentName}" after focused edit — keeping baseline. Error: ${validationErr}`,
+                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}" after focused edit — keeping baseline. Error: ${validationErr}`,
                 );
                 await this.logToFile(
                   logPath,
-                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${task.componentName}": ${validationErr}`,
+                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}": ${validationErr}`,
                 );
                 continue;
               }
 
-              components[componentIndex] = revalidated.components[0];
+              const replacementIndex = components.findIndex(
+                (component) => component.name === fixedResult.editedComponentName,
+              );
+              if (replacementIndex !== -1) {
+                components[replacementIndex] = revalidated.components[0];
+              }
             }
 
             const finalValidation =

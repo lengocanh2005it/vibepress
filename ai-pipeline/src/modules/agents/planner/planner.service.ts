@@ -16,6 +16,7 @@ import {
 import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import {
@@ -83,6 +84,7 @@ export class PlannerService {
     private readonly configService: ConfigService,
     private readonly aiLogger: AiLoggerService,
     private readonly styleResolver: StyleResolverService,
+    private readonly capturePlanning: CapturePlanningService,
   ) {}
 
   async plan(
@@ -510,6 +512,12 @@ export class PlannerService {
     }
     try {
       const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+      const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
+        request: editRequest,
+        componentName: componentPlan.componentName,
+        route: componentPlan.route,
+        maxAttachments: 3,
+      });
       const planningSource = this.buildPlanningSourceContext(
         componentPlan,
         templateSource,
@@ -571,7 +579,7 @@ export class PlannerService {
             }
           : undefined,
         draftSections,
-        editRequestContextNote: buildEditRequestContextNote(editRequest, {
+        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
           audience: 'visual-plan',
           componentName: componentPlan.componentName,
           route: componentPlan.route,
