@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { runAiProcess } from "../services/AiService";
+import { ToastContainer, toast } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
+import { AiProcessError, runAiProcess } from "../services/AiService";
 import {
   captureRegion,
   getWpSitePages,
@@ -16,6 +18,72 @@ interface WpPage {
   status: string;
 }
 
+interface ViewportCaptureRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  coordinateSpace: "iframe-viewport";
+}
+
+interface DocumentCaptureRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  coordinateSpace: "iframe-document";
+}
+
+interface CaptureNormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  coordinateSpace: "iframe-document-normalized";
+}
+
+interface CaptureGeometry {
+  viewportRect: ViewportCaptureRect;
+  documentRect: DocumentCaptureRect;
+  normalizedRect: CaptureNormalizedRect;
+}
+
+interface CapturePageMetadata {
+  route: string | null;
+  title?: string;
+  documentWidth: number;
+  documentHeight: number;
+}
+
+interface CaptureDomTarget {
+  cssSelector?: string;
+  xpath?: string;
+  tagName?: string;
+  elementId?: string;
+  classNames?: string[];
+  htmlSnippet?: string;
+  textSnippet?: string;
+  blockName?: string;
+  blockClientId?: string;
+  domPath?: string;
+  role?: string;
+  ariaLabel?: string;
+  nearestHeading?: string;
+  nearestLandmark?: string;
+}
+
+interface CaptureTargetNode {
+  nodeId?: string;
+  templateName?: string;
+  route?: string | null;
+  blockName?: string;
+  blockClientId?: string;
+  tagName?: string;
+  domPath?: string;
+  nearestHeading?: string;
+  nearestLandmark?: string;
+}
+
 interface Capture {
   id: string;
   filePath: string;
@@ -26,13 +94,11 @@ interface Capture {
   iframeSrc?: string;
   capturedAt: string;
   viewport: CaptureViewport;
-  selection: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    coordinateSpace: "iframe-viewport";
-  };
+  page: CapturePageMetadata;
+  selection: DocumentCaptureRect;
+  geometry: CaptureGeometry;
+  domTarget?: CaptureDomTarget;
+  targetNode?: CaptureTargetNode;
 }
 
 interface SelectionRect {
@@ -51,6 +117,609 @@ interface Annotation {
   initials: string;
   colorClasses: string;
 }
+
+type SupportedLanguage = "vi" | "en";
+
+const stripVietnameseMarks = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D");
+
+const normalizeLanguageInput = (value?: string | null) =>
+  value?.trim().toLowerCase() ? stripVietnameseMarks(value.trim().toLowerCase()) : "";
+
+const detectRequestLanguage = (
+  prompt: string,
+  captureNotes: string[],
+): SupportedLanguage => {
+  const combined = [prompt, ...captureNotes].join(" ").trim();
+  const normalized = normalizeLanguageInput(combined) || "";
+
+  if (!normalized) return "en";
+
+  const hasVietnameseDiacritics =
+    stripVietnameseMarks(combined.toLowerCase()) !== combined.toLowerCase();
+  const hasVietnameseKeywords =
+    /\b(hay|giup|migrate toan bo|toan bo|toan site|toan website|chuyen doi|dich chuyen|giu nguyen|dieu chinh|chinh sua|doi mau|trang chu|dau trang|chan trang|khu vuc)\b/.test(
+      normalized,
+    );
+
+  return hasVietnameseDiacritics || hasVietnameseKeywords ? "vi" : "en";
+};
+
+const mentionsFocusTarget = (value: string) =>
+  /\b(home|homepage|landing|about|contact|blog|header|hero|footer|navbar|section|page|trang chu|trang home|trang gioi thieu|trang lien he|dau trang|chan trang|khu vuc)\b/.test(
+    value,
+  );
+
+const hasConcreteEditAction = (value: string) =>
+  /\b(make|change|update|adjust|reduce|increase|move|align|center|replace|remove|add|keep|preserve|match|use|switch|resize|shrink|expand|hide|show|simplify|restyle|redesign|improve|fix|doi|sua|chinh sua|dieu chinh|giam|tang|can giua|can trai|can phai|thay|xoa|them|giu|bao toan|khop|dung|chuyen|thu nho|mo rong|an|hien|toi uu|lam nho|lam lon)\b/.test(
+    value,
+  );
+
+const hasFeatureSignal = (value: string) =>
+  /\b(feature|functionality|widget|module|popup|modal|form|signup|newsletter|chatbot|chat|calculator|booking|spin|lucky wheel|wheel|carousel|faq|search|filter|mini game|game|voucher|coupon|quiz|survey|tinh nang|chuc nang|dang ky|vong quay|quay thuong|tim kiem|bo loc|ma giam gia|khao sat)\b/.test(
+    value,
+  );
+
+const hasScopeOrTargetHint = (value: string) => {
+  const scopeSignal =
+    /\b(site|website|wordpress|theme|all pages|full site|whole site|entire site|toan bo|ca trang|toan site|toan website)\b/.test(
+      value,
+    );
+  return scopeSignal || mentionsFocusTarget(value);
+};
+
+const isGenericCapturePhrase = (value: string) =>
+  [
+    "home page",
+    "homepage",
+    "trang home",
+    "trang chu",
+    "header",
+    "hero",
+    "footer",
+    "section nay",
+    "khu vuc nay",
+    "cho nay",
+    "cai nay",
+    "lam dep hon",
+    "dep hon",
+    "fix giup",
+    "sua giup",
+    "change this",
+    "fix this",
+    "make it better",
+    "improve this",
+    "same here",
+  ].includes(value);
+
+const truncateText = (value: string, maxLength: number) => {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+};
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
+
+const roundNumber = (value: number, digits = 4) => {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+};
+
+const compactObject = <T extends Record<string, unknown>>(value: T) =>
+  Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
+  ) as T;
+
+const toRoutePath = (value?: string | null): string | null => {
+  if (!value) return null;
+  try {
+    const route = new URL(value).pathname.replace(/\/+$/g, "");
+    return route || "/";
+  } catch {
+    const cleaned = value.trim().replace(/\/+$/g, "");
+    return cleaned || "/";
+  }
+};
+
+const resolveWordPressRoute = (
+  route?: string | null,
+  pageUrl?: string | null,
+): string | null => {
+  if (route && !route.startsWith("/api/wp/proxy")) {
+    return route;
+  }
+
+  return toRoutePath(pageUrl);
+};
+
+const escapeCssToken = (value: string) =>
+  value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+
+const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
+
+const CAPTURE_CANDIDATE_SELECTOR = [
+  "[data-vp-node-id]",
+  "[data-block]",
+  "[data-type]",
+  "[data-block-name]",
+  '[class*="wp-block-"]',
+  HEADING_SELECTOR,
+  "p",
+  "li",
+  "a",
+  "button",
+  "img",
+  "section",
+  "article",
+  "figure",
+  "form",
+].join(", ");
+
+const getElementTextSnippet = (element: Element) =>
+  truncateText(element.textContent?.trim().replace(/\s+/g, " ") || "", 140);
+
+const getElementHtmlSnippet = (element: Element) =>
+  truncateText(element.outerHTML.replace(/\s+/g, " "), 240);
+
+const buildCssSelector = (element: Element): string | undefined => {
+  const segments: string[] = [];
+  let current: Element | null = element;
+  let depth = 0;
+
+  while (current && depth < 6) {
+    const tagName = current.tagName.toLowerCase();
+    if (current.id) {
+      segments.unshift(`#${escapeCssToken(current.id)}`);
+      break;
+    }
+
+    let segment = tagName;
+    const classNames = Array.from(current.classList)
+      .filter(Boolean)
+      .slice(0, 2);
+    if (classNames.length > 0) {
+      segment += `.${classNames.map(escapeCssToken).join(".")}`;
+    } else if (current.parentElement) {
+      const siblings = (Array.from(current.parentElement.children) as Element[]).filter(
+        (sibling) => sibling.tagName === current?.tagName,
+      );
+      if (siblings.length > 1) {
+        const index = siblings.indexOf(current) + 1;
+        segment += `:nth-of-type(${index})`;
+      }
+    }
+
+    segments.unshift(segment);
+    current = current.parentElement;
+    if (tagName === "body") break;
+    depth += 1;
+  }
+
+  return segments.length > 0 ? segments.join(" > ") : undefined;
+};
+
+const buildDomPath = (element: Element): string | undefined => {
+  const segments: string[] = [];
+  let current: Element | null = element;
+  let depth = 0;
+
+  while (current && depth < 8) {
+    const tagName = current.tagName.toLowerCase();
+    const parent: Element | null = current.parentElement;
+    let segment = tagName;
+
+    if (parent) {
+      const siblings = (Array.from(parent.children) as Element[]).filter(
+        (sibling) => sibling.tagName === current?.tagName,
+      );
+      if (siblings.length > 1) {
+        segment += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+      }
+    }
+
+    segments.unshift(segment);
+    current = parent;
+    if (tagName === "body") break;
+    depth += 1;
+  }
+
+  return segments.length > 0 ? segments.join(" > ") : undefined;
+};
+
+const buildXPath = (element: Element): string | undefined => {
+  const segments: string[] = [];
+  let current: Element | null = element;
+
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    let index = 1;
+    let sibling = current.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName === current.tagName) index += 1;
+      sibling = sibling.previousElementSibling;
+    }
+    segments.unshift(`${current.tagName.toLowerCase()}[${index}]`);
+    current = current.parentElement;
+  }
+
+  return segments.length > 0 ? `/${segments.join("/")}` : undefined;
+};
+
+const findHeadingWithin = (
+  element: Element | null | undefined,
+  fromEnd = false,
+): string | undefined => {
+  if (!element) return undefined;
+
+  if (element.matches(HEADING_SELECTOR)) {
+    const text = element.textContent?.trim().replace(/\s+/g, " ");
+    return text ? truncateText(text, 120) : undefined;
+  }
+
+  const headings = Array.from(element.querySelectorAll(HEADING_SELECTOR));
+  const heading = fromEnd ? headings[headings.length - 1] : headings[0];
+  const text = heading?.textContent?.trim().replace(/\s+/g, " ");
+  return text ? truncateText(text, 120) : undefined;
+};
+
+const getNearestHeading = (element: Element): string | undefined => {
+  const selfHeading = findHeadingWithin(element);
+  if (selfHeading) return selfHeading;
+
+  let current: Element | null = element;
+  while (current && current.tagName.toLowerCase() !== "body") {
+    let sibling: Element | null = current.previousElementSibling;
+    while (sibling) {
+      const siblingHeading = findHeadingWithin(sibling, true);
+      if (siblingHeading) return siblingHeading;
+      sibling = sibling.previousElementSibling;
+    }
+    current = current.parentElement;
+  }
+
+  const localContainers: Array<Element | null> = [
+    element.closest('[data-block], [data-type], [data-block-name], [class*="wp-block-"]'),
+    element.closest("section, article, header, aside, footer, nav, form"),
+    element.parentElement,
+    element.parentElement?.parentElement || null,
+    element.closest("main"),
+  ];
+
+  for (const container of localContainers) {
+    const heading = findHeadingWithin(container);
+    if (heading) return heading;
+  }
+
+  return undefined;
+};
+
+const getNearestLandmark = (element: Element): string | undefined =>
+  element
+    .closest("header, nav, main, section, article, aside, footer, form")
+    ?.tagName.toLowerCase();
+
+const getBlockMetadata = (element: Element) => {
+  const blockHost = element.closest(
+    '[data-block], [data-type], [data-block-name], [class*="wp-block-"]',
+  );
+  if (!blockHost) {
+    return {
+      blockName: undefined,
+      blockClientId: undefined,
+    };
+  }
+
+  const blockClass = Array.from(blockHost.classList).find((className) =>
+    className.startsWith("wp-block-"),
+  );
+
+  return {
+    blockName:
+      blockHost.getAttribute("data-type") ||
+      blockHost.getAttribute("data-block-name") ||
+      blockClass ||
+      undefined,
+    blockClientId:
+      blockHost.getAttribute("data-block") ||
+      blockHost.getAttribute("data-id") ||
+      undefined,
+  };
+};
+
+const resolveInstrumentedNode = (
+  element: Element,
+): HTMLElement | null => {
+  if (element instanceof HTMLElement && element.dataset.vpNodeId) {
+    return element;
+  }
+
+  const closestInstrumented = element.closest("[data-vp-node-id]");
+  return closestInstrumented instanceof HTMLElement ? closestInstrumented : null;
+};
+
+const getViewportIntersectionArea = (
+  rect: DOMRect,
+  selection: ViewportCaptureRect,
+) => {
+  const left = Math.max(rect.left, selection.x);
+  const top = Math.max(rect.top, selection.y);
+  const right = Math.min(rect.right, selection.x + selection.width);
+  const bottom = Math.min(rect.bottom, selection.y + selection.height);
+
+  if (right <= left || bottom <= top) return 0;
+  return (right - left) * (bottom - top);
+};
+
+const selectBestElementForCapture = (
+  frameDocument: Document,
+  viewportRect: ViewportCaptureRect,
+): Element | null => {
+  const centerX = viewportRect.x + viewportRect.width / 2;
+  const centerY = viewportRect.y + viewportRect.height / 2;
+  const selectionArea = Math.max(1, viewportRect.width * viewportRect.height);
+  const centerElement = frameDocument.elementFromPoint(centerX, centerY);
+
+  const candidates = Array.from(
+    frameDocument.querySelectorAll(CAPTURE_CANDIDATE_SELECTOR),
+  ).filter((element): element is Element => element instanceof Element);
+
+  let bestElement: Element | null = null;
+  let bestScore = -Infinity;
+
+  for (const candidate of candidates) {
+    const rect = candidate.getBoundingClientRect();
+    const overlapArea = getViewportIntersectionArea(rect, viewportRect);
+    if (overlapArea <= 0) continue;
+
+    const overlapRatio = overlapArea / selectionArea;
+    const candidateArea = Math.max(1, rect.width * rect.height);
+    const coverageRatio = overlapArea / candidateArea;
+    const containsCenter =
+      centerX >= rect.left &&
+      centerX <= rect.right &&
+      centerY >= rect.top &&
+      centerY <= rect.bottom;
+    const isHeading = candidate.matches(HEADING_SELECTOR);
+    const isInstrumented =
+      candidate instanceof HTMLElement && Boolean(candidate.dataset.vpNodeId);
+    const textLength = candidate.textContent?.trim().length ?? 0;
+
+    const score =
+      overlapRatio * 100 +
+      coverageRatio * 25 +
+      (containsCenter ? 20 : 0) +
+      (isHeading ? 18 : 0) +
+      (isInstrumented ? 10 : 0) +
+      Math.min(textLength, 160) / 40 -
+      candidateArea / 50000;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestElement = candidate;
+    }
+  }
+
+  if (bestElement) return bestElement;
+
+  if (
+    centerElement instanceof HTMLElement &&
+    ["html", "body"].includes(centerElement.tagName.toLowerCase())
+  ) {
+    return centerElement.querySelector("*");
+  }
+
+  return centerElement;
+};
+
+const resolveDomTargetSnapshot = (
+  frameDocument: Document | undefined,
+  viewportRect: ViewportCaptureRect,
+  fallbackRoute?: string | null,
+): {
+  domTarget?: CaptureDomTarget;
+  targetNode?: CaptureTargetNode;
+} => {
+  if (!frameDocument) return {};
+
+  const element = selectBestElementForCapture(frameDocument, viewportRect);
+
+  if (!element) return {};
+
+  const classNames = Array.from(element.classList).filter(Boolean);
+  const textSnippet = getElementTextSnippet(element);
+  const htmlSnippet = getElementHtmlSnippet(element);
+  const blockMetadata = getBlockMetadata(element);
+  const instrumentedNode = resolveInstrumentedNode(element);
+  const nearestHeading = getNearestHeading(element);
+  const nearestLandmark = getNearestLandmark(element);
+  const documentRoute =
+    frameDocument.documentElement.dataset.vpRoute || fallbackRoute || null;
+  const documentTemplate =
+    frameDocument.documentElement.dataset.vpTemplate || undefined;
+  const targetNode = compactObject({
+    nodeId: instrumentedNode?.dataset.vpNodeId,
+    templateName:
+      instrumentedNode?.dataset.vpTemplate || documentTemplate || undefined,
+    route: instrumentedNode?.dataset.vpRoute || documentRoute,
+    blockName:
+      instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
+    blockClientId:
+      instrumentedNode?.dataset.vpBlockClientId || blockMetadata.blockClientId,
+    tagName:
+      instrumentedNode?.dataset.vpTag ||
+      instrumentedNode?.tagName.toLowerCase() ||
+      element.tagName.toLowerCase(),
+    domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
+    nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
+    nearestLandmark:
+      instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+  });
+
+  return {
+    domTarget: {
+      cssSelector: buildCssSelector(element),
+      xpath: buildXPath(element),
+      tagName: element.tagName.toLowerCase(),
+      elementId: element.id || undefined,
+      classNames: classNames.length > 0 ? classNames : undefined,
+      htmlSnippet: htmlSnippet || undefined,
+      textSnippet: textSnippet || undefined,
+      blockName:
+        instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
+      blockClientId:
+        instrumentedNode?.dataset.vpBlockClientId || blockMetadata.blockClientId,
+      domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
+      role: element.getAttribute("role") || undefined,
+      ariaLabel: element.getAttribute("aria-label") || undefined,
+      nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
+      nearestLandmark:
+        instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+    },
+    targetNode: Object.keys(targetNode).length > 0 ? targetNode : undefined,
+  };
+};
+
+const EDITOR_MESSAGES: Record<
+  | "mainPromptNotAllowedWithCaptures"
+  | "captureNoteRequired"
+  | "captureNoteTooVague"
+  | "captureNoteTooVagueOnSave"
+  | "supplementalPromptTooVague"
+  | "supplementalPromptTargetRequired"
+  | "mainPromptRequired"
+  | "focusTargetActionRequired"
+  | "unclearIntent"
+  | "saveCaptureNoteRequired"
+  | "selectedCaptureNoteRequired"
+  | "pipelineStartFailed"
+  | "outOfScope"
+  | "invalidEditRequest",
+  Record<SupportedLanguage, string>
+> = {
+  mainPromptNotAllowedWithCaptures: {
+    vi: "Khi đã đính kèm capture, hãy dùng note trên từng capture thay vì prompt chính.",
+    en: "When captures are attached, use the note on each capture instead of the main prompt.",
+  },
+  captureNoteRequired: {
+    vi: "Mỗi capture đính kèm cần có một yêu cầu chỉnh sửa rõ ràng trước khi gửi cho AI.",
+    en: "Each attached capture needs a clear edit request before sending to AI.",
+  },
+  captureNoteTooVague: {
+    vi: "Note của capture phải mô tả thay đổi UI cụ thể, không chỉ ghi chung chung như Home, header hoặc fix this.",
+    en: "Each capture note must describe a concrete UI change, not just a generic label like Home, header, or fix this.",
+  },
+  captureNoteTooVagueOnSave: {
+    vi: 'Chưa thể lưu capture này. Hãy ghi rõ thay đổi cần làm, ví dụ: "Giảm chiều cao hero" hoặc "Đổi màu CTA sang xanh".',
+    en: 'This capture cannot be saved yet. Describe the requested change clearly, for example: "Reduce hero height" or "Change the CTA to green".',
+  },
+  supplementalPromptTooVague: {
+    vi: 'Khi đã có capture, prompt chính vẫn phải là một chỉ dẫn rõ ràng. Các nội dung như "hello" hoặc "test" sẽ bị chặn.',
+    en: 'When captures are attached, the main prompt must still be a clear additional instruction. Inputs like "hello" or "test" are rejected.',
+  },
+  supplementalPromptTargetRequired: {
+    vi: "Nếu bạn muốn thêm chức năng mới khi đã có capture, hãy nói rõ nó cần nằm ở page hoặc khu vực nào.",
+    en: "When requesting a new feature with captures attached, also describe which page or area it should go into.",
+  },
+  mainPromptRequired: {
+    vi: "Hãy nhập một yêu cầu migrate rõ ràng khi chưa đính kèm capture.",
+    en: "Add a migration prompt when no captures are attached.",
+  },
+  focusTargetActionRequired: {
+    vi: "Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào trên đó cần thay đổi.",
+    en: "When you mention a page like Home, also describe what should change there.",
+  },
+  unclearIntent: {
+    vi: "Hãy mô tả yêu cầu migrate toàn site hoặc migrate toàn site kèm focus vào một page/khu vực cụ thể trước khi gửi.",
+    en: "Describe either a full-site migration or a page-focused migration request before sending.",
+  },
+  saveCaptureNoteRequired: {
+    vi: "Hãy thêm một yêu cầu chỉnh sửa rõ ràng trước khi lưu capture này.",
+    en: "Add a clear edit request before saving this capture.",
+  },
+  selectedCaptureNoteRequired: {
+    vi: "Mỗi capture đã chọn cần có note yêu cầu chỉnh sửa trước khi thêm vào chat.",
+    en: "Each selected capture needs an edit request before it can be added to chat.",
+  },
+  pipelineStartFailed: {
+    vi: "Không thể khởi chạy AI pipeline.",
+    en: "Failed to start AI pipeline.",
+  },
+  outOfScope: {
+    vi: "Yêu cầu này không giống một tác vụ migrate site hoặc chỉnh sửa UI trong quá trình migrate.",
+    en: "This prompt does not look like a site migration or UI-focused request.",
+  },
+  invalidEditRequest: {
+    vi: "Không thể hiểu yêu cầu này như một chỉ dẫn migrate hợp lệ.",
+    en: "The request could not be understood as a valid migration instruction.",
+  },
+};
+
+const getEditorMessage = (
+  language: SupportedLanguage,
+  key: keyof typeof EDITOR_MESSAGES,
+) => EDITOR_MESSAGES[key][language];
+
+const getAiErrorMessage = (
+  error: AiProcessError,
+  language: SupportedLanguage,
+) => {
+  const messageByCode: Partial<
+    Record<string, keyof typeof EDITOR_MESSAGES>
+  > = {
+    MAIN_PROMPT_REQUIRED: "mainPromptRequired",
+    MAIN_PROMPT_NOT_ALLOWED_WITH_CAPTURES: "mainPromptNotAllowedWithCaptures",
+    SUPPLEMENTAL_PROMPT_TOO_VAGUE: "supplementalPromptTooVague",
+    SUPPLEMENTAL_PROMPT_TARGET_REQUIRED: "supplementalPromptTargetRequired",
+    CAPTURE_NOTE_REQUIRED: "captureNoteRequired",
+    CAPTURE_NOTE_TOO_VAGUE: "captureNoteTooVague",
+    FOCUS_TARGET_ACTION_REQUIRED: "focusTargetActionRequired",
+    UNCLEAR_INTENT: "unclearIntent",
+    OUT_OF_SCOPE: "outOfScope",
+    INVALID_EDIT_REQUEST: "invalidEditRequest",
+  };
+
+  const mappedKey = error.code ? messageByCode[error.code] : undefined;
+  if (mappedKey) {
+    return getEditorMessage(language, mappedKey);
+  }
+
+  return error.message || getEditorMessage(language, "pipelineStartFailed");
+};
+
+const getChatHelperContent = (
+  language: SupportedLanguage,
+  isCaptureMode: boolean,
+) => {
+  if (isCaptureMode) {
+    return language === "vi"
+      ? {
+          title: "Captures + optional prompt",
+          body: 'Mỗi capture vẫn cần note cụ thể. Prompt chính là tuỳ chọn và có thể dùng để thêm chỉ dẫn tổng quát, ví dụ: "Đổi background trang Home thành màu đỏ".',
+        }
+      : {
+          title: "Captures + optional prompt",
+          body: 'Each capture still needs a specific note. The main prompt is optional and can add broader guidance, for example: "Change the Home page background to red".',
+        };
+  }
+
+  return language === "vi"
+    ? {
+        title: "Main prompt",
+        body: 'Hãy mô tả migrate toàn site, hoặc migrate toàn site kèm focus cụ thể. Ví dụ: "Migrate toàn bộ site sang React và giảm chiều cao hero ở trang Home".',
+      }
+      : {
+          title: "Main prompt",
+          body: 'Describe a full-site migration, or a full-site migration with a clear focus. Example: "Migrate the full site to React and reduce the hero height on the Home page".',
+        };
+};
+
+const getChatInputPlaceholder = (language: SupportedLanguage) =>
+  language === "vi"
+    ? "Mô tả yêu cầu migrate hoặc chỉ dẫn bổ sung cho các captures..."
+    : "Describe the migration or any extra instruction for the attached captures...";
 
 const Editor: React.FC = () => {
   const navigate = useNavigate();
@@ -80,6 +749,7 @@ const Editor: React.FC = () => {
   const [isSendingAiRequest, setIsSendingAiRequest] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [capturesOpen, setCapturesOpen] = useState(true);
+  const previewVersionRef = useRef(Date.now());
   const overlayRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -118,7 +788,15 @@ const Editor: React.FC = () => {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Enter" || event.key === "ArrowRight") {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable;
+
+      if (isTypingTarget) return;
+
+      if (event.key === "ArrowRight") {
         navigate("/app/editor/split-view", { state: { siteId } });
       }
     };
@@ -132,6 +810,20 @@ const Editor: React.FC = () => {
       .then(setWpPages)
       .catch(() => setWpPages([]));
   }, [siteUrl]);
+
+  const showToast = (message: string, tone: "error" | "success" = "error") => {
+    const fn = tone === "success" ? toast.success : toast.error;
+    fn(message, {
+      position: "top-right",
+      autoClose: 4000,
+      hideProgressBar: true,
+      closeButton: false,
+      className:
+        tone === "success"
+          ? "!rounded-2xl !border !border-[#cfe0c5] !bg-[#f4fbef] !px-4 !py-3 !text-[13px] !font-medium !text-[#3e6a39] !shadow-lg"
+          : "!rounded-2xl !border !border-[#e2beb9] !bg-[#fff4f2] !px-4 !py-3 !text-[13px] !font-medium !text-[#8c413a] !shadow-lg",
+    });
+  };
 
   const cancelCaptureFlow = () => {
     setIsCapturing(false);
@@ -154,11 +846,6 @@ const Editor: React.FC = () => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isCapturing, showCommentPopup]);
 
-  const getDefaultAiPrompt = () => {
-    if (chatCaptures.length === 0) return "";
-    return "Apply the requested changes from the attached captures. Preserve everything else unless a broader update is required.";
-  };
-
   const getCaptureDisplayUrl = (capture: Capture) =>
     capture.asset?.url ||
     `${import.meta.env.VITE_BACKEND_URL}${capture.filePath}`;
@@ -177,55 +864,207 @@ const Editor: React.FC = () => {
     return "image/png";
   };
 
+  const isMeaningfulNoCapturePrompt = (value: string) => {
+    const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+    const normalizedAscii = normalized
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D");
+    if (normalized.length < 12) return false;
+    if (
+      [
+        "hello",
+        "hi",
+        "test",
+        "ok",
+        "oke",
+        "fix this",
+        "change this",
+        "xin chao",
+        "chao",
+        "thu",
+        "sua cai nay",
+        "doi cai nay",
+      ].includes(normalizedAscii)
+    ) {
+      return false;
+    }
+
+    const migrationSignal =
+      /\b(migrate|migration|convert|rebuild|clone|port|transform|chuyen doi|migrate full|migrate toan bo|di chuyen sang react)\b/.test(
+        normalizedAscii,
+      );
+    const uiSignal =
+      /\b(improve|update|adjust|refine|redesign|restyle|focus|preserve|change|make|toi uu|dieu chinh|chinh sua|giu nguyen|doi mau|tap trung)\b/.test(
+        normalizedAscii,
+      );
+    const featureSignal =
+      /\b(add|insert|create|build|integrate|enable|introduce|implement|feature|functionality|widget|module|popup|modal|form|signup|newsletter|chatbot|chat|calculator|booking|spin|lucky wheel|wheel|carousel|faq|search|filter|them|chen|tao|xay dung|tich hop|bat|bo sung|tinh nang|chuc nang|dang ky|vong quay|quay thuong|tim kiem|bo loc)\b/.test(
+        normalizedAscii,
+      );
+    const scopeSignal =
+      /\b(site|website|wordpress|theme|all pages|full site|whole site|entire site|toan bo|ca trang|toan site|toan website)\b/.test(
+        normalizedAscii,
+      );
+    const focusSignal =
+      /\b(home|homepage|landing|about|contact|blog|header|hero|footer|navbar|section|page|trang chu|trang home|trang gioi thieu|trang lien he|dau trang|chan trang|khu vuc)\b/.test(
+        normalizedAscii,
+      );
+
+    return migrationSignal || ((uiSignal || featureSignal) && (scopeSignal || focusSignal));
+  };
+
+  const hasFocusTargetWithoutAction = (value: string) => {
+    const normalized = normalizeLanguageInput(value) || "";
+    return mentionsFocusTarget(normalized) && !hasConcreteEditAction(normalized);
+  };
+
+  const isSpecificCaptureNote = (value: string) => {
+    const normalized = normalizeLanguageInput(value) || "";
+    if (!normalized || normalized.length < 6) return false;
+    if (isGenericCapturePhrase(normalized)) return false;
+    return hasConcreteEditAction(normalized);
+  };
+
+  const isMeaningfulSupplementalPrompt = (value: string) => {
+    const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+    const normalizedAscii = normalizeLanguageInput(normalized) || "";
+
+    if (normalized.length < 6) return false;
+    if (
+      ["hello", "hi", "test", "ok", "oke", "xin chao", "chao", "thu"].includes(
+        normalizedAscii,
+      )
+    ) {
+      return false;
+    }
+
+    return (
+      hasConcreteEditAction(normalizedAscii) ||
+      mentionsFocusTarget(normalizedAscii) ||
+      hasFeatureSignal(normalizedAscii)
+    );
+  };
+
+  const isFeaturePromptWithoutTarget = (value: string) => {
+    const normalized = normalizeLanguageInput(value) || "";
+    return hasFeatureSignal(normalized) && !hasScopeOrTargetHint(normalized);
+  };
+
+  const buildAiAttachmentPayload = (capture: Capture) => ({
+    id: capture.id,
+    note: capture.comment,
+    sourcePageUrl: capture.pageUrl,
+    captureContext: {
+      page: {
+        route: resolveWordPressRoute(capture.page.route, capture.pageUrl),
+        title: capture.page.title,
+      },
+      document: {
+        width: capture.page.documentWidth,
+        height: capture.page.documentHeight,
+      },
+    },
+    selection: capture.selection,
+    ...(capture.targetNode ? { targetNode: capture.targetNode } : {}),
+    asset: {
+      provider: capture.asset?.provider || "local",
+      fileName:
+        capture.asset?.fileName ||
+        capture.fileName ||
+        capture.filePath.split("/").pop() ||
+        `${capture.id}.png`,
+      publicUrl: getCaptureDisplayUrl(capture),
+      mimeType: getCaptureMimeType(capture),
+      width: capture.asset?.width,
+      height: capture.asset?.height,
+    },
+  });
+
+  const buildAiRequestPayload = (
+    prompt: string,
+    language: SupportedLanguage,
+    capturesForAi: Capture[],
+  ) => {
+    const primaryPage = capturesForAi[0]?.page;
+
+    return {
+      ...(prompt ? { prompt } : {}),
+      language,
+      pageContext: {
+        wordpressUrl: selectedPageUrl,
+        wordpressRoute:
+          resolveWordPressRoute(primaryPage?.route, selectedPageUrl) ||
+          toRoutePath(selectedPageUrl),
+        pageTitle: primaryPage?.title || selectedPage?.title?.trim() || undefined,
+      },
+      ...(capturesForAi.length > 0
+        ? {
+            attachments: capturesForAi.map(buildAiAttachmentPayload),
+          }
+        : {}),
+    };
+  };
+
   const sendChatMessage = async () => {
     const trimmedPrompt = chatInput.trim();
-    const userPrompt = trimmedPrompt || getDefaultAiPrompt();
+    const hasCaptureInstructions = chatCaptures.length > 0;
+    const requestLanguage = detectRequestLanguage(
+      trimmedPrompt,
+      chatCaptures.map((capture) => capture.comment),
+    );
 
-    if (!siteId || (!userPrompt && chatCaptures.length === 0)) return;
+    if (!siteId) return;
+
+    if (hasCaptureInstructions) {
+      if (trimmedPrompt && !isMeaningfulSupplementalPrompt(trimmedPrompt)) {
+        showToast(
+          getEditorMessage(requestLanguage, "supplementalPromptTooVague"),
+        );
+        return;
+      }
+      if (trimmedPrompt && isFeaturePromptWithoutTarget(trimmedPrompt)) {
+        showToast(
+          getEditorMessage(requestLanguage, "supplementalPromptTargetRequired"),
+        );
+        return;
+      }
+      if (chatCaptures.some((capture) => !capture.comment.trim())) {
+        showToast(
+          getEditorMessage(requestLanguage, "captureNoteRequired"),
+        );
+        return;
+      }
+      if (chatCaptures.some((capture) => !isSpecificCaptureNote(capture.comment))) {
+        showToast(getEditorMessage(requestLanguage, "captureNoteTooVague"));
+        return;
+      }
+    } else {
+      if (!trimmedPrompt) {
+        showToast(getEditorMessage(requestLanguage, "mainPromptRequired"));
+        return;
+      }
+      if (!isMeaningfulNoCapturePrompt(trimmedPrompt)) {
+        showToast(getEditorMessage(requestLanguage, "unclearIntent"));
+        return;
+      }
+      if (hasFocusTargetWithoutAction(trimmedPrompt)) {
+        showToast(
+          getEditorMessage(requestLanguage, "focusTargetActionRequired"),
+        );
+        return;
+      }
+    }
+
 
     setIsSendingAiRequest(true);
 
-    const requestBody = {
-      prompt: userPrompt,
-      language: "en",
-      pageContext: {
-        reactUrl: window.location.href,
-        reactRoute: window.location.pathname,
-        wordpressUrl: selectedPageUrl,
-        iframeSrc: previewSrc,
-        viewport: getCaptureViewport(),
-      },
-      attachments: chatCaptures.map((capture) => ({
-        id: capture.id,
-        note: capture.comment,
-        sourcePageUrl: capture.pageUrl,
-        captureContext: {
-          capturedAt: capture.capturedAt,
-          iframeSrc: capture.iframeSrc,
-          viewport: capture.viewport,
-        },
-        selection: capture.selection,
-        asset: {
-          provider: capture.asset?.provider || "local",
-          fileName:
-            capture.asset?.fileName ||
-            capture.fileName ||
-            capture.filePath.split("/").pop() ||
-            `${capture.id}.png`,
-          publicUrl: getCaptureDisplayUrl(capture),
-          storagePath: capture.filePath,
-          originalPath: capture.asset?.originalPath,
-          mimeType: getCaptureMimeType(capture),
-          bytes: capture.asset?.bytes,
-          width: capture.asset?.width,
-          height: capture.asset?.height,
-          createdAt: capture.asset?.createdAt,
-          providerAssetId: capture.asset?.publicId || capture.asset?.fileId,
-          providerAssetPath: capture.asset?.filePath,
-          format: capture.asset?.format,
-        },
-      })),
-    };
+    const requestBody = buildAiRequestPayload(
+      trimmedPrompt,
+      requestLanguage,
+      chatCaptures,
+    );
 
     console.log("Sending AI request with body:", requestBody);
     try {
@@ -237,6 +1076,12 @@ const Editor: React.FC = () => {
       navigate("/app/editor/split-view", {
         state: { jobId: data.jobId, siteId },
       });
+    } catch (error) {
+      if (error instanceof AiProcessError) {
+        showToast(getAiErrorMessage(error, requestLanguage));
+      } else {
+        showToast(getEditorMessage(requestLanguage, "pipelineStartFailed"));
+      }
     } finally {
       setIsSendingAiRequest(false);
     }
@@ -331,7 +1176,7 @@ const Editor: React.FC = () => {
     };
   };
 
-  const getCaptureViewport = (): CaptureViewport => {
+  const getCaptureMetrics = () => {
     const iframeEl = iframeRef.current;
     const fallbackWidth = Math.max(
       1,
@@ -342,13 +1187,29 @@ const Editor: React.FC = () => {
       Math.round(overlayRef.current?.clientHeight || window.innerHeight),
     );
 
+    const fallbackRoute = toRoutePath(selectedPageUrl);
+    const fallbackTitle =
+      wpPages.find((page) => page.link === selectedPageUrl)?.title?.trim() ||
+      undefined;
+
     if (!iframeEl) {
       return {
-        width: fallbackWidth,
-        height: fallbackHeight,
-        scrollX: 0,
-        scrollY: 0,
-        dpr: window.devicePixelRatio || 1,
+        viewport: {
+          width: fallbackWidth,
+          height: fallbackHeight,
+          scrollX: 0,
+          scrollY: 0,
+          dpr: window.devicePixelRatio || 1,
+        },
+        overlayWidth: fallbackWidth,
+        overlayHeight: fallbackHeight,
+        frameDocument: undefined,
+        page: {
+          route: fallbackRoute,
+          title: fallbackTitle,
+          documentWidth: fallbackWidth,
+          documentHeight: fallbackHeight,
+        },
       };
     }
 
@@ -356,8 +1217,10 @@ const Editor: React.FC = () => {
       const frameWindow = iframeEl.contentWindow;
       const frameDocument = frameWindow?.document;
       const docEl = frameDocument?.documentElement;
-
-      return {
+      const body = frameDocument?.body;
+      const instrumentedRoute =
+        docEl?.dataset.vpRoute || toRoutePath(selectedPageUrl);
+      const viewport = {
         width: Math.max(
           1,
           Math.round(
@@ -377,33 +1240,195 @@ const Editor: React.FC = () => {
           frameWindow?.devicePixelRatio || window.devicePixelRatio || 1,
         ),
       };
+
+      return {
+        viewport,
+        overlayWidth: Math.max(
+          1,
+          Math.round(overlayRef.current?.clientWidth || iframeEl.clientWidth || viewport.width),
+        ),
+        overlayHeight: Math.max(
+          1,
+          Math.round(
+            overlayRef.current?.clientHeight || iframeEl.clientHeight || viewport.height,
+          ),
+        ),
+        frameDocument,
+        page: {
+          route: instrumentedRoute || fallbackRoute,
+          title:
+            frameDocument?.title?.trim() ||
+            fallbackTitle,
+          documentWidth: Math.max(
+            viewport.width,
+            Math.round(
+              docEl?.scrollWidth ||
+                body?.scrollWidth ||
+                docEl?.clientWidth ||
+                body?.clientWidth ||
+                fallbackWidth,
+            ),
+          ),
+          documentHeight: Math.max(
+            viewport.height,
+            Math.round(
+              docEl?.scrollHeight ||
+                body?.scrollHeight ||
+                docEl?.clientHeight ||
+                body?.clientHeight ||
+                fallbackHeight,
+            ),
+          ),
+        },
+      };
     } catch {
       return {
-        width: fallbackWidth,
-        height: fallbackHeight,
-        scrollX: 0,
-        scrollY: 0,
-        dpr: window.devicePixelRatio || 1,
+        viewport: {
+          width: fallbackWidth,
+          height: fallbackHeight,
+          scrollX: 0,
+          scrollY: 0,
+          dpr: window.devicePixelRatio || 1,
+        },
+        overlayWidth: fallbackWidth,
+        overlayHeight: fallbackHeight,
+        frameDocument: undefined,
+        page: {
+          route: fallbackRoute,
+          title: fallbackTitle,
+          documentWidth: fallbackWidth,
+          documentHeight: fallbackHeight,
+        },
       };
     }
   };
 
+  const buildCaptureSnapshot = (sel: SelectionRect) => {
+    const overlayRect = getRelativeRect(sel);
+    const metrics = getCaptureMetrics();
+    const scaleX = metrics.viewport.width / Math.max(1, metrics.overlayWidth);
+    const scaleY = metrics.viewport.height / Math.max(1, metrics.overlayHeight);
+    const maxViewportWidth = Math.max(1, metrics.viewport.width);
+    const maxViewportHeight = Math.max(1, metrics.viewport.height);
+
+    const viewportRect: ViewportCaptureRect = {
+      x: clampNumber(roundNumber(overlayRect.x * scaleX), 0, maxViewportWidth - 1),
+      y: clampNumber(roundNumber(overlayRect.y * scaleY), 0, maxViewportHeight - 1),
+      width: clampNumber(
+        roundNumber(overlayRect.width * scaleX),
+        1,
+        maxViewportWidth,
+      ),
+      height: clampNumber(
+        roundNumber(overlayRect.height * scaleY),
+        1,
+        maxViewportHeight,
+      ),
+      coordinateSpace: "iframe-viewport",
+    };
+
+    const safeViewportWidth = Math.min(
+      viewportRect.width,
+      maxViewportWidth - viewportRect.x,
+    );
+    const safeViewportHeight = Math.min(
+      viewportRect.height,
+      maxViewportHeight - viewportRect.y,
+    );
+
+    const normalizedViewportRect: ViewportCaptureRect = {
+      ...viewportRect,
+      width: Math.max(1, roundNumber(safeViewportWidth)),
+      height: Math.max(1, roundNumber(safeViewportHeight)),
+    };
+
+    const documentRect: DocumentCaptureRect = {
+      x: roundNumber(normalizedViewportRect.x + (metrics.viewport.scrollX || 0)),
+      y: roundNumber(normalizedViewportRect.y + (metrics.viewport.scrollY || 0)),
+      width: normalizedViewportRect.width,
+      height: normalizedViewportRect.height,
+      coordinateSpace: "iframe-document",
+    };
+
+    const normalizedRect: CaptureNormalizedRect = {
+      x: roundNumber(
+        clampNumber(documentRect.x / Math.max(1, metrics.page.documentWidth), 0, 1),
+      ),
+      y: roundNumber(
+        clampNumber(documentRect.y / Math.max(1, metrics.page.documentHeight), 0, 1),
+      ),
+      width: roundNumber(
+        clampNumber(
+          documentRect.width / Math.max(1, metrics.page.documentWidth),
+          0,
+          1,
+        ),
+      ),
+      height: roundNumber(
+        clampNumber(
+          documentRect.height / Math.max(1, metrics.page.documentHeight),
+          0,
+          1,
+        ),
+      ),
+      coordinateSpace: "iframe-document-normalized",
+    };
+
+    const domSnapshot = resolveDomTargetSnapshot(
+      metrics.frameDocument,
+      normalizedViewportRect,
+      metrics.page.route,
+    );
+
+    return {
+      viewport: metrics.viewport,
+      page: metrics.page,
+      selection: documentRect,
+      geometry: {
+        viewportRect: normalizedViewportRect,
+        documentRect,
+        normalizedRect,
+      },
+      domTarget: domSnapshot.domTarget,
+      targetNode: domSnapshot.targetNode,
+    };
+  };
+
   const handleSaveCapture = async () => {
     if (!selection) return;
+    const captureLanguage = detectRequestLanguage("", [captureComment]);
+    if (!captureComment.trim()) {
+      showToast(
+        getEditorMessage(
+          captureLanguage,
+          "saveCaptureNoteRequired",
+        ),
+      );
+      return;
+    }
+    if (!isSpecificCaptureNote(captureComment)) {
+      showToast(
+        getEditorMessage(captureLanguage, "captureNoteTooVagueOnSave"),
+      );
+      return;
+    }
     setIsSubmittingCapture(true);
     try {
       const previewSrc = `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`;
-      const relativeRect = getRelativeRect(selection);
-      const captureViewport = getCaptureViewport();
+      const captureSnapshot = buildCaptureSnapshot(selection);
       const result = await captureRegion(
         selectedPageUrl,
         previewSrc,
-        relativeRect,
+        {
+          x: captureSnapshot.geometry.viewportRect.x,
+          y: captureSnapshot.geometry.viewportRect.y,
+          width: captureSnapshot.geometry.viewportRect.width,
+          height: captureSnapshot.geometry.viewportRect.height,
+        },
         captureComment,
-        captureViewport,
+        captureSnapshot.viewport,
       );
       setCaptures((prev) => [
-        ...prev,
         {
           id: Date.now().toString(),
           filePath: result.filePath,
@@ -413,12 +1438,14 @@ const Editor: React.FC = () => {
           pageUrl: selectedPageUrl,
           iframeSrc: previewSrc,
           capturedAt: new Date().toISOString(),
-          viewport: captureViewport,
-          selection: {
-            ...relativeRect,
-            coordinateSpace: "iframe-viewport",
-          },
+          viewport: captureSnapshot.viewport,
+          page: captureSnapshot.page,
+          selection: captureSnapshot.selection,
+          geometry: captureSnapshot.geometry,
+          domTarget: captureSnapshot.domTarget,
+          targetNode: captureSnapshot.targetNode,
         },
+        ...prev,
       ]);
     } finally {
       setIsSubmittingCapture(false);
@@ -456,6 +1483,20 @@ const Editor: React.FC = () => {
     );
 
     if (capturesToSave.length === 0) return;
+    const selectionLanguage = detectRequestLanguage(
+      "",
+      capturesToSave.map((capture) => capture.comment),
+    );
+    if (capturesToSave.some((capture) => !capture.comment.trim())) {
+      showToast(
+        getEditorMessage(selectionLanguage, "selectedCaptureNoteRequired"),
+      );
+      return;
+    }
+    if (capturesToSave.some((capture) => !isSpecificCaptureNote(capture.comment))) {
+      showToast(getEditorMessage(selectionLanguage, "captureNoteTooVague"));
+      return;
+    }
 
     setChatCaptures((prev) => {
       const merged = [...prev];
@@ -467,6 +1508,7 @@ const Editor: React.FC = () => {
       return merged;
     });
 
+    setChatInput("");
     setIsChatOpen(true);
   };
 
@@ -494,7 +1536,7 @@ const Editor: React.FC = () => {
   };
 
   const previewSrc = selectedPageUrl
-    ? `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`
+    ? `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}&vpv=${previewVersionRef.current}`
     : "";
   const selectedPage = wpPages.find((page) => page.link === selectedPageUrl);
   const selectedPageLabel =
@@ -504,13 +1546,28 @@ const Editor: React.FC = () => {
   const selectedPageMeta = selectedPage?.slug
     ? `/${selectedPage.slug}`
     : selectedPageUrl;
+  const isCaptureMode = chatCaptures.length > 0;
+  const helperLanguage = detectRequestLanguage(
+    chatInput,
+    chatCaptures.map((capture) => capture.comment),
+  );
+  const chatHelper = getChatHelperContent(helperLanguage, isCaptureMode);
+  const chatInputPlaceholder = getChatInputPlaceholder(helperLanguage);
   const canSendChatMessage =
     !!siteId &&
-    (!!chatInput.trim() || chatCaptures.length > 0) &&
-    !isSendingAiRequest;
+    !isSendingAiRequest &&
+    (isCaptureMode ? chatCaptures.length > 0 : !!chatInput.trim());
 
   return (
     <div className="flex flex-col h-screen bg-[#FAF7F0] font-body text-[#233227] overflow-hidden">
+      <ToastContainer
+        newestOnTop
+        limit={2}
+        draggable={false}
+        style={{ width: "min(460px, calc(100vw - 24px))" }}
+        toastClassName={() => "!min-h-0 !p-0 !bg-transparent !shadow-none"}
+      />
+
       {/* Top Navbar */}
       <header className="h-[72px] shrink-0 border-b border-[#e8e6df] px-6 flex items-center justify-between bg-[#FAF7F0] z-20">
         <div className="flex items-center gap-2">
@@ -823,11 +1880,11 @@ const Editor: React.FC = () => {
                     <p className="text-[13px] font-bold text-[#233227] mb-2">
                       Describe the change for this area
                     </p>
-                    <textarea
+                      <textarea
                       autoFocus
                       value={captureComment}
                       onChange={(e) => setCaptureComment(e.target.value)}
-                      placeholder="Describe the edit request..."
+                      placeholder="Describe the edit request for this area..."
                       className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
                     />
                     <div className="flex gap-2 justify-end">
@@ -839,7 +1896,7 @@ const Editor: React.FC = () => {
                       </button>
                       <button
                         onClick={handleSaveCapture}
-                        disabled={isSubmittingCapture}
+                        disabled={isSubmittingCapture || !captureComment.trim()}
                         className="bg-[#49704F] disabled:opacity-50 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg hover:bg-[#346E56]"
                       >
                         {isSubmittingCapture ? "Saving..." : "Save"}
@@ -854,8 +1911,8 @@ const Editor: React.FC = () => {
           {!previewCapture && (
             <div className="absolute right-6 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none">
               {isChatOpen && (
-                <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
-                  <div className="p-3 border-b border-[#e5e8df]">
+                <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] min-h-0 flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
+                  <div className="shrink-0 p-3 border-b border-[#e5e8df]">
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
                       <h3 className="font-semibold text-sm text-[#2e3e2f]">
@@ -865,8 +1922,8 @@ const Editor: React.FC = () => {
                   </div>
 
                   {chatCaptures.length > 0 && (
-                    <div className="flex-1 overflow-hidden p-3">
-                      <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
+                      <div className="mb-3 shrink-0 flex items-center justify-between gap-3">
                         <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#6d7d68]">
                           Attached Captures
                         </p>
@@ -878,12 +1935,12 @@ const Editor: React.FC = () => {
                           Clear all
                         </button>
                       </div>
-                      <div className="max-h-[320px] overflow-y-auto pr-1">
-                        <div className="flex flex-wrap items-start gap-3">
+                      <div className="min-h-0 flex-1 overflow-y-auto">
+                        <div className="grid grid-cols-2 items-start gap-3">
                           {chatCaptures.map((capture) => (
                             <div
                               key={capture.id}
-                              className="relative w-[140px] overflow-hidden rounded-2xl border border-[#d9e3d1] bg-white"
+                              className="relative min-w-0 overflow-hidden rounded-2xl border border-[#d9e3d1] bg-white"
                             >
                               <button
                                 type="button"
@@ -930,7 +1987,7 @@ const Editor: React.FC = () => {
                   )}
 
                   {chatCaptures.length === 0 && (
-                    <div className="border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
+                    <div className="shrink-0 border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
                       <p className="text-[12px] leading-relaxed text-[#6b7568]">
                         No captures attached yet. Save a selection from the
                         preview to send visual context.
@@ -938,18 +1995,34 @@ const Editor: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="p-3 border-t border-[#e5e8df]">
-                    <div className="flex gap-2 items-center">
-                      <input
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && canSendChatMessage)
-                            void sendChatMessage();
-                        }}
-                        className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
-                        placeholder="Ask AI anything (press Enter to send)..."
-                      />
+                  <div className="shrink-0 p-3 border-t border-[#e5e8df]">
+                    <div>
+                      <div className="flex gap-2 items-center">
+                        <input
+                          value={chatInput}
+                          onChange={(e) => setChatInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && canSendChatMessage)
+                              void sendChatMessage();
+                          }}
+                          className="flex-1 h-10 text-sm border border-[#ccd7cc] rounded-full px-4 outline-none focus:ring-2 focus:ring-[#4a7c59]/40"
+                          placeholder={chatInputPlaceholder}
+                        />
+                      </div>
+                      <div
+                        className={`mt-2 rounded-2xl px-4 py-3 ${isCaptureMode ? "border border-[#e7e2d6] bg-[#fcfaf5]" : "border border-[#ece6da] bg-[#fcfbf7]"}`}
+                      >
+                        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#7b876f]">
+                          {chatHelper.title}
+                        </p>
+                        <p
+                          className={`mt-1 text-[12px] leading-relaxed ${isCaptureMode ? "text-[#60705d]" : "text-[#667062]"}`}
+                        >
+                          {chatHelper.body}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex justify-end">
                       <button
                         onClick={() => void sendChatMessage()}
                         disabled={!canSendChatMessage}

@@ -43,6 +43,95 @@ async function getPrefix(
   return rows[0].tableName.replace(/options$/, '');
 }
 
+function phpUnserializeSimple(input: string): Record<string, any> | null {
+  let pos = 0;
+
+  function readValue(): any {
+    const type = input[pos];
+    pos += 2;
+    if (type === 'i') {
+      const end = input.indexOf(';', pos);
+      const n = parseInt(input.slice(pos, end), 10);
+      pos = end + 1;
+      return n;
+    }
+    if (type === 's') {
+      const lenEnd = input.indexOf(':', pos);
+      const len = parseInt(input.slice(pos, lenEnd), 10);
+      pos = lenEnd + 2;
+      const str = input.slice(pos, pos + len);
+      pos += len + 2;
+      return str;
+    }
+    if (type === 'a') {
+      const countEnd = input.indexOf(':', pos);
+      const count = parseInt(input.slice(pos, countEnd), 10);
+      pos = countEnd + 2;
+      const obj: Record<string, any> = {};
+      for (let i = 0; i < count; i++) {
+        const key = readValue();
+        const val = readValue();
+        obj[String(key)] = val;
+      }
+      pos += 1;
+      return obj;
+    }
+    if (type === 'b') {
+      const end = input.indexOf(';', pos);
+      const b = input.slice(pos, end) === '1';
+      pos = end + 1;
+      return b;
+    }
+    if (type === 'N') {
+      pos -= 1;
+      return null;
+    }
+    return undefined;
+  }
+
+  try {
+    return readValue() as Record<string, any>;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCustomLogoUrl(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<string | null> {
+  try {
+    const [[stylesheetRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+    );
+    const stylesheet = stylesheetRow?.option_value as string | undefined;
+    if (!stylesheet) return null;
+
+    const [[modsRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = ? LIMIT 1`,
+      [`theme_mods_${stylesheet}`],
+    );
+    const serialized = modsRow?.option_value as string | undefined;
+    if (!serialized) return null;
+
+    const parsed = phpUnserializeSimple(serialized);
+    const customLogoId = Number(parsed?.custom_logo ?? 0);
+    if (!Number.isFinite(customLogoId) || customLogoId <= 0) return null;
+
+    const [[logoRow]] = await conn.query<any[]>(
+      `SELECT guid
+       FROM \`${prefix}posts\`
+       WHERE ID = ? AND post_type = 'attachment'
+       LIMIT 1`,
+      [customLogoId],
+    );
+    const logoUrl = logoRow?.guid as string | undefined;
+    return logoUrl?.trim() ? logoUrl : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeCommentModerationStatus(
   raw: unknown,
 ): 'approved' | 'pending' | 'spam' | 'trash' {
@@ -99,6 +188,9 @@ app.get('/api/site-info', async (req, res) => {
       siteUrl: opts['siteurl'] ?? '',
       siteName: opts['blogname'] ?? '',
       blogDescription: opts['blogdescription'] ?? '',
+      logoUrl:
+        process.env.SITE_LOGO_URL ||
+        (await resolveCustomLogoUrl(conn, prefix)),
       adminEmail: opts['admin_email'] ?? '',
       language: opts['WPLANG'] ?? 'en',
     });

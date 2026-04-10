@@ -44,8 +44,7 @@ export class CleanupService {
     if (!pid) return;
 
     await new Promise<void>((resolve) => {
-      const command =
-        process.platform === 'win32' ? 'taskkill' : 'kill';
+      const command = process.platform === 'win32' ? 'taskkill' : 'kill';
       const args =
         process.platform === 'win32'
           ? ['/PID', String(pid), '/T', '/F']

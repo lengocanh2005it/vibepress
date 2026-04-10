@@ -41,6 +41,7 @@ export interface WpSiteInfo {
   siteUrl: string;
   siteName: string;
   blogDescription: string;
+  logoUrl: string | null;
   adminEmail: string;
   language: string;
   tablePrefix: string;
@@ -378,6 +379,7 @@ export class WpQueryService {
         siteUrl: opts['siteurl'] ?? '',
         siteName: opts['blogname'] ?? '',
         blogDescription: opts['blogdescription'] ?? '',
+        logoUrl: await this.resolveCustomLogoUrl(conn, prefix),
         adminEmail: opts['admin_email'] ?? '',
         language: opts['WPLANG'] ?? 'en',
         tablePrefix: prefix,
@@ -574,6 +576,42 @@ export class WpQueryService {
       password: creds.password,
       database: creds.database,
     });
+  }
+
+  private async resolveCustomLogoUrl(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+  ): Promise<string | null> {
+    try {
+      const [[stylesheetRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+      );
+      const stylesheet = stylesheetRow?.option_value as string | undefined;
+      if (!stylesheet) return null;
+
+      const [[modsRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = ? LIMIT 1`,
+        [`theme_mods_${stylesheet}`],
+      );
+      const serialized = modsRow?.option_value as string | undefined;
+      if (!serialized) return null;
+
+      const parsed = phpUnserializeSimple(serialized);
+      const customLogoId = Number(parsed?.custom_logo ?? 0);
+      if (!Number.isFinite(customLogoId) || customLogoId <= 0) return null;
+
+      const [[logoRow]] = await conn.query<any[]>(
+        `SELECT guid
+         FROM \`${prefix}posts\`
+         WHERE ID = ? AND post_type = 'attachment'
+         LIMIT 1`,
+        [customLogoId],
+      );
+      const logoUrl = logoRow?.guid as string | undefined;
+      return logoUrl?.trim() ? logoUrl : null;
+    } catch {
+      return null;
+    }
   }
 
   private mapPost(row: any): WpPost {

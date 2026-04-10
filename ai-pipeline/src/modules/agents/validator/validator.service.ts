@@ -451,7 +451,7 @@ export class ValidatorService {
     const siteInfoMatch = code.match(/\bsiteInfo\.(name|url|description)\b/);
     if (siteInfoMatch) {
       violations.push(
-        `\`siteInfo.${siteInfoMatch[1]}\` does not exist. Use \`siteInfo.siteName\` / \`siteInfo.siteUrl\` / \`siteInfo.blogDescription\`.`,
+        `\`siteInfo.${siteInfoMatch[1]}\` does not exist. Use \`siteInfo.siteName\` / \`siteInfo.siteUrl\` / \`siteInfo.blogDescription\` / \`siteInfo.logoUrl\`.`,
       );
     }
 
@@ -528,6 +528,10 @@ export class ValidatorService {
     }
 
     if (isSharedChromePartial) {
+      const isHeaderLikePartial = /^(Header|Navigation|Nav)$/i.test(
+        context.componentName ?? '',
+      );
+      const isFooterPartial = /^Footer$/i.test(context.componentName ?? '');
       const usesSiteTitle =
         /\bsiteInfo\??\.siteName\b/.test(code) ||
         /\{siteInfo\??\.siteName\}/.test(code);
@@ -568,6 +572,26 @@ export class ValidatorService {
       if (/No menus available/i.test(code)) {
         violations.push(
           'Shared chrome contract violated: do not emit `No menus available` placeholders in Header/Footer/Navigation partials. Render the API menus or a structurally empty nav.',
+        );
+      }
+      if (
+        isHeaderLikePartial &&
+        dataNeeds.has('menus') &&
+        !/location\s*===\s*['"]primary['"]/.test(code) &&
+        !/slug\s*===\s*['"]primary['"]/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Header/Navigation partials must source their links from the primary menu (`location === "primary"` with `slug === "primary"` fallback), not by raw menu index.',
+        );
+      }
+      if (
+        isFooterPartial &&
+        dataNeeds.has('menus') &&
+        !/location\s*!==\s*['"]primary['"]/.test(code) &&
+        !/slug\s*!==\s*['"]primary['"]/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Footer must exclude the primary navigation menu (`location !== "primary"` and slug fallback) and render only footer/social menu groups.',
         );
       }
     }
@@ -1110,8 +1134,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private usesSharedChromeData(code: string): boolean {
-    return (
-      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription)\b/.test(code) ||
+      return (
+      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription|logoUrl)\b/.test(code) ||
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
       /\{\s*menus\b/.test(code)
     );

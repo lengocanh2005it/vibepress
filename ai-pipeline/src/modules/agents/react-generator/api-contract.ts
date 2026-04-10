@@ -4,6 +4,7 @@ export const SITE_INFO_FIELDS = [
   'siteUrl',
   'siteName',
   'blogDescription',
+  'logoUrl',
   'adminEmail',
   'language',
 ] as const;
@@ -41,7 +42,7 @@ export const MENU_ITEM_FIELDS = [
   'parentId',
 ] as const;
 
-export const MENU_FIELDS = ['name', 'slug', 'items'] as const;
+export const MENU_FIELDS = ['name', 'slug', 'location', 'items'] as const;
 
 export const TERM_FIELDS = [
   'id',
@@ -68,9 +69,9 @@ export const COMMENT_SUBMISSION_FIELDS = [
 
 export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; categories: string[]; featuredImage: string | null; }`;
 export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; }`;
-export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; adminEmail: string; language: string; }`;
+export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; logoUrl: string | null; adminEmail: string; language: string; }`;
 export const MENU_ITEM_INTERFACE = `interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }`;
-export const MENU_INTERFACE = `interface Menu { name: string; slug: string; items: MenuItem[]; }`;
+export const MENU_INTERFACE = `interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }`;
 export const TERM_INTERFACE = `interface Term { id: number; name: string; slug: string; description: string; count: number; parentId: number; }`;
 export const COMMENT_INTERFACE = `interface Comment { id: number; author: string; date: string; content: string; parentId: number; userId: number; }`;
 export const COMMENT_SUBMISSION_INTERFACE = `interface CommentSubmission extends Comment { moderationStatus: 'approved' | 'pending' | 'spam' | 'trash'; }`;
@@ -167,7 +168,7 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
   if (availableVariables.includes('`siteInfo: SiteInfo | null`')) {
     lines.push(
       `- \`siteInfo\` fields: ${formatFieldList(SITE_INFO_FIELDS)}.`,
-      '- `siteInfo.siteName`, `siteInfo.siteUrl`, `siteInfo.blogDescription` are plain strings.',
+      '- `siteInfo.siteName`, `siteInfo.siteUrl`, `siteInfo.blogDescription` are plain strings; `siteInfo.logoUrl` is `string | null`.',
     );
   }
 

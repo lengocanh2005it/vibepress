@@ -22,6 +22,7 @@ export function buildFragmentPrompt(options: {
   templateSource: string;
   visualPlan?: ComponentVisualPlan;
   componentType?: 'page' | 'partial';
+  editRequestContextNote?: string;
   retryError?: string;
   previousFragment?: string;
 }): string {
@@ -31,6 +32,7 @@ export function buildFragmentPrompt(options: {
     templateSource,
     visualPlan,
     componentType,
+    editRequestContextNote,
     retryError,
     previousFragment,
   } = options;
@@ -92,7 +94,7 @@ ${componentType === 'page' ? '- This is a page-content component inside a shared
 ## Visual plan sections:
 ${visualPlanText}
 
-## WordPress template source:
+${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}## WordPress template source:
 ${templateSource}${retrySection}
 
 Fragment:`;

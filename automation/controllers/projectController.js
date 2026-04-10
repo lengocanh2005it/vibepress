@@ -3,8 +3,18 @@ const path = require("path");
 const crypto = require("crypto");
 const axios = require("axios");
 const fse = require("fs-extra");
-const { getTables, getTableRows, dumpFullTable, dumpAllTables, dumpToSql } = require("../services/wpSqlDumpService");
-const { createSiteDatabase, syncPostToLocalDb, deletePostFromLocalDb } = require("../services/siteDbService");
+const {
+  getTables,
+  getTableRows,
+  dumpFullTable,
+  dumpAllTables,
+  dumpToSql,
+} = require("../services/wpSqlDumpService");
+const {
+  createSiteDatabase,
+  syncPostToLocalDb,
+  deletePostFromLocalDb,
+} = require("../services/siteDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
 const { query, queryOne } = require("../db/mysql");
@@ -17,6 +27,9 @@ const {
   TEMP_ROOT,
   UPLOAD_ROOT,
 } = require("../config/constants");
+const {
+  injectWpPreviewMetadata,
+} = require("../services/wpPreviewInstrumentation");
 
 function ensureFileSystemState() {
   fse.ensureDirSync(TEMP_ROOT);
@@ -64,16 +77,23 @@ function slugify(input) {
 }
 
 function buildReachableUrlCandidates(rawUrl) {
-  const candidates = [];
-  if (!rawUrl) return candidates;
-  candidates.push(rawUrl);
+  if (!rawUrl) return [];
 
-  const rewritten = rawUrl.replace(
-    /http(s?):\/\/(localhost|127\.0\.0\.1)/,
-    (_, scheme) => `http${scheme}://host.docker.internal`,
-  );
+  const candidates = [rawUrl];
 
-  if (rewritten !== rawUrl) candidates.push(rewritten);
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+      parsed.hostname = "host.docker.internal";
+      candidates.push(parsed.toString().replace(/\/$/, ""));
+    } else if (parsed.hostname === "host.docker.internal") {
+      parsed.hostname = "localhost";
+      candidates.push(parsed.toString().replace(/\/$/, ""));
+    }
+  } catch {
+    // Giữ nguyên rawUrl nếu parse thất bại.
+  }
+
   return [...new Set(candidates)];
 }
 
@@ -84,6 +104,24 @@ async function axiosGetWithFallback(rawUrl, config = {}) {
   for (const candidate of candidates) {
     try {
       return await axios.get(candidate, config);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError;
+}
+
+async function dumpAllTablesWithFallback(siteUrl, apiKey, onTable = null) {
+  const candidates = buildReachableUrlCandidates(siteUrl);
+  let lastError;
+
+  for (const candidate of candidates) {
+    try {
+      return {
+        tables: await dumpAllTables(candidate, apiKey, onTable),
+        resolvedUrl: candidate,
+      };
     } catch (error) {
       lastError = error;
     }
@@ -313,29 +351,42 @@ async function uploadTheme(req, res) {
 function normalizeSite(row) {
   if (!row) return null;
   return {
-    siteId:      row.site_id,
-    userId:      row.user_id,
-    siteUrl:     row.site_url,
-    siteName:    row.site_name,
-    wpVersion:   row.wp_version,
-    adminEmail:  row.admin_email,
-    apiKey:      row.api_key,
-    wpRepoName:  row.wp_repo_name,
-    wpRepoUrl:   row.wp_repo_url,
-    clonedDb:    row.cloned_db   ? (typeof row.cloned_db === 'string'   ? JSON.parse(row.cloned_db)   : row.cloned_db)   : null,
-    lastSync:    row.last_sync   ? (typeof row.last_sync === 'string'   ? JSON.parse(row.last_sync)   : row.last_sync)   : null,
+    siteId: row.site_id,
+    userId: row.user_id,
+    siteUrl: row.site_url,
+    siteName: row.site_name,
+    wpVersion: row.wp_version,
+    adminEmail: row.admin_email,
+    apiKey: row.api_key,
+    wpRepoName: row.wp_repo_name,
+    wpRepoUrl: row.wp_repo_url,
+    clonedDb: row.cloned_db
+      ? typeof row.cloned_db === "string"
+        ? JSON.parse(row.cloned_db)
+        : row.cloned_db
+      : null,
+    lastSync: row.last_sync
+      ? typeof row.last_sync === "string"
+        ? JSON.parse(row.last_sync)
+        : row.last_sync
+      : null,
     registeredAt: row.registered_at,
-    updatedAt:   row.updated_at,
+    updatedAt: row.updated_at,
   };
 }
 
 async function findSiteByApiKey(apiKey) {
-  const row = await queryOne('SELECT * FROM wp_sites WHERE api_key = ? LIMIT 1', [apiKey]);
+  const row = await queryOne(
+    "SELECT * FROM wp_sites WHERE api_key = ? LIMIT 1",
+    [apiKey],
+  );
   return normalizeSite(row);
 }
 
 async function findSiteBySiteUrl(siteUrl) {
-  const row = await queryOne('SELECT * FROM wp_sites WHERE site_url = ?', [siteUrl]);
+  const row = await queryOne("SELECT * FROM wp_sites WHERE site_url = ?", [
+    siteUrl,
+  ]);
   return normalizeSite(row);
 }
 
@@ -346,33 +397,39 @@ async function findSiteBySiteUrl(siteUrl) {
 async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
   await new Promise((r) => setTimeout(r, delayMs));
 
-  // Khi chạy trong Docker, localhost trỏ vào container chứ không phải host.
-  // Dùng host.docker.internal để reach WordPress trên máy host (Windows/Mac).
-  const resolvedUrl = siteUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)/,
-    (_, scheme) => `${scheme}host.docker.internal`,
-  );
-
-  const dumpDir  = path.join(__dirname, '..', 'temp_dumps');
+  const dumpDir = path.join(__dirname, "..", "temp_dumps");
   fse.ensureDirSync(dumpDir);
   const dumpPath = path.join(dumpDir, `dump-${siteId}-${Date.now()}.sql`);
 
   try {
-    console.log(`[DbSync] start — siteId=${siteId} url=${resolvedUrl}`);
-    const tables = await dumpAllTables(resolvedUrl, apiKey);
-    const sql    = dumpToSql(tables);
-    fs.writeFileSync(dumpPath, sql, 'utf8');
+    console.log(`[DbSync] start — siteId=${siteId} url=${siteUrl}`);
+    const { tables, resolvedUrl } = await dumpAllTablesWithFallback(
+      siteUrl,
+      apiKey,
+    );
+    if (resolvedUrl !== siteUrl) {
+      console.log(
+        `[DbSync] using fallback url — siteId=${siteId} url=${resolvedUrl}`,
+      );
+    }
+    const sql = dumpToSql(tables);
+    fs.writeFileSync(dumpPath, sql, "utf8");
     console.log(`[DbSync] dump saved — ${dumpPath}`);
 
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
-    console.log(`[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
-
-    await query(
-      'UPDATE wp_sites SET cloned_db = ? WHERE site_id = ?',
-      [JSON.stringify(dbInfo), siteId],
+    console.log(
+      `[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`,
     );
+
+    await query("UPDATE wp_sites SET cloned_db = ? WHERE site_id = ?", [
+      JSON.stringify(dbInfo),
+      siteId,
+    ]);
   } catch (e) {
-    console.error(`[DbSync] FAILED — siteId=${siteId}:`, e?.message || e?.code || String(e));
+    console.error(
+      `[DbSync] FAILED — siteId=${siteId}:`,
+      e?.message || e?.code || String(e),
+    );
   } finally {
     if (fs.existsSync(dumpPath)) fs.unlinkSync(dumpPath);
   }
@@ -385,21 +442,35 @@ async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
 // Trả về: { githubToken, githubRepo, isFirstConnect }
 // -------------------------------------------------------
 async function registerWpSite(req, res) {
-  const apiKey = req.headers['x-vibepress-key'];
+  const apiKey = req.headers["x-vibepress-key"];
   const { siteUrl, siteName, wpVersion, adminEmail } = req.body ?? {};
 
   if (!apiKey) {
-    return res.status(401).json({ success: false, error: 'Thiếu X-Vibepress-Key header. Vui lòng nhập API Key trong cài đặt plugin.' });
+    return res.status(401).json({
+      success: false,
+      error:
+        "Thiếu X-Vibepress-Key header. Vui lòng nhập API Key trong cài đặt plugin.",
+    });
   }
   if (!siteUrl) {
-    return res.status(400).json({ success: false, error: 'siteUrl is required' });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteUrl is required" });
   }
 
   // Validate API key — phải thuộc về 1 user trong hệ thống
-  const user = await queryOne('SELECT id FROM users WHERE api_key = ?', [apiKey]);
+  const user = await queryOne("SELECT id FROM users WHERE api_key = ?", [
+    apiKey,
+  ]);
   if (!user) {
-    console.warn(`[WP] register FAILED — invalid API key ${apiKey.slice(0, 8)}…`);
-    return res.status(401).json({ success: false, error: 'API Key không hợp lệ. Kiểm tra lại trong trang tài khoản Vibepress.' });
+    console.warn(
+      `[WP] register FAILED — invalid API key ${apiKey.slice(0, 8)}…`,
+    );
+    return res.status(401).json({
+      success: false,
+      error:
+        "API Key không hợp lệ. Kiểm tra lại trong trang tài khoản Vibepress.",
+    });
   }
 
   try {
@@ -420,30 +491,40 @@ async function registerWpSite(req, res) {
       [
         user.id,
         apiKey,
-        siteName   ?? existingSite.siteName,
-        wpVersion  ?? existingSite.wpVersion,
+        siteName ?? existingSite.siteName,
+        wpVersion ?? existingSite.wpVersion,
         adminEmail ?? existingSite.adminEmail,
         existingSite.siteId,
       ],
     );
 
-    const githubRepo = existingSite.wpRepoUrl.replace('https://github.com/', '');
-    console.log(`[WP] register (reconnect) OK — siteUrl=${siteUrl} userId=${user.id}`);
-    res.status(200).json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: false });
+    const githubRepo = existingSite.wpRepoUrl.replace(
+      "https://github.com/",
+      "",
+    );
+    console.log(
+      `[WP] register (reconnect) OK — siteUrl=${siteUrl} userId=${user.id}`,
+    );
+    res
+      .status(200)
+      .json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: false });
     triggerDbSync(existingSite.siteId, siteUrl, apiKey);
     return;
   }
 
   // FIRST CONNECT — tạo GitHub repo mới
-  const siteId     = `wp-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-  const repoSuffix = slugify(siteName || siteUrl).slice(0, 20) || 'site';
-  const repoName   = `wp-site-${repoSuffix}-${siteId.slice(-8)}`;
+  const siteId = `wp-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const repoSuffix = slugify(siteName || siteUrl).slice(0, 20) || "site";
+  const repoName = `wp-site-${repoSuffix}-${siteId.slice(-8)}`;
   let wpRepo;
   try {
     wpRepo = await createGithubRepo(repoName);
     console.log(`[WP] register — created GitHub repo: ${wpRepo.htmlUrl}`);
   } catch (e) {
-    console.error(`[WP] register FAILED — could not create GitHub repo:`, e.message);
+    console.error(
+      `[WP] register FAILED — could not create GitHub repo:`,
+      e.message,
+    );
     return res.status(500).json({
       success: false,
       error: `Failed to create GitHub repo: ${e.response?.data?.message || e.message}`,
@@ -453,13 +534,27 @@ async function registerWpSite(req, res) {
   await query(
     `INSERT INTO wp_sites (site_id, user_id, site_url, site_name, wp_version, admin_email, api_key, wp_repo_name, wp_repo_url)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [siteId, user.id, siteUrl, siteName ?? null, wpVersion ?? null, adminEmail ?? null, apiKey, wpRepo.name, wpRepo.htmlUrl],
+    [
+      siteId,
+      user.id,
+      siteUrl,
+      siteName ?? null,
+      wpVersion ?? null,
+      adminEmail ?? null,
+      apiKey,
+      wpRepo.name,
+      wpRepo.htmlUrl,
+    ],
   );
 
-  console.log(`[WP] register (first connect) OK — siteUrl=${siteUrl} siteId=${siteId} userId=${user.id}`);
+  console.log(
+    `[WP] register (first connect) OK — siteUrl=${siteUrl} siteId=${siteId} userId=${user.id}`,
+  );
 
-  const githubRepo = wpRepo.htmlUrl.replace('https://github.com/', '');
-  res.status(200).json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: true });
+  const githubRepo = wpRepo.htmlUrl.replace("https://github.com/", "");
+  res
+    .status(200)
+    .json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: true });
   triggerDbSync(siteId, siteUrl, apiKey);
 }
 
@@ -473,12 +568,16 @@ async function getToken(req, res) {
   const apiKey = req.headers["x-vibepress-key"];
 
   if (!apiKey) {
-    return res.status(401).json({ success: false, error: "Missing X-Vibepress-Key header" });
+    return res
+      .status(401)
+      .json({ success: false, error: "Missing X-Vibepress-Key header" });
   }
 
   const site = await findSiteByApiKey(apiKey);
   if (!site) {
-    console.warn(`[WP] get-token FAILED — invalid API key ${apiKey.slice(0, 8)}…`);
+    console.warn(
+      `[WP] get-token FAILED — invalid API key ${apiKey.slice(0, 8)}…`,
+    );
     return res.status(401).json({ success: false, error: "Invalid API key" });
   }
 
@@ -495,31 +594,43 @@ async function getToken(req, res) {
 async function syncComplete(req, res) {
   const apiKey = req.headers["x-vibepress-key"];
   if (!apiKey) {
-    return res.status(401).json({ success: false, error: "Missing X-Vibepress-Key header" });
+    return res
+      .status(401)
+      .json({ success: false, error: "Missing X-Vibepress-Key header" });
   }
 
   const site = await findSiteByApiKey(apiKey);
   if (!site) {
-    console.warn(`[WP] sync-complete FAILED — invalid API key ${apiKey.slice(0, 8)}…`);
+    console.warn(
+      `[WP] sync-complete FAILED — invalid API key ${apiKey.slice(0, 8)}…`,
+    );
     return res.status(401).json({ success: false, error: "Invalid API key" });
   }
 
-  const { themeName, synced, failed, success: syncSuccess, syncedAt } = req.body ?? {};
+  const {
+    themeName,
+    synced,
+    failed,
+    success: syncSuccess,
+    syncedAt,
+  } = req.body ?? {};
 
   const lastSync = {
-    themeName:  themeName  ?? null,
-    synced:     synced     ?? 0,
-    failed:     failed     ?? 0,
-    success:    syncSuccess ?? false,
-    syncedAt:   syncedAt   ?? new Date().toISOString(),
+    themeName: themeName ?? null,
+    synced: synced ?? 0,
+    failed: failed ?? 0,
+    success: syncSuccess ?? false,
+    syncedAt: syncedAt ?? new Date().toISOString(),
   };
 
-  await query(
-    'UPDATE wp_sites SET last_sync = ? WHERE site_id = ?',
-    [JSON.stringify(lastSync), site.siteId],
-  );
+  await query("UPDATE wp_sites SET last_sync = ? WHERE site_id = ?", [
+    JSON.stringify(lastSync),
+    site.siteId,
+  ]);
 
-  console.log(`[WP] sync-complete OK — site=${site.siteUrl} synced=${synced} failed=${failed}`);
+  console.log(
+    `[WP] sync-complete OK — site=${site.siteUrl} synced=${synced} failed=${failed}`,
+  );
   return res.status(200).json({ success: true });
 }
 
@@ -532,17 +643,21 @@ async function getReposByEmail(req, res) {
   const userId = req.user.id;
 
   const rows = await query(
-    'SELECT * FROM wp_sites WHERE user_id = ? ORDER BY registered_at DESC',
+    "SELECT * FROM wp_sites WHERE user_id = ? ORDER BY registered_at DESC",
     [userId],
   );
 
   const repos = rows.map((r) => ({
-    siteId:       r.site_id,
-    siteUrl:      r.site_url,
-    siteName:     r.site_name,
-    wpRepoName:   r.wp_repo_name,
-    wpRepoUrl:    r.wp_repo_url,
-    clonedDb:     r.cloned_db ? (typeof r.cloned_db === 'string' ? JSON.parse(r.cloned_db) : r.cloned_db) : null,
+    siteId: r.site_id,
+    siteUrl: r.site_url,
+    siteName: r.site_name,
+    wpRepoName: r.wp_repo_name,
+    wpRepoUrl: r.wp_repo_url,
+    clonedDb: r.cloned_db
+      ? typeof r.cloned_db === "string"
+        ? JSON.parse(r.cloned_db)
+        : r.cloned_db
+      : null,
     registeredAt: r.registered_at,
   }));
 
@@ -553,17 +668,24 @@ async function getDBinfoBySiteId(req, res) {
   const { siteId } = req.query;
 
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId query param is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId query param is required" });
   }
 
-  const row = await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]);
+  const row = await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [
+    siteId,
+  ]);
   if (!row) {
-    return res.status(404).json({ success: false, error: "No site found for this siteId" });
+    return res
+      .status(404)
+      .json({ success: false, error: "No site found for this siteId" });
   }
 
   const site = normalizeSite(row);
+
   return res.status(200).json({
-    themeGithubUrl:     site.wpRepoUrl,
+    themeGithubUrl: site.wpRepoUrl,
     dbConnectionString: site.clonedDb?.connectionString ?? null,
   });
 }
@@ -575,10 +697,14 @@ async function getDBinfoBySiteId(req, res) {
 async function getSqlDumpTables(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
-  const site = normalizeSite(await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]));
+  const site = normalizeSite(
+    await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [siteId]),
+  );
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
@@ -599,10 +725,14 @@ async function getSqlDumpTables(req, res) {
 async function getSqlDumpRows(req, res) {
   const { siteId, table, offset, limit } = req.query;
   if (!siteId || !table) {
-    return res.status(400).json({ success: false, error: "siteId and table are required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId and table are required" });
   }
 
-  const site = normalizeSite(await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]));
+  const site = normalizeSite(
+    await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [siteId]),
+  );
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
@@ -632,10 +762,14 @@ async function getSqlDumpRows(req, res) {
 async function getSqlDumpFullTable(req, res) {
   const { siteId, table } = req.query;
   if (!siteId || !table) {
-    return res.status(400).json({ success: false, error: "siteId and table are required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId and table are required" });
   }
 
-  const site = normalizeSite(await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]));
+  const site = normalizeSite(
+    await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [siteId]),
+  );
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
@@ -659,10 +793,14 @@ async function getSqlDumpFullTable(req, res) {
 async function getSqlDumpAll(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
-  const site = normalizeSite(await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]));
+  const site = normalizeSite(
+    await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [siteId]),
+  );
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
@@ -699,10 +837,14 @@ async function getSqlDumpAll(req, res) {
 async function createSiteDb(req, res) {
   const { siteId } = req.query;
   if (!siteId) {
-    return res.status(400).json({ success: false, error: "siteId is required" });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteId is required" });
   }
 
-  const site = normalizeSite(await queryOne('SELECT * FROM wp_sites WHERE site_id = ?', [siteId]));
+  const site = normalizeSite(
+    await queryOne("SELECT * FROM wp_sites WHERE site_id = ?", [siteId]),
+  );
   if (!site) {
     return res.status(404).json({ success: false, error: "Site not found" });
   }
@@ -713,20 +855,30 @@ async function createSiteDb(req, res) {
 
   try {
     // 1. Dump SQL từ WP
-    const tables = await dumpAllTables(site.siteUrl, site.apiKey);
+    const { tables, resolvedUrl } = await dumpAllTablesWithFallback(
+      site.siteUrl,
+      site.apiKey,
+    );
+    if (resolvedUrl !== site.siteUrl) {
+      console.log(
+        `[CreateDb] using fallback url — siteId=${siteId} url=${resolvedUrl}`,
+      );
+    }
     const sql = dumpToSql(tables);
     fs.writeFileSync(dumpPath, sql, "utf8");
     console.log(`[CreateDb] dump saved — ${dumpPath}`);
 
     // 2. Tạo database trên local MySQL và import
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
-    console.log(`[CreateDb] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+    console.log(
+      `[CreateDb] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`,
+    );
 
     // 3. Lưu vào MySQL
-    await query(
-      'UPDATE wp_sites SET cloned_db = ? WHERE site_id = ?',
-      [JSON.stringify(dbInfo), siteId],
-    );
+    await query("UPDATE wp_sites SET cloned_db = ? WHERE site_id = ?", [
+      JSON.stringify(dbInfo),
+      siteId,
+    ]);
 
     return res.status(200).json({ success: true, clonedDb: dbInfo });
   } catch (e) {
@@ -741,27 +893,34 @@ async function createSiteDb(req, res) {
 // Backend fetch post data từ plugin rồi REPLACE INTO / DELETE trên local MySQL.
 // -------------------------------------------------------
 async function notifyContentChange(req, res) {
-  const apiKey = req.headers['x-vibepress-key'];
+  const apiKey = req.headers["x-vibepress-key"];
   const { siteUrl, postId, action } = req.body ?? {};
 
   if (!postId || !siteUrl) {
-    return res.status(400).json({ success: false, error: 'siteUrl and postId are required' });
+    return res
+      .status(400)
+      .json({ success: false, error: "siteUrl and postId are required" });
   }
 
   const site = normalizeSite(
-    await queryOne('SELECT * FROM wp_sites WHERE site_url = ? AND api_key = ?', [siteUrl, apiKey]),
+    await queryOne(
+      "SELECT * FROM wp_sites WHERE site_url = ? AND api_key = ?",
+      [siteUrl, apiKey],
+    ),
   );
   if (!site) {
-    return res.status(401).json({ success: false, error: 'Unauthorized' });
+    return res.status(401).json({ success: false, error: "Unauthorized" });
   }
 
   // Trả ngay để plugin không bị block
   res.status(202).json({ success: true });
 
   try {
-    if (action === 'delete') {
+    if (action === "delete") {
       await deletePostFromLocalDb(site.siteId, postId);
-      console.log(`[ContentSync] deleted postId=${postId} from local DB — siteId=${site.siteId}`);
+      console.log(
+        `[ContentSync] deleted postId=${postId} from local DB — siteId=${site.siteId}`,
+      );
       return;
     }
 
@@ -769,16 +928,21 @@ async function notifyContentChange(req, res) {
     const response = await axios.get(
       `${siteUrl}/wp-json/vibepress/v1/post-data`,
       {
-        params:  { post_id: postId },
-        headers: { 'X-Vibepress-Key': site.apiKey },
+        params: { post_id: postId },
+        headers: { "X-Vibepress-Key": site.apiKey },
         timeout: 15000,
-      }
+      },
     );
 
     await syncPostToLocalDb(site.siteId, response.data);
-    console.log(`[ContentSync] synced postId=${postId} to local DB — siteId=${site.siteId}`);
+    console.log(
+      `[ContentSync] synced postId=${postId} to local DB — siteId=${site.siteId}`,
+    );
   } catch (e) {
-    console.error(`[ContentSync] FAILED postId=${postId} siteId=${site.siteId}:`, e.message);
+    console.error(
+      `[ContentSync] FAILED postId=${postId} siteId=${site.siteId}:`,
+      e.message,
+    );
   }
 }
 
@@ -869,10 +1033,13 @@ async function getWpSitePages(req, res) {
   }
 
   try {
-    const response = await axiosGetWithFallback(`${siteUrl}/wp-json/wp/v2/pages`, {
-      params: { per_page: 100, _fields: "id,title,link,slug,status" },
-      timeout: 15000,
-    });
+    const response = await axiosGetWithFallback(
+      `${siteUrl}/wp-json/wp/v2/pages`,
+      {
+        params: { per_page: 100, _fields: "id,title,link,slug,status" },
+        timeout: 15000,
+      },
+    );
 
     // Normalize page links to use the same origin as siteUrl.
     // WordPress REST API returns `link` based on its own configured siteurl,
@@ -923,10 +1090,13 @@ async function getWpAuthCookie(siteUrl, apiKey) {
     return cached.cookie;
 
   try {
-    const res = await axiosGetWithFallback(`${siteUrl}/wp-json/vibepress/v1/auth-cookie`, {
-      headers: { "X-Vibepress-Key": apiKey },
-      timeout: 15000,
-    });
+    const res = await axiosGetWithFallback(
+      `${siteUrl}/wp-json/vibepress/v1/auth-cookie`,
+      {
+        headers: { "X-Vibepress-Key": apiKey },
+        timeout: 15000,
+      },
+    );
 
     const { cookieName, cookieValue, expiresAt } = res.data;
     const cookie = `${cookieName}=${cookieValue}`;
@@ -967,7 +1137,8 @@ async function proxyWpAsset(req, res) {
       maxRedirects: 5,
     });
 
-    const contentType = response.headers["content-type"] || "application/octet-stream";
+    const contentType =
+      response.headers["content-type"] || "application/octet-stream";
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Cache-Control", "public, max-age=86400");
@@ -1014,9 +1185,14 @@ async function proxyWpPage(req, res) {
       /(<head[^>]*>)/i,
       `$1\n  <base href="${targetUrl.origin}/">`,
     );
+    html = injectWpPreviewMetadata(html, targetUrl.toString());
 
     // Build a fresh response — intentionally omits X-Frame-Options and
     // Content-Security-Policy that WordPress/WooCommerce would send.
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   } catch (error) {

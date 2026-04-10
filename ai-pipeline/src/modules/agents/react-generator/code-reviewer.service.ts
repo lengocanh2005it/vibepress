@@ -44,6 +44,7 @@ export interface ReviewInput {
   tokens?: ThemeTokens;
   repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
+  editRequestContextNote?: string;
   logPath?: string;
   jobId?: string;
 }
@@ -64,6 +65,7 @@ export interface SectionReviewInput {
   tokens?: ThemeTokens;
   repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
+  editRequestContextNote?: string;
   logPath?: string;
   jobId?: string;
 }
@@ -126,6 +128,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       jobId,
     } = input;
@@ -235,6 +238,7 @@ export class CodeReviewerService {
           tokens,
           repoManifest,
           componentPlan: promptContext,
+          editRequestContextNote,
           logPath,
           logLabel: 'precomputed-plan',
           systemPrompt: componentSystemPrompt,
@@ -394,6 +398,7 @@ export class CodeReviewerService {
             route: componentPlan?.route,
             isDetail: componentPlan?.isDetail,
             dataNeeds: visualDataNeeds,
+            editRequestContextNote,
           });
 
         try {
@@ -429,6 +434,7 @@ export class CodeReviewerService {
               tokens,
               repoManifest,
               componentPlan: promptContext,
+              editRequestContextNote,
               logPath,
               logLabel: 'visual-plan',
               systemPrompt: componentSystemPrompt,
@@ -549,6 +555,7 @@ export class CodeReviewerService {
         tokens,
         repoManifest,
         componentPlan: promptContext,
+        editRequestContextNote,
         logPath,
         logLabel: 'direct-ai',
         systemPrompt: componentSystemPrompt,
@@ -735,6 +742,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       jobId,
     } = input;
@@ -757,6 +765,7 @@ export class CodeReviewerService {
       repoManifest,
       content,
       componentPlan: promptContext,
+      editRequestContextNote,
     });
 
     let code = '';
@@ -1023,6 +1032,7 @@ export class CodeReviewerService {
     templateSource: string;
     modelName: string;
     componentPlan: ComponentPromptContext;
+    editRequestContextNote?: string;
     logPath?: string;
   }): Promise<{
     code: string;
@@ -1030,8 +1040,14 @@ export class CodeReviewerService {
     attemptsUsed: number;
     lastError?: string;
   }> {
-    const { componentName, templateSource, modelName, componentPlan, logPath } =
-      input;
+    const {
+      componentName,
+      templateSource,
+      modelName,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+    } = input;
 
     const frame = this.frameGenerator.generateFrame({
       componentName,
@@ -1062,6 +1078,7 @@ export class CodeReviewerService {
         templateSource,
         visualPlan: componentPlan.visualPlan,
         componentType: componentPlan.type,
+        editRequestContextNote,
         retryError: attempt > 1 ? lastError : undefined,
         previousFragment: attempt > 1 ? lastFragment : undefined,
       });
@@ -1129,6 +1146,7 @@ export class CodeReviewerService {
     tokens?: ThemeTokens;
     repoManifest?: RepoThemeManifest;
     componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
     logPath?: string;
     logLabel: string;
     systemPrompt: string;
@@ -1150,6 +1168,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       logLabel,
       systemPrompt,
@@ -1179,6 +1198,7 @@ export class CodeReviewerService {
         templateSource,
         modelName,
         componentPlan,
+        editRequestContextNote,
         logPath,
       });
       if (frameResult.isValid) {
@@ -1212,6 +1232,7 @@ export class CodeReviewerService {
         tokens,
         repoManifest,
         componentPlan,
+        editRequestContextNote,
         attempt > 1
           ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
           : undefined,

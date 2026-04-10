@@ -4,6 +4,8 @@ import { appendFile, mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
@@ -93,6 +95,7 @@ export class ReactGeneratorService {
     content: DbContentResult;
     plan?: PlanResult;
     repoManifest?: RepoThemeManifest;
+    editRequest?: PipelineEditRequestDto;
     jobId?: string;
     logPath?: string;
     /** Per-step model overrides. undefined fields fall back to llmFactory.getModel(). */
@@ -107,6 +110,7 @@ export class ReactGeneratorService {
       content,
       plan,
       repoManifest,
+      editRequest,
       jobId = 'unknown',
       logPath,
       modelConfig,
@@ -119,7 +123,15 @@ export class ReactGeneratorService {
     const reviewCodeModel = modelConfig?.reviewCode ?? codeGeneratorModel;
     const fixAgentModel = modelConfig?.fixAgent ?? reviewCodeModel;
 
-    const systemPrompt = buildPlanPrompt(theme, content, repoManifest);
+    const systemPrompt = buildPlanPrompt(
+      theme,
+      content,
+      repoManifest,
+      buildEditRequestContextNote(editRequest, {
+        audience: 'system',
+        maxAttachments: 2,
+      }),
+    );
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
 
     const pagesCount = theme.templates.length;
@@ -233,6 +245,7 @@ export class ReactGeneratorService {
             tokens,
             themeType: theme.type,
             componentPlan,
+            editRequest,
             repoManifest,
             logPath,
             jobId,
@@ -284,6 +297,7 @@ export class ReactGeneratorService {
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
     componentPlan?: PlanResult[number];
+    editRequest?: PipelineEditRequestDto;
     repoManifest?: RepoThemeManifest;
     logPath?: string;
     jobId?: string;
@@ -298,6 +312,7 @@ export class ReactGeneratorService {
       tokens,
       themeType,
       componentPlan,
+      editRequest,
       repoManifest,
       logPath,
       jobId,
@@ -384,6 +399,11 @@ export class ReactGeneratorService {
         tokens,
         repoManifest,
         componentPlan,
+        editRequestContextNote: buildEditRequestContextNote(editRequest, {
+          audience: 'codegen',
+          componentName,
+          route: componentPlan?.route,
+        }),
         logPath,
         jobId,
       });
@@ -457,6 +477,11 @@ export class ReactGeneratorService {
             tokens,
             repoManifest,
             componentPlan,
+            editRequestContextNote: buildEditRequestContextNote(editRequest, {
+              audience: 'section',
+              componentName,
+              route: componentPlan?.route,
+            }),
             logPath,
             jobId,
           });
@@ -535,23 +560,54 @@ export class ReactGeneratorService {
     feedback: string;
     modelConfig?: { fixAgent?: string };
     logPath?: string;
+    fixMode?: 'full' | 'syntax-only';
   }): Promise<GeneratedComponent> {
-    const { component, plan, feedback, modelConfig, logPath } = input;
+    const {
+      component,
+      plan,
+      feedback,
+      modelConfig,
+      logPath,
+      fixMode = 'full',
+    } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
+    const isProtectedDeterministicSharedPartial =
+      component.generationMode === 'deterministic' &&
+      /^(Header|Footer|Navigation|Nav)$/i.test(component.name);
+
+    if (isProtectedDeterministicSharedPartial && fixMode !== 'syntax-only') {
+      this.logger.log(
+        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure`,
+      );
+      await this.logToFile(
+        logPath,
+        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure. Feedback: ${feedback}`,
+      );
+      return this.attachPlanContext(component, componentPlan);
+    }
+
+    const effectiveFeedback =
+      fixMode === 'syntax-only'
+        ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
+        : feedback;
 
     this.logger.log(
-      `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+      fixMode === 'syntax-only'
+        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}"`
+        : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
     );
     await this.logToFile(
       logPath,
-      `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${feedback}`,
+      fixMode === 'syntax-only'
+        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${effectiveFeedback}`
+        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${effectiveFeedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
       fixAgentModel,
       component.code,
-      feedback,
+      effectiveFeedback,
       logPath,
       component.name,
     );

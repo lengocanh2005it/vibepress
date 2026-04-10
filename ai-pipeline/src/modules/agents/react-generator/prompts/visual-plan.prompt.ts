@@ -32,6 +32,7 @@ export function buildVisualPlanPrompt(input: {
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
   draftSections?: SectionPlan[];
+  editRequestContextNote?: string;
 }): { systemPrompt: string; userPrompt: string } {
   const {
     componentName,
@@ -46,6 +47,7 @@ export function buildVisualPlanPrompt(input: {
     sourceAnalysis,
     visualReference,
     draftSections,
+    editRequestContextNote,
   } = input;
 
   const palette = buildPaletteHint(tokens);
@@ -183,7 +185,7 @@ ${palette}
 
 ${imageHints}
 
-${draftHint ? `${draftHint}\n\n` : ''}## Template source
+${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}${draftHint ? `${draftHint}\n\n` : ''}## Template source
 
 ${templateSource}
 
@@ -466,11 +468,7 @@ function validateSectionDetailed(
   if (typeof raw.paddingStyle !== 'string') delete raw.paddingStyle;
   if (typeof raw.marginStyle !== 'string') delete raw.marginStyle;
   if (typeof raw.gapStyle !== 'string') delete raw.gapStyle;
-  for (const key of [
-    'headingStyle',
-    'subheadingStyle',
-    'bodyStyle',
-  ] as const) {
+  for (const key of ['headingStyle', 'subheadingStyle', 'bodyStyle'] as const) {
     const value = sanitizeTypographyStyle(raw[key]);
     if (value) raw[key] = value;
     else delete raw[key];
@@ -995,9 +993,7 @@ function escapeControlCharsInJsonStrings(input: string): string {
   return out;
 }
 
-function sanitizeTypographyStyle(
-  value: unknown,
-):
+function sanitizeTypographyStyle(value: unknown):
   | {
       fontSize?: string;
       fontFamily?: string;

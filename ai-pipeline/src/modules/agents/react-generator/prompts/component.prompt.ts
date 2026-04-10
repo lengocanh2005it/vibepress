@@ -417,7 +417,7 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   // Site info
   parts.push('### Site info (GET /api/site-info)');
   parts.push(
-    `${SITE_INFO_FIELDS[1]}: "${siteInfo.siteName}" | ${SITE_INFO_FIELDS[0]}: "${siteInfo.siteUrl}" | ${SITE_INFO_FIELDS[2]}: "${siteInfo.blogDescription}"`,
+    `${SITE_INFO_FIELDS[1]}: "${siteInfo.siteName}" | ${SITE_INFO_FIELDS[0]}: "${siteInfo.siteUrl}" | ${SITE_INFO_FIELDS[2]}: "${siteInfo.blogDescription}" | ${SITE_INFO_FIELDS[3]}: "${siteInfo.logoUrl ?? '(none)'}"`,
   );
   parts.push('');
 
@@ -868,6 +868,7 @@ export function buildComponentPrompt(
   tokens?: ThemeTokens,
   repoManifest?: RepoThemeManifest,
   componentPlan?: ComponentPromptContext,
+  editRequestContextNote?: string,
   retryError?: string,
 ): string {
   const normalizedDataNeeds = normalizeDataNeeds(componentPlan?.dataNeeds);
@@ -899,6 +900,7 @@ export function buildComponentPrompt(
     buildPlanContextNote(componentPlan, componentName),
     buildVisualPlanContextNote(componentPlan?.visualPlan),
     buildRepoManifestContextNote(repoManifest),
+    editRequestContextNote,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -963,6 +965,7 @@ export function buildSectionPrompt(input: {
   tokens?: ThemeTokens;
   repoManifest?: RepoThemeManifest;
   componentPlan?: ComponentPromptContext;
+  editRequestContextNote?: string;
   retryError?: string;
   content?: DbContentResult;
 }): string {
@@ -1006,6 +1009,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
     buildPlanContextNote(input.componentPlan),
     buildVisualPlanContextNote(input.componentPlan?.visualPlan),
     buildRepoManifestContextNote(input.repoManifest),
+    input.editRequestContextNote,
   ]
     .filter(Boolean)
     .join('\n\n');

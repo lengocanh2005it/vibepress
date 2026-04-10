@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { PipelineProgressEvent } from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
@@ -10,6 +10,51 @@ const SplitView: React.FC = () => {
   const siteId: string = location.state?.siteId || "";
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  const getConnectionBadge = () => {
+    switch (sse.connectionState) {
+      case "connected":
+        return {
+          label: "Connected",
+          className: "bg-green-500/20 text-green-600",
+          dotClassName: "bg-green-800 animate-pulse",
+        };
+      case "reconnecting":
+        return {
+          label: "Reconnecting",
+          className: "bg-amber-500/20 text-amber-600",
+          dotClassName: "bg-amber-500 animate-pulse",
+        };
+      case "connecting":
+        return {
+          label: "Connecting",
+          className: "bg-sky-500/20 text-sky-600",
+          dotClassName: "bg-sky-500 animate-pulse",
+        };
+      case "completed":
+        return {
+          label: "Completed",
+          className: "bg-green-500/20 text-green-600",
+          dotClassName: "bg-green-700",
+        };
+      case "error":
+        return {
+          label: "Error",
+          className: "bg-red-500/20 text-red-400",
+          dotClassName: "bg-red-500",
+        };
+      case "idle":
+      default:
+        return {
+          label: "Idle",
+          className: "bg-white/10 text-black/45",
+          dotClassName: "bg-white/30",
+        };
+    }
+  };
+
+  const connectionBadge = getConnectionBadge();
 
   const getStatusIcon = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
@@ -48,6 +93,77 @@ const SplitView: React.FC = () => {
 
   const completionEvent = getCompletionEvent();
   const latestEvent = sse.currentEvent;
+
+  useEffect(() => {
+    setElapsedSeconds(0);
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const isFinished =
+        sse.connectionState === "completed" ||
+        sse.currentEvent?.status === "done";
+      if (isFinished) {
+        window.clearInterval(timer);
+        return;
+      }
+
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [jobId, sse.connectionState, sse.currentEvent?.status]);
+
+  const elapsedLabel = useMemo(() => {
+    const hours = Math.floor(elapsedSeconds / 3600);
+    const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+    const seconds = elapsedSeconds % 60;
+
+    if (hours > 0) {
+      return [hours, minutes, seconds]
+        .map((value) => String(value).padStart(2, "0"))
+        .join(":");
+    }
+
+    return [minutes, seconds]
+      .map((value) => String(value).padStart(2, "0"))
+      .join(":");
+  }, [elapsedSeconds]);
+
+  useEffect(() => {
+    const shouldWarnBeforeRefresh = () =>
+      !completionEvent && sse.connectionState !== "completed";
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!shouldWarnBeforeRefresh()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isRefreshShortcut =
+        event.key === "F5" ||
+        ((event.ctrlKey || event.metaKey) &&
+          event.key.toLowerCase() === "r");
+
+      if (!isRefreshShortcut || !shouldWarnBeforeRefresh()) return;
+
+      event.preventDefault();
+      const confirmed = window.confirm(
+        "The AI pipeline is still running. Refreshing this page may interrupt your live monitoring. Do you want to refresh anyway?",
+      );
+
+      if (confirmed) {
+        window.location.reload();
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [completionEvent, sse.connectionState]);
 
   const [pushGitState, setPushGitState] = useState<{
     loading: boolean;
@@ -114,7 +230,7 @@ const SplitView: React.FC = () => {
         <div className="px-6 py-4 flex items-center justify-between bg-black/10">
           <div className="flex items-center gap-3">
             <div
-              className={`w-2 h-2 rounded-full ${sse.isConnected ? "bg-green-800 animate-pulse" : "bg-red-500"}`}
+              className={`w-2 h-2 rounded-full ${connectionBadge.dotClassName}`}
             />
             <div>
               <h2 className="font-headline text-lg tracking-tight">
@@ -129,10 +245,13 @@ const SplitView: React.FC = () => {
             <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
               Job: {jobId.slice(0, 8)}...
             </span>
+            <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
+              Elapsed: {elapsedLabel}
+            </span>
             <span
-              className={`text-xs font-mono px-2 py-1 rounded ${sse.isConnected ? "bg-green-500/20 text-green-600" : "bg-red-500/20 text-red-400"}`}
+              className={`text-xs font-mono px-2 py-1 rounded ${connectionBadge.className}`}
             >
-              {sse.isConnected ? "Connected" : "Disconnected"}
+              {connectionBadge.label}
             </span>
           </div>
         </div>
@@ -163,7 +282,11 @@ const SplitView: React.FC = () => {
           ) : null}
 
           {sse.isLoading && (
-            <p className="text-black/40">Connecting to the AI workflow stream...</p>
+            <p className="text-black/40">
+              {sse.connectionState === "reconnecting"
+                ? "Reconnecting to the AI workflow stream..."
+                : "Connecting to the AI workflow stream..."}
+            </p>
           )}
           {sse.error && (
             <div className="p-3 bg-red-500/20 border border-red-500/50 rounded text-red-400 text-xs">
@@ -173,9 +296,11 @@ const SplitView: React.FC = () => {
 
           {sse.allEvents.length === 0 && !sse.isLoading ? (
             <p className="text-black/50">
-              {sse.isConnected
+              {sse.connectionState === "connected"
                 ? "Connected. Waiting for the first agent update..."
-                : "Waiting for the workflow stream..."}
+                : sse.connectionState === "reconnecting"
+                  ? "Reconnecting to the workflow stream while the pipeline continues..."
+                  : "Waiting for the workflow stream..."}
             </p>
           ) : null}
 
@@ -265,7 +390,15 @@ const SplitView: React.FC = () => {
               <span className="material-symbols-outlined text-xs">
                 terminal
               </span>
-              {sse.isConnected ? "Agent Stream Live" : "Agent Stream Offline"}
+              {sse.connectionState === "connected"
+                ? "Agent Stream Live"
+                : sse.connectionState === "reconnecting"
+                  ? "Agent Stream Reconnecting"
+                  : sse.connectionState === "connecting"
+                    ? "Agent Stream Connecting"
+                    : sse.connectionState === "completed"
+                      ? "Agent Stream Completed"
+                      : "Agent Stream Offline"}
             </span>
             <span className="flex items-center gap-1">
               {sse.progress}% Workflow Progress

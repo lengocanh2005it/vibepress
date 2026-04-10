@@ -273,8 +273,8 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 - `/wp-content/uploads/` URLs → keep as-is
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
-- Site logo / site title in shared chrome → `<Link to="/" className="font-bold">{siteInfo.siteName}</Link>`, no `<img>`
-- `block: "site-logo"` → skip entirely
+- Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
+- Site title remains a separate `<Link to="/">{siteInfo.siteName}</Link>` when the template includes `site-title`
 - Preserve exact ORDER of blocks in JSON
 
 ## Responsive — MANDATORY (mobile-first: base=mobile, sm=640, md=768, lg=1024)
@@ -356,7 +356,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `site-title`            | for shared Header/Footer/Navigation partials render `<Link to="/">{siteInfo.siteName}</Link>`; in page components skip shared chrome entirely                 |
 | `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                  |
-| `site-logo`             | skip entirely                                                                                                                                                 |
+| `site-logo`             | render `<img src={node.src ?? siteInfo.logoUrl}>` ONLY when a real logo URL exists; otherwise render nothing                                                                                                |
 | `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                            |
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                       |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                       |

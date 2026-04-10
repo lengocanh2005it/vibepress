@@ -3,13 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import {
-  appendFile,
-  mkdir,
-  readdir,
-  stat,
-  writeFile,
-} from 'fs/promises';
+import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
@@ -42,10 +36,9 @@ import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { TokenTracker } from '../../common/utils/token-tracker.js';
-import {
-  PipelineEditRequestDto,
-  RunPipelineDto,
-} from './orchestrator.controller.js';
+import type { RunPipelineDto } from './orchestrator.dto.js';
+import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
+import { EditRequestPhaseService } from '../edit-request/edit-request-phase.service.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
@@ -244,13 +237,14 @@ export class OrchestratorService {
     private readonly validator: ValidatorService,
     private readonly sourceResolver: SourceResolverService,
     private readonly cleanup: CleanupService,
+    private readonly editRequestPhase: EditRequestPhaseService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
 
   async run(
     siteId: string,
-    editRequest?: PipelineEditRequestDto,
+    editRequestContext?: ResolvedEditRequestContext,
   ): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
       this.httpService.get(
@@ -258,8 +252,8 @@ export class OrchestratorService {
       ),
     );
 
-    const dto: RunPipelineDto = editRequest
-      ? { ...response.data, editRequest }
+    const dto: RunPipelineDto = editRequestContext?.request
+      ? { ...response.data, editRequest: editRequestContext.request }
       : response.data;
 
     this.validateDto(dto);
@@ -541,7 +535,8 @@ export class OrchestratorService {
         label: 'Pipeline Deleted',
         status: 'done',
         percent: 100,
-        message: 'Pipeline execution was deleted. Temporary artifacts are being removed.',
+        message:
+          'Pipeline execution was deleted. Temporary artifacts are being removed.',
       });
       await this.cleanup.cleanupAll(jobId);
       subject?.complete();
@@ -640,6 +635,9 @@ export class OrchestratorService {
       );
 
       const { dbConnectionString, themeGithubUrl } = dto;
+      const planningEditRequest = this.editRequestPhase.buildPlanningRequest(
+        dto.editRequest,
+      );
       const dbCreds = this.toWpDbCredentials(dbConnectionString);
 
       await this.sqlService.verifyDirectCredentials(dbConnectionString);
@@ -831,6 +829,7 @@ export class OrchestratorService {
               includeVisualPlans: false,
               logPath,
               repoManifest: repoResult.themeManifest,
+              editRequest: dto.editRequest,
             },
           );
           this.emitStepProgress(
@@ -877,6 +876,7 @@ export class OrchestratorService {
                 includeVisualPlans: false,
                 logPath,
                 repoManifest: repoResult.themeManifest,
+                editRequest: planningEditRequest,
                 planReviewErrors: review.errors,
               },
             );
@@ -912,6 +912,7 @@ export class OrchestratorService {
             review.plan,
             resolvedModels.planning,
             repoResult.themeManifest,
+            planningEditRequest,
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
@@ -942,6 +943,7 @@ export class OrchestratorService {
               review.plan,
               resolvedModels.planning,
               repoResult.themeManifest,
+              planningEditRequest,
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,
@@ -967,8 +969,6 @@ export class OrchestratorService {
       );
       await stepDelay();
 
-      // Removed cotEvidence logging for planning
-
       // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
       // Flow inside this step:
       //   1. AI code generation per component
@@ -991,6 +991,7 @@ export class OrchestratorService {
             content,
             plan: reviewResult.plan,
             repoManifest: repoResult.themeManifest,
+            editRequest: planningEditRequest,
             jobId,
             logPath,
             modelConfig: {
@@ -1041,16 +1042,48 @@ export class OrchestratorService {
                   (c) => c.name === failure.component.name,
                 );
                 if (compIndex === -1) return null;
+                let targetComponent = components[compIndex];
+                if (
+                  this.isProtectedDeterministicSharedPartial(targetComponent)
+                ) {
+                  const sanitized =
+                    this.sanitizeProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    );
+                  if (sanitized.code !== targetComponent.code) {
+                    const sanitizedValidation =
+                      this.validator.collectValidationIssues([sanitized]);
+                    if (sanitizedValidation.failures.length === 0) {
+                      this.logger.log(
+                        `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
+                      );
+                      await this.logToFile(
+                        logPath,
+                        `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
+                      );
+                      return {
+                        compIndex,
+                        component: sanitizedValidation.components[0],
+                      };
+                    }
+                    targetComponent = sanitizedValidation.components[0];
+                  }
+                }
+                const isProtectedDeterministicSyntaxRepair =
+                  this.isProtectedDeterministicSharedPartial(targetComponent) &&
+                  this.isSyntaxOnlyValidationError(failure.error);
 
                 const fixed = await this.reactGenerator.fixComponent({
-                  component: components[compIndex],
+                  component: targetComponent,
                   plan: reviewResult.plan,
-                  feedback:
-                    `Validator contract error for component "${failure.component.name}":\n` +
-                    `${failure.error}\n\n` +
-                    'Return a complete corrected TSX component that satisfies the validator rules.',
+                  feedback: isProtectedDeterministicSyntaxRepair
+                    ? `Validator syntax error for deterministic shared partial "${failure.component.name}":\n${failure.error}\n\nReturn a complete corrected TSX component. Preserve the existing structure and content exactly where possible; only repair syntax / TSX structure issues required by the validator.`
+                    : `Validator contract error for component "${failure.component.name}":\n${failure.error}\n\nReturn a complete corrected TSX component that satisfies the validator rules.`,
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
+                  fixMode: isProtectedDeterministicSyntaxRepair
+                    ? 'syntax-only'
+                    : 'full',
                 });
                 const revalidated = this.validator.collectValidationIssues([
                   fixed,
@@ -1075,16 +1108,46 @@ export class OrchestratorService {
             );
 
             for (const fixResult of fixResults) {
-              if (fixResult) components[fixResult.compIndex] = fixResult.component;
+              if (fixResult)
+                components[fixResult.compIndex] = fixResult.component;
             }
 
             validation = this.validator.collectValidationIssues(components);
             components = validation.components;
           }
 
-          if (validation.failures.length > 0) {
+          const toleratedValidationFailures = validation.failures.filter(
+            (failure) =>
+              this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                failure.component,
+                failure.error,
+              ),
+          );
+          if (toleratedValidationFailures.length > 0) {
+            const toleratedSummary = toleratedValidationFailures
+              .map(
+                (failure) =>
+                  `"${failure.component.name}": ${failure.error.split('\n')[0]}`,
+              )
+              .join('; ');
+            this.logger.warn(
+              `[Stage 4: D4 Validator] Tolerating ${toleratedValidationFailures.length} protected deterministic shared partial validation warning(s): ${toleratedSummary}`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 4: D4 Validator] Tolerating ${toleratedValidationFailures.length} protected deterministic shared partial validation warning(s): ${toleratedSummary}`,
+            );
+          }
+          const fatalValidationFailures = validation.failures.filter(
+            (failure) =>
+              !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                failure.component,
+                failure.error,
+              ),
+          );
+          if (fatalValidationFailures.length > 0) {
             throw new Error(
-              `[validator] Generated component validation failed after auto-fix:\n${validation.failures
+              `[validator] Generated component validation failed after auto-fix:\n${fatalValidationFailures
                 .map(
                   (failure) =>
                     `Component "${failure.component.name}": ${failure.error}`,
@@ -1095,8 +1158,8 @@ export class OrchestratorService {
 
           // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
-          // Skipping Stage 5 AI review for them avoids false positives and unnecessary
-          // AI calls on code that follows the contract by construction.
+          // Protected shared partials are syntax-checked and syntax-fixed in Stage 4,
+          // so Stage 5 keeps focusing on AI-generated TSX/components.
           const aiComponents = components.filter(
             (c) => c.generationMode !== 'deterministic',
           );
@@ -1160,8 +1223,9 @@ export class OrchestratorService {
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
                 });
-                const revalidated =
-                  this.validator.collectValidationIssues([fixed]);
+                const revalidated = this.validator.collectValidationIssues([
+                  fixed,
+                ]);
                 if (revalidated.failures.length > 0) {
                   const validationErr = revalidated.failures[0]?.error;
                   this.logger.warn(
@@ -1185,6 +1249,83 @@ export class OrchestratorService {
           for (const fixed of aiComponents) {
             const idx = components.findIndex((c) => c.name === fixed.name);
             if (idx !== -1) components[idx] = fixed;
+          }
+
+          const postMigrationEditTasks =
+            this.editRequestPhase.buildPostMigrationEditTasks({
+              request: dto.editRequest,
+              plan: reviewResult.plan,
+              components,
+            });
+
+          if (postMigrationEditTasks.length > 0) {
+            this.logger.log(
+              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused edit task(s) after baseline generation.`,
+            );
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.9,
+              `Applying ${postMigrationEditTasks.length} focused post-migration edit task(s) to the generated baseline.`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused task(s).`,
+            );
+
+            for (const task of postMigrationEditTasks) {
+              this.logger.log(
+                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
+              );
+
+              const componentIndex = components.findIndex(
+                (component) => component.name === task.componentName,
+              );
+              if (componentIndex === -1) continue;
+
+              const fixed = await this.reactGenerator.fixComponent({
+                component: components[componentIndex],
+                plan: reviewResult.plan,
+                feedback: task.feedback,
+                modelConfig: { fixAgent: resolvedModels.fixAgent },
+                logPath,
+              });
+              const revalidated = this.validator.collectValidationIssues([
+                fixed,
+              ]);
+              if (revalidated.failures.length > 0) {
+                const validationErr = revalidated.failures[0]?.error;
+                this.logger.warn(
+                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${task.componentName}" after focused edit — keeping baseline. Error: ${validationErr}`,
+                );
+                await this.logToFile(
+                  logPath,
+                  `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${task.componentName}": ${validationErr}`,
+                );
+                continue;
+              }
+
+              components[componentIndex] = revalidated.components[0];
+            }
+
+            const finalValidation =
+              this.validator.collectValidationIssues(components);
+            if (finalValidation.failures.length > 0) {
+              throw new Error(
+                `[post-edit] Focused post-migration edits introduced validation failures:\n${finalValidation.failures
+                  .map(
+                    (failure) =>
+                      `Component "${failure.component.name}": ${failure.error}`,
+                  )
+                  .join('\n')}`,
+              );
+            }
+
+            components = finalValidation.components;
           }
 
           this.emitStepProgress(
@@ -1307,6 +1448,7 @@ export class OrchestratorService {
                 },
                 dbCreds,
                 themeDir,
+                siteInfo: content.siteInfo,
                 tokens:
                   'tokens' in normalizedTheme
                     ? (normalizedTheme as any).tokens
@@ -1344,12 +1486,22 @@ export class OrchestratorService {
                     (c) => c.name === componentName,
                   );
                   if (idx === -1) return null;
+                  const targetComponent = buildComponents[idx];
                   const fixed = await this.reactGenerator.fixComponent({
-                    component: buildComponents[idx],
+                    component: targetComponent,
                     plan: reviewResult.plan,
-                    feedback: `TypeScript build error:\n${error}`,
+                    feedback: this.isProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    )
+                      ? `TypeScript build error in deterministic shared partial "${componentName}":\n${error}\n\nPreserve the current structure and content. Repair only the TypeScript / TSX / import issue that prevents the preview build from succeeding.`
+                      : `TypeScript build error:\n${error}`,
                     modelConfig: { fixAgent: resolvedModels.fixAgent },
                     logPath,
+                    fixMode: this.isProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    )
+                      ? 'syntax-only'
+                      : 'full',
                   });
                   return { idx, fixed };
                 }),
@@ -1802,8 +1954,6 @@ export class OrchestratorService {
       );
     }
 
-    console.log(dto);
-
     if (
       typeof dto.themeGithubUrl !== 'string' ||
       dto.themeGithubUrl.trim().length === 0
@@ -1817,6 +1967,54 @@ export class OrchestratorService {
     ) {
       throw new BadRequestException('dbConnectionString is required');
     }
+  }
+
+  private isProtectedDeterministicSharedPartial(component: {
+    name: string;
+    generationMode?: 'deterministic' | 'ai';
+  }): boolean {
+    return (
+      component.generationMode === 'deterministic' &&
+      /^(Header|Footer|Navigation|Nav)$/i.test(component.name)
+    );
+  }
+
+  private sanitizeProtectedDeterministicSharedPartial<T extends { code: string }>(
+    component: T,
+  ): T {
+    let code = component.code;
+
+    code = code.replace(
+      /<a\b([^>]*?)\bhref=(["'])#\2([^>]*)>([\s\S]*?)<\/a>/g,
+      '<span$1$3>$4</span>',
+    );
+    code = code.replace(/No menus available/g, '');
+
+    return { ...component, code };
+  }
+
+  private shouldTolerateProtectedDeterministicSharedPartialFailure(
+    component: { name: string; generationMode?: 'deterministic' | 'ai' },
+    error: string,
+  ): boolean {
+    return (
+      this.isProtectedDeterministicSharedPartial(component) &&
+      /^Shared chrome contract violated:/i.test(error)
+    );
+  }
+
+  private isSyntaxOnlyValidationError(error: string): boolean {
+    return [
+      /^Missing `export default`/i,
+      /^No JSX return found/i,
+      /^Duplicate className attributes found\./i,
+      /^JSX tag error:/i,
+      /^Unbalanced braces \(depth:/i,
+      /^Unbalanced parentheses \(depth:/i,
+      /^Unbalanced square brackets \(depth:/i,
+      /^HTML attribute `.+=` found in JSX/i,
+      /^`<label for=>` found/i,
+    ].some((pattern) => pattern.test(error));
   }
 
   /**

@@ -13,12 +13,14 @@ import {
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
+import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
+import type { WpSiteInfo } from '../../sql/wp-query.service.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -58,11 +60,13 @@ export class PreviewBuilderService {
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
     themeDir?: string;
+    siteInfo?: WpSiteInfo;
     tokens?: ThemeTokens;
     plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
+    const { jobId, components, dbCreds, themeDir, siteInfo, tokens, plan } =
+      input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -95,6 +99,11 @@ export class PreviewBuilderService {
         destFontsDir,
       );
     }
+
+    const copiedLogoPublicPath = await this.copySiteLogoToPublic(
+      siteInfo?.logoUrl ?? null,
+      join(frontendDir, 'public', 'assets', 'images'),
+    );
 
     // 3. Write generated components từ AI (code in memory)
     // Relink WordPress image URLs từ /wp-content/uploads/ sang local /assets/images/
@@ -323,7 +332,7 @@ ${routesBlock}
     // server/.env — DB credentials + port
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n${copiedLogoPublicPath ? `SITE_LOGO_URL=${copiedLogoPublicPath}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss
@@ -571,6 +580,37 @@ ${fontEntries}
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async copySiteLogoToPublic(
+    logoUrl: string | null | undefined,
+    destImagesDir: string,
+  ): Promise<string | null> {
+    if (!logoUrl) return null;
+
+    try {
+      const url = new URL(logoUrl);
+      const originalName = basename(url.pathname) || 'site-logo';
+      const ext = extname(originalName) || '.png';
+      const safeExt = /^[.][a-zA-Z0-9]+$/.test(ext) ? ext : '.png';
+      const fileName = `site-logo${safeExt.toLowerCase()}`;
+      const destPath = join(destImagesDir, fileName);
+
+      await mkdir(destImagesDir, { recursive: true });
+      const response = await fetch(logoUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} while fetching ${logoUrl}`);
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      await writeFile(destPath, bytes);
+      this.logger.log(`Copied site logo to preview assets: ${destPath}`);
+      return `/assets/images/${fileName}`;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to copy site logo from "${logoUrl}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+      return null;
     }
   }
 

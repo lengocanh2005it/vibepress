@@ -15,6 +15,8 @@ import {
 } from '../../../common/utils/wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
+import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -91,6 +93,7 @@ export class PlannerService {
       includeVisualPlans?: boolean;
       logPath?: string;
       repoManifest?: RepoThemeManifest;
+      editRequest?: PipelineEditRequestDto;
       /** Errors from the previous plan-review pass — injected into the Phase A prompt so the LLM knows what to fix. */
       planReviewErrors?: string[];
     },
@@ -126,16 +129,24 @@ export class PlannerService {
     );
 
     const systemPrompt = this.buildSystemPrompt();
+    const editRequestContext = buildEditRequestContextNote(
+      options?.editRequest,
+      {
+        audience: 'planner',
+      },
+    );
     const userPrompt = options?.planReviewErrors?.length
       ? this.buildValidationFeedbackPrompt(
           options.planReviewErrors,
           templateNames,
+          editRequestContext,
         )
       : this.buildUserPrompt(
           theme,
           content,
           templateNames,
           options?.repoManifest,
+          editRequestContext,
         );
 
     let plan: PlanResult | null = null;
@@ -148,7 +159,7 @@ export class PlannerService {
       const prompt =
         attempt === 1
           ? userPrompt
-          : this.buildRetryPrompt(lastRaw, templateNames);
+          : this.buildRetryPrompt(lastRaw, templateNames, editRequestContext);
 
       const {
         text: raw,
@@ -291,6 +302,7 @@ export class PlannerService {
       globalPalette,
       globalTypography,
       options?.repoManifest,
+      options?.editRequest,
       resolvedModel,
       options?.logPath,
       jobId,
@@ -303,6 +315,7 @@ export class PlannerService {
     plan: PlanResult,
     modelName?: string,
     repoManifest?: RepoThemeManifest,
+    editRequest?: PipelineEditRequestDto,
   ): Promise<PlanResult> {
     const skipVisualPlan =
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
@@ -339,6 +352,7 @@ export class PlannerService {
       globalPalette,
       globalTypography,
       repoManifest,
+      editRequest,
       resolvedModel,
       undefined,
       undefined,
@@ -355,6 +369,7 @@ export class PlannerService {
     globalPalette: ColorPalette,
     globalTypography: TypographyTokens,
     repoManifest: RepoThemeManifest | undefined,
+    editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
     jobId?: string,
@@ -423,6 +438,7 @@ export class PlannerService {
               globalTypography,
               plan,
               repoManifest,
+              editRequest,
               modelName,
               logPath,
               browser,
@@ -462,6 +478,7 @@ export class PlannerService {
     globalTypography: TypographyTokens,
     fullPlan: PlanResult,
     repoManifest: RepoThemeManifest | undefined,
+    editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
     browser?: Awaited<ReturnType<typeof puppeteer.launch>> | null,
@@ -553,6 +570,11 @@ export class PlannerService {
             }
           : undefined,
         draftSections,
+        editRequestContextNote: buildEditRequestContextNote(editRequest, {
+          audience: 'visual-plan',
+          componentName: componentPlan.componentName,
+          route: componentPlan.route,
+        }),
       });
       const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';
@@ -1350,6 +1372,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     content: DbContentResult,
     _templateNames: string[],
     repoManifest?: RepoThemeManifest,
+    editRequestContext?: string,
   ): string {
     const lines: string[] = [];
     const templates =
@@ -1427,6 +1450,11 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     lines.push('');
 
     lines.push(`## Posts: ${content.posts.length} total`);
+
+    if (editRequestContext) {
+      lines.push('');
+      lines.push(editRequestContext);
+    }
 
     return lines.join('\n');
   }
@@ -1637,12 +1665,15 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
   private buildValidationFeedbackPrompt(
     errors: string[],
     templateNames: string[],
+    editRequestContext?: string,
   ): string {
     return `Your previous plan failed validation with these errors:
 
 ${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}
 
 Templates that MUST be planned: ${templateNames.join(', ')}
+
+${editRequestContext ? `\n${editRequestContext}\n` : ''}
 
 Fix all of the above errors and return a corrected JSON array. Key rules:
 - Every template must appear exactly once
@@ -1654,7 +1685,11 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
   }
 
-  private buildRetryPrompt(badRaw: string, templateNames: string[]): string {
+  private buildRetryPrompt(
+    badRaw: string,
+    templateNames: string[],
+    editRequestContext?: string,
+  ): string {
     const preview = badRaw.slice(0, 500);
     return `Your previous response could not be parsed as a valid JSON array.
 
@@ -1664,6 +1699,8 @@ ${preview}${badRaw.length > 500 ? '\n... (truncated)' : ''}
 \`\`\`
 
 Templates that MUST be planned: ${templateNames.join(', ')}
+
+${editRequestContext ? `\n${editRequestContext}\n` : ''}
 
 Return ONLY a valid JSON array — no markdown fences, no explanation, no text before or after the array.
 Each object must have: templateName, componentName, type ("page"|"partial"), route (string|null), dataNeeds (string[]), isDetail (boolean), description (string).`;

@@ -95,6 +95,31 @@ export interface UseSseState {
   currentEvent: PipelineProgressEvent | null;
   allEvents: PipelineProgressEvent[];
   progress: number;
+  connectionState:
+    | "idle"
+    | "connecting"
+    | "connected"
+    | "reconnecting"
+    | "completed"
+    | "error";
+}
+
+type PipelineJobStatus =
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "done"
+  | "error"
+  | "deleted";
+
+interface PipelineStatusResponse {
+  jobId: string;
+  status: PipelineJobStatus;
+  error?: string;
+  result?: {
+    previewUrl?: string;
+    metrics?: ProgressEventData["metrics"];
+  };
 }
 
 /**
@@ -114,10 +139,128 @@ export function useSse(
     currentEvent: null,
     allEvents: [],
     progress: 0,
+    connectionState: "idle",
   });
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const pipelineCompletedRef = useRef(false);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const disposedRef = useRef(false);
+
+  const clearReconnectTimeout = useCallback(() => {
+    if (reconnectTimeoutRef.current !== null) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  }, []);
+
+  const fetchPipelineStatus = useCallback(async () => {
+    const response = await fetch(`${apiUrl}/pipeline/status/${jobId}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch pipeline status (${response.status})`);
+    }
+    return (await response.json()) as PipelineStatusResponse;
+  }, [apiUrl, jobId]);
+
+  const pushSyntheticCompletionEvent = useCallback(
+    (status: PipelineStatusResponse) => {
+      if (!status.result?.previewUrl) return;
+
+      pipelineCompletedRef.current = true;
+
+      const completionEvent: PipelineProgressEvent = {
+        step: "11_done",
+        label: "Preview Ready",
+        status: "done",
+        percent: 100,
+        message: "Migration workflow is complete. Preview is ready.",
+        data: {
+          previewUrl: status.result.previewUrl,
+          metrics:
+            status.result.metrics ??
+            ({
+              summary: {
+                visual: {
+                  totalCompared: 0,
+                  passed: 0,
+                  failed: 0,
+                  passRate: 0,
+                  avgAccuracy: 0,
+                },
+                content: {
+                  total: 0,
+                  passed: 0,
+                  failed: 0,
+                  missing: 0,
+                  passRate: 0,
+                  avgOverall: 0,
+                },
+                overall: {
+                  visualAvgAccuracy: 0,
+                  contentAvgOverall: 0,
+                  visualPassRate: 0,
+                  contentPassRate: 0,
+                },
+                errors: {
+                  visual: null,
+                  content: null,
+                },
+              },
+              pages: [],
+            } as ProgressEventData["metrics"]),
+        },
+      };
+
+      setState((prev) => {
+        const alreadyHasCompletion = prev.allEvents.some(
+          (event) =>
+            event.step === "11_done" &&
+            event.status === "done" &&
+            event.data?.previewUrl === status.result?.previewUrl,
+        );
+
+        return {
+          ...prev,
+          isConnected: false,
+          isLoading: false,
+          error: null,
+          currentEvent: completionEvent,
+          allEvents: alreadyHasCompletion
+            ? prev.allEvents
+            : [...prev.allEvents, completionEvent],
+          progress: 100,
+          connectionState: "completed",
+        };
+      });
+    },
+    [],
+  );
+
+  const scheduleReconnect = useCallback(() => {
+    if (disposedRef.current) return;
+    clearReconnectTimeout();
+
+    const attempt = reconnectAttemptsRef.current + 1;
+    reconnectAttemptsRef.current = attempt;
+    const delayMs = Math.min(1000 * attempt, 5000);
+
+    setState((prev) => ({
+      ...prev,
+      isConnected: false,
+      isLoading: true,
+      error: null,
+      connectionState:
+        prev.allEvents.length > 0 || reconnectAttemptsRef.current > 0
+          ? "reconnecting"
+          : "connecting",
+    }));
+
+    reconnectTimeoutRef.current = window.setTimeout(() => {
+      if (disposedRef.current) return;
+      connect();
+    }, delayMs);
+  }, [clearReconnectTimeout]);
 
   /**
    * Connect đến SSE endpoint
@@ -128,6 +271,7 @@ export function useSse(
         ...prev,
         error: new Error("jobId is required"),
         isLoading: false,
+        connectionState: "error",
       }));
       return;
     }
@@ -136,19 +280,31 @@ export function useSse(
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
-    pipelineCompletedRef.current = false;
+    clearReconnectTimeout();
 
     const url = `${apiUrl}/pipeline/progress/${jobId}`;
 
     try {
+      setState((prev) => ({
+        ...prev,
+        isLoading: true,
+        error: null,
+        connectionState:
+          prev.allEvents.length > 0 || reconnectAttemptsRef.current > 0
+            ? "reconnecting"
+            : "connecting",
+      }));
+
       const eventSource = new EventSource(url);
 
       eventSource.onopen = () => {
+        reconnectAttemptsRef.current = 0;
         setState((prev) => ({
           ...prev,
           isConnected: true,
           isLoading: false,
           error: null,
+          connectionState: "connected",
         }));
       };
 
@@ -174,24 +330,52 @@ export function useSse(
       };
 
       eventSource.onerror = () => {
-        eventSource.close();
-        eventSourceRef.current = null;
+        const handleStreamError = async () => {
+          eventSource.close();
+          if (eventSourceRef.current === eventSource) {
+            eventSourceRef.current = null;
+          }
 
-        if (pipelineCompletedRef.current) {
-          // Server closed the stream after pipeline finished — not a real error
-          setState((prev) => ({
-            ...prev,
-            isConnected: false,
-            isLoading: false,
-          }));
-        } else {
-          setState((prev) => ({
-            ...prev,
-            error: new Error("Không thể kết nối tới server. Kiểm tra pipeline đang chạy không."),
-            isConnected: false,
-            isLoading: false,
-          }));
-        }
+          if (pipelineCompletedRef.current) {
+            setState((prev) => ({
+              ...prev,
+              isConnected: false,
+              isLoading: false,
+              error: null,
+              connectionState: "completed",
+            }));
+            return;
+          }
+
+          try {
+            const status = await fetchPipelineStatus();
+
+            if (status.status === "done") {
+              pushSyntheticCompletionEvent(status);
+              return;
+            }
+
+            if (status.status === "running" || status.status === "stopping") {
+              scheduleReconnect();
+              return;
+            }
+
+            setState((prev) => ({
+              ...prev,
+              error: new Error(
+                status.error ||
+                  `Pipeline stream stopped while job is ${status.status}.`,
+              ),
+              isConnected: false,
+              isLoading: false,
+              connectionState: "error",
+            }));
+          } catch {
+            scheduleReconnect();
+          }
+        };
+
+        void handleStreamError();
       };
 
       eventSourceRef.current = eventSource;
@@ -200,14 +384,23 @@ export function useSse(
         ...prev,
         error: err instanceof Error ? err : new Error(String(err)),
         isLoading: false,
+        connectionState: "error",
       }));
     }
-  }, [jobId, apiUrl]);
+  }, [
+    apiUrl,
+    clearReconnectTimeout,
+    fetchPipelineStatus,
+    jobId,
+    pushSyntheticCompletionEvent,
+    scheduleReconnect,
+  ]);
 
   /**
    * Disconnect từ SSE
    */
   const disconnect = useCallback(() => {
+    clearReconnectTimeout();
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
@@ -215,21 +408,26 @@ export function useSse(
     setState((prev) => ({
       ...prev,
       isConnected: false,
+      isLoading: false,
+      connectionState:
+        prev.connectionState === "completed" ? "completed" : "idle",
     }));
-  }, []);
+  }, [clearReconnectTimeout]);
 
   /**
    * Auto-connect khi jobId thay đổi
    */
   useEffect(() => {
+    disposedRef.current = false;
     if (jobId) {
       connect();
     }
 
     return () => {
+      disposedRef.current = true;
       disconnect();
     };
-  }, [jobId]);
+  }, [connect, disconnect, jobId]);
 
   return {
     ...state,

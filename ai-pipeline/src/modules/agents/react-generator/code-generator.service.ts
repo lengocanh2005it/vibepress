@@ -143,10 +143,12 @@ export class CodeGeneratorService {
       navIndex: 0,
       componentKind: /^footer/i.test(componentName) ? 'footer' : 'header',
     };
-    const rootTag = renderState.componentKind === 'footer' ? 'footer' : 'header';
+    const rootTag =
+      renderState.componentKind === 'footer' ? 'footer' : 'header';
     const fragment = this.renderBlockFaithfulNodes(nodes, ctx, renderState, 3);
     const lines: string[] = [
       "import React, { useEffect, useState } from 'react';",
+      "import { Link } from 'react-router-dom';",
       '',
       SHARED_INTERFACES,
       '',
@@ -189,7 +191,76 @@ export class CodeGeneratorService {
         '  const navigationMenus = menus.filter((menu) => Array.isArray(menu.items));',
       );
       lines.push(
-        '  const resolveNavigationMenu = (index: number) => navigationMenus[index] ?? navigationMenus[0] ?? null;',
+        "  const normalizeMenuLabel = (value: string) => value.toLowerCase().replace(/\\s+/g, ' ').trim();",
+      );
+      lines.push(
+        "  const primaryMenu = navigationMenus.find((menu) => menu.location === 'primary') ?? navigationMenus.find((menu) => menu.slug === 'primary') ?? navigationMenus[0] ?? null;",
+      );
+      lines.push(
+        "  const footerNavigationMenus = navigationMenus.filter((menu) => menu !== primaryMenu && menu.location !== 'primary' && menu.slug !== 'primary');",
+      );
+      lines.push(
+        '  const scoreMenuByHints = (menu: Menu, hintTitles: string[]) => {',
+      );
+      lines.push(
+        '    if (hintTitles.length === 0) return 0;',
+      );
+      lines.push(
+        '    const topLevelTitles = (menu.items ?? [])',
+      );
+      lines.push(
+        '      .filter((item) => item.parentId === 0)',
+      );
+      lines.push(
+        '      .map((item) => normalizeMenuLabel(item.title));',
+      );
+      lines.push(
+        '    return hintTitles.reduce((score, title) => {',
+      );
+      lines.push(
+        '      return score + (topLevelTitles.includes(normalizeMenuLabel(title)) ? 1 : 0);',
+      );
+      lines.push(
+        '    }, 0);',
+      );
+      lines.push(
+        '  };',
+      );
+      lines.push(
+        '  const resolveNavigationMenu = (hintTitles: string[] = [], index = 0, preferFooter = false) => {',
+      );
+      lines.push(
+        '    const hintedTitles = hintTitles.filter(Boolean);',
+      );
+      lines.push(
+        '    const pool = preferFooter',
+      );
+      lines.push(
+        '      ? (footerNavigationMenus.length > 0 ? footerNavigationMenus : navigationMenus.filter((menu) => menu !== primaryMenu))',
+      );
+      lines.push(
+        '      : (primaryMenu ? [primaryMenu, ...navigationMenus.filter((menu) => menu !== primaryMenu)] : navigationMenus);',
+      );
+      lines.push(
+        '    if (pool.length === 0) return null;',
+      );
+      lines.push(
+        '    const scored = pool',
+      );
+      lines.push(
+        '      .map((menu) => ({ menu, score: scoreMenuByHints(menu, hintedTitles) }))',
+      );
+      lines.push(
+        '      .sort((a, b) => b.score - a.score);',
+      );
+      lines.push(
+        '    if ((scored[0]?.score ?? 0) > 0) return scored[0]?.menu ?? null;',
+      );
+      lines.push(
+        '    return pool[index] ?? pool[0] ?? null;',
+      );
+      lines.push(
+        '  };',
       );
       lines.push(
         '  const renderMenuItems = (items: MenuItem[], parentId = 0, vertical = false): React.ReactNode =>',
@@ -206,10 +277,26 @@ export class CodeGeneratorService {
         '          <li key={item.id} className={vertical ? "flex flex-col gap-2" : "relative"}>',
       );
       lines.push(
-        '            <a href={toAppPath(item.url)} className="transition-opacity hover:opacity-75">',
+        '            {isInternalPath(item.url) ? (',
+      );
+      lines.push(
+        '              <Link to={toAppPath(item.url)} className="transition-opacity hover:opacity-75">',
+      );
+      lines.push(
+        '                {item.title}',
+      );
+      lines.push(
+        '              </Link>',
+      );
+      lines.push(
+        '            ) : (',
+      );
+      lines.push(
+        '              <a href={item.url} className="transition-opacity hover:opacity-75">',
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
+      lines.push('            )}');
       lines.push('            {hasChildren ? (');
       lines.push(
         '              <ul className={vertical ? "pl-4 flex flex-col gap-2" : "pl-4 mt-2 flex flex-col gap-2"}>',
@@ -224,7 +311,7 @@ export class CodeGeneratorService {
 
     lines.push('');
     lines.push('  const toAppPath = (url?: string) => {');
-    lines.push("    if (!url) return '#';");
+    lines.push("    if (!url) return '/';");
     lines.push('    try {');
     lines.push('      if (!siteInfo?.siteUrl) return url;');
     lines.push('      const site = new URL(siteInfo.siteUrl);');
@@ -238,6 +325,11 @@ export class CodeGeneratorService {
     lines.push('    } catch {');
     lines.push('      return url;');
     lines.push('    }');
+    lines.push('  };');
+    lines.push('');
+    lines.push('  const isInternalPath = (url?: string) => {');
+    lines.push('    const next = toAppPath(url);');
+    lines.push("    return next.startsWith('/');");
     lines.push('  };');
 
     if (needsSiteInfo) {
@@ -1181,10 +1273,7 @@ ${postCard}
       { padding: l.cardPadding },
       true,
     );
-    const colClass = this.responsiveGridColumnsClass(
-      s.columns,
-      s.columnWidths,
-    );
+    const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
     const cards = s.cards
       .map(
         (
@@ -1752,15 +1841,30 @@ ${indent}</div>`;
       case 'navigation':
         return this.renderBlockFaithfulNavigation(node, ctx, state, depth);
       case 'navigation-link': {
-        const href = node.href ?? '#';
-        return `${indent}<a href={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
-${childIndent}${node.text ?? href}
-${indent}</a>`;
+        const href = node.href?.trim() ?? '';
+        const hasUsableHref = href.length > 0 && href !== '#';
+        const nestedChildren =
+          node.children?.length && node.children.some((child) => child.block)
+            ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
+            : '';
+        return `${indent}<li className="relative">
+${hasUsableHref ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
+${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}    ${node.text ?? href}
+${childIndent}  </Link>
+${childIndent}) : (
+${childIndent}  <a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}    ${node.text ?? href}
+${childIndent}  </a>
+${childIndent})}` : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}  ${node.text ?? ''}
+${childIndent}</span>`}${nestedChildren}
+${indent}</li>`;
       }
       case 'site-title':
-        return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="font-semibold transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+        return `${indent}<Link to="/" className="font-semibold transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
 ${childIndent}{siteInfo?.siteName}
-${indent}</a>`;
+${indent}</Link>`;
       case 'site-tagline':
         return `${indent}<p className="text-sm"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
 ${childIndent}{siteInfo?.blogDescription}
@@ -1769,19 +1873,19 @@ ${indent}</p>`;
         const width = node.params?.width
           ? this.normalizeCssLength(String(node.params.width))
           : undefined;
+        const logoSrcExpr = node.src
+          ? JSON.stringify(node.src)
+          : 'siteInfo?.logoUrl ?? null';
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'site-logo', 'image'),
           width ? { width, maxWidth: '100%' } : {},
         );
-        if (node.src) {
-          return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="inline-flex items-center"${styleAttr}>
-${childIndent}<img src="${node.src}" alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto w-full object-contain" />
-${indent}</a>`;
-        }
-        return `${indent}<a href={toAppPath(siteInfo?.siteUrl ?? '/')} className="inline-flex items-center font-semibold transition-opacity hover:opacity-75"${styleAttr}>
-${childIndent}{siteInfo?.siteName}
-${indent}</a>`;
+        return `${indent}{${logoSrcExpr} ? (
+${childIndent}<Link to="/" className="inline-flex items-center"${styleAttr}>
+${childIndent}  <img src={${logoSrcExpr}} alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto w-full object-contain" />
+${childIndent}</Link>
+${indent}) : null}`;
       }
       case 'heading': {
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
@@ -1817,14 +1921,25 @@ ${children}
 ${indent}</div>`;
       }
       case 'button': {
-        const href = node.href ?? '#';
+        const href = node.href?.trim() ?? '';
+        const hasUsableHref = href.length > 0 && href !== '#';
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'button'),
         );
-        return `${indent}<a href={toAppPath(${JSON.stringify(href)})} className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
-${childIndent}${node.text ?? href}
-${indent}</a>`;
+        return hasUsableHref
+          ? `${indent}{isInternalPath(${JSON.stringify(href)}) ? (
+${childIndent}<Link to={toAppPath(${JSON.stringify(href)})} className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+${childIndent}  ${node.text ?? href}
+${childIndent}</Link>
+${indent}) : (
+${childIndent}<a href="${href}" className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+${childIndent}  ${node.text ?? href}
+${childIndent}</a>
+${indent})}`
+          : `${indent}<span className="inline-flex items-center justify-center no-underline"${styleAttr}>
+${childIndent}${node.text ?? ''}
+${indent}</span>`;
       }
       case 'image': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -1869,16 +1984,24 @@ ${indent}</div>`;
       }
       case 'social-link': {
         const service = String(node.params?.service ?? node.text ?? 'Social');
-        const href = String(node.params?.url ?? node.href ?? '#');
-        return `${indent}<a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+        const href = String(node.params?.url ?? node.href ?? '').trim();
+        return href && href !== '#'
+          ? `${indent}<a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
-${indent}</a>`;
+${indent}</a>`
+          : `${indent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+${childIndent}${service}
+${indent}</span>`;
       }
       case 'separator':
         return `${indent}<hr className="w-full border-0 border-t border-current/20"${this.buildWpNodeStyleAttr(node)} />`;
       case 'spacer': {
         const height = this.normalizeCssLength(
-          String(node.params?.height ?? node.params?.style?.spacing?.height ?? '2rem'),
+          String(
+            node.params?.height ??
+              node.params?.style?.spacing?.height ??
+              '2rem',
+          ),
         );
         return `${indent}<div aria-hidden="true"${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
       }
@@ -1910,17 +2033,63 @@ ${indent}</div>`;
     const isVertical =
       node.params?.layout?.orientation === 'vertical' ||
       state.componentKind === 'footer';
-    const menuVar = `resolveNavigationMenu(${menuIndex})`;
+    const hintTitles = this.extractNavigationHintTitles(node);
+    const menuVar = `resolveNavigationMenu(${JSON.stringify(
+      hintTitles,
+    )}, ${menuIndex}, ${state.componentKind === 'footer' ? 'true' : 'false'})`;
     const listClass = isVertical
       ? 'flex flex-col gap-2'
       : 'flex flex-wrap items-center gap-4';
+    const fallbackMarkup = this.renderBlockFaithfulNavigationChildren(
+      node.children ?? [],
+      ctx,
+      state,
+      depth + 1,
+      isVertical,
+    );
     return `${indent}<nav${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
 ${indent}    <ul className="${listClass}">
 ${indent}      {renderMenuItems(${menuVar}.items, 0, ${isVertical ? 'true' : 'false'})}
 ${indent}    </ul>
-${indent}  ) : null}
+${indent}  ) : (
+${fallbackMarkup}
+${indent}  )}
 ${indent}</nav>`;
+  }
+
+  private renderBlockFaithfulNavigationChildren(
+    nodes: WpNode[],
+    ctx: RenderCtx,
+    state: BlockFaithfulRenderState,
+    depth: number,
+    isVertical: boolean,
+  ): string {
+    const indent = '  '.repeat(depth);
+    const listClass = isVertical
+      ? 'flex flex-col gap-2'
+      : 'flex flex-wrap items-center gap-4';
+    const items = nodes
+      .map((child) => this.renderBlockFaithfulNode(child, ctx, state, depth + 1))
+      .filter(Boolean)
+      .join('\n');
+    if (!items) return `${indent}null`;
+    return `${indent}<ul className="${listClass}">
+${items}
+${indent}</ul>`;
+  }
+
+  private extractNavigationHintTitles(node: WpNode): string[] {
+    const titles: string[] = [];
+    const visit = (current: WpNode) => {
+      const block = current.block.replace(/^core\//, '');
+      if (block === 'navigation-link' && current.text) {
+        titles.push(current.text);
+      }
+      for (const child of current.children ?? []) visit(child);
+    };
+    for (const child of node.children ?? []) visit(child);
+    return titles;
   }
 
   private buildWpNodeStyleAttr(
@@ -1939,9 +2108,11 @@ ${indent}</nav>`;
     style?: BlockStyleToken,
   ): Record<string, string | number | undefined> {
     const styleMap: Record<string, string | number | undefined> = {};
-    if (style?.color?.background) styleMap.backgroundColor = style.color.background;
+    if (style?.color?.background)
+      styleMap.backgroundColor = style.color.background;
     if (style?.color?.text) styleMap.color = style.color.text;
-    if (style?.typography?.fontSize) styleMap.fontSize = style.typography.fontSize;
+    if (style?.typography?.fontSize)
+      styleMap.fontSize = style.typography.fontSize;
     if (style?.typography?.fontFamily)
       styleMap.fontFamily = style.typography.fontFamily;
     if (style?.typography?.fontWeight)
@@ -1973,7 +2144,9 @@ ${indent}</nav>`;
       ...(node.gap ? { gap: node.gap } : {}),
       ...(node.borderRadius ? { borderRadius: node.borderRadius } : {}),
       ...(node.minHeight ? { minHeight: node.minHeight } : {}),
-      ...(node.typography?.fontSize ? { fontSize: node.typography.fontSize } : {}),
+      ...(node.typography?.fontSize
+        ? { fontSize: node.typography.fontSize }
+        : {}),
       ...(node.typography?.fontFamily
         ? { fontFamily: node.typography.fontFamily }
         : {}),
@@ -2020,8 +2193,7 @@ ${indent}</nav>`;
   ): Record<string, string | number | undefined> {
     const cols =
       node.children?.filter(
-        (child) =>
-          child.block === 'column' || child.block === 'core/column',
+        (child) => child.block === 'column' || child.block === 'core/column',
       ) ?? [];
     const widths = cols
       .map((col) => this.normalizeCssLength(col.columnWidth))
@@ -2036,9 +2208,7 @@ ${indent}</nav>`;
     };
   }
 
-  private boxSpacingToCss(
-    box: NonNullable<WpNode['padding']>,
-  ): string {
+  private boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
     const { top = '0', right = top, bottom = top, left = right } = box;
     if (top === right && top === bottom && top === left) return top;
     if (top === bottom && right === left) return `${top} ${right}`;

@@ -275,7 +275,8 @@ function parseBlocks(markup: string): WpNode[] {
     const normalizedPadding = normalizeBoxSpacing(pad);
     if (normalizedPadding) node.padding = normalizedPadding;
     // Lift minHeight (cover/group blocks)
-    if (params?.minHeight) node.minHeight = normalizeCssLength(params.minHeight);
+    if (params?.minHeight)
+      node.minHeight = normalizeCssLength(params.minHeight);
     // Lift inline typography from params.style.typography
     const typo = params?.style?.typography;
     if (typo || params?.fontSize) {
