@@ -420,6 +420,7 @@ const Editor: React.FC = () => {
           },
         },
       ]);
+      console.log("Capture saved:", captures);
     } finally {
       setIsSubmittingCapture(false);
       setShowCommentPopup(false);
@@ -511,51 +512,6 @@ const Editor: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-[#FAF7F0] font-body text-[#233227] overflow-hidden">
-      {/* Top Navbar */}
-      <header className="h-[72px] shrink-0 border-b border-[#e8e6df] px-6 flex items-center justify-between bg-[#FAF7F0] z-20">
-        <div className="flex items-center gap-2">
-          <span className="font-headline text-[22px] font-bold text-[#49704F] tracking-tight">
-            TerraWP
-          </span>
-        </div>
-
-        <div className="flex-1 flex justify-center max-w-2xl px-8">
-          <div className="relative w-full max-w-md">
-            <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-[#8e9892] text-[18px]">
-              search
-            </span>
-            <input
-              type="text"
-              placeholder="Search pages..."
-              className="w-full bg-[#e8e6df]/60 border-none rounded-full pl-11 pr-4 py-2.5 text-[14px] focus:ring-2 focus:ring-[#49704F]/30 outline-none placeholder:text-[#8e9892]"
-            />
-          </div>
-        </div>
-
-        <div className="flex items-center gap-5">
-          <button className="text-[#5c6860] hover:text-[#233227] transition-colors">
-            <span className="material-symbols-outlined text-[20px]">help</span>
-          </button>
-          <button className="text-[#5c6860] hover:text-[#233227] transition-colors">
-            <span className="material-symbols-outlined text-[20px]">
-              notifications
-            </span>
-          </button>
-          <button className="text-[#5c6860] hover:text-[#233227] transition-colors">
-            <span className="material-symbols-outlined text-[20px]">
-              settings
-            </span>
-          </button>
-          <div className="w-8 h-8 rounded-full overflow-hidden bg-stone-300 border border-[#e8e6df]">
-            <img
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuBNquCMiRaqjW9ZQps-IM_DXabuGUWa5xfomwd9zlIJn7NyMhcGfdKCYFCtJWfNM1zH94ZA4ylfu9E-NpBJ6cnjgIkQeyNlppuzfxcoKXDCLkNr55QMG2hN8o0i3stD84tWxv6CPjOhxCNCTCpPsHyu72rwl4y45POvfYHIrx9kfwbLravt0JpmIMr-Ky4PNBEde_d--vaoYEWCtz1ZmUP_56qT9wRvWbKM2YYGPa91v99RPbXvS8dHLGGD4jlB2yNgdM7SXTCISW8"
-              className="w-full h-full object-cover"
-              alt="User profile"
-            />
-          </div>
-        </div>
-      </header>
-
       {/* Main Work Area */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left Sidebar: Site Pages */}

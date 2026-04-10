@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const fse = require("fs-extra");
 const { getTables, getTableRows, dumpFullTable, dumpAllTables, dumpToSql } = require("../services/wpSqlDumpService");
-const { createSiteDatabase, syncPostToLocalDb, deletePostFromLocalDb } = require("../services/siteDbService");
+const { createSiteDatabase, dropSiteDatabase, syncPostToLocalDb, deletePostFromLocalDb } = require("../services/siteDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
 const { query, queryOne } = require("../db/mysql");
@@ -364,8 +364,9 @@ async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
     fs.writeFileSync(dumpPath, sql, 'utf8');
     console.log(`[DbSync] dump saved — ${dumpPath}`);
 
+    await dropSiteDatabase(siteId);
     const dbInfo = await createSiteDatabase(siteId, dumpPath);
-    console.log(`[DbSync] DB created — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
+    console.log(`[DbSync] DB synced — ${dbInfo.dbName} (${dbInfo.tables} tables, ${dbInfo.totalRows} rows)`);
 
     await query(
       'UPDATE wp_sites SET cloned_db = ? WHERE site_id = ?',
