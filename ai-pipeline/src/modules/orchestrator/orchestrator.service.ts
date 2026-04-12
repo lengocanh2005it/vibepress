@@ -3,13 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import {
-  appendFile,
-  mkdir,
-  readdir,
-  stat,
-  writeFile,
-} from 'fs/promises';
+import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
@@ -29,6 +23,7 @@ import type { PreviewBuilderResult } from '../agents/preview-builder/preview-bui
 import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type {
@@ -42,10 +37,13 @@ import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import { TokenTracker } from '../../common/utils/token-tracker.js';
-import {
-  PipelineEditRequestDto,
+import type {
+  PipelineCaptureAttachmentDto,
   RunPipelineDto,
-} from './orchestrator.controller.js';
+} from './orchestrator.dto.js';
+import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
+import { CaptureReviewService } from '../edit-request/capture-review.service.js';
+import { EditRequestPhaseService } from '../edit-request/edit-request-phase.service.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
@@ -236,6 +234,7 @@ export class OrchestratorService {
     private readonly planner: PlannerService,
     private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
+    private readonly sectionEdit: SectionEditService,
     private readonly generatedCodeReview: GeneratedCodeReviewService,
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
@@ -244,13 +243,15 @@ export class OrchestratorService {
     private readonly validator: ValidatorService,
     private readonly sourceResolver: SourceResolverService,
     private readonly cleanup: CleanupService,
+    private readonly captureReview: CaptureReviewService,
+    private readonly editRequestPhase: EditRequestPhaseService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
 
   async run(
     siteId: string,
-    editRequest?: PipelineEditRequestDto,
+    editRequestContext?: ResolvedEditRequestContext,
   ): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
       this.httpService.get(
@@ -258,8 +259,8 @@ export class OrchestratorService {
       ),
     );
 
-    const dto: RunPipelineDto = editRequest
-      ? { ...response.data, editRequest }
+    const dto: RunPipelineDto = editRequestContext?.request
+      ? { ...response.data, editRequest: editRequestContext.request }
       : response.data;
 
     this.validateDto(dto);
@@ -300,25 +301,27 @@ export class OrchestratorService {
       finalized: false,
     });
 
-    this.executePipelineLegacy(jobId, dto, state).catch((err) => {
-      if (err instanceof PipelineControlError) {
-        void this.finalizeControlledTermination(jobId, state, err);
-        return;
-      }
+    this.executePipelineLegacy(jobId, dto, state, editRequestContext).catch(
+      (err) => {
+        if (err instanceof PipelineControlError) {
+          void this.finalizeControlledTermination(jobId, state, err);
+          return;
+        }
 
-      state.status = 'error';
-      state.error = err.message;
-      const subject = this.progress.get(jobId);
-      subject?.next({
-        step: 'error',
-        label: 'Pipeline Error',
-        status: 'error',
-        percent: 0,
-        message: `AI workflow stopped because of an error: ${err.message}`,
-      });
-      subject?.complete();
-      this.logger.error(`Pipeline ${jobId} failed:`, err);
-    });
+        state.status = 'error';
+        state.error = err.message;
+        const subject = this.progress.get(jobId);
+        subject?.next({
+          step: 'error',
+          label: 'Pipeline Error',
+          status: 'error',
+          percent: 0,
+          message: `AI workflow stopped because of an error: ${err.message}`,
+        });
+        subject?.complete();
+        this.logger.error(`Pipeline ${jobId} failed:`, err);
+      },
+    );
 
     return { jobId };
   }
@@ -541,7 +544,8 @@ export class OrchestratorService {
         label: 'Pipeline Deleted',
         status: 'done',
         percent: 100,
-        message: 'Pipeline execution was deleted. Temporary artifacts are being removed.',
+        message:
+          'Pipeline execution was deleted. Temporary artifacts are being removed.',
       });
       await this.cleanup.cleanupAll(jobId);
       subject?.complete();
@@ -581,6 +585,7 @@ export class OrchestratorService {
     jobId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
+    editRequestContext?: ResolvedEditRequestContext,
   ): Promise<void> {
     // ── Init log file ─────────────────────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
@@ -592,6 +597,11 @@ export class OrchestratorService {
     if (control) control.logPath = logPath;
     await this.tokenTracker.init(tokenLogPath);
     await this.logToFile(logPath, `Pipeline ${jobId} started`);
+    await this.logResolvedEditRequestContext(
+      jobId,
+      logPath,
+      editRequestContext,
+    );
     try {
       const cfgPlanning = this.configService.get<string>(
         'pipeline.planningModel',
@@ -640,6 +650,9 @@ export class OrchestratorService {
       );
 
       const { dbConnectionString, themeGithubUrl } = dto;
+      const planningEditRequest = this.editRequestPhase.buildPlanningRequest(
+        dto.editRequest,
+      );
       const dbCreds = this.toWpDbCredentials(dbConnectionString);
 
       await this.sqlService.verifyDirectCredentials(dbConnectionString);
@@ -831,6 +844,7 @@ export class OrchestratorService {
               includeVisualPlans: false,
               logPath,
               repoManifest: repoResult.themeManifest,
+              editRequest: planningEditRequest,
             },
           );
           this.emitStepProgress(
@@ -877,6 +891,7 @@ export class OrchestratorService {
                 includeVisualPlans: false,
                 logPath,
                 repoManifest: repoResult.themeManifest,
+                editRequest: planningEditRequest,
                 planReviewErrors: review.errors,
               },
             );
@@ -912,6 +927,7 @@ export class OrchestratorService {
             review.plan,
             resolvedModels.planning,
             repoResult.themeManifest,
+            planningEditRequest,
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
@@ -942,6 +958,7 @@ export class OrchestratorService {
               review.plan,
               resolvedModels.planning,
               repoResult.themeManifest,
+              planningEditRequest,
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,
@@ -966,8 +983,6 @@ export class OrchestratorService {
         },
       );
       await stepDelay();
-
-      // Removed cotEvidence logging for planning
 
       // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
       // Flow inside this step:
@@ -1041,16 +1056,48 @@ export class OrchestratorService {
                   (c) => c.name === failure.component.name,
                 );
                 if (compIndex === -1) return null;
+                let targetComponent = components[compIndex];
+                if (
+                  this.isProtectedDeterministicSharedPartial(targetComponent)
+                ) {
+                  const sanitized =
+                    this.sanitizeProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    );
+                  if (sanitized.code !== targetComponent.code) {
+                    const sanitizedValidation =
+                      this.validator.collectValidationIssues([sanitized]);
+                    if (sanitizedValidation.failures.length === 0) {
+                      this.logger.log(
+                        `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
+                      );
+                      await this.logToFile(
+                        logPath,
+                        `[Stage 4: D4 Validator] Deterministically sanitized "${failure.component.name}" before AI fix.`,
+                      );
+                      return {
+                        compIndex,
+                        component: sanitizedValidation.components[0],
+                      };
+                    }
+                    targetComponent = sanitizedValidation.components[0];
+                  }
+                }
+                const isProtectedDeterministicSyntaxRepair =
+                  this.isProtectedDeterministicSharedPartial(targetComponent) &&
+                  this.isSyntaxOnlyValidationError(failure.error);
 
                 const fixed = await this.reactGenerator.fixComponent({
-                  component: components[compIndex],
+                  component: targetComponent,
                   plan: reviewResult.plan,
-                  feedback:
-                    `Validator contract error for component "${failure.component.name}":\n` +
-                    `${failure.error}\n\n` +
-                    'Return a complete corrected TSX component that satisfies the validator rules.',
+                  feedback: isProtectedDeterministicSyntaxRepair
+                    ? `Validator syntax error for deterministic shared partial "${failure.component.name}":\n${failure.error}\n\nReturn a complete corrected TSX component. Preserve the existing structure and content exactly where possible; only repair syntax / TSX structure issues required by the validator.`
+                    : `Validator contract error for component "${failure.component.name}":\n${failure.error}\n\nReturn a complete corrected TSX component that satisfies the validator rules.`,
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
+                  fixMode: isProtectedDeterministicSyntaxRepair
+                    ? 'syntax-only'
+                    : 'full',
                 });
                 const revalidated = this.validator.collectValidationIssues([
                   fixed,
@@ -1075,16 +1122,46 @@ export class OrchestratorService {
             );
 
             for (const fixResult of fixResults) {
-              if (fixResult) components[fixResult.compIndex] = fixResult.component;
+              if (fixResult)
+                components[fixResult.compIndex] = fixResult.component;
             }
 
             validation = this.validator.collectValidationIssues(components);
             components = validation.components;
           }
 
-          if (validation.failures.length > 0) {
+          const toleratedValidationFailures = validation.failures.filter(
+            (failure) =>
+              this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                failure.component,
+                failure.error,
+              ),
+          );
+          if (toleratedValidationFailures.length > 0) {
+            const toleratedSummary = toleratedValidationFailures
+              .map(
+                (failure) =>
+                  `"${failure.component.name}": ${failure.error.split('\n')[0]}`,
+              )
+              .join('; ');
+            this.logger.warn(
+              `[Stage 4: D4 Validator] Tolerating ${toleratedValidationFailures.length} protected deterministic shared partial validation warning(s): ${toleratedSummary}`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 4: D4 Validator] Tolerating ${toleratedValidationFailures.length} protected deterministic shared partial validation warning(s): ${toleratedSummary}`,
+            );
+          }
+          const fatalValidationFailures = validation.failures.filter(
+            (failure) =>
+              !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                failure.component,
+                failure.error,
+              ),
+          );
+          if (fatalValidationFailures.length > 0) {
             throw new Error(
-              `[validator] Generated component validation failed after auto-fix:\n${validation.failures
+              `[validator] Generated component validation failed after auto-fix:\n${fatalValidationFailures
                 .map(
                   (failure) =>
                     `Component "${failure.component.name}": ${failure.error}`,
@@ -1093,10 +1170,283 @@ export class OrchestratorService {
             );
           }
 
+          const postMigrationEditTasks =
+            this.editRequestPhase.buildPostMigrationEditTasks({
+              request: dto.editRequest,
+              plan: reviewResult.plan,
+              components,
+            });
+          const editedComponentNames: Record<string, string> = {};
+          const applyFocusedTask = async (
+            task: (typeof postMigrationEditTasks)[number],
+            feedbackOverride?: string,
+          ): Promise<boolean> => {
+            const componentIndex = components.findIndex(
+              (component) => component.name === task.componentName,
+            );
+            if (componentIndex === -1) return false;
+
+            const effectiveTask = feedbackOverride
+              ? {
+                  ...task,
+                  feedback: feedbackOverride,
+                  debugSummary: `${task.debugSummary} | refix=true`,
+                }
+              : task;
+            const fixedResult = await this.sectionEdit.applyFocusedTask({
+              task: effectiveTask,
+              request: dto.editRequest,
+              plan: reviewResult.plan,
+              components,
+              modelConfig: { fixAgent: resolvedModels.fixAgent },
+              logPath,
+            });
+            if (!fixedResult) return false;
+
+            const revalidated = this.validator.collectValidationIssues([
+              fixedResult.component,
+            ]);
+            if (revalidated.failures.length > 0) {
+              const validationErr = revalidated.failures[0]?.error;
+              this.logger.warn(
+                `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}" after focused edit — keeping baseline. Error: ${validationErr}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}": ${validationErr}`,
+              );
+              return false;
+            }
+
+            const replacementIndex = components.findIndex(
+              (component) => component.name === fixedResult.editedComponentName,
+            );
+            if (replacementIndex !== -1) {
+              components[replacementIndex] = revalidated.components[0];
+            }
+            editedComponentNames[task.componentName] =
+              fixedResult.editedComponentName;
+            return true;
+          };
+
+          if (postMigrationEditTasks.length > 0) {
+            this.logger.log(
+              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused edit task(s) after baseline generation.`,
+            );
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.72,
+              `Applying ${postMigrationEditTasks.length} focused post-migration edit task(s) to the generated baseline.`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused task(s).`,
+            );
+
+            for (const task of postMigrationEditTasks) {
+              this.logger.log(
+                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
+              );
+
+              await applyFocusedTask(task);
+            }
+
+            const finalValidation =
+              this.validator.collectValidationIssues(components);
+            if (finalValidation.failures.length > 0) {
+              throw new Error(
+                `[post-edit] Focused post-migration edits introduced validation failures:\n${finalValidation.failures
+                  .map(
+                    (failure) =>
+                      `Component "${failure.component.name}": ${failure.error}`,
+                  )
+                  .join('\n')}`,
+              );
+            }
+
+            components = finalValidation.components;
+          }
+
+          if (postMigrationEditTasks.length > 0) {
+            this.emitStepProgress(
+              state,
+              '6_generator',
+              0.78,
+              `Reviewing ${postMigrationEditTasks.length} focused capture edit task(s) against the user-requested evidence.`,
+            );
+            let captureReviewResult = this.captureReview.reviewFocusedTasks({
+              tasks: postMigrationEditTasks,
+              request: dto.editRequest,
+              plan: reviewResult.plan,
+              components,
+              editedComponentNames,
+            });
+
+            this.logger.log(
+              `[Stage 5: Capture Review] ${captureReviewResult.summary}`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 5: Capture Review] ${captureReviewResult.summary}`,
+            );
+
+            const advisoryResults = captureReviewResult.results.filter(
+              (result) => result.status !== 'matched',
+            );
+            for (const result of advisoryResults) {
+              const issueText =
+                result.issues.map((issue) => issue.message).join(' | ') ||
+                result.summary;
+              this.logger.warn(
+                `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
+              );
+            }
+
+            const MAX_CAPTURE_REVIEW_FIX_ROUNDS = 2;
+            for (
+              let round = 1;
+              round <= MAX_CAPTURE_REVIEW_FIX_ROUNDS;
+              round++
+            ) {
+              const componentsSnapshot = [...components];
+              const editedComponentNamesSnapshot = {
+                ...editedComponentNames,
+              };
+              const reviewFailures = captureReviewResult.results.filter(
+                (result) =>
+                  result.status !== 'matched' &&
+                  Boolean(result.suggestedFixFeedback),
+              );
+              if (reviewFailures.length === 0) break;
+
+              this.logger.warn(
+                `[Stage 5: Capture Review] ${reviewFailures.length} capture review issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Capture Review] ${reviewFailures.length} issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
+              );
+              this.emitStepProgress(
+                state,
+                '6_generator',
+                0.8,
+                `Capture review re-fix ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: repairing ${reviewFailures.length} attachment-targeted issue(s).`,
+              );
+
+              for (const reviewFailure of reviewFailures) {
+                const relatedTask = postMigrationEditTasks.find(
+                  (task) =>
+                    task.componentName === reviewFailure.componentName &&
+                    task.attachments.some(
+                      (attachment) =>
+                        attachment.id === reviewFailure.attachmentId,
+                    ),
+                );
+                if (!relatedTask || !reviewFailure.suggestedFixFeedback) continue;
+
+                this.logger.warn(
+                  `[Stage 5: Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
+                );
+                await this.logToFile(
+                  logPath,
+                  `[Stage 5: Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
+                );
+
+                await applyFocusedTask(
+                  relatedTask,
+                  `${relatedTask.feedback}\n\n${reviewFailure.suggestedFixFeedback}`,
+                );
+              }
+
+              const refixValidation =
+                this.validator.collectValidationIssues(components);
+              if (refixValidation.failures.length > 0) {
+                const validationSummary = refixValidation.failures
+                  .map(
+                    (failure) =>
+                      `Component "${failure.component.name}": ${failure.error}`,
+                  )
+                  .join('\n');
+                this.logger.warn(
+                  `[Stage 5: Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid component snapshot and continuing. ${validationSummary}`,
+                );
+                await this.logToFile(
+                  logPath,
+                  `[Stage 5: Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid snapshot.\n${validationSummary}`,
+                );
+                components = componentsSnapshot;
+                for (const key of Object.keys(editedComponentNames)) {
+                  delete editedComponentNames[key];
+                }
+                Object.assign(editedComponentNames, editedComponentNamesSnapshot);
+                break;
+              }
+              components = refixValidation.components;
+
+              captureReviewResult = this.captureReview.reviewFocusedTasks({
+                tasks: postMigrationEditTasks,
+                request: dto.editRequest,
+                plan: reviewResult.plan,
+                components,
+                editedComponentNames,
+              });
+
+              this.logger.log(
+                `[Stage 5: Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
+              );
+
+              const remainingIssues = captureReviewResult.results.filter(
+                (result) => result.status !== 'matched',
+              );
+              for (const result of remainingIssues) {
+                const issueText =
+                  result.issues.map((issue) => issue.message).join(' | ') ||
+                  result.summary;
+                this.logger.warn(
+                  `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
+                );
+                await this.logToFile(
+                  logPath,
+                  `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
+                );
+              }
+            }
+
+            const unresolvedCaptureReviewIssues = captureReviewResult.results.filter(
+              (result) => result.status !== 'matched',
+            );
+            if (unresolvedCaptureReviewIssues.length > 0) {
+              const unresolvedSummary = unresolvedCaptureReviewIssues
+                .map((result) => result.debugSummary)
+                .join(' || ');
+              this.logger.warn(
+                `[Stage 5: Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
+              );
+              await this.logToFile(
+                logPath,
+                `[Stage 5: Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
+              );
+            }
+          }
+
           // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
-          // Skipping Stage 5 AI review for them avoids false positives and unnecessary
-          // AI calls on code that follows the contract by construction.
+          // Protected shared partials are syntax-checked and syntax-fixed in Stage 4.
+          // Request-specific focused edits run before the AI review loop so review
+          // evaluates the final post-edit baseline instead of the raw baseline.
           const aiComponents = components.filter(
             (c) => c.generationMode !== 'deterministic',
           );
@@ -1114,11 +1464,11 @@ export class OrchestratorService {
             this.emitStepProgress(
               state,
               '6_generator',
-              0.65,
-              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking generated components against the approved contract.`,
+              0.82,
+              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking the post-edit generated components against the approved contract.`,
             );
             this.logger.log(
-              `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+              `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components after post-migration edits (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
             );
             const review = await this.generatedCodeReview.review({
               components: aiComponents,
@@ -1138,7 +1488,7 @@ export class OrchestratorService {
             this.emitStepProgress(
               state,
               '6_generator',
-              0.82,
+              0.9,
               `Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
             );
             await this.logToFile(
@@ -1146,7 +1496,6 @@ export class OrchestratorService {
               `[Stage 5] ${review.failures.length} components failed review. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
             );
 
-            // Fixes are independent — run all in parallel, then apply results.
             const fixResults = await Promise.all(
               review.failures.map(async (failure) => {
                 const compIndex = aiComponents.findIndex(
@@ -1160,8 +1509,9 @@ export class OrchestratorService {
                   modelConfig: { fixAgent: resolvedModels.fixAgent },
                   logPath,
                 });
-                const revalidated =
-                  this.validator.collectValidationIssues([fixed]);
+                const revalidated = this.validator.collectValidationIssues([
+                  fixed,
+                ]);
                 if (revalidated.failures.length > 0) {
                   const validationErr = revalidated.failures[0]?.error;
                   this.logger.warn(
@@ -1181,7 +1531,6 @@ export class OrchestratorService {
             }
           }
 
-          // Merge fixed AI components back into the full list (preserve original order).
           for (const fixed of aiComponents) {
             const idx = components.findIndex((c) => c.name === fixed.name);
             if (idx !== -1) components[idx] = fixed;
@@ -1307,6 +1656,7 @@ export class OrchestratorService {
                 },
                 dbCreds,
                 themeDir,
+                siteInfo: content.siteInfo,
                 tokens:
                   'tokens' in normalizedTheme
                     ? (normalizedTheme as any).tokens
@@ -1344,12 +1694,22 @@ export class OrchestratorService {
                     (c) => c.name === componentName,
                   );
                   if (idx === -1) return null;
+                  const targetComponent = buildComponents[idx];
                   const fixed = await this.reactGenerator.fixComponent({
-                    component: buildComponents[idx],
+                    component: targetComponent,
                     plan: reviewResult.plan,
-                    feedback: `TypeScript build error:\n${error}`,
+                    feedback: this.isProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    )
+                      ? `TypeScript build error in deterministic shared partial "${componentName}":\n${error}\n\nPreserve the current structure and content. Repair only the TypeScript / TSX / import issue that prevents the preview build from succeeding.`
+                      : `TypeScript build error:\n${error}`,
                     modelConfig: { fixAgent: resolvedModels.fixAgent },
                     logPath,
+                    fixMode: this.isProtectedDeterministicSharedPartial(
+                      targetComponent,
+                    )
+                      ? 'syntax-only'
+                      : 'full',
                   });
                   return { idx, fixed };
                 }),
@@ -1802,8 +2162,6 @@ export class OrchestratorService {
       );
     }
 
-    console.log(dto);
-
     if (
       typeof dto.themeGithubUrl !== 'string' ||
       dto.themeGithubUrl.trim().length === 0
@@ -1817,6 +2175,158 @@ export class OrchestratorService {
     ) {
       throw new BadRequestException('dbConnectionString is required');
     }
+  }
+
+  private async logResolvedEditRequestContext(
+    jobId: string,
+    logPath: string,
+    context?: ResolvedEditRequestContext,
+  ): Promise<void> {
+    const lines = this.buildEditRequestLogLines(context);
+    for (const line of lines) {
+      const formatted = `[${jobId}] [edit-request] ${line}`;
+      this.logger.log(formatted);
+      await this.logToFile(logPath, formatted);
+    }
+  }
+
+  private buildEditRequestLogLines(
+    context?: ResolvedEditRequestContext,
+  ): string[] {
+    if (!context) {
+      return ['none'];
+    }
+
+    const request = context.request;
+    const summary = context.summary;
+    const lines = [
+      [
+        `accepted=${context.accepted}`,
+        `mode=${context.mode}`,
+        `category=${context.category}`,
+        `source=${summary.source}`,
+        `attachments=${summary.attachmentCount}`,
+        `hasPrompt=${summary.hasPrompt}`,
+        `hasVisualContext=${summary.hasVisualContext}`,
+      ].join(' | '),
+    ];
+
+    const intentParts = [
+      context.globalIntent
+        ? `intent="${truncateForLog(context.globalIntent, 180)}"`
+        : null,
+      context.focusHint
+        ? `focus="${truncateForLog(context.focusHint, 140)}"`
+        : null,
+      typeof context.confidence === 'number'
+        ? `confidence=${context.confidence.toFixed(2)}`
+        : null,
+      context.source ? `resolver=${context.source}` : null,
+    ].filter(Boolean);
+    if (intentParts.length > 0) {
+      lines.push(intentParts.join(' | '));
+    }
+
+    if (request?.targetHint) {
+      const targetLine = [
+        request.targetHint.componentName
+          ? `component=${request.targetHint.componentName}`
+          : null,
+        request.targetHint.route ? `route=${request.targetHint.route}` : null,
+        request.targetHint.templateName
+          ? `template=${request.targetHint.templateName}`
+          : null,
+        request.targetHint.sectionType
+          ? `sectionType=${request.targetHint.sectionType}`
+          : null,
+        typeof request.targetHint.sectionIndex === 'number'
+          ? `sectionIndex=${request.targetHint.sectionIndex}`
+          : null,
+      ].filter(Boolean);
+      if (targetLine.length > 0) {
+        lines.push(`target | ${targetLine.join(' | ')}`);
+      }
+    }
+
+    if (request?.pageContext) {
+      const pageContextLine = [
+        request.pageContext.wordpressRoute
+          ? `route=${request.pageContext.wordpressRoute}`
+          : null,
+        request.pageContext.wordpressUrl
+          ? `wpUrl=${request.pageContext.wordpressUrl}`
+          : null,
+        request.pageContext.pageTitle
+          ? `pageTitle="${truncateForLog(request.pageContext.pageTitle, 80)}"`
+          : null,
+        formatViewportForLog(request.pageContext.viewport),
+        formatDocumentForLog(request.pageContext.document),
+      ].filter(Boolean);
+      if (pageContextLine.length > 0) {
+        lines.push(`page | ${pageContextLine.join(' | ')}`);
+      }
+    }
+
+    if (request?.prompt) {
+      lines.push(`prompt | "${truncateForLog(request.prompt, 220)}"`);
+    }
+
+    const attachments = request?.attachments ?? [];
+    attachments.forEach((attachment, index) => {
+      lines.push(
+        `capture#${index + 1} | ${formatAttachmentForLog(attachment)}`,
+      );
+    });
+
+    return lines;
+  }
+
+  private isProtectedDeterministicSharedPartial(component: {
+    name: string;
+    generationMode?: 'deterministic' | 'ai';
+  }): boolean {
+    return (
+      component.generationMode === 'deterministic' &&
+      /^(Header|Footer|Navigation|Nav)$/i.test(component.name)
+    );
+  }
+
+  private sanitizeProtectedDeterministicSharedPartial<
+    T extends { code: string },
+  >(component: T): T {
+    let code = component.code;
+
+    code = code.replace(
+      /<a\b([^>]*?)\bhref=(["'])#\2([^>]*)>([\s\S]*?)<\/a>/g,
+      '<span$1$3>$4</span>',
+    );
+    code = code.replace(/No menus available/g, '');
+
+    return { ...component, code };
+  }
+
+  private shouldTolerateProtectedDeterministicSharedPartialFailure(
+    component: { name: string; generationMode?: 'deterministic' | 'ai' },
+    error: string,
+  ): boolean {
+    return (
+      this.isProtectedDeterministicSharedPartial(component) &&
+      /^Shared chrome contract violated:/i.test(error)
+    );
+  }
+
+  private isSyntaxOnlyValidationError(error: string): boolean {
+    return [
+      /^Missing `export default`/i,
+      /^No JSX return found/i,
+      /^Duplicate className attributes found\./i,
+      /^JSX tag error:/i,
+      /^Unbalanced braces \(depth:/i,
+      /^Unbalanced parentheses \(depth:/i,
+      /^Unbalanced square brackets \(depth:/i,
+      /^HTML attribute `.+=` found in JSX/i,
+      /^`<label for=>` found/i,
+    ].some((pattern) => pattern.test(error));
   }
 
   /**
@@ -1842,4 +2352,183 @@ export class OrchestratorService {
       error: errors.join('\n'),
     }));
   }
+}
+
+function formatAttachmentForLog(
+  attachment: PipelineCaptureAttachmentDto,
+): string {
+  const documentRect =
+    attachment.geometry?.documentRect ??
+    (attachment.selection?.coordinateSpace === 'iframe-document'
+      ? attachment.selection
+      : undefined);
+  const normalizedRect = attachment.geometry?.normalizedRect;
+  const pageRoute =
+    attachment.targetNode?.route ??
+    attachment.captureContext?.page?.route ??
+    attachment.sourcePageUrl;
+  const sectionType = inferSectionTypeForLog(attachment);
+  const sectionIndex = inferSectionIndexForLog(attachment);
+
+  return [
+    `id=${attachment.id}`,
+    pageRoute ? `route=${pageRoute}` : null,
+    attachment.targetNode?.templateName
+      ? `template=${attachment.targetNode.templateName}`
+      : null,
+    attachment.targetNode?.blockName || attachment.domTarget?.blockName
+      ? `block=${attachment.targetNode?.blockName ?? attachment.domTarget?.blockName}`
+      : null,
+    sectionType ? `sectionType=${sectionType}` : null,
+    typeof sectionIndex === 'number' ? `sectionIndex≈${sectionIndex}` : null,
+    attachment.targetNode?.nearestHeading ||
+    attachment.domTarget?.nearestHeading
+      ? `heading="${truncateForLog(attachment.targetNode?.nearestHeading ?? attachment.domTarget?.nearestHeading ?? '', 80)}"`
+      : null,
+    attachment.targetNode?.nearestLandmark ||
+    attachment.domTarget?.nearestLandmark
+      ? `landmark=${attachment.targetNode?.nearestLandmark ?? attachment.domTarget?.nearestLandmark}`
+      : null,
+    documentRect
+      ? `documentRect=(${documentRect.x},${documentRect.y},${documentRect.width},${documentRect.height})`
+      : null,
+    normalizedRect
+      ? `normalizedRect=(${normalizedRect.x},${normalizedRect.y},${normalizedRect.width},${normalizedRect.height})`
+      : null,
+    formatViewportForLog(attachment.captureContext?.viewport),
+    formatDocumentForLog(attachment.captureContext?.document),
+    attachment.note ? `note="${truncateForLog(attachment.note, 120)}"` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function formatViewportForLog(
+  viewport?:
+    | {
+        width: number;
+        height: number;
+        scrollX?: number;
+        scrollY?: number;
+        dpr?: number;
+      }
+    | undefined,
+): string | null {
+  if (!viewport) return null;
+
+  const parts = [
+    `${viewport.width}x${viewport.height}`,
+    typeof viewport.scrollX === 'number' || typeof viewport.scrollY === 'number'
+      ? `scroll=(${viewport.scrollX ?? 0},${viewport.scrollY ?? 0})`
+      : null,
+    typeof viewport.dpr === 'number' ? `dpr=${viewport.dpr}` : null,
+  ].filter(Boolean);
+
+  return parts.length > 0 ? `viewport=${parts.join(' ')}` : null;
+}
+
+function formatDocumentForLog(
+  document?:
+    | {
+        width: number;
+        height: number;
+      }
+    | undefined,
+): string | null {
+  if (!document) return null;
+  return `document=${document.width}x${document.height}`;
+}
+
+function inferSectionTypeForLog(
+  attachment: PipelineCaptureAttachmentDto,
+): string | undefined {
+  const signal = normalizeLogToken(
+    [
+      attachment.targetNode?.blockName,
+      attachment.targetNode?.tagName,
+      attachment.targetNode?.domPath,
+      attachment.targetNode?.nearestHeading,
+      attachment.targetNode?.nearestLandmark,
+      attachment.domTarget?.blockName,
+      attachment.domTarget?.tagName,
+      attachment.domTarget?.domPath,
+      attachment.domTarget?.nearestHeading,
+      attachment.domTarget?.nearestLandmark,
+      attachment.note,
+    ]
+      .filter(Boolean)
+      .join(' '),
+  );
+
+  if (!signal) return undefined;
+  if (/\b(hero|banner|cover)\b/.test(signal)) return 'hero';
+  if (/\b(header|navigation|navbar|menu)\b/.test(signal)) return 'header';
+  if (/\bfooter\b/.test(signal)) return 'footer';
+  if (/\bcta|button|call to action\b/.test(signal)) return 'cta';
+  if (/\bfaq|accordion\b/.test(signal)) return 'faq';
+  if (/\btestimonial|review|quote\b/.test(signal)) return 'testimonial';
+  if (/\bpricing|price|plan\b/.test(signal)) return 'pricing';
+  if (/\bfeature|benefit|service\b/.test(signal)) return 'features';
+  if (/\bcontact|form|signup|newsletter|chat|search|filter\b/.test(signal)) {
+    return 'interactive';
+  }
+  if (/\bgallery|image|media|video\b/.test(signal)) return 'media';
+  if (/\bposts|post|query|blog|article\b/.test(signal)) return 'posts';
+  if (/\bsidebar|aside\b/.test(signal)) return 'sidebar';
+  if (/\bmain\b/.test(signal)) return 'main';
+  if (/\bsection|group|columns|column|container\b/.test(signal)) {
+    return 'section';
+  }
+
+  return undefined;
+}
+
+function inferSectionIndexForLog(
+  attachment: PipelineCaptureAttachmentDto,
+): number | undefined {
+  const normalizedY =
+    attachment.geometry?.normalizedRect?.y ??
+    deriveNormalizedYForLog(
+      attachment.geometry?.documentRect?.y ?? attachment.selection?.y,
+      attachment.captureContext?.document?.height,
+    );
+
+  if (typeof normalizedY !== 'number' || Number.isNaN(normalizedY)) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.min(9, Math.floor(normalizedY * 10)));
+}
+
+function deriveNormalizedYForLog(
+  y?: number,
+  documentHeight?: number,
+): number | undefined {
+  if (
+    typeof y !== 'number' ||
+    Number.isNaN(y) ||
+    typeof documentHeight !== 'number' ||
+    Number.isNaN(documentHeight) ||
+    documentHeight <= 0
+  ) {
+    return undefined;
+  }
+
+  return Math.min(Math.max(y / documentHeight, 0), 0.999);
+}
+
+function normalizeLogToken(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .trim()
+    .toLowerCase();
+}
+
+function truncateForLog(value: string, maxLength: number): string {
+  return value.length <= maxLength
+    ? value
+    : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }

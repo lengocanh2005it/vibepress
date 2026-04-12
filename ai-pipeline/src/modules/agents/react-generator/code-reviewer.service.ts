@@ -1,6 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
+import OpenAI from 'openai';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { OPENAI_CLIENT } from '../../../common/providers/openai/openai.provider.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
@@ -44,6 +46,7 @@ export interface ReviewInput {
   tokens?: ThemeTokens;
   repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
+  editRequestContextNote?: string;
   logPath?: string;
   jobId?: string;
 }
@@ -64,6 +67,7 @@ export interface SectionReviewInput {
   tokens?: ThemeTokens;
   repoManifest?: RepoThemeManifest;
   componentPlan?: PlanResult[number];
+  editRequestContextNote?: string;
   logPath?: string;
   jobId?: string;
 }
@@ -101,6 +105,7 @@ export class CodeReviewerService {
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
 
   constructor(
+    @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
     private readonly llmFactory: LlmFactoryService,
     private readonly validator: ValidatorService,
     private readonly codeGenerator: CodeGeneratorService,
@@ -126,6 +131,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       jobId,
     } = input;
@@ -235,6 +241,7 @@ export class CodeReviewerService {
           tokens,
           repoManifest,
           componentPlan: promptContext,
+          editRequestContextNote,
           logPath,
           logLabel: 'precomputed-plan',
           systemPrompt: componentSystemPrompt,
@@ -394,6 +401,7 @@ export class CodeReviewerService {
             route: componentPlan?.route,
             isDetail: componentPlan?.isDetail,
             dataNeeds: visualDataNeeds,
+            editRequestContextNote,
           });
 
         try {
@@ -429,6 +437,7 @@ export class CodeReviewerService {
               tokens,
               repoManifest,
               componentPlan: promptContext,
+              editRequestContextNote,
               logPath,
               logLabel: 'visual-plan',
               systemPrompt: componentSystemPrompt,
@@ -549,6 +558,7 @@ export class CodeReviewerService {
         tokens,
         repoManifest,
         componentPlan: promptContext,
+        editRequestContextNote,
         logPath,
         logLabel: 'direct-ai',
         systemPrompt: componentSystemPrompt,
@@ -735,6 +745,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       jobId,
     } = input;
@@ -757,6 +768,7 @@ export class CodeReviewerService {
       repoManifest,
       content,
       componentPlan: promptContext,
+      editRequestContextNote,
     });
 
     let code = '';
@@ -1023,6 +1035,7 @@ export class CodeReviewerService {
     templateSource: string;
     modelName: string;
     componentPlan: ComponentPromptContext;
+    editRequestContextNote?: string;
     logPath?: string;
   }): Promise<{
     code: string;
@@ -1030,8 +1043,14 @@ export class CodeReviewerService {
     attemptsUsed: number;
     lastError?: string;
   }> {
-    const { componentName, templateSource, modelName, componentPlan, logPath } =
-      input;
+    const {
+      componentName,
+      templateSource,
+      modelName,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+    } = input;
 
     const frame = this.frameGenerator.generateFrame({
       componentName,
@@ -1062,6 +1081,7 @@ export class CodeReviewerService {
         templateSource,
         visualPlan: componentPlan.visualPlan,
         componentType: componentPlan.type,
+        editRequestContextNote,
         retryError: attempt > 1 ? lastError : undefined,
         previousFragment: attempt > 1 ? lastFragment : undefined,
       });
@@ -1129,6 +1149,7 @@ export class CodeReviewerService {
     tokens?: ThemeTokens;
     repoManifest?: RepoThemeManifest;
     componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
     logPath?: string;
     logLabel: string;
     systemPrompt: string;
@@ -1150,6 +1171,7 @@ export class CodeReviewerService {
       tokens,
       repoManifest,
       componentPlan,
+      editRequestContextNote,
       logPath,
       logLabel,
       systemPrompt,
@@ -1179,6 +1201,7 @@ export class CodeReviewerService {
         templateSource,
         modelName,
         componentPlan,
+        editRequestContextNote,
         logPath,
       });
       if (frameResult.isValid) {
@@ -1212,6 +1235,7 @@ export class CodeReviewerService {
         tokens,
         repoManifest,
         componentPlan,
+        editRequestContextNote,
         attempt > 1
           ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
           : undefined,
@@ -1416,7 +1440,58 @@ export class CodeReviewerService {
     error: string,
     logPath?: string,
     label?: string,
+    visionImageUrls: string[] = [],
   ): Promise<string> {
+    const normalizedVisionUrls = visionImageUrls
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+
+    if (
+      normalizedVisionUrls.length > 0 &&
+      this.canUseOpenAiVisionModel(model)
+    ) {
+      try {
+        const response = await this.openai.chat.completions.create({
+          model: this.resolveOpenAiModelName(model),
+          temperature: 0,
+          max_completion_tokens: this.llmFactory.getMaxTokens(),
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code. Return ONLY the corrected TSX code.',
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    `This component has a validation or targeted edit request:\n${error}\n\n` +
+                    `Fix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                },
+                ...normalizedVisionUrls.map((url) => ({
+                  type: 'image_url' as const,
+                  image_url: { url, detail: 'high' as const },
+                })),
+              ],
+            },
+          ],
+        });
+        const text = response.choices[0]?.message?.content;
+        if (text) return this.postProcessCode(text);
+      } catch (err: any) {
+        this.logger.warn(
+          `[reviewer] Vision self-fix failed for "${label ?? model}" (${err?.message ?? 'unknown error'}) — falling back to text-only repair`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer] Vision self-fix failed for "${label ?? model}" (${err?.message ?? 'unknown error'}) — falling back to text-only repair`,
+        );
+      }
+    }
+
     const { text: raw } = await this.generateWithRetry(
       model,
       'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
@@ -1426,6 +1501,20 @@ export class CodeReviewerService {
       label ? `${label}:fix` : undefined,
     );
     return this.postProcessCode(raw);
+  }
+
+  private canUseOpenAiVisionModel(modelName: string): boolean {
+    const slashIdx = modelName.indexOf('/');
+    if (slashIdx !== -1) {
+      return modelName.slice(0, slashIdx) === 'openai';
+    }
+    return this.llmFactory.getProvider() === 'openai';
+  }
+
+  private resolveOpenAiModelName(modelName: string): string {
+    return modelName.startsWith('openai/')
+      ? modelName.slice('openai/'.length)
+      : modelName;
   }
 
   // ── LLM call with exponential back-off ───────────────────────────────────

@@ -18,6 +18,7 @@ import { ThemeModule } from '../theme/theme.module.js';
 import { AiLoggerModule } from '../ai-logger/ai-logger.module.js';
 import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 import { SourceResolverModule } from '../agents/source-resolver/source-resolver.module.js';
+import { EditRequestModule } from '../edit-request/edit-request.module.js';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { SourceResolverModule } from '../agents/source-resolver/source-resolver.
     AiLoggerModule,
     NormalizerModule,
     SourceResolverModule,
+    EditRequestModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService],

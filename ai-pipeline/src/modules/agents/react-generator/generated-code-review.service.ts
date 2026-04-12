@@ -293,7 +293,7 @@ ${component.code}
     }
     if (normalized.has('authorDetail')) {
       lines.push(
-        '- Author archive fetches /api/posts and filters client-side by matching post.author against the URL :slug. No dedicated /api/authors endpoint exists.',
+        '- Author archive fetches `/api/posts?author=${slug}` (and may include pagination query params). Use `post.authorSlug`, not `post.author`, for archive matching.',
       );
     }
     const hasComments =

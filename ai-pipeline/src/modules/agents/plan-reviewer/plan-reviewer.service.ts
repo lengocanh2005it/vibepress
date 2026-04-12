@@ -7,6 +7,7 @@ import type {
 } from '../react-generator/visual-plan.schema.js';
 import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-plan.prompt.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -33,8 +34,6 @@ interface RoutePolicy {
   requiredDataNeeds: PlanDataNeed[];
 }
 
-const PARTIAL_PATTERNS =
-  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)(?:[-_].+)?$/i;
 const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'posts',
   'pages',
@@ -747,7 +746,7 @@ export class PlanReviewerService {
       .toLowerCase();
     const routeSlug = this.toKebabCase(templateBase);
 
-    if (PARTIAL_PATTERNS.test(templateBase)) {
+    if (isPartialComponentName(templateBase)) {
       return {
         type: 'partial',
         route: null,

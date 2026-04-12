@@ -4,6 +4,7 @@ export const SITE_INFO_FIELDS = [
   'siteUrl',
   'siteName',
   'blogDescription',
+  'logoUrl',
   'adminEmail',
   'language',
 ] as const;
@@ -18,7 +19,9 @@ export const POST_FIELDS = [
   'status',
   'date',
   'author',
+  'authorSlug',
   'categories',
+  'tags',
   'featuredImage',
 ] as const;
 
@@ -27,11 +30,22 @@ export const PAGE_BACKEND_FIELDS = [
   'title',
   'content',
   'slug',
+  'parentId',
   'menuOrder',
   'template',
+  'featuredImage',
 ] as const;
 
-export const PAGE_FRONTEND_FIELDS = ['id', 'title', 'content', 'slug'] as const;
+export const PAGE_FRONTEND_FIELDS = [
+  'id',
+  'title',
+  'content',
+  'slug',
+  'parentId',
+  'menuOrder',
+  'template',
+  'featuredImage',
+] as const;
 
 export const MENU_ITEM_FIELDS = [
   'id',
@@ -39,9 +53,11 @@ export const MENU_ITEM_FIELDS = [
   'url',
   'order',
   'parentId',
+  'target',
 ] as const;
 
-export const MENU_FIELDS = ['name', 'slug', 'items'] as const;
+export const MENU_FIELDS = ['name', 'slug', 'location', 'items'] as const;
+export const POST_TYPE_SUMMARY_FIELDS = ['postType', 'count', 'taxonomies'] as const;
 
 export const TERM_FIELDS = [
   'id',
@@ -66,14 +82,16 @@ export const COMMENT_SUBMISSION_FIELDS = [
   'moderationStatus',
 ] as const;
 
-export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; categories: string[]; featuredImage: string | null; }`;
-export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; }`;
-export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; adminEmail: string; language: string; }`;
-export const MENU_ITEM_INTERFACE = `interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }`;
-export const MENU_INTERFACE = `interface Menu { name: string; slug: string; items: MenuItem[]; }`;
+export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; authorSlug: string; categories: string[]; tags: string[]; featuredImage: string | null; }`;
+export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; parentId: number; menuOrder: number; template: string; featuredImage: string | null; }`;
+export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; logoUrl: string | null; adminEmail: string; language: string; }`;
+export const MENU_ITEM_INTERFACE = `interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; target: string | null; }`;
+export const MENU_INTERFACE = `interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }`;
+export const POST_TYPE_SUMMARY_INTERFACE = `interface PostTypeSummary { postType: string; count: number; taxonomies: string[]; }`;
 export const TERM_INTERFACE = `interface Term { id: number; name: string; slug: string; description: string; count: number; parentId: number; }`;
 export const COMMENT_INTERFACE = `interface Comment { id: number; author: string; date: string; content: string; parentId: number; userId: number; }`;
 export const COMMENT_SUBMISSION_INTERFACE = `interface CommentSubmission extends Comment { moderationStatus: 'approved' | 'pending' | 'spam' | 'trash'; }`;
+export const FOOTER_COLUMN_INTERFACE = `interface FooterColumn { heading: string; links: Array<{ label: string; url: string }>; }`;
 
 function formatFieldList(fields: readonly string[]): string {
   return fields.map((field) => `\`${field}\``).join(', ');
@@ -86,16 +104,20 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 
 ### Endpoints
 - \`GET /api/site-info\` → SiteInfo
-- \`GET /api/posts\` → Post[]
-- \`GET /api/posts/:slug\` → Post
-- \`GET /api/pages\` → backend returns ${formatFieldList(PAGE_BACKEND_FIELDS)}, but React components must use ONLY ${formatFieldList(PAGE_FRONTEND_FIELDS)}
-- \`GET /api/pages/:slug\` → same Page rule as above
+- \`GET /api/posts\` → Post[] (optional \`?author=<nicename>\`, \`?type=<post-type|all>\`, \`?page=<n>\`, \`?perPage=<n>\`)
+- \`GET /api/posts/:slug\` → Post (optional \`?type=<post-type|all>\`)
+- \`GET /api/pages\` → Page[]
+- \`GET /api/pages/:slug\` → Page
+- \`GET /api/post-types\` → PostTypeSummary[]
+- \`GET /api/post-types/:postType/posts\` → Post[] (supports \`?page=<n>\`, \`?perPage=<n>\`)
+- \`GET /api/post-types/:postType/:slug\` → Post
 - \`GET /api/menus\` → Menu[]
 - \`GET /api/taxonomies\` → string[]
 - \`GET /api/taxonomies/:taxonomy\` → Term[]
-- \`GET /api/taxonomies/:taxonomy/:term/posts\` → post previews for that term
+- \`GET /api/taxonomies/:taxonomy/:term/posts\` → post previews for that term (supports \`?page=<n>\`, \`?perPage=<n>\`)
 - \`GET /api/comments?slug=<post-slug>\` or \`?postId=<id>\` → Comment[]
 - \`GET /api/comments/submissions?...&clientToken=...\` → CommentSubmission[]
+- \`GET /api/footer-links\` → FooterColumn[] (parsed from wp_template_part footer blocks)
 - \`POST /api/comments\` → creates a moderated comment submission
 
 ### Entity fields
@@ -104,6 +126,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - Page for React usage: ${formatFieldList(PAGE_FRONTEND_FIELDS)}
 - Menu: ${formatFieldList(MENU_FIELDS)}
 - MenuItem: ${formatFieldList(MENU_ITEM_FIELDS)}
+- PostTypeSummary: ${formatFieldList(POST_TYPE_SUMMARY_FIELDS)}
 - Term: ${formatFieldList(TERM_FIELDS)}
 - Comment: ${formatFieldList(COMMENT_FIELDS)}
 - CommentSubmission: ${formatFieldList(COMMENT_SUBMISSION_FIELDS)}
@@ -111,8 +134,12 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 ### Non-negotiable constraints
 - Do NOT invent GraphQL or WordPress wrapper fields such as \`.node\`, \`.nodes\`, \`.edges\`, or \`.rendered\`.
 - Do NOT rename \`siteInfo.siteName/siteUrl/blogDescription\` into \`name/url/description\`.
-- Do NOT add post-only fields to \`Page\`. Even though the backend includes \`menuOrder\` and \`template\`, the React pipeline contract keeps Page limited to ${formatFieldList(PAGE_FRONTEND_FIELDS)}.
+- Pages may use ${formatFieldList(PAGE_FRONTEND_FIELDS)}, but still must NOT use post-only fields such as \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, or comments.
+- \`post.content\` and \`page.content\` are normalized HTML strings: WordPress asset URLs are rewritten, Gutenberg comments are stripped, and common dynamic blocks are rendered to HTML where possible.
+- Paginated post-list endpoints return flat \`Post[]\` plus WP-style response headers: \`X-WP-Total\`, \`X-WP-TotalPages\`, \`X-WP-CurrentPage\`, \`X-WP-PerPage\`.
+- Use \`post.authorSlug\` for author archive links; \`post.author\` is display text only.
 - \`menus[].items[].parentId\` is always a number; top-level menu items use \`0\`.
+- Use \`menu.items[].target\` when rendering anchors; when it is \`"_blank"\`, also set \`rel="noopener noreferrer"\`.
 - Comments use \`comment.author\`, not \`comment.author_name\` or avatar fields.
 - If a comment form exists, submit via \`POST /api/comments\` and poll \`/api/comments/submissions\` for moderation status.`;
 }
@@ -128,24 +155,29 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
   if (availableVariables.includes('`post: Post | null`')) {
     lines.push(
       `- \`post\` fields: ${formatFieldList(POST_FIELDS)}.`,
-      '- `post.title`, `post.excerpt`, `post.author`, `post.content`, `post.date` are plain strings.',
-      '- `post.categories` is `string[]`.',
-      '- Valid examples: `post.title`, `post.excerpt`, `post.categories[0]`.',
-      '- Invalid examples: `post.title.node`, `post.excerpt.rendered`, `post.categories.nodes`.',
+      '- `post.title`, `post.excerpt`, `post.author`, `post.authorSlug`, `post.content`, `post.date` are plain strings.',
+      '- `post.content` is already normalized HTML suitable for `dangerouslySetInnerHTML`.',
+      '- `post.categories` and `post.tags` are `string[]`.',
+      '- Valid examples: `post.title`, `post.authorSlug`, `post.excerpt`, `post.categories[0]`, `post.tags[0]`.',
+      '- Invalid examples: `post.title.node`, `post.excerpt.rendered`, `post.author.slug`, `post.categories.nodes`, `post.tags.nodes`.',
     );
   }
 
   if (availableVariables.includes('`posts: Post[]`')) {
     lines.push(
       `- Inside \`posts.map(post => ...)\`, \`post\` uses fields: ${formatFieldList(POST_FIELDS)}.`,
+      '- Pagination helpers available alongside `posts`: `currentPage: number`, `totalPages: number`, `updatePage(nextPage: number): void`.',
+      '- Use `currentPage` and `totalPages` to render pagination UI; call `updatePage(nextPage)` to change pages.',
       '- Invalid examples inside loops: `post.title.node`, `post.categories.nodes`, `node.title.rendered`.',
     );
   }
 
   if (availableVariables.includes('`page: Page | null`')) {
     lines.push(
-      `- \`page\` only has: ${formatFieldList(PAGE_FRONTEND_FIELDS)}.`,
-      '- Invalid examples: `page.title.rendered`, `page.author`, `page.featuredImage`, `page.menuOrder`, `page.template`.',
+      `- \`page\` fields: ${formatFieldList(PAGE_FRONTEND_FIELDS)}.`,
+      '- Valid examples: `page.featuredImage`, `page.parentId`, `page.template`.',
+      '- `page.content` is already normalized HTML suitable for `dangerouslySetInnerHTML`.',
+      '- Invalid examples: `page.title.rendered`, `page.author`, `page.categories`, `page.tags`, `page.date`, `page.excerpt`.',
     );
   }
 
@@ -159,7 +191,7 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
     lines.push(
       `- \`menus\` is \`Menu[]\`; each \`menu\` has ${formatFieldList(MENU_FIELDS)}.`,
       `- Each \`item\` has flat fields: ${formatFieldList(MENU_ITEM_FIELDS)}.`,
-      '- Valid examples: `menu.items.map(item => item.title)`, `item.parentId === 0`.',
+      '- Valid examples: `menu.items.map(item => item.title)`, `item.parentId === 0`, `item.target === "_blank"`.',
       '- Invalid examples: `menu.items.nodes`, `item.node.title`, `menu.node.slug`.',
     );
   }
@@ -167,7 +199,7 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
   if (availableVariables.includes('`siteInfo: SiteInfo | null`')) {
     lines.push(
       `- \`siteInfo\` fields: ${formatFieldList(SITE_INFO_FIELDS)}.`,
-      '- `siteInfo.siteName`, `siteInfo.siteUrl`, `siteInfo.blogDescription` are plain strings.',
+      '- `siteInfo.siteName`, `siteInfo.siteUrl`, `siteInfo.blogDescription` are plain strings; `siteInfo.logoUrl` is `string | null`.',
     );
   }
 

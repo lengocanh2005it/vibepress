@@ -15,6 +15,10 @@ import {
 } from '../../../common/utils/wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
+import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
+import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -80,6 +84,7 @@ export class PlannerService {
     private readonly configService: ConfigService,
     private readonly aiLogger: AiLoggerService,
     private readonly styleResolver: StyleResolverService,
+    private readonly capturePlanning: CapturePlanningService,
   ) {}
 
   async plan(
@@ -91,6 +96,7 @@ export class PlannerService {
       includeVisualPlans?: boolean;
       logPath?: string;
       repoManifest?: RepoThemeManifest;
+      editRequest?: PipelineEditRequestDto;
       /** Errors from the previous plan-review pass — injected into the Phase A prompt so the LLM knows what to fix. */
       planReviewErrors?: string[];
     },
@@ -126,16 +132,24 @@ export class PlannerService {
     );
 
     const systemPrompt = this.buildSystemPrompt();
+    const editRequestContext = buildEditRequestContextNote(
+      options?.editRequest,
+      {
+        audience: 'planner',
+      },
+    );
     const userPrompt = options?.planReviewErrors?.length
       ? this.buildValidationFeedbackPrompt(
           options.planReviewErrors,
           templateNames,
+          editRequestContext,
         )
       : this.buildUserPrompt(
           theme,
           content,
           templateNames,
           options?.repoManifest,
+          editRequestContext,
         );
 
     let plan: PlanResult | null = null;
@@ -148,7 +162,7 @@ export class PlannerService {
       const prompt =
         attempt === 1
           ? userPrompt
-          : this.buildRetryPrompt(lastRaw, templateNames);
+          : this.buildRetryPrompt(lastRaw, templateNames, editRequestContext);
 
       const {
         text: raw,
@@ -291,6 +305,7 @@ export class PlannerService {
       globalPalette,
       globalTypography,
       options?.repoManifest,
+      options?.editRequest,
       resolvedModel,
       options?.logPath,
       jobId,
@@ -303,6 +318,7 @@ export class PlannerService {
     plan: PlanResult,
     modelName?: string,
     repoManifest?: RepoThemeManifest,
+    editRequest?: PipelineEditRequestDto,
   ): Promise<PlanResult> {
     const skipVisualPlan =
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
@@ -339,6 +355,7 @@ export class PlannerService {
       globalPalette,
       globalTypography,
       repoManifest,
+      editRequest,
       resolvedModel,
       undefined,
       undefined,
@@ -355,6 +372,7 @@ export class PlannerService {
     globalPalette: ColorPalette,
     globalTypography: TypographyTokens,
     repoManifest: RepoThemeManifest | undefined,
+    editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
     jobId?: string,
@@ -423,6 +441,7 @@ export class PlannerService {
               globalTypography,
               plan,
               repoManifest,
+              editRequest,
               modelName,
               logPath,
               browser,
@@ -462,6 +481,7 @@ export class PlannerService {
     globalTypography: TypographyTokens,
     fullPlan: PlanResult,
     repoManifest: RepoThemeManifest | undefined,
+    editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
     browser?: Awaited<ReturnType<typeof puppeteer.launch>> | null,
@@ -492,6 +512,12 @@ export class PlannerService {
     }
     try {
       const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+      const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
+        request: editRequest,
+        componentName: componentPlan.componentName,
+        route: componentPlan.route,
+        maxAttachments: 3,
+      });
       const planningSource = this.buildPlanningSourceContext(
         componentPlan,
         templateSource,
@@ -553,6 +579,11 @@ export class PlannerService {
             }
           : undefined,
         draftSections,
+        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
+          audience: 'visual-plan',
+          componentName: componentPlan.componentName,
+          route: componentPlan.route,
+        }),
       });
       const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';
@@ -1292,7 +1323,7 @@ For each template, decide:
 - front-page → route "/"
 - home → route "/" ONLY when no front-page template exists; otherwise route "/blog"
  - index → route "/" ONLY when neither front-page nor home exists; otherwise route "/index"
-- archive → route "/archive"  (category/tag/date archives — NOT the blog homepage)
+- archive → route "/archive"  (WordPress archive fallback: handles category/tag/author/date archives — App.tsx will register alias routes /category/:slug, /author/:slug, /tag/:slug pointing to this component)
 - search → route "/search"
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
@@ -1350,6 +1381,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     content: DbContentResult,
     _templateNames: string[],
     repoManifest?: RepoThemeManifest,
+    editRequestContext?: string,
   ): string {
     const lines: string[] = [];
     const templates =
@@ -1427,6 +1459,11 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     lines.push('');
 
     lines.push(`## Posts: ${content.posts.length} total`);
+
+    if (editRequestContext) {
+      lines.push('');
+      lines.push(editRequestContext);
+    }
 
     return lines.join('\n');
   }
@@ -1516,7 +1553,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     // Standard templates injected synthetically — AI doesn't need to produce them.
     // Small numbers of other omissions are also tolerated because the planner
     // can inject deterministic fallback components after Phase A.
-    const INJECTABLE_STANDARDS = new Set(['author', 'category']);
+    // 'archive' is injected when neither archive/author/category exist in the theme.
+    const INJECTABLE_STANDARDS = new Set(['archive']);
     const missingRequired = missing.filter((n) => !INJECTABLE_STANDARDS.has(n));
     const maxInjectableMissing = Math.max(
       1,
@@ -1637,12 +1675,15 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
   private buildValidationFeedbackPrompt(
     errors: string[],
     templateNames: string[],
+    editRequestContext?: string,
   ): string {
     return `Your previous plan failed validation with these errors:
 
 ${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}
 
 Templates that MUST be planned: ${templateNames.join(', ')}
+
+${editRequestContext ? `\n${editRequestContext}\n` : ''}
 
 Fix all of the above errors and return a corrected JSON array. Key rules:
 - Every template must appear exactly once
@@ -1654,7 +1695,11 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
   }
 
-  private buildRetryPrompt(badRaw: string, templateNames: string[]): string {
+  private buildRetryPrompt(
+    badRaw: string,
+    templateNames: string[],
+    editRequestContext?: string,
+  ): string {
     const preview = badRaw.slice(0, 500);
     return `Your previous response could not be parsed as a valid JSON array.
 
@@ -1664,6 +1709,8 @@ ${preview}${badRaw.length > 500 ? '\n... (truncated)' : ''}
 \`\`\`
 
 Templates that MUST be planned: ${templateNames.join(', ')}
+
+${editRequestContext ? `\n${editRequestContext}\n` : ''}
 
 Return ONLY a valid JSON array — no markdown fences, no explanation, no text before or after the array.
 Each object must have: templateName, componentName, type ("page"|"partial"), route (string|null), dataNeeds (string[]), isDetail (boolean), description (string).`;
@@ -1698,22 +1745,21 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     );
 
     // Ensure standard routes are generated even when not present in theme templates.
+    // Per WordPress template hierarchy: author/category/tag pages fall back to archive.php.
+    // So we inject a single 'archive' fallback instead of separate author/category templates.
     const createFallbackTemplate = (name: string, body: string) =>
       themeType === 'classic' ? { name, html: body } : { name, markup: body };
 
-    if (!existingTemplateNames.has('author')) {
+    const hasArchiveVariant =
+      existingTemplateNames.has('archive') ||
+      existingTemplateNames.has('author') ||
+      existingTemplateNames.has('category');
+
+    if (!hasArchiveVariant) {
       templates.push(
         createFallbackTemplate(
-          'author',
-          '<div class="author-page"><h1>Author: {author.name}</h1><div class="author-bio">{author.description}</div><div class="author-posts"><!-- List of author posts --></div></div>',
-        ),
-      );
-    }
-    if (!existingTemplateNames.has('category')) {
-      templates.push(
-        createFallbackTemplate(
-          'category',
-          '<div class="category-page"><h1>Category: {category.name}</h1><div class="category-description">{category.description}</div><div class="category-posts"><!-- List of category posts --></div></div>',
+          'archive',
+          '<div><!-- Archive fallback: lists posts filtered by category, author, or tag --></div>',
         ),
       );
     }
@@ -1729,12 +1775,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   private buildFallbackPlan(templateNames: string[]): PlanResult {
-    const PARTIAL_PATTERNS =
-      /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
     return templateNames.map((name) => {
       const componentName = this.toComponentName(name);
-      const isPartial = PARTIAL_PATTERNS.test(componentName);
+      const isPartial = isPartialComponentName(componentName);
 
       // Determine appropriate data needs based on template type
       let dataNeeds: string[] = ['posts'];
@@ -1743,12 +1786,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : `/${componentName.toLowerCase()}`;
       let isDetail = false;
 
-      if (name.toLowerCase() === 'author') {
+      if (name.toLowerCase() === 'archive') {
+        dataNeeds = ['posts'];
+        route = '/archive';
+        isDetail = false;
+      } else if (name.toLowerCase() === 'author') {
         dataNeeds = ['posts'];
         route = '/author/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'category') {
-        dataNeeds = ['categoryDetail', 'posts'];
+        dataNeeds = ['posts'];
         route = '/category/:slug';
         isDetail = true;
       } else if (name.toLowerCase() === 'page') {

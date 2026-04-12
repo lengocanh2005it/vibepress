@@ -3,9 +3,7 @@ import { spawn } from 'child_process';
 import ts from 'typescript';
 import puppeteer, { type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
-
-const PARTIAL_PATTERNS =
-  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
 const VIRTUAL_MAIN_FILE = `${VIRTUAL_ROOT}/src/main.tsx`;
 const VIRTUAL_APP_FILE = `${VIRTUAL_ROOT}/src/App.tsx`;
@@ -381,7 +379,7 @@ export class ValidatorService {
     const expectsAnyDetail =
       context.isDetail === true || expectsPostDetail || expectsPageDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
-    const isPartialComponent = PARTIAL_PATTERNS.test(
+    const isPartialComponent = isPartialComponentName(
       context.componentName ?? '',
     );
     const isSharedChromePartial =
@@ -399,7 +397,7 @@ export class ValidatorService {
       const pageType = this.findTypeBody(code, 'Page');
       if (pageType) {
         const BAD_FIELDS =
-          /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b(\??\s*:[^;}\n]+[;,\n]?)?/g;
+          /\b(author|categories|tags|excerpt|date|comment_count|comments)\b(\??\s*:[^;}\n]+[;,\n]?)?/g;
         const cleanedBody = pageType.body.replace(BAD_FIELDS, '');
         code =
           code.slice(0, pageType.openBrace + 1) +
@@ -451,15 +449,15 @@ export class ValidatorService {
     const siteInfoMatch = code.match(/\bsiteInfo\.(name|url|description)\b/);
     if (siteInfoMatch) {
       violations.push(
-        `\`siteInfo.${siteInfoMatch[1]}\` does not exist. Use \`siteInfo.siteName\` / \`siteInfo.siteUrl\` / \`siteInfo.blogDescription\`.`,
+        `\`siteInfo.${siteInfoMatch[1]}\` does not exist. Use \`siteInfo.siteName\` / \`siteInfo.siteUrl\` / \`siteInfo.blogDescription\` / \`siteInfo.logoUrl\`.`,
       );
     }
 
     // 11. Wrong post field names
-    const postFieldMatch = code.match(/\bpost\.(tags|title\.rendered)\b/);
+    const postFieldMatch = code.match(/\bpost\.(title\.rendered)\b/);
     if (postFieldMatch) {
       violations.push(
-        `\`post.${postFieldMatch[1]}\` does not exist. Use \`post.title\` (string) or \`post.categories\` (string[]).`,
+        `\`post.${postFieldMatch[1]}\` does not exist. Use \`post.title\` (string), \`post.categories\` (string[]), or \`post.tags\` (string[]).`,
       );
     }
     if (expectsPageDetail) {
@@ -467,20 +465,20 @@ export class ValidatorService {
       // variable over Posts (e.g. sidebar recent-posts), not over Page objects.
       // Only flag unambiguous page variable names.
       const pageFieldMatch = code.match(
-        /\b(?:pageDetail|page)\.(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
+        /\b(?:pageDetail|page)\.(author|categories|tags|excerpt|date|comment_count|comments)\b/,
       );
       if (pageFieldMatch) {
         violations.push(
-          `Page detail contract violated: \`Page.${pageFieldMatch[1]}\` does not exist. A page only exposes \`id, title, content, slug\` in this pipeline.`,
+          `Page detail contract violated: \`Page.${pageFieldMatch[1]}\` does not exist. Use only the canonical Page fields for this pipeline.`,
         );
       }
       const pageType = this.findTypeBody(code, 'Page');
       const pageInterfaceMatch = pageType?.body.match(
-        /\b(author|categories|featuredImage|excerpt|date|comment_count|comments)\b/,
+        /\b(author|categories|tags|excerpt|date|comment_count|comments)\b/,
       );
       if (pageInterfaceMatch) {
         violations.push(
-          `Page detail contract violated: \`interface Page\` (or \`type Page\`) declares post-only field \`${pageInterfaceMatch[1]}\`. Keep Page limited to \`id, title, content, slug\`.`,
+          `Page detail contract violated: \`interface Page\` (or \`type Page\`) declares post-only field \`${pageInterfaceMatch[1]}\`. Keep Page aligned with the canonical Page contract.`,
         );
       }
     }
@@ -528,6 +526,10 @@ export class ValidatorService {
     }
 
     if (isSharedChromePartial) {
+      const isHeaderLikePartial = /^(Header|Navigation|Nav)$/i.test(
+        context.componentName ?? '',
+      );
+      const isFooterPartial = /^Footer$/i.test(context.componentName ?? '');
       const usesSiteTitle =
         /\bsiteInfo\??\.siteName\b/.test(code) ||
         /\{siteInfo\??\.siteName\}/.test(code);
@@ -568,6 +570,26 @@ export class ValidatorService {
       if (/No menus available/i.test(code)) {
         violations.push(
           'Shared chrome contract violated: do not emit `No menus available` placeholders in Header/Footer/Navigation partials. Render the API menus or a structurally empty nav.',
+        );
+      }
+      if (
+        isHeaderLikePartial &&
+        dataNeeds.has('menus') &&
+        !/location\s*===\s*['"]primary['"]/.test(code) &&
+        !/slug\s*===\s*['"]primary['"]/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Header/Navigation partials must source their links from the primary menu (`location === "primary"` with `slug === "primary"` fallback), not by raw menu index.',
+        );
+      }
+      if (
+        isFooterPartial &&
+        dataNeeds.has('menus') &&
+        !/location\s*!==\s*['"]primary['"]/.test(code) &&
+        !/slug\s*!==\s*['"]primary['"]/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Footer must exclude the primary navigation menu (`location !== "primary"` and slug fallback) and render only footer/social menu groups.',
         );
       }
     }
@@ -1079,7 +1101,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     if (
       type === 'partial' ||
       isSubComponent === true ||
-      PARTIAL_PATTERNS.test(componentName ?? '')
+      isPartialComponentName(componentName ?? '')
     ) {
       return 'components';
     }
@@ -1110,8 +1132,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private usesSharedChromeData(code: string): boolean {
-    return (
-      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription)\b/.test(code) ||
+      return (
+      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription|logoUrl)\b/.test(code) ||
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
       /\{\s*menus\b/.test(code)
     );
@@ -1186,7 +1208,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 
   private getVirtualComponentFilePath(comp: GeneratedComponent): string {
     const folder =
-      PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent
+      isPartialComponentName(comp.name) || comp.isSubComponent
         ? 'components'
         : 'pages';
     return `${VIRTUAL_ROOT}/src/${folder}/${comp.name}.tsx`;
