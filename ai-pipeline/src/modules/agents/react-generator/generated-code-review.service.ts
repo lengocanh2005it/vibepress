@@ -230,7 +230,7 @@ Rules:
 - Do NOT fail on component/function/export naming differences if the file still clearly implements the approved component.
 - If the approved visual sections include \`comments\`, comments fetching/rendering is justified.
 - Do NOT fail only because fetched data is unused unless it clearly indicates a wrong endpoint or broken logic.
-- Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, or obviously different wrapper structure from the approved plan.
+ - Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, obviously different wrapper structure from the approved plan, or typography that is materially inflated beyond the approved/source visual weight (for example giant display headings or oversized menu/body text in an otherwise modest WordPress template).
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
@@ -350,8 +350,6 @@ ${component.code}
     const ignorablePatterns = [
       'component name does not match approved contract',
       'fetches menus data but does not use it',
-      'violates contract by fetching data from an api endpoint',
-      'fetches unauthorized data and includes unauthorized visual sections',
     ];
     if (ignorablePatterns.some((pattern) => combined.includes(pattern))) {
       return [];

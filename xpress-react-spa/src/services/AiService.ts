@@ -92,7 +92,23 @@ export interface AiEditRequestPayload {
         };
         targetNode?: {
             nodeId?: string;
+            sourceNodeId?: string;
+            sourceFile?: string;
+            topLevelIndex?: number;
             templateName?: string;
+            ownerNodeId?: string;
+            ownerSourceNodeId?: string;
+            ownerSourceFile?: string;
+            ownerTopLevelIndex?: number;
+            ownerTemplateName?: string;
+            editNodeId?: string;
+            editSourceNodeId?: string;
+            editSourceFile?: string;
+            editTopLevelIndex?: number;
+            editTemplateName?: string;
+            editNodeRole?: string;
+            editTagName?: string;
+            ancestorSourceNodeIds?: string[];
             route?: string | null;
             blockName?: string;
             blockClientId?: string;

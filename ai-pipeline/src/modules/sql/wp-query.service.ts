@@ -60,6 +60,31 @@ export interface WpThemeRuntimeConfig {
   template: string;
 }
 
+export interface WpDbTemplate {
+  id: number;
+  postType: 'wp_template' | 'wp_template_part';
+  title: string;
+  slug: string;
+  content: string;
+  status: string;
+  modified: string;
+}
+
+export interface WpDbGlobalStyle {
+  id: number;
+  title: string;
+  slug: string;
+  content: string;
+  status: string;
+  modified: string;
+}
+
+export interface WpReadingSettings {
+  showOnFront: 'posts' | 'page';
+  pageOnFrontId: number | null;
+  pageForPostsId: number | null;
+}
+
 export interface WpPluginInfo {
   slug: string;
   pluginFile: string;
@@ -234,6 +259,28 @@ export class WpQueryService {
         });
       }
 
+      const [wpNavPosts] = await conn.query<any[]>(
+        `SELECT p.ID, p.post_title, p.post_content, p.post_name
+         FROM \`${prefix}posts\` p
+         WHERE p.post_type = 'wp_navigation' AND p.post_status = 'publish'
+         ORDER BY p.ID`,
+      );
+      for (const navPost of wpNavPosts) {
+        const items = parseNavigationBlockItems(
+          String(navPost.post_content ?? ''),
+          siteUrl,
+        );
+        if (items.length === 0) continue;
+        result.push({
+          name: String(navPost.post_title || navPost.post_name || 'Primary'),
+          slug: String(navPost.post_name ?? 'primary'),
+          location: result.some((menu) => menu.location === 'primary')
+            ? null
+            : 'primary',
+          items,
+        });
+      }
+
       // Heuristic fallback: if no location assignments found, infer primary nav
       // by matching slug patterns, then by item count (largest menu = main nav).
       if (result.length > 0 && result.every((m) => !m.location)) {
@@ -246,6 +293,30 @@ export class WpQueryService {
         const primary = primaryBySlug ?? primaryBySize;
         for (const m of result) {
           if (m === primary) m.location = 'primary';
+        }
+      }
+
+      if (result.length === 0) {
+        const [pages] = await conn.query<any[]>(
+          `SELECT ID, post_title, post_name, menu_order
+           FROM \`${prefix}posts\`
+           WHERE post_type = 'page' AND post_status = 'publish'
+           ORDER BY menu_order, ID`,
+        );
+        if (pages.length > 0) {
+          result.push({
+            name: 'Primary',
+            slug: 'primary',
+            location: 'primary',
+            items: pages.map((page, index) => ({
+              id: Number(page.ID),
+              title: String(page.post_title ?? ''),
+              url: `/page/${page.post_name}`,
+              order: Number(page.menu_order ?? index),
+              parentId: 0,
+              target: null,
+            })),
+          });
         }
       }
 
@@ -407,10 +478,100 @@ export class WpQueryService {
         siteUrl: opts['siteurl'] ?? '',
         siteName: opts['blogname'] ?? '',
         blogDescription: opts['blogdescription'] ?? '',
-        logoUrl: await this.resolveCustomLogoUrl(conn, prefix),
+        logoUrl: await this.resolveSiteLogoUrl(
+          conn,
+          prefix,
+          opts['siteurl'] ?? '',
+        ),
         adminEmail: opts['admin_email'] ?? '',
         language: opts['WPLANG'] ?? 'en',
         tablePrefix: prefix,
+      };
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getDbTemplates(connectionString: string): Promise<WpDbTemplate[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_type, post_title, post_name, post_content, post_status, post_modified
+         FROM \`${prefix}posts\`
+         WHERE post_type IN ('wp_template', 'wp_template_part')
+           AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+         ORDER BY post_modified DESC, ID DESC`,
+      );
+
+      return rows.map((row) => ({
+        id: Number(row.ID),
+        postType: String(row.post_type) as 'wp_template' | 'wp_template_part',
+        title: String(row.post_title ?? ''),
+        slug: String(row.post_name ?? ''),
+        content: String(row.post_content ?? ''),
+        status: String(row.post_status ?? ''),
+        modified: String(row.post_modified ?? ''),
+      }));
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getDbGlobalStyles(
+    connectionString: string,
+  ): Promise<WpDbGlobalStyle[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_title, post_name, post_content, post_status, post_modified
+         FROM \`${prefix}posts\`
+         WHERE post_type = 'wp_global_styles'
+           AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+         ORDER BY post_modified DESC, ID DESC`,
+      );
+
+      return rows.map((row) => ({
+        id: Number(row.ID),
+        title: String(row.post_title ?? ''),
+        slug: String(row.post_name ?? ''),
+        content: String(row.post_content ?? ''),
+        status: String(row.post_status ?? ''),
+        modified: String(row.post_modified ?? ''),
+      }));
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getReadingSettings(
+    connectionString: string,
+  ): Promise<WpReadingSettings> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT option_name, option_value
+         FROM \`${prefix}options\`
+         WHERE option_name IN ('show_on_front', 'page_on_front', 'page_for_posts')`,
+      );
+
+      const options = new Map<string, string>();
+      for (const row of rows) {
+        options.set(String(row.option_name), String(row.option_value ?? ''));
+      }
+
+      const showOnFront =
+        options.get('show_on_front') === 'page' ? 'page' : 'posts';
+      const pageOnFrontId = Number(options.get('page_on_front') ?? 0) || null;
+      const pageForPostsId =
+        Number(options.get('page_for_posts') ?? 0) || null;
+
+      return {
+        showOnFront,
+        pageOnFrontId,
+        pageForPostsId,
       };
     } finally {
       await conn.end();
@@ -642,6 +803,193 @@ export class WpQueryService {
     }
   }
 
+  private async resolveSiteLogoUrl(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+    siteUrl: string,
+  ): Promise<string | null> {
+    const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix);
+    if (customLogoUrl) return customLogoUrl;
+
+    const fallbackLogoUrl = await this.resolveLogoUrlFromTemplateMarkup(
+      conn,
+      prefix,
+      siteUrl,
+    );
+    if (fallbackLogoUrl) {
+      this.logger.log('Resolved site logo from DB template markup fallback');
+    }
+    return fallbackLogoUrl;
+  }
+
+  private async resolveLogoUrlFromTemplateMarkup(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+    siteUrl: string,
+  ): Promise<string | null> {
+    try {
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_name, post_type, post_content
+         FROM \`${prefix}posts\`
+         WHERE post_type IN ('wp_template_part', 'wp_template')
+           AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+           AND (
+             post_name LIKE '%header%'
+             OR post_name LIKE '%logo%'
+             OR post_content LIKE '%wp:site-logo%'
+             OR post_content LIKE '%/wp-content/uploads/%'
+             OR post_content LIKE '%<img%'
+           )
+         ORDER BY
+           CASE WHEN post_type = 'wp_template_part' THEN 0 ELSE 1 END,
+           CASE WHEN post_name LIKE '%header%' THEN 0 ELSE 1 END,
+           ID DESC
+         LIMIT 20`,
+      );
+
+      for (const row of rows) {
+        const markup = String(row.post_content ?? '');
+        const resolved = await this.extractLogoUrlFromMarkup(
+          conn,
+          prefix,
+          markup,
+          siteUrl,
+        );
+        if (resolved) return resolved;
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async extractLogoUrlFromMarkup(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+    markup: string,
+    siteUrl: string,
+  ): Promise<string | null> {
+    if (!markup.trim()) return null;
+
+    const siteLogoBlockPattern =
+      /<!--\s*wp:site-logo(?:\s+(\{[\s\S]*?\}))?[\s/]*-->/gi;
+    for (const match of markup.matchAll(siteLogoBlockPattern)) {
+      const attrs = this.tryParseBlockAttrs(match[1]);
+      const attrUrl = this.normalizeLogoCandidateUrl(
+        typeof attrs?.url === 'string' ? attrs.url : null,
+        siteUrl,
+      );
+      if (attrUrl) return attrUrl;
+
+      const attrId = Number(attrs?.id ?? 0);
+      if (Number.isFinite(attrId) && attrId > 0) {
+        const attachmentUrl = await this.resolveAttachmentUrlById(
+          conn,
+          prefix,
+          attrId,
+          siteUrl,
+        );
+        if (attachmentUrl) return attachmentUrl;
+      }
+    }
+
+    const imagePattern = /<img\b[^>]*\bsrc="([^"]+)"[^>]*>/gi;
+    for (const match of markup.matchAll(imagePattern)) {
+      const src = this.normalizeLogoCandidateUrl(match[1], siteUrl);
+      if (src) return src;
+    }
+
+    const uploadUrlPattern =
+      /(?:https?:\/\/[^\s"'<>]+)?\/wp-content\/uploads\/[^\s"'<>]+/gi;
+    for (const match of markup.matchAll(uploadUrlPattern)) {
+      const src = this.normalizeLogoCandidateUrl(match[0], siteUrl);
+      if (src) return src;
+    }
+
+    const attachmentIdPattern =
+      /(?:wp-image-|\"id\"\s*:\s*|data-id=")(\d{1,12})/gi;
+    for (const match of markup.matchAll(attachmentIdPattern)) {
+      const attachmentId = Number(match[1] ?? 0);
+      if (!Number.isFinite(attachmentId) || attachmentId <= 0) continue;
+      const attachmentUrl = await this.resolveAttachmentUrlById(
+        conn,
+        prefix,
+        attachmentId,
+        siteUrl,
+      );
+      if (attachmentUrl) return attachmentUrl;
+    }
+
+    return null;
+  }
+
+  private tryParseBlockAttrs(
+    raw: string | null | undefined,
+  ): Record<string, any> | null {
+    if (!raw?.trim()) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeLogoCandidateUrl(
+    raw: string | null | undefined,
+    siteUrl: string,
+  ): string | null {
+    if (!raw) return null;
+    const trimmed = String(raw).trim();
+    if (!trimmed) return null;
+
+    try {
+      if (/^https?:\/\//i.test(trimmed)) {
+        return new URL(trimmed).toString();
+      }
+      if (siteUrl) {
+        if (trimmed.startsWith('/')) {
+          return new URL(trimmed, siteUrl).toString();
+        }
+        if (trimmed.includes('wp-content/uploads/')) {
+          return new URL(
+            trimmed.startsWith('wp-content/')
+              ? `/${trimmed}`
+              : `/wp-content/uploads/${trimmed.split('wp-content/uploads/')[1] ?? ''}`,
+            siteUrl,
+          ).toString();
+        }
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  private async resolveAttachmentUrlById(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+    attachmentId: number,
+    siteUrl: string,
+  ): Promise<string | null> {
+    try {
+      const [[attachmentRow]] = await conn.query<any[]>(
+        `SELECT guid
+         FROM \`${prefix}posts\`
+         WHERE ID = ? AND post_type = 'attachment'
+         LIMIT 1`,
+        [attachmentId],
+      );
+      return this.normalizeLogoCandidateUrl(
+        attachmentRow?.guid as string | undefined,
+        siteUrl,
+      );
+    } catch {
+      return null;
+    }
+  }
+
   private mapPost(row: any): WpPost {
     return {
       id: row.ID,
@@ -841,4 +1189,68 @@ function phpUnserializeSimple(input: string): Record<string, any> | null {
   } catch {
     return null;
   }
+}
+
+function parseNavigationBlockItems(
+  content: string,
+  siteUrl?: string | null,
+): WpMenuItem[] {
+  const items: WpMenuItem[] = [];
+  const pattern = /<!--\s*wp:navigation-link\s+(\{[^}]*\})\s*(?:\/-->|-->)/g;
+  let match: RegExpExecArray | null;
+  let order = 0;
+
+  while ((match = pattern.exec(content)) !== null) {
+    try {
+      const attrs = JSON.parse(match[1]) as {
+        label?: string;
+        url?: string;
+        id?: number;
+        opensInNewTab?: boolean;
+      };
+      const url = normalizeNavigationMenuUrl(attrs.url ?? '', siteUrl);
+      if (!attrs.label || !url) continue;
+
+      items.push({
+        id: attrs.id ?? 0,
+        title: attrs.label,
+        url,
+        order: order++,
+        parentId: 0,
+        target: attrs.opensInNewTab ? '_blank' : null,
+      });
+    } catch {
+      // Skip malformed block attrs.
+    }
+  }
+
+  return items;
+}
+
+function normalizeNavigationMenuUrl(
+  raw: string,
+  siteUrl?: string | null,
+): string {
+  if (!raw) return '';
+  const trimmed = raw.trim();
+  try {
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      const url = new URL(trimmed);
+      if (siteUrl) {
+        try {
+          const site = new URL(siteUrl);
+          if (url.origin !== site.origin) return trimmed;
+        } catch {
+          // Invalid site URL — fall back to pathname rewrite.
+        }
+      }
+      raw = `${url.pathname}${url.search}${url.hash}`;
+    } else {
+      raw = trimmed;
+    }
+  } catch {
+    raw = trimmed;
+  }
+
+  return raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
 }

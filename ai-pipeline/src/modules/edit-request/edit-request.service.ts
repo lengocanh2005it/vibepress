@@ -585,9 +585,48 @@ function normalizeTargetNode(
 ) {
   if (!targetNode) return undefined;
 
+  const ownerSourceNodeId =
+    targetNode.ownerSourceNodeId?.trim() || undefined;
+  const ownerSourceFile = targetNode.ownerSourceFile?.trim() || undefined;
+  const ownerTemplateName =
+    targetNode.ownerTemplateName?.trim() || undefined;
+  const ownerTopLevelIndex =
+    normalizeOptionalNumber(targetNode.ownerTopLevelIndex);
+  const editSourceNodeId = targetNode.editSourceNodeId?.trim() || undefined;
+  const editSourceFile = targetNode.editSourceFile?.trim() || undefined;
+  const editTemplateName = targetNode.editTemplateName?.trim() || undefined;
+  const editTopLevelIndex =
+    normalizeOptionalNumber(targetNode.editTopLevelIndex);
+
   return compactObject({
-    nodeId: targetNode.nodeId?.trim() || undefined,
-    templateName: targetNode.templateName?.trim() || undefined,
+    nodeId:
+      targetNode.nodeId?.trim() ||
+      targetNode.ownerNodeId?.trim() ||
+      undefined,
+    sourceNodeId:
+      targetNode.sourceNodeId?.trim() || ownerSourceNodeId || undefined,
+    sourceFile:
+      targetNode.sourceFile?.trim() || ownerSourceFile || undefined,
+    topLevelIndex:
+      normalizeOptionalNumber(targetNode.topLevelIndex) ??
+      ownerTopLevelIndex,
+    templateName:
+      targetNode.templateName?.trim() || ownerTemplateName || undefined,
+    ownerNodeId: targetNode.ownerNodeId?.trim() || undefined,
+    ownerSourceNodeId,
+    ownerSourceFile,
+    ownerTopLevelIndex,
+    ownerTemplateName,
+    editNodeId: targetNode.editNodeId?.trim() || undefined,
+    editSourceNodeId,
+    editSourceFile,
+    editTopLevelIndex,
+    editTemplateName,
+    editNodeRole: targetNode.editNodeRole?.trim() || undefined,
+    editTagName: targetNode.editTagName?.trim() || undefined,
+    ancestorSourceNodeIds: normalizeStringArray(
+      targetNode.ancestorSourceNodeIds,
+    ),
     route:
       targetNode.route?.trim() ||
       pageRoute ||
@@ -595,7 +634,7 @@ function normalizeTargetNode(
       undefined,
     blockName: targetNode.blockName?.trim() || undefined,
     blockClientId: targetNode.blockClientId?.trim() || undefined,
-    tagName: targetNode.tagName?.trim() || undefined,
+    tagName: targetNode.tagName?.trim() || targetNode.editTagName?.trim() || undefined,
     domPath: targetNode.domPath?.trim() || undefined,
     nearestHeading: targetNode.nearestHeading?.trim() || undefined,
     nearestLandmark: targetNode.nearestLandmark?.trim() || undefined,
@@ -619,6 +658,20 @@ function roundMetric(value: number): number {
 
 function clampRatio(value: number): number {
   return Math.min(Math.max(roundMetric(value), 0), 1);
+}
+
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeStringArray(values?: string[]): string[] | undefined {
+  const normalized = values
+    ?.map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  return normalized && normalized.length > 0
+    ? Array.from(new Set(normalized))
+    : undefined;
 }
 
 function compactObject<T>(value: T): T {

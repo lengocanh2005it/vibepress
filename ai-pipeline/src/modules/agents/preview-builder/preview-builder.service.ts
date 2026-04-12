@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   access,
   cp,
@@ -21,7 +22,11 @@ import type { PlanResult } from '../planner/planner.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
-import type { WpSiteInfo } from '../../sql/wp-query.service.js';
+import type { WpPage, WpPost, WpSiteInfo } from '../../sql/wp-query.service.js';
+import {
+  buildUiSourceMapForProject,
+  writeUiSourceMapArtifacts,
+} from '../../edit-request/ui-source-map.util.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -36,6 +41,7 @@ export interface PreviewBuilderResult {
   previewUrl: string;
   apiBaseUrl: string;
   routeEntries: PreviewRouteEntry[];
+  uiSourceMapPath?: string;
   frontendPid?: number;
   serverPid?: number;
 }
@@ -49,6 +55,7 @@ export class PreviewBuilderService {
   private readonly logger = new Logger(PreviewBuilderService.name);
 
   constructor(
+    private readonly configService: ConfigService,
     private assetDownloader: AssetDownloaderService,
     private readonly validator: ValidatorService,
   ) {}
@@ -57,14 +64,23 @@ export class PreviewBuilderService {
     jobId: string;
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
+    content?: { posts: WpPost[]; pages: WpPage[] };
     themeDir?: string;
     siteInfo?: WpSiteInfo;
     tokens?: ThemeTokens;
     plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, siteInfo, tokens, plan } =
-      input;
+    const {
+      jobId,
+      components,
+      dbCreds,
+      content,
+      themeDir,
+      siteInfo,
+      tokens,
+      plan,
+    } = input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -98,6 +114,19 @@ export class PreviewBuilderService {
       );
     }
 
+    const wpUploadAssetUrls = this.collectWordPressUploadUrls({
+      components: components.components,
+      content,
+      siteUrl: siteInfo?.siteUrl,
+    });
+    if (wpUploadAssetUrls.length > 0) {
+      await this.copyWordPressUploadAssetsToPublic(
+        wpUploadAssetUrls,
+        join(frontendDir, 'public', 'assets', 'images'),
+        siteInfo?.siteUrl,
+      );
+    }
+
     const copiedLogoPublicPath = await this.copySiteLogoToPublic(
       siteInfo?.logoUrl ?? null,
       join(frontendDir, 'public', 'assets', 'images'),
@@ -112,10 +141,14 @@ export class PreviewBuilderService {
 
       // Match WordPress URLs (http://localhost/wp-content/uploads/... hoặc https://domain.com/wp-content/uploads/...)
       const wpUploadPattern =
-        /https?:\/\/[^"'\s]+\/wp-content\/uploads\/([^"'\s]+\.(jpg|jpeg|png|gif|webp))/gi;
-      comp.code = comp.code.replace(wpUploadPattern, (match, fileName) => {
-        this.logger.log(`Relinked WP image: ${fileName}`);
-        return `/assets/images/${fileName}`;
+        /https?:\/\/[^"'\s]+\/wp-content\/uploads\/[^"'\s)]+/gi;
+      comp.code = comp.code.replace(wpUploadPattern, (match) => {
+        const localPath = this.toLocalWpUploadAssetPath(
+          match,
+          siteInfo?.siteUrl,
+        );
+        this.logger.log(`Relinked WP image: ${match} -> ${localPath}`);
+        return localPath;
       });
 
       if (!isPartial && (hasSharedHeader || hasSharedFooter)) {
@@ -131,11 +164,36 @@ export class PreviewBuilderService {
     // 3b. Copy đúng các asset mà component generated đang reference.
     // Điều này tránh case assets/ có tồn tại nhưng thiếu các ảnh con mà JSX dùng.
     if (themeDir) {
-      const missingAssets = await this.copyReferencedThemeAssets(
-        themeDir,
-        join(frontendDir, 'public'),
-        components.components,
-      );
+      const { missing: missingAssets, remapped: remappedAssets } =
+        await this.copyReferencedThemeAssets(
+          themeDir,
+          join(frontendDir, 'public'),
+          components.components,
+        );
+
+      // Remap paths where the file exists under /assets/images/ but was referenced
+      // as /assets/<file> (common mismatch between theme image copy and AI-generated paths).
+      if (remappedAssets.size > 0) {
+        for (const comp of components.components) {
+          let code = comp.code;
+          for (const [oldPath, newPath] of remappedAssets) {
+            // Replace all variants: /assets/foo.png and assets/foo.png
+            code = code.split(oldPath).join(newPath);
+            const withoutLeadingSlash = oldPath.replace(/^\//, '');
+            code = code.split(withoutLeadingSlash).join(newPath);
+          }
+          if (code === comp.code) continue;
+          comp.code = code;
+          const isPartial =
+            isPartialComponentName(comp.name) || comp.isSubComponent;
+          const targetDir = isPartial ? componentsDir : pagesDir;
+          await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+        }
+        this.logger.log(
+          `Remapped ${remappedAssets.size} asset path(s) to /assets/images/ subdir`,
+        );
+      }
+
       if (missingAssets.size > 0) {
         for (const comp of components.components) {
           const stripped = this.stripImgTagsForMissingAssets(
@@ -222,6 +280,14 @@ export class PreviewBuilderService {
         `Generated Layout.tsx with ${[headerComp?.name, footerComp?.name].filter(Boolean).join(' + ')}`,
       );
     }
+
+    const uiSourceMapPath = await this.writeUiSourceMap({
+      previewDir: rootDir,
+      frontendDir,
+      srcDir,
+      components: components.components,
+      plan,
+    });
 
     // Build route map từ plan (primary) — fallback sang convention nếu plan thiếu
     const FALLBACK_ROUTE_MAP: Record<string, string> = {
@@ -375,7 +441,7 @@ ${routesBlock}
     // server/.env — DB credentials + port
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n${copiedLogoPublicPath ? `SITE_LOGO_URL=${copiedLogoPublicPath}\n` : ''}`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${copiedLogoPublicPath}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss
@@ -409,6 +475,7 @@ ${routesBlock}
       previewUrl,
       apiBaseUrl,
       routeEntries,
+      uiSourceMapPath,
       frontendPid: frontendProc.pid,
       serverPid: serverProc.pid,
     };
@@ -432,6 +499,39 @@ ${routesBlock}
       const targetDir = isPartial ? componentsDir : pagesDir;
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
+
+    await this.writeUiSourceMap({
+      previewDir,
+      frontendDir,
+      srcDir,
+      components,
+    });
+  }
+
+  private async writeUiSourceMap(input: {
+    previewDir: string;
+    frontendDir: string;
+    srcDir: string;
+    components: ReactGenerateResult['components'];
+    plan?: PlanResult;
+  }): Promise<string | undefined> {
+    const { previewDir, frontendDir, srcDir, components, plan } = input;
+    const entries = await buildUiSourceMapForProject({
+      srcDir,
+      components,
+      plan,
+    });
+
+    if (entries.length === 0) return undefined;
+    const uiSourceMapPath = await writeUiSourceMapArtifacts({
+      entries,
+      previewDir,
+      frontendDir,
+    });
+    this.logger.log(
+      `Generated ui-source-map.json with ${entries.length} tracked source node entries`,
+    );
+    return uiSourceMapPath;
   }
 
   private async applyThemeTokens(
@@ -658,6 +758,150 @@ ${fontEntries}
     }
   }
 
+  private collectWordPressUploadUrls(input: {
+    components: ReactGenerateResult['components'];
+    content?: { posts: WpPost[]; pages: WpPage[] };
+    siteUrl?: string | null;
+  }): string[] {
+    const urls = new Set<string>();
+    const { components, content, siteUrl } = input;
+
+    for (const component of components) {
+      for (const match of component.code.matchAll(
+        /https?:\/\/[^"'\s]+\/wp-content\/uploads\/[^"'\s)]+/gi,
+      )) {
+        const normalized = this.normalizeWpUploadUrl(match[0], siteUrl);
+        if (normalized) urls.add(normalized);
+      }
+    }
+
+    for (const item of [...(content?.posts ?? []), ...(content?.pages ?? [])]) {
+      if (item.featuredImage) {
+        const normalized = this.normalizeWpUploadUrl(
+          item.featuredImage,
+          siteUrl,
+        );
+        if (normalized) urls.add(normalized);
+      }
+      for (const match of String(item.content ?? '').matchAll(
+        /(?:https?:\/\/[^"'\s]+)?\/wp-content\/uploads\/[^"'\s)]+/gi,
+      )) {
+        const normalized = this.normalizeWpUploadUrl(match[0], siteUrl);
+        if (normalized) urls.add(normalized);
+      }
+    }
+
+    return [...urls];
+  }
+
+  private normalizeWpUploadUrl(
+    rawUrl: string | null | undefined,
+    siteUrl?: string | null,
+  ): string | null {
+    if (!rawUrl) return null;
+    const trimmed = String(rawUrl).trim();
+    if (!trimmed || !/\/wp-content\/uploads\//i.test(trimmed)) return null;
+
+    try {
+      if (/^https?:\/\//i.test(trimmed)) return new URL(trimmed).toString();
+      if (siteUrl) return new URL(trimmed, siteUrl).toString();
+    } catch {
+      // Fall back to the original string below.
+    }
+
+    return trimmed;
+  }
+
+  private buildWpUploadAssetFileName(
+    rawUrl: string,
+    siteUrl?: string | null,
+  ): string {
+    const normalized = this.normalizeWpUploadUrl(rawUrl, siteUrl) ?? rawUrl;
+    let pathname = normalized;
+    try {
+      pathname = new URL(normalized).pathname;
+    } catch {
+      pathname = normalized.split(/[?#]/)[0] ?? normalized;
+    }
+
+    const originalName = basename(pathname) || 'wp-asset';
+    const ext = extname(originalName) || '.jpg';
+    const safeExt = /^[.][a-zA-Z0-9]+$/.test(ext) ? ext.toLowerCase() : '.jpg';
+    const baseName = basename(originalName, ext)
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80);
+    const safeBaseName = baseName || 'wp-asset';
+    const hash = createHash('sha1')
+      .update(normalized)
+      .digest('hex')
+      .slice(0, 12);
+    return `${hash}-${safeBaseName}${safeExt}`;
+  }
+
+  private toLocalWpUploadAssetPath(
+    rawUrl: string,
+    siteUrl?: string | null,
+  ): string {
+    return `/assets/images/${this.buildWpUploadAssetFileName(rawUrl, siteUrl)}`;
+  }
+
+  private async copyWordPressUploadAssetsToPublic(
+    urls: string[],
+    destImagesDir: string,
+    siteUrl?: string | null,
+  ): Promise<void> {
+    if (urls.length === 0) return;
+    await mkdir(destImagesDir, { recursive: true });
+
+    const concurrency = Math.max(
+      1,
+      this.configService.get<number>('preview.wpAssetCopyConcurrency') ?? 6,
+    );
+    let copied = 0;
+    for (
+      let batchStart = 0;
+      batchStart < urls.length;
+      batchStart += concurrency
+    ) {
+      const batch = urls.slice(batchStart, batchStart + concurrency);
+      const copiedInBatch: number[] = await Promise.all(
+        batch.map(async (url) => {
+          const destPath = join(
+            destImagesDir,
+            this.buildWpUploadAssetFileName(url, siteUrl),
+          );
+
+          try {
+            if (await this.pathExists(destPath)) {
+              return 0;
+            }
+
+            const response = await fetch(url);
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const bytes = Buffer.from(await response.arrayBuffer());
+            await writeFile(destPath, bytes);
+            return 1;
+          } catch (error) {
+            this.logger.warn(
+              `Failed to copy WordPress upload asset "${url}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+            );
+            return 0;
+          }
+        }),
+      );
+      copied += copiedInBatch.reduce((sum, value) => sum + value, 0);
+    }
+
+    if (copied > 0) {
+      this.logger.log(
+        `Copied ${copied}/${urls.length} WordPress upload asset(s) to preview public assets`,
+      );
+    }
+  }
+
   private spawnDevServer(dir: string) {
     const proc = spawn('npm', ['run', 'dev'], {
       cwd: dir,
@@ -709,18 +953,37 @@ ${fontEntries}
     themeDir: string,
     publicDir: string,
     components: ReactGenerateResult['components'],
-  ): Promise<Set<string>> {
+  ): Promise<{ missing: Set<string>; remapped: Map<string, string> }> {
     const missing = new Set<string>();
+    const remapped = new Map<string, string>();
     const assetPaths = this.collectReferencedAssetPaths(components);
-    if (assetPaths.length === 0) return missing;
+    if (assetPaths.length === 0) return { missing, remapped };
 
     let copied = 0;
     for (const assetPath of assetPaths) {
       const relativePath = assetPath.replace(/^\/+/, '');
       const sourcePath = join(themeDir, relativePath);
       const destPath = join(publicDir, relativePath);
+      const canonical = assetPath.startsWith('/') ? assetPath : `/${relativePath}`;
 
       try {
+        if (await this.pathExists(destPath)) {
+          continue;
+        }
+
+        // Fallback: check if the file was already copied under /assets/images/ by the
+        // bulk theme-image copy step (themeDir/assets/images/ → public/assets/images/).
+        // This handles path mismatches where the AI used /assets/foo.png but the file
+        // lives at /assets/images/foo.png.
+        const imagesFallback = join(publicDir, 'assets', 'images', basename(relativePath));
+        if (await this.pathExists(imagesFallback)) {
+          remapped.set(canonical, `/assets/images/${basename(relativePath)}`);
+          this.logger.debug(
+            `Asset remapped to images subdir: ${relativePath} → /assets/images/${basename(relativePath)}`,
+          );
+          continue;
+        }
+
         const info = await stat(sourcePath);
         if (!info.isFile()) continue;
         await mkdir(dirname(destPath), { recursive: true });
@@ -730,13 +993,19 @@ ${fontEntries}
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unknown error';
         if (msg.includes('ENOENT')) {
-          const canonical = assetPath.startsWith('/')
-            ? assetPath
-            : `/${relativePath}`;
-          missing.add(canonical);
-          this.logger.debug(
-            `Theme asset not found (will drop <img>): ${relativePath}`,
-          );
+          // One more chance: the images-subdir fallback (catches errors from stat() too)
+          const imagesFallback = join(publicDir, 'assets', 'images', basename(relativePath));
+          if (await this.pathExists(imagesFallback)) {
+            remapped.set(canonical, `/assets/images/${basename(relativePath)}`);
+            this.logger.debug(
+              `Asset remapped to images subdir: ${relativePath} → /assets/images/${basename(relativePath)}`,
+            );
+          } else {
+            missing.add(canonical);
+            this.logger.debug(
+              `Theme asset not found (will drop <img>): ${relativePath}`,
+            );
+          }
         } else {
           this.logger.warn(`Failed to copy asset from ${sourcePath}: ${msg}`);
         }
@@ -746,7 +1015,7 @@ ${fontEntries}
     if (copied > 0) {
       this.logger.log(`Copied ${copied} referenced theme assets to preview`);
     }
-    return missing;
+    return { missing, remapped };
   }
 
   /**

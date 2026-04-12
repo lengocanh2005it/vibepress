@@ -15,6 +15,7 @@ export interface AttemptLog {
     input: number;
     output: number;
     total: number;
+    cached?: number;
   };
   timestamp: string;
   success: boolean;

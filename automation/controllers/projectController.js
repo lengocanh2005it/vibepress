@@ -31,6 +31,9 @@ const {
 const {
   injectWpPreviewMetadata,
 } = require("../services/wpPreviewInstrumentation");
+const {
+  buildPreviewSourceContext,
+} = require("../services/wpPreviewSourceService");
 
 function ensureFileSystemState() {
   fse.ensureDirSync(TEMP_ROOT);
@@ -387,6 +390,13 @@ async function findSiteByApiKey(apiKey) {
 async function findSiteBySiteUrl(siteUrl) {
   const row = await queryOne("SELECT * FROM wp_sites WHERE site_url = ?", [
     siteUrl,
+  ]);
+  return normalizeSite(row);
+}
+
+async function findSiteBySiteId(siteId) {
+  const row = await queryOne("SELECT * FROM wp_sites WHERE site_id = ? LIMIT 1", [
+    siteId,
   ]);
   return normalizeSite(row);
 }
@@ -1115,6 +1125,40 @@ async function getWpAuthCookie(siteUrl, apiKey) {
   }
 }
 
+function logPreviewSourceContext({
+  siteId,
+  targetUrl,
+  previewSourceContext,
+}) {
+  const summary = [
+    `[proxy-source] siteId=${siteId || "unknown"}`,
+    `url=${targetUrl}`,
+    `route=${previewSourceContext.route || "/"}`,
+    `template=${previewSourceContext.templateHint || "unknown"}`,
+    `sourceFile=${previewSourceContext.sourceFile || "unknown"}`,
+    `sourceMap=${previewSourceContext.sourceMap?.length || 0}`,
+  ].join(" | ");
+  console.log(summary);
+
+  const samples = (previewSourceContext.sourceMap || []).slice(0, 5);
+  samples.forEach((entry, index) => {
+    console.log(
+      [
+        `[proxy-source] sample#${index + 1}`,
+        `sourceNodeId=${entry.sourceNodeId}`,
+        `block=${entry.blockName || "unknown"}`,
+        `topLevelIndex=${entry.topLevelIndex}`,
+        `template=${entry.templateName || "unknown"}`,
+        `sourceFile=${entry.sourceFile || "unknown"}`,
+      ].join(" | "),
+    );
+  });
+
+  if (!samples.length) {
+    console.log("[proxy-source] sample=none | exact top-level source map unavailable");
+  }
+}
+
 // -------------------------------------------------------
 // GET /api/wp/proxy-asset?url=<full-url>
 // Proxy bất kỳ static asset (font, CSS, JS, image) từ WP với CORS headers.
@@ -1153,7 +1197,7 @@ async function proxyWpAsset(req, res) {
 }
 
 async function proxyWpPage(req, res) {
-  const { url } = req.query;
+  const { url, siteId } = req.query;
 
   if (!url) {
     return res
@@ -1166,7 +1210,10 @@ async function proxyWpPage(req, res) {
 
     // Lấy auth cookie từ plugin Vibepress — plugin tự sinh, không cần password.
     // Giúp WooCommerce pages (Tài khoản, Thanh toán…) render đúng nội dung.
-    const site = await findSiteBySiteUrl(targetUrl.origin);
+    const site =
+      (typeof siteId === "string" && siteId
+        ? await findSiteBySiteId(siteId)
+        : null) || (await findSiteBySiteUrl(targetUrl.origin));
     const extraHeaders = {};
     if (site?.apiKey) {
       const authCookie = await getWpAuthCookie(targetUrl.origin, site.apiKey);
@@ -1187,7 +1234,24 @@ async function proxyWpPage(req, res) {
       /(<head[^>]*>)/i,
       `$1\n  <base href="${targetUrl.origin}/">`,
     );
-    html = injectWpPreviewMetadata(html, targetUrl.toString());
+    const previewSourceContext = await buildPreviewSourceContext({
+      site,
+      targetUrl: targetUrl.toString(),
+      html,
+    });
+    logPreviewSourceContext({
+      siteId:
+        (typeof siteId === "string" && siteId) || site?.siteId || "",
+      targetUrl: targetUrl.toString(),
+      previewSourceContext,
+    });
+    html = injectWpPreviewMetadata(html, {
+      targetUrl: targetUrl.toString(),
+      siteId: typeof siteId === "string" ? siteId : "",
+      templateHint: previewSourceContext.templateHint,
+      sourceFile: previewSourceContext.sourceFile,
+      sourceMap: previewSourceContext.sourceMap,
+    });
 
     // Build a fresh response — intentionally omits X-Frame-Options and
     // Content-Security-Policy that WordPress/WooCommerce would send.

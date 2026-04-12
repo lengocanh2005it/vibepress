@@ -113,6 +113,9 @@ export class CodeReviewerService {
     private readonly aiLogger?: AiLoggerService,
   ) {}
 
+  private readonly selfFixSystemPrompt =
+    'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.';
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   /**
@@ -1237,13 +1240,20 @@ export class CodeReviewerService {
         componentPlan,
         editRequestContextNote,
         attempt > 1
-          ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
+          ? this.buildRetryAppendix({
+              componentName,
+              code,
+              lastError,
+              validationContext,
+              componentPlan,
+            })
           : undefined,
       );
       const {
         text: raw,
         inputTokens: inTok,
         outputTokens: outTok,
+        cachedTokens,
       } = await this.generateWithRetry(
         modelName,
         systemPrompt,
@@ -1266,7 +1276,14 @@ export class CodeReviewerService {
           user: userPromptForAttempt,
         },
         response: raw,
-        tokensUsed: { input: inTok, output: outTok, total: inTok + outTok },
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number'
+            ? { cached: cachedTokens }
+            : {}),
+        },
         timestamp: new Date().toISOString(),
         success: check.isValid,
         error: check.isValid ? undefined : check.error,
@@ -1312,14 +1329,14 @@ export class CodeReviewerService {
           );
 
           try {
-            const fixed = await this.selfFix(
+            const fixedResult = await this.selfFixDetailed(
               modelName,
               code,
               `${reason}: ${lastError}`,
               logPath,
               `${componentName}:${logLabel}:autofix`,
             );
-            code = fixed;
+            code = fixedResult.code;
 
             const finalCheck = this.validator.checkCodeStructure(
               code,
@@ -1338,10 +1355,10 @@ export class CodeReviewerService {
               cotAttempts.push({
                 attemptNumber: cotAttempts.length + 1,
                 promptSent: {
-                  system: this.componentSystemPrompt,
-                  user: userPromptForAttempt,
+                  system: fixedResult.systemPrompt,
+                  user: fixedResult.userPrompt,
                 },
-                response: raw,
+                response: fixedResult.rawResponse,
                 tokensUsed: { input: 0, output: 0, total: 0 },
                 timestamp: new Date().toISOString(),
                 success: true,
@@ -1442,10 +1459,37 @@ export class CodeReviewerService {
     label?: string,
     visionImageUrls: string[] = [],
   ): Promise<string> {
+    const result = await this.selfFixDetailed(
+      model,
+      brokenCode,
+      error,
+      logPath,
+      label,
+      visionImageUrls,
+    );
+    return result.code;
+  }
+
+  private async selfFixDetailed(
+    model: string,
+    brokenCode: string,
+    error: string,
+    logPath?: string,
+    label?: string,
+    visionImageUrls: string[] = [],
+  ): Promise<{
+    code: string;
+    systemPrompt: string;
+    userPrompt: string;
+    rawResponse: string;
+  }> {
     const normalizedVisionUrls = visionImageUrls
       .map((value) => value.trim())
       .filter(Boolean)
       .slice(0, 3);
+
+    const userPrompt =
+      `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
 
     if (
       normalizedVisionUrls.length > 0 &&
@@ -1480,7 +1524,15 @@ export class CodeReviewerService {
           ],
         });
         const text = response.choices[0]?.message?.content;
-        if (text) return this.postProcessCode(text);
+        if (text) {
+          return {
+            code: this.postProcessCode(text),
+            systemPrompt:
+              'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code. Return ONLY the corrected TSX code.',
+            userPrompt,
+            rawResponse: text,
+          };
+        }
       } catch (err: any) {
         this.logger.warn(
           `[reviewer] Vision self-fix failed for "${label ?? model}" (${err?.message ?? 'unknown error'}) — falling back to text-only repair`,
@@ -1494,13 +1546,18 @@ export class CodeReviewerService {
 
     const { text: raw } = await this.generateWithRetry(
       model,
-      'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
-      `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+      this.selfFixSystemPrompt,
+      userPrompt,
       3,
       logPath,
       label ? `${label}:fix` : undefined,
     );
-    return this.postProcessCode(raw);
+    return {
+      code: this.postProcessCode(raw),
+      systemPrompt: this.selfFixSystemPrompt,
+      userPrompt,
+      rawResponse: raw,
+    };
   }
 
   private canUseOpenAiVisionModel(modelName: string): boolean {
@@ -1526,13 +1583,19 @@ export class CodeReviewerService {
     maxRetries = 5,
     logPath?: string,
     label?: string,
-  ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  ): Promise<{
+    text: string;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens?: number;
+  }> {
     let delay = 30_000;
     let maxTokens = this.llmFactory.getMaxTokens();
     let lastTruncatedResult: {
       text: string;
       inputTokens: number;
       outputTokens: number;
+      cachedTokens?: number;
     } | null = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -1552,11 +1615,18 @@ export class CodeReviewerService {
             label ?? model,
           );
         }
+        if (typeof result.cachedTokens === 'number' && result.cachedTokens > 0) {
+          await this.log(
+            logPath,
+            `[llm-cache] ${label ?? model} cachedTokens=${result.cachedTokens}`,
+          );
+        }
         if (result.truncated) {
           lastTruncatedResult = {
             text: result.text,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
+            cachedTokens: result.cachedTokens,
           };
           const nextMaxTokens = Math.max(
             maxTokens + 1,
@@ -1584,6 +1654,7 @@ export class CodeReviewerService {
           text: result.text,
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
+          cachedTokens: result.cachedTokens,
         };
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
@@ -1610,7 +1681,179 @@ export class CodeReviewerService {
         }
       }
     }
-    return { text: '', inputTokens: 0, outputTokens: 0 };
+    return { text: '', inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  }
+
+  private buildRetryAppendix(input: {
+    componentName: string;
+    code: string;
+    lastError?: string;
+    validationContext: CodeValidationContext;
+    componentPlan?: ComponentPromptContext;
+  }): string {
+    const compactError = this.compactRetryError(input.lastError);
+    const failingSnippet = this.extractFailingSnippet(
+      input.code,
+      input.lastError,
+      input.componentName,
+    );
+    const fixInstructions = this.buildTargetedFixInstructions(
+      input.lastError,
+      input.componentPlan,
+      input.validationContext,
+    );
+
+    const lines = [
+      '## RETRY MODE — DELTA ONLY',
+      'Fix ONLY the failing area described below. Preserve unrelated layout and code.',
+      '',
+      '### Error',
+      compactError,
+    ];
+
+    if (failingSnippet) {
+      lines.push('');
+      lines.push('### Failing snippet');
+      lines.push('```tsx');
+      lines.push(failingSnippet);
+      lines.push('```');
+    }
+
+    if (fixInstructions.length > 0) {
+      lines.push('');
+      lines.push('### Fix instructions');
+      for (const instruction of fixInstructions) {
+        lines.push(`- ${instruction}`);
+      }
+    }
+
+    lines.push('');
+    lines.push(
+      'Return the complete corrected component file, but only change code necessary to fix the failure above.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private compactRetryError(error?: string): string {
+    if (!error) return 'Unknown validation error.';
+    const compact = error.replace(/\s+/g, ' ').trim();
+    return compact.length > 700 ? `${compact.slice(0, 700)}...` : compact;
+  }
+
+  private extractFailingSnippet(
+    code: string,
+    error: string | undefined,
+    componentName: string,
+  ): string {
+    if (!code.trim()) return '';
+
+    const tsErrors = this.validator.extractTypeScriptErrors(code, componentName);
+    const lineNumbers = new Set<number>();
+
+    for (const source of [error ?? '', ...tsErrors]) {
+      for (const match of source.matchAll(/:(\d+):\d+/g)) {
+        const line = Number(match[1]);
+        if (Number.isFinite(line) && line > 0) lineNumbers.add(line);
+      }
+    }
+
+    const lines = code.split('\n');
+
+    if (lineNumbers.size > 0) {
+      const ordered = [...lineNumbers].sort((a, b) => a - b).slice(0, 2);
+      return ordered
+        .map((line) => this.sliceCodeWindow(lines, line, 10))
+        .join('\n...\n');
+    }
+
+    const patterns = [
+      /page\.(author|categories|tags|date|excerpt|comments)\b/,
+      /pageDetail\.(author|categories|tags|date|excerpt|comments)\b/,
+      /href="#"/,
+      /to="#"/,
+      /\/author\//,
+      /menus\.map\(/,
+    ];
+
+    for (const pattern of patterns) {
+      const idx = lines.findIndex((line) => pattern.test(line));
+      if (idx !== -1) return this.sliceCodeWindow(lines, idx + 1, 8);
+    }
+
+    return this.sliceCodeWindow(lines, 1, 20);
+  }
+
+  private sliceCodeWindow(
+    lines: string[],
+    centerLine: number,
+    radius: number,
+  ): string {
+    const start = Math.max(1, centerLine - radius);
+    const end = Math.min(lines.length, centerLine + radius);
+    return lines
+      .slice(start - 1, end)
+      .map((line, index) => `${String(start + index).padStart(4)}: ${line}`)
+      .join('\n');
+  }
+
+  private buildTargetedFixInstructions(
+    error: string | undefined,
+    componentPlan: ComponentPromptContext | undefined,
+    validationContext: CodeValidationContext,
+  ): string[] {
+    const compact = (error ?? '').toLowerCase();
+    const instructions = [
+      'Do not redesign or rewrite unrelated sections.',
+      'Keep the existing approved route/data contract intact.',
+    ];
+
+    if (/expected corresponding|jsx|parse|closing tag|unterminated/.test(compact)) {
+      instructions.push(
+        'Fix JSX/tag balancing only in the failing area. Every opened JSX tag must close in the correct order.',
+      );
+    }
+
+    if (/page detail contract|page\./.test(compact)) {
+      instructions.push(
+        'Use only canonical Page fields: id, title, content, slug, parentId, menuOrder, template, featuredImage.',
+      );
+      instructions.push(
+        'Remove any page usage of author, categories, tags, date, excerpt, or comments.',
+      );
+    }
+
+    if (/shared chrome contract|menus/.test(compact)) {
+      instructions.push(
+        'Do not hardcode nav/footer links. If this component declares menus, render them from `/api/menus` only.',
+      );
+    }
+
+    if (/author/.test(compact) && /route|link/.test(compact)) {
+      instructions.push(
+        'Do not create author archive links unless the contract explicitly approves that route.',
+      );
+    }
+
+    if (/no jsx return found/.test(compact)) {
+      instructions.push(
+        'Return a complete TSX component file with a valid JSX return block.',
+      );
+    }
+
+    if (componentPlan?.type === 'page') {
+      instructions.push(
+        'Do not reintroduce shared header/footer/navigation chrome inside this page component.',
+      );
+    }
+
+    if (validationContext.dataNeeds?.includes('pageDetail')) {
+      instructions.push(
+        'The main record for this component must stay on the page-detail contract, not a posts contract.',
+      );
+    }
+
+    return [...new Set(instructions)];
   }
 
   // ── Code post-processors ──────────────────────────────────────────────────

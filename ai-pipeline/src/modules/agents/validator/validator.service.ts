@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { spawn } from 'child_process';
 import ts from 'typescript';
 import puppeteer, { type Page } from 'puppeteer';
@@ -49,6 +50,8 @@ export interface ComponentValidationResult {
 @Injectable()
 export class ValidatorService {
   private readonly logger = new Logger(ValidatorService.name);
+
+  constructor(private readonly configService: ConfigService) {}
 
   /**
    * Post-process all generated components:
@@ -122,7 +125,13 @@ export class ValidatorService {
     previewUrl: string,
     routes: string[] = ['/'],
   ): Promise<void> {
-    await this.waitForPreviewServer(previewUrl, 30_000);
+    const readyTimeoutMs =
+      this.configService.get<number>('preview.runtimeServerReadyTimeoutMs') ??
+      30_000;
+    const routeDelayMs =
+      this.configService.get<number>('preview.runtimeRouteDelayMs') ?? 400;
+
+    await this.waitForPreviewServer(previewUrl, readyTimeoutMs);
 
     const browser = await puppeteer.launch({
       headless: true,
@@ -157,7 +166,9 @@ export class ValidatorService {
       for (const route of uniqueRoutes) {
         const url = new URL(route, previewUrl).toString();
         await this.gotoWithRetry(page, url);
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (routeDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, routeDelayMs));
+        }
       }
 
       if (runtimeErrors.length > 0) {

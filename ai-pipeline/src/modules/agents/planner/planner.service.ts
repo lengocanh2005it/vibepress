@@ -10,6 +10,7 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
   wpBlocksToJson,
+  wpBlocksToJsonWithSourceRefs,
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
@@ -550,7 +551,11 @@ export class PlannerService {
           const rawMarkup = templateSource;
           if (!rawMarkup) return undefined;
           const nodes = this.styleResolver.resolve(
-            wpBlocksToJson(rawMarkup),
+            wpBlocksToJsonWithSourceRefs({
+              markup: rawMarkup,
+              templateName: componentPlan.templateName,
+              sourceFile: inferFseSourceFile(componentPlan.templateName, componentPlan.type),
+            }),
             tokens,
           );
           const draft = mapWpNodesToDraftSections(nodes);
@@ -1610,6 +1615,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
     const mergedBase = {
       ...section,
+      ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
+      ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
       ...(draft.background ? { background: draft.background } : {}),
       ...(draft.textColor ? { textColor: draft.textColor } : {}),
       ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
@@ -2081,4 +2088,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .replace(/^\.\/+/, '')
       .toLowerCase();
   }
+}
+
+function inferFseSourceFile(
+  templateName: string,
+  componentType?: 'page' | 'partial',
+): string {
+  const normalized = templateName.endsWith('.html')
+    ? templateName
+    : `${templateName}.html`;
+  if (normalized.includes('/')) return normalized;
+  return `${componentType === 'partial' ? 'parts' : 'templates'}/${normalized}`;
 }

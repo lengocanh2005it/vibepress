@@ -73,6 +73,12 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(mapCover(node), node);
   }
 
+  // Standalone image block: preserve it as an explicit visual section instead
+  // of expecting the LLM to remember an image-only region from raw HTML.
+  if (block === 'core/image' || block === 'image') {
+    return toMappedSections(mapImage(node), node);
+  }
+
   // Query / post loop
   if (block === 'core/query' || block === 'query') {
     return toMappedSections(mapQuery(node), node);
@@ -247,11 +253,28 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   return s;
 }
 
+function mapImage(node: WpNode): CoverSection | null {
+  if (!node.src) return null;
+
+  return {
+    type: 'cover',
+    imageSrc: node.src,
+    dimRatio: 0,
+    minHeight: normalizeCssLength(node.minHeight) ?? '420px',
+    contentAlign: 'center',
+  };
+}
+
 // ── group block ─────────────────────────────────────────────────────────────
 
 function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   const children = node.children ?? [];
   if (children.length === 0) return [];
+
+  const groupedCardGrid = buildGroupedCardGrid(children);
+  if (groupedCardGrid) {
+    return toMappedSections(groupedCardGrid, node);
+  }
 
   // Group acting as a hero: has heading + paragraph (+ optional button)
   if (isHeroGroup(children)) {
@@ -416,6 +439,10 @@ function applyNodePresentation<T extends SectionPlan>(
   node: WpNode,
 ): T {
   const next: T = { ...section };
+  if (node.sourceRef && !next.sourceRef) next.sourceRef = node.sourceRef;
+  if (!next.sectionKey) {
+    next.sectionKey = buildSectionKey(next.type, node.sourceRef?.topLevelIndex);
+  }
   if (node.bgColor && !next.background) next.background = node.bgColor;
   if (node.textColor && !next.textColor) next.textColor = node.textColor;
   if (node.padding && !next.paddingStyle) {
@@ -428,6 +455,13 @@ function applyNodePresentation<T extends SectionPlan>(
     next.gapStyle = node.gap;
   }
   return next;
+}
+
+function buildSectionKey(type: SectionPlan['type'], topLevelIndex?: number): string {
+  if (typeof topLevelIndex !== 'number' || topLevelIndex <= 0) {
+    return type;
+  }
+  return `${type}-${topLevelIndex}`;
 }
 
 // ── helpers: recognise group intent ────────────────────────────────────────
@@ -443,6 +477,64 @@ function isHeroGroup(children: WpNode[]): boolean {
     (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
   return hasH1OrH2 && hasPara;
+}
+
+function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
+  let title: string | undefined;
+  let subtitle: string | undefined;
+  let columnCount: 2 | 3 | 4 = 3;
+  const cards: { heading: string; body: string }[] = [];
+  let foundCardGrid = false;
+
+  for (const child of children) {
+    const block = child.block;
+
+    if (
+      !foundCardGrid &&
+      (block === 'core/heading' || block === 'heading') &&
+      child.text
+    ) {
+      title ??= child.text;
+      continue;
+    }
+
+    if (
+      !foundCardGrid &&
+      (block === 'core/paragraph' || block === 'paragraph') &&
+      child.text
+    ) {
+      subtitle ??= child.text;
+      continue;
+    }
+
+    if (block === 'core/spacer' || block === 'spacer') {
+      continue;
+    }
+
+    if (block === 'core/columns' || block === 'columns') {
+      const mapped = mapColumns(child);
+      if (mapped?.type !== 'card-grid') {
+        return null;
+      }
+      foundCardGrid = true;
+      columnCount = mapped.columns;
+      cards.push(...mapped.cards);
+      continue;
+    }
+
+    return null;
+  }
+
+  if (!foundCardGrid || cards.length === 0) return null;
+
+  const section: CardGridSection = {
+    type: 'card-grid',
+    columns: columnCount,
+    cards,
+  };
+  if (title) section.title = title;
+  if (subtitle) section.subtitle = subtitle;
+  return section;
 }
 
 function buildHeroFromChildren(

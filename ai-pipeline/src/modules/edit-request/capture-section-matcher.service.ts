@@ -97,6 +97,15 @@ function scoreSectionMatch(
   const reasons: string[] = [];
   const sectionCorpus = buildSectionCorpus(section);
   const hintedType = normalizeToken(request?.targetHint?.sectionType);
+  const exactSourceNodeId = attachment.targetNode?.sourceNodeId?.trim();
+
+  if (
+    exactSourceNodeId &&
+    section.sourceRef?.sourceNodeId === exactSourceNodeId
+  ) {
+    score += 100;
+    reasons.push('targetNode.sourceNodeId');
+  }
 
   if (hintedType && hintedType === normalizeToken(section.type)) {
     score += 14;

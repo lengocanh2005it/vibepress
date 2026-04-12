@@ -61,6 +61,7 @@ interface BlockFaithfulPartialInput {
 interface BlockFaithfulRenderState {
   navIndex: number;
   componentKind: 'header' | 'footer';
+  componentName: string;
 }
 
 @Injectable()
@@ -140,6 +141,7 @@ export class CodeGeneratorService {
     const renderState: BlockFaithfulRenderState = {
       navIndex: 0,
       componentKind: /^footer/i.test(componentName) ? 'footer' : 'header',
+      componentName,
     };
     const rootTag =
       renderState.componentKind === 'footer' ? 'footer' : 'header';
@@ -894,11 +896,12 @@ export default ${componentName};`;
             sidebarSection,
             ctx,
             plan.layout.contentLayout === 'sidebar-left',
+            plan.componentName,
           ),
         );
         continue;
       }
-      parts.push(this.renderSection(section, ctx));
+      parts.push(this.renderSection(section, ctx, plan.componentName));
     }
 
     return parts.join('\n\n');
@@ -906,43 +909,65 @@ export default ${componentName};`;
 
   // ── Section dispatcher ────────────────────────────────────────────────────
 
-  private renderSection(section: SectionPlan, ctx: RenderCtx): string {
+  private renderSection(
+    section: SectionPlan,
+    ctx: RenderCtx,
+    componentName: string,
+  ): string {
     const bg = section.background ?? ctx.p.background;
     const tc = section.textColor ?? ctx.p.text;
     const py = this.sectionPaddingClass(section);
+    let markup = '';
 
     switch (section.type) {
       case 'navbar':
-        return this.renderNavbar(section, ctx);
+        markup = this.renderNavbar(section, ctx);
+        break;
       case 'hero':
-        return this.renderHero(section, ctx, py);
+        markup = this.renderHero(section, ctx, py);
+        break;
       case 'cover':
-        return this.renderCover(section, ctx);
+        markup = this.renderCover(section, ctx);
+        break;
       case 'post-list':
-        return this.renderPostList(section, ctx, bg, tc, py);
+        markup = this.renderPostList(section, ctx, bg, tc, py);
+        break;
       case 'card-grid':
-        return this.renderCardGrid(section, ctx, bg, tc, py);
+        markup = this.renderCardGrid(section, ctx, bg, tc, py);
+        break;
       case 'media-text':
-        return this.renderMediaText(section, ctx, bg, tc, py);
+        markup = this.renderMediaText(section, ctx, bg, tc, py);
+        break;
       case 'testimonial':
-        return this.renderTestimonial(section, ctx, py);
+        markup = this.renderTestimonial(section, ctx, py);
+        break;
       case 'newsletter':
-        return this.renderNewsletter(section, ctx, bg, tc, py);
+        markup = this.renderNewsletter(section, ctx, bg, tc, py);
+        break;
       case 'footer':
-        return this.renderFooter(section, ctx);
+        markup = this.renderFooter(section, ctx);
+        break;
       case 'post-content':
-        return this.renderPostContent(section, ctx, py);
+        markup = this.renderPostContent(section, ctx, py);
+        break;
       case 'page-content':
-        return this.renderPageContent(section, ctx, py);
+        markup = this.renderPageContent(section, ctx, py);
+        break;
       case 'comments':
-        return this.renderComments(section, ctx, py);
+        markup = this.renderComments(section, ctx, py);
+        break;
       case 'search':
-        return this.renderSearch(section, ctx, py);
+        markup = this.renderSearch(section, ctx, py);
+        break;
       case 'breadcrumb':
-        return this.renderBreadcrumb(ctx);
+        markup = this.renderBreadcrumb(ctx);
+        break;
       case 'sidebar':
-        return this.renderSidebar(section, ctx, py);
+        markup = this.renderSidebar(section, ctx, py);
+        break;
     }
+
+    return this.annotateSectionMarkup(section, markup, componentName);
   }
 
   private buildStyleAttr(
@@ -982,6 +1007,60 @@ export default ${componentName};`;
     return section.gapStyle
       ? this.buildStyleAttr({ gap: section.gapStyle })
       : '';
+  }
+
+  private annotateSectionMarkup(
+    section: SectionPlan,
+    markup: string,
+    componentName: string,
+  ): string {
+    const trackingAttrs = this.buildSectionTrackingAttrs(section, componentName);
+    if (!trackingAttrs) return markup;
+
+    return markup.replace(
+      /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-source-node=)/,
+      `$1${trackingAttrs}`,
+    );
+  }
+
+  private buildSectionTrackingAttrs(
+    section: SectionPlan,
+    componentName: string,
+  ): string {
+    if (!section.sourceRef?.sourceNodeId) return '';
+
+    const attrs = [
+      ['data-vp-source-node', section.sourceRef.sourceNodeId],
+      ['data-vp-template', section.sourceRef.templateName],
+      ['data-vp-source-file', section.sourceRef.sourceFile],
+      ['data-vp-section-key', section.sectionKey ?? section.type],
+      ['data-vp-component', componentName],
+      [
+        'data-vp-section-component',
+        this.buildTrackedSectionComponentName(
+          componentName,
+          section.sectionKey ?? section.type,
+        ),
+      ],
+    ].filter(([, value]) => !!value);
+
+    return attrs
+      .map(
+        ([name, value]) =>
+          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
+      )
+      .join('');
+  }
+
+  private buildTrackedSectionComponentName(
+    componentName: string,
+    sectionKey: string,
+  ): string {
+    return `${componentName}${sectionKey
+      .split(/[^a-zA-Z0-9]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+      .join('')}Section`;
   }
 
   private exactRadiusClass(value?: string): string {
@@ -1710,6 +1789,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     sidebarSection: SidebarSection,
     ctx: RenderCtx,
     sidebarLeft: boolean,
+    componentName: string,
   ): string {
     const { p } = ctx;
     const bg = mainSection.background ?? p.background;
@@ -1726,13 +1806,18 @@ ${this.renderSidebarCard(s, ctx, 10)}
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
       gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
     });
+    const mainAttrs = this.buildSectionTrackingAttrs(mainSection, componentName);
+    const sidebarAttrs = this.buildSectionTrackingAttrs(
+      sidebarSection,
+      componentName,
+    );
 
     return `      {/* Main Content With Sidebar */}
-      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+      <section${mainAttrs} className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
-            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
-            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
+            ${sidebarLeft ? `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
+            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>`}
           </div>
         </div>
       </section>`;
@@ -1874,9 +1959,42 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
     depth: number,
   ): string {
     return nodes
-      .map((node) => this.renderBlockFaithfulNode(node, ctx, state, depth))
+      .map((node) => {
+        const markup = this.renderBlockFaithfulNode(node, ctx, state, depth);
+        return depth === 3
+          ? this.annotateBlockFaithfulMarkup(node, markup, state.componentName)
+          : markup;
+      })
       .filter(Boolean)
       .join('\n');
+  }
+
+  private annotateBlockFaithfulMarkup(
+    node: WpNode,
+    markup: string,
+    componentName: string,
+  ): string {
+    if (!node.sourceRef?.sourceNodeId || !markup) return markup;
+
+    const attrs = [
+      ['data-vp-source-node', node.sourceRef.sourceNodeId],
+      ['data-vp-template', node.sourceRef.templateName],
+      ['data-vp-source-file', node.sourceRef.sourceFile],
+      ['data-vp-section-key', node.block.replace(/^core\//, '')],
+      ['data-vp-component', componentName],
+      ['data-vp-section-component', componentName],
+    ]
+      .filter(([, value]) => !!value)
+      .map(
+        ([name, value]) =>
+          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
+      )
+      .join('');
+
+    return markup.replace(
+      /(<(?:section|header|footer|main|article|aside|nav|div|ul|li|p|h1|h2|h3|h4|h5|h6|form|span|img|a|Link)\b)(?![^>]*\bdata-vp-source-node=)/,
+      `$1${attrs}`,
+    );
   }
 
   private renderBlockFaithfulNode(

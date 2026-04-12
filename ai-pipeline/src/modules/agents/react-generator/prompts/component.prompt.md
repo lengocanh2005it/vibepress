@@ -8,10 +8,19 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 
 {{slugFetchingNote}}
 
+## Hard Contract
+
+- Use ONLY the API endpoints explicitly allowed in the plan/context above.
+- Render ONLY sections and data justified by the source template or approved visual plan.
+- This is a migration, not a redesign: preserve the original WordPress structure, spacing density, and visual hierarchy.
+- Do NOT fetch extra list/helper endpoints "just in case". If an endpoint is not approved, do not call it.
+- Do NOT invent hero blocks, utility sidebars, promo widgets, fallback link groups, or placeholder content.
+
 ## Navigation — MANDATORY
 
 ⛔ NEVER use `<a href="...">` for internal links — this causes full page reload and breaks React Router.
 ✅ Always import and use `<Link to="...">` from `react-router-dom` for ALL internal navigation.
+⛔ ONLY create internal links for routes explicitly approved by the frontend/app contract in the prompt context above. If a route is not approved, render plain text instead of guessing a path.
 
 ```tsx
 // ❌ breaks SPA routing
@@ -25,17 +34,14 @@ Internal link paths:
 
 - Single post → `to={'/post/' + post.slug}`
 - Single page → `to={'/page/' + page.slug}`
-- Archive / blog index → `to="/archive"`
-- Category archive → `to={'/category/' + category.slug}`
-- Tag archive → `to={'/tag/' + tag.slug}`
-- Author archive → `to={'/author/' + author.slug}`
 - Home → `to="/"`
+- Archive / taxonomy links → use them ONLY when those routes are explicitly approved in the contract/context above
+- Author names are usually plain text unless an author route is explicitly approved; do NOT assume `/author/:slug` exists
 
 **Sidebar / widget link patterns** (use these — NEVER `href="#"`):
 
 - "View all posts" / "Read more" in a post list → `to={'/post/' + post.slug}`
-- "All categories" link → `to="/archive"`
-- Category item in widget → `to={'/category/' + cat.slug}`
+- Category/tag/archive widget links → only when that exact route is approved; otherwise render plain text
 - Recent post item → `to={'/post/' + post.slug}`
 - If the target URL is truly unknown → **omit the link entirely**, render plain text instead of `href="#"`
 
@@ -54,6 +60,7 @@ Exception: external URLs (`http://`, `https://`, `mailto:`) → use `<a href tar
 ⛔ MANDATORY CONTRACT — violating this causes a runtime ReferenceError:
 
 1. List every API endpoint you will call based on the template blocks **AND the Component plan `Data needed` field**.
+   Those endpoints must be a subset of the explicitly allowed endpoints in the plan/context above.
 2. Declare ONE `useState` per variable BEFORE writing any JSX.
 3. Fetch ALL of them together in a single `Promise.all` inside `useEffect`.
 4. NEVER use `menus`, `posts`, `pages`, `siteInfo` in JSX unless you declared `useState` for it above.
@@ -169,7 +176,7 @@ const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
 ```
 
 ⛔ NEVER render the `location === "primary"` or `slug === "primary"` menu in the Footer — that belongs to the Header
-⛔ NEVER filter menus by hardcoded slug name — always use the `location` field
+⛔ NEVER choose menus by arbitrary content slugs like `about`, `company`, `resources`, `links`. Use `location` first; `slug === "primary"` is allowed only as a fallback when `location` is missing.
 ⛔ NEVER skip `menu.items` rendering — always map over `(menu.items ?? [])` even if you're unsure items exist
 
 {{dataGrounding}}
@@ -273,7 +280,7 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 ### Other rules
 
 - HTML from API → `<div className="prose max-w-none" dangerouslySetInnerHTML={{__html:content}} />`
-- `/wp-content/uploads/` URLs → keep as-is
+- WordPress upload/media URLs should use the local preview asset path exactly as provided (`/assets/...` or `/assets/images/...`). Do NOT rewrite them back to remote WordPress URLs.
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
 - Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
@@ -363,7 +370,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                            |
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                       |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                       |
-| `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match correct menu; fallback: `menus.find(m=>m.slug==='primary')??menus[0]` |
+| `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
 | `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                     |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                     |
 

@@ -40,7 +40,7 @@ export class SectionEditService {
     if (!parentComponent) return null;
 
     const componentPlan = plan.find(
-      (entry) => entry.componentName === task.componentName,
+      (entry) => entry.componentName === task.planComponentName,
     );
     const sectionMatches =
       task.sectionMatches.length > 0
@@ -52,7 +52,7 @@ export class SectionEditService {
           });
 
     const target = this.resolveTargetComponent(
-      task.componentName,
+      task,
       sectionMatches,
       components,
     );
@@ -83,7 +83,7 @@ export class SectionEditService {
   }
 
   private resolveTargetComponent(
-    componentName: string,
+    task: PostMigrationEditTask,
     sectionMatches: CaptureSectionMatch[],
     components: GeneratedComponent[],
   ): {
@@ -91,8 +91,19 @@ export class SectionEditService {
     component: GeneratedComponent;
     isSectionTarget: boolean;
   } {
+    const exactComponent = components.find(
+      (component) => component.name === task.componentName,
+    );
+    if (exactComponent) {
+      return {
+        name: task.componentName,
+        component: exactComponent,
+        isSectionTarget: task.planComponentName !== task.componentName,
+      };
+    }
+
     for (const match of sectionMatches) {
-      const candidateName = `${componentName}Section${match.sectionIndex + 1}`;
+      const candidateName = `${task.planComponentName}Section${match.sectionIndex + 1}`;
       const sectionComponent = components.find(
         (component) => component.name === candidateName,
       );
@@ -106,14 +117,16 @@ export class SectionEditService {
     }
 
     const parentComponent = components.find(
-      (component) => component.name === componentName,
+      (component) => component.name === task.planComponentName,
     );
     if (!parentComponent) {
-      throw new Error(`Missing component "${componentName}" for focused edit`);
+      throw new Error(
+        `Missing component "${task.planComponentName}" for focused edit`,
+      );
     }
 
     return {
-      name: componentName,
+      name: task.planComponentName,
       component: parentComponent,
       isSectionTarget: false,
     };
@@ -133,6 +146,15 @@ function buildScopedFeedback(
     );
   }
 
+  if (task.exactTargets.length > 0) {
+    lines.push('Exact generated React target metadata:');
+    for (const target of task.exactTargets) {
+      lines.push(
+        `- attachment=${target.captureId} -> file=${target.outputFilePath} section=${target.sectionKey} sourceNodeId=${target.sourceNodeId} lines=${formatLineRange(target.startLine, target.endLine)} resolution=${target.resolution} confidence=${target.confidence.toFixed(2)}`,
+      );
+    }
+  }
+
   if (sectionMatches.length > 0) {
     lines.push('Prioritized section evidence:');
     for (const match of sectionMatches.slice(0, 4)) {
@@ -143,4 +165,12 @@ function buildScopedFeedback(
   }
 
   return lines.join('\n\n');
+}
+
+function formatLineRange(startLine?: number, endLine?: number): string {
+  if (typeof startLine === 'number' && typeof endLine === 'number') {
+    return `${startLine}-${endLine}`;
+  }
+
+  return 'unknown';
 }

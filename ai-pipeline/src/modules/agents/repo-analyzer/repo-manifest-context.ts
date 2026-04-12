@@ -1,5 +1,12 @@
 import type { RepoThemeManifest } from './repo-analyzer.service.js';
 
+export interface RepoManifestContextOptions {
+  mode?: 'full' | 'compact';
+  includeLayoutHints?: boolean;
+  includeStyleHints?: boolean;
+  includeStructureHints?: boolean;
+}
+
 function fmtList<T>(
   items: T[],
   limit: number,
@@ -12,8 +19,14 @@ function fmtList<T>(
 
 export function buildRepoManifestContextNote(
   manifest?: RepoThemeManifest,
+  options?: RepoManifestContextOptions,
 ): string {
   if (!manifest) return '';
+
+  const mode = options?.mode ?? 'full';
+  const includeLayoutHints = options?.includeLayoutHints ?? true;
+  const includeStyleHints = options?.includeStyleHints ?? true;
+  const includeStructureHints = options?.includeStructureHints ?? true;
 
   const lines: string[] = ['## Theme repo source-of-truth hints'];
   const { themeTypeHints } = manifest;
@@ -35,87 +48,91 @@ export function buildRepoManifestContextNote(
     lines.push(note);
   }
 
-  if (manifest.sourceOfTruth.priorityDirectories.length > 0) {
+  if (includeLayoutHints && manifest.sourceOfTruth.priorityDirectories.length > 0) {
     lines.push(
-      `Priority directories: ${manifest.sourceOfTruth.priorityDirectories.join(', ')}`,
+      `Priority directories: ${manifest.sourceOfTruth.priorityDirectories.slice(0, mode === 'compact' ? 3 : 999).join(', ')}`,
     );
   }
 
-  if (manifest.sourceOfTruth.themeDirectories.length > 0) {
+  if (includeLayoutHints && manifest.sourceOfTruth.themeDirectories.length > 0) {
     lines.push(
-      `Detected theme directories: ${manifest.sourceOfTruth.themeDirectories.join(', ')}`,
+      `Detected theme directories: ${manifest.sourceOfTruth.themeDirectories.slice(0, mode === 'compact' ? 3 : 999).join(', ')}`,
     );
   }
 
-  if (manifest.sourceOfTruth.layoutFiles.length > 0) {
+  if (includeLayoutHints && manifest.sourceOfTruth.layoutFiles.length > 0) {
     lines.push('Primary layout files:');
-    for (const file of manifest.sourceOfTruth.layoutFiles.slice(0, 12)) {
+    for (const file of manifest.sourceOfTruth.layoutFiles.slice(
+      0,
+      mode === 'compact' ? 4 : 12,
+    )) {
       lines.push(`- ${file}`);
     }
-    if (manifest.sourceOfTruth.layoutFiles.length > 12) {
+    const layoutLimit = mode === 'compact' ? 4 : 12;
+    if (manifest.sourceOfTruth.layoutFiles.length > layoutLimit) {
       lines.push(
-        `- ... and ${manifest.sourceOfTruth.layoutFiles.length - 12} more layout file(s)`,
+        `- ... and ${manifest.sourceOfTruth.layoutFiles.length - layoutLimit} more layout file(s)`,
       );
     }
   }
 
   const { templatePartAreas } = manifest.themeJsonSummary;
-  if (templatePartAreas.length > 0) {
+  if (includeStructureHints && templatePartAreas.length > 0) {
     lines.push('Template part area assignments (from theme.json):');
-    for (const part of templatePartAreas) {
+    for (const part of templatePartAreas.slice(0, mode === 'compact' ? 6 : 999)) {
       lines.push(
         `- ${part.name} → area: ${part.area}${part.title !== part.name ? ` (${part.title})` : ''}`,
       );
     }
   }
 
-  if (manifest.sourceOfTruth.styleFiles.length > 0) {
+  if (includeStyleHints && manifest.sourceOfTruth.styleFiles.length > 0) {
     lines.push(
-      `Primary style sources: ${manifest.sourceOfTruth.styleFiles.slice(0, 10).join(', ')}`,
+      `Primary style sources: ${manifest.sourceOfTruth.styleFiles.slice(0, mode === 'compact' ? 4 : 10).join(', ')}`,
     );
   }
 
   const { paletteColors } = manifest.themeJsonSummary;
-  if (paletteColors.length > 0) {
+  if (includeStyleHints && paletteColors.length > 0) {
     lines.push(
-      `Theme palette colors: ${fmtList(paletteColors, 8, (c) => `${c.slug}:${c.color}`)}`,
+      `Theme palette colors: ${fmtList(paletteColors, mode === 'compact' ? 5 : 8, (c) => `${c.slug}:${c.color}`)}`,
     );
   }
 
-  if (manifest.styleSources.discoveredFontFamilies.length > 0) {
+  if (includeStyleHints && manifest.styleSources.discoveredFontFamilies.length > 0) {
     lines.push(
-      `Discovered font families in CSS: ${manifest.styleSources.discoveredFontFamilies.slice(0, 8).join(', ')}`,
+      `Discovered font families in CSS: ${manifest.styleSources.discoveredFontFamilies.slice(0, mode === 'compact' ? 4 : 8).join(', ')}`,
     );
   }
 
   const { customTemplateNames } = manifest.themeJsonSummary;
-  if (customTemplateNames.length > 0) {
+  if (includeLayoutHints && customTemplateNames.length > 0) {
     lines.push(
-      `Custom templates: ${fmtList(customTemplateNames, 8, (t) => (t.postTypes?.length ? `${t.name} (${t.postTypes.join(',')})` : t.name))}`,
+      `Custom templates: ${fmtList(customTemplateNames, mode === 'compact' ? 4 : 8, (t) => (t.postTypes?.length ? `${t.name} (${t.postTypes.join(',')})` : t.name))}`,
     );
   }
 
   const { styleVariationNames } = manifest.themeJsonSummary;
-  if (styleVariationNames.length > 0) {
+  if (includeStyleHints && styleVariationNames.length > 0) {
     lines.push(
-      `Style variations: ${fmtList(styleVariationNames, 6, (v) => v)}`,
+      `Style variations: ${fmtList(styleVariationNames, mode === 'compact' ? 3 : 6, (v) => v)}`,
     );
   }
 
-  if (manifest.structureHints.templatePartRefs.length > 0) {
+  if (includeStructureHints && manifest.structureHints.templatePartRefs.length > 0) {
     lines.push(
-      `Referenced template parts: ${manifest.structureHints.templatePartRefs.slice(0, 10).join(', ')}`,
+      `Referenced template parts: ${manifest.structureHints.templatePartRefs.slice(0, mode === 'compact' ? 5 : 10).join(', ')}`,
     );
   }
 
-  if (manifest.structureHints.patternRefs.length > 0) {
+  if (includeStructureHints && manifest.structureHints.patternRefs.length > 0) {
     lines.push(
-      `Referenced patterns: ${manifest.structureHints.patternRefs.slice(0, 10).join(', ')}`,
+      `Referenced patterns: ${manifest.structureHints.patternRefs.slice(0, mode === 'compact' ? 5 : 10).join(', ')}`,
     );
   }
 
   const { patternMeta } = manifest.structureHints;
-  if (patternMeta.length > 0) {
+  if (includeStructureHints && mode !== 'compact' && patternMeta.length > 0) {
     lines.push(`Available patterns (${patternMeta.length} total):`);
     for (const p of patternMeta.slice(0, 12)) {
       const cats =
@@ -139,7 +156,7 @@ export function buildRepoManifestContextNote(
     lines.push(`Structural signals: ${structuralSignals.join(', ')}`);
   }
 
-  if (manifest.themes.length > 0) {
+  if (mode !== 'compact' && manifest.themes.length > 0) {
     lines.push(`Available themes in repo (${manifest.themes.length} total):`);
     for (const theme of manifest.themes.slice(0, 12)) {
       const vendor = theme.vendor ? ` (${theme.vendor})` : '';
@@ -158,7 +175,7 @@ export function buildRepoManifestContextNote(
     }
   }
 
-  if (manifest.resolvedSource) {
+  if (manifest.resolvedSource && mode !== 'compact') {
     lines.push('## Resolved active source set');
     const {
       activeTheme,
@@ -182,7 +199,10 @@ export function buildRepoManifestContextNote(
     }
   }
 
-  for (const note of manifest.sourceOfTruth.notes) {
+  for (const note of manifest.sourceOfTruth.notes.slice(
+    0,
+    mode === 'compact' ? 2 : manifest.sourceOfTruth.notes.length,
+  )) {
     lines.push(note);
   }
 

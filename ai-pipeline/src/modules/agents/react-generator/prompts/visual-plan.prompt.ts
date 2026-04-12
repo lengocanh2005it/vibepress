@@ -850,10 +850,10 @@ export function parseVisualPlanDetailed(
   const typography = {
     headingFamily: 'inherit',
     bodyFamily: 'inherit',
-    h1: 'text-[2.5rem] leading-tight',
-    h2: 'text-[2rem] leading-snug',
-    h3: 'text-[1.5rem] leading-snug',
-    body: 'text-[1rem]',
+    h1: 'text-[2rem] leading-[1.15]',
+    h2: 'text-[1.5rem] leading-[1.2]',
+    h3: 'text-[1.25rem] leading-[1.3]',
+    body: 'text-[0.95rem]',
     small: 'text-sm',
     buttonRadius: 'rounded',
   };
