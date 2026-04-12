@@ -10,6 +10,11 @@ export interface WpPost {
   slug: string;
   type: string;
   status: string;
+  author: string;
+  authorSlug: string;
+  categories: string[];
+  tags: string[];
+  featuredImage: string | null;
 }
 
 export interface WpPage {
@@ -17,8 +22,10 @@ export interface WpPage {
   title: string;
   content: string;
   slug: string;
+  parentId: number;
   menuOrder: number;
   template: string;
+  featuredImage: string | null;
 }
 
 export interface WpMenu {
@@ -35,12 +42,14 @@ export interface WpMenuItem {
   url: string;
   order: number;
   parentId: number;
+  target: string | null;
 }
 
 export interface WpSiteInfo {
   siteUrl: string;
   siteName: string;
   blogDescription: string;
+  logoUrl: string | null;
   adminEmail: string;
   language: string;
   tablePrefix: string;
@@ -129,11 +138,19 @@ export class WpQueryService {
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
-        `SELECT ID, post_title, post_content, post_excerpt, post_name, post_type, post_status
-         FROM \`${prefix}posts\`
-         WHERE post_type = 'post' AND post_status = 'publish'`,
+        `SELECT p.ID, p.post_title, p.post_content, p.post_excerpt, p.post_name, p.post_type, p.post_status,
+                u.display_name AS author_name,
+                u.user_nicename AS author_slug,
+                img.guid AS featured_image,
+                ${this.taxonomyNamesSubquery(prefix, 'category')} AS categories,
+                ${this.taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
+         FROM \`${prefix}posts\` p
+         LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+         LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+         LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
+         WHERE p.post_type = 'post' AND p.post_status = 'publish'`,
       );
-      return rows.map(this.mapPost);
+      return rows.map((row) => this.mapPost(row));
     } finally {
       await conn.end();
     }
@@ -144,15 +161,20 @@ export class WpQueryService {
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
-        `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.menu_order,
-                COALESCE(pm.meta_value, '') AS template
+        `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
+                COALESCE(pm.meta_value, '') AS template,
+                img.guid AS featured_image
          FROM \`${prefix}posts\` p
          LEFT JOIN \`${prefix}postmeta\` pm
-           ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+            ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+         LEFT JOIN \`${prefix}postmeta\` thumb
+           ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+         LEFT JOIN \`${prefix}posts\` img
+           ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
          WHERE p.post_type = 'page' AND p.post_status = 'publish'
          ORDER BY p.menu_order`,
       );
-      return rows.map(this.mapPage);
+      return rows.map((row) => this.mapPage(row));
     } finally {
       await conn.end();
     }
@@ -162,6 +184,10 @@ export class WpQueryService {
     const conn = await this.createConnection(connectionString);
     try {
       const prefix = await this.getTablePrefix(conn);
+      const [[siteUrlRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'siteurl' LIMIT 1`,
+      );
+      const siteUrl = (siteUrlRow?.option_value as string | undefined) ?? null;
 
       // Lấy tất cả nav_menu terms
       const [menus] = await conn.query<any[]>(
@@ -180,12 +206,14 @@ export class WpQueryService {
         const [items] = await conn.query<any[]>(
           `SELECT p.ID, p.post_title, p.menu_order,
                   url_meta.meta_value AS url,
-                  parent_meta.meta_value AS parent_id
+                  parent_meta.meta_value AS parent_id,
+                  target_meta.meta_value AS target
            FROM \`${prefix}posts\` p
            INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
            INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
            LEFT JOIN \`${prefix}postmeta\` url_meta ON url_meta.post_id = p.ID AND url_meta.meta_key = '_menu_item_url'
            LEFT JOIN \`${prefix}postmeta\` parent_meta ON parent_meta.post_id = p.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
+           LEFT JOIN \`${prefix}postmeta\` target_meta ON target_meta.post_id = p.ID AND target_meta.meta_key = '_menu_item_target'
            WHERE tt.term_id = ? AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'
            ORDER BY p.menu_order`,
           [menu.term_id],
@@ -198,9 +226,10 @@ export class WpQueryService {
           items: items.map((item) => ({
             id: item.ID,
             title: item.post_title,
-            url: item.url ?? '',
+            url: this.normalizeMenuUrl(item.url ?? '', siteUrl),
             order: item.menu_order,
             parentId: parseInt(item.parent_id ?? '0', 10),
+            target: item.target?.trim() ? item.target : null,
           })),
         });
       }
@@ -378,6 +407,7 @@ export class WpQueryService {
         siteUrl: opts['siteurl'] ?? '',
         siteName: opts['blogname'] ?? '',
         blogDescription: opts['blogdescription'] ?? '',
+        logoUrl: await this.resolveCustomLogoUrl(conn, prefix),
         adminEmail: opts['admin_email'] ?? '',
         language: opts['WPLANG'] ?? 'en',
         tablePrefix: prefix,
@@ -576,6 +606,42 @@ export class WpQueryService {
     });
   }
 
+  private async resolveCustomLogoUrl(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+  ): Promise<string | null> {
+    try {
+      const [[stylesheetRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+      );
+      const stylesheet = stylesheetRow?.option_value as string | undefined;
+      if (!stylesheet) return null;
+
+      const [[modsRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = ? LIMIT 1`,
+        [`theme_mods_${stylesheet}`],
+      );
+      const serialized = modsRow?.option_value as string | undefined;
+      if (!serialized) return null;
+
+      const parsed = phpUnserializeSimple(serialized);
+      const customLogoId = Number(parsed?.custom_logo ?? 0);
+      if (!Number.isFinite(customLogoId) || customLogoId <= 0) return null;
+
+      const [[logoRow]] = await conn.query<any[]>(
+        `SELECT guid
+         FROM \`${prefix}posts\`
+         WHERE ID = ? AND post_type = 'attachment'
+         LIMIT 1`,
+        [customLogoId],
+      );
+      const logoUrl = logoRow?.guid as string | undefined;
+      return logoUrl?.trim() ? logoUrl : null;
+    } catch {
+      return null;
+    }
+  }
+
   private mapPost(row: any): WpPost {
     return {
       id: row.ID,
@@ -585,6 +651,11 @@ export class WpQueryService {
       slug: row.post_name,
       type: row.post_type,
       status: row.post_status,
+      author: row.author_name ?? '',
+      authorSlug: row.author_slug ?? '',
+      categories: this.splitTermList(row.categories),
+      tags: this.splitTermList(row.tags),
+      featuredImage: row.featured_image ?? null,
     };
   }
 
@@ -594,9 +665,54 @@ export class WpQueryService {
       title: row.post_title,
       content: row.post_content,
       slug: row.post_name,
+      parentId: Number(row.post_parent ?? 0),
       menuOrder: row.menu_order,
       template: row.template,
+      featuredImage: row.featured_image ?? null,
     };
+  }
+
+  private splitTermList(raw: string | null | undefined): string[] {
+    if (!raw) return [];
+    return String(raw)
+      .split(', ')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private taxonomyNamesSubquery(prefix: string, taxonomy: string): string {
+    return `(SELECT GROUP_CONCAT(DISTINCT t.name ORDER BY t.name SEPARATOR ', ')
+             FROM \`${prefix}term_relationships\` tr2
+             INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+             INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+             WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
+  }
+
+  private normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
+    if (!raw) return '';
+    const trimmed = raw.trim();
+    try {
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        const url = new URL(trimmed);
+        if (siteUrl) {
+          try {
+            const site = new URL(siteUrl);
+            if (url.origin !== site.origin) return trimmed;
+          } catch {
+            // invalid site URL — fall back to pathname rewrite
+          }
+        }
+        raw = `${url.pathname}${url.search}${url.hash}`;
+      } else {
+        raw = trimmed;
+      }
+    } catch {
+      raw = trimmed;
+    }
+
+    return raw
+      .replace(/^\/pages\//, '/page/')
+      .replace(/^\/posts\//, '/post/');
   }
 
   private parseSerializedPhpStringArray(serialized: string): string[] {

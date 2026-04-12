@@ -13,12 +13,15 @@ import {
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
+import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
+import type { WpSiteInfo } from '../../sql/wp-query.service.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -41,9 +44,6 @@ const TEMPLATE_DIR = resolve('templates/react-preview');
 const SERVER_TEMPLATE_DIR = resolve('templates/express-server');
 const DEP_CACHE_ROOT = resolve('temp/cache/template-deps');
 
-const PARTIAL_PATTERNS =
-  /^(header|footer|sidebar|nav|navigation|searchform|comments|comment|postmeta|post-meta|widget|breadcrumb|pagination|loop|content-none|no-results|functions)/i;
-
 @Injectable()
 export class PreviewBuilderService {
   private readonly logger = new Logger(PreviewBuilderService.name);
@@ -58,11 +58,13 @@ export class PreviewBuilderService {
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
     themeDir?: string;
+    siteInfo?: WpSiteInfo;
     tokens?: ThemeTokens;
     plan?: PlanResult;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
-    const { jobId, components, dbCreds, themeDir, tokens, plan } = input;
+    const { jobId, components, dbCreds, themeDir, siteInfo, tokens, plan } =
+      input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -96,10 +98,16 @@ export class PreviewBuilderService {
       );
     }
 
+    const copiedLogoPublicPath = await this.copySiteLogoToPublic(
+      siteInfo?.logoUrl ?? null,
+      join(frontendDir, 'public', 'assets', 'images'),
+    );
+
     // 3. Write generated components từ AI (code in memory)
     // Relink WordPress image URLs từ /wp-content/uploads/ sang local /assets/images/
     for (const comp of components.components) {
-      const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+      const isPartial =
+        isPartialComponentName(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
 
       // Match WordPress URLs (http://localhost/wp-content/uploads/... hoặc https://domain.com/wp-content/uploads/...)
@@ -137,7 +145,7 @@ export class PreviewBuilderService {
           if (stripped === comp.code) continue;
           comp.code = stripped;
           const isPartial =
-            PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+            isPartialComponentName(comp.name) || comp.isSubComponent;
           const targetDir = isPartial ? componentsDir : pagesDir;
           await writeFile(
             join(targetDir, `${comp.name}.tsx`),
@@ -158,7 +166,12 @@ export class PreviewBuilderService {
 
     // Partials: không tạo route (header, footer, sidebar, nav, meta, search form, comments, widgets...)
     const pageComponents = routeableComponents.filter(
-      (c) => !PARTIAL_PATTERNS.test(c.name),
+      (c) => !isPartialComponentName(c.name),
+    );
+    const notFoundComponent =
+      pageComponents.find((c) => c.name === 'Page404') ?? null;
+    const primaryPageComponents = pageComponents.filter(
+      (c) => c.name !== 'Page404',
     );
 
     // Detect shared Header/Footer partials để tạo Layout wrapper
@@ -244,7 +257,7 @@ export class PreviewBuilderService {
       .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
       .map((c) => {
         const folder =
-          PARTIAL_PATTERNS.test(c.name) || c.isSubComponent
+          isPartialComponentName(c.name) || c.isSubComponent
             ? 'components'
             : 'pages';
         return `import ${c.name} from './${folder}/${c.name}';`;
@@ -256,7 +269,7 @@ export class PreviewBuilderService {
     const routeLines: string[] = [];
     const routeEntries: PreviewRouteEntry[] = [];
 
-    for (const c of pageComponents) {
+    for (const c of primaryPageComponents) {
       const path =
         planRouteMap.get(c.name) ??
         FALLBACK_ROUTE_MAP[c.name] ??
@@ -269,15 +282,54 @@ export class PreviewBuilderService {
       routeEntries.push({ route: path, componentName: c.name });
     }
 
+    // WordPress archive fallback: if Archive exists but no Author/Category/Tag,
+    // register alias routes pointing to Archive (mirrors WP template hierarchy).
+    const archiveComp = primaryPageComponents.find((c) => c.name === 'Archive');
+    if (archiveComp) {
+      const archiveAliases: Array<{ path: string }> = [
+        { path: '/category/:slug' },
+        { path: '/author/:slug' },
+        { path: '/tag/:slug' },
+      ];
+      for (const alias of archiveAliases) {
+        if (!usedPaths.has(alias.path)) {
+          usedPaths.add(alias.path);
+          routeLines.push(
+            `        <Route path="${alias.path}" element={<Archive />} />`,
+          );
+          routeEntries.push({ route: alias.path, componentName: 'Archive' });
+        }
+      }
+    }
+
     // Đảm bảo luôn có route "/" — dùng component đầu tiên nếu chưa có
-    if (!usedPaths.has('/') && pageComponents.length > 0) {
+    if (!usedPaths.has('/') && primaryPageComponents.length > 0) {
       routeLines.unshift(
-        `        <Route path="/" element={<${pageComponents[0].name} />} />`,
+        `        <Route path="/" element={<${primaryPageComponents[0].name} />} />`,
       );
       routeEntries.unshift({
         route: '/',
-        componentName: pageComponents[0].name,
+        componentName: primaryPageComponents[0].name,
       });
+    }
+
+    // Register the catch-all route explicitly at the end so 404 handling
+    // never depends on the general page loop ordering/filtering.
+    if (notFoundComponent) {
+      const notFoundPath =
+        planRouteMap.get(notFoundComponent.name) ??
+        FALLBACK_ROUTE_MAP[notFoundComponent.name] ??
+        '*';
+      if (!usedPaths.has(notFoundPath)) {
+        usedPaths.add(notFoundPath);
+        routeLines.push(
+          `        <Route path="${notFoundPath}" element={<${notFoundComponent.name} />} />`,
+        );
+        routeEntries.push({
+          route: notFoundPath,
+          componentName: notFoundComponent.name,
+        });
+      }
     }
 
     const routes = routeLines.join('\n');
@@ -323,7 +375,7 @@ ${routesBlock}
     // server/.env — DB credentials + port
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n${copiedLogoPublicPath ? `SITE_LOGO_URL=${copiedLogoPublicPath}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss
@@ -375,7 +427,8 @@ ${routesBlock}
     await mkdir(pagesDir, { recursive: true });
 
     for (const comp of components) {
-      const isPartial = PARTIAL_PATTERNS.test(comp.name) || comp.isSubComponent;
+      const isPartial =
+        isPartialComponentName(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
@@ -571,6 +624,37 @@ ${fontEntries}
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async copySiteLogoToPublic(
+    logoUrl: string | null | undefined,
+    destImagesDir: string,
+  ): Promise<string | null> {
+    if (!logoUrl) return null;
+
+    try {
+      const url = new URL(logoUrl);
+      const originalName = basename(url.pathname) || 'site-logo';
+      const ext = extname(originalName) || '.png';
+      const safeExt = /^[.][a-zA-Z0-9]+$/.test(ext) ? ext : '.png';
+      const fileName = `site-logo${safeExt.toLowerCase()}`;
+      const destPath = join(destImagesDir, fileName);
+
+      await mkdir(destImagesDir, { recursive: true });
+      const response = await fetch(logoUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} while fetching ${logoUrl}`);
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      await writeFile(destPath, bytes);
+      this.logger.log(`Copied site logo to preview assets: ${destPath}`);
+      return `/assets/images/${fileName}`;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to copy site logo from "${logoUrl}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+      return null;
     }
   }
 

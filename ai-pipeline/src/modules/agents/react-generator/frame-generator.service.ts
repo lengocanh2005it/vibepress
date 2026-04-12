@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
   COMMENT_INTERFACE,
+  FOOTER_COLUMN_INTERFACE,
   MENU_INTERFACE,
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
@@ -47,7 +48,7 @@ export class FrameGeneratorService {
    * FRAME_PLACEHOLDER where the AI JSX block should be inserted.
    */
   generateFrame(options: FrameOptions): string {
-    const { componentName, type, dataNeeds, isDetail } = options;
+    const { componentName, type, dataNeeds, isDetail, route } = options;
     const needs = this.normalizeNeeds(dataNeeds);
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
@@ -57,6 +58,10 @@ export class FrameGeneratorService {
     const hasMenus = needs.has('menus');
     const hasSiteInfo = needs.has('siteInfo');
     const hasComments = needs.has('comments') && isDetail;
+    const isFooter = componentName.toLowerCase().includes('footer');
+    // Archive component: handles /archive, /category/:slug, /author/:slug, /tag/:slug
+    const isArchive =
+      componentName.toLowerCase() === 'archive' || route === '/archive';
 
     const needsPost = hasPostDetail || hasPosts;
     const needsPage = hasPageDetail || hasPages;
@@ -66,9 +71,14 @@ export class FrameGeneratorService {
     // ── 1. Imports ────────────────────────────────────────────────────────────
     const routerImports = ['Link'];
     if (isDetail) routerImports.push('useParams');
+    if (isArchive) {
+      if (!routerImports.includes('useParams')) routerImports.push('useParams');
+      routerImports.push('useLocation');
+    }
+    if (hasPosts || isArchive) routerImports.push('useSearchParams');
     lines.push(`import React, { useState, useEffect } from 'react';`);
     lines.push(
-      `import { ${routerImports.join(', ')} } from 'react-router-dom';`,
+      `import { ${Array.from(new Set(routerImports)).join(', ')} } from 'react-router-dom';`,
     );
     lines.push('');
 
@@ -79,9 +89,12 @@ export class FrameGeneratorService {
     if (needsPage) {
       lines.push(PAGE_INTERFACE);
     }
-    if (hasMenus) {
+    if (hasMenus && !isFooter) {
       lines.push(MENU_ITEM_INTERFACE);
       lines.push(MENU_INTERFACE);
+    }
+    if (isFooter) {
+      lines.push(FOOTER_COLUMN_INTERFACE);
     }
     if (hasSiteInfo) {
       lines.push(SITE_INFO_INTERFACE);
@@ -89,16 +102,48 @@ export class FrameGeneratorService {
     if (hasComments) {
       lines.push(COMMENT_INTERFACE);
     }
-    if (needsPost || needsPage || hasMenus || hasSiteInfo || hasComments) {
+    if (needsPost || needsPage || hasMenus || isFooter || hasSiteInfo || hasComments) {
       lines.push('');
     }
 
     // ── 3. Component function ─────────────────────────────────────────────────
     lines.push(`export default function ${componentName}() {`);
 
-    // ── 4. useParams (detail routes only) ────────────────────────────────────
-    if (isDetail) {
+    // ── 4. useParams / archive detection ─────────────────────────────────────
+    if (isArchive) {
+      lines.push(`  const { slug } = useParams<{ slug?: string }>();`);
+      lines.push(`  const location = useLocation();`);
+      lines.push(
+        `  const archiveType = location.pathname.startsWith('/category/') ? 'category'`,
+      );
+      lines.push(
+        `    : location.pathname.startsWith('/author/') ? 'author'`,
+      );
+      lines.push(
+        `    : location.pathname.startsWith('/tag/') ? 'tag' : null;`,
+      );
+    } else if (isDetail) {
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+    }
+    if (hasPosts || isArchive) {
+      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
+      );
+      lines.push(`  const perPage = 10;`);
+      lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
+      lines.push(`  const updatePage = (nextPage: number) => {`);
+      lines.push(
+        `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
+      );
+      lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
+      lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
+      lines.push(`    else nextParams.set('page', String(safePage));`);
+      lines.push(`    setSearchParams(nextParams);`);
+      lines.push(
+        `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
+      );
+      lines.push(`  };`);
     }
 
     // ── 5. State declarations ────────────────────────────────────────────────
@@ -112,8 +157,11 @@ export class FrameGeneratorService {
     } else if (hasPages) {
       lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     }
-    if (hasMenus) {
+    if (hasMenus && !isFooter) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
+    }
+    if (isFooter) {
+      lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
     }
     if (hasSiteInfo) {
       lines.push(
@@ -134,17 +182,35 @@ export class FrameGeneratorService {
       hasSiteInfo,
       hasComments,
       isDetail,
+      isFooter,
+      isArchive,
     });
 
     if (fetches.length > 0) {
       lines.push('');
-      const depArray = isDetail ? '[slug]' : '[]';
+      const depArray = isArchive
+        ? '[slug, archiveType, currentPage]'
+        : isDetail
+          ? '[slug]'
+          : hasPosts
+            ? '[currentPage]'
+            : '[]';
       lines.push(`  useEffect(() => {`);
       lines.push(`    (async () => {`);
       if (fetches.length === 1) {
         lines.push(`      const res = await fetch(${fetches[0].url});`);
-        lines.push(`      ${fetches[0].setter}(await res.json());`);
-      } else {
+          if (fetches[0].setter === 'setPosts') {
+            lines.push(`      const postsData = await res.json();`);
+            lines.push(
+              `      setPosts(Array.isArray(postsData) ? postsData : []);`,
+            );
+            lines.push(
+              `      setTotalPages(Number(res.headers.get('X-WP-TotalPages') ?? '1'));`,
+            );
+          } else {
+            lines.push(`      ${fetches[0].setter}(await res.json());`);
+          }
+        } else {
         const vars = fetches.map((f, i) => `r${i}`).join(', ');
         lines.push(`      const [${vars}] = await Promise.all([`);
         fetches.forEach((f, i) => {
@@ -153,10 +219,20 @@ export class FrameGeneratorService {
           );
         });
         lines.push(`      ]);`);
-        fetches.forEach((f, i) => {
-          lines.push(`      ${f.setter}(await r${i}.json());`);
-        });
-      }
+          fetches.forEach((f, i) => {
+            if (f.setter === 'setPosts') {
+              lines.push(`      const postsData${i} = await r${i}.json();`);
+              lines.push(
+                `      setPosts(Array.isArray(postsData${i}) ? postsData${i} : []);`,
+              );
+              lines.push(
+                `      setTotalPages(Number(r${i}.headers.get('X-WP-TotalPages') ?? '1'));`,
+              );
+            } else {
+              lines.push(`      ${f.setter}(await r${i}.json());`);
+            }
+          });
+        }
       lines.push(`    })();`);
       lines.push(`  }, ${depArray});`);
     }
@@ -177,6 +253,22 @@ export class FrameGeneratorService {
       lines.push(
         `  if (!posts.length) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
       );
+    }
+
+    // ── 7.5. Deterministic menu helpers for Header/Footer/Nav ─────────────────
+    // These are injected as constants so AI only writes JSX layout, not menu logic.
+    if (hasMenus && !isFooter) {
+      const nameLower = componentName.toLowerCase();
+      if (nameLower.includes('header') || nameLower.includes('nav')) {
+        lines.push('');
+        // Header/Nav uses the primary location menu, falling back by slug then position
+        lines.push(
+          `  const navMenu = menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0];`,
+        );
+        lines.push(
+          `  const topLevelItems = navMenu?.items?.filter(item => item.parentId === 0) ?? [];`,
+        );
+      }
     }
 
     // ── 8. Return with AI placeholder ────────────────────────────────────────
@@ -214,7 +306,12 @@ export class FrameGeneratorService {
     const hasPageDetail = needs.has('pageDetail') && isDetail;
 
     if (hasPostDetail) vars.push('`post: Post | null`');
-    else if (needs.has('posts')) vars.push('`posts: Post[]`');
+    else if (needs.has('posts')) {
+      vars.push('`posts: Post[]`');
+      vars.push('`currentPage: number`');
+      vars.push('`totalPages: number`');
+      vars.push('`updatePage(nextPage: number): void`');
+    }
     if (hasPageDetail) vars.push('`page: Page | null`');
     else if (needs.has('pages')) vars.push('`pages: Page[]`');
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
@@ -244,13 +341,27 @@ export class FrameGeneratorService {
     hasSiteInfo: boolean;
     hasComments: boolean;
     isDetail: boolean;
+    isFooter: boolean;
+    isArchive: boolean;
   }): Array<{ setter: string; url: string }> {
     const fetches: Array<{ setter: string; url: string }> = [];
 
-    if (flags.hasPostDetail) {
+    if (flags.isArchive) {
+      // Dynamic URL based on archive type detected from location.pathname
+      fetches.push({
+        setter: 'setPosts',
+        url: `archiveType === 'category' && slug ? \`/api/taxonomies/category/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
+             ` : archiveType === 'tag' && slug ? \`/api/taxonomies/post_tag/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
+             ` : archiveType === 'author' && slug ? \`/api/posts?author=\${slug}&page=\${currentPage}&perPage=\${perPage}\`` +
+             ` : \`/api/posts?page=\${currentPage}&perPage=\${perPage}\``,
+      });
+    } else if (flags.hasPostDetail) {
       fetches.push({ setter: 'setPost', url: '`/api/posts/${slug}`' });
     } else if (flags.hasPosts) {
-      fetches.push({ setter: 'setPosts', url: `'/api/posts'` });
+      fetches.push({
+        setter: 'setPosts',
+        url: '`/api/posts?page=${currentPage}&perPage=${perPage}`',
+      });
     }
 
     if (flags.hasPageDetail) {
@@ -259,8 +370,11 @@ export class FrameGeneratorService {
       fetches.push({ setter: 'setPages', url: `'/api/pages'` });
     }
 
-    if (flags.hasMenus) {
+    if (flags.hasMenus && !flags.isFooter) {
       fetches.push({ setter: 'setMenus', url: `'/api/menus'` });
+    }
+    if (flags.isFooter) {
+      fetches.push({ setter: 'setFooterColumns', url: `'/api/footer-links'` });
     }
 
     if (flags.hasSiteInfo) {

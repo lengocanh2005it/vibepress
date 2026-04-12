@@ -18,6 +18,7 @@ export function buildPlanPrompt(
   theme: PhpParseResult | BlockParseResult,
   content: DbContentResult,
   repoManifest?: RepoThemeManifest,
+  editRequestContextNote?: string,
 ): string {
   const templateNames =
     theme.type === 'classic'
@@ -49,5 +50,7 @@ export function buildPlanPrompt(
     );
 
   const repoContext = buildRepoManifestContextNote(repoManifest);
-  return repoContext ? `${base}\n\n${repoContext}` : base;
+  return [base, repoContext, editRequestContextNote]
+    .filter(Boolean)
+    .join('\n\n');
 }

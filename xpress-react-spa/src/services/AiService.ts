@@ -1,17 +1,23 @@
 export interface AiEditRequestPayload {
-    prompt: string;
+    prompt?: string;
     language?: string;
     pageContext?: {
         reactUrl?: string;
         reactRoute?: string;
         wordpressUrl?: string;
+        wordpressRoute?: string | null;
         iframeSrc?: string;
+        pageTitle?: string;
         viewport?: {
             width: number;
             height: number;
             scrollX: number;
             scrollY: number;
             dpr: number;
+        };
+        document?: {
+            width: number;
+            height: number;
         };
     };
     attachments?: Array<{
@@ -28,6 +34,15 @@ export interface AiEditRequestPayload {
                 scrollY?: number;
                 dpr?: number;
             };
+            page?: {
+                url?: string;
+                route?: string | null;
+                title?: string;
+            };
+            document?: {
+                width: number;
+                height: number;
+            };
         };
         selection?: {
             x: number;
@@ -35,6 +50,56 @@ export interface AiEditRequestPayload {
             width: number;
             height: number;
             coordinateSpace?: 'iframe-viewport' | 'iframe-document';
+        };
+        geometry?: {
+            viewportRect?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+                coordinateSpace?: 'iframe-viewport';
+            };
+            documentRect?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+                coordinateSpace?: 'iframe-document';
+            };
+            normalizedRect?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+                coordinateSpace?: 'iframe-document-normalized';
+            };
+        };
+        domTarget?: {
+            cssSelector?: string;
+            xpath?: string;
+            tagName?: string;
+            elementId?: string;
+            classNames?: string[];
+            htmlSnippet?: string;
+            textSnippet?: string;
+            blockName?: string;
+            blockClientId?: string;
+            domPath?: string;
+            role?: string;
+            ariaLabel?: string;
+            nearestHeading?: string;
+            nearestLandmark?: string;
+        };
+        targetNode?: {
+            nodeId?: string;
+            templateName?: string;
+            route?: string | null;
+            blockName?: string;
+            blockClientId?: string;
+            tagName?: string;
+            domPath?: string;
+            nearestHeading?: string;
+            nearestLandmark?: string;
         };
         asset: {
             provider: 'local' | 'cloudinary' | 'imagekit';
@@ -54,6 +119,25 @@ export interface AiEditRequestPayload {
     }>;
 }
 
+export class AiProcessError extends Error {
+    status: number;
+    code?: string;
+    details?: unknown;
+
+    constructor(
+        message: string,
+        status: number,
+        code?: string,
+        details?: unknown,
+    ) {
+        super(message);
+        this.name = 'AiProcessError';
+        this.status = status;
+        this.code = code;
+        this.details = details;
+    }
+}
+
 export const runAiProcess = async (
     siteId: string,
     editRequest?: AiEditRequestPayload,
@@ -67,7 +151,18 @@ export const runAiProcess = async (
             body: JSON.stringify({ siteId, editRequest })
         });
         if (!response.ok) {
-            throw new Error('Failed to fetch repos');
+            let errorPayload: any = null;
+            try {
+                errorPayload = await response.json();
+            } catch {
+                errorPayload = null;
+            }
+            throw new AiProcessError(
+                errorPayload?.message || 'Failed to start AI pipeline.',
+                response.status,
+                errorPayload?.code,
+                errorPayload?.details,
+            );
         }
         const data = await response.json();
         return data;

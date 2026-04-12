@@ -4,9 +4,13 @@ import { appendFile, mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
+import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
+import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
+import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
@@ -28,10 +32,6 @@ const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
 const FSE_CHUNK_THRESHOLD_CHARS = 80_000;
 // Target size per section chunk
 const CHUNK_TARGET_CHARS = 15_000;
-// Component names matching these patterns are placed in src/components (partials), not src/pages
-const PARTIAL_PATTERNS =
-  /^(Header|Footer|Sidebar|Nav|Breadcrumb|Widget|Part[A-Z])/i;
-
 /**
  * Returns true for top-level block nodes that represent the shared site header
  * or footer (template-part with header/footer slug, or direct header/footer blocks).
@@ -83,6 +83,7 @@ export class ReactGeneratorService {
     private readonly styleResolver: StyleResolverService,
     private readonly codeGenerator: CodeGeneratorService,
     private readonly codeReviewer: CodeReviewerService,
+    private readonly capturePlanning: CapturePlanningService,
     private readonly aiLogger: AiLoggerService,
   ) {}
 
@@ -93,6 +94,7 @@ export class ReactGeneratorService {
     content: DbContentResult;
     plan?: PlanResult;
     repoManifest?: RepoThemeManifest;
+    editRequest?: PipelineEditRequestDto;
     jobId?: string;
     logPath?: string;
     /** Per-step model overrides. undefined fields fall back to llmFactory.getModel(). */
@@ -107,6 +109,7 @@ export class ReactGeneratorService {
       content,
       plan,
       repoManifest,
+      editRequest,
       jobId = 'unknown',
       logPath,
       modelConfig,
@@ -119,7 +122,15 @@ export class ReactGeneratorService {
     const reviewCodeModel = modelConfig?.reviewCode ?? codeGeneratorModel;
     const fixAgentModel = modelConfig?.fixAgent ?? reviewCodeModel;
 
-    const systemPrompt = buildPlanPrompt(theme, content, repoManifest);
+    const systemPrompt = buildPlanPrompt(
+      theme,
+      content,
+      repoManifest,
+      buildEditRequestContextNote(editRequest, {
+        audience: 'system',
+        maxAttachments: 2,
+      }),
+    );
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
 
     const pagesCount = theme.templates.length;
@@ -138,19 +149,18 @@ export class ReactGeneratorService {
     const createFallbackTemplate = (name: string, body: string) =>
       theme.type === 'classic' ? { name, html: body } : { name, markup: body };
 
-    if (!existingTemplateNames.has('author')) {
+    // Per WordPress template hierarchy: author/category/tag fall back to archive.php.
+    // Inject a single 'archive' fallback instead of separate author/category templates.
+    const hasArchiveVariant =
+      existingTemplateNames.has('archive') ||
+      existingTemplateNames.has('author') ||
+      existingTemplateNames.has('category');
+
+    if (!hasArchiveVariant) {
       templates.push(
         createFallbackTemplate(
-          'author',
-          '<div><!-- Author template fallback --></div>',
-        ),
-      );
-    }
-    if (!existingTemplateNames.has('category')) {
-      templates.push(
-        createFallbackTemplate(
-          'category',
-          '<div><!-- Category template fallback --></div>',
+          'archive',
+          '<div><!-- Archive fallback: lists posts filtered by category, author, or tag --></div>',
         ),
       );
     }
@@ -210,7 +220,7 @@ export class ReactGeneratorService {
               ? 'src/components'
               : componentPlan?.type === 'page'
                 ? 'src/pages'
-                : PARTIAL_PATTERNS.test(componentName)
+                : isPartialComponentName(componentName)
                   ? 'src/components'
                   : 'src/pages';
 
@@ -233,6 +243,7 @@ export class ReactGeneratorService {
             tokens,
             themeType: theme.type,
             componentPlan,
+            editRequest,
             repoManifest,
             logPath,
             jobId,
@@ -284,6 +295,7 @@ export class ReactGeneratorService {
     tokens?: ThemeTokens;
     themeType: 'classic' | 'fse';
     componentPlan?: PlanResult[number];
+    editRequest?: PipelineEditRequestDto;
     repoManifest?: RepoThemeManifest;
     logPath?: string;
     jobId?: string;
@@ -298,6 +310,7 @@ export class ReactGeneratorService {
       tokens,
       themeType,
       componentPlan,
+      editRequest,
       repoManifest,
       logPath,
       jobId,
@@ -371,6 +384,12 @@ export class ReactGeneratorService {
       themeType === 'fse' &&
       componentPlan?.type === 'partial' &&
       !getComponentStrategy(componentName).deterministicFirst;
+    const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
+      request: editRequest,
+      componentName,
+      route: componentPlan?.route,
+      maxAttachments: 3,
+    });
 
     if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
@@ -384,6 +403,11 @@ export class ReactGeneratorService {
         tokens,
         repoManifest,
         componentPlan,
+        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
+          audience: 'codegen',
+          componentName,
+          route: componentPlan?.route,
+        }),
         logPath,
         jobId,
       });
@@ -457,6 +481,14 @@ export class ReactGeneratorService {
             tokens,
             repoManifest,
             componentPlan,
+            editRequestContextNote: buildEditRequestContextNote(
+              scopedEditRequest,
+              {
+                audience: 'section',
+                componentName,
+                route: componentPlan?.route,
+              },
+            ),
             logPath,
             jobId,
           });
@@ -535,25 +567,63 @@ export class ReactGeneratorService {
     feedback: string;
     modelConfig?: { fixAgent?: string };
     logPath?: string;
+    fixMode?: 'full' | 'syntax-only';
+    visionImageUrls?: string[];
+    visionContextNote?: string;
   }): Promise<GeneratedComponent> {
-    const { component, plan, feedback, modelConfig, logPath } = input;
+    const {
+      component,
+      plan,
+      feedback,
+      modelConfig,
+      logPath,
+      fixMode = 'full',
+      visionImageUrls,
+      visionContextNote,
+    } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
+    const isProtectedDeterministicSharedPartial =
+      component.generationMode === 'deterministic' &&
+      /^(Header|Footer|Navigation|Nav)$/i.test(component.name);
+
+    if (isProtectedDeterministicSharedPartial && fixMode !== 'syntax-only') {
+      this.logger.log(
+        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure`,
+      );
+      await this.logToFile(
+        logPath,
+        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure. Feedback: ${feedback}`,
+      );
+      return this.attachPlanContext(component, componentPlan);
+    }
+
+    const effectiveFeedback =
+      fixMode === 'syntax-only'
+        ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
+        : feedback;
 
     this.logger.log(
-      `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+      fixMode === 'syntax-only'
+        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}"`
+        : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
     );
     await this.logToFile(
       logPath,
-      `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${feedback}`,
+      fixMode === 'syntax-only'
+        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${effectiveFeedback}`
+        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${effectiveFeedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
       fixAgentModel,
       component.code,
-      feedback,
+      visionContextNote
+        ? `${effectiveFeedback}\n\n${visionContextNote}`
+        : effectiveFeedback,
       logPath,
       component.name,
+      visionImageUrls,
     );
 
     return this.attachPlanContext(
@@ -723,7 +793,7 @@ ${renders}
         const isPartial =
           component.type === 'partial' ||
           component.isSubComponent === true ||
-          PARTIAL_PATTERNS.test(component.name);
+          isPartialComponentName(component.name);
         const targetDir = isPartial ? componentsDir : pagesDir;
         await writeFile(
           join(targetDir, `${component.name}.tsx`),

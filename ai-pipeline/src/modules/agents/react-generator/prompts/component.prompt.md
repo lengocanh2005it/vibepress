@@ -32,6 +32,7 @@ Internal link paths:
 - Home → `to="/"`
 
 **Sidebar / widget link patterns** (use these — NEVER `href="#"`):
+
 - "View all posts" / "Read more" in a post list → `to={'/post/' + post.slug}`
 - "All categories" link → `to="/archive"`
 - Category item in widget → `to={'/category/' + cat.slug}`
@@ -86,6 +87,7 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 - Define TypeScript interfaces above the component
 - ⛔ PAGE components must NEVER fetch `/api/site-info` or `/api/menus`. Those endpoints are owned exclusively by `Header` / `Footer` / `Navigation` partials. If the template JSON contains a `header` or `footer` block, skip it entirely — the shared Layout wrapper already renders it.
 - Menu guard — always use optional chaining. Each menu object now includes a `location` field (the WP theme location slug, e.g. `"primary"`, `"footer-about"`, or `null` if unassigned):
+
   ```tsx
   // Header/Navigation — use the primary location menu
   const navMenu = menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0];
@@ -213,9 +215,9 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 | `margin` {top/right/bottom/left}  | `mt-[t] mr-[r] mb-[b] ml-[l]`                                         |
 | `minHeight`                       | `min-h-[value]`                                                       |
 | `textAlign`                       | `text-left/center/right`                                              |
-| `align: "full"`                   | full-bleed section wrapper, e.g. `w-full`                              |
-| `align: "wide"`                   | wide container, e.g. `max-w-[1280px] mx-auto`                          |
-| `align: center/absent`            | normal content container using theme widths                            |
+| `align: "full"`                   | full-bleed section wrapper, e.g. `w-full`                             |
+| `align: "wide"`                   | wide container, e.g. `max-w-[1280px] mx-auto`                         |
+| `align: center/absent`            | normal content container using theme widths                           |
 | `borderRadius`                    | `rounded-[value]` — resolve CSS vars; if unresolvable, omit           |
 | `columnWidth` e.g. `"33.33%"`     | `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}`                |
 | `overlayColor` on cover           | `style={{backgroundColor:'#hex'}}` on overlay div                     |
@@ -261,6 +263,7 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 ```
 
 **Cover overlay rules — read `dimRatio` and `overlayColor` exactly from the node:**
+
 - `node.src` — background image URL (may be undefined if cover has no image → render as plain colored section)
 - `node.overlayColor` — overlay hex or slug (may be a light color like `#ffffff` or `white` → results in a near-white section with text on top, NOT a dark photo overlay)
 - `node.params?.dimRatio` — overlay opacity 0-100. **If `dimRatio` is 0 → `opacity: 0` (no overlay, image shows fully). If `dimRatio` is 100 with a white `overlayColor` → section looks like a plain white background with text.**
@@ -273,8 +276,8 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 - `/wp-content/uploads/` URLs → keep as-is
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
-- Site logo / site title in shared chrome → `<Link to="/" className="font-bold">{siteInfo.siteName}</Link>`, no `<img>`
-- `block: "site-logo"` → skip entirely
+- Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
+- Site title remains a separate `<Link to="/">{siteInfo.siteName}</Link>` when the template includes `site-title`
 - Preserve exact ORDER of blocks in JSON
 
 ## Responsive — MANDATORY (mobile-first: base=mobile, sm=640, md=768, lg=1024)
@@ -356,7 +359,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `site-title`            | for shared Header/Footer/Navigation partials render `<Link to="/">{siteInfo.siteName}</Link>`; in page components skip shared chrome entirely                 |
 | `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                  |
-| `site-logo`             | skip entirely                                                                                                                                                 |
+| `site-logo`             | render `<img src={node.src ?? siteInfo.logoUrl}>` ONLY when a real logo URL exists; otherwise render nothing                                                  |
 | `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                            |
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                       |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                       |
