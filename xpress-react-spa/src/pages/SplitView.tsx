@@ -615,30 +615,43 @@ const SplitView: React.FC = () => {
                 {completionEvent && (
                   <button
                     onClick={handleOpenVisualEdit}
-                    className={`${actionButtonClass} border-amber-800 bg-amber-700 text-white hover:bg-amber-800 focus-visible:ring-amber-500`}
+                    className={`${actionButtonClass} border-amber-900 bg-amber-700 text-white hover:bg-amber-800 focus-visible:ring-amber-500 shadow-md shadow-amber-900/20`}
                   >
+                    <span className="material-symbols-outlined text-[18px]">
+                      auto_fix_high
+                    </span>
                     Open Visual Edit
                   </button>
                 )}
                 <button
                   onClick={() => window.open(previewUrl, "_blank")}
-                  className={`${actionButtonClass} border-emerald-800 bg-emerald-700 text-white hover:bg-emerald-800 focus-visible:ring-emerald-500`}
+                  className={`${actionButtonClass} border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 focus-visible:ring-emerald-300`}
                 >
-                  Open Frontend
+                  <span className="material-symbols-outlined text-[18px]">
+                    language
+                  </span>
+                  Frontend
                 </button>
                 {apiBaseUrl && (
                   <button
                     onClick={() => window.open(apiBaseUrl, "_blank")}
-                    className={`${actionButtonClass} border-blue-800 bg-blue-700 text-white hover:bg-blue-800 focus-visible:ring-blue-500`}
+                    className={`${actionButtonClass} border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100 focus-visible:ring-sky-300`}
                   >
-                    Open Backend
+                    <span className="material-symbols-outlined text-[18px]">
+                      dns
+                    </span>
+                    Backend
                   </button>
                 )}
                 <button
                   onClick={handleRefreshPreview}
-                  className={`${actionButtonClass} border-slate-300 bg-white text-slate-900 hover:bg-slate-100 focus-visible:ring-slate-400`}
+                  title="Refresh preview"
+                  aria-label="Refresh preview"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-900 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2"
                 >
-                  Refresh
+                  <span className="material-symbols-outlined text-[18px]">
+                    refresh
+                  </span>
                 </button>
               </>
             ) : (
