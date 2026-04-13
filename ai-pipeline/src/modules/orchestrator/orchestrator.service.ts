@@ -169,6 +169,14 @@ const STEP_META: Record<
     doneMessage:
       'Preview app assembly, build checks, and runtime smoke tests have passed.',
   },
+  '8b_edit_request': {
+    label: 'Apply User Edit Request',
+    weight: 6,
+    activeMessage:
+      'Applying the submitted edit request to the generated React output and syncing the changes into the running preview.',
+    doneMessage:
+      'The requested user edits have been applied to the generated React preview.',
+  },
   '9_visual_compare': {
     label: 'Evaluate Visual Metrics',
     weight: 2,
@@ -191,8 +199,6 @@ const STEP_META: Record<
     doneMessage: 'Migration workflow is complete and the preview is ready.',
   },
 };
-
-const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
 
 export type PipelineStepStatus =
   | 'pending'
@@ -373,6 +379,9 @@ export class OrchestratorService {
         // Stage 6: Build & Preview (E1 API → E2 Vite → E3 Runtime Instrumentation)
         { name: '7_api_builder', status: 'pending' },
         { name: '8_preview_builder', status: 'pending' },
+        ...(dto.editRequest
+          ? [{ name: '8b_edit_request', status: 'pending' as const }]
+          : []),
         // Stage 7: Visual Compare (E4)
         { name: '9_visual_compare', status: 'pending' },
         // Stage 8: Cleanup + completion
@@ -629,11 +638,22 @@ export class OrchestratorService {
     if (name === '8_preview_builder') {
       return {
         ...baseMeta,
-        label: 'Launch Preview And Apply Requested Edits',
+        label: 'Launch Preview Baseline',
         activeMessage:
-          'Starting preview servers so the baseline can be inspected while focused edit-request fixes continue in the background.',
+          'Starting preview servers so the generated baseline can be inspected before any requested edit pass runs.',
         doneMessage:
-          'Preview servers are live and any requested edits have been synced into the running preview.',
+          'Preview servers are live and the baseline React app is ready for inspection.',
+      };
+    }
+
+    if (name === '8b_edit_request') {
+      return {
+        ...baseMeta,
+        label: 'Apply Requested Edits',
+        activeMessage:
+          'Applying the user edit request to the running preview and validating the updated React output.',
+        doneMessage:
+          'Requested edits have been applied and synced into the running preview.',
       };
     }
 
@@ -662,24 +682,41 @@ export class OrchestratorService {
     return baseMeta;
   }
 
-  private calcPercentBefore(name: string): number {
-    const stepOrder = Object.keys(STEP_META);
-    let done = 0;
-    for (const stepName of stepOrder) {
-      if (stepName === name) break;
-      done += STEP_META[stepName]?.weight ?? 0;
+  private getStepOrder(jobId?: string): string[] {
+    const state = jobId ? this.jobs.get(jobId) : undefined;
+    if (state?.steps?.length) {
+      return state.steps.map((step) => step.name);
     }
-    return Math.round((done / TOTAL_WEIGHT) * 100);
+    return Object.keys(STEP_META);
   }
 
-  private calcPercentThrough(name: string): number {
-    const stepOrder = Object.keys(STEP_META);
+  private getTotalWeight(jobId?: string): number {
+    return this.getStepOrder(jobId).reduce(
+      (sum, stepName) => sum + (this.getStepMeta(stepName, jobId).weight ?? 0),
+      0,
+    );
+  }
+
+  private calcPercentBefore(name: string, jobId?: string): number {
+    const stepOrder = this.getStepOrder(jobId);
+    const totalWeight = this.getTotalWeight(jobId);
     let done = 0;
     for (const stepName of stepOrder) {
-      done += STEP_META[stepName]?.weight ?? 0;
+      if (stepName === name) break;
+      done += this.getStepMeta(stepName, jobId).weight ?? 0;
+    }
+    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
+  }
+
+  private calcPercentThrough(name: string, jobId?: string): number {
+    const stepOrder = this.getStepOrder(jobId);
+    const totalWeight = this.getTotalWeight(jobId);
+    let done = 0;
+    for (const stepName of stepOrder) {
+      done += this.getStepMeta(stepName, jobId).weight ?? 0;
       if (stepName === name) break;
     }
-    return Math.round((done / TOTAL_WEIGHT) * 100);
+    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
   }
 
   private emitStepProgress(
@@ -694,11 +731,19 @@ export class OrchestratorService {
     const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
     const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
-    const beforeWeight = Object.keys(STEP_META)
-      .slice(0, Math.max(Object.keys(STEP_META).indexOf(name), 0))
-      .reduce((sum, stepName) => sum + (STEP_META[stepName]?.weight ?? 0), 0);
+    const stepOrder = this.getStepOrder(state.jobId);
+    const totalWeight = this.getTotalWeight(state.jobId);
+    const beforeWeight = stepOrder
+      .slice(0, Math.max(stepOrder.indexOf(name), 0))
+      .reduce(
+        (sum, stepName) =>
+          sum + (this.getStepMeta(stepName, state.jobId).weight ?? 0),
+        0,
+      );
     const percent = Math.round(
-      ((beforeWeight + meta.weight * bounded) / TOTAL_WEIGHT) * 100,
+      totalWeight > 0
+        ? ((beforeWeight + meta.weight * bounded) / totalWeight) * 100
+        : 0,
     );
 
     subject?.next({
@@ -1752,40 +1797,61 @@ export class OrchestratorService {
         uiSourceMapPath: preview.uiSourceMapPath,
         routeEntries: preview.routeEntries,
       };
-      this.emitStepProgress(
-        state,
-        '8_preview_builder',
-        hasEditRequest ? 0.56 : 0.72,
-        hasEditRequest
-          ? 'Baseline preview is live. The requested edits are now being applied in the background.'
-          : 'Preview is live and ready for inspection.',
-        this.buildPreviewEventData({
-          preview,
-          previewStage: 'baseline',
-          hasEditRequest,
-        }),
-      );
-      if (hasEditRequest) {
-        const editPassResult = await this.applyPostMigrationEditPass({
-          jobId,
-          state,
-          stepName: '8_preview_builder',
-          request: dto.editRequest,
-          plan: reviewResult.plan,
-          components: buildComponents,
-          fixAgentModel: resolvedModels.fixAgent,
-          logPath,
-          applyProgress: 0.64,
-          reviewProgress: 0.74,
-          refixProgress: 0.8,
+      {
+        const subject = this.progress.get(jobId);
+        const meta = this.getStepMeta('8_preview_builder', jobId);
+        subject?.next({
+          step: '8_preview_builder',
+          label: meta.label,
+          status: 'done',
+          percent: this.calcPercentThrough('8_preview_builder', jobId),
+          message: hasEditRequest
+            ? 'Baseline preview is live. The pipeline will now run a dedicated requested-edit pass.'
+            : 'Preview is live and ready for inspection.',
+          data: this.buildPreviewEventData({
+            preview,
+            previewStage: 'baseline',
+            hasEditRequest,
+          }),
         });
-        buildComponents = editPassResult.components;
-
-        if (editPassResult.applied) {
+      }
+      if (hasEditRequest) {
+        await this.runStep(state, '8b_edit_request', logPath, async () => {
           this.emitStepProgress(
             state,
-            '8_preview_builder',
-            0.86,
+            '8b_edit_request',
+            0.12,
+            'Reviewing the submitted edit request against the generated React baseline.',
+          );
+          const editPassResult = await this.applyPostMigrationEditPass({
+            jobId,
+            state,
+            stepName: '8b_edit_request',
+            request: dto.editRequest,
+            plan: reviewResult.plan,
+            components: buildComponents,
+            fixAgentModel: resolvedModels.fixAgent,
+            logPath,
+            applyProgress: 0.38,
+            reviewProgress: 0.58,
+            refixProgress: 0.72,
+          });
+          buildComponents = editPassResult.components;
+
+          if (!editPassResult.applied) {
+            this.emitStepProgress(
+              state,
+              '8b_edit_request',
+              0.92,
+              'No targeted edit mutations were required after reviewing the submitted edit request.',
+            );
+            return { applied: false, taskCount: 0 };
+          }
+
+          this.emitStepProgress(
+            state,
+            '8b_edit_request',
+            0.82,
             `Syncing ${editPassResult.taskCount} requested edit update(s) into the running preview.`,
           );
           await this.previewBuilder.syncGeneratedComponents(
@@ -1799,8 +1865,8 @@ export class OrchestratorService {
           );
           this.emitStepProgress(
             state,
-            '8_preview_builder',
-            0.92,
+            '8b_edit_request',
+            0.94,
             'Requested edits are now visible in the running preview.',
             this.buildPreviewEventData({
               preview,
@@ -1819,7 +1885,8 @@ export class OrchestratorService {
             uiSourceMapPath: preview.uiSourceMapPath,
             routeEntries: preview.routeEntries,
           };
-        }
+          return { applied: true, taskCount: editPassResult.taskCount };
+        });
       }
       await stepDelay();
 
@@ -2208,14 +2275,14 @@ export class OrchestratorService {
     const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
 
-    step.status = 'running';
-    subject?.next({
-      step: name,
-      label: meta.label,
-      status: 'running',
-      percent: this.calcPercentBefore(name),
-      message: meta.activeMessage,
-    });
+      step.status = 'running';
+      subject?.next({
+        step: name,
+        label: meta.label,
+        status: 'running',
+        percent: this.calcPercentBefore(name, state.jobId),
+        message: meta.activeMessage,
+      });
     this.logger.log(`[${state.jobId}] Step ${name} started`);
     await this.logToFile(logPath, `Step ${name} started`);
     const t0 = Date.now();
@@ -2246,7 +2313,7 @@ export class OrchestratorService {
         step: name,
         label: meta.label,
         status: 'done',
-        percent: this.calcPercentThrough(name),
+        percent: this.calcPercentThrough(name, state.jobId),
         message: `${meta.doneMessage} (${elapsed}s)`,
       });
 
@@ -2274,7 +2341,7 @@ export class OrchestratorService {
         step: name,
         label: meta.label,
         status: 'error',
-        percent: this.calcPercentBefore(name),
+        percent: this.calcPercentBefore(name, state.jobId),
         message: `${meta.label} failed: ${err.message}`,
       });
       await this.logToFile(
