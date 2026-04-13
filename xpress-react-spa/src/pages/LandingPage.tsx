@@ -73,7 +73,6 @@ const LandingPage: React.FC = () => {
 
       setAuth(data.user, data.token);
       setShowModal(false);
-      navigate('/app/onboarding');
     } catch {
       setError('Không thể kết nối đến server');
     } finally {
