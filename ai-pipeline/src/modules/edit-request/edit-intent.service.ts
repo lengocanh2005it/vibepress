@@ -146,26 +146,28 @@ export class EditIntentService {
           : 'Migrate the full site to React.'
         : '',
       focusHint:
-        parsed.accepted &&
-        parsed.category === 'full_site_migration_with_focus'
+        parsed.accepted && parsed.category === 'full_site_migration_with_focus'
           ? parsed.focusHint?.trim() || input.request?.prompt?.trim()
           : undefined,
       confidence: parsed.confidence,
       source: 'llm',
       rejectionCode: parsed.accepted
         ? undefined
-        : parsed.rejectionCode ?? 'UNCLEAR_INTENT',
+        : (parsed.rejectionCode ?? 'UNCLEAR_INTENT'),
       userMessage: parsed.accepted
         ? undefined
-        : parsed.userMessage ??
-          'The request could not be understood as a valid migration instruction.',
+        : (parsed.userMessage ??
+          'The request could not be understood as a valid migration instruction.'),
     };
   }
 }
 
 interface IntentClassifierResponse {
   accepted: boolean;
-  category: 'full_site_migration' | 'full_site_migration_with_focus' | 'invalid';
+  category:
+    | 'full_site_migration'
+    | 'full_site_migration_with_focus'
+    | 'invalid';
   focusHint?: string;
   confidence?: number;
   rejectionCode?: 'UNCLEAR_INTENT' | 'OUT_OF_SCOPE';
@@ -202,7 +204,9 @@ function buildIntentClassifierPrompt(input: ValidatedEditRequest): string {
   ];
 
   if (request?.pageContext) {
-    lines.push(`WordPress URL: ${request.pageContext.wordpressUrl ?? '(none)'}`);
+    lines.push(
+      `WordPress URL: ${request.pageContext.wordpressUrl ?? '(none)'}`,
+    );
     lines.push(`React route: ${request.pageContext.reactRoute ?? '(none)'}`);
   }
 

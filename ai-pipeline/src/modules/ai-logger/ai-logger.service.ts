@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { mkdir, writeFile } from 'fs/promises';
+import { appendFile, mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 
 export interface AttemptLog {
@@ -15,6 +15,7 @@ export interface AttemptLog {
     input: number;
     output: number;
     total: number;
+    cached?: number;
   };
   timestamp: string;
   success: boolean;
@@ -40,6 +41,8 @@ export interface CotLogEntry {
     output: number;
   };
   finalError?: string;
+  durationMs?: number;
+  retryCount?: number;
 }
 
 export interface AiLogEntry {
@@ -53,6 +56,26 @@ export interface AiLogEntry {
   error?: string;
 }
 
+interface AiLogIndexEntry {
+  kind: 'cot' | 'activity';
+  jobId: string;
+  step: string;
+  componentName?: string;
+  timestamp: string;
+  model: string;
+  success: boolean;
+  durationMs?: number;
+  totalAttempts?: number;
+  retryCount?: number;
+  totalTokens?: {
+    input: number;
+    output: number;
+    total: number;
+  };
+  totalTokenCost?: number;
+  error?: string;
+}
+
 @Injectable()
 export class AiLoggerService {
   /**
@@ -61,19 +84,44 @@ export class AiLoggerService {
   async logCotProcess(entry: CotLogEntry): Promise<void> {
     const logDir = join('./temp/logs', entry.jobId, 'ai-logs', entry.step);
     await mkdir(logDir, { recursive: true });
+    const normalizedEntry = this.normalizeCotEntry(entry);
 
     // Tạo tên file với component name nếu có, để log từng component riêng
     // planning-cot-<timestamp>.json
     // code-generation-NotFound-cot-<timestamp>.json
     // section-generation-HeroSection-cot-<timestamp>.json
     let fileName: string;
-    if (entry.componentName) {
-      fileName = `${entry.step}-${entry.componentName}-cot-${Date.now()}.json`;
+    if (normalizedEntry.componentName) {
+      fileName = `${normalizedEntry.step}-${normalizedEntry.componentName}-cot-${Date.now()}.json`;
     } else {
-      fileName = `${entry.step}-cot-${Date.now()}.json`;
+      fileName = `${normalizedEntry.step}-cot-${Date.now()}.json`;
     }
 
-    await writeFile(join(logDir, fileName), JSON.stringify(entry, null, 2));
+    await writeFile(
+      join(logDir, fileName),
+      JSON.stringify(normalizedEntry, null, 2),
+    );
+    await this.appendIndexEntry(normalizedEntry.jobId, {
+      kind: 'cot',
+      jobId: normalizedEntry.jobId,
+      step: normalizedEntry.step,
+      componentName: normalizedEntry.componentName,
+      timestamp: normalizedEntry.endTime,
+      model: normalizedEntry.model,
+      success: normalizedEntry.finalSuccess,
+      durationMs: normalizedEntry.durationMs,
+      totalAttempts: normalizedEntry.totalAttempts,
+      retryCount: normalizedEntry.retryCount,
+      totalTokens: {
+        input: normalizedEntry.totalTokens.input,
+        output: normalizedEntry.totalTokens.output,
+        total:
+          normalizedEntry.totalTokens.input +
+          normalizedEntry.totalTokens.output,
+      },
+      totalTokenCost: normalizedEntry.totalTokenCost,
+      error: normalizedEntry.finalError,
+    });
   }
 
   /**
@@ -104,5 +152,41 @@ export class AiLoggerService {
 
     const fileName = `${step}-${Date.now()}.json`;
     await writeFile(join(logDir, fileName), JSON.stringify(entry, null, 2));
+    await this.appendIndexEntry(jobId, {
+      kind: 'activity',
+      jobId,
+      step,
+      timestamp: entry.timestamp,
+      model,
+      success,
+      totalTokenCost: tokenCost,
+      error,
+    });
+  }
+
+  private normalizeCotEntry(entry: CotLogEntry): CotLogEntry {
+    const durationMs =
+      entry.durationMs ??
+      Math.max(
+        0,
+        new Date(entry.endTime).getTime() - new Date(entry.startTime).getTime(),
+      );
+    const retryCount =
+      entry.retryCount ??
+      Math.max(0, entry.attempts.filter((attempt) => !attempt.success).length);
+    return {
+      ...entry,
+      durationMs,
+      retryCount,
+    };
+  }
+
+  private async appendIndexEntry(
+    jobId: string,
+    entry: AiLogIndexEntry,
+  ): Promise<void> {
+    const indexPath = join('./temp/logs', jobId, 'ai-logs', 'index.jsonl');
+    await mkdir(join('./temp/logs', jobId, 'ai-logs'), { recursive: true });
+    await appendFile(indexPath, `${JSON.stringify(entry)}\n`);
   }
 }

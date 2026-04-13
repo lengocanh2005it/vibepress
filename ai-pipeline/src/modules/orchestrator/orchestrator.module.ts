@@ -18,6 +18,7 @@ import { ThemeModule } from '../theme/theme.module.js';
 import { AiLoggerModule } from '../ai-logger/ai-logger.module.js';
 import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 import { SourceResolverModule } from '../agents/source-resolver/source-resolver.module.js';
+import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { EditRequestModule } from '../edit-request/edit-request.module.js';
 
 @Module({
@@ -42,6 +43,6 @@ import { EditRequestModule } from '../edit-request/edit-request.module.js';
     EditRequestModule,
   ],
   controllers: [OrchestratorController],
-  providers: [OrchestratorService],
+  providers: [OrchestratorService, DbTemplateOverlayService],
 })
 export class OrchestratorModule {}

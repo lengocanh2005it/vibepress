@@ -16,7 +16,6 @@ import {
   PAGE_FRONTEND_FIELDS,
   POST_FIELDS,
   SITE_INFO_FIELDS,
-  buildCanonicalApiContractNote,
 } from '../api-contract.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
@@ -68,6 +67,13 @@ const DATA_NEED_ALIASES: Record<string, string> = {
   'page-detail': 'pageDetail',
 };
 
+const MAX_TEMPLATE_TEXT_ITEMS = 12;
+const MAX_STATIC_IMAGE_HINTS = 8;
+const MAX_SAMPLE_ITEMS = 3;
+const MAX_TAXONOMY_TERMS = 5;
+const MAX_RETRY_ERROR_CHARS = 700;
+const MAX_PLAN_TEXT_CHARS = 180;
+
 export interface ComponentPromptContext {
   description?: string;
   dataNeeds?: string[];
@@ -75,6 +81,198 @@ export interface ComponentPromptContext {
   isDetail?: boolean;
   type?: 'page' | 'partial';
   visualPlan?: ComponentVisualPlan;
+}
+
+function compactPlanText(
+  value?: string | null,
+  maxChars: number = MAX_PLAN_TEXT_CHARS,
+): string | null {
+  if (!value) return null;
+  const cleaned = stripTags(value).replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function pushPlanTextPart(
+  parts: string[],
+  key: string,
+  value?: string | null,
+  maxChars?: number,
+): void {
+  const compact = compactPlanText(value, maxChars);
+  if (compact) {
+    parts.push(`${key}=${JSON.stringify(compact)}`);
+  }
+}
+
+function pushPlanListPart(
+  parts: string[],
+  key: string,
+  values?: readonly (string | null | undefined)[],
+  options?: { maxItems?: number; maxChars?: number },
+): void {
+  if (!values?.length) return;
+  const maxItems = options?.maxItems ?? 8;
+  const normalized = values
+    .map((value) => compactPlanText(value, options?.maxChars))
+    .filter((value): value is string => Boolean(value));
+  if (normalized.length === 0) return;
+  const sliced = normalized.slice(0, maxItems);
+  parts.push(`${key}=${JSON.stringify(sliced)}`);
+  if (normalized.length > maxItems) {
+    parts.push(`${key}Count=${normalized.length}`);
+  }
+}
+
+function shouldIncludeRepoManifestContext(
+  componentName?: string,
+  plan?: ComponentPromptContext,
+): boolean {
+  if (!plan?.visualPlan) return false;
+  if (/header|footer|nav/i.test(componentName ?? '')) return true;
+  if (plan.dataNeeds?.includes('menus')) return true;
+  return plan.visualPlan.sections.some((section) =>
+    ['navbar', 'footer', 'sidebar'].includes(section.type),
+  );
+}
+
+function buildAllowedEndpointsNote(input: {
+  dataNeeds: string[];
+  route?: string | null;
+  visualPlan?: ComponentVisualPlan;
+  componentName?: string;
+}): string {
+  const lines = ['## Allowed runtime data for this component'];
+  const allowed = new Set<string>();
+  const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
+  const isArchiveAlias = isArchiveAliasComponent(
+    input.componentName,
+    input.route,
+  );
+
+  if (input.dataNeeds.includes('siteInfo')) allowed.add('GET /api/site-info');
+  if (input.dataNeeds.includes('menus')) allowed.add('GET /api/menus');
+  if (input.dataNeeds.includes('posts')) allowed.add('GET /api/posts');
+  if (input.dataNeeds.includes('pages')) allowed.add('GET /api/pages');
+  if (input.dataNeeds.includes('postDetail') && routeHasParams)
+    allowed.add('GET /api/posts/${slug}');
+  if (input.dataNeeds.includes('pageDetail') && routeHasParams)
+    allowed.add('GET /api/pages/${slug}');
+  if (input.dataNeeds.includes('comments') && routeHasParams) {
+    allowed.add('GET /api/comments?slug=${slug}');
+    allowed.add(
+      'GET /api/comments/submissions?slug=${slug}&clientToken=${token}',
+    );
+    allowed.add('POST /api/comments');
+  }
+  if (input.dataNeeds.includes('categoryDetail')) {
+    allowed.add('GET /api/taxonomies/category');
+    allowed.add('GET /api/taxonomies/category/${slug}/posts');
+  }
+  if (input.dataNeeds.includes('authorDetail')) {
+    allowed.add('GET /api/posts?author=${slug}');
+  }
+  if (isArchiveAlias) {
+    allowed.add('GET /api/posts?page=${currentPage}&perPage=${perPage}');
+    allowed.add(
+      'GET /api/posts?author=${slug}&page=${currentPage}&perPage=${perPage}',
+    );
+    allowed.add('GET /api/taxonomies/category');
+    allowed.add(
+      'GET /api/taxonomies/category/${slug}/posts?page=${currentPage}&perPage=${perPage}',
+    );
+    allowed.add('GET /api/taxonomies/post_tag');
+    allowed.add(
+      'GET /api/taxonomies/post_tag/${slug}/posts?page=${currentPage}&perPage=${perPage}',
+    );
+  }
+
+  const sidebarSection = input.visualPlan?.sections?.find(
+    (section) => section.type === 'sidebar',
+  );
+  if (sidebarSection?.type === 'sidebar') {
+    if (sidebarSection.showPages) allowed.add('GET /api/pages');
+    if (sidebarSection.showPosts) allowed.add('GET /api/posts');
+    if (sidebarSection.showSiteInfo) allowed.add('GET /api/site-info');
+    if (sidebarSection.menuSlug) allowed.add('GET /api/menus');
+  }
+
+  if (allowed.size === 0) {
+    lines.push(
+      '- No runtime fetch is allowed unless the template source or approved plan explicitly requires it.',
+    );
+  } else {
+    for (const endpoint of allowed) lines.push(`- ${endpoint}`);
+  }
+
+  lines.push(
+    '⛔ Do NOT call any endpoint not listed above. Do NOT add helper fetches "for convenience".',
+  );
+  return lines.join('\n');
+}
+
+function buildForbiddenBehaviorNote(input: {
+  type?: 'page' | 'partial';
+  dataNeeds: string[];
+  route?: string | null;
+}): string {
+  const lines = ['## Forbidden behavior'];
+  const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
+  const isPageDetail = input.dataNeeds.includes('pageDetail');
+  const isPostDetail = input.dataNeeds.includes('postDetail');
+
+  if (input.type === 'page') {
+    lines.push(
+      '- Do NOT render shared site chrome (`<header>`, navigation bar, `<footer>`, site logo/title, footer columns) inside this page component.',
+    );
+    lines.push(
+      '- Do NOT fetch `/api/site-info` or `/api/menus` just to rebuild shared layout chrome inside a page component.',
+    );
+  }
+  if (!input.dataNeeds.includes('postDetail')) {
+    lines.push('- Do NOT fetch `/api/posts/${slug}` in this component.');
+  }
+  if (!input.dataNeeds.includes('pageDetail')) {
+    lines.push('- Do NOT fetch `/api/pages/${slug}` in this component.');
+  }
+  if (!input.dataNeeds.includes('posts')) {
+    lines.push(
+      '- Do NOT fetch `/api/posts` unless the approved plan explicitly allows a list/sidebar widget.',
+    );
+  }
+  if (!input.dataNeeds.includes('pages')) {
+    lines.push(
+      '- Do NOT fetch `/api/pages` unless the approved plan explicitly allows page navigation/sidebar content.',
+    );
+  }
+  if (!routeHasParams) {
+    lines.push('- Do NOT import or call `useParams` for this route.');
+  }
+  lines.push(
+    '- Do NOT create internal links to routes that are absent from the approved frontend/app contract. If a route is not explicitly approved, render plain text instead of guessing a path.',
+  );
+  lines.push(
+    '- Do NOT assume `/author/${slug}` exists. Render author names as plain text unless an author archive route is explicitly approved.',
+  );
+  lines.push(
+    '- Do NOT invent hero sections, widgets, promos, author bios, utility links, or filler content not present in the source template or approved visual plan.',
+  );
+  if (isPageDetail || isPostDetail) {
+    lines.push(
+      `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside \`dangerouslySetInnerHTML\`.`,
+    );
+    lines.push(
+      '- Do NOT append footer-style link columns such as "About", "Privacy", "Social", "Resources", or "Useful Links" after the main content unless those exact blocks are already inside the HTML body being rendered.',
+    );
+    lines.push(
+      '- Do NOT duplicate content that already appears in the fetched HTML body. If the body contains columns/cards/lists/images, render the body once and stop; do not recreate those blocks as separate React sections.',
+    );
+  }
+  lines.push(
+    '- Do NOT fetch a full list and pick index 0 as a substitute for a slug-detail endpoint.',
+  );
+  return lines.join('\n');
 }
 
 function normalizeDataNeeds(dataNeeds?: string[]): string[] {
@@ -94,6 +292,136 @@ function normalizeDataNeeds(dataNeeds?: string[]): string[] {
   return result;
 }
 
+function isArchiveAliasComponent(
+  componentName?: string,
+  route?: string | null,
+): boolean {
+  const normalizedName = (componentName ?? '').trim().toLowerCase();
+  return (
+    normalizedName === 'archive' ||
+    route === '/archive' ||
+    route === '/category/:slug' ||
+    route === '/author/:slug' ||
+    route === '/tag/:slug'
+  );
+}
+
+function hasAnyDataNeed(dataNeeds: string[], ...candidates: string[]): boolean {
+  return candidates.some((candidate) => dataNeeds.includes(candidate));
+}
+
+function buildScopedApiContractNote(input: {
+  dataNeeds: string[];
+  route?: string | null;
+  componentName?: string;
+}): string {
+  const lines = [
+    `## Canonical API contract — relevant subset from \`${API_CONTRACT_SOURCE_PATH}\``,
+  ];
+  const endpoints = new Set<string>();
+  const entityLines: string[] = [];
+  const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
+  const needs = input.dataNeeds;
+  const isArchiveAlias = isArchiveAliasComponent(
+    input.componentName,
+    input.route,
+  );
+
+  if (needs.includes('siteInfo')) {
+    endpoints.add('GET /api/site-info -> SiteInfo');
+    entityLines.push(`- SiteInfo: ${formatContractFields(SITE_INFO_FIELDS)}`);
+  }
+  if (hasAnyDataNeed(needs, 'posts', 'postDetail', 'authorDetail')) {
+    endpoints.add('GET /api/posts -> Post[]');
+    entityLines.push(`- Post: ${formatContractFields(POST_FIELDS)}`);
+  }
+  if (needs.includes('postDetail') && routeHasParams) {
+    endpoints.add('GET /api/posts/${slug} -> Post');
+  }
+  if (hasAnyDataNeed(needs, 'pages', 'pageDetail')) {
+    endpoints.add('GET /api/pages -> Page[]');
+    entityLines.push(`- Page: ${formatContractFields(PAGE_FRONTEND_FIELDS)}`);
+  }
+  if (needs.includes('pageDetail') && routeHasParams) {
+    endpoints.add('GET /api/pages/${slug} -> Page');
+  }
+  if (needs.includes('menus')) {
+    endpoints.add('GET /api/menus -> Menu[]');
+    entityLines.push(`- Menu: ${formatContractFields(MENU_FIELDS)}`);
+    entityLines.push(`- MenuItem: ${formatContractFields(MENU_ITEM_FIELDS)}`);
+  }
+  if (needs.includes('comments')) {
+    endpoints.add('GET /api/comments?slug=${slug} -> Comment[]');
+    endpoints.add(
+      'GET /api/comments/submissions?slug=${slug}&clientToken=${token} -> CommentSubmission[]',
+    );
+    endpoints.add('POST /api/comments');
+    entityLines.push(`- Comment: ${formatContractFields(COMMENT_FIELDS)}`);
+  }
+  if (needs.includes('categoryDetail')) {
+    endpoints.add('GET /api/taxonomies/category -> Term[]');
+    endpoints.add('GET /api/taxonomies/category/${slug}/posts -> Post[]');
+  }
+  if (isArchiveAlias) {
+    endpoints.add('GET /api/posts?author=${slug} -> Post[]');
+    endpoints.add('GET /api/taxonomies/category -> Term[]');
+    endpoints.add('GET /api/taxonomies/category/${slug}/posts -> Post[]');
+    endpoints.add('GET /api/taxonomies/post_tag -> Term[]');
+    endpoints.add('GET /api/taxonomies/post_tag/${slug}/posts -> Post[]');
+  }
+
+  if (endpoints.size > 0) {
+    lines.push('### Endpoints');
+    for (const endpoint of endpoints) lines.push(`- ${endpoint}`);
+  }
+
+  if (entityLines.length > 0) {
+    lines.push('');
+    lines.push('### Entity fields');
+    lines.push(...entityLines);
+  }
+
+  lines.push('');
+  lines.push('### Non-negotiable constraints');
+  lines.push(
+    '- Use flat REST fields only. Do NOT invent `.node`, `.nodes`, `.edges`, or `.rendered` wrappers.',
+  );
+  lines.push(
+    '- Pages must NOT use post-only fields such as `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`.',
+  );
+  lines.push(
+    '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
+  );
+  lines.push(
+    '- Use `post.author` as display text. If the contract/known routes approve `/author/:slug`, link the author name with `to={"/author/" + post.authorSlug}`; otherwise keep it plain text.',
+  );
+  lines.push(
+    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings may link to that route using `post.categorySlugs[index]` alongside `post.categories[index]`. Do NOT guess a slug from display text when no slug is available.',
+  );
+  lines.push(
+    '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
+  );
+  if (isArchiveAlias) {
+    lines.push(
+      '- Archive fallback contract: this component must handle `/archive`, `/category/:slug`, `/author/:slug`, and `/tag/:slug` by reading `location.pathname` plus the optional `slug` param.',
+    );
+    lines.push(
+      '- For `/category/:slug`, fetch `GET /api/taxonomies/category/${slug}/posts` and render a primary heading beginning with the literal text `Category:` followed by the term label.',
+    );
+    lines.push(
+      '- For `/author/:slug`, fetch `GET /api/posts?author=${slug}` and render a primary heading beginning with the literal text `Author:`.',
+    );
+    lines.push(
+      '- For `/tag/:slug`, fetch `GET /api/taxonomies/post_tag/${slug}/posts` and render a primary heading beginning with the literal text `Tag:`.',
+    );
+    lines.push(
+      '- Only the plain `/archive` fallback may use a generic `Archive` title.',
+    );
+  }
+
+  return lines.join('\n');
+}
+
 export function buildMenusNote(menus: WpMenu[]): string {
   if (!menus || menus.length === 0) return '';
   const lines = ['## Available menus — fetch at runtime via GET /api/menus'];
@@ -108,7 +436,7 @@ export function buildMenusNote(menus: WpMenu[]): string {
     );
   }
   lines.push(
-    "→ Use menus.find(m => m.slug === '<slug>') ?? menus[0] to select the right menu",
+    "→ Select menus by `location` first. Use `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` only as a primary-nav fallback. Do NOT guess content menus by arbitrary slugs such as `about` or `resources`.",
   );
   return lines.join('\n');
 }
@@ -313,13 +641,22 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 }
 
 function buildTemplateTextsNote(templateSource: string): string {
+  const toBulletList = (texts: string[], title: string): string => {
+    const unique = [...new Set(texts.map((t) => t.trim()).filter(Boolean))];
+    if (unique.length === 0) return '';
+    const lines = unique.slice(0, MAX_TEMPLATE_TEXT_ITEMS).map((t) => `- ${t}`);
+    if (unique.length > MAX_TEMPLATE_TEXT_ITEMS) {
+      lines.push(`- ... and ${unique.length - MAX_TEMPLATE_TEXT_ITEMS} more`);
+    }
+    return `${title}\n${lines.join('\n')}\n`;
+  };
+
   try {
     const nodes: WpNode[] = JSON.parse(templateSource);
-    const texts = extractTexts(nodes);
-    if (texts.length === 0) return '';
-    return `## Static text in this template — hardcode EXACTLY as-is (do NOT paraphrase or invent)
-${texts.map((t) => `- ${t}`).join('\n')}
-`;
+    return toBulletList(
+      extractTexts(nodes),
+      '## Static text in this template — hardcode EXACTLY as-is (do NOT paraphrase or invent)',
+    );
   } catch {
     // Classic PHP theme: templateSource is HTML with {/* WP: ... */} hints.
     // Extract any visible static text that survived PHP stripping.
@@ -333,10 +670,10 @@ ${texts.map((t) => `- ${t}`).join('\n')}
       .split(/\s{3,}/)
       .map((t) => t.trim())
       .filter((t) => t.length > 3 && t.length < 400);
-    if (texts.length === 0) return '';
-    return `## Static text extracted from classic PHP template — hardcode EXACTLY as-is
-${texts.map((t) => `- ${t}`).join('\n')}
-`;
+    return toBulletList(
+      texts,
+      '## Static text extracted from classic PHP template — hardcode EXACTLY as-is',
+    );
   }
 }
 
@@ -355,7 +692,7 @@ function buildClassicThemeNote(
   const contentHint =
     isSingle || isPage
       ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
-      : `- \`{/* WP: post.content (HTML) */}\` → fetch \`GET /api/pages\` and render \`pages[0]?.content\` with \`dangerouslySetInnerHTML={{ __html: pages[0]?.content ?? '' }}\``;
+      : `- \`{/* WP: post.content (HTML) */}\` → render content ONLY from the endpoint(s) explicitly approved in the component plan. ⛔ NEVER fetch a full list and pick \`pages[0]\` or \`posts[0]\`.`;
 
   const loopHint =
     isSingle || isPage
@@ -366,10 +703,10 @@ function buildClassicThemeNote(
   // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
   const headerHint = isPageComponent
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Header /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
+    : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
   const footerHint = isPageComponent
     ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` for footer links`;
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -393,9 +730,30 @@ ${footerHint}
 
 // ── Data Grounding ─────────────────────────────────────────────────────────
 
-export function buildDataGroundingNote(content: DbContentResult): string {
+export function buildDataGroundingNote(
+  content: DbContentResult,
+  options?: { dataNeeds?: string[] },
+): string {
   const { siteInfo, posts, pages, menus, taxonomies } = content;
   const parts: string[] = [];
+  const dataNeeds = options?.dataNeeds ?? [];
+  const wantsSiteInfo = dataNeeds.includes('siteInfo');
+  const wantsPosts = hasAnyDataNeed(
+    dataNeeds,
+    'posts',
+    'postDetail',
+    'comments',
+    'authorDetail',
+  );
+  const wantsPages = hasAnyDataNeed(dataNeeds, 'pages', 'pageDetail');
+  const wantsMenus = dataNeeds.includes('menus');
+  const wantsComments = dataNeeds.includes('comments');
+  const wantsTaxonomies = hasAnyDataNeed(
+    dataNeeds,
+    'posts',
+    'postDetail',
+    'categoryDetail',
+  );
 
   parts.push(
     `## ACTUAL DATA from this site — grounded to ${API_CONTRACT_SOURCE_PATH}`,
@@ -407,95 +765,112 @@ export function buildDataGroundingNote(content: DbContentResult): string {
   parts.push(`> Posts have: ${formatContractFields(POST_FIELDS)}.`);
   parts.push(`> Pages have: ${formatContractFields(PAGE_FRONTEND_FIELDS)}.`);
   parts.push(
-    '> ⛔ Pages do NOT have: excerpt, date, author, categories, featuredImage, comments.',
+    '> ⛔ Pages do NOT have: excerpt, date, author, categories, tags, comments.',
   );
   parts.push(
     '> ⛔ NEVER render siteName more than once per component — one element only.',
   );
-  parts.push('');
-
-  // Site info
-  parts.push('### Site info (GET /api/site-info)');
   parts.push(
-    `${SITE_INFO_FIELDS[1]}: "${siteInfo.siteName}" | ${SITE_INFO_FIELDS[0]}: "${siteInfo.siteUrl}" | ${SITE_INFO_FIELDS[2]}: "${siteInfo.blogDescription}" | ${SITE_INFO_FIELDS[3]}: "${siteInfo.logoUrl ?? '(none)'}"`,
+    '> If shared chrome renders `siteInfo.logoUrl` and/or `siteInfo.siteName`, the visible brand must navigate home as a single clickable cluster. Prefer one `<Link to="/">` that wraps both logo and title.',
   );
   parts.push('');
 
-  // Posts sample
-  const postSample = posts.slice(0, 5);
-  parts.push(
-    `### Posts — ${posts.length} total (GET /api/posts)` +
-      (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
-  );
-  for (const p of postSample) {
-    parts.push(`  id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
-  }
-  if (posts.length > 5) parts.push(`  ... and ${posts.length - 5} more`);
-  if (posts.length === 0) parts.push('  (empty)');
-  parts.push('');
-
-  // Pages sample
-  const pageSample = pages.slice(0, 5);
-  parts.push(
-    `### Pages — ${pages.length} total (GET /api/pages)` +
-      (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
-  );
-  for (const p of pageSample) {
-    const contentPreview = p.content
-      ? stripTags(p.content).replace(/\s+/g, ' ').trim().slice(0, 300)
-      : '';
-    parts.push(`  id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
-    if (contentPreview)
-      parts.push(`    content preview: "${contentPreview}..."`);
-  }
-  if (pages.length > 5) parts.push(`  ... and ${pages.length - 5} more`);
-  if (pages.length === 0) parts.push('  (empty)');
-  parts.push('');
-  // Menus full
-  parts.push(
-    `### Menus — ${menus.length} total (GET /api/menus)` +
-      (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
-  );
-  parts.push(
-    `> Menu fields: ${formatContractFields(MENU_FIELDS)} | MenuItem fields: ${formatContractFields(MENU_ITEM_FIELDS)}.`,
-  );
-  for (const m of menus) {
+  if (wantsSiteInfo) {
+    parts.push('### Site info (GET /api/site-info)');
     parts.push(
-      `  menu slug:"${m.slug}" name:"${m.name}" — ${m.items.length} items`,
+      `${SITE_INFO_FIELDS[1]}: "${siteInfo.siteName}" | ${SITE_INFO_FIELDS[0]}: "${siteInfo.siteUrl}" | ${SITE_INFO_FIELDS[2]}: "${siteInfo.blogDescription}" | ${SITE_INFO_FIELDS[3]}: "${siteInfo.logoUrl ?? '(none)'}"`,
     );
-    for (const item of m.items) {
+    parts.push('');
+  }
+
+  if (wantsPosts) {
+    const postSample = posts.slice(0, MAX_SAMPLE_ITEMS);
+    parts.push(
+      `### Posts — ${posts.length} total (GET /api/posts)` +
+        (posts.length === 0 ? ' — NONE, do NOT invent posts' : ''),
+    );
+    for (const p of postSample) {
+      parts.push(`- id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
+    }
+    if (posts.length > MAX_SAMPLE_ITEMS) {
+      parts.push(`- ... and ${posts.length - MAX_SAMPLE_ITEMS} more`);
+    }
+    if (posts.length === 0) parts.push('- (empty)');
+    parts.push('');
+  }
+
+  if (wantsPages) {
+    const pageSample = pages.slice(0, MAX_SAMPLE_ITEMS);
+    parts.push(
+      `### Pages — ${pages.length} total (GET /api/pages)` +
+        (pages.length === 0 ? ' — NONE, do NOT invent pages' : ''),
+    );
+    for (const p of pageSample) {
+      parts.push(`- id:${p.id} slug:"${p.slug}" title:"${p.title}"`);
+    }
+    if (pages.length > MAX_SAMPLE_ITEMS) {
+      parts.push(`- ... and ${pages.length - MAX_SAMPLE_ITEMS} more`);
+    }
+    if (pages.length === 0) parts.push('- (empty)');
+    parts.push('');
+  }
+
+  if (wantsMenus) {
+    parts.push(
+      `### Menus — ${menus.length} total (GET /api/menus)` +
+        (menus.length === 0 ? ' — NONE, do NOT invent nav links' : ''),
+    );
+    parts.push(
+      `> Menu fields: ${formatContractFields(MENU_FIELDS)} | MenuItem fields: ${formatContractFields(MENU_ITEM_FIELDS)}.`,
+    );
+    parts.push(
+      '> IMPORTANT: `item.url` from `/api/menus` is already the canonical app path for internal links. Use `<Link to={item.url}>` directly. NEVER prepend `/page`, `/post`, or any extra route segment to `item.url`.',
+    );
+    for (const m of menus) {
+      const itemPreview = m.items
+        .slice(0, MAX_SAMPLE_ITEMS)
+        .map((item) => item.title)
+        .join(', ');
+      const extra =
+        m.items.length > MAX_SAMPLE_ITEMS
+          ? ` +${m.items.length - MAX_SAMPLE_ITEMS} more`
+          : '';
       parts.push(
-        `    - id:${item.id} parentId:${item.parentId} title:"${item.title}" url:"${item.url}" target:"${item.target ?? ''}"`,
+        `- menu slug:"${m.slug}" location:"${m.location ?? 'null'}" name:"${m.name}" — items: ${itemPreview || '(empty)'}${extra}`,
       );
     }
+    if (menus.length === 0) parts.push('- (empty)');
+    parts.push('');
   }
-  if (menus.length === 0) parts.push('  (empty)');
 
-  parts.push('');
-  parts.push(
-    `### Comments contract (GET /api/comments) — fields: ${formatContractFields(COMMENT_FIELDS)}`,
-  );
-  parts.push(
-    'Use `comment.author` and `comment.content` directly; moderation polling uses `/api/comments/submissions`.',
-  );
+  if (wantsComments) {
+    parts.push(
+      `### Comments contract (GET /api/comments) — fields: ${formatContractFields(COMMENT_FIELDS)}`,
+    );
+    parts.push(
+      'Use `comment.author` and `comment.content` directly; moderation polling uses `/api/comments/submissions`.',
+    );
+    parts.push('');
+  }
 
-  // Taxonomies — categories, tags, custom
-  if (taxonomies && taxonomies.length > 0) {
+  if (wantsTaxonomies && taxonomies && taxonomies.length > 0) {
     parts.push(
       `### Taxonomies — ${taxonomies.length} type(s) (GET /api/taxonomies)`,
     );
     parts.push(
-      '> Use taxonomy slugs for archive routes (e.g. /category/:slug, /tag/:slug).',
+      '> Use taxonomy slugs for archive routes only when those routes are explicitly approved.',
     );
     for (const tax of taxonomies) {
       const termPreview = tax.terms
-        .slice(0, 8)
+        .slice(0, MAX_TAXONOMY_TERMS)
         .map((t) => `"${t.slug}"(${t.count})`)
         .join(', ');
       const suffix =
-        tax.terms.length > 8 ? ` +${tax.terms.length - 8} more` : '';
+        tax.terms.length > MAX_TAXONOMY_TERMS
+          ? ` +${tax.terms.length - MAX_TAXONOMY_TERMS} more`
+          : '';
       parts.push(
-        `  taxonomy:"${tax.taxonomy}" — ${tax.terms.length} terms: ${termPreview}${suffix}`,
+        `- taxonomy:"${tax.taxonomy}" — ${tax.terms.length} terms: ${termPreview}${suffix}`,
       );
     }
   }
@@ -509,12 +884,14 @@ export function buildPlanContextNote(
     dataNeeds?: string[];
     route?: string | null;
     type?: 'page' | 'partial';
+    visualPlan?: ComponentVisualPlan;
   },
   componentName?: string,
 ): string {
   if (!plan) return '';
   const lines: string[] = ['## Component plan'];
   const normalizedDataNeeds = normalizeDataNeeds(plan.dataNeeds);
+  const isArchiveAlias = isArchiveAliasComponent(componentName, plan.route);
   if (plan.description) lines.push(`Purpose: ${plan.description}`);
   if (plan.route) {
     lines.push(`Route: \`${plan.route}\``);
@@ -526,24 +903,39 @@ export function buildPlanContextNote(
   }
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
+  lines.push('');
+  lines.push(
+    buildAllowedEndpointsNote({
+      dataNeeds: normalizedDataNeeds,
+      route: plan.route,
+      visualPlan: plan.visualPlan,
+      componentName,
+    }),
+  );
+  lines.push('');
+  lines.push(
+    buildForbiddenBehaviorNote({
+      type: plan.type,
+      dataNeeds: normalizedDataNeeds,
+      route: plan.route,
+    }),
+  );
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
   if (normalizedDataNeeds.includes('postDetail')) {
     lines.push(
       routeHasParams
         ? 'Detail data contract: fetch the specific post with `/api/posts/${slug}` and render that record, not the full posts list.'
-        : 'Data contract: this component displays post detail data but does NOT own the route. ' +
-            'Accept a `post` prop of type `Post` from the parent component — do NOT call `useParams` or fetch `/api/posts/...` yourself.',
+        : 'Data contract: this component does not own a slug route. Do NOT fabricate post detail by fetching `/api/posts` and picking an item by index, title, or guesswork.',
     );
   }
   if (normalizedDataNeeds.includes('pageDetail')) {
     lines.push(
       routeHasParams
         ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
-        : 'Data contract: this component displays page detail data but does NOT own the route. ' +
-            'Accept a `page` prop of type `Page` from the parent component — do NOT call `useParams` or fetch `/api/pages/...` yourself.',
+        : 'Data contract: this component does not own a slug route. Do NOT fabricate page detail by fetching `/api/pages` and picking an item by index, title, or guesswork.',
     );
     lines.push(
-      '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup. You MAY call `/api/pages` additionally when the design needs page hierarchy, breadcrumbs, or related-page navigation.',
+      '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
     );
     lines.push(
       '⛔ Page Detail Contract: a page has NO `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`. Use page fields from the approved contract only.',
@@ -582,6 +974,26 @@ export function buildPlanContextNote(
         'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed.',
     );
   }
+  if (isArchiveAlias) {
+    lines.push(
+      'Archive alias contract: although the canonical plan route may be `/archive`, this component is also mounted at `/category/:slug`, `/author/:slug`, and `/tag/:slug` in the app router.',
+    );
+    lines.push(
+      'Archive alias contract: for this component, DO import/use `useLocation` and `useParams<{ slug?: string }>()` to detect the active archive variant. Ignore the generic no-params rule for plain `/archive`.',
+    );
+    lines.push(
+      'Heading contract: `/category/:slug` must render a primary heading that begins with the literal prefix `Category:` and the resolved term label, for example `Category: Uncategorized`.',
+    );
+    lines.push(
+      'Heading contract: `/author/:slug` must render a primary heading that begins with `Author:`. `/tag/:slug` must render a primary heading that begins with `Tag:`.',
+    );
+    lines.push(
+      'Fetch contract: `/category/:slug` -> `/api/taxonomies/category/${slug}/posts`; `/author/:slug` -> `/api/posts?author=${slug}`; `/tag/:slug` -> `/api/taxonomies/post_tag/${slug}/posts`; plain `/archive` may use `/api/posts`.',
+    );
+    lines.push(
+      'Do NOT render a generic `Archive` heading on category/author/tag alias routes.',
+    );
+  }
   if (
     !normalizedDataNeeds.includes('postDetail') &&
     !normalizedDataNeeds.includes('pageDetail')
@@ -591,138 +1003,25 @@ export function buildPlanContextNote(
     );
   }
 
-  // ── Layout contract for page components ───────────────────────────────────
-  if (plan?.type === 'page') {
-    lines.push('');
-    lines.push('## Layout contract — MANDATORY');
-    lines.push('This component renders PAGE CONTENT ONLY.');
-    lines.push(
-      '⛔ Do NOT generate a `<header>` navigation bar or `<footer>` element — they are rendered by the shared Layout wrapper that wraps every page.',
-    );
-    lines.push(
-      '✅ Start your JSX return with the main page content directly (e.g. `<main>`, `<section>`, or a wrapper `<div>`). No site logo, no top nav, no copyright footer.',
-    );
-    lines.push(
-      '⛔ Do NOT fetch `GET /api/site-info` or `GET /api/menus` just to rebuild global site chrome inside this page. Shared Header/Footer/Navigation partials own that data.',
-    );
-    lines.push(
-      '⛔ Do NOT render `siteInfo.siteName`, `siteInfo.blogDescription`, or `menus.find(...)/menus.map(...)` in this page unless the approved plan is specifically for a dedicated layout partial.',
-    );
-    lines.push(
-      '⛔ Even if the original WordPress template source contains header/footer/site-title/navigation/footer-column markup or text, IGNORE it for page components. Shared chrome is migrated into dedicated partials and must not be duplicated inside page content.',
-    );
-    lines.push(
-      '⛔ Do NOT hardcode fallback footer columns, copyright text, placeholder nav links, or `No menus available` messages in any page component.',
-    );
-  }
-
-  // ── UI Rendering Guidelines ────────────────────────────────────────────────
   lines.push('');
-  lines.push('## Fidelity Goal');
+  lines.push('## Fidelity goal');
   lines.push(
-    'This is a WordPress-to-React migration, not a redesign. Match the original WordPress UI as closely as possible.',
+    '- This is a migration, not a redesign. Match the original WordPress structure and visual weight as closely as possible.',
   );
   lines.push(
-    '- Preserve the original block order, wrapper hierarchy, alignment, and section density from the template source.',
+    '- Preserve block order, wrapper hierarchy, spacing density, and section widths from the source template.',
   );
   lines.push(
-    '- Keep the same visual tone as the source template. Do NOT center, enlarge, simplify, or "modernize" sections unless the original template already does that.',
+    '- Keep sparse templates sparse. Do NOT modernize, center, enlarge, or decorate sections unless the source template already does that.',
   );
   lines.push(
-    '- Do NOT add hero/marketing/newsletter/testimonial treatments unless those blocks clearly exist in the template source or approved visual plan.',
+    '- Typography fidelity matters: do NOT upscale headings, body copy, buttons, or menu text beyond the source template and theme tokens. If the source is modest WordPress typography, keep it modest.',
   );
   lines.push(
-    '- If the original template is simple or sparse, keep it simple or sparse. Do NOT embellish it.',
-  );
-
-  lines.push('');
-  lines.push('## UI Rendering Guidelines');
-  lines.push(
-    'Render a complete React component that preserves the template source structure and original visual design as faithfully as possible. Follow these standards:',
-  );
-  lines.push('');
-  lines.push('### Layout & Structure');
-  if (plan?.type === 'page') {
-    lines.push(
-      '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<nav>` instead of generic `<div>`. ⛔ Do NOT use site-level `<header>` or `<footer>` elements — the shared Layout wrapper provides them.',
-    );
-  } else {
-    lines.push(
-      '- Use semantic HTML: `<main>`, `<section>`, `<article>`, `<aside>`, `<header>`, `<footer>`, `<nav>` instead of generic `<div>`.',
-    );
-  }
-  lines.push(
-    '- Implement responsive design: use Tailwind responsive prefixes (`sm:`, `md:`, `lg:`, `xl:`) for mobile-first layouts.',
+    '- Avoid oversized display classes like `text-[4rem]`, `text-[5rem]`, giant centered hero copy, or overly narrow text wrappers unless the approved visual plan explicitly requires that scale.',
   );
   lines.push(
-    '- Container widths: use the planner layout tokens. Full-width sections/chrome use the layout container; long-form article/page bodies use the narrower content container when provided.',
-  );
-  lines.push(
-    '- Spacing: use consistent spacing from theme tokens (blockGap, padding, margins) — avoid arbitrary values.',
-  );
-  lines.push('');
-  lines.push('### Typography & Colors');
-  lines.push(
-    '- Headings: use theme typography tokens (`h1`, `h2`, `h3`, `body`) for consistent sizing and family.',
-  );
-  lines.push(
-    '- Colors: use palette from theme tokens (`text`, `textMuted`, `accent`, `background`, `surface`) — no hardcoded colors.',
-  );
-  lines.push(
-    '- Text hierarchy: ensure proper heading levels (h1 → h2 → h3) and semantic structure.',
-  );
-  lines.push('');
-  lines.push('### Images & Media');
-  lines.push(
-    '- Images: use exact `src` from template source or static image sources provided. Add `alt` attributes for accessibility.',
-  );
-  lines.push(
-    '- Responsive images: use `w-full h-auto` for fluid images, or specific aspect ratios from template.',
-  );
-  lines.push(
-    '- Image radius: apply theme `imageRadius` (e.g., `rounded-[8px]`) for consistent styling.',
-  );
-  lines.push('');
-  lines.push('### Interactive Elements');
-  lines.push(
-    '- Buttons/Links: use `accent` colors, theme `buttonPadding` and `buttonRadius` for consistent styling.',
-  );
-  lines.push(
-    '- Navigation: render menus as `<nav>` with proper ARIA labels and keyboard navigation.',
-  );
-  lines.push(
-    '- Forms: if present, use semantic `<form>`, `<label>`, `<input>` with proper `for` attributes.',
-  );
-  lines.push('');
-  lines.push('### Accessibility & Best Practices');
-  lines.push(
-    '- ARIA: add `aria-label`, `role` where needed (e.g., `role="navigation"` for nav).',
-  );
-  lines.push(
-    '- Keyboard navigation: ensure focusable elements have visible focus states.',
-  );
-  lines.push(
-    '- Screen readers: use `sr-only` for hidden labels, descriptive `alt` text.',
-  );
-  lines.push(
-    '- Loading states: show loading indicators for async data (posts, pages, comments).',
-  );
-  lines.push(
-    '- Error handling: display user-friendly error messages for failed API calls.',
-  );
-  lines.push('');
-  lines.push('### Code Quality');
-  lines.push(
-    '- Clean JSX: no unnecessary nesting, use fragments `<>` where appropriate.',
-  );
-  lines.push(
-    '- Tailwind classes: use utility-first approach, combine with arbitrary values only when theme tokens require it.',
-  );
-  lines.push(
-    '- Performance: avoid inline functions in render, use `useCallback` for event handlers if needed.',
-  );
-  lines.push(
-    '- TypeScript: declare proper interfaces for props and state, use union types for variants.',
+    '- Use semantic HTML that matches the role of the original content (`<main>`, `<section>`, `<article>`, `<aside>`, `<nav>`).',
   );
 
   return lines.join('\n');
@@ -766,11 +1065,11 @@ function buildImageSourcesNote(templateSource: string): string {
   if (sources.length === 0) {
     lines.push('- None. Do NOT invent images, avatars, or placeholders.');
   } else {
-    for (const src of sources.slice(0, 20)) {
+    for (const src of sources.slice(0, MAX_STATIC_IMAGE_HINTS)) {
       lines.push(`- ${src}`);
     }
-    if (sources.length > 20) {
-      lines.push(`- ... and ${sources.length - 20} more`);
+    if (sources.length > MAX_STATIC_IMAGE_HINTS) {
+      lines.push(`- ... and ${sources.length - MAX_STATIC_IMAGE_HINTS} more`);
     }
     lines.push('Use only these exact sources for static images and avatars.');
   }
@@ -778,12 +1077,172 @@ function buildImageSourcesNote(templateSource: string): string {
   lines.push(
     '⛔ If a testimonial/person/media block has no image source in the template, omit the image/avatar entirely.',
   );
+  lines.push(
+    'For local paths (`/assets/...` or `/assets/images/...`): copy the path EXACTLY into your JSX `src` attribute.',
+  );
+  lines.push(
+    'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten to just `/assets/filename`. These URLs are automatically relinked to local paths after generation.',
+  );
+  lines.push(
+    'For important screenshot/product/composite images from the template source, preserve the full asset by default: prefer `w-full h-auto object-contain` (optionally with a max-height) instead of fixed-height `object-cover` cropping, unless the source itself is intentionally cropped.',
+  );
+  lines.push(
+    'When a media-text/photo section in the source has a framed or rounded image, preserve that rounded treatment in React. Do not flatten it to a sharp-corner image unless the source is clearly square-edged.',
+  );
+  lines.push(
+    'Preserve emphasis from the source: if a media-text heading or key list lines read as bold/strong in the template, keep them visually strong in JSX instead of downgrading everything to regular muted text.',
+  );
 
   return lines.join('\n');
 }
 
+function buildCompactSectionSummary(
+  visualPlan: ComponentVisualPlan,
+  componentName?: string,
+): string[] {
+  return visualPlan.sections.map((section, index) => {
+    const parts = [`- section ${index + 1}: type=${section.type}`];
+
+    if (section.sectionKey) parts.push(`sectionKey=${section.sectionKey}`);
+    if (section.sourceRef?.sourceNodeId) {
+      parts.push(`sourceNodeId=${section.sourceRef.sourceNodeId}`);
+    }
+
+    switch (section.type) {
+      case 'navbar':
+        parts.push(`menuSlug=${section.menuSlug}`);
+        parts.push(`sticky=${section.sticky}`);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        pushPlanTextPart(parts, 'ctaStyle', section.cta?.style);
+        break;
+      case 'hero':
+        parts.push(`layout=${section.layout}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        pushPlanTextPart(parts, 'imageSrc', section.image?.src);
+        pushPlanTextPart(parts, 'imageAlt', section.image?.alt);
+        pushPlanTextPart(parts, 'imagePosition', section.image?.position);
+        break;
+      case 'sidebar':
+        pushPlanTextPart(parts, 'title', section.title);
+        parts.push(`showPages=${section.showPages}`);
+        parts.push(`showPosts=${section.showPosts}`);
+        parts.push(`showSiteInfo=${section.showSiteInfo}`);
+        if (section.menuSlug) parts.push(`menuSlug=${section.menuSlug}`);
+        if (section.maxItems) parts.push(`maxItems=${section.maxItems}`);
+        break;
+      case 'post-list':
+        pushPlanTextPart(parts, 'title', section.title);
+        parts.push(`layout=${section.layout}`);
+        parts.push(`showDate=${section.showDate}`);
+        parts.push(`showAuthor=${section.showAuthor}`);
+        parts.push(`showCategory=${section.showCategory}`);
+        parts.push(`showExcerpt=${section.showExcerpt}`);
+        parts.push(`showFeaturedImage=${section.showFeaturedImage}`);
+        break;
+      case 'post-content':
+        parts.push(`showTitle=${section.showTitle}`);
+        parts.push(`showAuthor=${section.showAuthor}`);
+        parts.push(`showDate=${section.showDate}`);
+        parts.push(`showCategories=${section.showCategories}`);
+        break;
+      case 'page-content':
+        parts.push(`showTitle=${section.showTitle}`);
+        break;
+      case 'cover':
+        parts.push(`contentAlign=${section.contentAlign}`);
+        parts.push(`minHeight=${section.minHeight}`);
+        parts.push(`dimRatio=${section.dimRatio}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'card-grid':
+        pushPlanTextPart(parts, 'title', section.title);
+        pushPlanTextPart(parts, 'subtitle', section.subtitle);
+        parts.push(`columns=${section.columns}`);
+        parts.push(`cardCount=${section.cards.length}`);
+        section.cards.forEach((card, cardIndex) => {
+          pushPlanTextPart(
+            parts,
+            `card${cardIndex + 1}Heading`,
+            card.heading,
+            140,
+          );
+          pushPlanTextPart(parts, `card${cardIndex + 1}Body`, card.body, 180);
+        });
+        break;
+      case 'media-text':
+        parts.push(`imagePosition=${section.imagePosition}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'body', section.body, 240);
+        pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
+        pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
+        pushPlanListPart(parts, 'listItems', section.listItems, {
+          maxItems: 10,
+          maxChars: 160,
+        });
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'testimonial':
+        pushPlanTextPart(parts, 'quote', section.quote, 240);
+        pushPlanTextPart(parts, 'authorName', section.authorName);
+        pushPlanTextPart(parts, 'authorTitle', section.authorTitle);
+        pushPlanTextPart(parts, 'authorAvatar', section.authorAvatar);
+        break;
+      case 'newsletter':
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'buttonText', section.buttonText);
+        parts.push(`layout=${section.layout}`);
+        break;
+      case 'footer':
+        pushPlanTextPart(
+          parts,
+          'brandDescription',
+          section.brandDescription,
+          220,
+        );
+        pushPlanListPart(
+          parts,
+          'menuColumns',
+          section.menuColumns.map(
+            (column) => `${column.title || 'Untitled'} -> ${column.menuSlug}`,
+          ),
+        );
+        pushPlanTextPart(parts, 'copyright', section.copyright);
+        break;
+      case 'search':
+        pushPlanTextPart(parts, 'title', section.title);
+        break;
+      case 'comments':
+        parts.push(`showForm=${section.showForm}`);
+        parts.push(`requireName=${section.requireName}`);
+        parts.push(`requireEmail=${section.requireEmail}`);
+        break;
+      default:
+        break;
+    }
+
+    if (componentName && section.sectionKey) {
+      parts.push(
+        `sectionComponent=${buildTrackedSectionComponentName(componentName, section.sectionKey)}`,
+      );
+    }
+
+    return parts.join(' | ');
+  });
+}
+
 export function buildVisualPlanContextNote(
   visualPlan?: ComponentVisualPlan,
+  componentName?: string,
 ): string {
   if (!visualPlan) return '';
 
@@ -813,6 +1272,59 @@ export function buildVisualPlanContextNote(
     lines.push(
       '⛔ If you are tempted to add a section that is not in the list above, STOP and omit it entirely.',
     );
+    lines.push(
+      '⛔ CONTENT FIDELITY: When the approved plan below includes concrete headings, card text, body copy, list items, CTA labels, image sources, or image alts, render that exact approved content instead of inventing substitute marketing copy or shortening the section.',
+    );
+    lines.push(
+      '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
+    );
+    lines.push(
+      '⛔ For `hero`, `cover`, `media-text`, `testimonial`, and `newsletter`, preserve the approved heading/body/image/CTA pairing for that exact section. Do NOT swap content between sections.',
+    );
+    lines.push(
+      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different `sectionKey` / `sourceNodeId`, keep them as separate top-level JSX wrappers in the same order. Do NOT merge two approved sections into one split row or one shared wrapper.',
+    );
+    lines.push(
+      '⛔ If one approved section is text-first and a later approved section owns the image, keep the image in the later section. Do NOT pull that image up beside the earlier text block.',
+    );
+    lines.push(
+      '⛔ Split/flex-row guardrail: use side-by-side text/image layout ONLY when the approved section itself is `media-text` or a `hero` whose approved `layout=split`. Do NOT introduce `md:flex-row` / two-column hero structure for a section that is approved as a text-only hero followed by a later media/image section.',
+    );
+
+    const trackedSections = visualPlan.sections
+      .filter((section) => !!section.sourceRef?.sourceNodeId)
+      .map((section, index) => {
+        const sectionKey =
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`;
+        return [
+          `- section ${index + 1}: type=${section.type}`,
+          `sectionKey=${sectionKey}`,
+          `sourceNodeId=${section.sourceRef?.sourceNodeId}`,
+          `template=${section.sourceRef?.templateName}`,
+          `sourceFile=${section.sourceRef?.sourceFile}`,
+          componentName
+            ? `sectionComponent=${buildTrackedSectionComponentName(componentName, sectionKey)}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' | ');
+      });
+
+    if (trackedSections.length > 0) {
+      lines.push('');
+      lines.push('## Section tracking markers — MANDATORY');
+      lines.push(
+        'For every approved section, keep a dedicated top-level JSX wrapper and preserve these exact string-literal attributes on that wrapper:',
+      );
+      lines.push(
+        '`data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, `data-vp-section-component`.',
+      );
+      lines.push(
+        'Do NOT rename, hash, omit, or move these attributes to a child element. They are required for exact capture-to-source resolution after React generation.',
+      );
+      lines.push(...trackedSections);
+    }
   }
 
   const sidebarSection = visualPlan.sections?.find((s) => s.type === 'sidebar');
@@ -852,10 +1364,9 @@ export function buildVisualPlanContextNote(
     );
   }
 
-  lines.push('Visual plan JSON:');
-  lines.push('```json');
-  lines.push(JSON.stringify(visualPlan, null, 2));
-  lines.push('```');
+  lines.push('');
+  lines.push('## Compact visual plan summary');
+  lines.push(...buildCompactSectionSummary(visualPlan, componentName));
 
   return lines.join('\n');
 }
@@ -886,8 +1397,10 @@ export function buildComponentPrompt(
       normalizedDataNeeds.includes('pageDetail')
     : PAGE_TEMPLATES.has(componentName);
 
-  const menuContextNote = buildMenusNote(content?.menus ?? []);
-  const dataGrounding = content ? buildDataGroundingNote(content) : '';
+  const menuContextNote = '';
+  const dataGrounding = content
+    ? buildDataGroundingNote(content, { dataNeeds: normalizedDataNeeds })
+    : '';
   const templateTexts = buildTemplateTextsNote(templateSource);
   const imageSources = buildImageSourcesNote(templateSource);
   const classicThemeNote = buildClassicThemeNote(
@@ -896,25 +1409,31 @@ export function buildComponentPrompt(
     isPage ?? false,
     componentPlan?.type === 'page',
   );
+  const repoContext = shouldIncludeRepoManifestContext(
+    componentName,
+    componentPlan,
+  )
+    ? buildRepoManifestContextNote(repoManifest, {
+        mode: 'compact',
+        includeLayoutHints: true,
+        includeStyleHints: false,
+        includeStructureHints: true,
+      })
+    : '';
   const planContext = [
     buildPlanContextNote(componentPlan, componentName),
-    buildVisualPlanContextNote(componentPlan?.visualPlan),
-    buildRepoManifestContextNote(repoManifest),
+    buildVisualPlanContextNote(componentPlan?.visualPlan, componentName),
+    repoContext,
     editRequestContextNote,
   ]
     .filter(Boolean)
     .join('\n\n');
-  const retryNote = retryError
-    ? `## ERROR FROM PREVIOUS ATTEMPT\n${retryError}\nFIX THIS.${
-        /jsx|closing tag|Expected corresponding|parse/i.test(retryError)
-          ? '\n\n**Parsing:** Re-check every `<div>` / `<section>` / `<main>` / `<article>` — each must have a matching `</…>` in order. The file must be complete, valid TSX before `export default`.'
-          : ''
-      }${
-        /Page detail contract|interface Page|post-only field/i.test(retryError)
-          ? '\n\n**Page type:** `interface Page` must match the canonical contract — remove post-only fields like `author`, `categories`, `tags`, `date`, `excerpt`, and `comments`. `page.featuredImage`, `page.parentId`, `page.menuOrder`, and `page.template` are allowed. Do NOT access `page.author` or `pageDetail.author`. Sidebar/list items (recent posts, etc.) must use a separate `interface Post` — using `item.author` inside a `posts.map()` is fine.'
-          : ''
-      }`
-    : '';
+  const retryNote = buildRetryNote(retryError);
+  const isNoTitle =
+    /no.?title/i.test(componentName ?? '') ||
+    /without.{0,20}title|no.{0,10}title|omit.{0,10}title/i.test(
+      componentPlan?.description ?? '',
+    );
 
   const slugFetchingNote =
     isSingle || isPage
@@ -925,7 +1444,11 @@ export function buildComponentPrompt(
   - ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'}
 - If the response is null/404, show a "Not found" message
 - Do NOT fetch the full list and pick index 0 — always use the slug from URL
-- Always render \`${isSingle ? 'post' : 'page'}.title\` as a heading (e.g. \`<h1>{${isSingle ? 'post' : 'page'}.title}</h1>\`) above the content — do NOT skip it. \`title\` is a plain string, not an object
+${
+  isNoTitle
+    ? '- This is a NoTitle variant: do NOT render the record title in any heading element.'
+    : `- Render \`${isSingle ? 'post' : 'page'}.title\` as the primary heading above the content.`
+}
 ${
   isPage
     ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, \`comments\`.
@@ -935,7 +1458,14 @@ ${
 }`
       : '';
   return TEMPLATE.replace('{{componentName}}', componentName)
-    .replace('{{apiContract}}', buildCanonicalApiContractNote())
+    .replace(
+      '{{apiContract}}',
+      buildScopedApiContractNote({
+        dataNeeds: normalizedDataNeeds,
+        route: componentPlan?.route,
+        componentName,
+      }),
+    )
     .replace('{{menuContext}}', menuContextNote)
     .replace('{{planContext}}', planContext)
     .replace('{{slugFetchingNote}}', slugFetchingNote)
@@ -986,9 +1516,9 @@ export function buildSectionPrompt(input: {
       normalizedDataNeeds.includes('pageDetail')
     : PAGE_TEMPLATES.has(input.parentName);
 
-  const menuContextNote = buildMenusNote(input.content?.menus ?? input.menus);
+  const menuContextNote = input.content ? '' : buildMenusNote(input.menus);
   const dataGrounding = input.content
-    ? buildDataGroundingNote(input.content)
+    ? buildDataGroundingNote(input.content, { dataNeeds: normalizedDataNeeds })
     : '';
   const templateTexts = buildTemplateTextsNote(input.nodesJson);
   const imageSources = buildImageSourcesNote(input.nodesJson);
@@ -998,24 +1528,42 @@ export function buildSectionPrompt(input: {
     isPage ?? false,
     input.componentPlan?.type === 'page',
   );
+  const repoContext = shouldIncludeRepoManifestContext(
+    input.parentName,
+    input.componentPlan,
+  )
+    ? buildRepoManifestContextNote(input.repoManifest, {
+        mode: 'compact',
+        includeLayoutHints: true,
+        includeStyleHints: false,
+        includeStructureHints: true,
+      })
+    : '';
   const sectionContextNote = `## Section context — CRITICAL
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
 ⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
 ⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
 If this section needs runtime data, declare/fetch only the data actually rendered in this section.
 Render ONLY the JSX for the blocks in the template source below.`;
+  const sourceTrackingNote = buildSourceTrackingNoteForNodes(
+    input.nodesJson,
+    input.parentName,
+    input.sectionName,
+  );
   const planContext = [
     sectionContextNote,
-    buildPlanContextNote(input.componentPlan),
-    buildVisualPlanContextNote(input.componentPlan?.visualPlan),
-    buildRepoManifestContextNote(input.repoManifest),
+    buildPlanContextNote(input.componentPlan, input.parentName),
+    buildVisualPlanContextNote(
+      input.componentPlan?.visualPlan,
+      input.parentName,
+    ),
+    sourceTrackingNote,
+    repoContext,
     input.editRequestContextNote,
   ]
     .filter(Boolean)
     .join('\n\n');
-  const retryNote = input.retryError
-    ? `## ERROR FROM PREVIOUS ATTEMPT\n${input.retryError}\nFIX THIS.`
-    : '';
+  const retryNote = buildRetryNote(input.retryError);
 
   const slugFetchingNote =
     isSingle || isPage
@@ -1027,6 +1575,14 @@ Render ONLY the JSX for the blocks in the template source below.`;
       : '';
 
   return TEMPLATE.replace('{{componentName}}', input.sectionName)
+    .replace(
+      '{{apiContract}}',
+      buildScopedApiContractNote({
+        dataNeeds: normalizedDataNeeds,
+        route: input.componentPlan?.route,
+        componentName: input.parentName,
+      }),
+    )
     .replace('{{menuContext}}', menuContextNote)
     .replace('{{planContext}}', planContext)
     .replace('{{slugFetchingNote}}', slugFetchingNote)
@@ -1039,4 +1595,76 @@ Render ONLY the JSX for the blocks in the template source below.`;
     .replace('{{siteName}}', input.siteInfo.siteName)
     .replace('{{siteUrl}}', input.siteInfo.siteUrl)
     .replace('{{templateSource}}', input.nodesJson);
+}
+
+function buildSourceTrackingNoteForNodes(
+  nodesJson: string,
+  componentName: string,
+  sectionComponentName: string,
+): string {
+  try {
+    const parsed = JSON.parse(nodesJson) as WpNode[];
+    const trackedNodes = parsed
+      .filter((node) => !!node.sourceRef?.sourceNodeId)
+      .map((node, index) => {
+        const sectionKey =
+          node.sourceRef?.blockName?.replace(/^core\//, '') ??
+          `section-${index + 1}`;
+        return [
+          `- top-level node ${index + 1}: sourceNodeId=${node.sourceRef?.sourceNodeId}`,
+          `template=${node.sourceRef?.templateName}`,
+          `sourceFile=${node.sourceRef?.sourceFile}`,
+          `sectionKey=${sectionKey}`,
+        ].join(' | ');
+      });
+
+    if (trackedNodes.length === 0) return '';
+
+    return [
+      '## Source tracking markers — MANDATORY',
+      'For each top-level source node rendered by this section component, keep a stable outer JSX wrapper with exact string-literal attributes:',
+      '`data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, `data-vp-section-component`.',
+      `Use \`data-vp-component="${componentName}"\` and \`data-vp-section-component="${sectionComponentName}"\` on every tracked wrapper in this file.`,
+      'Tracked top-level source nodes:',
+      ...trackedNodes,
+    ].join('\n');
+  } catch {
+    return '';
+  }
+}
+
+function buildTrackedSectionComponentName(
+  componentName: string,
+  sectionKey: string,
+): string {
+  return `${componentName}${sectionKey
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join('')}Section`;
+}
+
+function compactRetryError(retryError?: string): string {
+  if (!retryError) return '';
+  const normalized = retryError.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= MAX_RETRY_ERROR_CHARS) return normalized;
+  return `${normalized.slice(0, MAX_RETRY_ERROR_CHARS)}...`;
+}
+
+function buildRetryNote(retryError?: string): string {
+  if (!retryError) return '';
+
+  if (/^## RETRY MODE — DELTA ONLY/m.test(retryError)) {
+    return retryError;
+  }
+
+  return `## ERROR FROM PREVIOUS ATTEMPT\n${compactRetryError(retryError)}\nFIX THIS.${
+    /jsx|closing tag|Expected corresponding|parse/i.test(retryError)
+      ? '\n\n**Parsing:** Re-check every `<div>` / `<section>` / `<main>` / `<article>` — each must have a matching `</…>` in order. The file must be complete, valid TSX before `export default`.'
+      : ''
+  }${
+    /Page detail contract|interface Page|post-only field/i.test(retryError)
+      ? '\n\n**Page type:** `interface Page` must match the canonical contract — remove post-only fields like `author`, `categories`, `tags`, `date`, `excerpt`, and `comments`. `page.featuredImage`, `page.parentId`, `page.menuOrder`, and `page.template` are allowed. Do NOT access `page.author` or `pageDetail.author`. Sidebar/list items (recent posts, etc.) must use a separate `interface Post` — using `item.author` inside a `posts.map()` is fine.'
+      : ''
+  }`;
 }

@@ -82,6 +82,17 @@ export class LlmFactoryService {
     'custom',
   ]);
 
+  private extractCachedTokens(usage: any): number | undefined {
+    const cached =
+      usage?.prompt_tokens_details?.cached_tokens ??
+      usage?.input_tokens_details?.cache_read_input_tokens ??
+      usage?.cache_creation_input_tokens ??
+      usage?.cache_read_input_tokens ??
+      usage?.cached_tokens;
+
+    return typeof cached === 'number' ? cached : undefined;
+  }
+
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
     let provider = this.getProvider();
     let model = params.model;
@@ -164,6 +175,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usage?.prompt_tokens ?? 0,
       outputTokens: response.usage?.completion_tokens ?? 0,
+      cachedTokens: this.extractCachedTokens(response.usage),
       truncated: finishReason === 'length',
     };
   }
@@ -203,6 +215,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usage?.prompt_tokens ?? 0,
       outputTokens: response.usage?.completion_tokens ?? 0,
+      cachedTokens: this.extractCachedTokens(response.usage),
       truncated: finishReason === 'length',
     };
   }
@@ -235,6 +248,7 @@ export class LlmFactoryService {
       text: firstBlock.text,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+      cachedTokens: this.extractCachedTokens(response.usage),
       truncated: response.stop_reason === 'max_tokens',
     };
   }
@@ -266,6 +280,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
       outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+      cachedTokens: this.extractCachedTokens(response.usageMetadata),
       truncated: response.candidates?.[0]?.finishReason === 'MAX_TOKENS',
     };
   }
@@ -303,7 +318,7 @@ export class LlmFactoryService {
       ),
     );
 
-    const { text, inputTokens, outputTokens } = response.data;
+    const { text, inputTokens, outputTokens, cachedTokens } = response.data;
     const finishReason = response.data.choices?.[0]?.finish_reason;
 
     if (!text) {
@@ -316,6 +331,7 @@ export class LlmFactoryService {
       text,
       inputTokens: inputTokens ?? 0,
       outputTokens: outputTokens ?? 0,
+      cachedTokens: typeof cachedTokens === 'number' ? cachedTokens : undefined,
       truncated: finishReason === 'length',
     };
   }
@@ -350,6 +366,7 @@ export class LlmFactoryService {
       text,
       inputTokens: response.prompt_eval_count ?? 0,
       outputTokens: response.eval_count ?? 0,
+      cachedTokens: this.extractCachedTokens(response),
       truncated: response.done_reason === 'length',
     };
   }

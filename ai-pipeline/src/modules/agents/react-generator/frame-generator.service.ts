@@ -102,7 +102,14 @@ export class FrameGeneratorService {
     if (hasComments) {
       lines.push(COMMENT_INTERFACE);
     }
-    if (needsPost || needsPage || hasMenus || isFooter || hasSiteInfo || hasComments) {
+    if (
+      needsPost ||
+      needsPage ||
+      hasMenus ||
+      isFooter ||
+      hasSiteInfo ||
+      hasComments
+    ) {
       lines.push('');
     }
 
@@ -116,17 +123,15 @@ export class FrameGeneratorService {
       lines.push(
         `  const archiveType = location.pathname.startsWith('/category/') ? 'category'`,
       );
-      lines.push(
-        `    : location.pathname.startsWith('/author/') ? 'author'`,
-      );
-      lines.push(
-        `    : location.pathname.startsWith('/tag/') ? 'tag' : null;`,
-      );
+      lines.push(`    : location.pathname.startsWith('/author/') ? 'author'`);
+      lines.push(`    : location.pathname.startsWith('/tag/') ? 'tag' : null;`);
     } else if (isDetail) {
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
     }
     if (hasPosts || isArchive) {
-      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const [searchParams, setSearchParams] = useSearchParams();`,
+      );
       lines.push(
         `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
       );
@@ -161,7 +166,9 @@ export class FrameGeneratorService {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
     if (isFooter) {
-      lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
+      lines.push(
+        `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
+      );
     }
     if (hasSiteInfo) {
       lines.push(
@@ -199,18 +206,18 @@ export class FrameGeneratorService {
       lines.push(`    (async () => {`);
       if (fetches.length === 1) {
         lines.push(`      const res = await fetch(${fetches[0].url});`);
-          if (fetches[0].setter === 'setPosts') {
-            lines.push(`      const postsData = await res.json();`);
-            lines.push(
-              `      setPosts(Array.isArray(postsData) ? postsData : []);`,
-            );
-            lines.push(
-              `      setTotalPages(Number(res.headers.get('X-WP-TotalPages') ?? '1'));`,
-            );
-          } else {
-            lines.push(`      ${fetches[0].setter}(await res.json());`);
-          }
+        if (fetches[0].setter === 'setPosts') {
+          lines.push(`      const postsData = await res.json();`);
+          lines.push(
+            `      setPosts(Array.isArray(postsData) ? postsData : []);`,
+          );
+          lines.push(
+            `      setTotalPages(Number(res.headers.get('X-WP-TotalPages') ?? '1'));`,
+          );
         } else {
+          lines.push(`      ${fetches[0].setter}(await res.json());`);
+        }
+      } else {
         const vars = fetches.map((f, i) => `r${i}`).join(', ');
         lines.push(`      const [${vars}] = await Promise.all([`);
         fetches.forEach((f, i) => {
@@ -219,20 +226,20 @@ export class FrameGeneratorService {
           );
         });
         lines.push(`      ]);`);
-          fetches.forEach((f, i) => {
-            if (f.setter === 'setPosts') {
-              lines.push(`      const postsData${i} = await r${i}.json();`);
-              lines.push(
-                `      setPosts(Array.isArray(postsData${i}) ? postsData${i} : []);`,
-              );
-              lines.push(
-                `      setTotalPages(Number(r${i}.headers.get('X-WP-TotalPages') ?? '1'));`,
-              );
-            } else {
-              lines.push(`      ${f.setter}(await r${i}.json());`);
-            }
-          });
-        }
+        fetches.forEach((f, i) => {
+          if (f.setter === 'setPosts') {
+            lines.push(`      const postsData${i} = await r${i}.json();`);
+            lines.push(
+              `      setPosts(Array.isArray(postsData${i}) ? postsData${i} : []);`,
+            );
+            lines.push(
+              `      setTotalPages(Number(r${i}.headers.get('X-WP-TotalPages') ?? '1'));`,
+            );
+          } else {
+            lines.push(`      ${f.setter}(await r${i}.json());`);
+          }
+        });
+      }
       lines.push(`    })();`);
       lines.push(`  }, ${depArray});`);
     }
@@ -350,10 +357,11 @@ export class FrameGeneratorService {
       // Dynamic URL based on archive type detected from location.pathname
       fetches.push({
         setter: 'setPosts',
-        url: `archiveType === 'category' && slug ? \`/api/taxonomies/category/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
-             ` : archiveType === 'tag' && slug ? \`/api/taxonomies/post_tag/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
-             ` : archiveType === 'author' && slug ? \`/api/posts?author=\${slug}&page=\${currentPage}&perPage=\${perPage}\`` +
-             ` : \`/api/posts?page=\${currentPage}&perPage=\${perPage}\``,
+        url:
+          `archiveType === 'category' && slug ? \`/api/taxonomies/category/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
+          ` : archiveType === 'tag' && slug ? \`/api/taxonomies/post_tag/\${slug}/posts?page=\${currentPage}&perPage=\${perPage}\`` +
+          ` : archiveType === 'author' && slug ? \`/api/posts?author=\${slug}&page=\${currentPage}&perPage=\${perPage}\`` +
+          ` : \`/api/posts?page=\${currentPage}&perPage=\${perPage}\``,
       });
     } else if (flags.hasPostDetail) {
       fetches.push({ setter: 'setPost', url: '`/api/posts/${slug}`' });

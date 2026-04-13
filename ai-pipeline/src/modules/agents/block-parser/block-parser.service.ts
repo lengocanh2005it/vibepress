@@ -202,6 +202,27 @@ export class BlockParserService {
     };
   }
 
+  applyThemeJsonOverride(
+    theme: BlockParseResult,
+    overrideThemeJson: Record<string, any>,
+  ): BlockParseResult {
+    if (!overrideThemeJson || Object.keys(overrideThemeJson).length === 0) {
+      return theme;
+    }
+
+    const mergedThemeJson = this.deepMergeThemeJson(
+      theme.themeJson ?? {},
+      overrideThemeJson,
+    );
+    const mergedJsonTokens = this.extractTokens(mergedThemeJson);
+
+    return {
+      ...theme,
+      themeJson: mergedThemeJson,
+      tokens: this.mergeThemeTokens(mergedJsonTokens, theme.tokens),
+    };
+  }
+
   private extractTokens(
     themeJson: Record<string, any> | null,
     styleCss?: string,
@@ -212,29 +233,31 @@ export class BlockParserService {
     // 3. Merge them into a single ThemeTokens object that downstream planner /
     //    generator code can consume without caring where a token came from.
     const settings = themeJson?.settings ?? {};
+    const asArray = <T = any>(value: unknown): T[] =>
+      Array.isArray(value) ? (value as T[]) : [];
 
-    const colors: ThemeTokens['colors'] = (settings.color?.palette ?? []).map(
+    const colors: ThemeTokens['colors'] = asArray(settings.color?.palette).map(
       (c: any) => ({ slug: c.slug, value: c.color }),
     );
 
-    const gradients: NonNullable<ThemeTokens['gradients']> = (
-      settings.color?.gradients ?? []
+    const gradients: NonNullable<ThemeTokens['gradients']> = asArray(
+      settings.color?.gradients,
     ).map((g: any) => ({ slug: g.slug, value: g.gradient }));
 
-    const shadows: NonNullable<ThemeTokens['shadows']> = (
-      settings.shadow?.presets ?? []
+    const shadows: NonNullable<ThemeTokens['shadows']> = asArray(
+      settings.shadow?.presets,
     ).map((s: any) => ({ slug: s.slug, value: s.shadow }));
 
-    const fonts: ThemeTokens['fonts'] = (
-      settings.typography?.fontFamilies ?? []
+    const fonts: ThemeTokens['fonts'] = asArray(
+      settings.typography?.fontFamilies,
     ).map((f: any) => ({ slug: f.slug, family: f.fontFamily, name: f.name }));
 
-    const fontSizes: ThemeTokens['fontSizes'] = (
-      settings.typography?.fontSizes ?? []
+    const fontSizes: ThemeTokens['fontSizes'] = asArray(
+      settings.typography?.fontSizes,
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
-    const spacing: ThemeTokens['spacing'] = (
-      settings.spacing?.spacingSizes ?? []
+    const spacing: ThemeTokens['spacing'] = asArray(
+      settings.spacing?.spacingSizes,
     ).map((s: any) => ({ slug: s.slug, size: s.size }));
 
     const defaults = themeJson
@@ -836,6 +859,50 @@ export class BlockParserService {
     for (const item of base) map.set(item.slug, item);
     for (const item of extra) if (!map.has(item.slug)) map.set(item.slug, item);
     return [...map.values()];
+  }
+
+  private mergeThemeTokens(
+    primary: ThemeTokens,
+    fallback: ThemeTokens,
+  ): ThemeTokens {
+    return {
+      colors: this.mergeBySlug(primary.colors, fallback.colors),
+      gradients: this.mergeBySlug(
+        primary.gradients ?? [],
+        fallback.gradients ?? [],
+      ),
+      shadows: this.mergeBySlug(primary.shadows ?? [], fallback.shadows ?? []),
+      fonts: this.mergeBySlug(primary.fonts, fallback.fonts),
+      fontSizes: this.mergeBySlug(primary.fontSizes, fallback.fontSizes),
+      spacing: this.mergeBySlug(primary.spacing, fallback.spacing),
+      defaults: this.mergeDefaults(primary.defaults, fallback.defaults),
+      blockStyles: this.mergeBlockStyles(
+        primary.blockStyles,
+        fallback.blockStyles,
+      ),
+    };
+  }
+
+  private deepMergeThemeJson(
+    base: Record<string, any>,
+    override: Record<string, any>,
+  ): Record<string, any> {
+    const result: Record<string, any> = { ...base };
+
+    for (const [key, overrideValue] of Object.entries(override)) {
+      const baseValue = result[key];
+      if (this.isPlainObject(baseValue) && this.isPlainObject(overrideValue)) {
+        result[key] = this.deepMergeThemeJson(baseValue, overrideValue);
+        continue;
+      }
+      result[key] = overrideValue;
+    }
+
+    return result;
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, any> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
   private mergeDefaults(

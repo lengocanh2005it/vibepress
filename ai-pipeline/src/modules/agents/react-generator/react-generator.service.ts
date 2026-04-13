@@ -17,7 +17,7 @@ import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
-  wpBlocksToJson,
+  wpBlocksToJsonWithSourceRefs,
   wpJsonToString,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
@@ -319,7 +319,17 @@ export class ReactGeneratorService {
     const templateSource = rawSource;
     const templateNodes =
       themeType === 'fse' && this.looksLikeBlockMarkup(templateSource)
-        ? this.styleResolver.resolve(wpBlocksToJson(templateSource), tokens)
+        ? this.styleResolver.resolve(
+            wpBlocksToJsonWithSourceRefs({
+              markup: templateSource,
+              templateName: componentPlan?.templateName ?? componentName,
+              sourceFile: inferFseSourceFile(
+                componentPlan?.templateName ?? componentName,
+                componentPlan?.type,
+              ),
+            }),
+            tokens,
+          )
         : undefined;
 
     // For FSE page components, strip top-level header/footer blocks before
@@ -719,6 +729,13 @@ ${renders}
     componentPlan: PlanResult[number] | undefined,
     nodes: WpNode[] | undefined,
   ): boolean {
+    // Header/Footer are visually sensitive shared chrome. Let them go through
+    // the AI-assisted reviewer path so layout can stay closer to the original
+    // WordPress site, while validator rules still enforce the hard data contract.
+    if (/^(header|footer)$/i.test(componentName)) {
+      return false;
+    }
+
     return !!(
       componentPlan?.type === 'partial' &&
       /^(header|footer)/i.test(componentName) &&
@@ -803,4 +820,15 @@ ${renders}
       }),
     );
   }
+}
+
+function inferFseSourceFile(
+  templateName: string,
+  componentType?: 'page' | 'partial',
+): string {
+  const normalized = templateName.endsWith('.html')
+    ? templateName
+    : `${templateName}.html`;
+  if (normalized.includes('/')) return normalized;
+  return `${componentType === 'partial' ? 'parts' : 'templates'}/${normalized}`;
 }

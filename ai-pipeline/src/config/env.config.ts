@@ -45,15 +45,15 @@ export default () => ({
   },
   reactGenerator: {
     delayBetweenComponents: parseInt(
-      process.env.REACT_GEN_DELAY_MS ?? '10000',
+      process.env.REACT_GEN_DELAY_MS ?? '1500',
       10,
     ),
     generationConcurrency: parseInt(
-      process.env.REACT_GEN_CONCURRENCY ?? '1',
+      process.env.REACT_GEN_CONCURRENCY ?? '2',
       10,
     ),
     sectionConcurrency: parseInt(
-      process.env.REACT_GEN_SECTION_CONCURRENCY ?? '1',
+      process.env.REACT_GEN_SECTION_CONCURRENCY ?? '2',
       10,
     ),
   },
@@ -74,6 +74,20 @@ export default () => ({
     ),
     visualViewportHeight: parseInt(
       process.env.PLANNER_VISUAL_VIEWPORT_HEIGHT ?? '1400',
+      10,
+    ),
+  },
+  preview: {
+    runtimeRouteDelayMs: parseInt(
+      process.env.PREVIEW_RUNTIME_ROUTE_DELAY_MS ?? '400',
+      10,
+    ),
+    runtimeServerReadyTimeoutMs: parseInt(
+      process.env.PREVIEW_RUNTIME_READY_TIMEOUT_MS ?? '30000',
+      10,
+    ),
+    wpAssetCopyConcurrency: parseInt(
+      process.env.PREVIEW_WP_ASSET_COPY_CONCURRENCY ?? '6',
       10,
     ),
   },

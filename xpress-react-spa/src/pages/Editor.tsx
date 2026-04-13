@@ -27,7 +27,6 @@ interface WpPage {
   status: string;
 }
 
-
 interface SelectionRect {
   startX: number;
   startY: number;
@@ -165,12 +164,36 @@ const resolveWordPressRoute = (
   return toRoutePath(pageUrl);
 };
 
+const buildPreviewProxyUrl = (
+  pageUrl?: string | null,
+  siteId?: string | null,
+  previewVersion?: number,
+) => {
+  if (!pageUrl) return "";
+
+  const params = new URLSearchParams({
+    url: pageUrl,
+  });
+
+  if (siteId) {
+    params.set("siteId", siteId);
+  }
+
+  if (typeof previewVersion === "number") {
+    params.set("vpv", String(previewVersion));
+  }
+
+  return `/api/wp/proxy?${params.toString()}`;
+};
+
 const escapeCssToken = (value: string) =>
   value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 
 const CAPTURE_CANDIDATE_SELECTOR = [
+  "[data-vp-source-node]",
+  "[data-vp-node-role]",
   "[data-vp-node-id]",
   "[data-block]",
   "[data-type]",
@@ -178,7 +201,9 @@ const CAPTURE_CANDIDATE_SELECTOR = [
   '[class*="wp-block-"]',
   HEADING_SELECTOR,
   "p",
+  "span",
   "li",
+  "label",
   "a",
   "button",
   "img",
@@ -186,6 +211,9 @@ const CAPTURE_CANDIDATE_SELECTOR = [
   "article",
   "figure",
   "form",
+  "input",
+  "textarea",
+  "select",
 ].join(", ");
 
 const getElementTextSnippet = (element: Element) =>
@@ -360,7 +388,12 @@ const getBlockMetadata = (element: Element) => {
   };
 };
 
-const resolveInstrumentedNode = (element: Element): HTMLElement | null => {
+const resolveOwnerElement = (element: Element): HTMLElement | null => {
+  const closestSourceNode = element.closest("[data-vp-source-node]");
+  return closestSourceNode instanceof HTMLElement ? closestSourceNode : null;
+};
+
+const resolveEditableElement = (element: Element): HTMLElement | null => {
   if (element instanceof HTMLElement && element.dataset.vpNodeId) {
     return element;
   }
@@ -369,6 +402,24 @@ const resolveInstrumentedNode = (element: Element): HTMLElement | null => {
   return closestInstrumented instanceof HTMLElement
     ? closestInstrumented
     : null;
+};
+
+const deriveTopLevelIndexFromSourceNodeId = (
+  sourceNodeId?: string,
+): number | undefined => {
+  if (!sourceNodeId) return undefined;
+
+  const pathToken = sourceNodeId.split("::")[2];
+  if (!pathToken) return undefined;
+
+  const topLevelIndex = Number(pathToken.split(".")[0]);
+  return Number.isFinite(topLevelIndex) ? topLevelIndex : undefined;
+};
+
+const parseOptionalInteger = (value?: string): number | undefined => {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 };
 
 const getViewportIntersectionArea = (
@@ -384,9 +435,118 @@ const getViewportIntersectionArea = (
   return (right - left) * (bottom - top);
 };
 
+type CaptureSelectionMode = "owner" | "edit";
+
+const inferCaptureNodeRole = (
+  element: Element | null | undefined,
+): string | undefined => {
+  if (!element) return undefined;
+
+  if (element instanceof HTMLElement && element.dataset.vpNodeRole) {
+    return element.dataset.vpNodeRole;
+  }
+
+  const explicitRole = element.getAttribute("role")?.trim().toLowerCase();
+  if (explicitRole === "button") return "button";
+  if (explicitRole === "link") return "link";
+
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "button") return "button";
+  if (tagName === "a") {
+    const className =
+      element instanceof HTMLElement ? String(element.className || "") : "";
+    return /btn|button|cta|chip|pill/i.test(className) ? "button" : "link";
+  }
+  if (/^h[1-6]$/.test(tagName)) return "heading";
+  if (["img", "picture", "video", "figure", "svg", "canvas"].includes(tagName)) {
+    return "media";
+  }
+  if (tagName === "form") return "form";
+  if (["input", "textarea", "select", "option"].includes(tagName)) return "input";
+  if (["ul", "ol", "li", "dl"].includes(tagName)) return "list";
+  if (
+    ["header", "nav", "main", "section", "article", "aside", "footer"].includes(
+      tagName,
+    )
+  ) {
+    return "section";
+  }
+
+  const className =
+    element instanceof HTMLElement ? String(element.className || "") : "";
+  if (/card|panel|tile|badge|banner|feature/i.test(className)) {
+    return "card";
+  }
+  if (["p", "span", "label", "small", "strong", "em"].includes(tagName)) {
+    return "text";
+  }
+
+  return getElementTextSnippet(element) ? "text" : "container";
+};
+
+const getSourceNodeIdsFromAncestors = (element: Element): string[] => {
+  const collected = new Set<string>();
+  let current: Element | null = element;
+
+  while (current) {
+    if (current instanceof HTMLElement) {
+      const sourceNodeId = current.dataset.vpSourceNode?.trim();
+      const ownerSourceNodeId = current.dataset.vpOwnerSourceNode?.trim();
+      if (sourceNodeId) collected.add(sourceNodeId);
+      if (ownerSourceNodeId) collected.add(ownerSourceNodeId);
+    }
+    current = current.parentElement;
+  }
+
+  return Array.from(collected);
+};
+
+const readOwnerContext = (
+  editElement: HTMLElement,
+  frameDocument: Document,
+  fallbackRoute?: string | null,
+) => {
+  const ownerElement = resolveOwnerElement(editElement);
+  const documentRoute =
+    frameDocument.documentElement.dataset.vpRoute || fallbackRoute || null;
+  const documentTemplate =
+    frameDocument.documentElement.dataset.vpTemplate || undefined;
+  const documentSourceFile =
+    frameDocument.documentElement.dataset.vpSourceFile || undefined;
+
+  return {
+    ownerElement,
+    ownerNodeId:
+      ownerElement?.dataset.vpNodeId ||
+      editElement.dataset.vpOwnerNodeId ||
+      undefined,
+    ownerSourceNodeId:
+      editElement.dataset.vpOwnerSourceNode ||
+      ownerElement?.dataset.vpSourceNode ||
+      undefined,
+    ownerSourceFile:
+      editElement.dataset.vpOwnerSourceFile ||
+      ownerElement?.dataset.vpSourceFile ||
+      documentSourceFile,
+    ownerTemplateName:
+      editElement.dataset.vpOwnerTemplate ||
+      ownerElement?.dataset.vpTemplate ||
+      documentTemplate,
+    ownerTopLevelIndex: parseOptionalInteger(
+      editElement.dataset.vpOwnerTopLevelIndex ||
+        ownerElement?.dataset.vpTopLevelIndex,
+    ),
+    route:
+      ownerElement?.dataset.vpRoute ||
+      editElement.dataset.vpRoute ||
+      documentRoute,
+  };
+};
+
 const selectBestElementForCapture = (
   frameDocument: Document,
   viewportRect: ViewportCaptureRect,
+  mode: CaptureSelectionMode = "edit",
 ): Element | null => {
   const centerX = viewportRect.x + viewportRect.width / 2;
   const centerY = viewportRect.y + viewportRect.height / 2;
@@ -416,9 +576,14 @@ const selectBestElementForCapture = (
     const isHeading = candidate.matches(HEADING_SELECTOR);
     const isInstrumented =
       candidate instanceof HTMLElement && Boolean(candidate.dataset.vpNodeId);
+    const nodeRole = inferCaptureNodeRole(candidate);
     const textLength = candidate.textContent?.trim().length ?? 0;
+    const isLocalRole = ["button", "link", "heading", "text", "media", "input"].includes(
+      nodeRole || "",
+    );
+    const isBroadRole = ["section", "container"].includes(nodeRole || "");
 
-    const score =
+    let score =
       overlapRatio * 100 +
       coverageRatio * 25 +
       (containsCenter ? 20 : 0) +
@@ -426,6 +591,15 @@ const selectBestElementForCapture = (
       (isInstrumented ? 10 : 0) +
       Math.min(textLength, 160) / 40 -
       candidateArea / 50000;
+
+    if (mode === "edit") {
+      score += isLocalRole ? 18 : 0;
+      score += isBroadRole ? -12 : 0;
+      score += containsCenter && candidateArea < selectionArea * 0.7 ? 12 : 0;
+      score += candidateArea > selectionArea * 0.9 ? -10 : 0;
+    } else {
+      score += isBroadRole ? 14 : 0;
+    }
 
     if (score > bestScore) {
       bestScore = score;
@@ -455,57 +629,109 @@ const resolveDomTargetSnapshot = (
 } => {
   if (!frameDocument) return {};
 
-  const element = selectBestElementForCapture(frameDocument, viewportRect);
+  const selectedElement = selectBestElementForCapture(
+    frameDocument,
+    viewportRect,
+    "edit",
+  );
 
-  if (!element) return {};
+  if (!selectedElement) return {};
 
-  const classNames = Array.from(element.classList).filter(Boolean);
-  const textSnippet = getElementTextSnippet(element);
-  const htmlSnippet = getElementHtmlSnippet(element);
-  const blockMetadata = getBlockMetadata(element);
-  const instrumentedNode = resolveInstrumentedNode(element);
-  const nearestHeading = getNearestHeading(element);
-  const nearestLandmark = getNearestLandmark(element);
-  const documentRoute =
-    frameDocument.documentElement.dataset.vpRoute || fallbackRoute || null;
-  const documentTemplate =
-    frameDocument.documentElement.dataset.vpTemplate || undefined;
+  const editElement = resolveEditableElement(selectedElement) || (
+    selectedElement instanceof HTMLElement ? selectedElement : null
+  );
+  if (!editElement) return {};
+
+  const classNames = Array.from(editElement.classList).filter(Boolean);
+  const textSnippet = getElementTextSnippet(editElement);
+  const htmlSnippet = getElementHtmlSnippet(editElement);
+  const blockMetadata = getBlockMetadata(editElement);
+  const nearestHeading = getNearestHeading(editElement);
+  const nearestLandmark = getNearestLandmark(editElement);
+  const ownerContext = readOwnerContext(
+    editElement,
+    frameDocument,
+    fallbackRoute,
+  );
+  const ownerSourceNodeId = ownerContext.ownerSourceNodeId;
+  const ownerTopLevelIndex =
+    ownerContext.ownerTopLevelIndex ??
+    deriveTopLevelIndexFromSourceNodeId(ownerSourceNodeId);
+  const editSourceNodeId =
+    editElement.dataset.vpSourceNode ||
+    (editElement === ownerContext.ownerElement ? ownerSourceNodeId : undefined);
+  const editTopLevelIndex =
+    parseOptionalInteger(editElement.dataset.vpTopLevelIndex) ??
+    (editSourceNodeId
+      ? deriveTopLevelIndexFromSourceNodeId(editSourceNodeId)
+      : undefined);
+  const editNodeRole = inferCaptureNodeRole(editElement);
+  const ancestorSourceNodeIds = getSourceNodeIdsFromAncestors(editElement);
   const targetNode = compactObject({
-    nodeId: instrumentedNode?.dataset.vpNodeId,
-    templateName:
-      instrumentedNode?.dataset.vpTemplate || documentTemplate || undefined,
-    route: instrumentedNode?.dataset.vpRoute || documentRoute,
-    blockName: instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
+    nodeId: ownerContext.ownerNodeId || editElement.dataset.vpNodeId,
+    sourceNodeId: ownerSourceNodeId,
+    sourceFile: ownerContext.ownerSourceFile,
+    topLevelIndex: ownerTopLevelIndex,
+    templateName: ownerContext.ownerTemplateName,
+    ownerNodeId: ownerContext.ownerNodeId,
+    ownerSourceNodeId,
+    ownerSourceFile: ownerContext.ownerSourceFile,
+    ownerTopLevelIndex,
+    ownerTemplateName: ownerContext.ownerTemplateName,
+    editNodeId: editElement.dataset.vpNodeId,
+    editSourceNodeId,
+    editSourceFile:
+      editElement.dataset.vpSourceFile ||
+      (editSourceNodeId ? ownerContext.ownerSourceFile : undefined),
+    editTopLevelIndex,
+    editTemplateName:
+      editElement.dataset.vpTemplate ||
+      (editSourceNodeId ? ownerContext.ownerTemplateName : undefined),
+    editNodeRole,
+    editTagName: editElement.tagName.toLowerCase(),
+    ancestorSourceNodeIds:
+      ancestorSourceNodeIds.length > 0 ? ancestorSourceNodeIds : undefined,
+    route: ownerContext.route,
+    blockName:
+      editElement.dataset.vpBlockName || blockMetadata.blockName,
     blockClientId:
-      instrumentedNode?.dataset.vpBlockClientId || blockMetadata.blockClientId,
-    tagName:
-      instrumentedNode?.dataset.vpTag ||
-      instrumentedNode?.tagName.toLowerCase() ||
-      element.tagName.toLowerCase(),
-    domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
-    nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
-    nearestLandmark: instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+      editElement.dataset.vpBlockClientId || blockMetadata.blockClientId,
+    tagName: editElement.dataset.vpTag || editElement.tagName.toLowerCase(),
+    domPath: editElement.dataset.vpDomPath || buildDomPath(editElement),
+    nearestHeading: editElement.dataset.vpHeading || nearestHeading,
+    nearestLandmark: editElement.dataset.vpLandmark || nearestLandmark,
+  });
+
+  console.info("[capture-target]", {
+    ownerSourceNodeId,
+    ownerTemplateName: ownerContext.ownerTemplateName,
+    ownerTopLevelIndex,
+    editNodeId: editElement.dataset.vpNodeId,
+    editSourceNodeId,
+    editNodeRole,
+    editTagName: editElement.tagName.toLowerCase(),
+    route: ownerContext.route,
+    domPath: targetNode.domPath,
   });
 
   return {
     domTarget: {
-      cssSelector: buildCssSelector(element),
-      xpath: buildXPath(element),
-      tagName: element.tagName.toLowerCase(),
-      elementId: element.id || undefined,
+      cssSelector: buildCssSelector(editElement),
+      xpath: buildXPath(editElement),
+      tagName: editElement.tagName.toLowerCase(),
+      elementId: editElement.id || undefined,
       classNames: classNames.length > 0 ? classNames : undefined,
       htmlSnippet: htmlSnippet || undefined,
       textSnippet: textSnippet || undefined,
       blockName:
-        instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
+        editElement.dataset.vpBlockName || blockMetadata.blockName,
       blockClientId:
-        instrumentedNode?.dataset.vpBlockClientId ||
-        blockMetadata.blockClientId,
-      domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
-      role: element.getAttribute("role") || undefined,
-      ariaLabel: element.getAttribute("aria-label") || undefined,
-      nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
-      nearestLandmark: instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+        editElement.dataset.vpBlockClientId || blockMetadata.blockClientId,
+      domPath: editElement.dataset.vpDomPath || buildDomPath(editElement),
+      role: editNodeRole || editElement.getAttribute("role") || undefined,
+      ariaLabel: editElement.getAttribute("aria-label") || undefined,
+      nearestHeading: editElement.dataset.vpHeading || nearestHeading,
+      nearestLandmark: editElement.dataset.vpLandmark || nearestLandmark,
     },
     targetNode: Object.keys(targetNode).length > 0 ? targetNode : undefined,
   };
@@ -1392,7 +1618,7 @@ const Editor: React.FC = () => {
     }
     setIsSubmittingCapture(true);
     try {
-      const previewSrc = `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}`;
+      const previewSrc = buildPreviewProxyUrl(selectedPageUrl, siteId);
       const captureSnapshot = buildCaptureSnapshot(selection);
       const result = await captureRegion(
         selectedPageUrl,
@@ -1515,7 +1741,11 @@ const Editor: React.FC = () => {
   };
 
   const previewSrc = selectedPageUrl
-    ? `/api/wp/proxy?url=${encodeURIComponent(selectedPageUrl)}&vpv=${previewVersionRef.current}`
+    ? buildPreviewProxyUrl(
+        selectedPageUrl,
+        siteId,
+        previewVersionRef.current,
+      )
     : "";
   const isCaptureMode = chatCaptures.length > 0;
   const helperLanguage = detectRequestLanguage(

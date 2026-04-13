@@ -53,7 +53,13 @@ export class CaptureSectionMatcherService {
         | undefined;
 
       sections.forEach((section, index) => {
-        const scored = scoreSectionMatch(section, index, sections.length, attachment, request);
+        const scored = scoreSectionMatch(
+          section,
+          index,
+          sections.length,
+          attachment,
+          request,
+        );
         if (!best || scored.score > best.score) {
           best = scored;
         }
@@ -97,6 +103,15 @@ function scoreSectionMatch(
   const reasons: string[] = [];
   const sectionCorpus = buildSectionCorpus(section);
   const hintedType = normalizeToken(request?.targetHint?.sectionType);
+  const exactSourceNodeId = attachment.targetNode?.sourceNodeId?.trim();
+
+  if (
+    exactSourceNodeId &&
+    section.sourceRef?.sourceNodeId === exactSourceNodeId
+  ) {
+    score += 100;
+    reasons.push('targetNode.sourceNodeId');
+  }
 
   if (hintedType && hintedType === normalizeToken(section.type)) {
     score += 14;
@@ -111,7 +126,9 @@ function scoreSectionMatch(
     reasons.push('blockName~sectionType');
   }
 
-  const heading = attachment.targetNode?.nearestHeading ?? attachment.domTarget?.nearestHeading;
+  const heading =
+    attachment.targetNode?.nearestHeading ??
+    attachment.domTarget?.nearestHeading;
   if (heading && fuzzyMatch(heading, sectionCorpus)) {
     score += 12;
     reasons.push('nearestHeading');
@@ -131,7 +148,9 @@ function scoreSectionMatch(
   }
 
   const rectY =
-    attachment.geometry?.documentRect?.y ?? attachment.selection?.y ?? undefined;
+    attachment.geometry?.documentRect?.y ??
+    attachment.selection?.y ??
+    undefined;
   const docHeight = attachment.captureContext?.document?.height;
   if (rectY != null && docHeight && docHeight > 0) {
     const ratio = clamp(rectY / docHeight, 0, 0.999);
@@ -194,7 +213,10 @@ function buildSectionCorpus(section: SectionPlan): string {
       values.push(
         section.brandDescription,
         section.copyright,
-        ...section.menuColumns.flatMap((column) => [column.title, column.menuSlug]),
+        ...section.menuColumns.flatMap((column) => [
+          column.title,
+          column.menuSlug,
+        ]),
       );
       break;
     case 'sidebar':

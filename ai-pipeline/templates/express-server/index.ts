@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import { createConnection } from 'mysql2/promise';
 import dotenv from 'dotenv';
-import { resolve } from 'path';
+import { createHash } from 'crypto';
+import { basename, extname, resolve } from 'path';
 
 dotenv.config({ path: resolve(process.cwd(), '.env'), override: true });
 
@@ -43,9 +44,49 @@ function formatDate(mysqlDate: string | Date | null): string {
 function rewriteWpContentAssetUrls(html: string | null | undefined): string {
   if (!html) return '';
   return String(html).replace(
-    /https?:\/\/[^"'\s)]+(\/wp-content\/[^"'\s)]+)/gi,
-    (_, relativePath: string) => relativePath,
+    /(?:https?:\/\/[^"'\s)]+)?\/wp-content\/uploads\/[^"'\s)]+/gi,
+    (match: string) => localizeWpUploadAssetUrl(match) ?? match,
   );
+}
+
+function normalizeWpUploadAssetUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed || !/\/wp-content\/uploads\//i.test(trimmed)) return null;
+  try {
+    if (/^https?:\/\//i.test(trimmed)) return new URL(trimmed).toString();
+    const siteUrl = process.env.SITE_URL?.trim();
+    if (siteUrl) return new URL(trimmed, siteUrl).toString();
+  } catch {
+    // Fall through to returning the original string.
+  }
+  return trimmed;
+}
+
+function buildWpUploadAssetFileName(raw: string): string {
+  const normalized = normalizeWpUploadAssetUrl(raw) ?? raw;
+  let pathname = normalized;
+  try {
+    pathname = new URL(normalized).pathname;
+  } catch {
+    pathname = normalized.split(/[?#]/)[0] ?? normalized;
+  }
+  const originalName = basename(pathname) || 'wp-asset';
+  const ext = extname(originalName) || '.jpg';
+  const safeExt = /^[.][a-zA-Z0-9]+$/.test(ext) ? ext.toLowerCase() : '.jpg';
+  const baseName = basename(originalName, ext)
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  const safeBaseName = baseName || 'wp-asset';
+  const hash = createHash('sha1').update(normalized).digest('hex').slice(0, 12);
+  return `${hash}-${safeBaseName}${safeExt}`;
+}
+
+function localizeWpUploadAssetUrl(raw: string | null | undefined): string | null {
+  const normalized = normalizeWpUploadAssetUrl(raw);
+  if (!normalized) return raw?.trim() ? String(raw).trim() : null;
+  return `/assets/images/${buildWpUploadAssetFileName(normalized)}`;
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -297,6 +338,14 @@ function taxonomyNamesSubquery(prefix: string, taxonomy: string): string {
            WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
 }
 
+function taxonomySlugsSubquery(prefix: string, taxonomy: string): string {
+  return `(SELECT GROUP_CONCAT(DISTINCT t.slug ORDER BY t.slug SEPARATOR ', ')
+           FROM \`${prefix}term_relationships\` tr2
+           INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+           INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+           WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
+}
+
 function parsePositiveInt(raw: unknown, fallback: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -426,8 +475,9 @@ async function serializePost(
     author: r.author_name ?? '',
     authorSlug: r.author_slug ?? '',
     categories: splitTermList(r.categories),
+    categorySlugs: splitTermList(r.category_slugs),
     tags: splitTermList(r.tags),
-    featuredImage: r.featured_image ?? null,
+    featuredImage: localizeWpUploadAssetUrl(r.featured_image ?? null),
   };
 }
 
@@ -444,7 +494,7 @@ async function serializePage(
     parentId: Number(r.post_parent ?? 0),
     menuOrder: r.menu_order,
     template: r.template ?? '',
-    featuredImage: r.featured_image ?? null,
+    featuredImage: localizeWpUploadAssetUrl(r.featured_image ?? null),
   };
 }
 
@@ -582,6 +632,234 @@ async function resolveCustomLogoUrl(
   }
 }
 
+async function resolveSiteLogoOptionUrl(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  siteUrl: string,
+): Promise<string | null> {
+  try {
+    const [[siteLogoRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'site_logo' LIMIT 1`,
+    );
+    const logoId = Number(siteLogoRow?.option_value ?? 0);
+    if (!Number.isFinite(logoId) || logoId <= 0) return null;
+    return resolveAttachmentUrlById(conn, prefix, logoId, siteUrl);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveSiteLogoUrl(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  siteUrl: string,
+): Promise<string | null> {
+  const siteLogoOptionUrl = await resolveSiteLogoOptionUrl(
+    conn,
+    prefix,
+    siteUrl,
+  );
+  if (siteLogoOptionUrl) return siteLogoOptionUrl;
+
+  const customLogoUrl = await resolveCustomLogoUrl(conn, prefix);
+  if (customLogoUrl) return customLogoUrl;
+  return resolveLogoUrlFromTemplateMarkup(conn, prefix, siteUrl);
+}
+
+async function resolveLogoUrlFromTemplateMarkup(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  siteUrl: string,
+): Promise<string | null> {
+  try {
+    const [rows] = await conn.query<any[]>(
+      `SELECT ID, post_name, post_type, post_content
+       FROM \`${prefix}posts\`
+       WHERE post_type IN ('wp_template_part', 'wp_template')
+         AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+         AND (
+           post_name LIKE '%header%'
+           OR post_name LIKE '%logo%'
+           OR post_content LIKE '%wp:site-logo%'
+           OR post_content LIKE '%/wp-content/uploads/%'
+           OR post_content LIKE '%<img%'
+         )
+       ORDER BY
+         CASE WHEN post_type = 'wp_template_part' THEN 0 ELSE 1 END,
+         CASE WHEN post_name LIKE '%header%' THEN 0 ELSE 1 END,
+         ID DESC
+       LIMIT 20`,
+    );
+
+    for (const row of rows) {
+      const markup = String(row.post_content ?? '');
+      const resolved = await extractLogoUrlFromMarkup(conn, prefix, markup, siteUrl);
+      if (resolved) return resolved;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function extractLogoUrlFromMarkup(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  markup: string,
+  siteUrl: string,
+): Promise<string | null> {
+  if (!markup.trim()) return null;
+
+  const siteLogoBlockPattern =
+    /<!--\s*wp:site-logo(?:\s+(\{[\s\S]*?\}))?[\s/]*-->/gi;
+  for (const match of markup.matchAll(siteLogoBlockPattern)) {
+    const attrs = tryParseBlockAttrs(match[1]);
+    const attrUrl = normalizeLogoCandidateUrl(
+      typeof attrs?.url === 'string' ? attrs.url : null,
+      siteUrl,
+    );
+    if (attrUrl) return attrUrl;
+
+    const attrId = Number(attrs?.id ?? 0);
+    if (Number.isFinite(attrId) && attrId > 0) {
+      const attachmentUrl = await resolveAttachmentUrlById(
+        conn,
+        prefix,
+        attrId,
+        siteUrl,
+      );
+      if (attachmentUrl) return attachmentUrl;
+    }
+  }
+
+  const imagePattern = /<img\b[^>]*\bsrc="([^"]+)"[^>]*>/gi;
+  for (const match of markup.matchAll(imagePattern)) {
+    const src = normalizeLogoCandidateUrl(match[1], siteUrl);
+    if (src) return src;
+  }
+
+  const uploadUrlPattern =
+    /(?:https?:\/\/[^\s"'<>]+)?\/wp-content\/uploads\/[^\s"'<>]+/gi;
+  for (const match of markup.matchAll(uploadUrlPattern)) {
+    const src = normalizeLogoCandidateUrl(match[0], siteUrl);
+    if (src) return src;
+  }
+
+  const attachmentIdPattern =
+    /(?:wp-image-|\"id\"\s*:\s*|data-id=")(\d{1,12})/gi;
+  for (const match of markup.matchAll(attachmentIdPattern)) {
+    const attachmentId = Number(match[1] ?? 0);
+    if (!Number.isFinite(attachmentId) || attachmentId <= 0) continue;
+    const attachmentUrl = await resolveAttachmentUrlById(
+      conn,
+      prefix,
+      attachmentId,
+      siteUrl,
+    );
+    if (attachmentUrl) return attachmentUrl;
+  }
+
+  return null;
+}
+
+function tryParseBlockAttrs(raw: string | null | undefined): Record<string, any> | null {
+  if (!raw?.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function extractSiteLogoWidth(markup: string): number | null {
+  if (!markup) return null;
+  const pattern = /<!--\s*wp:site-logo(?:\s+(\{[\s\S]*?\}))?[\s/]*-->/gi;
+  for (const match of markup.matchAll(pattern)) {
+    const attrs = tryParseBlockAttrs(match[1]);
+    const w = Number(attrs?.width ?? 0);
+    if (Number.isFinite(w) && w > 0) return w;
+  }
+  return null;
+}
+
+async function resolveSiteLogoWidth(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<number | null> {
+  try {
+    const [rows] = await conn.query<any[]>(
+      `SELECT post_content FROM \`${prefix}posts\`
+       WHERE post_type IN ('wp_template', 'wp_template_part')
+         AND post_status IN ('publish', 'auto-draft')
+         AND post_content LIKE '%wp:site-logo%'
+       ORDER BY post_modified DESC LIMIT 10`,
+    );
+    for (const row of rows) {
+      const width = extractSiteLogoWidth(row.post_content as string);
+      if (width) return width;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLogoCandidateUrl(
+  raw: string | null | undefined,
+  siteUrl: string,
+): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+
+  try {
+    if (/^https?:\/\//i.test(trimmed)) {
+      return new URL(trimmed).toString();
+    }
+    if (siteUrl) {
+      if (trimmed.startsWith('/')) {
+        return new URL(trimmed, siteUrl).toString();
+      }
+      if (trimmed.includes('wp-content/uploads/')) {
+        return new URL(
+          trimmed.startsWith('wp-content/')
+            ? `/${trimmed}`
+            : `/wp-content/uploads/${trimmed.split('wp-content/uploads/')[1] ?? ''}`,
+          siteUrl,
+        ).toString();
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function resolveAttachmentUrlById(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  attachmentId: number,
+  siteUrl: string,
+): Promise<string | null> {
+  try {
+    const [[attachmentRow]] = await conn.query<any[]>(
+      `SELECT guid
+       FROM \`${prefix}posts\`
+       WHERE ID = ? AND post_type = 'attachment'
+       LIMIT 1`,
+      [attachmentId],
+    );
+    return normalizeLogoCandidateUrl(
+      attachmentRow?.guid as string | undefined,
+      siteUrl,
+    );
+  } catch {
+    return null;
+  }
+}
+
 function normalizeCommentModerationStatus(
   raw: unknown,
 ): 'approved' | 'pending' | 'spam' | 'trash' {
@@ -639,7 +917,9 @@ app.get('/api/site-info', async (req, res) => {
       siteName: opts['blogname'] ?? '',
       blogDescription: opts['blogdescription'] ?? '',
       logoUrl:
-        process.env.SITE_LOGO_URL || (await resolveCustomLogoUrl(conn, prefix)),
+        process.env.SITE_LOGO_URL ||
+        (await resolveSiteLogoUrl(conn, prefix, opts['siteurl'] ?? '')),
+      logoWidth: await resolveSiteLogoWidth(conn, prefix),
       adminEmail: opts['admin_email'] ?? '',
       language: opts['WPLANG'] ?? 'en',
     });
@@ -684,6 +964,7 @@ app.get('/api/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -718,6 +999,7 @@ app.get('/api/posts/:slug', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -814,6 +1096,7 @@ app.get('/api/post-types/:postType/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -846,6 +1129,7 @@ app.get('/api/post-types/:postType/:slug', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -955,7 +1239,22 @@ function normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
     // not a valid URL — treat as relative path
     raw = trimmed;
   }
-  return raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+  raw = raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+  // Ensure local paths always start with / so React Router treats them as
+  // absolute, not relative. A relative path like "page/slug" would be resolved
+  // against the current URL — navigating from /page/x to page/slug would
+  // produce /page/page/slug instead of /page/slug.
+  if (
+    raw &&
+    !raw.startsWith('/') &&
+    !raw.startsWith('#') &&
+    !raw.startsWith('http://') &&
+    !raw.startsWith('https://') &&
+    !raw.startsWith('mailto:')
+  ) {
+    raw = '/' + raw;
+  }
+  return raw;
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -968,28 +1267,6 @@ app.get('/api/menus', async (req, res) => {
        INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_id = t.term_id
        WHERE tt.taxonomy = 'nav_menu'`,
     );
-    // Fallback: no nav menus registered → return published pages as "primary" menu
-    if (menus.length === 0) {
-      const [pages] = await conn.query<any[]>(
-        `SELECT ID, post_title, post_name, menu_order FROM \`${prefix}posts\`
-         WHERE post_type = 'page' AND post_status = 'publish'
-         ORDER BY menu_order, ID`,
-      );
-      return res.json([
-        {
-          name: 'Primary',
-          slug: 'primary',
-          items: pages.map((p, idx) => ({
-            id: p.ID,
-            title: p.post_title,
-            url: `/page/${p.post_name}`,
-            order: p.menu_order || idx,
-            parentId: 0,
-            target: null,
-          })),
-        },
-      ]);
-    }
 
     // Resolve theme location assignments: termId → locationSlug
     let termToLocation = new Map<number, string>();
@@ -1053,10 +1330,33 @@ app.get('/api/menus', async (req, res) => {
         result.push({
           name: navPost.post_title || navPost.post_name,
           slug: navPost.post_name as string,
-          location: null,
+          location: result.some((menu) => menu.location === 'primary')
+            ? null
+            : 'primary',
           items,
         });
       }
+    }
+
+    if (result.length === 0) {
+      const [pages] = await conn.query<any[]>(
+        `SELECT ID, post_title, post_name, menu_order FROM \`${prefix}posts\`
+         WHERE post_type = 'page' AND post_status = 'publish'
+         ORDER BY menu_order, ID`,
+      );
+      result.push({
+        name: 'Primary',
+        slug: 'primary',
+        location: 'primary',
+        items: pages.map((p, idx) => ({
+          id: p.ID,
+          title: p.post_title,
+          url: `/page/${p.post_name}`,
+          order: p.menu_order || idx,
+          parentId: 0,
+          target: null,
+        })),
+      });
     }
 
     res.json(result);
@@ -1143,6 +1443,7 @@ app.get('/api/taxonomies/:taxonomy/:term/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID

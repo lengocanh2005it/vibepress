@@ -6,6 +6,7 @@ import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { ApiBuilderResult } from './api-builder.service.js';
 
+const AI_ROUTE_EXCLUDED_CPTS = new Set(['product']);
 interface ApiReviewIssue {
   severity: 'high' | 'medium' | 'low';
   message: string;
@@ -23,6 +24,17 @@ export interface GeneratedApiReviewResult {
   blockingMessage?: string;
 }
 
+function shouldIgnoreCustomPostType(
+  cpt: DbContentResult['customPostTypes'][number],
+) {
+  return (
+    AI_ROUTE_EXCLUDED_CPTS.has(cpt.postType) ||
+    cpt.taxonomies.some((taxonomy) =>
+      ['product_cat', 'product_tag', 'product_type'].includes(taxonomy),
+    )
+  );
+}
+
 @Injectable()
 export class GeneratedApiReviewService {
   private readonly logger = new Logger(GeneratedApiReviewService.name);
@@ -35,13 +47,7 @@ export class GeneratedApiReviewService {
     plan: PlanResult;
     content: Pick<
       DbContentResult,
-      | 'customPostTypes'
-      | 'detectedPlugins'
-      | 'siteInfo'
-      | 'pages'
-      | 'posts'
-      | 'menus'
-      | 'taxonomies'
+      'customPostTypes' | 'pages' | 'posts' | 'menus' | 'taxonomies'
     >;
     modelName?: string;
     mode?: 'warn' | 'blocking';
@@ -175,13 +181,7 @@ export class GeneratedApiReviewService {
     plan: PlanResult,
     content: Pick<
       DbContentResult,
-      | 'customPostTypes'
-      | 'detectedPlugins'
-      | 'siteInfo'
-      | 'pages'
-      | 'posts'
-      | 'menus'
-      | 'taxonomies'
+      'customPostTypes' | 'pages' | 'posts' | 'menus' | 'taxonomies'
     >,
   ): string {
     const requiredDataNeeds = [
@@ -190,8 +190,12 @@ export class GeneratedApiReviewService {
     const detailRoutes = plan
       .filter((item) => item.isDetail && item.route)
       .map((item) => `${item.componentName}: ${item.route}`);
-    const pluginSlugs = content.detectedPlugins.map((plugin) => plugin.slug);
-    const cptSlugs = content.customPostTypes.map((cpt) => cpt.postType);
+    const cptSlugs = content.customPostTypes
+      .filter((cpt) => !shouldIgnoreCustomPostType(cpt))
+      .map((cpt) => cpt.postType);
+    const excludedCptSlugs = content.customPostTypes
+      .filter((cpt) => shouldIgnoreCustomPostType(cpt))
+      .map((cpt) => cpt.postType);
 
     return `Review this generated backend/API code against the approved frontend contract.
 
@@ -207,7 +211,7 @@ Rules:
 - Only flag concrete problems:
   1. obvious missing API coverage required by the frontend contract
   2. clearly wrong detail route behavior for post/page slug endpoints
-  3. generated custom post type or plugin routes that are clearly malformed or disconnected from the contract
+  3. generated custom post type routes that are clearly malformed or disconnected from the contract
   4. server code structure/imports that are likely broken
 - Do NOT flag stylistic preferences.
 - If the backend is acceptable, return pass=true with issues=[].
@@ -218,7 +222,8 @@ Approved frontend contract summary:
 - detail routes:
 ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n') : '  - (none)'}
 - custom post types detected: ${cptSlugs.length > 0 ? cptSlugs.join(', ') : '(none)'}
-- plugin slugs detected: ${pluginSlugs.length > 0 ? pluginSlugs.join(', ') : '(none)'}
+- intentionally excluded dedicated CPT routes: ${excludedCptSlugs.length > 0 ? excludedCptSlugs.join(', ') : '(none)'}
+- These excluded integrations are intentionally served only through the generic static endpoints already present in the template. Do NOT require or suggest dedicated /api/products... routes for them.
 - content counts:
   - posts: ${content.posts.length}
   - pages: ${content.pages.length}

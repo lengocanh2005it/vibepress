@@ -80,7 +80,7 @@ export class CaptureReviewService {
       (component) => component.name === reviewedComponentName,
     );
     const componentPlan = plan.find(
-      (entry) => entry.componentName === task.componentName,
+      (entry) => entry.componentName === task.planComponentName,
     );
 
     return task.attachments.map((attachment) => {
@@ -132,7 +132,7 @@ export class CaptureReviewService {
         });
       }
 
-      const scope = resolveScope(task.componentName, reviewedComponentName);
+      const scope = resolveScope(task.planComponentName, reviewedComponentName);
       if (scope === 'section') {
         score += 8;
         reasons.push('section-scope');
@@ -212,6 +212,9 @@ export class CaptureReviewService {
         debugSummary: [
           `attachment=${attachment.id}`,
           `target=${task.componentName}`,
+          task.planComponentName !== task.componentName
+            ? `planTarget=${task.planComponentName}`
+            : null,
           `edited=${reviewedComponentName}`,
           `scope=${scope}`,
           sectionMatch
@@ -219,7 +222,9 @@ export class CaptureReviewService {
             : 'section=none',
           `score=${normalizedScore.toFixed(2)}`,
           `status=${status}`,
-        ].join(' | '),
+        ]
+          .filter((value): value is string => Boolean(value))
+          .join(' | '),
       };
     });
   }
@@ -237,15 +242,21 @@ export class CaptureReviewService {
     task: PostMigrationEditTask,
     components: GeneratedComponent[],
   ): string | undefined {
+    if (components.some((component) => component.name === task.componentName)) {
+      return task.componentName;
+    }
+
     for (const match of task.sectionMatches) {
-      const candidateName = `${task.componentName}Section${match.sectionIndex + 1}`;
+      const candidateName = `${task.planComponentName}Section${match.sectionIndex + 1}`;
       if (components.some((component) => component.name === candidateName)) {
         return candidateName;
       }
     }
 
-    if (components.some((component) => component.name === task.componentName)) {
-      return task.componentName;
+    if (
+      components.some((component) => component.name === task.planComponentName)
+    ) {
+      return task.planComponentName;
     }
 
     return undefined;

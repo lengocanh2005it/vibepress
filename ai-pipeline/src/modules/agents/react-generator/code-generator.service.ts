@@ -61,6 +61,7 @@ interface BlockFaithfulPartialInput {
 interface BlockFaithfulRenderState {
   navIndex: number;
   componentKind: 'header' | 'footer';
+  componentName: string;
 }
 
 @Injectable()
@@ -140,6 +141,7 @@ export class CodeGeneratorService {
     const renderState: BlockFaithfulRenderState = {
       navIndex: 0,
       componentKind: /^footer/i.test(componentName) ? 'footer' : 'header',
+      componentName,
     };
     const rootTag =
       renderState.componentKind === 'footer' ? 'footer' : 'header';
@@ -200,66 +202,38 @@ export class CodeGeneratorService {
       lines.push(
         '  const scoreMenuByHints = (menu: Menu, hintTitles: string[]) => {',
       );
-      lines.push(
-        '    if (hintTitles.length === 0) return 0;',
-      );
-      lines.push(
-        '    const topLevelTitles = (menu.items ?? [])',
-      );
-      lines.push(
-        '      .filter((item) => item.parentId === 0)',
-      );
-      lines.push(
-        '      .map((item) => normalizeMenuLabel(item.title));',
-      );
-      lines.push(
-        '    return hintTitles.reduce((score, title) => {',
-      );
+      lines.push('    if (hintTitles.length === 0) return 0;');
+      lines.push('    const topLevelTitles = (menu.items ?? [])');
+      lines.push('      .filter((item) => item.parentId === 0)');
+      lines.push('      .map((item) => normalizeMenuLabel(item.title));');
+      lines.push('    return hintTitles.reduce((score, title) => {');
       lines.push(
         '      return score + (topLevelTitles.includes(normalizeMenuLabel(title)) ? 1 : 0);',
       );
-      lines.push(
-        '    }, 0);',
-      );
-      lines.push(
-        '  };',
-      );
+      lines.push('    }, 0);');
+      lines.push('  };');
       lines.push(
         '  const resolveNavigationMenu = (hintTitles: string[] = [], index = 0, preferFooter = false) => {',
       );
-      lines.push(
-        '    const hintedTitles = hintTitles.filter(Boolean);',
-      );
-      lines.push(
-        '    const pool = preferFooter',
-      );
+      lines.push('    const hintedTitles = hintTitles.filter(Boolean);');
+      lines.push('    const pool = preferFooter');
       lines.push(
         '      ? (footerNavigationMenus.length > 0 ? footerNavigationMenus : navigationMenus.filter((menu) => menu !== primaryMenu))',
       );
       lines.push(
         '      : (primaryMenu ? [primaryMenu, ...navigationMenus.filter((menu) => menu !== primaryMenu)] : navigationMenus);',
       );
-      lines.push(
-        '    if (pool.length === 0) return null;',
-      );
-      lines.push(
-        '    const scored = pool',
-      );
+      lines.push('    if (pool.length === 0) return null;');
+      lines.push('    const scored = pool');
       lines.push(
         '      .map((menu) => ({ menu, score: scoreMenuByHints(menu, hintedTitles) }))',
       );
-      lines.push(
-        '      .sort((a, b) => b.score - a.score);',
-      );
+      lines.push('      .sort((a, b) => b.score - a.score);');
       lines.push(
         '    if ((scored[0]?.score ?? 0) > 0) return scored[0]?.menu ?? null;',
       );
-      lines.push(
-        '    return pool[index] ?? pool[0] ?? null;',
-      );
-      lines.push(
-        '  };',
-      );
+      lines.push('    return pool[index] ?? pool[0] ?? null;');
+      lines.push('  };');
       lines.push(
         '  const renderMenuItems = (items: MenuItem[], parentId = 0, vertical = false): React.ReactNode =>',
       );
@@ -274,21 +248,13 @@ export class CodeGeneratorService {
       lines.push(
         '          <li key={item.id} className={vertical ? "flex flex-col gap-2" : "relative"}>',
       );
-      lines.push(
-        '            {isInternalPath(item.url) ? (',
-      );
+      lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
         '              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
-      lines.push(
-        '                {item.title}',
-      );
-      lines.push(
-        '              </Link>',
-      );
-      lines.push(
-        '            ) : (',
-      );
+      lines.push('                {item.title}');
+      lines.push('              </Link>');
+      lines.push('            ) : (');
       lines.push(
         '              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
@@ -470,15 +436,15 @@ export class CodeGeneratorService {
         `  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);`,
       );
     if (dataNeeds.includes('posts')) {
-      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const [searchParams, setSearchParams] = useSearchParams();`,
+      );
       lines.push(
         `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
       );
       lines.push(`  const perPage = 10;`);
       lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
-      lines.push(
-        `  const updatePage = (nextPage: number) => {`,
-      );
+      lines.push(`  const updatePage = (nextPage: number) => {`);
       lines.push(
         `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
       );
@@ -894,11 +860,12 @@ export default ${componentName};`;
             sidebarSection,
             ctx,
             plan.layout.contentLayout === 'sidebar-left',
+            plan.componentName,
           ),
         );
         continue;
       }
-      parts.push(this.renderSection(section, ctx));
+      parts.push(this.renderSection(section, ctx, plan.componentName));
     }
 
     return parts.join('\n\n');
@@ -906,43 +873,65 @@ export default ${componentName};`;
 
   // ── Section dispatcher ────────────────────────────────────────────────────
 
-  private renderSection(section: SectionPlan, ctx: RenderCtx): string {
+  private renderSection(
+    section: SectionPlan,
+    ctx: RenderCtx,
+    componentName: string,
+  ): string {
     const bg = section.background ?? ctx.p.background;
     const tc = section.textColor ?? ctx.p.text;
     const py = this.sectionPaddingClass(section);
+    let markup = '';
 
     switch (section.type) {
       case 'navbar':
-        return this.renderNavbar(section, ctx);
+        markup = this.renderNavbar(section, ctx);
+        break;
       case 'hero':
-        return this.renderHero(section, ctx, py);
+        markup = this.renderHero(section, ctx, py);
+        break;
       case 'cover':
-        return this.renderCover(section, ctx);
+        markup = this.renderCover(section, ctx);
+        break;
       case 'post-list':
-        return this.renderPostList(section, ctx, bg, tc, py);
+        markup = this.renderPostList(section, ctx, bg, tc, py);
+        break;
       case 'card-grid':
-        return this.renderCardGrid(section, ctx, bg, tc, py);
+        markup = this.renderCardGrid(section, ctx, bg, tc, py);
+        break;
       case 'media-text':
-        return this.renderMediaText(section, ctx, bg, tc, py);
+        markup = this.renderMediaText(section, ctx, bg, tc, py);
+        break;
       case 'testimonial':
-        return this.renderTestimonial(section, ctx, py);
+        markup = this.renderTestimonial(section, ctx, py);
+        break;
       case 'newsletter':
-        return this.renderNewsletter(section, ctx, bg, tc, py);
+        markup = this.renderNewsletter(section, ctx, bg, tc, py);
+        break;
       case 'footer':
-        return this.renderFooter(section, ctx);
+        markup = this.renderFooter(section, ctx);
+        break;
       case 'post-content':
-        return this.renderPostContent(section, ctx, py);
+        markup = this.renderPostContent(section, ctx, py);
+        break;
       case 'page-content':
-        return this.renderPageContent(section, ctx, py);
+        markup = this.renderPageContent(section, ctx, py);
+        break;
       case 'comments':
-        return this.renderComments(section, ctx, py);
+        markup = this.renderComments(section, ctx, py);
+        break;
       case 'search':
-        return this.renderSearch(section, ctx, py);
+        markup = this.renderSearch(section, ctx, py);
+        break;
       case 'breadcrumb':
-        return this.renderBreadcrumb(ctx);
+        markup = this.renderBreadcrumb(ctx);
+        break;
       case 'sidebar':
-        return this.renderSidebar(section, ctx, py);
+        markup = this.renderSidebar(section, ctx, py);
+        break;
     }
+
+    return this.annotateSectionMarkup(section, markup, componentName);
   }
 
   private buildStyleAttr(
@@ -982,6 +971,63 @@ export default ${componentName};`;
     return section.gapStyle
       ? this.buildStyleAttr({ gap: section.gapStyle })
       : '';
+  }
+
+  private annotateSectionMarkup(
+    section: SectionPlan,
+    markup: string,
+    componentName: string,
+  ): string {
+    const trackingAttrs = this.buildSectionTrackingAttrs(
+      section,
+      componentName,
+    );
+    if (!trackingAttrs) return markup;
+
+    return markup.replace(
+      /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-source-node=)/,
+      `$1${trackingAttrs}`,
+    );
+  }
+
+  private buildSectionTrackingAttrs(
+    section: SectionPlan,
+    componentName: string,
+  ): string {
+    if (!section.sourceRef?.sourceNodeId) return '';
+
+    const attrs = [
+      ['data-vp-source-node', section.sourceRef.sourceNodeId],
+      ['data-vp-template', section.sourceRef.templateName],
+      ['data-vp-source-file', section.sourceRef.sourceFile],
+      ['data-vp-section-key', section.sectionKey ?? section.type],
+      ['data-vp-component', componentName],
+      [
+        'data-vp-section-component',
+        this.buildTrackedSectionComponentName(
+          componentName,
+          section.sectionKey ?? section.type,
+        ),
+      ],
+    ].filter(([, value]) => !!value);
+
+    return attrs
+      .map(
+        ([name, value]) =>
+          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
+      )
+      .join('');
+  }
+
+  private buildTrackedSectionComponentName(
+    componentName: string,
+    sectionKey: string,
+  ): string {
+    return `${componentName}${sectionKey
+      .split(/[^a-zA-Z0-9]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+      .join('')}Section`;
   }
 
   private exactRadiusClass(value?: string): string {
@@ -1365,7 +1411,10 @@ ${cards}
   ): string {
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
-    const imageRadius = this.imageRadiusClass(ctx);
+    const imageRadius =
+      this.imageRadiusClass(ctx) ||
+      this.cardRadiusClass(ctx) ||
+      'rounded-[24px]';
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const headingStyle = this.buildTypographyStyleAttr(
       this.pickBlockStyle(ctx, 'heading')?.typography,
@@ -1383,9 +1432,9 @@ ${cards}
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
     const imgEl = `<div className="${itemWrapper}"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
-            ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
-            ${s.body ? `<p className="text-[${p.textMuted}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${p.textMuted}]">${li}</li>`).join('')}</ul>` : ''}
+            ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
 
@@ -1710,6 +1759,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     sidebarSection: SidebarSection,
     ctx: RenderCtx,
     sidebarLeft: boolean,
+    componentName: string,
   ): string {
     const { p } = ctx;
     const bg = mainSection.background ?? p.background;
@@ -1726,13 +1776,21 @@ ${this.renderSidebarCard(s, ctx, 10)}
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
       gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
     });
+    const mainAttrs = this.buildSectionTrackingAttrs(
+      mainSection,
+      componentName,
+    );
+    const sidebarAttrs = this.buildSectionTrackingAttrs(
+      sidebarSection,
+      componentName,
+    );
 
     return `      {/* Main Content With Sidebar */}
-      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+      <section${mainAttrs} className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
-            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
-            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
+            ${sidebarLeft ? `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
+            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>`}
           </div>
         </div>
       </section>`;
@@ -1874,9 +1932,42 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
     depth: number,
   ): string {
     return nodes
-      .map((node) => this.renderBlockFaithfulNode(node, ctx, state, depth))
+      .map((node) => {
+        const markup = this.renderBlockFaithfulNode(node, ctx, state, depth);
+        return depth === 3
+          ? this.annotateBlockFaithfulMarkup(node, markup, state.componentName)
+          : markup;
+      })
       .filter(Boolean)
       .join('\n');
+  }
+
+  private annotateBlockFaithfulMarkup(
+    node: WpNode,
+    markup: string,
+    componentName: string,
+  ): string {
+    if (!node.sourceRef?.sourceNodeId || !markup) return markup;
+
+    const attrs = [
+      ['data-vp-source-node', node.sourceRef.sourceNodeId],
+      ['data-vp-template', node.sourceRef.templateName],
+      ['data-vp-source-file', node.sourceRef.sourceFile],
+      ['data-vp-section-key', node.block.replace(/^core\//, '')],
+      ['data-vp-component', componentName],
+      ['data-vp-section-component', componentName],
+    ]
+      .filter(([, value]) => !!value)
+      .map(
+        ([name, value]) =>
+          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
+      )
+      .join('');
+
+    return markup.replace(
+      /(<(?:section|header|footer|main|article|aside|nav|div|ul|li|p|h1|h2|h3|h4|h5|h6|form|span|img|a|Link)\b)(?![^>]*\bdata-vp-source-node=)/,
+      `$1${attrs}`,
+    );
   }
 
   private renderBlockFaithfulNode(
@@ -1934,7 +2025,9 @@ ${indent}</div>`;
             ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
             : '';
         return `${indent}<li className="relative">
-${hasUsableHref ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
+${
+  hasUsableHref
+    ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
 ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
@@ -1942,9 +2035,11 @@ ${childIndent}) : (
 ${childIndent}  <a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
-${childIndent})}` : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
+${childIndent})}`
+    : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
-${childIndent}</span>`}${nestedChildren}
+${childIndent}</span>`
+}${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
@@ -2156,7 +2251,9 @@ ${indent}</nav>`;
       ? 'flex flex-col gap-2'
       : 'flex flex-wrap items-center gap-4';
     const items = nodes
-      .map((child) => this.renderBlockFaithfulNode(child, ctx, state, depth + 1))
+      .map((child) =>
+        this.renderBlockFaithfulNode(child, ctx, state, depth + 1),
+      )
       .filter(Boolean)
       .join('\n');
     if (!items) return `${indent}null`;

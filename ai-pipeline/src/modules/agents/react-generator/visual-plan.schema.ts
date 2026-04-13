@@ -1,3 +1,5 @@
+import type { SourceRef } from '../../../common/utils/source-node-id.util.js';
+
 // ── Visual Plan Schema ─────────────────────────────────────────────────────
 // Planner builds ComponentVisualPlan and injects it into ComponentPlan.
 // Code generator consumes the complete plan to produce deterministic TSX.
@@ -52,6 +54,8 @@ export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
+  sectionKey?: string;
+  sourceRef?: SourceRef;
   background?: string; // overrides palette for this section
   textColor?: string;
   padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl';

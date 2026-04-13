@@ -23,8 +23,12 @@ export function buildEditRequestContextNote(
     maxAttachments = audience === 'planner' ? 5 : 3,
   } = options;
   const lines: string[] = ['## User edit request context'];
-  lines.push('Hard rule: always migrate the full site, even when the request mentions a single page or selected captures.');
-  lines.push('Treat page references and capture notes as focus hints for extra fidelity, not as migration scope limits.');
+  lines.push(
+    'Hard rule: always migrate the full site, even when the request mentions a single page or selected captures.',
+  );
+  lines.push(
+    'Treat page references and capture notes as focus hints for extra fidelity, not as migration scope limits.',
+  );
 
   if (editRequest.prompt) {
     lines.push(`Primary request: ${editRequest.prompt}`);
@@ -241,7 +245,9 @@ function formatAttachmentLine(
     parts.push(`route=${attachment.captureContext.page.route}`);
   }
   if (attachment.captureContext?.page?.title) {
-    parts.push(`pageTitle="${truncate(attachment.captureContext.page.title, 80)}"`);
+    parts.push(
+      `pageTitle="${truncate(attachment.captureContext.page.title, 80)}"`,
+    );
   }
   if (attachment.asset?.publicUrl) {
     parts.push(`image=${attachment.asset.publicUrl}`);

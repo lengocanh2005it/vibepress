@@ -10,6 +10,7 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
   wpBlocksToJson,
+  wpBlocksToJsonWithSourceRefs,
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
@@ -550,7 +551,14 @@ export class PlannerService {
           const rawMarkup = templateSource;
           if (!rawMarkup) return undefined;
           const nodes = this.styleResolver.resolve(
-            wpBlocksToJson(rawMarkup),
+            wpBlocksToJsonWithSourceRefs({
+              markup: rawMarkup,
+              templateName: componentPlan.templateName,
+              sourceFile: inferFseSourceFile(
+                componentPlan.templateName,
+                componentPlan.type,
+              ),
+            }),
             tokens,
           );
           const draft = mapWpNodesToDraftSections(nodes);
@@ -1610,6 +1618,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
     const mergedBase = {
       ...section,
+      ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
+      ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
       ...(draft.background ? { background: draft.background } : {}),
       ...(draft.textColor ? { textColor: draft.textColor } : {}),
       ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
@@ -1644,9 +1654,18 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         } as SectionPlan;
       }
       case 'card-grid': {
-        const cardGridDraft = draft as typeof section;
+        const cardGridDraft = draft as any;
+        const cardGridSection = section as any;
+        // The mapper (draft) is the authoritative source for card content.
+        // If the AI returned fewer cards than the draft, restore the full list —
+        // the AI tends to truncate long card arrays to save tokens.
+        const draftCards: unknown[] = cardGridDraft.cards ?? [];
+        const aiCards: unknown[] = cardGridSection.cards ?? [];
+        const mergedCards =
+          draftCards.length > aiCards.length ? draftCards : aiCards;
         return {
           ...mergedBase,
+          cards: mergedCards,
           ...(cardGridDraft.columnWidths
             ? { columnWidths: cardGridDraft.columnWidths }
             : {}),
@@ -2081,4 +2100,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .replace(/^\.\/+/, '')
       .toLowerCase();
   }
+}
+
+function inferFseSourceFile(
+  templateName: string,
+  componentType?: 'page' | 'partial',
+): string {
+  const normalized = templateName.endsWith('.html')
+    ? templateName
+    : `${templateName}.html`;
+  if (normalized.includes('/')) return normalized;
+  return `${componentType === 'partial' ? 'parts' : 'templates'}/${normalized}`;
 }

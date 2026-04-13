@@ -1,3 +1,5 @@
+import { buildSourceNodeId, type SourceRef } from './source-node-id.util.js';
+
 /**
  * Converts WordPress block markup into a compact JSON tree.
  * This replaces passing raw HTML to the AI — instead AI receives structured data
@@ -6,6 +8,7 @@
 
 export interface WpNode {
   block: string;
+  sourceRef?: SourceRef;
   params?: Record<string, any>;
   // Extracted content from inner HTML
   text?: string;
@@ -46,6 +49,18 @@ export interface WpNode {
  */
 export function wpBlocksToJson(markup: string): WpNode[] {
   return parseBlocks(markup.trim());
+}
+
+export function wpBlocksToJsonWithSourceRefs(input: {
+  markup: string;
+  templateName: string;
+  sourceFile: string;
+}): WpNode[] {
+  const nodes = parseBlocks(input.markup.trim());
+  return annotateSourceRefs(nodes, {
+    templateName: input.templateName,
+    sourceFile: input.sourceFile,
+  });
 }
 
 /**
@@ -175,6 +190,54 @@ function compactBoxSpacing(
   ) as NonNullable<WpNode['padding']>;
 
   return Object.keys(compacted).length > 0 ? compacted : undefined;
+}
+
+function annotateSourceRefs(
+  nodes: WpNode[],
+  context: {
+    templateName: string;
+    sourceFile: string;
+    topLevelIndex?: number;
+    parentSourceNodeId?: string;
+    childPath?: number[];
+  },
+): WpNode[] {
+  return nodes.map((node, index) => {
+    const topLevelIndex =
+      typeof context.topLevelIndex === 'number' ? context.topLevelIndex : index;
+    const childPath =
+      typeof context.topLevelIndex === 'number'
+        ? [...(context.childPath ?? []), index]
+        : [];
+    const sourceRef: SourceRef = {
+      sourceNodeId: buildSourceNodeId({
+        templateName: context.templateName,
+        blockName: node.block,
+        topLevelIndex,
+        childPath,
+      }),
+      templateName: context.templateName,
+      sourceFile: context.sourceFile,
+      topLevelIndex,
+      parentSourceNodeId: context.parentSourceNodeId,
+      blockName: node.block,
+    };
+
+    return {
+      ...node,
+      sourceRef,
+      ...(node.children?.length
+        ? {
+            children: annotateSourceRefs(node.children, {
+              ...context,
+              topLevelIndex,
+              parentSourceNodeId: sourceRef.sourceNodeId,
+              childPath,
+            }),
+          }
+        : {}),
+    };
+  });
 }
 
 function parseBlocks(markup: string): WpNode[] {

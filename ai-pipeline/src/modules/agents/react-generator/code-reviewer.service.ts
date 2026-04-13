@@ -4,7 +4,10 @@ import OpenAI from 'openai';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { OPENAI_CLIENT } from '../../../common/providers/openai/openai.provider.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
-import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
+import {
+  AiLoggerService,
+  type AttemptLog,
+} from '../../ai-logger/ai-logger.service.js';
 import {
   ValidatorService,
   type CodeValidationContext,
@@ -113,6 +116,9 @@ export class CodeReviewerService {
     private readonly aiLogger?: AiLoggerService,
   ) {}
 
+  private readonly selfFixSystemPrompt =
+    'You are a React/TypeScript expert. Fix the exact validation or targeted UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code, no explanation.';
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   /**
@@ -146,7 +152,7 @@ export class CodeReviewerService {
     let code = '';
     let attempts = 0;
     let lastError: string | undefined;
-    const cotAttempts: any[] = [];
+    const cotAttempts: AttemptLog[] = [];
     // Set when both AI codegen AND deterministic fallback from the pre-computed
     // plan have failed. Signals D2 to generate a fresh AI visual plan instead
     // of running direct-AI with the same broken plan context.
@@ -248,40 +254,21 @@ export class CodeReviewerService {
         });
         attempts += planned.attemptsUsed;
         code = planned.code;
+        this.appendCotAttempts(cotAttempts, planned.cotAttempts);
         if (planned.isValid) {
           this.logger.log(
             `[reviewer] "${componentName}" ✓ AI codegen succeeded using reviewed visual plan`,
           );
 
-          // Log COT process before returning
-          if (this.aiLogger && jobId) {
-            cotAttempts.push({
-              attemptNumber: cotAttempts.length + 1,
-              response: planned.lastRawOutput?.substring(0, 500) || '',
-              tokensUsed: {
-                input: 0,
-                output: 0,
-                total: 0,
-              },
-              timestamp: new Date().toISOString(),
-              success: true,
-              validationFeedback: 'Pre-computed visual plan codegen succeeded',
-            });
-
-            await this.aiLogger.logCotProcess({
-              jobId,
-              step: 'code-generation',
-              componentName,
-              model: modelName,
-              startTime,
-              endTime: new Date().toISOString(),
-              totalAttempts: cotAttempts.length,
-              attempts: cotAttempts,
-              finalSuccess: true,
-              totalTokenCost: 0,
-              totalTokens: { input: 0, output: 0 },
-            });
-          }
+          await this.logCotProcessIfEnabled({
+            jobId,
+            step: 'code-generation',
+            componentName,
+            model: modelName,
+            startTime,
+            attempts: cotAttempts,
+            finalSuccess: true,
+          });
 
           return {
             component: {
@@ -312,32 +299,28 @@ export class CodeReviewerService {
           'pre-computed plan',
         );
         if (deterministic.isValid) {
-          // Log COT process before returning
-          if (this.aiLogger && jobId) {
-            cotAttempts.push({
-              attemptNumber: cotAttempts.length + 1,
-              response: 'Deterministic fallback (rule-based generation)',
-              tokensUsed: { input: 0, output: 0, total: 0 },
-              timestamp: new Date().toISOString(),
-              success: true,
-              validationFeedback:
-                'Deterministic pre-computed plan codegen succeeded',
-            });
-
-            await this.aiLogger.logCotProcess({
-              jobId,
-              step: 'code-generation',
-              componentName,
-              model: modelName,
-              startTime,
-              endTime: new Date().toISOString(),
-              totalAttempts: cotAttempts.length,
-              attempts: cotAttempts,
-              finalSuccess: true,
-              totalTokenCost: 0,
-              totalTokens: { input: 0, output: 0 },
-            });
-          }
+          cotAttempts.push({
+            attemptNumber: cotAttempts.length + 1,
+            promptSent: {
+              system: 'deterministic-fallback',
+              user: 'rule-based generation fallback',
+            },
+            response: 'Deterministic fallback (rule-based generation)',
+            tokensUsed: { input: 0, output: 0, total: 0 },
+            timestamp: new Date().toISOString(),
+            success: true,
+            validationFeedback:
+              'Deterministic pre-computed plan codegen succeeded',
+          });
+          await this.logCotProcessIfEnabled({
+            jobId,
+            step: 'code-generation',
+            componentName,
+            model: modelName,
+            startTime,
+            attempts: cotAttempts,
+            finalSuccess: true,
+          });
 
           return {
             component: {
@@ -444,42 +427,21 @@ export class CodeReviewerService {
             });
             attempts += planned.attemptsUsed;
             code = planned.code;
+            this.appendCotAttempts(cotAttempts, planned.cotAttempts);
             if (planned.isValid) {
               this.logger.log(
                 `[reviewer] "${componentName}" ✓ AI codegen succeeded using AI-generated visual plan`,
               );
 
-              // Log COT process before returning
-              if (this.aiLogger && jobId) {
-                cotAttempts.push({
-                  attemptNumber: cotAttempts.length + 1,
-                  response: (planned.lastRawOutput || '').substring(0, 500),
-                  tokensUsed: {
-                    input: 0,
-                    output: 0,
-                    total: 0,
-                  },
-                  timestamp: new Date().toISOString(),
-                  success: true,
-                  validationFeedback:
-                    'AI visual plan + codegen succeeded on attempt ' +
-                    (cotAttempts.length + 1),
-                });
-
-                await this.aiLogger.logCotProcess({
-                  jobId,
-                  step: 'code-generation',
-                  componentName,
-                  model: modelName,
-                  startTime,
-                  endTime: new Date().toISOString(),
-                  totalAttempts: cotAttempts.length,
-                  attempts: cotAttempts,
-                  finalSuccess: true,
-                  totalTokenCost: 0,
-                  totalTokens: { input: 0, output: 0 },
-                });
-              }
+              await this.logCotProcessIfEnabled({
+                jobId,
+                step: 'code-generation',
+                componentName,
+                model: modelName,
+                startTime,
+                attempts: cotAttempts,
+                finalSuccess: true,
+              });
 
               return {
                 component: { name: componentName, filePath: '', code },
@@ -566,41 +528,22 @@ export class CodeReviewerService {
       attempts += direct.attemptsUsed;
       code = direct.code;
       lastError = direct.lastError ?? lastError;
+      this.appendCotAttempts(cotAttempts, direct.cotAttempts);
 
       if (direct.isValid) {
         this.logger.log(
           `[reviewer] "${componentName}" ✓ AI codegen succeeded using direct template prompt`,
         );
 
-        // Log COT process before returning
-        if (this.aiLogger && jobId) {
-          cotAttempts.push({
-            attemptNumber: cotAttempts.length + 1,
-            response: (direct.lastRawOutput || '').substring(0, 500),
-            tokensUsed: {
-              input: 0,
-              output: 0,
-              total: 0,
-            },
-            timestamp: new Date().toISOString(),
-            success: true,
-            validationFeedback: 'Direct AI TSX generation succeeded',
-          });
-
-          await this.aiLogger.logCotProcess({
-            jobId,
-            step: 'code-generation',
-            componentName,
-            model: modelName,
-            startTime,
-            endTime: new Date().toISOString(),
-            totalAttempts: cotAttempts.length,
-            attempts: cotAttempts,
-            finalSuccess: true,
-            totalTokenCost: 0,
-            totalTokens: { input: 0, output: 0 },
-          });
-        }
+        await this.logCotProcessIfEnabled({
+          jobId,
+          step: 'code-generation',
+          componentName,
+          model: modelName,
+          startTime,
+          attempts: cotAttempts,
+          finalSuccess: true,
+        });
 
         return {
           component: { name: componentName, filePath: '', code },
@@ -617,13 +560,33 @@ export class CodeReviewerService {
         `[reviewer:fix-agent] repairing "${componentName}": ${lastError}`,
       );
       try {
-        code = await this.selfFix(
+        const fixResult = await this.selfFixDetailed(
           fixAgentModel,
           code,
           lastError!,
           logPath,
           componentName,
         );
+        code = fixResult.code;
+        cotAttempts.push({
+          attemptNumber: cotAttempts.length + 1,
+          promptSent: {
+            system: fixResult.systemPrompt,
+            user: fixResult.userPrompt,
+          },
+          response: fixResult.rawResponse,
+          tokensUsed: {
+            input: fixResult.inputTokens,
+            output: fixResult.outputTokens,
+            total: fixResult.inputTokens + fixResult.outputTokens,
+            ...(typeof fixResult.cachedTokens === 'number'
+              ? { cached: fixResult.cachedTokens }
+              : {}),
+          },
+          timestamp: new Date().toISOString(),
+          success: false,
+          validationFeedback: 'Fix Agent produced a repair candidate',
+        });
         const check = this.validator.checkCodeStructure(
           code,
           validationContext,
@@ -636,35 +599,21 @@ export class CodeReviewerService {
             `[reviewer:fix-agent] "${componentName}" ✓ repaired`,
           );
 
-          // Log COT process before returning
-          if (this.aiLogger && jobId) {
-            cotAttempts.push({
-              attemptNumber: cotAttempts.length + 1,
-              response: 'Fix Agent repair successful',
-              tokensUsed: {
-                input: 0,
-                output: 0,
-                total: 0,
-              },
-              timestamp: new Date().toISOString(),
-              success: true,
-              validationFeedback: 'Fix Agent repair resolved validation errors',
-            });
-
-            await this.aiLogger.logCotProcess({
-              jobId,
-              step: 'code-generation',
-              componentName,
-              model: fixAgentModel,
-              startTime,
-              endTime: new Date().toISOString(),
-              totalAttempts: cotAttempts.length,
-              attempts: cotAttempts,
-              finalSuccess: true,
-              totalTokenCost: 0,
-              totalTokens: { input: 0, output: 0 },
-            });
-          }
+          cotAttempts[cotAttempts.length - 1] = {
+            ...cotAttempts[cotAttempts.length - 1],
+            success: true,
+            error: undefined,
+            validationFeedback: 'Fix Agent repair resolved validation errors',
+          };
+          await this.logCotProcessIfEnabled({
+            jobId,
+            step: 'code-generation',
+            componentName,
+            model: fixAgentModel,
+            startTime,
+            attempts: cotAttempts,
+            finalSuccess: true,
+          });
 
           return {
             component: { name: componentName, filePath: '', code },
@@ -695,31 +644,28 @@ export class CodeReviewerService {
     }
 
     // All retries exhausted — log final failure
-    if (this.aiLogger && jobId) {
-      cotAttempts.push({
-        attemptNumber: cotAttempts.length + 1,
-        response: `All retry paths exhausted after ${MAX_ROUNDS} rounds`,
-        tokensUsed: { input: 0, output: 0, total: 0 },
-        timestamp: new Date().toISOString(),
-        success: false,
-        error: lastError,
-      });
-
-      await this.aiLogger.logCotProcess({
-        jobId,
-        step: 'code-generation',
-        componentName,
-        model: modelName,
-        startTime,
-        endTime: new Date().toISOString(),
-        totalAttempts: cotAttempts.length,
-        attempts: cotAttempts,
-        finalSuccess: false,
-        totalTokenCost: 0,
-        totalTokens: { input: 0, output: 0 },
-        finalError: lastError,
-      });
-    }
+    cotAttempts.push({
+      attemptNumber: cotAttempts.length + 1,
+      promptSent: {
+        system: 'exhausted-retries',
+        user: 'all retry paths exhausted',
+      },
+      response: `All retry paths exhausted after ${MAX_ROUNDS} rounds`,
+      tokensUsed: { input: 0, output: 0, total: 0 },
+      timestamp: new Date().toISOString(),
+      success: false,
+      error: lastError,
+    });
+    await this.logCotProcessIfEnabled({
+      jobId,
+      step: 'code-generation',
+      componentName,
+      model: modelName,
+      startTime,
+      attempts: cotAttempts,
+      finalSuccess: false,
+      finalError: lastError,
+    });
 
     throw new Error(
       `[reviewer] "${componentName}" failed after ${MAX_ROUNDS} rounds + fix-agent: ${lastError}`,
@@ -751,7 +697,7 @@ export class CodeReviewerService {
     } = input;
 
     const startTime = new Date().toISOString();
-    const cotAttempts: any[] = [];
+    const cotAttempts: AttemptLog[] = [];
     const promptContext = this.buildPromptContext(componentPlan, undefined, {
       includeVisualPlan: !preferDirectAi,
     });
@@ -785,6 +731,7 @@ export class CodeReviewerService {
         text: raw,
         inputTokens: inTok,
         outputTokens: outTok,
+        cachedTokens,
       } = await this.generateWithRetry(
         modelName,
         systemPrompt,
@@ -800,6 +747,26 @@ export class CodeReviewerService {
 
       const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.fixedCode) code = check.fixedCode;
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        promptSent: {
+          system: systemPrompt,
+          user: userPrompt,
+        },
+        response: raw,
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
+        },
+        timestamp: new Date().toISOString(),
+        success: check.isValid,
+        error: check.isValid ? undefined : check.error,
+        validationFeedback: check.isValid
+          ? 'Section generation succeeded'
+          : undefined,
+      });
       if (check.isValid) {
         isValid = true;
         break;
@@ -817,13 +784,33 @@ export class CodeReviewerService {
 
     if (!isValid && lastError) {
       try {
-        code = await this.selfFix(
+        const fixResult = await this.selfFixDetailed(
           fixAgentModel,
           code,
           lastError,
           logPath,
           sectionName,
         );
+        code = fixResult.code;
+        cotAttempts.push({
+          attemptNumber: cotAttempts.length + 1,
+          promptSent: {
+            system: fixResult.systemPrompt,
+            user: fixResult.userPrompt,
+          },
+          response: fixResult.rawResponse,
+          tokensUsed: {
+            input: fixResult.inputTokens,
+            output: fixResult.outputTokens,
+            total: fixResult.inputTokens + fixResult.outputTokens,
+            ...(typeof fixResult.cachedTokens === 'number'
+              ? { cached: fixResult.cachedTokens }
+              : {}),
+          },
+          timestamp: new Date().toISOString(),
+          success: false,
+          validationFeedback: 'Section fix agent produced a repair candidate',
+        });
         const check = this.validator.checkCodeStructure(
           code,
           validationContext,
@@ -831,6 +818,12 @@ export class CodeReviewerService {
         if (check.fixedCode) code = check.fixedCode;
         if (check.isValid) {
           isValid = true;
+          cotAttempts[cotAttempts.length - 1] = {
+            ...cotAttempts[cotAttempts.length - 1],
+            success: true,
+            error: undefined,
+            validationFeedback: 'Section fix agent resolved validation errors',
+          };
           await this.log(
             logPath,
             `[reviewer:fix-agent] section "${sectionName}" ✓ repaired`,
@@ -842,63 +835,43 @@ export class CodeReviewerService {
     }
 
     if (!isValid) {
-      // Log section generation failure
-      if (this.aiLogger && jobId) {
-        cotAttempts.push({
-          attemptNumber: cotAttempts.length + 1,
-          response: `Section generation failed after all attempts`,
-          tokensUsed: { input: 0, output: 0, total: 0 },
-          timestamp: new Date().toISOString(),
-          success: false,
-          error: lastError,
-        });
-
-        await this.aiLogger.logCotProcess({
-          jobId,
-          step: 'section-generation',
-          componentName: sectionName,
-          model: modelName,
-          startTime,
-          endTime: new Date().toISOString(),
-          totalAttempts: cotAttempts.length,
-          attempts: cotAttempts,
-          finalSuccess: false,
-          totalTokenCost: 0,
-          totalTokens: { input: 0, output: 0 },
-          finalError: lastError,
-        });
-      }
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        promptSent: {
+          system: 'section-generation-failed',
+          user: 'section generation exhausted all attempts',
+        },
+        response: `Section generation failed after all attempts`,
+        tokensUsed: { input: 0, output: 0, total: 0 },
+        timestamp: new Date().toISOString(),
+        success: false,
+        error: lastError,
+      });
+      await this.logCotProcessIfEnabled({
+        jobId,
+        step: 'section-generation',
+        componentName: sectionName,
+        model: modelName,
+        startTime,
+        attempts: cotAttempts,
+        finalSuccess: false,
+        finalError: lastError,
+      });
 
       throw new Error(
         `[reviewer] Section "${sectionName}" failed after 3 attempts: ${lastError}`,
       );
     }
 
-    // Log successful section generation
-    if (this.aiLogger && jobId) {
-      cotAttempts.push({
-        attemptNumber: cotAttempts.length + 1,
-        response: 'Section generation succeeded',
-        tokensUsed: { input: 0, output: 0, total: 0 },
-        timestamp: new Date().toISOString(),
-        success: true,
-        validationFeedback: 'Section code passed validation',
-      });
-
-      await this.aiLogger.logCotProcess({
-        jobId,
-        step: 'section-generation',
-        componentName: sectionName,
-        model: modelName,
-        startTime,
-        endTime: new Date().toISOString(),
-        totalAttempts: cotAttempts.length,
-        attempts: cotAttempts,
-        finalSuccess: true,
-        totalTokenCost: 0,
-        totalTokens: { input: 0, output: 0 },
-      });
-    }
+    await this.logCotProcessIfEnabled({
+      jobId,
+      step: 'section-generation',
+      componentName: sectionName,
+      model: modelName,
+      startTime,
+      attempts: cotAttempts,
+      finalSuccess: true,
+    });
 
     return { name: sectionName, filePath: '', code, isSubComponent: true };
   }
@@ -1042,6 +1015,7 @@ export class CodeReviewerService {
     isValid: boolean;
     attemptsUsed: number;
     lastError?: string;
+    cotAttempts: AttemptLog[];
   }> {
     const {
       componentName,
@@ -1073,6 +1047,7 @@ export class CodeReviewerService {
 
     let lastFragment = '';
     let lastError = '';
+    const cotAttempts: AttemptLog[] = [];
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       const userPrompt = buildFragmentPrompt({
@@ -1086,7 +1061,12 @@ export class CodeReviewerService {
         previousFragment: attempt > 1 ? lastFragment : undefined,
       });
 
-      const { text: raw } = await this.generateWithRetry(
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedTokens,
+      } = await this.generateWithRetry(
         modelName,
         FRAGMENT_SYSTEM_PROMPT,
         userPrompt,
@@ -1110,13 +1090,33 @@ export class CodeReviewerService {
         validationContext,
       );
       const code = check.fixedCode ?? sanitized;
+      cotAttempts.push({
+        attemptNumber: attempt,
+        promptSent: {
+          system: FRAGMENT_SYSTEM_PROMPT,
+          user: userPrompt,
+        },
+        response: raw,
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
+        },
+        timestamp: new Date().toISOString(),
+        success: check.isValid,
+        error: check.isValid ? undefined : check.error,
+        validationFeedback: check.isValid
+          ? 'frame-fragment generation succeeded'
+          : undefined,
+      });
 
       if (check.isValid) {
         await this.log(
           logPath,
           `[reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 ✓`,
         );
-        return { code, isValid: true, attemptsUsed: attempt };
+        return { code, isValid: true, attemptsUsed: attempt, cotAttempts };
       }
 
       // Prefer TypeScript compiler diagnostics over generic validator message
@@ -1138,7 +1138,13 @@ export class CodeReviewerService {
       );
     }
 
-    return { code: '', isValid: false, attemptsUsed: 2, lastError };
+    return {
+      code: '',
+      isValid: false,
+      attemptsUsed: 2,
+      lastError,
+      cotAttempts,
+    };
   }
 
   private async generateComponentWithPlan(input: {
@@ -1213,7 +1219,7 @@ export class CodeReviewerService {
           isValid: true,
           attemptsUsed: frameResult.attemptsUsed,
           lastRawOutput: '',
-          cotAttempts: [],
+          cotAttempts: frameResult.cotAttempts,
         };
       }
       lastError = frameResult.lastError;
@@ -1237,13 +1243,20 @@ export class CodeReviewerService {
         componentPlan,
         editRequestContextNote,
         attempt > 1
-          ? `Previous attempt failed: ${lastError}\n\nYour previous output:\n\`\`\`tsx\n${code}\n\`\`\`\nFix ONLY the error above.`
+          ? this.buildRetryAppendix({
+              componentName,
+              code,
+              lastError,
+              validationContext,
+              componentPlan,
+            })
           : undefined,
       );
       const {
         text: raw,
         inputTokens: inTok,
         outputTokens: outTok,
+        cachedTokens,
       } = await this.generateWithRetry(
         modelName,
         systemPrompt,
@@ -1266,7 +1279,12 @@ export class CodeReviewerService {
           user: userPromptForAttempt,
         },
         response: raw,
-        tokensUsed: { input: inTok, output: outTok, total: inTok + outTok },
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
+        },
         timestamp: new Date().toISOString(),
         success: check.isValid,
         error: check.isValid ? undefined : check.error,
@@ -1312,14 +1330,14 @@ export class CodeReviewerService {
           );
 
           try {
-            const fixed = await this.selfFix(
+            const fixedResult = await this.selfFixDetailed(
               modelName,
               code,
               `${reason}: ${lastError}`,
               logPath,
               `${componentName}:${logLabel}:autofix`,
             );
-            code = fixed;
+            code = fixedResult.code;
 
             const finalCheck = this.validator.checkCodeStructure(
               code,
@@ -1338,11 +1356,18 @@ export class CodeReviewerService {
               cotAttempts.push({
                 attemptNumber: cotAttempts.length + 1,
                 promptSent: {
-                  system: this.componentSystemPrompt,
-                  user: userPromptForAttempt,
+                  system: fixedResult.systemPrompt,
+                  user: fixedResult.userPrompt,
                 },
-                response: raw,
-                tokensUsed: { input: 0, output: 0, total: 0 },
+                response: fixedResult.rawResponse,
+                tokensUsed: {
+                  input: fixedResult.inputTokens,
+                  output: fixedResult.outputTokens,
+                  total: fixedResult.inputTokens + fixedResult.outputTokens,
+                  ...(typeof fixedResult.cachedTokens === 'number'
+                    ? { cached: fixedResult.cachedTokens }
+                    : {}),
+                },
                 timestamp: new Date().toISOString(),
                 success: true,
                 validationFeedback: `autofix resolved: ${reason}`,
@@ -1442,10 +1467,39 @@ export class CodeReviewerService {
     label?: string,
     visionImageUrls: string[] = [],
   ): Promise<string> {
+    const result = await this.selfFixDetailed(
+      model,
+      brokenCode,
+      error,
+      logPath,
+      label,
+      visionImageUrls,
+    );
+    return result.code;
+  }
+
+  private async selfFixDetailed(
+    model: string,
+    brokenCode: string,
+    error: string,
+    logPath?: string,
+    label?: string,
+    visionImageUrls: string[] = [],
+  ): Promise<{
+    code: string;
+    systemPrompt: string;
+    userPrompt: string;
+    rawResponse: string;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens?: number;
+  }> {
     const normalizedVisionUrls = visionImageUrls
       .map((value) => value.trim())
       .filter(Boolean)
       .slice(0, 3);
+
+    const userPrompt = `This component has a validation error or targeted edit request:\n${error}\n\nFix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
 
     if (
       normalizedVisionUrls.length > 0 &&
@@ -1460,7 +1514,7 @@ export class CodeReviewerService {
             {
               role: 'system',
               content:
-                'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code. Return ONLY the corrected TSX code.',
+                'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
             },
             {
               role: 'user',
@@ -1469,7 +1523,7 @@ export class CodeReviewerService {
                   type: 'text',
                   text:
                     `This component has a validation or targeted edit request:\n${error}\n\n` +
-                    `Fix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                    `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
                 },
                 ...normalizedVisionUrls.map((url) => ({
                   type: 'image_url' as const,
@@ -1480,7 +1534,18 @@ export class CodeReviewerService {
           ],
         });
         const text = response.choices[0]?.message?.content;
-        if (text) return this.postProcessCode(text);
+        if (text) {
+          const usage = response.usage;
+          return {
+            code: this.postProcessCode(text),
+            systemPrompt:
+              'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
+            userPrompt,
+            rawResponse: text,
+            inputTokens: usage?.prompt_tokens ?? 0,
+            outputTokens: usage?.completion_tokens ?? 0,
+          };
+        }
       } catch (err: any) {
         this.logger.warn(
           `[reviewer] Vision self-fix failed for "${label ?? model}" (${err?.message ?? 'unknown error'}) — falling back to text-only repair`,
@@ -1492,15 +1557,97 @@ export class CodeReviewerService {
       }
     }
 
-    const { text: raw } = await this.generateWithRetry(
+    const {
+      text: raw,
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+    } = await this.generateWithRetry(
       model,
-      'You are a React/TypeScript expert. Fix the exact error in the component. Return ONLY the corrected TSX code, no explanation.',
-      `This component has a validation error: ${error}\n\nFix it and return the complete corrected code:\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+      this.selfFixSystemPrompt,
+      userPrompt,
       3,
       logPath,
       label ? `${label}:fix` : undefined,
     );
-    return this.postProcessCode(raw);
+    return {
+      code: this.postProcessCode(raw),
+      systemPrompt: this.selfFixSystemPrompt,
+      userPrompt,
+      rawResponse: raw,
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+    };
+  }
+
+  private appendCotAttempts(
+    target: AttemptLog[],
+    attempts: AttemptLog[],
+  ): void {
+    for (const attempt of attempts) {
+      target.push({
+        ...attempt,
+        attemptNumber: target.length + 1,
+      });
+    }
+  }
+
+  private summarizeCotAttempts(attempts: AttemptLog[]): {
+    input: number;
+    output: number;
+    totalCost: number;
+  } {
+    return attempts.reduce(
+      (acc, attempt) => {
+        acc.input += attempt.tokensUsed.input;
+        acc.output += attempt.tokensUsed.output;
+        return acc;
+      },
+      { input: 0, output: 0, totalCost: 0 },
+    );
+  }
+
+  private async logCotProcessIfEnabled(input: {
+    jobId?: string;
+    step: 'code-generation' | 'section-generation';
+    componentName: string;
+    model: string;
+    startTime: string;
+    attempts: AttemptLog[];
+    finalSuccess: boolean;
+    finalError?: string;
+  }): Promise<void> {
+    const {
+      jobId,
+      step,
+      componentName,
+      model,
+      startTime,
+      attempts,
+      finalSuccess,
+      finalError,
+    } = input;
+    if (!this.aiLogger || !jobId) return;
+
+    const totals = this.summarizeCotAttempts(attempts);
+    await this.aiLogger.logCotProcess({
+      jobId,
+      step,
+      componentName,
+      model,
+      startTime,
+      endTime: new Date().toISOString(),
+      totalAttempts: attempts.length,
+      attempts,
+      finalSuccess,
+      totalTokenCost: totals.totalCost,
+      totalTokens: {
+        input: totals.input,
+        output: totals.output,
+      },
+      finalError,
+    });
   }
 
   private canUseOpenAiVisionModel(modelName: string): boolean {
@@ -1526,13 +1673,19 @@ export class CodeReviewerService {
     maxRetries = 5,
     logPath?: string,
     label?: string,
-  ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  ): Promise<{
+    text: string;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens?: number;
+  }> {
     let delay = 30_000;
     let maxTokens = this.llmFactory.getMaxTokens();
     let lastTruncatedResult: {
       text: string;
       inputTokens: number;
       outputTokens: number;
+      cachedTokens?: number;
     } | null = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -1552,11 +1705,21 @@ export class CodeReviewerService {
             label ?? model,
           );
         }
+        if (
+          typeof result.cachedTokens === 'number' &&
+          result.cachedTokens > 0
+        ) {
+          await this.log(
+            logPath,
+            `[llm-cache] ${label ?? model} cachedTokens=${result.cachedTokens}`,
+          );
+        }
         if (result.truncated) {
           lastTruncatedResult = {
             text: result.text,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
+            cachedTokens: result.cachedTokens,
           };
           const nextMaxTokens = Math.max(
             maxTokens + 1,
@@ -1584,6 +1747,7 @@ export class CodeReviewerService {
           text: result.text,
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
+          cachedTokens: result.cachedTokens,
         };
       } catch (err: any) {
         const isRateLimit = err?.status === 429;
@@ -1610,7 +1774,223 @@ export class CodeReviewerService {
         }
       }
     }
-    return { text: '', inputTokens: 0, outputTokens: 0 };
+    return { text: '', inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  }
+
+  private buildRetryAppendix(input: {
+    componentName: string;
+    code: string;
+    lastError?: string;
+    validationContext: CodeValidationContext;
+    componentPlan?: ComponentPromptContext;
+  }): string {
+    const compactError = this.compactRetryError(input.lastError);
+    const failingSnippet = this.extractFailingSnippet(
+      input.code,
+      input.lastError,
+      input.componentName,
+    );
+    const fixInstructions = this.buildTargetedFixInstructions(
+      input.lastError,
+      input.componentPlan,
+      input.validationContext,
+    );
+
+    const lines = [
+      '## RETRY MODE — DELTA ONLY',
+      'Fix ONLY the failing area described below. Preserve unrelated layout and code.',
+      '',
+      '### Error',
+      compactError,
+    ];
+
+    if (failingSnippet) {
+      lines.push('');
+      lines.push('### Failing snippet');
+      lines.push('```tsx');
+      lines.push(failingSnippet);
+      lines.push('```');
+    }
+
+    if (fixInstructions.length > 0) {
+      lines.push('');
+      lines.push('### Fix instructions');
+      for (const instruction of fixInstructions) {
+        lines.push(`- ${instruction}`);
+      }
+    }
+
+    lines.push('');
+    lines.push(
+      'Return the complete corrected component file, but only change code necessary to fix the failure above.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private compactRetryError(error?: string): string {
+    if (!error) return 'Unknown validation error.';
+    const compact = error.replace(/\s+/g, ' ').trim();
+    return compact.length > 700 ? `${compact.slice(0, 700)}...` : compact;
+  }
+
+  private extractFailingSnippet(
+    code: string,
+    error: string | undefined,
+    componentName: string,
+  ): string {
+    if (!code.trim()) return '';
+
+    const tsErrors = this.validator.extractTypeScriptErrors(
+      code,
+      componentName,
+    );
+    const lineNumbers = new Set<number>();
+
+    for (const source of [error ?? '', ...tsErrors]) {
+      for (const match of source.matchAll(/:(\d+):\d+/g)) {
+        const line = Number(match[1]);
+        if (Number.isFinite(line) && line > 0) lineNumbers.add(line);
+      }
+    }
+
+    const lines = code.split('\n');
+
+    if (lineNumbers.size > 0) {
+      const ordered = [...lineNumbers].sort((a, b) => a - b).slice(0, 2);
+      return ordered
+        .map((line) => this.sliceCodeWindow(lines, line, 10))
+        .join('\n...\n');
+    }
+
+    const patterns = [
+      /page\.(author|categories|tags|date|excerpt|comments)\b/,
+      /pageDetail\.(author|categories|tags|date|excerpt|comments)\b/,
+      /href="#"/,
+      /to="#"/,
+      /\/author\//,
+      /menus\.map\(/,
+    ];
+
+    for (const pattern of patterns) {
+      const idx = lines.findIndex((line) => pattern.test(line));
+      if (idx !== -1) return this.sliceCodeWindow(lines, idx + 1, 8);
+    }
+
+    return this.sliceCodeWindow(lines, 1, 20);
+  }
+
+  private sliceCodeWindow(
+    lines: string[],
+    centerLine: number,
+    radius: number,
+  ): string {
+    const start = Math.max(1, centerLine - radius);
+    const end = Math.min(lines.length, centerLine + radius);
+    return lines
+      .slice(start - 1, end)
+      .map((line, index) => `${String(start + index).padStart(4)}: ${line}`)
+      .join('\n');
+  }
+
+  private buildTargetedFixInstructions(
+    error: string | undefined,
+    componentPlan: ComponentPromptContext | undefined,
+    validationContext: CodeValidationContext,
+  ): string[] {
+    const compact = (error ?? '').toLowerCase();
+    const instructions = [
+      'Do not redesign or rewrite unrelated sections.',
+      'Keep the existing approved route/data contract intact.',
+    ];
+
+    if (
+      /expected corresponding|jsx|parse|closing tag|unterminated/.test(compact)
+    ) {
+      instructions.push(
+        'Fix JSX/tag balancing only in the failing area. Every opened JSX tag must close in the correct order.',
+      );
+    }
+
+    if (/page detail contract|page\./.test(compact)) {
+      instructions.push(
+        'Use only canonical Page fields: id, title, content, slug, parentId, menuOrder, template, featuredImage.',
+      );
+      instructions.push(
+        'Remove any page usage of author, categories, tags, date, excerpt, or comments.',
+      );
+    }
+
+    if (/shared chrome contract|menus/.test(compact)) {
+      instructions.push(
+        'Do not hardcode nav/footer links. If this component declares menus, render them from `/api/menus` only.',
+      );
+    }
+
+    if (
+      /card-grid|card grid|expected card headings|approved cards|missing:/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Preserve every approved card item in the affected card-grid; do not collapse multi-row grids down to a single row.',
+      );
+      instructions.push(
+        'Keep all approved card headings and bodies from the visual plan/template source, including lower rows and later items.',
+      );
+    }
+
+    if (
+      /tracked wrapper|data-vp-section-key|section boundaries can collapse|merge incorrectly/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Restore a dedicated top-level JSX wrapper for every approved tracked section and keep the exact `data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, and `data-vp-section-component` attributes on that wrapper.',
+      );
+      instructions.push(
+        'Do not merge two approved sections into one shared hero/grid wrapper. If text and image belong to different approved sections, render them in separate wrappers in the original order.',
+      );
+    }
+
+    if (
+      /duplicated route prefix|extra `\/page` segment|\/page\/page\//.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'For menu items from `/api/menus`, use `item.url` directly for internal `<Link to={...}>` navigation.',
+      );
+      instructions.push(
+        'Do not prepend `/page` or `/post` to a menu URL that already contains the canonical route path.',
+      );
+    }
+
+    if (/author/.test(compact) && /route|link/.test(compact)) {
+      instructions.push(
+        'Do not create author archive links unless the contract explicitly approves that route.',
+      );
+    }
+
+    if (/no jsx return found/.test(compact)) {
+      instructions.push(
+        'Return a complete TSX component file with a valid JSX return block.',
+      );
+    }
+
+    if (componentPlan?.type === 'page') {
+      instructions.push(
+        'Do not reintroduce shared header/footer/navigation chrome inside this page component.',
+      );
+    }
+
+    if (validationContext.dataNeeds?.includes('pageDetail')) {
+      instructions.push(
+        'The main record for this component must stay on the page-detail contract, not a posts contract.',
+      );
+    }
+
+    return [...new Set(instructions)];
   }
 
   // ── Code post-processors ──────────────────────────────────────────────────

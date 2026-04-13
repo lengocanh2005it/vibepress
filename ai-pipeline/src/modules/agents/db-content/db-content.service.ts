@@ -9,6 +9,9 @@ import {
   WpPluginInfo,
   WpSiteCapabilities,
   WpCustomPostType,
+  WpDbTemplate,
+  WpDbGlobalStyle,
+  WpReadingSettings,
 } from '../../sql/wp-query.service.js';
 import type {
   DetectedPlugin,
@@ -22,6 +25,9 @@ export interface DbContentResult {
   posts: WpPost[];
   pages: WpPage[];
   menus: WpMenu[];
+  dbTemplates: WpDbTemplate[];
+  dbGlobalStyles: WpDbGlobalStyle[];
+  readingSettings: WpReadingSettings;
   /** All public taxonomies (categories, tags, custom) with their terms */
   taxonomies: WpTaxonomy[];
   plugins: WpPluginInfo[];
@@ -45,15 +51,27 @@ export class DbContentService {
     const { database } = parseDbConnectionString(connectionString);
     this.logger.log(`Extracting WP content from DB: ${database}`);
 
-    const [siteInfo, posts, pages, menus, taxonomies, runtimeFeatures] =
-      await Promise.all([
-        this.wpQuery.getSiteInfo(connectionString),
-        this.wpQuery.getPosts(connectionString),
-        this.wpQuery.getPages(connectionString),
-        this.wpQuery.getMenus(connectionString),
-        this.wpQuery.getTaxonomies(connectionString),
-        this.wpQuery.getRuntimeFeatures(connectionString),
-      ]);
+    const [
+      siteInfo,
+      posts,
+      pages,
+      menus,
+      dbTemplates,
+      dbGlobalStyles,
+      readingSettings,
+      taxonomies,
+      runtimeFeatures,
+    ] = await Promise.all([
+      this.wpQuery.getSiteInfo(connectionString),
+      this.wpQuery.getPosts(connectionString),
+      this.wpQuery.getPages(connectionString),
+      this.wpQuery.getMenus(connectionString),
+      this.wpQuery.getDbTemplates(connectionString),
+      this.wpQuery.getDbGlobalStyles(connectionString),
+      this.wpQuery.getReadingSettings(connectionString),
+      this.wpQuery.getTaxonomies(connectionString),
+      this.wpQuery.getRuntimeFeatures(connectionString),
+    ]);
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
       runtimeFeatures,
@@ -61,6 +79,7 @@ export class DbContentService {
 
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ` +
+        `${dbTemplates.length} db templates, ${dbGlobalStyles.length} db global styles, ` +
         `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
@@ -70,6 +89,9 @@ export class DbContentService {
       posts,
       pages,
       menus,
+      dbTemplates,
+      dbGlobalStyles,
+      readingSettings,
       taxonomies,
       plugins: runtimeFeatures.plugins,
       customPostTypes: runtimeFeatures.customPostTypes,

@@ -32,7 +32,9 @@ import type {
 } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
 import { ValidatorService } from '../agents/validator/validator.service.js';
+import { GenerationContractAuditService } from '../agents/validator/generation-contract-audit.service.js';
 import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
+import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
@@ -44,6 +46,13 @@ import type {
 import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
 import { CaptureReviewService } from '../edit-request/capture-review.service.js';
 import { EditRequestPhaseService } from '../edit-request/edit-request-phase.service.js';
+import {
+  buildUiMutationCandidatesForGeneratedComponents,
+  buildUiSourceMapForGeneratedComponents,
+  readUiSourceMapEntries,
+  resolveCaptureTargetsFromUiSourceMap,
+} from '../edit-request/ui-source-map.util.js';
+import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.types.js';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 
@@ -241,7 +250,9 @@ export class OrchestratorService {
     private readonly previewBuilder: PreviewBuilderService,
     private readonly visualRouteReview: VisualRouteReviewService,
     private readonly validator: ValidatorService,
+    private readonly contractAudit: GenerationContractAuditService,
     private readonly sourceResolver: SourceResolverService,
+    private readonly dbTemplateOverlay: DbTemplateOverlayService,
     private readonly cleanup: CleanupService,
     private readonly captureReview: CaptureReviewService,
     private readonly editRequestPhase: EditRequestPhaseService,
@@ -264,6 +275,8 @@ export class OrchestratorService {
       : response.data;
 
     this.validateDto(dto);
+
+    console.log('AI Pipeline dto: ', dto);
 
     const jobId = uuidv4();
     const state: PipelineStatus = {
@@ -811,6 +824,17 @@ export class OrchestratorService {
         logPath,
       });
       normalizedTheme = enrichResult.theme;
+      const overlaidTheme = this.dbTemplateOverlay.apply(
+        normalizedTheme,
+        content,
+      );
+      if (overlaidTheme !== normalizedTheme) {
+        normalizedTheme = await this.normalizer.normalize(overlaidTheme);
+        await this.logToFile(
+          logPath,
+          `[Stage 2] Applied DB template overlay from wp_template/wp_template_part before planner.`,
+        );
+      }
 
       // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
       // All 4 phases + plan review + retry loop are ONE atomic step.
@@ -1170,11 +1194,50 @@ export class OrchestratorService {
             );
           }
 
+          const inMemoryUiSourceMapEntries =
+            await buildUiSourceMapForGeneratedComponents({
+              components,
+              plan: reviewResult.plan,
+            });
+          const inMemoryMutationCandidates =
+            await buildUiMutationCandidatesForGeneratedComponents({
+              components,
+            });
+          const exactCaptureTargetsForEditPass =
+            resolveCaptureTargetsFromUiSourceMap({
+              attachments: dto.editRequest?.attachments,
+              uiSourceMap: inMemoryUiSourceMapEntries,
+            });
+          await this.logExactCaptureResolution({
+            jobId,
+            logPath,
+            attachments: dto.editRequest?.attachments,
+            uiSourceMapPath: 'in-memory:baseline-generated-components',
+            uiSourceMapEntryCount: inMemoryUiSourceMapEntries.length,
+            exactCaptureTargets: exactCaptureTargetsForEditPass,
+          });
+          const intentAwareCaptureTargetsForEditPass =
+            this.editRequestPhase.resolveIntentAwareCaptureTargets({
+              request: dto.editRequest,
+              exactCaptureTargets: exactCaptureTargetsForEditPass,
+              mutationCandidates: inMemoryMutationCandidates,
+            });
+          await this.logExactCaptureResolution({
+            jobId,
+            logPath,
+            attachments: dto.editRequest?.attachments,
+            uiSourceMapPath: 'in-memory:intent-aware-mutation-targets',
+            uiSourceMapEntryCount: inMemoryMutationCandidates.length,
+            exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
+          });
+
           const postMigrationEditTasks =
             this.editRequestPhase.buildPostMigrationEditTasks({
               request: dto.editRequest,
               plan: reviewResult.plan,
               components,
+              exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
+              mutationCandidates: inMemoryMutationCandidates,
             });
           const editedComponentNames: Record<string, string> = {};
           const applyFocusedTask = async (
@@ -1351,7 +1414,8 @@ export class OrchestratorService {
                         attachment.id === reviewFailure.attachmentId,
                     ),
                 );
-                if (!relatedTask || !reviewFailure.suggestedFixFeedback) continue;
+                if (!relatedTask || !reviewFailure.suggestedFixFeedback)
+                  continue;
 
                 this.logger.warn(
                   `[Stage 5: Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
@@ -1387,7 +1451,10 @@ export class OrchestratorService {
                 for (const key of Object.keys(editedComponentNames)) {
                   delete editedComponentNames[key];
                 }
-                Object.assign(editedComponentNames, editedComponentNamesSnapshot);
+                Object.assign(
+                  editedComponentNames,
+                  editedComponentNamesSnapshot,
+                );
                 break;
               }
               components = refixValidation.components;
@@ -1425,9 +1492,10 @@ export class OrchestratorService {
               }
             }
 
-            const unresolvedCaptureReviewIssues = captureReviewResult.results.filter(
-              (result) => result.status !== 'matched',
-            );
+            const unresolvedCaptureReviewIssues =
+              captureReviewResult.results.filter(
+                (result) => result.status !== 'matched',
+              );
             if (unresolvedCaptureReviewIssues.length > 0) {
               const unresolvedSummary = unresolvedCaptureReviewIssues
                 .map((result) => result.debugSummary)
@@ -1614,6 +1682,29 @@ export class OrchestratorService {
           0.93,
           'Preview API layer is ready for the runtime preview environment.',
         );
+
+        const auditWarnings = this.contractAudit.audit({
+          components: generationResult.components,
+          plan: reviewResult.plan,
+          api,
+        });
+        this.contractAudit.logWarnings(
+          auditWarnings,
+          'Stage 7: Deterministic Contract Audit',
+        );
+        if (auditWarnings.length > 0) {
+          await this.logToFile(
+            logPath,
+            `[Stage 7: Deterministic Contract Audit] ${auditWarnings.length} warning(s)\n${auditWarnings
+              .map((warning) => {
+                const target = warning.componentName
+                  ? `"${warning.componentName}" `
+                  : '';
+                return `- [${warning.scope}] ${target}${warning.message}`;
+              })
+              .join('\n')}`,
+          );
+        }
         return api;
       });
       await stepDelay();
@@ -1655,6 +1746,10 @@ export class OrchestratorService {
                   components: buildComponents,
                 },
                 dbCreds,
+                content: {
+                  posts: content.posts,
+                  pages: content.pages,
+                },
                 themeDir,
                 siteInfo: content.siteInfo,
                 tokens:
@@ -1866,10 +1961,47 @@ export class OrchestratorService {
 
       // Step 9: Migration completion
       await this.runStep(state, '11_done', logPath, async () => {
+        const uiSourceMapEntries = await readUiSourceMapEntries(
+          preview.uiSourceMapPath,
+        );
+        const ownerCaptureTargets = resolveCaptureTargetsFromUiSourceMap({
+          attachments: dto.editRequest?.attachments,
+          uiSourceMap: uiSourceMapEntries,
+        });
+        const finalMutationCandidates =
+          await buildUiMutationCandidatesForGeneratedComponents({
+            components: buildComponents,
+          });
+        const exactCaptureTargets =
+          this.editRequestPhase.resolveIntentAwareCaptureTargets({
+            request: dto.editRequest,
+            exactCaptureTargets: ownerCaptureTargets,
+            mutationCandidates: finalMutationCandidates,
+          });
+        await this.logExactCaptureResolution({
+          jobId,
+          logPath,
+          attachments: dto.editRequest?.attachments,
+          uiSourceMapPath: preview.uiSourceMapPath,
+          uiSourceMapEntryCount: uiSourceMapEntries.length,
+          exactCaptureTargets: ownerCaptureTargets,
+        });
+        await this.logExactCaptureResolution({
+          jobId,
+          logPath,
+          attachments: dto.editRequest?.attachments,
+          uiSourceMapPath: 'final:intent-aware-mutation-targets',
+          uiSourceMapEntryCount: finalMutationCandidates.length,
+          exactCaptureTargets,
+        });
+
         state.status = 'done';
         state.result = {
           previewDir: preview.previewDir,
           previewUrl: preview.previewUrl,
+          uiSourceMapPath: preview.uiSourceMapPath,
+          ownerCaptureTargets,
+          exactCaptureTargets,
           dbCreds,
           visualRouteResults,
           metrics,
@@ -2190,6 +2322,48 @@ export class OrchestratorService {
     }
   }
 
+  private async logExactCaptureResolution(input: {
+    jobId: string;
+    logPath: string;
+    attachments?: PipelineCaptureAttachmentDto[];
+    uiSourceMapPath?: string | null;
+    uiSourceMapEntryCount: number;
+    exactCaptureTargets: ResolvedCaptureTargetRecord[];
+  }): Promise<void> {
+    const {
+      jobId,
+      logPath,
+      attachments,
+      uiSourceMapPath,
+      uiSourceMapEntryCount,
+      exactCaptureTargets,
+    } = input;
+
+    const summaryMessage = [
+      `[${jobId}] [capture-resolve]`,
+      `uiSourceMapPath=${uiSourceMapPath ?? 'none'}`,
+      `uiSourceMapEntries=${uiSourceMapEntryCount}`,
+      `captures=${attachments?.length ?? 0}`,
+      `resolved=${exactCaptureTargets.length}`,
+    ].join(' ');
+    this.logger.log(summaryMessage);
+    await this.logToFile(logPath, summaryMessage);
+
+    const resolvedByCaptureId = new Map(
+      exactCaptureTargets.map((target) => [target.captureId, target]),
+    );
+
+    for (const attachment of attachments ?? []) {
+      const resolved = resolvedByCaptureId.get(attachment.id);
+      const detail = resolved
+        ? formatResolvedCaptureTargetForLog(resolved)
+        : formatUnresolvedCaptureAttachmentForLog(attachment);
+      const formatted = `[${jobId}] [capture-resolve] ${detail}`;
+      this.logger.log(formatted);
+      await this.logToFile(logPath, formatted);
+    }
+  }
+
   private buildEditRequestLogLines(
     context?: ResolvedEditRequestContext,
   ): string[] {
@@ -2376,6 +2550,19 @@ function formatAttachmentForLog(
     attachment.targetNode?.templateName
       ? `template=${attachment.targetNode.templateName}`
       : null,
+    attachment.targetNode?.ownerSourceNodeId ||
+    attachment.targetNode?.sourceNodeId
+      ? `ownerSourceNodeId=${attachment.targetNode?.ownerSourceNodeId ?? attachment.targetNode?.sourceNodeId}`
+      : null,
+    attachment.targetNode?.editSourceNodeId
+      ? `editSourceNodeId=${attachment.targetNode.editSourceNodeId}`
+      : null,
+    attachment.targetNode?.editNodeRole
+      ? `editRole=${attachment.targetNode.editNodeRole}`
+      : null,
+    attachment.targetNode?.editTagName
+      ? `editTag=${attachment.targetNode.editTagName}`
+      : null,
     attachment.targetNode?.blockName || attachment.domTarget?.blockName
       ? `block=${attachment.targetNode?.blockName ?? attachment.domTarget?.blockName}`
       : null,
@@ -2531,4 +2718,99 @@ function truncateForLog(value: string, maxLength: number): string {
   return value.length <= maxLength
     ? value
     : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatResolvedCaptureTargetForLog(
+  target: ResolvedCaptureTargetRecord,
+): string {
+  return [
+    `capture=${target.captureId}`,
+    `sourceNodeId=${target.sourceNodeId}`,
+    `template=${target.templateName}`,
+    `sourceFile=${target.sourceFile}`,
+    `component=${target.componentName}`,
+    `section=${target.sectionKey}`,
+    target.sectionComponentName
+      ? `sectionComponent=${target.sectionComponentName}`
+      : null,
+    `outputFile=${target.outputFilePath}`,
+    formatResolvedCaptureLinesForLog(
+      'ownerLines',
+      target.startLine,
+      target.endLine,
+    ),
+    target.targetComponentName
+      ? `targetComponent=${target.targetComponentName}`
+      : null,
+    target.targetSourceNodeId
+      ? `targetSourceNodeId=${target.targetSourceNodeId}`
+      : null,
+    target.targetNodeRole ? `targetRole=${target.targetNodeRole}` : null,
+    target.targetElementTag ? `targetTag=${target.targetElementTag}` : null,
+    target.targetTextPreview
+      ? `targetText="${truncateForLog(target.targetTextPreview, 80)}"`
+      : null,
+    formatResolvedCaptureLinesForLog(
+      'targetLines',
+      target.targetStartLine,
+      target.targetEndLine,
+    ),
+    `resolution=${target.resolution}`,
+    `confidence=${target.confidence.toFixed(2)}`,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function formatUnresolvedCaptureAttachmentForLog(
+  attachment: PipelineCaptureAttachmentDto,
+): string {
+  return [
+    `capture=${attachment.id}`,
+    'status=unresolved',
+    attachment.targetNode?.sourceNodeId
+      ? `sourceNodeId=${attachment.targetNode.sourceNodeId}`
+      : null,
+    attachment.targetNode?.ownerSourceNodeId
+      ? `ownerSourceNodeId=${attachment.targetNode.ownerSourceNodeId}`
+      : null,
+    attachment.targetNode?.editSourceNodeId
+      ? `editSourceNodeId=${attachment.targetNode.editSourceNodeId}`
+      : null,
+    attachment.targetNode?.editNodeRole
+      ? `editRole=${attachment.targetNode.editNodeRole}`
+      : null,
+    attachment.targetNode?.editTagName
+      ? `editTag=${attachment.targetNode.editTagName}`
+      : null,
+    attachment.targetNode?.templateName
+      ? `template=${attachment.targetNode.templateName}`
+      : null,
+    attachment.targetNode?.sourceFile
+      ? `sourceFile=${attachment.targetNode.sourceFile}`
+      : null,
+    typeof attachment.targetNode?.topLevelIndex === 'number'
+      ? `topLevelIndex=${attachment.targetNode.topLevelIndex}`
+      : null,
+    attachment.targetNode?.blockName
+      ? `block=${attachment.targetNode.blockName}`
+      : null,
+    attachment.targetNode?.domPath
+      ? `domPath=${truncateForLog(attachment.targetNode.domPath, 120)}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function formatResolvedCaptureLinesForLog(
+  label: string,
+  startLine?: number,
+  endLine?: number,
+): string | null {
+  if (typeof startLine !== 'number' || typeof endLine !== 'number') {
+    return null;
+  }
+
+  return `${label}=${startLine}-${endLine}`;
 }
