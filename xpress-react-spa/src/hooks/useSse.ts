@@ -3,7 +3,13 @@ import { useEffect, useState, useCallback, useRef } from "react";
 /**
  * Pipeline step status
  */
-export type PipelineStepStatus = "pending" | "running" | "done" | "error";
+export type PipelineStepStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "error"
+  | "skipped"
+  | "stopped";
 
 /**
  * SSE event từ server
@@ -56,7 +62,7 @@ export interface MetricsSummary {
     failed: number;
     passRate: number;
     avgAccuracy: number;
-  };
+  } | null;
   content: {
     total: number;
     passed: number;
@@ -64,12 +70,12 @@ export interface MetricsSummary {
     missing: number;
     passRate: number;
     avgOverall: number;
-  };
+  } | null;
   overall: {
-    visualAvgAccuracy: number;
-    contentAvgOverall: number;
-    visualPassRate: number;
-    contentPassRate: number;
+    visualAvgAccuracy: number | null;
+    contentAvgOverall: number | null;
+    visualPassRate: number | null;
+    contentPassRate: number | null;
   };
   errors: {
     visual: string | null;
@@ -79,7 +85,10 @@ export interface MetricsSummary {
 
 interface ProgressEventData {
   previewUrl?: string;
-  metrics: {
+  apiBaseUrl?: string;
+  previewStage?: "baseline" | "edited" | "final";
+  hasEditRequest?: boolean;
+  metrics?: {
     summary: MetricsSummary;
     pages: MetricPage[];
   };
@@ -118,6 +127,9 @@ interface PipelineStatusResponse {
   error?: string;
   result?: {
     previewUrl?: string;
+    apiBaseUrl?: string;
+    previewStage?: ProgressEventData["previewStage"];
+    hasEditRequest?: boolean;
     metrics?: ProgressEventData["metrics"];
   };
 }
@@ -177,38 +189,10 @@ export function useSse(
         message: "Migration workflow is complete. Preview is ready.",
         data: {
           previewUrl: status.result.previewUrl,
-          metrics:
-            status.result.metrics ??
-            ({
-              summary: {
-                visual: {
-                  totalCompared: 0,
-                  passed: 0,
-                  failed: 0,
-                  passRate: 0,
-                  avgAccuracy: 0,
-                },
-                content: {
-                  total: 0,
-                  passed: 0,
-                  failed: 0,
-                  missing: 0,
-                  passRate: 0,
-                  avgOverall: 0,
-                },
-                overall: {
-                  visualAvgAccuracy: 0,
-                  contentAvgOverall: 0,
-                  visualPassRate: 0,
-                  contentPassRate: 0,
-                },
-                errors: {
-                  visual: null,
-                  content: null,
-                },
-              },
-              pages: [],
-            } as ProgressEventData["metrics"]),
+          apiBaseUrl: status.result.apiBaseUrl,
+          previewStage: status.result.previewStage ?? "final",
+          hasEditRequest: status.result.hasEditRequest,
+          metrics: status.result.metrics,
         },
       };
 
@@ -313,7 +297,7 @@ export function useSse(
           // ServerSentEvent data là JSON string
           const data = JSON.parse(event.data) as PipelineProgressEvent;
           console.log(data);
-          if (data.status === "done" && data.data?.previewUrl) {
+          if (data.step === "11_done" && data.status === "done") {
             pipelineCompletedRef.current = true;
           }
           setState((prev) => ({

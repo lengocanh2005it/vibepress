@@ -185,6 +185,11 @@ export interface PipelineEditConstraintsDto {
   rerunFromScratch?: boolean;
 }
 
+export interface PipelinePreviewRouteEntryDto {
+  route: string;
+  componentName: string;
+}
+
 export interface PipelineClientEditRequestDto {
   prompt?: string;
   language?: string;
@@ -259,4 +264,29 @@ export interface RunPipelineDto {
   themeGithubUrl: string;
   dbConnectionString: string;
   editRequest?: PipelineEditRequestDto;
+}
+
+export interface PipelineReactSourceTargetDto {
+  previewDir?: string;
+  frontendDir?: string;
+  previewUrl?: string;
+  apiBaseUrl?: string;
+  uiSourceMapPath?: string;
+  routeEntries?: PipelinePreviewRouteEntryDto[];
+}
+
+export interface PipelineReactVisualEditRequestDto {
+  prompt?: string;
+  language?: string;
+  pageContext?: PipelineClientEditPageContextDto;
+  attachments?: PipelineClientCaptureAttachmentDto[];
+  targetHint?: PipelineEditTargetHintDto;
+  constraints?: PipelineEditConstraintsDto;
+  reactSourceTarget: PipelineReactSourceTargetDto;
+}
+
+export interface SubmitReactVisualEditDto {
+  siteId: string;
+  jobId: string;
+  editRequest: PipelineReactVisualEditRequestDto;
 }

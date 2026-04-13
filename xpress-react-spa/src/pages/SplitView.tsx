@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { PipelineProgressEvent } from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
@@ -11,6 +11,8 @@ const SplitView: React.FC = () => {
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
+  const previousPreviewStageRef = useRef<string | undefined>(undefined);
 
   const getConnectionBadge = () => {
     switch (sse.connectionState) {
@@ -62,6 +64,10 @@ const SplitView: React.FC = () => {
         return "check_circle";
       case "running":
         return "sync";
+      case "stopped":
+        return "stop_circle";
+      case "skipped":
+        return "skip_next";
       case "error":
         return "error";
       case "pending":
@@ -76,6 +82,10 @@ const SplitView: React.FC = () => {
         return "text-green-500";
       case "running":
         return "text-primary animate-spin";
+      case "stopped":
+        return "text-red-500";
+      case "skipped":
+        return "text-white/30";
       case "error":
         return "text-red-500";
       case "pending":
@@ -84,23 +94,114 @@ const SplitView: React.FC = () => {
     }
   };
 
-  // Check if pipeline is complete by looking for any done event with previewUrl
-  const getCompletionEvent = () => {
-    return sse.allEvents.find(
-      (event) => event.status === "done" && event.data?.previewUrl,
-    );
-  };
-
-  const completionEvent = getCompletionEvent();
+  const completionEvent = useMemo(
+    () =>
+      [...sse.allEvents]
+        .reverse()
+        .find((event) => event.step === "11_done" && event.status === "done") ??
+      null,
+    [sse.allEvents],
+  );
+  const latestPreviewEvent = useMemo(
+    () =>
+      [...sse.allEvents]
+        .reverse()
+        .find((event) => Boolean(event.data?.previewUrl)) ?? null,
+    [sse.allEvents],
+  );
+  const latestMetricsEvent = useMemo(
+    () =>
+      [...sse.allEvents]
+        .reverse()
+        .find((event) => Boolean(event.data?.metrics)) ?? null,
+    [sse.allEvents],
+  );
   const latestEvent = sse.currentEvent;
+  const previewData = latestPreviewEvent?.data;
+  const previewUrl = previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
+  const apiBaseUrl =
+    previewData?.apiBaseUrl ?? completionEvent?.data?.apiBaseUrl;
+  const previewStage =
+    previewData?.previewStage ?? completionEvent?.data?.previewStage;
+  const hasEditRequest = Boolean(
+    previewData?.hasEditRequest ?? completionEvent?.data?.hasEditRequest,
+  );
+  const metricsData = latestMetricsEvent?.data?.metrics;
+
+  const previewFrameSrc = useMemo(() => {
+    if (!previewUrl) return "";
+    const separator = previewUrl.includes("?") ? "&" : "?";
+    return `${previewUrl}${separator}livePreview=${previewRefreshNonce}`;
+  }, [previewRefreshNonce, previewUrl]);
+
+  useEffect(() => {
+    if (!previewUrl || !previewStage) return;
+    const previousStage = previousPreviewStageRef.current;
+    if (
+      previousStage &&
+      previousStage !== previewStage &&
+      previewStage !== "baseline"
+    ) {
+      setPreviewRefreshNonce((value) => value + 1);
+    }
+    previousPreviewStageRef.current = previewStage;
+  }, [previewStage, previewUrl]);
+
+  const previewStatus = useMemo(() => {
+    if (!previewStage) {
+      return {
+        badge: "Preparing",
+        title: "Preview is still being prepared",
+        description: "The preview will appear here as soon as it starts.",
+        badgeClass: "border-slate-300 bg-white text-slate-700",
+      };
+    }
+
+    if (previewStage === "baseline" && hasEditRequest) {
+      return {
+        badge: "Baseline Live",
+        title: "You are viewing the baseline preview",
+        description:
+          "The preview is already running while the pipeline applies the requested edits in the background.",
+        badgeClass: "border-amber-300 bg-amber-50 text-amber-800",
+      };
+    }
+
+    if (previewStage === "baseline") {
+      return {
+        badge: "Preview Live",
+        title: "The preview is ready for inspection",
+        description:
+          "Frontend and backend preview servers are live while the pipeline continues with metrics and cleanup.",
+        badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
+      };
+    }
+
+    if (previewStage === "edited") {
+      return {
+        badge: "Edited Live",
+        title: "Requested edits are now visible",
+        description:
+          "The running preview has been updated with the edit request while the pipeline continues with visual metrics.",
+        badgeClass: "border-sky-300 bg-sky-50 text-sky-800",
+      };
+    }
+
+    return {
+      badge: "Final Ready",
+      title: "The final edited preview is ready",
+      description:
+        "Pipeline execution is complete. You can inspect metrics and then push the result to GitHub.",
+      badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
+    };
+  }, [hasEditRequest, previewStage]);
 
   useEffect(() => {
     setElapsedSeconds(0);
     const startedAt = Date.now();
     const timer = window.setInterval(() => {
       const isFinished =
-        sse.connectionState === "completed" ||
-        sse.currentEvent?.status === "done";
+        sse.connectionState === "completed" || Boolean(completionEvent);
       if (isFinished) {
         window.clearInterval(timer);
         return;
@@ -110,7 +211,7 @@ const SplitView: React.FC = () => {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [jobId, sse.connectionState, sse.currentEvent?.status]);
+  }, [completionEvent, jobId, sse.connectionState]);
 
   const elapsedLabel = useMemo(() => {
     const hours = Math.floor(elapsedSeconds / 3600);
@@ -202,6 +303,25 @@ const SplitView: React.FC = () => {
       setPushGitState({ loading: false, githubUrl: null, error: message });
     }
   };
+
+  const handleRefreshPreview = () => {
+    setPreviewRefreshNonce((value) => value + 1);
+  };
+
+  const handleOpenVisualEdit = () => {
+    if (!completionEvent || !previewUrl) return;
+    navigate("/app/editor/visual", {
+      state: {
+        jobId,
+        siteId,
+        previewUrl,
+        apiBaseUrl,
+      },
+    });
+  };
+
+  const actionButtonClass =
+    "inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2";
 
   // Group events by step and get the latest status for each step
   const getLatestStepStatuses = () => {
@@ -353,54 +473,84 @@ const SplitView: React.FC = () => {
             </div>
           ))}
 
-          {completionEvent && (
-            <div className="mt-8 p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400 text-xs">
-              <div className="font-bold mb-2">Preview Is Ready</div>
-              <p className="text-green-400/80">
-                Preview URL: {completionEvent.data?.previewUrl}
-              </p>
-              <p className="mt-1 text-green-400/65">
-                The AI workflow finished building and checking the preview.
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={() =>
-                    window.open(completionEvent.data?.previewUrl, "_blank")
-                  }
-                  className="px-3 py-1 bg-green-500/20 hover:bg-green-500/30 border border-green-500/50 rounded text-green-400 text-xs"
+          {previewUrl && (
+            <div className="mt-8 rounded-2xl border border-[#d9d1c3] bg-[#f7f1e8] p-4 text-xs text-slate-700 shadow-lg shadow-black/10">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${previewStatus.badgeClass}`}
                 >
-                  Open Preview
+                  {previewStatus.badge}
+                </span>
+                {metricsData && (
+                  <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
+                    Metrics Ready
+                  </span>
+                )}
+              </div>
+              <div className="mt-3">
+                <p className="text-sm font-semibold text-slate-900">{previewStatus.title}</p>
+                <p className="mt-1 text-xs text-slate-600">{previewStatus.description}</p>
+              </div>
+              <div className="mt-4 space-y-2 rounded-xl border border-[#d8cec0] bg-[#d7d1ca] p-3 text-[11px] text-slate-700">
+                <p className="break-all">
+                  Frontend Preview: <span className="text-slate-900">{previewUrl}</span>
+                </p>
+                {apiBaseUrl && (
+                  <p className="break-all">
+                    Backend API: <span className="text-slate-900">{apiBaseUrl}</span>
+                  </p>
+                )}
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={() => window.open(previewUrl, "_blank")}
+                  className={`${actionButtonClass} border-teal-800 bg-teal-700 text-white hover:bg-teal-800 focus-visible:ring-teal-500`}
+                >
+                  Open Frontend
                 </button>
-                {completionEvent.data?.metrics && (
+                {apiBaseUrl && (
+                  <button
+                    onClick={() => window.open(apiBaseUrl, "_blank")}
+                    className={`${actionButtonClass} border-cyan-800 bg-cyan-700 text-white hover:bg-cyan-800 focus-visible:ring-cyan-500`}
+                  >
+                    Open Backend
+                  </button>
+                )}
+                <button
+                  onClick={handleRefreshPreview}
+                  className={`${actionButtonClass} border-slate-300 bg-white text-slate-900 hover:bg-slate-100 focus-visible:ring-slate-400`}
+                >
+                  Refresh Preview
+                </button>
+                {metricsData && (
                   <button
                     onClick={() => setShowMetrics(true)}
-                    className="px-3 py-1 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/50 rounded text-blue-400 text-xs"
+                    className={`${actionButtonClass} border-orange-700 bg-orange-600 text-white hover:bg-orange-700 focus-visible:ring-orange-500`}
                   >
                     View Metrics
                   </button>
                 )}
-                {pushGitState.githubUrl ? (
-                  <button
-                    onClick={() => window.open(pushGitState.githubUrl!, "_blank")}
-                    className="px-3 py-1 bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/50 rounded text-violet-400 text-xs"
-                  >
-                    View on GitHub →
-                  </button>
-                ) : (
-                  <button
-                    onClick={handlePushToGit}
-                    disabled={pushGitState.loading}
-                    className="px-3 py-1 bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/50 rounded text-violet-400 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {pushGitState.loading ? "Pushing…" : "Push to GitHub"}
-                  </button>
-                )}
-                {pushGitState.error && (
-                  <span className="text-red-400 text-xs self-center">
-                    {pushGitState.error}
-                  </span>
-                )}
+                {completionEvent &&
+                  (pushGitState.githubUrl ? (
+                    <button
+                      onClick={() => window.open(pushGitState.githubUrl!, "_blank")}
+                      className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500`}
+                    >
+                      View on GitHub
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handlePushToGit}
+                      disabled={pushGitState.loading}
+                      className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-50`}
+                    >
+                      {pushGitState.loading ? "Pushing…" : "Push to GitHub"}
+                    </button>
+                  ))}
               </div>
+              {pushGitState.error && (
+                <p className="mt-3 text-xs text-red-700">{pushGitState.error}</p>
+              )}
             </div>
           )}
         </div>
@@ -426,7 +576,7 @@ const SplitView: React.FC = () => {
             </span>
           </div>
           <div className="text-xs text-primary font-bold">
-            {sse.currentEvent?.status === "done"
+            {completionEvent
               ? "WORKFLOW COMPLETE"
               : "AGENTS WORKING"}
           </div>
@@ -434,29 +584,78 @@ const SplitView: React.FC = () => {
       </section>
 
       <section className="w-1/2 bg-surface-container-low flex flex-col">
-        <div className="px-6 py-4 flex items-center justify-between border-b border-outline-variant bg-white/50 backdrop-blur-sm">
-          <div className="flex items-center gap-3">
-            <span className="material-symbols-outlined text-on-surface-variant">
-              visibility
-            </span>
-            <h2 className="font-headline text-lg text-on-surface">
-              Live Preview
-            </h2>
-          </div>
-          <div className="flex items-center gap-2">
-            {completionEvent?.data?.previewUrl ? (
-              <button
-                onClick={() =>
-                  window.open(completionEvent.data?.previewUrl, "_blank")
-                }
-                className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-bold"
-              >
-                Open Preview →
-              </button>
-            ) : (
-              <span className="text-xs text-on-surface-variant">
-                Waiting for the preview build...
+        <div className="px-6 py-4 border-b border-outline-variant bg-white/60 backdrop-blur-sm">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex items-center gap-3">
+              <span className="material-symbols-outlined text-on-surface-variant">
+                visibility
               </span>
+              <div className="min-w-0">
+                <h2 className="font-headline text-lg text-on-surface">
+                  Live Preview
+                </h2>
+                {previewUrl ? (
+                  <p className="truncate text-xs text-on-surface-variant">
+                    {previewStatus.description}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center justify-end">
+              <span
+                className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${previewStatus.badgeClass}`}
+              >
+                {previewStatus.badge}
+              </span>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+            {previewUrl ? (
+              <>
+                {completionEvent && (
+                  <button
+                    onClick={handleOpenVisualEdit}
+                    className={`${actionButtonClass} border-amber-900 bg-amber-700 text-white hover:bg-amber-800 focus-visible:ring-amber-500 shadow-md shadow-amber-900/20`}
+                  >
+                    <span className="material-symbols-outlined text-[18px]">
+                      auto_fix_high
+                    </span>
+                    Open Visual Edit
+                  </button>
+                )}
+                <button
+                  onClick={() => window.open(previewUrl, "_blank")}
+                  className={`${actionButtonClass} border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 focus-visible:ring-emerald-300`}
+                >
+                  <span className="material-symbols-outlined text-[18px]">
+                    language
+                  </span>
+                  Frontend
+                </button>
+                {apiBaseUrl && (
+                  <button
+                    onClick={() => window.open(apiBaseUrl, "_blank")}
+                    className={`${actionButtonClass} border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100 focus-visible:ring-sky-300`}
+                  >
+                    <span className="material-symbols-outlined text-[18px]">
+                      dns
+                    </span>
+                    Backend
+                  </button>
+                )}
+                <button
+                  onClick={handleRefreshPreview}
+                  title="Refresh preview"
+                  aria-label="Refresh preview"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-900 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2"
+                >
+                  <span className="material-symbols-outlined text-[18px]">
+                    refresh
+                  </span>
+                </button>
+              </>
+            ) : (
+              <span className="text-xs text-on-surface-variant">Waiting...</span>
             )}
           </div>
         </div>
@@ -476,12 +675,34 @@ const SplitView: React.FC = () => {
                 Quay về trang dự án
               </button>
             </div>
-          ) : completionEvent?.data?.previewUrl ? (
-            <iframe
-              src={completionEvent.data?.previewUrl || ""}
-              title="Live Preview"
-              className="w-full h-full rounded-lg border border-outline-variant"
-            />
+          ) : previewUrl ? (
+            <div className="relative h-full w-full">
+              <div className="pointer-events-none absolute left-5 top-5 z-10 max-w-md rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-lg backdrop-blur">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${previewStatus.badgeClass}`}
+                  >
+                    {previewStatus.badge}
+                  </span>
+                  {metricsData && (
+                    <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
+                      Metrics Ready
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 text-sm font-semibold text-slate-900">
+                  {previewStatus.title}
+                </p>
+                <p className="mt-1 text-xs text-slate-600">
+                  {previewStatus.description}
+                </p>
+              </div>
+              <iframe
+                src={previewFrameSrc}
+                title="Live Preview"
+                className="h-full w-full rounded-2xl border border-outline-variant bg-white shadow-sm transition-all duration-500"
+              />
+            </div>
           ) : (
             <div className="text-center space-y-4">
               <div className="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin mx-auto" />
@@ -497,10 +718,26 @@ const SplitView: React.FC = () => {
       </section>
 
       {showMetrics &&
-        completionEvent?.data?.metrics &&
+        metricsData &&
         (() => {
-          const { summary, pages } = completionEvent.data.metrics;
-          const visualAccuracy = summary.visual.avgAccuracy;
+          const { summary, pages } = metricsData;
+          const hasContentSummary = summary.content !== null;
+          const visualSummary = summary.visual ?? {
+            totalCompared: 0,
+            passed: 0,
+            failed: 0,
+            passRate: 0,
+            avgAccuracy: 0,
+          };
+          const contentSummary = summary.content ?? {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            missing: 0,
+            passRate: 0,
+            avgOverall: 0,
+          };
+          const visualAccuracy = visualSummary.avgAccuracy;
           const scoreColor =
             visualAccuracy >= 95
               ? "text-primary"
@@ -574,7 +811,7 @@ const SplitView: React.FC = () => {
                         <p
                           className={`text-3xl font-headline font-bold ${scoreColor}`}
                         >
-                          {summary.visual.avgAccuracy.toFixed(1)}
+                          {visualSummary.avgAccuracy.toFixed(1)}
                           <span className="text-base">%</span>
                         </p>
                         <p className="text-xs text-on-surface-variant mb-1">
@@ -585,19 +822,19 @@ const SplitView: React.FC = () => {
                         <div
                           className={`h-full rounded-full ${scoreBarColor}`}
                           style={{
-                            width: `${summary.visual.avgAccuracy}%`,
+                            width: `${visualSummary.avgAccuracy}%`,
                           }}
                         />
                       </div>
                       <div className="flex gap-3 text-xs">
                         <span className="text-green-500">
-                          {summary.visual.passed} passed
+                          {visualSummary.passed} passed
                         </span>
                         <span className="text-error">
-                          {summary.visual.failed} failed
+                          {visualSummary.failed} failed
                         </span>
                         <span className="text-on-surface-variant">
-                          {summary.visual.totalCompared} total
+                          {visualSummary.totalCompared} total
                         </span>
                       </div>
                     </div>
@@ -607,32 +844,50 @@ const SplitView: React.FC = () => {
                       <p className="text-xs font-medium text-on-surface-variant mb-2 uppercase tracking-wider">
                         Content
                       </p>
-                      <div className="flex items-end gap-2 mb-2">
-                        <p className="text-3xl font-headline font-bold text-on-surface">
-                          {summary.content.passRate.toFixed(1)}
-                          <span className="text-base">%</span>
+                      {hasContentSummary ? (
+                        <>
+                          <div className="flex items-end gap-2 mb-2">
+                            <p className="text-3xl font-headline font-bold text-on-surface">
+                              {contentSummary.passRate.toFixed(1)}
+                              <span className="text-base">%</span>
+                            </p>
+                            <p className="text-xs text-on-surface-variant mb-1">
+                              pass rate
+                            </p>
+                          </div>
+                          <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
+                            <div
+                              className="h-full rounded-full bg-primary"
+                              style={{ width: `${contentSummary.passRate}%` }}
+                            />
+                          </div>
+                          <div className="flex gap-3 text-xs">
+                            <span className="text-green-500">
+                              {contentSummary.passed} passed
+                            </span>
+                            <span className="text-yellow-500">
+                              {contentSummary.missing} missing
+                            </span>
+                            <span className="text-on-surface-variant">
+                              {contentSummary.total} total
+                            </span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-xl border border-dashed border-outline-variant/50 bg-surface px-4 py-5">
+                          <p className="text-sm font-semibold text-on-surface">
+                            Khong co du lieu
+                          </p>
+                          <p className="mt-1 text-xs text-on-surface-variant">
+                            Automation hien khong tra ve tong hop content cho lan so sanh nay.
+                          </p>
+                        </div>
+                      )}
+                      {summary.errors.content && (
+                        <p className="mt-3 text-[11px] text-amber-700">
+                          Content metrics unavailable: {summary.errors.content}
                         </p>
-                        <p className="text-xs text-on-surface-variant mb-1">
-                          pass rate
-                        </p>
-                      </div>
-                      <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
-                        <div
-                          className="h-full rounded-full bg-primary"
-                          style={{ width: `${summary.content.passRate}%` }}
-                        />
-                      </div>
-                      <div className="flex gap-3 text-xs">
-                        <span className="text-green-500">
-                          {summary.content.passed} passed
-                        </span>
-                        <span className="text-yellow-500">
-                          {summary.content.missing} missing
-                        </span>
-                        <span className="text-on-surface-variant">
-                          {summary.content.total} total
-                        </span>
-                      </div>
+                      )}
                     </div>
                   </div>
 

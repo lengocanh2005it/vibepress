@@ -250,13 +250,13 @@ export class CodeGeneratorService {
       );
       lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
-        '              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
+        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.opacityLinkClass()}">`,
       );
       lines.push('                {item.title}');
       lines.push('              </Link>');
       lines.push('            ) : (');
       lines.push(
-        '              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
+        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.opacityLinkClass()}">`,
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
@@ -397,6 +397,7 @@ export class CodeGeneratorService {
         'footer',
         'breadcrumb',
         'post-list',
+        'post-content',
         'search',
         'sidebar',
         'hero',
@@ -1057,6 +1058,31 @@ export default ${componentName};`;
     );
   }
 
+  private textLinkClass(color: string, accent: string, extra = ''): string {
+    return [
+      extra,
+      `text-[${color}]`,
+      'transition-colors',
+      'underline-offset-4',
+      `hover:text-[${accent}]`,
+      'hover:underline',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  private opacityLinkClass(extra = ''): string {
+    return [
+      extra,
+      'transition-opacity',
+      'underline-offset-4',
+      'hover:opacity-75',
+      'hover:underline',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
   private pickBlockStyle(
     ctx: RenderCtx,
     ...keys: string[]
@@ -1159,7 +1185,7 @@ export default ${componentName};`;
     const cta = s.cta
       ? s.cta.style === 'button'
         ? `\n            <Link to="${s.cta.link}" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity"${buttonStyle}>${s.cta.text}</Link>`
-        : `\n            <Link to="${s.cta.link}" className="text-[${tc}] hover:text-[${p.accent}] transition-colors">${s.cta.text}</Link>`
+        : `\n            <Link to="${s.cta.link}" className="${this.textLinkClass(tc, p.accent)}">${s.cta.text}</Link>`
       : '';
 
     return `      {/* Navbar */}
@@ -1172,11 +1198,11 @@ export default ${componentName};`;
                 .filter(i => i.parentId === 0)
                 .map(item => (
                   isInternalPath(item.url) ? (
-                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">
+                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}">
                       {item.title}
                     </Link>
                   ) : (
-                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">
+                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}">
                       {item.title}
                     </a>
                   )
@@ -1303,12 +1329,12 @@ export default ${componentName};`;
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding })}>
               ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />}` : ''}
-              <Link to={\`/post/\${post.slug}\`} className="text-lg font-medium text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
+              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}">{post.title}</Link>
               ${s.showExcerpt ? `<p className="text-sm text-[${p.textMuted}]">{post.excerpt}</p>` : ''}
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
             </article>`
       : `            <article key={post.id} className="flex flex-col md:flex-row md:items-baseline gap-2 md:gap-4 py-4">
-              <Link to={\`/post/\${post.slug}\`} className="flex-1 text-lg text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
+              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'flex-1 text-lg')}">{post.title}</Link>
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx, true) : ''}
             </article>`;
 
@@ -1349,13 +1375,20 @@ ${postCard}
   private postMeta(s: PostListSection, ctx: RenderCtx, inline = false): string {
     const { p } = ctx;
     const parts: string[] = [];
+    const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
     if (s.showDate)
       parts.push(
         `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`,
       );
-    if (s.showAuthor) parts.push(`<span>by {post.author}</span>`);
+    if (s.showAuthor) {
+      parts.push(
+        `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <a href="#" className="${metaLinkClass}">by {post.author}</a>)}`,
+      );
+    }
     if (s.showCategory)
-      parts.push(`{post.categories[0] && <span>{post.categories[0]}</span>}`);
+      parts.push(
+        `{post.categories[0] && (post.categorySlugs[0] ? <Link to={\`/category/\${post.categorySlugs[0]}\`} className="${metaLinkClass}">{post.categories[0]}</Link> : <a href="#" className="${metaLinkClass}">{post.categories[0]}</a>)}`,
+      );
     const flex = inline
       ? 'flex items-center gap-2 whitespace-nowrap shrink-0'
       : 'flex flex-wrap gap-2 mt-1';
@@ -1531,11 +1564,11 @@ ${cards}
                   .filter(i => i.parentId === 0)
                   .map(item => (
                     isInternalPath(item.url) ? (
-                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-sm text-[${p.textMuted}] hover:text-[${p.accent}] transition-colors">
+                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
                         {item.title}
                       </Link>
                     ) : (
-                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="text-sm text-[${p.textMuted}] hover:text-[${p.accent}] transition-colors">
+                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
                         {item.title}
                       </a>
                     )
@@ -1702,7 +1735,7 @@ ${this.renderPageContentInner(s, ctx)}
           </div>
           <div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
-              <Link key={post.id} to={\`/post/\${post.slug}\`} className="text-[${tc}] hover:text-[${p.accent}] transition-colors">{post.title}</Link>
+              <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}">{post.title}</Link>
             ))}
           </div>
           {totalPages > 1 && (
@@ -1735,7 +1768,7 @@ ${this.renderPageContentInner(s, ctx)}
     return `      {/* Breadcrumb */}
       <nav className="w-full py-3 ${l.containerClass}">
         <ol className="flex items-center gap-2 text-sm text-[${p.textMuted}]">
-          <li><Link to="/" className="hover:text-[${p.accent}] transition-colors">Home</Link></li>
+          <li><Link to="/" className="${this.textLinkClass(p.textMuted, p.accent)}">Home</Link></li>
           <li>/</li>
           <li className="text-[${p.text}]">{item?.title ?? 'Page'}</li>
         </ol>
@@ -1804,12 +1837,17 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const tc = s.textColor ?? p.text;
     const hasMeta = s.showDate || s.showAuthor || s.showCategories;
     const metaParts: string[] = [];
+    const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
     if (s.showDate)
       metaParts.push(`<time>{new Date(item.date).toLocaleDateString()}</time>`);
-    if (s.showAuthor) metaParts.push(`<span>by {item.author}</span>`);
+    if (s.showAuthor) {
+      metaParts.push(
+        `{item.author && (item.authorSlug ? <Link to={\`/author/\${item.authorSlug}\`} className="${metaLinkClass}">by {item.author}</Link> : <a href="#" className="${metaLinkClass}">by {item.author}</a>)}`,
+      );
+    }
     if (s.showCategories)
       metaParts.push(
-        `{item.categories[0] && <span>{item.categories[0]}</span>}`,
+        `{item.categories[0] && (item.categorySlugs[0] ? <Link to={\`/category/\${item.categorySlugs[0]}\`} className="${metaLinkClass}">{item.categories[0]}</Link> : <a href="#" className="${metaLinkClass}">{item.categories[0]}</a>)}`,
       );
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
@@ -1875,9 +1913,15 @@ ${this.renderSidebarCard(s, ctx, 10)}
                   ?.filter(item => item.parentId === 0)
                   ?.slice(0, ${maxItems})
                   ?.map(item => (
-                    <Link key={item.id} to={item.url} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
-                      {item.title}
-                    </Link>
+                    isInternalPath(item.url) ? (
+                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                        {item.title}
+                      </Link>
+                    ) : (
+                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                        {item.title}
+                      </a>
+                    )
                   ))}
               </nav>
             </div>
@@ -1889,7 +1933,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
               <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Pages</div>
               <nav className="flex flex-col gap-2">
                 {pages.slice(0, ${maxItems}).map(page => (
-                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
+                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
                     {page.title}
                   </Link>
                 ))}
@@ -1903,7 +1947,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
               <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Latest Posts</div>
               <div className="flex flex-col gap-3">
                 {posts.slice(0, ${maxItems}).map(post => (
-                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="text-sm text-[${p.text}] hover:text-[${p.accent}] transition-colors">
+                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
                     {post.title}
                   </Link>
                 ))}
@@ -2024,26 +2068,26 @@ ${indent}</div>`;
           node.children?.length && node.children.some((child) => child.block)
             ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
             : '';
-        return `${indent}<li className="relative">
+    return `${indent}<li className="relative">
 ${
   hasUsableHref
     ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
-${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
 ${childIndent}) : (
-${childIndent}  <a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
+${childIndent}  <a href="${href}" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
 ${childIndent})}`
-    : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
+    : `${childIndent}<a href="#" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
-${childIndent}</span>`
+${childIndent}</a>`
 }${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
-        return `${indent}<Link to="/" className="font-semibold transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+        return `${indent}<Link to="/" className="${this.opacityLinkClass('font-semibold')}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
 ${childIndent}{siteInfo?.siteName}
 ${indent}</Link>`;
       case 'site-tagline':
@@ -2118,9 +2162,9 @@ ${childIndent}<a href="${href}" className="inline-flex items-center justify-cent
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</a>
 ${indent})}`
-          : `${indent}<span className="inline-flex items-center justify-center no-underline"${styleAttr}>
+          : `${indent}<a href="#" className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
 ${childIndent}${node.text ?? ''}
-${indent}</span>`;
+${indent}</a>`;
       }
       case 'image': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -2167,12 +2211,12 @@ ${indent}</div>`;
         const service = String(node.params?.service ?? node.text ?? 'Social');
         const href = String(node.params?.url ?? node.href ?? '').trim();
         return href && href !== '#'
-          ? `${indent}<a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          ? `${indent}<a href="${href}" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
 ${indent}</a>`
-          : `${indent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          : `${indent}<a href="#" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
-${indent}</span>`;
+${indent}</a>`;
       }
       case 'separator':
         return `${indent}<hr className="w-full border-0 border-t border-current/20"${this.buildWpNodeStyleAttr(node)} />`;

@@ -1,15 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { appendFile, mkdir, writeFile } from 'fs/promises';
-import { join } from 'path';
 
 export interface AttemptLog {
   attemptNumber: number;
-  /** Full prompt sent to the model — system + user message */
   promptSent: {
     system: string;
     user: string;
   };
-  /** Full raw response from the model (not truncated) */
   response: string;
   tokensUsed: {
     input: number;
@@ -19,16 +15,14 @@ export interface AttemptLog {
   };
   timestamp: string;
   success: boolean;
-  /** Validation error that caused this attempt to fail (if any) */
   error?: string;
-  /** Human-readable label for the outcome of this attempt */
   validationFeedback?: string;
 }
 
 export interface CotLogEntry {
   jobId: string;
   step: 'planning' | 'code-generation' | 'section-generation';
-  componentName?: string; // for code-generation
+  componentName?: string;
   model: string;
   startTime: string;
   endTime: string;
@@ -56,77 +50,67 @@ export interface AiLogEntry {
   error?: string;
 }
 
-interface AiLogIndexEntry {
-  kind: 'cot' | 'activity';
-  jobId: string;
-  step: string;
-  componentName?: string;
-  timestamp: string;
-  model: string;
-  success: boolean;
-  durationMs?: number;
-  totalAttempts?: number;
-  retryCount?: number;
-  totalTokens?: {
+export interface AiLoggerJobSummary {
+  totalCotEntries: number;
+  totalActivityEntries: number;
+  totalTokenCost: number;
+  totalTokens: {
     input: number;
     output: number;
     total: number;
   };
-  totalTokenCost?: number;
-  error?: string;
+  retries: {
+    total: number;
+    byStep: Record<CotLogEntry['step'], number>;
+  };
+  attempts: {
+    total: number;
+    byStep: Record<CotLogEntry['step'], number>;
+  };
+  failures: {
+    total: number;
+    byStep: Record<CotLogEntry['step'], number>;
+  };
 }
+
+interface AiLogSession {
+  totalCotEntries: number;
+  totalActivityEntries: number;
+  totalTokenCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  retriesByStep: Record<CotLogEntry['step'], number>;
+  attemptsByStep: Record<CotLogEntry['step'], number>;
+  failuresByStep: Record<CotLogEntry['step'], number>;
+}
+
+const AI_LOG_STEPS: Array<CotLogEntry['step']> = [
+  'planning',
+  'code-generation',
+  'section-generation',
+];
 
 @Injectable()
 export class AiLoggerService {
-  /**
-   * Log toàn bộ Chain of Thought process (tất cả attempts, validations, fixes)
-   */
+  private static readonly sessions = new Map<string, AiLogSession>();
+
   async logCotProcess(entry: CotLogEntry): Promise<void> {
-    const logDir = join('./temp/logs', entry.jobId, 'ai-logs', entry.step);
-    await mkdir(logDir, { recursive: true });
-    const normalizedEntry = this.normalizeCotEntry(entry);
+    const session = this.getSession(entry.jobId);
+    const retryCount =
+      entry.retryCount ??
+      Math.max(0, entry.attempts.filter((attempt) => !attempt.success).length);
 
-    // Tạo tên file với component name nếu có, để log từng component riêng
-    // planning-cot-<timestamp>.json
-    // code-generation-NotFound-cot-<timestamp>.json
-    // section-generation-HeroSection-cot-<timestamp>.json
-    let fileName: string;
-    if (normalizedEntry.componentName) {
-      fileName = `${normalizedEntry.step}-${normalizedEntry.componentName}-cot-${Date.now()}.json`;
-    } else {
-      fileName = `${normalizedEntry.step}-cot-${Date.now()}.json`;
+    session.totalCotEntries += 1;
+    session.totalTokenCost += entry.totalTokenCost;
+    session.totalInputTokens += entry.totalTokens.input;
+    session.totalOutputTokens += entry.totalTokens.output;
+    session.retriesByStep[entry.step] += retryCount;
+    session.attemptsByStep[entry.step] += entry.totalAttempts;
+    if (!entry.finalSuccess) {
+      session.failuresByStep[entry.step] += 1;
     }
-
-    await writeFile(
-      join(logDir, fileName),
-      JSON.stringify(normalizedEntry, null, 2),
-    );
-    await this.appendIndexEntry(normalizedEntry.jobId, {
-      kind: 'cot',
-      jobId: normalizedEntry.jobId,
-      step: normalizedEntry.step,
-      componentName: normalizedEntry.componentName,
-      timestamp: normalizedEntry.endTime,
-      model: normalizedEntry.model,
-      success: normalizedEntry.finalSuccess,
-      durationMs: normalizedEntry.durationMs,
-      totalAttempts: normalizedEntry.totalAttempts,
-      retryCount: normalizedEntry.retryCount,
-      totalTokens: {
-        input: normalizedEntry.totalTokens.input,
-        output: normalizedEntry.totalTokens.output,
-        total:
-          normalizedEntry.totalTokens.input +
-          normalizedEntry.totalTokens.output,
-      },
-      totalTokenCost: normalizedEntry.totalTokenCost,
-      error: normalizedEntry.finalError,
-    });
   }
 
-  /**
-   * Log simple activity (backwards compatibility)
-   */
   async logAiActivity(
     jobId: string,
     step: 'planning' | 'code-generation',
@@ -136,57 +120,104 @@ export class AiLoggerService {
     success: boolean,
     error?: string,
   ): Promise<void> {
-    const logDir = join('./temp/logs', jobId, 'ai-logs', step);
-    await mkdir(logDir, { recursive: true });
+    void rawResponse;
+    void model;
+    void error;
 
-    const entry: AiLogEntry = {
-      jobId,
-      step,
-      timestamp: new Date().toISOString(),
-      rawResponse,
-      tokenCost,
-      model,
-      success,
-      error,
-    };
-
-    const fileName = `${step}-${Date.now()}.json`;
-    await writeFile(join(logDir, fileName), JSON.stringify(entry, null, 2));
-    await this.appendIndexEntry(jobId, {
-      kind: 'activity',
-      jobId,
-      step,
-      timestamp: entry.timestamp,
-      model,
-      success,
-      totalTokenCost: tokenCost,
-      error,
-    });
+    const session = this.getSession(jobId);
+    session.totalActivityEntries += 1;
+    session.totalTokenCost += tokenCost;
+    if (!success) {
+      session.failuresByStep[step] += 1;
+    }
   }
 
-  private normalizeCotEntry(entry: CotLogEntry): CotLogEntry {
-    const durationMs =
-      entry.durationMs ??
-      Math.max(
-        0,
-        new Date(entry.endTime).getTime() - new Date(entry.startTime).getTime(),
-      );
-    const retryCount =
-      entry.retryCount ??
-      Math.max(0, entry.attempts.filter((attempt) => !attempt.success).length);
+  getJobSummary(jobId: string): AiLoggerJobSummary {
+    const session = AiLoggerService.sessions.get(jobId);
+    if (!session) {
+      return {
+        totalCotEntries: 0,
+        totalActivityEntries: 0,
+        totalTokenCost: 0,
+        totalTokens: {
+          input: 0,
+          output: 0,
+          total: 0,
+        },
+        retries: {
+          total: 0,
+          byStep: this.createStepCounter(),
+        },
+        attempts: {
+          total: 0,
+          byStep: this.createStepCounter(),
+        },
+        failures: {
+          total: 0,
+          byStep: this.createStepCounter(),
+        },
+      };
+    }
+
     return {
-      ...entry,
-      durationMs,
-      retryCount,
+      totalCotEntries: session.totalCotEntries,
+      totalActivityEntries: session.totalActivityEntries,
+      totalTokenCost: Number(session.totalTokenCost.toFixed(6)),
+      totalTokens: {
+        input: session.totalInputTokens,
+        output: session.totalOutputTokens,
+        total: session.totalInputTokens + session.totalOutputTokens,
+      },
+      retries: {
+        total: Object.values(session.retriesByStep).reduce(
+          (sum, value) => sum + value,
+          0,
+        ),
+        byStep: { ...session.retriesByStep },
+      },
+      attempts: {
+        total: Object.values(session.attemptsByStep).reduce(
+          (sum, value) => sum + value,
+          0,
+        ),
+        byStep: { ...session.attemptsByStep },
+      },
+      failures: {
+        total: Object.values(session.failuresByStep).reduce(
+          (sum, value) => sum + value,
+          0,
+        ),
+        byStep: { ...session.failuresByStep },
+      },
     };
   }
 
-  private async appendIndexEntry(
-    jobId: string,
-    entry: AiLogIndexEntry,
-  ): Promise<void> {
-    const indexPath = join('./temp/logs', jobId, 'ai-logs', 'index.jsonl');
-    await mkdir(join('./temp/logs', jobId, 'ai-logs'), { recursive: true });
-    await appendFile(indexPath, `${JSON.stringify(entry)}\n`);
+  clearJob(jobId: string): void {
+    AiLoggerService.sessions.delete(jobId);
+  }
+
+  private getSession(jobId: string): AiLogSession {
+    let session = AiLoggerService.sessions.get(jobId);
+    if (!session) {
+      session = {
+        totalCotEntries: 0,
+        totalActivityEntries: 0,
+        totalTokenCost: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        retriesByStep: this.createStepCounter(),
+        attemptsByStep: this.createStepCounter(),
+        failuresByStep: this.createStepCounter(),
+      };
+      AiLoggerService.sessions.set(jobId, session);
+    }
+    return session;
+  }
+
+  private createStepCounter(): Record<CotLogEntry['step'], number> {
+    return Object.fromEntries(AI_LOG_STEPS.map((step) => [step, 0])) as Record<
+      CotLogEntry['step'],
+      number
+    >;
   }
 }

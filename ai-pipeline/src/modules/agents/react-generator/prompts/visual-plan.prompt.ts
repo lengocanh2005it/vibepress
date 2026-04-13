@@ -112,7 +112,7 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | type | use when |
 |---|---|
 | \`navbar\` | header/navigation bar |
-| \`hero\` | large heading + optional CTA + optional image |
+| \`hero\` | large heading + optional CTA + optional image; \`centered\` / \`left\` heroes keep image BELOW text, only \`split\` may place image beside text |
 | \`cover\` | full-width image with overlay text |
 | \`post-list\` | list or grid of blog posts from API |
 | \`card-grid\` | static grid of feature cards |
@@ -131,7 +131,7 @@ Typography and exact column-ratio metadata may also appear when the template exp
 
 \`\`\`
 navbar:       { sticky, menuSlug, cta? }
-hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, image? }
+hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, image? } // centered|left => vertical stack (text first, image below)
 cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage }
 card-grid:    { title?, subtitle?, columns: 2|3|4, columnWidths?, cards: [{heading,body}] }
@@ -154,6 +154,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related in the screenshot.
 - If an earlier draft section owns the heading/body/CTA and a later draft section owns the image, keep them as two separate sections in the JSON output. The later image must NOT be pulled up beside the earlier text block.
 - \`hero.layout: "split"\` is allowed ONLY when that SAME single draft section already contains both the text content and the image/media content under one shared wrapper/source node.
+- If a single hero section contains both text and image but the source does NOT show an explicit side-by-side wrapper, columns block, media-text block, or left/right column ratio, use \`layout: "centered"\` or \`layout: "left"\` and keep the image BELOW the text content.
+- Do NOT use \`hero.layout: "split"\` just because a screenshot contains both copy and an image in the same broad hero area. Split is only valid when the source structure itself proves a horizontal two-column relationship.
 - \`media-text\` is allowed ONLY when the source wrapper itself is a real image-beside-text block (for example a WordPress media-text block or one columns/group wrapper that clearly contains both sides). It must NOT be used to fuse separate sibling sections.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.

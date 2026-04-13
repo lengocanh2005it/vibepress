@@ -135,6 +135,34 @@ export interface AiEditRequestPayload {
     }>;
 }
 
+export interface ReactVisualEditRouteEntry {
+    route: string;
+    componentName: string;
+}
+
+export interface ReactVisualEditPayload extends AiEditRequestPayload {
+    targetHint?: {
+        templateName?: string;
+        componentName?: string;
+        route?: string | null;
+        sectionIndex?: number;
+        sectionType?: string;
+    };
+    constraints?: {
+        preserveOutsideSelection?: boolean;
+        preserveDataContract?: boolean;
+        rerunFromScratch?: boolean;
+    };
+    reactSourceTarget: {
+        previewDir?: string;
+        frontendDir?: string;
+        previewUrl?: string;
+        apiBaseUrl?: string;
+        uiSourceMapPath?: string;
+        routeEntries?: ReactVisualEditRouteEntry[];
+    };
+}
+
 export class AiProcessError extends Error {
     status: number;
     code?: string;
@@ -184,6 +212,40 @@ export const runAiProcess = async (
         return data;
     } catch (error) {
         console.error('Error fetching repos:', error);
+        throw error;
+    }
+};
+
+export const submitReactVisualEdit = async (
+    siteId: string,
+    jobId: string,
+    editRequest: ReactVisualEditPayload,
+) => {
+    try {
+        const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/react-visual-edit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ siteId, jobId, editRequest })
+        });
+        if (!response.ok) {
+            let errorPayload: any = null;
+            try {
+                errorPayload = await response.json();
+            } catch {
+                errorPayload = null;
+            }
+            throw new AiProcessError(
+                errorPayload?.message || 'Failed to submit React visual edit request.',
+                response.status,
+                errorPayload?.code,
+                errorPayload?.details,
+            );
+        }
+        return response.json();
+    } catch (error) {
+        console.error('Error submitting React visual edit request:', error);
         throw error;
     }
 };
