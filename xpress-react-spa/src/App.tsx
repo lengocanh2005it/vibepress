@@ -6,6 +6,7 @@ import Editor from "./pages/Editor";
 import SplitView from "./pages/SplitView";
 import VisualEditor from "./pages/VisualEditor";
 import DeployDashboard from "./pages/DeployDashboard";
+import TemplateStore from "./pages/TemplateStore";
 import SharedLayout from "./components/SharedLayout";
 import { UserProvider } from "./context/UserContext";
 
@@ -26,6 +27,7 @@ function App() {
             <Route path="deploy" element={<DeployDashboard />} />
           </Route>
 
+          <Route path="template-store" element={<TemplateStore />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
