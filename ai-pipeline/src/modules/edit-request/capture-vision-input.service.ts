@@ -26,7 +26,9 @@ export class CaptureVisionInputService {
         selected.length > 0
           ? [
               'Capture image evidence:',
-              ...selected.map((attachment) => `- ${formatAttachmentSummary(attachment)}`),
+              ...selected.map(
+                (attachment) => `- ${formatAttachmentSummary(attachment)}`,
+              ),
             ].join('\n')
           : '',
       attachmentIds: selected.map((attachment) => attachment.id),
@@ -34,7 +36,9 @@ export class CaptureVisionInputService {
   }
 }
 
-function formatAttachmentSummary(attachment: PipelineCaptureAttachmentDto): string {
+function formatAttachmentSummary(
+  attachment: PipelineCaptureAttachmentDto,
+): string {
   const parts = [`id=${attachment.id}`];
   if (attachment.note) parts.push(`note="${truncate(attachment.note, 120)}"`);
   if (attachment.captureContext?.page?.route) {
@@ -47,7 +51,9 @@ function formatAttachmentSummary(attachment: PipelineCaptureAttachmentDto): stri
   }
   if (attachment.geometry?.documentRect) {
     const rect = attachment.geometry.documentRect;
-    parts.push(`documentRect=(${rect.x},${rect.y},${rect.width},${rect.height})`);
+    parts.push(
+      `documentRect=(${rect.x},${rect.y},${rect.width},${rect.height})`,
+    );
   } else if (attachment.selection) {
     const rect = attachment.selection;
     parts.push(`selection=(${rect.x},${rect.y},${rect.width},${rect.height})`);

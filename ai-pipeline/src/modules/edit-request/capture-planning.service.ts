@@ -14,11 +14,11 @@ export class CapturePlanningService {
     const attachments = this.selectPlanningAttachments(request).slice(0, 5);
     const hasMeaningfulPlanningContext = Boolean(
       request.prompt ||
-        request.language ||
-        request.pageContext ||
-        request.targetHint ||
-        request.constraints ||
-        attachments.length > 0,
+      request.language ||
+      request.pageContext ||
+      request.targetHint ||
+      request.constraints ||
+      attachments.length > 0,
     );
 
     if (!hasMeaningfulPlanningContext) return undefined;

@@ -48,13 +48,19 @@ export function buildRepoManifestContextNote(
     lines.push(note);
   }
 
-  if (includeLayoutHints && manifest.sourceOfTruth.priorityDirectories.length > 0) {
+  if (
+    includeLayoutHints &&
+    manifest.sourceOfTruth.priorityDirectories.length > 0
+  ) {
     lines.push(
       `Priority directories: ${manifest.sourceOfTruth.priorityDirectories.slice(0, mode === 'compact' ? 3 : 999).join(', ')}`,
     );
   }
 
-  if (includeLayoutHints && manifest.sourceOfTruth.themeDirectories.length > 0) {
+  if (
+    includeLayoutHints &&
+    manifest.sourceOfTruth.themeDirectories.length > 0
+  ) {
     lines.push(
       `Detected theme directories: ${manifest.sourceOfTruth.themeDirectories.slice(0, mode === 'compact' ? 3 : 999).join(', ')}`,
     );
@@ -79,7 +85,10 @@ export function buildRepoManifestContextNote(
   const { templatePartAreas } = manifest.themeJsonSummary;
   if (includeStructureHints && templatePartAreas.length > 0) {
     lines.push('Template part area assignments (from theme.json):');
-    for (const part of templatePartAreas.slice(0, mode === 'compact' ? 6 : 999)) {
+    for (const part of templatePartAreas.slice(
+      0,
+      mode === 'compact' ? 6 : 999,
+    )) {
       lines.push(
         `- ${part.name} → area: ${part.area}${part.title !== part.name ? ` (${part.title})` : ''}`,
       );
@@ -99,7 +108,10 @@ export function buildRepoManifestContextNote(
     );
   }
 
-  if (includeStyleHints && manifest.styleSources.discoveredFontFamilies.length > 0) {
+  if (
+    includeStyleHints &&
+    manifest.styleSources.discoveredFontFamilies.length > 0
+  ) {
     lines.push(
       `Discovered font families in CSS: ${manifest.styleSources.discoveredFontFamilies.slice(0, mode === 'compact' ? 4 : 8).join(', ')}`,
     );
@@ -119,7 +131,10 @@ export function buildRepoManifestContextNote(
     );
   }
 
-  if (includeStructureHints && manifest.structureHints.templatePartRefs.length > 0) {
+  if (
+    includeStructureHints &&
+    manifest.structureHints.templatePartRefs.length > 0
+  ) {
     lines.push(
       `Referenced template parts: ${manifest.structureHints.templatePartRefs.slice(0, mode === 'compact' ? 5 : 10).join(', ')}`,
     );

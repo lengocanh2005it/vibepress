@@ -390,6 +390,10 @@ export class ValidatorService {
     const expectsAnyDetail =
       context.isDetail === true || expectsPostDetail || expectsPageDetail;
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
+    const allowsArchiveAliasParams =
+      /^Archive$/i.test(context.componentName ?? '') &&
+      context.route === '/archive';
+    const effectiveRouteHasParams = routeHasParams || allowsArchiveAliasParams;
     const isPartialComponent = isPartialComponentName(
       context.componentName ?? '',
     );
@@ -544,11 +548,21 @@ export class ValidatorService {
       const usesSiteTitle =
         /\bsiteInfo\??\.siteName\b/.test(code) ||
         /\{siteInfo\??\.siteName\}/.test(code);
+      const usesSiteLogo =
+        /\bsiteInfo\??\.logoUrl\b/.test(code) ||
+        /\{siteInfo\??\.logoUrl\}/.test(code);
       const hasHomeLinkForBrand =
         /<Link\b[^>]*\bto=["']\/["'][^>]*>[\s\S]*siteInfo\??\.siteName[\s\S]*<\/Link>/.test(
           code,
         ) ||
         /<Link\b[^>]*\bto=\{["']\/["']\}[^>]*>[\s\S]*siteInfo\??\.siteName[\s\S]*<\/Link>/.test(
+          code,
+        );
+      const hasHomeLinkForLogo =
+        /<Link\b[^>]*\bto=["']\/["'][^>]*>[\s\S]*siteInfo\??\.logoUrl[\s\S]*<\/Link>/.test(
+          code,
+        ) ||
+        /<Link\b[^>]*\bto=\{["']\/["']\}[^>]*>[\s\S]*siteInfo\??\.logoUrl[\s\S]*<\/Link>/.test(
           code,
         );
       if (
@@ -563,6 +577,11 @@ export class ValidatorService {
       if (usesSiteTitle && !hasHomeLinkForBrand) {
         violations.push(
           'Shared chrome contract violated: when Header/Footer/Navigation renders `siteInfo.siteName`, it must wrap the site title in `<Link to=\"/\">...</Link>` so the brand navigates home.',
+        );
+      }
+      if (usesSiteLogo && !hasHomeLinkForLogo) {
+        violations.push(
+          'Shared chrome contract violated: when Header/Footer/Navigation renders `siteInfo.logoUrl`, the logo must also be inside a home `<Link to=\"/\">...</Link>` so the visible brand cluster is clickable.',
         );
       }
       if (
@@ -696,7 +715,7 @@ export class ValidatorService {
           'Detail component is missing `useParams<{ slug: string }>()` for slug-based routing.',
         );
       }
-      if (!routeHasParams && /\buseParams\s*</.test(code)) {
+      if (!effectiveRouteHasParams && /\buseParams\s*</.test(code)) {
         violations.push(
           'Component uses `useParams()` even though its planned route has no URL params.',
         );
@@ -1143,8 +1162,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private usesSharedChromeData(code: string): boolean {
-      return (
-      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription|logoUrl)\b/.test(code) ||
+    return (
+      /\bsiteInfo\??\.(?:siteName|siteUrl|blogDescription|logoUrl)\b/.test(
+        code,
+      ) ||
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
       /\{\s*menus\b/.test(code)
     );

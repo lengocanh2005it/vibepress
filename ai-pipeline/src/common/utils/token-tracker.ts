@@ -18,10 +18,21 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
 };
 
 type TokenPhase = 'plan' | 'gen' | 'review' | 'fix';
+type TokenEntry = {
+  timestamp: string;
+  model: string;
+  label: string;
+  phase: TokenPhase | 'unclassified';
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+};
 type TokenSession = {
   totalInput: number;
   totalOutput: number;
   totalCost: number;
+  entries: TokenEntry[];
   initialized: boolean;
   summaryWritten: boolean;
 };
@@ -41,6 +52,7 @@ export class TokenTracker {
         totalInput: 0,
         totalOutput: 0,
         totalCost: 0,
+        entries: [],
         initialized: false,
         summaryWritten: false,
       };
@@ -132,6 +144,7 @@ export class TokenTracker {
     inputTokens: number,
     outputTokens: number,
     tag: string,
+    phase: TokenPhase | 'unclassified',
   ): Promise<number> {
     const session = this.getSession(logFile);
     if (!session) return 0;
@@ -144,9 +157,19 @@ export class TokenTracker {
     session.totalInput += inputTokens;
     session.totalOutput += outputTokens;
     session.totalCost += costUsd;
+    session.entries.push({
+      timestamp: new Date().toISOString(),
+      model,
+      label: tag,
+      phase,
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      costUsd,
+    });
 
     const line =
-      `${new Date().toISOString()}  ` +
+      `${session.entries[session.entries.length - 1].timestamp}  ` +
       `${tag.padEnd(36)} ` +
       `${String(inputTokens).padStart(7)} ` +
       `${String(outputTokens).padStart(7)}  ` +
@@ -177,6 +200,7 @@ export class TokenTracker {
   ): Promise<void> {
     const tag = label || model;
     if (!this.baseLogFile) return;
+    const phase = this.classifyPhase(tag) ?? 'unclassified';
 
     const costUsd = await this.appendEntry(
       this.baseLogFile,
@@ -184,12 +208,20 @@ export class TokenTracker {
       inputTokens,
       outputTokens,
       tag,
+      phase,
     );
 
-    const phase = this.classifyPhase(tag);
-    const phaseFile = phase ? this.buildPhaseLogFile(phase) : undefined;
+    const phaseFile =
+      phase === 'unclassified' ? undefined : this.buildPhaseLogFile(phase);
     if (phaseFile) {
-      await this.appendEntry(phaseFile, model, inputTokens, outputTokens, tag);
+      await this.appendEntry(
+        phaseFile,
+        model,
+        inputTokens,
+        outputTokens,
+        tag,
+        phase,
+      );
     }
 
     this.logger.log(
@@ -219,11 +251,70 @@ export class TokenTracker {
         `[${phaseName}] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
       );
       await appendFile(logFile, line).catch(() => {});
+      if (logFile === this.baseLogFile) {
+        await writeFile(
+          join(dirname(logFile), 'summary.tokens.json'),
+          JSON.stringify(this.buildJsonSummary(session), null, 2),
+        ).catch(() => {});
+      }
       session.summaryWritten = true;
     }
   }
 
   getTotalCost(): number {
     return this.getSession(this.baseLogFile)?.totalCost ?? 0;
+  }
+
+  private buildJsonSummary(session: TokenSession) {
+    const phaseTotals = new Map<
+      TokenEntry['phase'],
+      {
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        costUsd: number;
+        calls: number;
+      }
+    >();
+
+    for (const entry of session.entries) {
+      const current = phaseTotals.get(entry.phase) ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        calls: 0,
+      };
+      current.inputTokens += entry.inputTokens;
+      current.outputTokens += entry.outputTokens;
+      current.totalTokens += entry.totalTokens;
+      current.costUsd += entry.costUsd;
+      current.calls += 1;
+      phaseTotals.set(entry.phase, current);
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      totals: {
+        inputTokens: session.totalInput,
+        outputTokens: session.totalOutput,
+        totalTokens: session.totalInput + session.totalOutput,
+        costUsd: Number(session.totalCost.toFixed(6)),
+        calls: session.entries.length,
+      },
+      phases: Object.fromEntries(
+        Array.from(phaseTotals.entries()).map(([phase, totals]) => [
+          phase,
+          {
+            ...totals,
+            costUsd: Number(totals.costUsd.toFixed(6)),
+          },
+        ]),
+      ),
+      entries: session.entries.map((entry) => ({
+        ...entry,
+        costUsd: Number(entry.costUsd.toFixed(6)),
+      })),
+    };
   }
 }

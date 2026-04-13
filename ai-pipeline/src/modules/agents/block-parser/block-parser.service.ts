@@ -871,10 +871,7 @@ export class BlockParserService {
         primary.gradients ?? [],
         fallback.gradients ?? [],
       ),
-      shadows: this.mergeBySlug(
-        primary.shadows ?? [],
-        fallback.shadows ?? [],
-      ),
+      shadows: this.mergeBySlug(primary.shadows ?? [], fallback.shadows ?? []),
       fonts: this.mergeBySlug(primary.fonts, fallback.fonts),
       fontSizes: this.mergeBySlug(primary.fontSizes, fallback.fontSizes),
       spacing: this.mergeBySlug(primary.spacing, fallback.spacing),
@@ -894,10 +891,7 @@ export class BlockParserService {
 
     for (const [key, overrideValue] of Object.entries(override)) {
       const baseValue = result[key];
-      if (
-        this.isPlainObject(baseValue) &&
-        this.isPlainObject(overrideValue)
-      ) {
+      if (this.isPlainObject(baseValue) && this.isPlainObject(overrideValue)) {
         result[key] = this.deepMergeThemeJson(baseValue, overrideValue);
         continue;
       }

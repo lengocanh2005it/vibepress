@@ -202,66 +202,38 @@ export class CodeGeneratorService {
       lines.push(
         '  const scoreMenuByHints = (menu: Menu, hintTitles: string[]) => {',
       );
-      lines.push(
-        '    if (hintTitles.length === 0) return 0;',
-      );
-      lines.push(
-        '    const topLevelTitles = (menu.items ?? [])',
-      );
-      lines.push(
-        '      .filter((item) => item.parentId === 0)',
-      );
-      lines.push(
-        '      .map((item) => normalizeMenuLabel(item.title));',
-      );
-      lines.push(
-        '    return hintTitles.reduce((score, title) => {',
-      );
+      lines.push('    if (hintTitles.length === 0) return 0;');
+      lines.push('    const topLevelTitles = (menu.items ?? [])');
+      lines.push('      .filter((item) => item.parentId === 0)');
+      lines.push('      .map((item) => normalizeMenuLabel(item.title));');
+      lines.push('    return hintTitles.reduce((score, title) => {');
       lines.push(
         '      return score + (topLevelTitles.includes(normalizeMenuLabel(title)) ? 1 : 0);',
       );
-      lines.push(
-        '    }, 0);',
-      );
-      lines.push(
-        '  };',
-      );
+      lines.push('    }, 0);');
+      lines.push('  };');
       lines.push(
         '  const resolveNavigationMenu = (hintTitles: string[] = [], index = 0, preferFooter = false) => {',
       );
-      lines.push(
-        '    const hintedTitles = hintTitles.filter(Boolean);',
-      );
-      lines.push(
-        '    const pool = preferFooter',
-      );
+      lines.push('    const hintedTitles = hintTitles.filter(Boolean);');
+      lines.push('    const pool = preferFooter');
       lines.push(
         '      ? (footerNavigationMenus.length > 0 ? footerNavigationMenus : navigationMenus.filter((menu) => menu !== primaryMenu))',
       );
       lines.push(
         '      : (primaryMenu ? [primaryMenu, ...navigationMenus.filter((menu) => menu !== primaryMenu)] : navigationMenus);',
       );
-      lines.push(
-        '    if (pool.length === 0) return null;',
-      );
-      lines.push(
-        '    const scored = pool',
-      );
+      lines.push('    if (pool.length === 0) return null;');
+      lines.push('    const scored = pool');
       lines.push(
         '      .map((menu) => ({ menu, score: scoreMenuByHints(menu, hintedTitles) }))',
       );
-      lines.push(
-        '      .sort((a, b) => b.score - a.score);',
-      );
+      lines.push('      .sort((a, b) => b.score - a.score);');
       lines.push(
         '    if ((scored[0]?.score ?? 0) > 0) return scored[0]?.menu ?? null;',
       );
-      lines.push(
-        '    return pool[index] ?? pool[0] ?? null;',
-      );
-      lines.push(
-        '  };',
-      );
+      lines.push('    return pool[index] ?? pool[0] ?? null;');
+      lines.push('  };');
       lines.push(
         '  const renderMenuItems = (items: MenuItem[], parentId = 0, vertical = false): React.ReactNode =>',
       );
@@ -276,21 +248,13 @@ export class CodeGeneratorService {
       lines.push(
         '          <li key={item.id} className={vertical ? "flex flex-col gap-2" : "relative"}>',
       );
-      lines.push(
-        '            {isInternalPath(item.url) ? (',
-      );
+      lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
         '              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
-      lines.push(
-        '                {item.title}',
-      );
-      lines.push(
-        '              </Link>',
-      );
-      lines.push(
-        '            ) : (',
-      );
+      lines.push('                {item.title}');
+      lines.push('              </Link>');
+      lines.push('            ) : (');
       lines.push(
         '              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="transition-opacity hover:opacity-75">',
       );
@@ -472,15 +436,15 @@ export class CodeGeneratorService {
         `  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);`,
       );
     if (dataNeeds.includes('posts')) {
-      lines.push(`  const [searchParams, setSearchParams] = useSearchParams();`);
+      lines.push(
+        `  const [searchParams, setSearchParams] = useSearchParams();`,
+      );
       lines.push(
         `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
       );
       lines.push(`  const perPage = 10;`);
       lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
-      lines.push(
-        `  const updatePage = (nextPage: number) => {`,
-      );
+      lines.push(`  const updatePage = (nextPage: number) => {`);
       lines.push(
         `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
       );
@@ -1014,7 +978,10 @@ export default ${componentName};`;
     markup: string,
     componentName: string,
   ): string {
-    const trackingAttrs = this.buildSectionTrackingAttrs(section, componentName);
+    const trackingAttrs = this.buildSectionTrackingAttrs(
+      section,
+      componentName,
+    );
     if (!trackingAttrs) return markup;
 
     return markup.replace(
@@ -1444,7 +1411,10 @@ ${cards}
   ): string {
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
-    const imageRadius = this.imageRadiusClass(ctx);
+    const imageRadius =
+      this.imageRadiusClass(ctx) ||
+      this.cardRadiusClass(ctx) ||
+      'rounded-[24px]';
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const headingStyle = this.buildTypographyStyleAttr(
       this.pickBlockStyle(ctx, 'heading')?.typography,
@@ -1462,9 +1432,9 @@ ${cards}
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
     const imgEl = `<div className="${itemWrapper}"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
-            ${s.heading ? `<h2 className="${t.h3} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
-            ${s.body ? `<p className="text-[${p.textMuted}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${p.textMuted}]">${li}</li>`).join('')}</ul>` : ''}
+            ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
 
@@ -1806,7 +1776,10 @@ ${this.renderSidebarCard(s, ctx, 10)}
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
       gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
     });
-    const mainAttrs = this.buildSectionTrackingAttrs(mainSection, componentName);
+    const mainAttrs = this.buildSectionTrackingAttrs(
+      mainSection,
+      componentName,
+    );
     const sidebarAttrs = this.buildSectionTrackingAttrs(
       sidebarSection,
       componentName,
@@ -2052,7 +2025,9 @@ ${indent}</div>`;
             ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
             : '';
         return `${indent}<li className="relative">
-${hasUsableHref ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
+${
+  hasUsableHref
+    ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
 ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
@@ -2060,9 +2035,11 @@ ${childIndent}) : (
 ${childIndent}  <a href="${href}" className="transition-opacity hover:opacity-75"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
-${childIndent})}` : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
+${childIndent})}`
+    : `${childIndent}<span className="transition-opacity"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
-${childIndent}</span>`}${nestedChildren}
+${childIndent}</span>`
+}${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
@@ -2274,7 +2251,9 @@ ${indent}</nav>`;
       ? 'flex flex-col gap-2'
       : 'flex flex-wrap items-center gap-4';
     const items = nodes
-      .map((child) => this.renderBlockFaithfulNode(child, ctx, state, depth + 1))
+      .map((child) =>
+        this.renderBlockFaithfulNode(child, ctx, state, depth + 1),
+      )
       .filter(Boolean)
       .join('\n');
     if (!items) return `${indent}null`;

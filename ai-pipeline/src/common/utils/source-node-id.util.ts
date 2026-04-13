@@ -21,12 +21,7 @@ export function buildSourceNodeId(input: {
     ? normalizeSourceToken(input.blockClientId, '')
     : '';
 
-  return [
-    templateToken,
-    blockToken,
-    pathToken || '0',
-    blockClientToken || null,
-  ]
+  return [templateToken, blockToken, pathToken || '0', blockClientToken || null]
     .filter(Boolean)
     .join('::');
 }

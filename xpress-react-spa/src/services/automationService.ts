@@ -1,3 +1,19 @@
+export type {
+  CaptureViewport,
+  CaptureAssetResponse,
+  ViewportCaptureRect,
+  DocumentCaptureRect,
+  CaptureNormalizedRect,
+  CaptureSelection,
+  CaptureGeometry,
+  CapturePage,
+  CaptureDomTarget,
+  CaptureTargetNode,
+  CaptureData,
+  Capture,
+} from '../types/capture';
+import type { CaptureViewport, CaptureAssetResponse, CaptureData } from '../types/capture';
+
 export const getMyRepos = async (token: string) => {
   try {
     const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp/repos`, {
@@ -13,30 +29,6 @@ export const getMyRepos = async (token: string) => {
     throw error;
   }
 };
-
-export interface CaptureViewport {
-  width: number;
-  height: number;
-  scrollX: number;
-  scrollY: number;
-  dpr: number;
-}
-
-export interface CaptureAssetResponse {
-  provider: 'local' | 'cloudinary' | 'imagekit';
-  fileName: string;
-  originalPath: string;
-  url: string;
-  bytes: number;
-  mimeType: string;
-  width?: number;
-  height?: number;
-  publicId?: string;
-  format?: string;
-  createdAt?: string;
-  fileId?: string;
-  filePath?: string;
-}
 
 export const captureRegion = async (
   pageUrl: string,
@@ -140,6 +132,52 @@ export const getCommitHistory = async (
     } as CommitHistoryResponse;
   } catch (error) {
     console.error('Error fetching commit history:', error);
+    throw error;
+  }
+};
+
+export const saveCapture = async (siteId: string, captureData: CaptureData) => {
+  try {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/captures/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteId, captureData }),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to save capture');
+    }
+    return response.json();
+  } catch (error) {
+    console.error('Error saving capture:', error);
+    throw error;
+  }
+};
+
+export const getCapturesBySite = async (siteId: string) => {
+  try {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/captures/${encodeURIComponent(siteId)}`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch captures');
+    }
+    const data = await response.json();
+    return data.captures as CaptureData[];
+  } catch (error) {
+    console.error('Error fetching captures:', error);
+    throw error;
+  }
+};
+
+export const deleteCapturesBySite = async (siteId: string) => {
+  try {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/captures/${encodeURIComponent(siteId)}`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to delete captures');
+    }
+    return response.json();
+  } catch (error) {
+    console.error('Error deleting captures:', error);
     throw error;
   }
 };

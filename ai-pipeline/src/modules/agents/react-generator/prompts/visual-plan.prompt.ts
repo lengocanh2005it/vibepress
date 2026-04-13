@@ -150,6 +150,11 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 ## Rules
 - Preserve the original WordPress layout hierarchy and reading order as closely as possible.
 - When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections unless a live screenshot contradicts the listed order.
+- When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`sectionKey\` or different \`sourceRef.sourceNodeId\`.
+- Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related in the screenshot.
+- If an earlier draft section owns the heading/body/CTA and a later draft section owns the image, keep them as two separate sections in the JSON output. The later image must NOT be pulled up beside the earlier text block.
+- \`hero.layout: "split"\` is allowed ONLY when that SAME single draft section already contains both the text content and the image/media content under one shared wrapper/source node.
+- \`media-text\` is allowed ONLY when the source wrapper itself is a real image-beside-text block (for example a WordPress media-text block or one columns/group wrapper that clearly contains both sides). It must NOT be used to fuse separate sibling sections.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
 - Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
@@ -161,6 +166,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
+- Use the live screenshot only to refine spacing, image treatment, and typography. It does NOT authorize changing deterministic section boundaries from the block tree.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
 - When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
@@ -207,6 +213,8 @@ function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
     'You MUST preserve this order in the `sections` array.',
     'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
     'You MUST NOT reorder, merge, split, or drop sections unless a live screenshot explicitly contradicts this list.',
+    'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
+    'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
     '',
     '```json',
     JSON.stringify(draftSections, null, 2),

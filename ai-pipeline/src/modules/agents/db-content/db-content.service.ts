@@ -61,18 +61,17 @@ export class DbContentService {
       readingSettings,
       taxonomies,
       runtimeFeatures,
-    ] =
-      await Promise.all([
-        this.wpQuery.getSiteInfo(connectionString),
-        this.wpQuery.getPosts(connectionString),
-        this.wpQuery.getPages(connectionString),
-        this.wpQuery.getMenus(connectionString),
-        this.wpQuery.getDbTemplates(connectionString),
-        this.wpQuery.getDbGlobalStyles(connectionString),
-        this.wpQuery.getReadingSettings(connectionString),
-        this.wpQuery.getTaxonomies(connectionString),
-        this.wpQuery.getRuntimeFeatures(connectionString),
-      ]);
+    ] = await Promise.all([
+      this.wpQuery.getSiteInfo(connectionString),
+      this.wpQuery.getPosts(connectionString),
+      this.wpQuery.getPages(connectionString),
+      this.wpQuery.getMenus(connectionString),
+      this.wpQuery.getDbTemplates(connectionString),
+      this.wpQuery.getDbGlobalStyles(connectionString),
+      this.wpQuery.getReadingSettings(connectionString),
+      this.wpQuery.getTaxonomies(connectionString),
+      this.wpQuery.getRuntimeFeatures(connectionString),
+    ]);
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
       runtimeFeatures,

@@ -23,8 +23,9 @@ export class EditRequestService {
       };
     }
 
+    const requestFormat = isCurrentEditRequest(raw) ? 'current' : 'legacy';
     const request =
-      'prompt' in raw
+      requestFormat === 'current'
         ? this.normalizeCurrentRequest(raw)
         : this.normalizeLegacyRequest(raw);
 
@@ -35,10 +36,7 @@ export class EditRequestService {
     return {
       raw,
       request: meaningfulRequest,
-      summary: this.buildSummary(
-        meaningfulRequest,
-        'prompt' in raw ? 'current' : 'legacy',
-      ),
+      summary: this.buildSummary(meaningfulRequest, requestFormat),
     };
   }
 
@@ -194,9 +192,7 @@ export class EditRequestService {
   ): PipelineCaptureAttachmentDto[] | undefined {
     const normalized = (attachments ?? [])
       .filter((attachment) => attachment?.id && attachment?.asset?.publicUrl)
-      .map((attachment) =>
-        this.normalizeAttachment(attachment, pageContext),
-      );
+      .map((attachment) => this.normalizeAttachment(attachment, pageContext));
 
     return normalized.length > 0 ? normalized : undefined;
   }
@@ -325,12 +321,8 @@ function normalizeRequestedLanguage(
   return inferLanguageFromContent(combined);
 }
 
-function normalizeLanguageToken(
-  language?: string,
-): 'vi' | 'en' | undefined {
-  const normalized = stripVietnameseMarks(
-    language?.trim().toLowerCase() ?? '',
-  );
+function normalizeLanguageToken(language?: string): 'vi' | 'en' | undefined {
+  const normalized = stripVietnameseMarks(language?.trim().toLowerCase() ?? '');
   if (!normalized) return undefined;
 
   if (['vi', 'vi-vn', 'vietnamese', 'tieng viet'].includes(normalized)) {
@@ -456,12 +448,8 @@ function normalizeNormalizedBoundingBox(
 }
 
 function normalizeAttachmentGeometry(
-  geometry:
-    | PipelineCaptureAttachmentDto['geometry']
-    | undefined,
-  selection:
-    | PipelineCaptureAttachmentDto['selection']
-    | undefined,
+  geometry: PipelineCaptureAttachmentDto['geometry'] | undefined,
+  selection: PipelineCaptureAttachmentDto['selection'] | undefined,
   viewport:
     | {
         width: number;
@@ -479,15 +467,15 @@ function normalizeAttachmentGeometry(
 ) {
   const viewportRect = normalizeBoundingBox(
     geometry?.viewportRect ??
-      (selection?.coordinateSpace === 'iframe-viewport' ? selection : undefined),
+      (selection?.coordinateSpace === 'iframe-viewport'
+        ? selection
+        : undefined),
   );
   const documentRect = normalizeBoundingBox(
-    geometry?.documentRect ??
-      deriveDocumentRect(selection, viewport),
+    geometry?.documentRect ?? deriveDocumentRect(selection, viewport),
   );
   const normalizedRect = normalizeNormalizedBoundingBox(
-    geometry?.normalizedRect ??
-      deriveNormalizedRect(documentRect, document),
+    geometry?.normalizedRect ?? deriveNormalizedRect(documentRect, document),
   );
 
   if (!viewportRect && !documentRect && !normalizedRect) {
@@ -502,9 +490,7 @@ function normalizeAttachmentGeometry(
 }
 
 function deriveDocumentRect(
-  selection:
-    | PipelineCaptureAttachmentDto['selection']
-    | undefined,
+  selection: PipelineCaptureAttachmentDto['selection'] | undefined,
   viewport:
     | {
         scrollX?: number;
@@ -564,8 +550,9 @@ function normalizeDomTarget(
     tagName: domTarget.tagName?.trim() || undefined,
     elementId: domTarget.elementId?.trim() || undefined,
     classNames:
-      domTarget.classNames?.map((className) => className.trim()).filter(Boolean) ||
-      undefined,
+      domTarget.classNames
+        ?.map((className) => className.trim())
+        .filter(Boolean) || undefined,
     htmlSnippet: domTarget.htmlSnippet?.trim() || undefined,
     textSnippet: domTarget.textSnippet?.trim() || undefined,
     blockName: domTarget.blockName?.trim() || undefined,
@@ -585,31 +572,27 @@ function normalizeTargetNode(
 ) {
   if (!targetNode) return undefined;
 
-  const ownerSourceNodeId =
-    targetNode.ownerSourceNodeId?.trim() || undefined;
+  const ownerSourceNodeId = targetNode.ownerSourceNodeId?.trim() || undefined;
   const ownerSourceFile = targetNode.ownerSourceFile?.trim() || undefined;
-  const ownerTemplateName =
-    targetNode.ownerTemplateName?.trim() || undefined;
-  const ownerTopLevelIndex =
-    normalizeOptionalNumber(targetNode.ownerTopLevelIndex);
+  const ownerTemplateName = targetNode.ownerTemplateName?.trim() || undefined;
+  const ownerTopLevelIndex = normalizeOptionalNumber(
+    targetNode.ownerTopLevelIndex,
+  );
   const editSourceNodeId = targetNode.editSourceNodeId?.trim() || undefined;
   const editSourceFile = targetNode.editSourceFile?.trim() || undefined;
   const editTemplateName = targetNode.editTemplateName?.trim() || undefined;
-  const editTopLevelIndex =
-    normalizeOptionalNumber(targetNode.editTopLevelIndex);
+  const editTopLevelIndex = normalizeOptionalNumber(
+    targetNode.editTopLevelIndex,
+  );
 
   return compactObject({
     nodeId:
-      targetNode.nodeId?.trim() ||
-      targetNode.ownerNodeId?.trim() ||
-      undefined,
+      targetNode.nodeId?.trim() || targetNode.ownerNodeId?.trim() || undefined,
     sourceNodeId:
       targetNode.sourceNodeId?.trim() || ownerSourceNodeId || undefined,
-    sourceFile:
-      targetNode.sourceFile?.trim() || ownerSourceFile || undefined,
+    sourceFile: targetNode.sourceFile?.trim() || ownerSourceFile || undefined,
     topLevelIndex:
-      normalizeOptionalNumber(targetNode.topLevelIndex) ??
-      ownerTopLevelIndex,
+      normalizeOptionalNumber(targetNode.topLevelIndex) ?? ownerTopLevelIndex,
     templateName:
       targetNode.templateName?.trim() || ownerTemplateName || undefined,
     ownerNodeId: targetNode.ownerNodeId?.trim() || undefined,
@@ -634,7 +617,8 @@ function normalizeTargetNode(
       undefined,
     blockName: targetNode.blockName?.trim() || undefined,
     blockClientId: targetNode.blockClientId?.trim() || undefined,
-    tagName: targetNode.tagName?.trim() || targetNode.editTagName?.trim() || undefined,
+    tagName:
+      targetNode.tagName?.trim() || targetNode.editTagName?.trim() || undefined,
     domPath: targetNode.domPath?.trim() || undefined,
     nearestHeading: targetNode.nearestHeading?.trim() || undefined,
     nearestLandmark: targetNode.nearestLandmark?.trim() || undefined,
@@ -661,7 +645,9 @@ function clampRatio(value: number): number {
 }
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function normalizeStringArray(values?: string[]): string[] | undefined {
@@ -690,4 +676,20 @@ function compactObject<T>(value: T): T {
     .filter(([, entryValue]) => entryValue !== undefined);
 
   return Object.fromEntries(compactedEntries) as T;
+}
+
+function isCurrentEditRequest(
+  raw: PipelineIncomingEditRequestDto,
+): raw is PipelineClientEditRequestDto {
+  if ('attachments' in raw || 'prompt' in raw) {
+    return true;
+  }
+
+  if ('captures' in raw || 'capture' in raw || 'userPrompt' in raw) {
+    return false;
+  }
+
+  // Default ambiguous payloads to the current schema so attachment-free
+  // requests still preserve the modern field layout.
+  return true;
 }

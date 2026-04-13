@@ -27,6 +27,7 @@ import type {
   SearchSection,
   BreadcrumbSection,
   SidebarSection,
+  TestimonialSection,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -44,10 +45,63 @@ export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
 
 function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
   const sections: SectionPlan[] = [];
+  let pendingSpacer: string | undefined;
   for (const node of nodes) {
-    sections.push(...mapNode(node, siblings));
+    if (isSpacerBlock(node.block)) {
+      pendingSpacer = resolveSpacerHeight(node) ?? pendingSpacer;
+      continue;
+    }
+
+    const mapped = mapNode(node, siblings);
+    if (mapped.length === 0) continue;
+
+    if (pendingSpacer) {
+      mapped[0] = applyLeadingSpacer(mapped[0], pendingSpacer);
+      pendingSpacer = undefined;
+    }
+
+    for (const section of mapped) {
+      const last = sections[sections.length - 1];
+      const mergedSection =
+        last && section.type === 'card-grid' && last.type === 'card-grid'
+          ? mergeAdjacentCardGridRows(last, section)
+          : null;
+      if (mergedSection) {
+        sections[sections.length - 1] = mergedSection;
+        continue;
+      }
+      sections.push(section);
+    }
+  }
+
+  if (pendingSpacer && sections.length > 0) {
+    sections[sections.length - 1] = applyTrailingSpacer(
+      sections[sections.length - 1],
+      pendingSpacer,
+    );
   }
   return sections;
+}
+
+function mergeAdjacentCardGridRows(
+  previous: CardGridSection,
+  current: CardGridSection,
+): CardGridSection | null {
+  // WordPress often stores a single logical card grid as multiple adjacent
+  // `wp:columns` rows separated only by spacers. Merge all consecutive card-grid
+  // sections that share the same column count, regardless of columnWidths or
+  // row count. This ensures multi-row card grids export correctly.
+  if (previous.columns !== current.columns) {
+    return null;
+  }
+
+  return {
+    ...previous,
+    columns: previous.columns,
+    // Keep previous columnWidths (if any). If previous has none, fall back to current.
+    columnWidths: previous.columnWidths ?? current.columnWidths,
+    cards: [...previous.cards, ...current.cards],
+  };
 }
 
 function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
@@ -76,6 +130,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   // Standalone image block: preserve it as an explicit visual section instead
   // of expecting the LLM to remember an image-only region from raw HTML.
   if (block === 'core/image' || block === 'image') {
+    return toMappedSections(mapImage(node), node);
+  }
+
+  if (node.src) {
     return toMappedSections(mapImage(node), node);
   }
 
@@ -110,18 +168,20 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   }
 
   // Separator / spacer — skip, not a section
-  if (
-    block === 'core/separator' ||
-    block === 'separator' ||
-    block === 'core/spacer' ||
-    block === 'spacer'
-  ) {
+  if (block === 'core/separator' || block === 'separator') {
     return [];
   }
 
-  // Standalone heading at root level that looks like a hero heading
-  if ((block === 'core/heading' || block === 'heading') && node.level === 1) {
-    return toMappedSections(mapStandaloneH1(node), node);
+  if (block === 'core/quote' || block === 'quote') {
+    return toMappedSections(mapQuote(node), node);
+  }
+
+  if (block === 'core/pullquote' || block === 'pullquote') {
+    return toMappedSections(mapQuote(node), node);
+  }
+
+  if (block === 'core/heading' || block === 'heading') {
+    return toMappedSections(mapStandaloneHeading(node), node);
   }
 
   return [];
@@ -317,28 +377,63 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
 // ── query block (post list) ─────────────────────────────────────────────────
 
 function mapQuery(node: WpNode): PostListSection {
-  const perPage = (node.params?.perPage as number | undefined) ?? 6;
-  // Infer layout from children: if post-template has columns layout it's a grid
   const postTemplate = findFirstByBlock(node.children ?? [], [
     'core/post-template',
     'post-template',
   ]);
+  const templateNodes = postTemplate ? flattenChildren(postTemplate) : [];
+  const displayColumns = Number(
+    node.params?.displayLayout?.columns ??
+      postTemplate?.params?.layout?.columnCount ??
+      postTemplate?.params?.layout?.columns ??
+      0,
+  );
   const columnsInTemplate =
     postTemplate?.children?.some(
       (c) => c.block === 'core/columns' || c.block === 'columns',
     ) ?? false;
-  const layout: PostListSection['layout'] = columnsInTemplate
-    ? 'grid-3'
-    : 'list';
+  const layout: PostListSection['layout'] =
+    Number.isFinite(displayColumns) && displayColumns >= 3
+      ? 'grid-3'
+      : displayColumns === 2
+        ? 'grid-2'
+        : columnsInTemplate
+          ? 'grid-3'
+          : 'list';
+
+  const hasAuthorBlock = templateNodes.some((child) =>
+    ['core/post-author', 'post-author'].includes(child.block),
+  );
+  const hasDateBlock = templateNodes.some((child) =>
+    ['core/post-date', 'post-date'].includes(child.block),
+  );
+  const hasTermsBlock = templateNodes.some((child) =>
+    ['core/post-terms', 'post-terms'].includes(child.block),
+  );
+  const hasExcerptBlock = templateNodes.some((child) =>
+    ['core/post-excerpt', 'post-excerpt'].includes(child.block),
+  );
+  const hasFeaturedImageBlock = templateNodes.some((child) =>
+    ['core/post-featured-image', 'post-featured-image'].includes(child.block),
+  );
 
   return {
     type: 'post-list',
     layout,
-    showDate: true,
-    showAuthor: false,
-    showCategory: true,
-    showExcerpt: true,
-    showFeaturedImage: true,
+    showDate: booleanAttr(node.params?.displayPostDate, hasDateBlock || true),
+    showAuthor: booleanAttr(node.params?.displayAuthor, hasAuthorBlock),
+    showCategory: booleanAttr(
+      node.params?.displayPostTerms ?? node.params?.displayCategories,
+      hasTermsBlock,
+    ),
+    showExcerpt: booleanAttr(
+      node.params?.displayPostExcerpt,
+      hasExcerptBlock || true,
+    ),
+    showFeaturedImage: booleanAttr(
+      node.params?.displayFeaturedImage,
+      hasFeaturedImageBlock || true,
+    ),
   };
 }
 
@@ -412,9 +507,10 @@ function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
   return s;
 }
 
-// ── standalone H1 ───────────────────────────────────────────────────────────
+// ── standalone heading / quote ──────────────────────────────────────────────
 
-function mapStandaloneH1(node: WpNode): HeroSection {
+function mapStandaloneHeading(node: WpNode): HeroSection | null {
+  if (!node.text?.trim()) return null;
   const hero: HeroSection = {
     type: 'hero',
     layout: node.textAlign === 'center' ? 'centered' : 'left',
@@ -424,6 +520,20 @@ function mapStandaloneH1(node: WpNode): HeroSection {
     hero.headingStyle = toTypographyStyle(node);
   }
   return hero;
+}
+
+function mapQuote(node: WpNode): TestimonialSection | null {
+  const quote = extractNodeText(node);
+  if (!quote) return null;
+
+  const authorMatch = node.html?.match(/<cite[^>]*>([\s\S]*?)<\/cite>/i);
+  const authorName = authorMatch ? stripInlineHtml(authorMatch[1]) : '';
+
+  return {
+    type: 'testimonial',
+    quote,
+    authorName,
+  };
 }
 
 function toMappedSections(
@@ -457,7 +567,10 @@ function applyNodePresentation<T extends SectionPlan>(
   return next;
 }
 
-function buildSectionKey(type: SectionPlan['type'], topLevelIndex?: number): string {
+function buildSectionKey(
+  type: SectionPlan['type'],
+  topLevelIndex?: number,
+): string {
   if (typeof topLevelIndex !== 'number' || topLevelIndex <= 0) {
     return type;
   }
@@ -511,14 +624,13 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
       continue;
     }
 
-    if (block === 'core/columns' || block === 'columns') {
-      const mapped = mapColumns(child);
-      if (mapped?.type !== 'card-grid') {
-        return null;
-      }
+    const cardGridRows = collectCardGridRows(child);
+    if (cardGridRows) {
       foundCardGrid = true;
-      columnCount = mapped.columns;
-      cards.push(...mapped.cards);
+      for (const row of cardGridRows) {
+        columnCount = row.columns;
+        cards.push(...row.cards);
+      }
       continue;
     }
 
@@ -535,6 +647,31 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
   if (title) section.title = title;
   if (subtitle) section.subtitle = subtitle;
   return section;
+}
+
+function collectCardGridRows(node: WpNode): CardGridSection[] | null {
+  const block = node.block;
+
+  if (block === 'core/spacer' || block === 'spacer') {
+    return [];
+  }
+
+  if (block === 'core/columns' || block === 'columns') {
+    const mapped = mapColumns(node);
+    return mapped?.type === 'card-grid' ? [mapped] : null;
+  }
+
+  if ((block === 'core/group' || block === 'group') && node.children?.length) {
+    const rows: CardGridSection[] = [];
+    for (const child of node.children) {
+      const nestedRows = collectCardGridRows(child);
+      if (nestedRows === null) return null;
+      rows.push(...nestedRows);
+    }
+    return rows.length > 0 ? rows : null;
+  }
+
+  return null;
 }
 
 function buildHeroFromChildren(
@@ -669,6 +806,41 @@ function findFirstByBlock(nodes: WpNode[], blocks: string[]): WpNode | null {
   return null;
 }
 
+function isSpacerBlock(block: string): boolean {
+  return block === 'core/spacer' || block === 'spacer';
+}
+
+function resolveSpacerHeight(node: WpNode): string | undefined {
+  const raw =
+    node.params?.height ??
+    node.params?.style?.spacing?.height ??
+    node.minHeight;
+  if (raw == null) return undefined;
+  return normalizeCssLength(String(raw));
+}
+
+function applyLeadingSpacer<T extends SectionPlan>(
+  section: T,
+  spacerHeight: string,
+): T {
+  if (section.marginStyle) return section;
+  return {
+    ...section,
+    marginStyle: `${spacerHeight} 0 0`,
+  };
+}
+
+function applyTrailingSpacer<T extends SectionPlan>(
+  section: T,
+  spacerHeight: string,
+): T {
+  if (section.marginStyle) return section;
+  return {
+    ...section,
+    marginStyle: `0 0 ${spacerHeight}`,
+  };
+}
+
 /** Flatten all descendant WpNodes into a single array (depth-first). */
 function flattenChildren(node: WpNode): WpNode[] {
   const result: WpNode[] = [];
@@ -692,6 +864,29 @@ function normalizeCssLength(value?: string): string | undefined {
   const normalized = value.trim();
   if (!normalized) return undefined;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function booleanAttr(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+  }
+  return fallback;
+}
+
+function extractNodeText(node: WpNode): string {
+  if (node.text?.trim()) return node.text.trim();
+  if (node.html?.trim()) return stripInlineHtml(node.html);
+  return '';
+}
+
+function stripInlineHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function toTypographyStyle(node?: WpNode): TypographyStyle | undefined {

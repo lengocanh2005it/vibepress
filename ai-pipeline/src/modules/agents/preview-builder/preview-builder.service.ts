@@ -187,7 +187,11 @@ export class PreviewBuilderService {
           const isPartial =
             isPartialComponentName(comp.name) || comp.isSubComponent;
           const targetDir = isPartial ? componentsDir : pagesDir;
-          await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+          await writeFile(
+            join(targetDir, `${comp.name}.tsx`),
+            comp.code,
+            'utf-8',
+          );
         }
         this.logger.log(
           `Remapped ${remappedAssets.size} asset path(s) to /assets/images/ subdir`,
@@ -332,6 +336,7 @@ export class PreviewBuilderService {
 
     // Tạo routes chỉ cho page components, tránh duplicate paths
     const usedPaths = new Set<string>();
+    const usedPathOwners = new Map<string, string>();
     const routeLines: string[] = [];
     const routeEntries: PreviewRouteEntry[] = [];
 
@@ -340,8 +345,14 @@ export class PreviewBuilderService {
         planRouteMap.get(c.name) ??
         FALLBACK_ROUTE_MAP[c.name] ??
         `/${c.name.toLowerCase()}`;
-      if (usedPaths.has(path)) continue;
+      if (usedPaths.has(path)) {
+        this.logger.warn(
+          `Duplicate preview route "${path}" for "${c.name}" ignored; already owned by "${usedPathOwners.get(path) ?? 'unknown'}"`,
+        );
+        continue;
+      }
       usedPaths.add(path);
+      usedPathOwners.set(path, c.name);
       routeLines.push(
         `        <Route path="${path}" element={<${c.name} />} />`,
       );
@@ -360,6 +371,7 @@ export class PreviewBuilderService {
       for (const alias of archiveAliases) {
         if (!usedPaths.has(alias.path)) {
           usedPaths.add(alias.path);
+          usedPathOwners.set(alias.path, 'Archive');
           routeLines.push(
             `        <Route path="${alias.path}" element={<Archive />} />`,
           );
@@ -373,6 +385,7 @@ export class PreviewBuilderService {
       routeLines.unshift(
         `        <Route path="/" element={<${primaryPageComponents[0].name} />} />`,
       );
+      usedPathOwners.set('/', primaryPageComponents[0].name);
       routeEntries.unshift({
         route: '/',
         componentName: primaryPageComponents[0].name,
@@ -388,6 +401,7 @@ export class PreviewBuilderService {
         '*';
       if (!usedPaths.has(notFoundPath)) {
         usedPaths.add(notFoundPath);
+        usedPathOwners.set(notFoundPath, notFoundComponent.name);
         routeLines.push(
           `        <Route path="${notFoundPath}" element={<${notFoundComponent.name} />} />`,
         );
@@ -914,12 +928,23 @@ ${fontEntries}
     return proc;
   }
 
-  private pickApiPort(_jobId: string): number {
-    return 3775;
+  private pickApiPort(jobId: string): number {
+    return this.pickDeterministicPort(jobId, 'api', 3700, 200);
   }
 
-  private pickVitePort(_jobId: string): number {
-    return 5353;
+  private pickVitePort(jobId: string): number {
+    return this.pickDeterministicPort(jobId, 'vite', 5300, 200);
+  }
+
+  private pickDeterministicPort(
+    jobId: string,
+    salt: string,
+    base: number,
+    span: number,
+  ): number {
+    const hash = createHash('sha1').update(`${salt}:${jobId}`).digest('hex');
+    const offset = parseInt(hash.slice(0, 8), 16) % span;
+    return base + offset;
   }
 
   private stripSharedLayoutSectionsFromPageCode(
@@ -964,7 +989,9 @@ ${fontEntries}
       const relativePath = assetPath.replace(/^\/+/, '');
       const sourcePath = join(themeDir, relativePath);
       const destPath = join(publicDir, relativePath);
-      const canonical = assetPath.startsWith('/') ? assetPath : `/${relativePath}`;
+      const canonical = assetPath.startsWith('/')
+        ? assetPath
+        : `/${relativePath}`;
 
       try {
         if (await this.pathExists(destPath)) {
@@ -975,7 +1002,12 @@ ${fontEntries}
         // bulk theme-image copy step (themeDir/assets/images/ → public/assets/images/).
         // This handles path mismatches where the AI used /assets/foo.png but the file
         // lives at /assets/images/foo.png.
-        const imagesFallback = join(publicDir, 'assets', 'images', basename(relativePath));
+        const imagesFallback = join(
+          publicDir,
+          'assets',
+          'images',
+          basename(relativePath),
+        );
         if (await this.pathExists(imagesFallback)) {
           remapped.set(canonical, `/assets/images/${basename(relativePath)}`);
           this.logger.debug(
@@ -994,7 +1026,12 @@ ${fontEntries}
         const msg = err instanceof Error ? err.message : 'Unknown error';
         if (msg.includes('ENOENT')) {
           // One more chance: the images-subdir fallback (catches errors from stat() too)
-          const imagesFallback = join(publicDir, 'assets', 'images', basename(relativePath));
+          const imagesFallback = join(
+            publicDir,
+            'assets',
+            'images',
+            basename(relativePath),
+          );
           if (await this.pathExists(imagesFallback)) {
             remapped.set(canonical, `/assets/images/${basename(relativePath)}`);
             this.logger.debug(

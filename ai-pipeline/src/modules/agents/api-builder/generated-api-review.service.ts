@@ -47,11 +47,7 @@ export class GeneratedApiReviewService {
     plan: PlanResult;
     content: Pick<
       DbContentResult,
-      | 'customPostTypes'
-      | 'pages'
-      | 'posts'
-      | 'menus'
-      | 'taxonomies'
+      'customPostTypes' | 'pages' | 'posts' | 'menus' | 'taxonomies'
     >;
     modelName?: string;
     mode?: 'warn' | 'blocking';
@@ -185,11 +181,7 @@ export class GeneratedApiReviewService {
     plan: PlanResult,
     content: Pick<
       DbContentResult,
-      | 'customPostTypes'
-      | 'pages'
-      | 'posts'
-      | 'menus'
-      | 'taxonomies'
+      'customPostTypes' | 'pages' | 'posts' | 'menus' | 'taxonomies'
     >,
   ): string {
     const requiredDataNeeds = [

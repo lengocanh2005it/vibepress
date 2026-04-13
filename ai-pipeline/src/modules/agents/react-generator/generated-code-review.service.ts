@@ -4,6 +4,7 @@ import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
+import type { CardGridSection } from './visual-plan.schema.js';
 
 interface CodeReviewIssue {
   severity: 'high' | 'medium' | 'low';
@@ -63,19 +64,26 @@ export class GeneratedCodeReviewService {
         resolvedModel,
         logPath,
       );
-
-      const blockingIssues = this.getBlockingIssues(
+      const effectiveReview = this.applyDeterministicIssues(
         review,
         component,
         contract,
       );
 
-      const issuesMessage = review.issues.length
-        ? review.issues
+      const blockingIssues = this.getBlockingIssues(
+        effectiveReview,
+        component,
+        contract,
+      );
+
+      const issuesMessage = effectiveReview.issues.length
+        ? effectiveReview.issues
             .map((issue) => `[${issue.severity}] ${issue.message}`)
             .join(' | ')
-        : review.summary ||
-          (review.pass ? 'Passed' : 'AI reviewer rejected the component');
+        : effectiveReview.summary ||
+          (effectiveReview.pass
+            ? 'Passed'
+            : 'AI reviewer rejected the component');
 
       if (blockingIssues.length > 0) {
         failures.push({
@@ -94,7 +102,7 @@ export class GeneratedCodeReviewService {
         }
       }
 
-      if (!review.pass || review.issues.length > 0) {
+      if (!effectiveReview.pass || effectiveReview.issues.length > 0) {
         if (blockingIssues.length === 0) {
           this.logger.warn(
             `[AI Generated Code Review] "${component.name}" advisory: ${issuesMessage}`,
@@ -231,6 +239,8 @@ Rules:
 - If the approved visual sections include \`comments\`, comments fetching/rendering is justified.
 - Do NOT fail only because fetched data is unused unless it clearly indicates a wrong endpoint or broken logic.
  - Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, obviously different wrapper structure from the approved plan, or typography that is materially inflated beyond the approved/source visual weight (for example giant display headings or oversized menu/body text in an otherwise modest WordPress template).
+ - If the template/source clearly includes an important screenshot, product composite, UI mockup, or other full illustrative image, DO flag fixed-height \`object-cover\` cropping when it visibly cuts off meaningful content that should remain visible.
+ - If a media-text/photo section in the approved/source layout clearly uses rounded image corners or strong heading/list emphasis, DO flag generated code that flattens those into sharp-corner images or weak muted regular-weight text.
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
@@ -245,6 +255,8 @@ Approved contract:
 - dataNeeds: ${dataNeeds.length > 0 ? dataNeeds.join(', ') : '(none)'}
 - description: ${description}
 - approved visual sections: ${visualSections}
+- approved visual section details:
+${this.buildVisualSectionDetailLines(contract)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
@@ -331,6 +343,153 @@ ${component.code}
     return lines.length > 0 ? lines.join('\n') : '- (none)';
   }
 
+  private buildVisualSectionDetailLines(
+    contract: PlanResult[number] | null,
+  ): string {
+    const sections = contract?.visualPlan?.sections ?? [];
+    if (sections.length === 0) return '- (none)';
+
+    return sections
+      .map((section) => {
+        if (section.type === 'card-grid') {
+          const headings = section.cards
+            .map((card) => card.heading?.trim())
+            .filter(Boolean)
+            .slice(0, 8)
+            .join(' | ');
+          return `- card-grid title="${section.title ?? ''}" cards=${section.cards.length}${headings ? ` headings=${headings}` : ''}`;
+        }
+        if (section.type === 'hero') {
+          return `- hero heading="${section.heading}"`;
+        }
+        if (section.type === 'cover') {
+          return `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+        }
+        if (section.type === 'media-text') {
+          return `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+        }
+        if (section.type === 'post-list') {
+          return `- post-list layout=${section.layout}`;
+        }
+        return `- ${section.type}`;
+      })
+      .join('\n');
+  }
+
+  private applyDeterministicIssues(
+    review: CodeReviewResult,
+    component: GeneratedComponent,
+    contract: PlanResult[number] | null,
+  ): CodeReviewResult {
+    const deterministicIssues = this.getDeterministicIssues(
+      component,
+      contract,
+    );
+    if (deterministicIssues.length === 0) return review;
+
+    return {
+      pass: false,
+      issues: [...deterministicIssues, ...review.issues],
+      summary: review.summary || 'Deterministic contract checks failed.',
+    };
+  }
+
+  private getDeterministicIssues(
+    component: GeneratedComponent,
+    contract: PlanResult[number] | null,
+  ): CodeReviewIssue[] {
+    const issues: CodeReviewIssue[] = [];
+    const sections = contract?.visualPlan?.sections ?? [];
+    const normalizedCode = this.normalizeForTextMatch(component.code);
+
+    if (
+      normalizedCode.includes('/page/page/') ||
+      normalizedCode.includes('/post/post/')
+    ) {
+      issues.push({
+        severity: 'high',
+        message:
+          'Generated code contains a duplicated route prefix such as `/page/page/` or `/post/post/`, which will navigate to the wrong URL.',
+      });
+    }
+    if (
+      /return\s+`?\/page\$\{path\}/i.test(component.code) ||
+      /return\s+`?\/page\$\{url\}/i.test(component.code) ||
+      /return\s+`?\/page\/\$\{url/i.test(component.code) ||
+      /return\s+['"`]\/page\$\{url/i.test(component.code) ||
+      (/return\s+['"`]\/page\//i.test(component.code) &&
+        component.code.includes('item.url'))
+    ) {
+      issues.push({
+        severity: 'high',
+        message:
+          'Menu links must use canonical `item.url` directly for internal navigation. Do not prepend an extra `/page` segment to menu URLs.',
+      });
+    }
+
+    if (sections.length === 0) return issues;
+
+    const trackedSections = sections
+      .filter((section) => !!section.sourceRef?.sourceNodeId)
+      .map((section, index) => ({
+        section,
+        sectionKey:
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`,
+      }));
+    if (trackedSections.length > 0) {
+      const missingTrackedWrappers = trackedSections.filter(
+        ({ sectionKey }) =>
+          !component.code.includes(`data-vp-section-key="${sectionKey}"`),
+      );
+
+      if (missingTrackedWrappers.length > 0) {
+        const missingKeys = missingTrackedWrappers.map(
+          ({ sectionKey }) => sectionKey,
+        );
+        issues.push({
+          severity: 'high',
+          message: `Generated code is missing required tracked wrapper markers for approved sections: ${missingKeys.join(', ')}. Each approved section with a source node must keep its own top-level wrapper with the exact \`data-vp-*\` attributes, otherwise section boundaries can collapse or merge incorrectly.`,
+        });
+      }
+    }
+
+    const cardGrids = sections.filter(
+      (section): section is CardGridSection => section.type === 'card-grid',
+    );
+
+    for (const section of cardGrids) {
+      const expectedHeadings = section.cards
+        .map((card) => card.heading?.trim())
+        .filter(Boolean);
+      if (expectedHeadings.length < 4) continue;
+
+      const missingHeadings = expectedHeadings.filter(
+        (heading) =>
+          !normalizedCode.includes(this.normalizeForTextMatch(heading)),
+      );
+      if (missingHeadings.length === 0) continue;
+
+      const presentCount = expectedHeadings.length - missingHeadings.length;
+      issues.push({
+        severity: 'high',
+        message: `Approved card-grid${section.title ? ` "${section.title}"` : ''} includes ${expectedHeadings.length} cards, but the generated code only contains ${presentCount}/${expectedHeadings.length} expected card headings. Missing: ${missingHeadings.join(', ')}.`,
+      });
+    }
+
+    return issues;
+  }
+
+  private normalizeForTextMatch(raw: string): string {
+    return raw
+      .replace(/&amp;/gi, '&')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&quot;/gi, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
   private getBlockingIssues(
     review: CodeReviewResult,
     component: GeneratedComponent,
@@ -377,6 +536,15 @@ ${component.code}
       'missing import',
       'missing variable',
       'obviously omits an important approved section',
+      'approved card-grid',
+      'expected card headings',
+      'missing:',
+      'missing required tracked wrapper markers',
+      'data-vp-*',
+      'section boundaries can collapse',
+      'duplicated route prefix',
+      'extra `/page` segment',
+      'menu links must use canonical `item.url` directly',
     ];
 
     return review.issues.filter(

@@ -95,10 +95,7 @@ function inferTemplateNameFromRoute(route?: string | null): string | undefined {
   if (!normalizedRoute) return undefined;
   if (normalizedRoute === '/') return 'home';
 
-  const slug = normalizedRoute
-    .split('/')
-    .filter(Boolean)
-    .pop();
+  const slug = normalizedRoute.split('/').filter(Boolean).pop();
 
   return slug ? slug.toLowerCase() : undefined;
 }
@@ -118,7 +115,9 @@ function deriveComponentName(templateName?: string): string | undefined {
   return /^\d/.test(name) ? `Page${name}` : name;
 }
 
-function deriveComponentNameFromRoute(route?: string | null): string | undefined {
+function deriveComponentNameFromRoute(
+  route?: string | null,
+): string | undefined {
   const templateName = inferTemplateNameFromRoute(route);
   return deriveComponentName(templateName);
 }
@@ -255,10 +254,10 @@ function hasMeaningfulTargetHint(
 ): boolean {
   return Boolean(
     targetHint?.route ||
-      targetHint?.templateName ||
-      targetHint?.componentName ||
-      targetHint?.sectionType ||
-      typeof targetHint?.sectionIndex === 'number',
+    targetHint?.templateName ||
+    targetHint?.componentName ||
+    targetHint?.sectionType ||
+    typeof targetHint?.sectionIndex === 'number',
   );
 }
 

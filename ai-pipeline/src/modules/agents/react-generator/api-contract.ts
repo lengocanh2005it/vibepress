@@ -21,6 +21,7 @@ export const POST_FIELDS = [
   'author',
   'authorSlug',
   'categories',
+  'categorySlugs',
   'tags',
   'featuredImage',
 ] as const;
@@ -57,7 +58,11 @@ export const MENU_ITEM_FIELDS = [
 ] as const;
 
 export const MENU_FIELDS = ['name', 'slug', 'location', 'items'] as const;
-export const POST_TYPE_SUMMARY_FIELDS = ['postType', 'count', 'taxonomies'] as const;
+export const POST_TYPE_SUMMARY_FIELDS = [
+  'postType',
+  'count',
+  'taxonomies',
+] as const;
 
 export const TERM_FIELDS = [
   'id',
@@ -82,7 +87,7 @@ export const COMMENT_SUBMISSION_FIELDS = [
   'moderationStatus',
 ] as const;
 
-export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; authorSlug: string; categories: string[]; tags: string[]; featuredImage: string | null; }`;
+export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; authorSlug: string; categories: string[]; categorySlugs: string[]; tags: string[]; featuredImage: string | null; }`;
 export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; parentId: number; menuOrder: number; template: string; featuredImage: string | null; }`;
 export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; logoUrl: string | null; adminEmail: string; language: string; }`;
 export const MENU_ITEM_INTERFACE = `interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; target: string | null; }`;
@@ -138,6 +143,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - \`post.content\` and \`page.content\` are normalized HTML strings: WordPress asset URLs are rewritten, Gutenberg comments are stripped, and common dynamic blocks are rendered to HTML where possible.
 - Paginated post-list endpoints return flat \`Post[]\` plus WP-style response headers: \`X-WP-Total\`, \`X-WP-TotalPages\`, \`X-WP-CurrentPage\`, \`X-WP-PerPage\`.
 - Use \`post.authorSlug\` for author archive links; \`post.author\` is display text only.
+- Use \`post.categorySlugs[index]\` with \`post.categories[index]\` for category archive links when \`/category/:slug\` is available.
 - \`menus[].items[].parentId\` is always a number; top-level menu items use \`0\`.
 - Use \`menu.items[].target\` when rendering anchors; when it is \`"_blank"\`, also set \`rel="noopener noreferrer"\`.
 - Comments use \`comment.author\`, not \`comment.author_name\` or avatar fields.
@@ -157,9 +163,9 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
       `- \`post\` fields: ${formatFieldList(POST_FIELDS)}.`,
       '- `post.title`, `post.excerpt`, `post.author`, `post.authorSlug`, `post.content`, `post.date` are plain strings.',
       '- `post.content` is already normalized HTML suitable for `dangerouslySetInnerHTML`.',
-      '- `post.categories` and `post.tags` are `string[]`.',
-      '- Valid examples: `post.title`, `post.authorSlug`, `post.excerpt`, `post.categories[0]`, `post.tags[0]`.',
-      '- Invalid examples: `post.title.node`, `post.excerpt.rendered`, `post.author.slug`, `post.categories.nodes`, `post.tags.nodes`.',
+      '- `post.categories`, `post.categorySlugs`, and `post.tags` are `string[]`.',
+      '- Valid examples: `post.title`, `post.authorSlug`, `post.excerpt`, `post.categories[0]`, `post.categorySlugs[0]`, `post.tags[0]`.',
+      '- Invalid examples: `post.title.node`, `post.excerpt.rendered`, `post.author.slug`, `post.categories.nodes`, `post.categorySlugs.nodes`, `post.tags.nodes`.',
     );
   }
 

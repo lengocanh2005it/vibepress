@@ -5,9 +5,7 @@ import type {
 } from '../orchestrator/orchestrator.dto.js';
 import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
-import {
-  CapturePlanningService,
-} from './capture-planning.service.js';
+import { CapturePlanningService } from './capture-planning.service.js';
 import type { CaptureSectionMatch } from './capture-section-matcher.service.js';
 import { CaptureSectionMatcherService } from './capture-section-matcher.service.js';
 import type {
@@ -49,36 +47,44 @@ export class EditRequestPhaseService {
     exactCaptureTargets?: ResolvedCaptureTargetRecord[];
     mutationCandidates?: UiMutationCandidate[];
   }): PostMigrationEditTask[] {
-    const { request, plan, components, exactCaptureTargets, mutationCandidates } =
-      input;
+    const {
+      request,
+      plan,
+      components,
+      exactCaptureTargets,
+      mutationCandidates,
+    } = input;
     if (!request) return [];
 
-    const planByComponent = new Map(plan.map((entry) => [entry.componentName, entry]));
-    const componentNames = new Set(components.map((component) => component.name));
-    const resolvedCaptureTargets =
-      exactCaptureTargets?.some(
-        (target) =>
-          !!target.targetNodeRole ||
-          !!target.targetComponentName ||
-          target.resolution === 'intent-element-match' ||
-          target.resolution === 'intent-owner-fallback',
-      )
-        ? (exactCaptureTargets ?? [])
-        : this.resolveIntentAwareCaptureTargets({
-            request,
-            exactCaptureTargets,
-            mutationCandidates,
-          });
+    const planByComponent = new Map(
+      plan.map((entry) => [entry.componentName, entry]),
+    );
+    const componentNames = new Set(
+      components.map((component) => component.name),
+    );
+    const resolvedCaptureTargets = exactCaptureTargets?.some(
+      (target) =>
+        !!target.targetNodeRole ||
+        !!target.targetComponentName ||
+        target.resolution === 'intent-element-match' ||
+        target.resolution === 'intent-owner-fallback',
+    )
+      ? (exactCaptureTargets ?? [])
+      : this.resolveIntentAwareCaptureTargets({
+          request,
+          exactCaptureTargets,
+          mutationCandidates,
+        });
 
-    const promptTargets = this.resolvePromptTargets(request, plan)
-      .filter((target) => componentNames.has(target.componentName));
+    const promptTargets = this.resolvePromptTargets(request, plan).filter(
+      (target) => componentNames.has(target.componentName),
+    );
     const captureTargets = this.resolveCaptureTargets({
       attachments: request.attachments,
       plan,
       componentNames,
       exactCaptureTargets: resolvedCaptureTargets,
-    })
-      .filter((target) => componentNames.has(target.componentName));
+    }).filter((target) => componentNames.has(target.componentName));
 
     const attachmentsByComponent = new Map<
       string,
@@ -93,7 +99,10 @@ export class EditRequestPhaseService {
 
     for (const target of promptTargets) {
       promptTargetComponents.add(target.componentName);
-      planComponentByTargetComponent.set(target.componentName, target.componentName);
+      planComponentByTargetComponent.set(
+        target.componentName,
+        target.componentName,
+      );
     }
 
     for (const target of captureTargets) {
@@ -154,7 +163,7 @@ export class EditRequestPhaseService {
             ? 'mixed'
             : promptIncluded
               ? 'prompt'
-            : 'capture',
+              : 'capture',
         attachments,
         sectionMatches,
         matchedAttachmentIds: attachments.map((attachment) => attachment.id),
@@ -227,9 +236,8 @@ export class EditRequestPhaseService {
       if (!best || best.scored.score < 20) {
         resolved.push({
           ...ownerTarget,
-          targetComponentName: deriveTargetComponentNameFromExactRecord(
-            ownerTarget,
-          ),
+          targetComponentName:
+            deriveTargetComponentNameFromExactRecord(ownerTarget),
           targetSourceNodeId: ownerTarget.sourceNodeId,
           targetNodeRole: 'section',
           targetStartLine: ownerTarget.startLine,
@@ -296,8 +304,7 @@ export class EditRequestPhaseService {
     plan: PlanResult;
     componentNames: Set<string>;
     exactCaptureTargets?: ResolvedCaptureTargetRecord[];
-  },
-  ): Array<{
+  }): Array<{
     componentName: string;
     planComponentName: string;
     attachments: PipelineCaptureAttachmentDto[];
@@ -521,7 +528,9 @@ export class EditRequestPhaseService {
         request.targetHint.componentName
           ? `targetComponent=${request.targetHint.componentName}`
           : null,
-        request.targetHint.route ? `targetRoute=${request.targetHint.route}` : null,
+        request.targetHint.route
+          ? `targetRoute=${request.targetHint.route}`
+          : null,
         request.targetHint.templateName
           ? `targetTemplate=${request.targetHint.templateName}`
           : null,
@@ -544,10 +553,14 @@ export class EditRequestPhaseService {
           .map((attachment) => {
             const attachmentParts = [`id=${attachment.id}`];
             if (attachment.captureContext?.page?.route) {
-              attachmentParts.push(`pageRoute=${attachment.captureContext.page.route}`);
+              attachmentParts.push(
+                `pageRoute=${attachment.captureContext.page.route}`,
+              );
             }
             if (attachment.targetNode?.route) {
-              attachmentParts.push(`targetRoute=${attachment.targetNode.route}`);
+              attachmentParts.push(
+                `targetRoute=${attachment.targetNode.route}`,
+              );
             }
             if (attachment.targetNode?.templateName) {
               attachmentParts.push(
@@ -594,8 +607,9 @@ export class EditRequestPhaseService {
     if (exactTargets.length > 0) {
       parts.push(
         `exactTargets=${exactTargets
-          .map((target) =>
-            `{attachment=${target.captureId},file=${target.outputFilePath},section=${target.sectionKey},ownerLines=${formatLineRange(target.startLine, target.endLine)},targetSourceNodeId=${target.targetSourceNodeId ?? target.sourceNodeId},targetRole=${target.targetNodeRole ?? 'section'},targetLines=${formatLineRange(target.targetStartLine, target.targetEndLine)},sourceNodeId=${target.sourceNodeId}}`,
+          .map(
+            (target) =>
+              `{attachment=${target.captureId},file=${target.outputFilePath},section=${target.sectionKey},ownerLines=${formatLineRange(target.startLine, target.endLine)},targetSourceNodeId=${target.targetSourceNodeId ?? target.sourceNodeId},targetRole=${target.targetNodeRole ?? 'section'},targetLines=${formatLineRange(target.targetStartLine, target.targetEndLine)},sourceNodeId=${target.sourceNodeId}}`,
           )
           .join(' ')}`,
       );
@@ -617,7 +631,9 @@ export class EditRequestPhaseService {
   }
 }
 
-function shouldIncludePromptInPostEdit(request: PipelineEditRequestDto): boolean {
+function shouldIncludePromptInPostEdit(
+  request: PipelineEditRequestDto,
+): boolean {
   return Boolean(request.prompt && request.targetHint);
 }
 
@@ -739,7 +755,10 @@ function formatAttachmentInstruction(
   if (attachment.targetNode?.templateName) {
     parts.push(`template=${attachment.targetNode.templateName}`);
   }
-  if (attachment.targetNode?.ownerSourceNodeId || attachment.targetNode?.sourceNodeId) {
+  if (
+    attachment.targetNode?.ownerSourceNodeId ||
+    attachment.targetNode?.sourceNodeId
+  ) {
     parts.push(
       `ownerSourceNodeId=${attachment.targetNode?.ownerSourceNodeId ?? attachment.targetNode?.sourceNodeId}`,
     );
@@ -835,7 +854,8 @@ function deriveTargetComponentNameFromExactRecord(
   target: ResolvedCaptureTargetRecord,
 ): string {
   if (target.targetComponentName) return target.targetComponentName;
-  const fileName = target.outputFilePath.split('/').pop() ?? target.outputFilePath;
+  const fileName =
+    target.outputFilePath.split('/').pop() ?? target.outputFilePath;
   return fileName.replace(/\.tsx$/i, '');
 }
 
@@ -872,10 +892,7 @@ function formatExactTargetInstruction(
   return parts.join(' | ');
 }
 
-function formatLineRange(
-  startLine?: number,
-  endLine?: number,
-): string {
+function formatLineRange(startLine?: number, endLine?: number): string {
   if (typeof startLine === 'number' && typeof endLine === 'number') {
     return `${startLine}-${endLine}`;
   }
@@ -931,7 +948,9 @@ function inferCaptureEditIntent(
   if (/\b(text|paragraph|copy|description|noi dung|chu)\b/.test(normalized)) {
     targetRoles.push('text');
   }
-  if (/\b(image|img|media|photo|banner|cover|hero image|hinh)\b/.test(normalized)) {
+  if (
+    /\b(image|img|media|photo|banner|cover|hero image|hinh)\b/.test(normalized)
+  ) {
     targetRoles.push('media');
   }
   if (/\b(card|panel|tile|badge|box)\b/.test(normalized)) {
@@ -960,9 +979,7 @@ function inferCaptureEditIntent(
 function inferIntentStyleProperty(
   normalized: string,
 ): CaptureEditIntentDescriptor['styleProperty'] {
-  if (
-    /\b(background|bg|nen|backgroud|overlay|gradient)\b/.test(normalized)
-  ) {
+  if (/\b(background|bg|nen|backgroud|overlay|gradient)\b/.test(normalized)) {
     return 'background';
   }
   if (/\b(text color|font color|chu|mau chu|color)\b/.test(normalized)) {
@@ -987,7 +1004,8 @@ function selectMutationCandidatesForOwner(
   candidates: UiMutationCandidate[],
   ownerTarget: ResolvedCaptureTargetRecord,
 ): UiMutationCandidate[] {
-  const ownerComponentName = deriveTargetComponentNameFromExactRecord(ownerTarget);
+  const ownerComponentName =
+    deriveTargetComponentNameFromExactRecord(ownerTarget);
 
   return candidates.filter((candidate) => {
     if (
@@ -1157,8 +1175,8 @@ function hasStructuredEditHint(
 ): boolean {
   return Boolean(
     attachment.targetNode?.editSourceNodeId ||
-      attachment.targetNode?.editNodeRole ||
-      attachment.targetNode?.editTagName,
+    attachment.targetNode?.editNodeRole ||
+    attachment.targetNode?.editTagName,
   );
 }
 
@@ -1253,9 +1271,7 @@ function scoreFrontendStructuredCandidate(input: {
   };
 }
 
-function dedupeNodeRoles(
-  roles: UiMutationNodeRole[],
-): UiMutationNodeRole[] {
+function dedupeNodeRoles(roles: UiMutationNodeRole[]): UiMutationNodeRole[] {
   return Array.from(new Set(roles));
 }
 
@@ -1276,7 +1292,9 @@ function clampMetric(value: number): number {
 function normalizeUiMutationNodeRole(
   value?: string,
 ): UiMutationNodeRole | undefined {
-  const normalized = String(value ?? '').trim().toLowerCase();
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase();
   if (!normalized) return undefined;
 
   const supportedRoles: UiMutationNodeRole[] = [

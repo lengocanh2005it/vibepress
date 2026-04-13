@@ -17,7 +17,9 @@ const PARTIAL_NAME_PREFIXES = [
   'functions',
 ] as const;
 
-export function isPartialComponentName(name: string | null | undefined): boolean {
+export function isPartialComponentName(
+  name: string | null | undefined,
+): boolean {
   if (!name) return false;
 
   const raw = name.trim();

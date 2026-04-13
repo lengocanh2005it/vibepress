@@ -86,7 +86,10 @@ export class DbTemplateOverlayService {
         (_match, slug: string) => {
           const nestedKey = this.findEntityKey(slug, rawPartMap);
           if (!nestedKey) return `<!-- part:${slug} not found -->`;
-          return this.wrapResolvedPart(slug, resolvePartMarkup(nestedKey, nextStack));
+          return this.wrapResolvedPart(
+            slug,
+            resolvePartMarkup(nestedKey, nextStack),
+          );
         },
       );
 
@@ -123,7 +126,8 @@ export class DbTemplateOverlayService {
         resolvedPartMap,
       );
       const existingIndex = this.findEntityIndex(nextTemplates, key);
-      const name = existingIndex === -1 ? key : nextTemplates[existingIndex].name;
+      const name =
+        existingIndex === -1 ? key : nextTemplates[existingIndex].name;
 
       if (existingIndex === -1) {
         nextTemplates.push({ name, markup: resolvedMarkup });
@@ -203,7 +207,10 @@ export class DbTemplateOverlayService {
         const partMarkup = partKey
           ? resolvedPartMap.get(partKey)
           : `<!-- part:${slug} not found -->`;
-        return this.wrapResolvedPart(slug, partMarkup ?? `<!-- part:${slug} not found -->`);
+        return this.wrapResolvedPart(
+          slug,
+          partMarkup ?? `<!-- part:${slug} not found -->`,
+        );
       },
     );
   }
@@ -252,7 +259,7 @@ export class DbTemplateOverlayService {
     if (!trimmed) return '';
 
     const themeScoped = trimmed.includes('//')
-      ? trimmed.split('//').pop() ?? trimmed
+      ? (trimmed.split('//').pop() ?? trimmed)
       : trimmed;
     return themeScoped.toLowerCase();
   }

@@ -331,8 +331,7 @@ export class LlmFactoryService {
       text,
       inputTokens: inputTokens ?? 0,
       outputTokens: outputTokens ?? 0,
-      cachedTokens:
-        typeof cachedTokens === 'number' ? cachedTokens : undefined,
+      cachedTokens: typeof cachedTokens === 'number' ? cachedTokens : undefined,
       truncated: finishReason === 'length',
     };
   }

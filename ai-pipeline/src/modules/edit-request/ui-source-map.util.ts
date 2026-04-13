@@ -22,7 +22,10 @@ export async function buildUiSourceMapForProject(input: {
 
   for (const component of components) {
     const outputFilePath = resolveComponentOutputFilePath(component);
-    const absoluteFilePath = join(srcDir, outputFilePath.replace(/^src[\\/]/, ''));
+    const absoluteFilePath = join(
+      srcDir,
+      outputFilePath.replace(/^src[\\/]/, ''),
+    );
     const extracted = await extractUiSourceMapEntriesFromFile(
       absoluteFilePath,
       toPosixPath(outputFilePath),
@@ -30,10 +33,7 @@ export async function buildUiSourceMapForProject(input: {
 
     for (const entry of extracted) {
       const existing = entries.get(entry.sourceNodeId);
-      entries.set(
-        entry.sourceNodeId,
-        mergeUiSourceMapEntry(existing, entry),
-      );
+      entries.set(entry.sourceNodeId, mergeUiSourceMapEntry(existing, entry));
     }
   }
 
@@ -61,10 +61,7 @@ export async function buildUiSourceMapForGeneratedComponents(input: {
 
     for (const entry of extracted) {
       const existing = entries.get(entry.sourceNodeId);
-      entries.set(
-        entry.sourceNodeId,
-        mergeUiSourceMapEntry(existing, entry),
-      );
+      entries.set(entry.sourceNodeId, mergeUiSourceMapEntry(existing, entry));
     }
   }
 
@@ -169,7 +166,8 @@ export function resolveCaptureTargetsFromUiSourceMap(input: {
           return toResolvedCaptureTargetRecord(attachment.id, exact, {
             resolution: 'exact-source-map',
             confidence:
-              typeof exact.startLine === 'number' && typeof exact.endLine === 'number'
+              typeof exact.startLine === 'number' &&
+              typeof exact.endLine === 'number'
                 ? 1
                 : 0.94,
           });
@@ -181,13 +179,19 @@ export function resolveCaptureTargetsFromUiSourceMap(input: {
       if (!templateName || typeof topLevelIndex !== 'number') return undefined;
 
       const heuristicCandidates =
-        byTemplateAndIndex.get(buildTemplateIndexKey(templateName, topLevelIndex)) ?? [];
+        byTemplateAndIndex.get(
+          buildTemplateIndexKey(templateName, topLevelIndex),
+        ) ?? [];
       if (heuristicCandidates.length !== 1) return undefined;
 
-      return toResolvedCaptureTargetRecord(attachment.id, heuristicCandidates[0], {
-        resolution: 'heuristic',
-        confidence: 0.72,
-      });
+      return toResolvedCaptureTargetRecord(
+        attachment.id,
+        heuristicCandidates[0],
+        {
+          resolution: 'heuristic',
+          confidence: 0.72,
+        },
+      );
     })
     .filter((value): value is ResolvedCaptureTargetRecord => !!value);
 }
@@ -207,7 +211,8 @@ function buildFallbackUiSourceMapEntries(
       .map((section, index) => ({
         ...section.sourceRef!,
         componentName: componentPlan.componentName,
-        sectionKey: section.sectionKey ?? buildFallbackSectionKey(section.type, index),
+        sectionKey:
+          section.sectionKey ?? buildFallbackSectionKey(section.type, index),
         sectionComponentName: buildSectionComponentName(
           componentPlan.componentName,
           section.sectionKey ?? section.type,
@@ -296,9 +301,7 @@ function readTrackedEntryFromJsxElement(
   sourceFile: ts.SourceFile,
   outputFilePath: string,
 ): UiSourceMapEntry | null {
-  let attributes:
-    | ts.JsxAttributes
-    | undefined;
+  let attributes: ts.JsxAttributes | undefined;
   let rangeNode: ts.Node = node;
 
   if (ts.isJsxElement(node)) {
@@ -311,20 +314,27 @@ function readTrackedEntryFromJsxElement(
     return null;
   }
 
-  const sourceNodeId = readStringJsxAttribute(attributes, 'data-vp-source-node');
+  const sourceNodeId = readStringJsxAttribute(
+    attributes,
+    'data-vp-source-node',
+  );
   if (!sourceNodeId) return null;
 
   const componentName =
     readStringJsxAttribute(attributes, 'data-vp-component') ??
     deriveComponentNameFromOutputPath(outputFilePath);
   const templateName =
-    readStringJsxAttribute(attributes, 'data-vp-template') ?? 'unknown-template';
+    readStringJsxAttribute(attributes, 'data-vp-template') ??
+    'unknown-template';
   const sourceFilePath =
-    readStringJsxAttribute(attributes, 'data-vp-source-file') ?? 'unknown-source';
+    readStringJsxAttribute(attributes, 'data-vp-source-file') ??
+    'unknown-source';
   const sectionKey =
-    readStringJsxAttribute(attributes, 'data-vp-section-key') ?? 'unknown-section';
+    readStringJsxAttribute(attributes, 'data-vp-section-key') ??
+    'unknown-section';
   const sectionComponentName =
-    readStringJsxAttribute(attributes, 'data-vp-section-component') ?? undefined;
+    readStringJsxAttribute(attributes, 'data-vp-section-component') ??
+    undefined;
 
   const start = sourceFile.getLineAndCharacterOfPosition(
     rangeNode.getStart(sourceFile),
@@ -363,9 +373,14 @@ function readUiMutationCandidateFromJsxNode(
     readStringJsxAttribute(attributes, 'data-vp-component') ??
     owner?.ownerComponentName ??
     deriveComponentNameFromOutputPath(outputFilePath);
-  const sourceNodeId = readStringJsxAttribute(attributes, 'data-vp-source-node');
+  const sourceNodeId = readStringJsxAttribute(
+    attributes,
+    'data-vp-source-node',
+  );
   const textPreview = extractJsxNodeTextPreview(jsxNode);
-  const start = sourceFile.getLineAndCharacterOfPosition(jsxNode.getStart(sourceFile));
+  const start = sourceFile.getLineAndCharacterOfPosition(
+    jsxNode.getStart(sourceFile),
+  );
   const end = sourceFile.getLineAndCharacterOfPosition(jsxNode.getEnd());
   const candidateId = [
     outputFilePath,
@@ -430,9 +445,7 @@ function getJsxAttributes(
     : node.attributes;
 }
 
-function getJsxTagName(
-  node: ts.JsxElement | ts.JsxSelfClosingElement,
-): string {
+function getJsxTagName(node: ts.JsxElement | ts.JsxSelfClosingElement): string {
   const tagName = ts.isJsxElement(node)
     ? node.openingElement.tagName.getText()
     : node.tagName.getText();
@@ -450,8 +463,12 @@ function inferUiMutationNodeRole(
   if (explicitRole) return explicitRole;
 
   const normalizedTag = elementTag.toLowerCase();
-  const sourceNodeId = readStringJsxAttribute(attributes, 'data-vp-source-node');
-  const className = readStringJsxAttribute(attributes, 'className')?.toLowerCase() ?? '';
+  const sourceNodeId = readStringJsxAttribute(
+    attributes,
+    'data-vp-source-node',
+  );
+  const className =
+    readStringJsxAttribute(attributes, 'className')?.toLowerCase() ?? '';
 
   if (/^h[1-6]$/.test(normalizedTag)) return 'heading';
   if (normalizedTag === 'button') return 'button';
@@ -464,7 +481,8 @@ function inferUiMutationNodeRole(
   if (['input', 'textarea', 'select'].includes(normalizedTag)) return 'input';
   if (['ul', 'ol', 'li'].includes(normalizedTag)) return 'list';
   if (normalizedTag === 'p') return 'text';
-  if (normalizedTag === 'span' && extractJsxNodeTextPreview(node)) return 'text';
+  if (normalizedTag === 'span' && extractJsxNodeTextPreview(node))
+    return 'text';
 
   if (
     ['section', 'header', 'footer', 'main', 'article', 'aside', 'nav'].includes(
@@ -607,7 +625,9 @@ function resolveComponentOutputFilePath(component: GeneratedComponent): string {
   return toPosixPath(`${folder}/${component.name}.tsx`);
 }
 
-export function deriveComponentNameFromOutputPath(outputFilePath: string): string {
+export function deriveComponentNameFromOutputPath(
+  outputFilePath: string,
+): string {
   const fileName = outputFilePath.split('/').pop() ?? outputFilePath;
   return fileName.replace(/\.tsx$/i, '');
 }
@@ -619,7 +639,10 @@ function deriveTopLevelIndexFromSourceNodeId(sourceNodeId: string): number {
   return Number.isFinite(topLevel) ? topLevel : 0;
 }
 
-function buildTemplateIndexKey(templateName: string, topLevelIndex: number): string {
+function buildTemplateIndexKey(
+  templateName: string,
+  topLevelIndex: number,
+): string {
   return `${templateName}::${topLevelIndex}`;
 }
 

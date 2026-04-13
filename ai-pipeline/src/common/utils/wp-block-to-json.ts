@@ -1,7 +1,4 @@
-import {
-  buildSourceNodeId,
-  type SourceRef,
-} from './source-node-id.util.js';
+import { buildSourceNodeId, type SourceRef } from './source-node-id.util.js';
 
 /**
  * Converts WordPress block markup into a compact JSON tree.

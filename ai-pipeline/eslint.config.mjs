@@ -32,4 +32,12 @@ export default tseslint.config(
       'prettier/prettier': ['error', { endOfLine: 'off' }],
     },
   },
+  {
+    files: ['scripts/*.js'],
+    ...tseslint.configs.disableTypeChecked,
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
 );

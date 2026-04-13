@@ -554,7 +554,10 @@ export class PlannerService {
             wpBlocksToJsonWithSourceRefs({
               markup: rawMarkup,
               templateName: componentPlan.templateName,
-              sourceFile: inferFseSourceFile(componentPlan.templateName, componentPlan.type),
+              sourceFile: inferFseSourceFile(
+                componentPlan.templateName,
+                componentPlan.type,
+              ),
             }),
             tokens,
           );
@@ -1651,9 +1654,18 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         } as SectionPlan;
       }
       case 'card-grid': {
-        const cardGridDraft = draft as typeof section;
+        const cardGridDraft = draft as any;
+        const cardGridSection = section as any;
+        // The mapper (draft) is the authoritative source for card content.
+        // If the AI returned fewer cards than the draft, restore the full list —
+        // the AI tends to truncate long card arrays to save tokens.
+        const draftCards: unknown[] = cardGridDraft.cards ?? [];
+        const aiCards: unknown[] = cardGridSection.cards ?? [];
+        const mergedCards =
+          draftCards.length > aiCards.length ? draftCards : aiCards;
         return {
           ...mergedBase,
+          cards: mergedCards,
           ...(cardGridDraft.columnWidths
             ? { columnWidths: cardGridDraft.columnWidths }
             : {}),

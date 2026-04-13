@@ -13,6 +13,7 @@ export interface WpPost {
   author: string;
   authorSlug: string;
   categories: string[];
+  categorySlugs: string[];
   tags: string[];
   featuredImage: string | null;
 }
@@ -168,6 +169,7 @@ export class WpQueryService {
                 u.user_nicename AS author_slug,
                 img.guid AS featured_image,
                 ${this.taxonomyNamesSubquery(prefix, 'category')} AS categories,
+                ${this.taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
                 ${this.taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
          FROM \`${prefix}posts\` p
          LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -565,8 +567,7 @@ export class WpQueryService {
       const showOnFront =
         options.get('show_on_front') === 'page' ? 'page' : 'posts';
       const pageOnFrontId = Number(options.get('page_on_front') ?? 0) || null;
-      const pageForPostsId =
-        Number(options.get('page_for_posts') ?? 0) || null;
+      const pageForPostsId = Number(options.get('page_for_posts') ?? 0) || null;
 
       return {
         showOnFront,
@@ -803,11 +804,38 @@ export class WpQueryService {
     }
   }
 
+  private async resolveSiteLogoOptionUrl(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    prefix: string,
+    siteUrl: string,
+  ): Promise<string | null> {
+    try {
+      const [[siteLogoRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'site_logo' LIMIT 1`,
+      );
+      const logoId = Number(siteLogoRow?.option_value ?? 0);
+      if (!Number.isFinite(logoId) || logoId <= 0) return null;
+      return this.resolveAttachmentUrlById(conn, prefix, logoId, siteUrl);
+    } catch {
+      return null;
+    }
+  }
+
   private async resolveSiteLogoUrl(
     conn: Awaited<ReturnType<typeof createConnection>>,
     prefix: string,
     siteUrl: string,
   ): Promise<string | null> {
+    const siteLogoOptionUrl = await this.resolveSiteLogoOptionUrl(
+      conn,
+      prefix,
+      siteUrl,
+    );
+    if (siteLogoOptionUrl) {
+      this.logger.log('Resolved site logo from wp_options.site_logo');
+      return siteLogoOptionUrl;
+    }
+
     const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix);
     if (customLogoUrl) return customLogoUrl;
 
@@ -1002,6 +1030,7 @@ export class WpQueryService {
       author: row.author_name ?? '',
       authorSlug: row.author_slug ?? '',
       categories: this.splitTermList(row.categories),
+      categorySlugs: this.splitTermList(row.category_slugs),
       tags: this.splitTermList(row.tags),
       featuredImage: row.featured_image ?? null,
     };
@@ -1036,6 +1065,14 @@ export class WpQueryService {
              WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
   }
 
+  private taxonomySlugsSubquery(prefix: string, taxonomy: string): string {
+    return `(SELECT GROUP_CONCAT(DISTINCT t.slug ORDER BY t.slug SEPARATOR ', ')
+             FROM \`${prefix}term_relationships\` tr2
+             INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+             INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+             WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
+  }
+
   private normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
     if (!raw) return '';
     const trimmed = raw.trim();
@@ -1058,9 +1095,18 @@ export class WpQueryService {
       raw = trimmed;
     }
 
-    return raw
-      .replace(/^\/pages\//, '/page/')
-      .replace(/^\/posts\//, '/post/');
+    raw = raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+    if (
+      raw &&
+      !raw.startsWith('/') &&
+      !raw.startsWith('#') &&
+      !raw.startsWith('http://') &&
+      !raw.startsWith('https://') &&
+      !raw.startsWith('mailto:')
+    ) {
+      raw = '/' + raw;
+    }
+    return raw;
   }
 
   private parseSerializedPhpStringArray(serialized: string): string[] {

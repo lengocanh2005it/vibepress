@@ -338,6 +338,14 @@ function taxonomyNamesSubquery(prefix: string, taxonomy: string): string {
            WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
 }
 
+function taxonomySlugsSubquery(prefix: string, taxonomy: string): string {
+  return `(SELECT GROUP_CONCAT(DISTINCT t.slug ORDER BY t.slug SEPARATOR ', ')
+           FROM \`${prefix}term_relationships\` tr2
+           INNER JOIN \`${prefix}term_taxonomy\` tt2 ON tt2.term_taxonomy_id = tr2.term_taxonomy_id
+           INNER JOIN \`${prefix}terms\` t ON t.term_id = tt2.term_id
+           WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
+}
+
 function parsePositiveInt(raw: unknown, fallback: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -467,6 +475,7 @@ async function serializePost(
     author: r.author_name ?? '',
     authorSlug: r.author_slug ?? '',
     categories: splitTermList(r.categories),
+    categorySlugs: splitTermList(r.category_slugs),
     tags: splitTermList(r.tags),
     featuredImage: localizeWpUploadAssetUrl(r.featured_image ?? null),
   };
@@ -623,11 +632,35 @@ async function resolveCustomLogoUrl(
   }
 }
 
+async function resolveSiteLogoOptionUrl(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  siteUrl: string,
+): Promise<string | null> {
+  try {
+    const [[siteLogoRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'site_logo' LIMIT 1`,
+    );
+    const logoId = Number(siteLogoRow?.option_value ?? 0);
+    if (!Number.isFinite(logoId) || logoId <= 0) return null;
+    return resolveAttachmentUrlById(conn, prefix, logoId, siteUrl);
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSiteLogoUrl(
   conn: Awaited<ReturnType<typeof getConn>>,
   prefix: string,
   siteUrl: string,
 ): Promise<string | null> {
+  const siteLogoOptionUrl = await resolveSiteLogoOptionUrl(
+    conn,
+    prefix,
+    siteUrl,
+  );
+  if (siteLogoOptionUrl) return siteLogoOptionUrl;
+
   const customLogoUrl = await resolveCustomLogoUrl(conn, prefix);
   if (customLogoUrl) return customLogoUrl;
   return resolveLogoUrlFromTemplateMarkup(conn, prefix, siteUrl);
@@ -734,6 +767,39 @@ function tryParseBlockAttrs(raw: string | null | undefined): Record<string, any>
   if (!raw?.trim()) return null;
   try {
     return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function extractSiteLogoWidth(markup: string): number | null {
+  if (!markup) return null;
+  const pattern = /<!--\s*wp:site-logo(?:\s+(\{[\s\S]*?\}))?[\s/]*-->/gi;
+  for (const match of markup.matchAll(pattern)) {
+    const attrs = tryParseBlockAttrs(match[1]);
+    const w = Number(attrs?.width ?? 0);
+    if (Number.isFinite(w) && w > 0) return w;
+  }
+  return null;
+}
+
+async function resolveSiteLogoWidth(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<number | null> {
+  try {
+    const [rows] = await conn.query<any[]>(
+      `SELECT post_content FROM \`${prefix}posts\`
+       WHERE post_type IN ('wp_template', 'wp_template_part')
+         AND post_status IN ('publish', 'auto-draft')
+         AND post_content LIKE '%wp:site-logo%'
+       ORDER BY post_modified DESC LIMIT 10`,
+    );
+    for (const row of rows) {
+      const width = extractSiteLogoWidth(row.post_content as string);
+      if (width) return width;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -853,6 +919,7 @@ app.get('/api/site-info', async (req, res) => {
       logoUrl:
         process.env.SITE_LOGO_URL ||
         (await resolveSiteLogoUrl(conn, prefix, opts['siteurl'] ?? '')),
+      logoWidth: await resolveSiteLogoWidth(conn, prefix),
       adminEmail: opts['admin_email'] ?? '',
       language: opts['WPLANG'] ?? 'en',
     });
@@ -897,6 +964,7 @@ app.get('/api/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -931,6 +999,7 @@ app.get('/api/posts/:slug', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -1027,6 +1096,7 @@ app.get('/api/post-types/:postType/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -1059,6 +1129,7 @@ app.get('/api/post-types/:postType/:slug', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
@@ -1168,7 +1239,22 @@ function normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
     // not a valid URL — treat as relative path
     raw = trimmed;
   }
-  return raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+  raw = raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+  // Ensure local paths always start with / so React Router treats them as
+  // absolute, not relative. A relative path like "page/slug" would be resolved
+  // against the current URL — navigating from /page/x to page/slug would
+  // produce /page/page/slug instead of /page/slug.
+  if (
+    raw &&
+    !raw.startsWith('/') &&
+    !raw.startsWith('#') &&
+    !raw.startsWith('http://') &&
+    !raw.startsWith('https://') &&
+    !raw.startsWith('mailto:')
+  ) {
+    raw = '/' + raw;
+  }
+  return raw;
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -1357,6 +1443,7 @@ app.get('/api/taxonomies/:taxonomy/:term/posts', async (req, res) => {
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
               ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
               ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
        FROM \`${prefix}posts\` p
        INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID

@@ -29,7 +29,10 @@ export class EditRequestValidatorService {
     }
 
     if (mode === 'capture') {
-      if (request?.prompt && !this.isMeaningfulSupplementalPrompt(request.prompt)) {
+      if (
+        request?.prompt &&
+        !this.isMeaningfulSupplementalPrompt(request.prompt)
+      ) {
         return {
           code: 'SUPPLEMENTAL_PROMPT_TOO_VAGUE',
           message:
@@ -82,8 +85,7 @@ export class EditRequestValidatorService {
     if (!request?.prompt || !this.isMeaningfulPrompt(request.prompt)) {
       return {
         code: 'MAIN_PROMPT_REQUIRED',
-        message:
-          'Add a clear migration prompt when no captures are attached.',
+        message: 'Add a clear migration prompt when no captures are attached.',
       };
     }
 
@@ -135,16 +137,9 @@ export class EditRequestValidatorService {
 
     if (normalized.length < 6) return false;
     if (
-      [
-        'hello',
-        'hi',
-        'test',
-        'ok',
-        'oke',
-        'xin chao',
-        'chao',
-        'thu',
-      ].includes(normalizedAscii)
+      ['hello', 'hi', 'test', 'ok', 'oke', 'xin chao', 'chao', 'thu'].includes(
+        normalizedAscii,
+      )
     ) {
       return false;
     }
@@ -197,7 +192,9 @@ export class EditRequestValidatorService {
 
   private hasFocusTargetWithoutConcreteAction(prompt: string): boolean {
     const normalized = stripVietnameseMarks(normalizeText(prompt));
-    return mentionsFocusTarget(normalized) && !hasConcreteEditAction(normalized);
+    return (
+      mentionsFocusTarget(normalized) && !hasConcreteEditAction(normalized)
+    );
   }
 
   private detectMode(request?: PipelineEditRequestDto): EditRequestMode {

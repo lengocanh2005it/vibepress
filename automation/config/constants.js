@@ -28,7 +28,7 @@ const UPLOAD_ROOT = path.join(BASE_DIR, 'uploads');
 
 const corsOptions = {
 	origin: CORS_ORIGIN,
-	methods: ['GET', 'POST', 'OPTIONS'],
+	methods: ['GET', 'POST', 'PUT'],
 	allowedHeaders: ['Content-Type', 'Authorization'],
 	optionsSuccessStatus: 204,
 };

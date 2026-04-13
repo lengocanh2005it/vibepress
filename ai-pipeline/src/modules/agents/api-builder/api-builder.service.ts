@@ -53,7 +53,9 @@ export interface ApiBuilderResult {
   files: { name: string; filePath: string; code: string }[];
 }
 
-function shouldSkipCustomPostTypeRoute(cpt: DbContentResult['customPostTypes'][number]) {
+function shouldSkipCustomPostTypeRoute(
+  cpt: DbContentResult['customPostTypes'][number],
+) {
   return (
     AI_ROUTE_EXCLUDED_CPTS.has(cpt.postType) ||
     cpt.taxonomies.some((taxonomy) =>
@@ -73,10 +75,7 @@ export class ApiBuilderService {
     jobId?: string;
     dbName: string;
     logPath?: string;
-    content: Pick<
-      DbContentResult,
-      | 'customPostTypes'
-    >;
+    content: Pick<DbContentResult, 'customPostTypes'>;
   }): Promise<ApiBuilderResult> {
     const { jobId = 'unknown', content, logPath } = input;
     const outDir = join('./temp/generated', jobId, 'server');
@@ -102,7 +101,9 @@ export class ApiBuilderService {
     }
 
     if (content.customPostTypes.length > 0) {
-      const skipped = content.customPostTypes.filter(shouldSkipCustomPostTypeRoute);
+      const skipped = content.customPostTypes.filter(
+        shouldSkipCustomPostTypeRoute,
+      );
       if (skipped.length > 0) {
         this.logger.log(
           `Skipping AI routes for template-covered/excluded CPT(s): ${skipped

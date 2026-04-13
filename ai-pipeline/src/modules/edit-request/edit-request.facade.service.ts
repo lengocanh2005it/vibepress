@@ -1,7 +1,4 @@
-import {
-  Injectable,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { Injectable, UnprocessableEntityException } from '@nestjs/common';
 import type { PipelineIncomingEditRequestDto } from '../orchestrator/orchestrator.dto.js';
 import { EditIntentService } from './edit-intent.service.js';
 import { EditRequestService } from './edit-request.service.js';
@@ -24,7 +21,10 @@ export class EditRequestFacadeService {
     raw?: PipelineIncomingEditRequestDto,
   ): Promise<ResolvedEditRequestContext> {
     const prepared = this.editRequestService.prepare(raw);
-    const requestLanguage = resolveRequestLanguage(raw, prepared.request?.language);
+    const requestLanguage = resolveRequestLanguage(
+      raw,
+      prepared.request?.language,
+    );
     const preparedWithResolvedTarget = prepared.request
       ? {
           ...prepared,
@@ -157,5 +157,9 @@ function localizeEditRequestError(
     },
   };
 
-  return messages[code]?.[language] ?? fallbackMessage ?? messages.INVALID_EDIT_REQUEST[language];
+  return (
+    messages[code]?.[language] ??
+    fallbackMessage ??
+    messages.INVALID_EDIT_REQUEST[language]
+  );
 }

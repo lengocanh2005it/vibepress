@@ -32,6 +32,7 @@ import type {
 } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
 import { ValidatorService } from '../agents/validator/validator.service.js';
+import { GenerationContractAuditService } from '../agents/validator/generation-contract-audit.service.js';
 import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
 import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { SqlService } from '../sql/sql.service.js';
@@ -249,6 +250,7 @@ export class OrchestratorService {
     private readonly previewBuilder: PreviewBuilderService,
     private readonly visualRouteReview: VisualRouteReviewService,
     private readonly validator: ValidatorService,
+    private readonly contractAudit: GenerationContractAuditService,
     private readonly sourceResolver: SourceResolverService,
     private readonly dbTemplateOverlay: DbTemplateOverlayService,
     private readonly cleanup: CleanupService,
@@ -273,6 +275,8 @@ export class OrchestratorService {
       : response.data;
 
     this.validateDto(dto);
+
+    console.log('AI Pipeline dto: ', dto);
 
     const jobId = uuidv4();
     const state: PipelineStatus = {
@@ -1678,6 +1682,29 @@ export class OrchestratorService {
           0.93,
           'Preview API layer is ready for the runtime preview environment.',
         );
+
+        const auditWarnings = this.contractAudit.audit({
+          components: generationResult.components,
+          plan: reviewResult.plan,
+          api,
+        });
+        this.contractAudit.logWarnings(
+          auditWarnings,
+          'Stage 7: Deterministic Contract Audit',
+        );
+        if (auditWarnings.length > 0) {
+          await this.logToFile(
+            logPath,
+            `[Stage 7: Deterministic Contract Audit] ${auditWarnings.length} warning(s)\n${auditWarnings
+              .map((warning) => {
+                const target = warning.componentName
+                  ? `"${warning.componentName}" `
+                  : '';
+                return `- [${warning.scope}] ${target}${warning.message}`;
+              })
+              .join('\n')}`,
+          );
+        }
         return api;
       });
       await stepDelay();

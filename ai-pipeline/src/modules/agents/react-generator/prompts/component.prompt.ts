@@ -72,6 +72,7 @@ const MAX_STATIC_IMAGE_HINTS = 8;
 const MAX_SAMPLE_ITEMS = 3;
 const MAX_TAXONOMY_TERMS = 5;
 const MAX_RETRY_ERROR_CHARS = 700;
+const MAX_PLAN_TEXT_CHARS = 180;
 
 export interface ComponentPromptContext {
   description?: string;
@@ -80,6 +81,48 @@ export interface ComponentPromptContext {
   isDetail?: boolean;
   type?: 'page' | 'partial';
   visualPlan?: ComponentVisualPlan;
+}
+
+function compactPlanText(
+  value?: string | null,
+  maxChars: number = MAX_PLAN_TEXT_CHARS,
+): string | null {
+  if (!value) return null;
+  const cleaned = stripTags(value).replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function pushPlanTextPart(
+  parts: string[],
+  key: string,
+  value?: string | null,
+  maxChars?: number,
+): void {
+  const compact = compactPlanText(value, maxChars);
+  if (compact) {
+    parts.push(`${key}=${JSON.stringify(compact)}`);
+  }
+}
+
+function pushPlanListPart(
+  parts: string[],
+  key: string,
+  values?: readonly (string | null | undefined)[],
+  options?: { maxItems?: number; maxChars?: number },
+): void {
+  if (!values?.length) return;
+  const maxItems = options?.maxItems ?? 8;
+  const normalized = values
+    .map((value) => compactPlanText(value, options?.maxChars))
+    .filter((value): value is string => Boolean(value));
+  if (normalized.length === 0) return;
+  const sliced = normalized.slice(0, maxItems);
+  parts.push(`${key}=${JSON.stringify(sliced)}`);
+  if (normalized.length > maxItems) {
+    parts.push(`${key}Count=${normalized.length}`);
+  }
 }
 
 function shouldIncludeRepoManifestContext(
@@ -98,10 +141,15 @@ function buildAllowedEndpointsNote(input: {
   dataNeeds: string[];
   route?: string | null;
   visualPlan?: ComponentVisualPlan;
+  componentName?: string;
 }): string {
   const lines = ['## Allowed runtime data for this component'];
   const allowed = new Set<string>();
   const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
+  const isArchiveAlias = isArchiveAliasComponent(
+    input.componentName,
+    input.route,
+  );
 
   if (input.dataNeeds.includes('siteInfo')) allowed.add('GET /api/site-info');
   if (input.dataNeeds.includes('menus')) allowed.add('GET /api/menus');
@@ -124,6 +172,20 @@ function buildAllowedEndpointsNote(input: {
   }
   if (input.dataNeeds.includes('authorDetail')) {
     allowed.add('GET /api/posts?author=${slug}');
+  }
+  if (isArchiveAlias) {
+    allowed.add('GET /api/posts?page=${currentPage}&perPage=${perPage}');
+    allowed.add(
+      'GET /api/posts?author=${slug}&page=${currentPage}&perPage=${perPage}',
+    );
+    allowed.add('GET /api/taxonomies/category');
+    allowed.add(
+      'GET /api/taxonomies/category/${slug}/posts?page=${currentPage}&perPage=${perPage}',
+    );
+    allowed.add('GET /api/taxonomies/post_tag');
+    allowed.add(
+      'GET /api/taxonomies/post_tag/${slug}/posts?page=${currentPage}&perPage=${perPage}',
+    );
   }
 
   const sidebarSection = input.visualPlan?.sections?.find(
@@ -230,6 +292,20 @@ function normalizeDataNeeds(dataNeeds?: string[]): string[] {
   return result;
 }
 
+function isArchiveAliasComponent(
+  componentName?: string,
+  route?: string | null,
+): boolean {
+  const normalizedName = (componentName ?? '').trim().toLowerCase();
+  return (
+    normalizedName === 'archive' ||
+    route === '/archive' ||
+    route === '/category/:slug' ||
+    route === '/author/:slug' ||
+    route === '/tag/:slug'
+  );
+}
+
 function hasAnyDataNeed(dataNeeds: string[], ...candidates: string[]): boolean {
   return candidates.some((candidate) => dataNeeds.includes(candidate));
 }
@@ -237,6 +313,7 @@ function hasAnyDataNeed(dataNeeds: string[], ...candidates: string[]): boolean {
 function buildScopedApiContractNote(input: {
   dataNeeds: string[];
   route?: string | null;
+  componentName?: string;
 }): string {
   const lines = [
     `## Canonical API contract — relevant subset from \`${API_CONTRACT_SOURCE_PATH}\``,
@@ -245,6 +322,10 @@ function buildScopedApiContractNote(input: {
   const entityLines: string[] = [];
   const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
   const needs = input.dataNeeds;
+  const isArchiveAlias = isArchiveAliasComponent(
+    input.componentName,
+    input.route,
+  );
 
   if (needs.includes('siteInfo')) {
     endpoints.add('GET /api/site-info -> SiteInfo');
@@ -281,6 +362,13 @@ function buildScopedApiContractNote(input: {
     endpoints.add('GET /api/taxonomies/category -> Term[]');
     endpoints.add('GET /api/taxonomies/category/${slug}/posts -> Post[]');
   }
+  if (isArchiveAlias) {
+    endpoints.add('GET /api/posts?author=${slug} -> Post[]');
+    endpoints.add('GET /api/taxonomies/category -> Term[]');
+    endpoints.add('GET /api/taxonomies/category/${slug}/posts -> Post[]');
+    endpoints.add('GET /api/taxonomies/post_tag -> Term[]');
+    endpoints.add('GET /api/taxonomies/post_tag/${slug}/posts -> Post[]');
+  }
 
   if (endpoints.size > 0) {
     lines.push('### Endpoints');
@@ -305,11 +393,31 @@ function buildScopedApiContractNote(input: {
     '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
   );
   lines.push(
-    '- Use `post.author` as display text only. Do NOT assume an author route unless the contract explicitly approves it.',
+    '- Use `post.author` as display text. If the contract/known routes approve `/author/:slug`, link the author name with `to={"/author/" + post.authorSlug}`; otherwise keep it plain text.',
+  );
+  lines.push(
+    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings may link to that route using `post.categorySlugs[index]` alongside `post.categories[index]`. Do NOT guess a slug from display text when no slug is available.',
   );
   lines.push(
     '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
   );
+  if (isArchiveAlias) {
+    lines.push(
+      '- Archive fallback contract: this component must handle `/archive`, `/category/:slug`, `/author/:slug`, and `/tag/:slug` by reading `location.pathname` plus the optional `slug` param.',
+    );
+    lines.push(
+      '- For `/category/:slug`, fetch `GET /api/taxonomies/category/${slug}/posts` and render a primary heading beginning with the literal text `Category:` followed by the term label.',
+    );
+    lines.push(
+      '- For `/author/:slug`, fetch `GET /api/posts?author=${slug}` and render a primary heading beginning with the literal text `Author:`.',
+    );
+    lines.push(
+      '- For `/tag/:slug`, fetch `GET /api/taxonomies/post_tag/${slug}/posts` and render a primary heading beginning with the literal text `Tag:`.',
+    );
+    lines.push(
+      '- Only the plain `/archive` fallback may use a generic `Archive` title.',
+    );
+  }
 
   return lines.join('\n');
 }
@@ -595,10 +703,10 @@ function buildClassicThemeNote(
   // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
   const headerHint = isPageComponent
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Header /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
+    : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
   const footerHint = isPageComponent
     ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → render the site title as a home link (\`<Link to="/">{siteInfo.siteName}</Link>\`) + fetch \`GET /api/menus\` for footer links`;
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -662,6 +770,9 @@ export function buildDataGroundingNote(
   parts.push(
     '> ⛔ NEVER render siteName more than once per component — one element only.',
   );
+  parts.push(
+    '> If shared chrome renders `siteInfo.logoUrl` and/or `siteInfo.siteName`, the visible brand must navigate home as a single clickable cluster. Prefer one `<Link to="/">` that wraps both logo and title.',
+  );
   parts.push('');
 
   if (wantsSiteInfo) {
@@ -711,6 +822,9 @@ export function buildDataGroundingNote(
     );
     parts.push(
       `> Menu fields: ${formatContractFields(MENU_FIELDS)} | MenuItem fields: ${formatContractFields(MENU_ITEM_FIELDS)}.`,
+    );
+    parts.push(
+      '> IMPORTANT: `item.url` from `/api/menus` is already the canonical app path for internal links. Use `<Link to={item.url}>` directly. NEVER prepend `/page`, `/post`, or any extra route segment to `item.url`.',
     );
     for (const m of menus) {
       const itemPreview = m.items
@@ -777,6 +891,7 @@ export function buildPlanContextNote(
   if (!plan) return '';
   const lines: string[] = ['## Component plan'];
   const normalizedDataNeeds = normalizeDataNeeds(plan.dataNeeds);
+  const isArchiveAlias = isArchiveAliasComponent(componentName, plan.route);
   if (plan.description) lines.push(`Purpose: ${plan.description}`);
   if (plan.route) {
     lines.push(`Route: \`${plan.route}\``);
@@ -794,6 +909,7 @@ export function buildPlanContextNote(
       dataNeeds: normalizedDataNeeds,
       route: plan.route,
       visualPlan: plan.visualPlan,
+      componentName,
     }),
   );
   lines.push('');
@@ -856,6 +972,26 @@ export function buildPlanContextNote(
         'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty. ' +
         'If the approved comments section includes a reply form, create controlled form state, generate/store a stable `clientToken` in `localStorage`, submit with `POST /api/comments`, show an awaiting-moderation notice, and poll `GET /api/comments/submissions?slug=${slug}&clientToken=${clientToken}` until a submission becomes approved; only then should you refetch `GET /api/comments` so the public list updates. ' +
         'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed.',
+    );
+  }
+  if (isArchiveAlias) {
+    lines.push(
+      'Archive alias contract: although the canonical plan route may be `/archive`, this component is also mounted at `/category/:slug`, `/author/:slug`, and `/tag/:slug` in the app router.',
+    );
+    lines.push(
+      'Archive alias contract: for this component, DO import/use `useLocation` and `useParams<{ slug?: string }>()` to detect the active archive variant. Ignore the generic no-params rule for plain `/archive`.',
+    );
+    lines.push(
+      'Heading contract: `/category/:slug` must render a primary heading that begins with the literal prefix `Category:` and the resolved term label, for example `Category: Uncategorized`.',
+    );
+    lines.push(
+      'Heading contract: `/author/:slug` must render a primary heading that begins with `Author:`. `/tag/:slug` must render a primary heading that begins with `Tag:`.',
+    );
+    lines.push(
+      'Fetch contract: `/category/:slug` -> `/api/taxonomies/category/${slug}/posts`; `/author/:slug` -> `/api/posts?author=${slug}`; `/tag/:slug` -> `/api/taxonomies/post_tag/${slug}/posts`; plain `/archive` may use `/api/posts`.',
+    );
+    lines.push(
+      'Do NOT render a generic `Archive` heading on category/author/tag alias routes.',
     );
   }
   if (
@@ -947,6 +1083,15 @@ function buildImageSourcesNote(templateSource: string): string {
   lines.push(
     'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten to just `/assets/filename`. These URLs are automatically relinked to local paths after generation.',
   );
+  lines.push(
+    'For important screenshot/product/composite images from the template source, preserve the full asset by default: prefer `w-full h-auto object-contain` (optionally with a max-height) instead of fixed-height `object-cover` cropping, unless the source itself is intentionally cropped.',
+  );
+  lines.push(
+    'When a media-text/photo section in the source has a framed or rounded image, preserve that rounded treatment in React. Do not flatten it to a sharp-corner image unless the source is clearly square-edged.',
+  );
+  lines.push(
+    'Preserve emphasis from the source: if a media-text heading or key list lines read as bold/strong in the template, keep them visually strong in JSX instead of downgrading everything to regular muted text.',
+  );
 
   return lines.join('\n');
 }
@@ -967,8 +1112,22 @@ function buildCompactSectionSummary(
       case 'navbar':
         parts.push(`menuSlug=${section.menuSlug}`);
         parts.push(`sticky=${section.sticky}`);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        pushPlanTextPart(parts, 'ctaStyle', section.cta?.style);
+        break;
+      case 'hero':
+        parts.push(`layout=${section.layout}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        pushPlanTextPart(parts, 'imageSrc', section.image?.src);
+        pushPlanTextPart(parts, 'imageAlt', section.image?.alt);
+        pushPlanTextPart(parts, 'imagePosition', section.image?.position);
         break;
       case 'sidebar':
+        pushPlanTextPart(parts, 'title', section.title);
         parts.push(`showPages=${section.showPages}`);
         parts.push(`showPosts=${section.showPosts}`);
         parts.push(`showSiteInfo=${section.showSiteInfo}`);
@@ -976,6 +1135,7 @@ function buildCompactSectionSummary(
         if (section.maxItems) parts.push(`maxItems=${section.maxItems}`);
         break;
       case 'post-list':
+        pushPlanTextPart(parts, 'title', section.title);
         parts.push(`layout=${section.layout}`);
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showAuthor=${section.showAuthor}`);
@@ -995,9 +1155,76 @@ function buildCompactSectionSummary(
       case 'cover':
         parts.push(`contentAlign=${section.contentAlign}`);
         parts.push(`minHeight=${section.minHeight}`);
+        parts.push(`dimRatio=${section.dimRatio}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'card-grid':
+        pushPlanTextPart(parts, 'title', section.title);
+        pushPlanTextPart(parts, 'subtitle', section.subtitle);
+        parts.push(`columns=${section.columns}`);
+        parts.push(`cardCount=${section.cards.length}`);
+        section.cards.forEach((card, cardIndex) => {
+          pushPlanTextPart(
+            parts,
+            `card${cardIndex + 1}Heading`,
+            card.heading,
+            140,
+          );
+          pushPlanTextPart(parts, `card${cardIndex + 1}Body`, card.body, 180);
+        });
         break;
       case 'media-text':
         parts.push(`imagePosition=${section.imagePosition}`);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'body', section.body, 240);
+        pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
+        pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
+        pushPlanListPart(parts, 'listItems', section.listItems, {
+          maxItems: 10,
+          maxChars: 160,
+        });
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'testimonial':
+        pushPlanTextPart(parts, 'quote', section.quote, 240);
+        pushPlanTextPart(parts, 'authorName', section.authorName);
+        pushPlanTextPart(parts, 'authorTitle', section.authorTitle);
+        pushPlanTextPart(parts, 'authorAvatar', section.authorAvatar);
+        break;
+      case 'newsletter':
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushPlanTextPart(parts, 'buttonText', section.buttonText);
+        parts.push(`layout=${section.layout}`);
+        break;
+      case 'footer':
+        pushPlanTextPart(
+          parts,
+          'brandDescription',
+          section.brandDescription,
+          220,
+        );
+        pushPlanListPart(
+          parts,
+          'menuColumns',
+          section.menuColumns.map(
+            (column) => `${column.title || 'Untitled'} -> ${column.menuSlug}`,
+          ),
+        );
+        pushPlanTextPart(parts, 'copyright', section.copyright);
+        break;
+      case 'search':
+        pushPlanTextPart(parts, 'title', section.title);
+        break;
+      case 'comments':
+        parts.push(`showForm=${section.showForm}`);
+        parts.push(`requireName=${section.requireName}`);
+        parts.push(`requireEmail=${section.requireEmail}`);
         break;
       default:
         break;
@@ -1045,12 +1272,31 @@ export function buildVisualPlanContextNote(
     lines.push(
       '⛔ If you are tempted to add a section that is not in the list above, STOP and omit it entirely.',
     );
+    lines.push(
+      '⛔ CONTENT FIDELITY: When the approved plan below includes concrete headings, card text, body copy, list items, CTA labels, image sources, or image alts, render that exact approved content instead of inventing substitute marketing copy or shortening the section.',
+    );
+    lines.push(
+      '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
+    );
+    lines.push(
+      '⛔ For `hero`, `cover`, `media-text`, `testimonial`, and `newsletter`, preserve the approved heading/body/image/CTA pairing for that exact section. Do NOT swap content between sections.',
+    );
+    lines.push(
+      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different `sectionKey` / `sourceNodeId`, keep them as separate top-level JSX wrappers in the same order. Do NOT merge two approved sections into one split row or one shared wrapper.',
+    );
+    lines.push(
+      '⛔ If one approved section is text-first and a later approved section owns the image, keep the image in the later section. Do NOT pull that image up beside the earlier text block.',
+    );
+    lines.push(
+      '⛔ Split/flex-row guardrail: use side-by-side text/image layout ONLY when the approved section itself is `media-text` or a `hero` whose approved `layout=split`. Do NOT introduce `md:flex-row` / two-column hero structure for a section that is approved as a text-only hero followed by a later media/image section.',
+    );
 
     const trackedSections = visualPlan.sections
       .filter((section) => !!section.sourceRef?.sourceNodeId)
       .map((section, index) => {
         const sectionKey =
-          section.sectionKey ?? `${section.type}${index === 0 ? '' : `-${index}`}`;
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`;
         return [
           `- section ${index + 1}: type=${section.type}`,
           `sectionKey=${sectionKey}`,
@@ -1217,6 +1463,7 @@ ${
       buildScopedApiContractNote({
         dataNeeds: normalizedDataNeeds,
         route: componentPlan?.route,
+        componentName,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
@@ -1306,7 +1553,10 @@ Render ONLY the JSX for the blocks in the template source below.`;
   const planContext = [
     sectionContextNote,
     buildPlanContextNote(input.componentPlan, input.parentName),
-    buildVisualPlanContextNote(input.componentPlan?.visualPlan, input.parentName),
+    buildVisualPlanContextNote(
+      input.componentPlan?.visualPlan,
+      input.parentName,
+    ),
     sourceTrackingNote,
     repoContext,
     input.editRequestContextNote,
@@ -1330,6 +1580,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
       buildScopedApiContractNote({
         dataNeeds: normalizedDataNeeds,
         route: input.componentPlan?.route,
+        componentName: input.parentName,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
