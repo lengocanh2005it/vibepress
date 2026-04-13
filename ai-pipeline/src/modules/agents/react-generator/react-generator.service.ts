@@ -4,6 +4,7 @@ import { appendFile, mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
+import type { TokenScope } from '../../../common/utils/token-tracker.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
 import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
@@ -580,6 +581,7 @@ export class ReactGeneratorService {
     fixMode?: 'full' | 'syntax-only';
     visionImageUrls?: string[];
     visionContextNote?: string;
+    tokenScope?: TokenScope;
   }): Promise<GeneratedComponent> {
     const {
       component,
@@ -590,6 +592,7 @@ export class ReactGeneratorService {
       fixMode = 'full',
       visionImageUrls,
       visionContextNote,
+      tokenScope = 'base',
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
@@ -634,6 +637,7 @@ export class ReactGeneratorService {
       logPath,
       component.name,
       visionImageUrls,
+      tokenScope,
     );
 
     return this.attachPlanContext(
@@ -773,7 +777,7 @@ ${renders}
     logPath: string | undefined,
     message: string,
   ): Promise<void> {
-    if (!logPath) return;
+    if (!logPath || logPath.endsWith('.json')) return;
     try {
       await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
     } catch {

@@ -175,14 +175,17 @@ export class PlannerService {
         userPrompt: prompt,
         maxTokens: 4096,
       });
-      if (tokenLogPath) {
-        await this.tokenTracker.track(
-          resolvedModel,
-          inTok,
-          outTok,
-          `planner:${attempt === 1 ? 'phase-a' : `phase-a-retry-${attempt}`}`,
-        );
-      }
+        if (tokenLogPath) {
+          await this.tokenTracker.track(
+            resolvedModel,
+            inTok,
+            outTok,
+            `planner:${attempt === 1 ? 'phase-a' : `phase-a-retry-${attempt}`}`,
+            {
+              scope: editRequestContext ? 'edit-request' : 'base',
+            },
+          );
+        }
 
       lastRaw = raw;
       const parsed = this.tryParseResponseDetailed(raw, templateNames);
@@ -629,6 +632,9 @@ export class PlannerService {
             inTok,
             outTok,
             `${componentPlan.componentName}:visual-plan:${attempt}`,
+            {
+              scope: scopedEditRequest ? 'edit-request' : 'base',
+            },
           );
         }
 

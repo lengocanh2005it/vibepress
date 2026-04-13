@@ -9,7 +9,10 @@ import {
 } from '@nestjs/common';
 import { Observable, map } from 'rxjs';
 import { EditRequestFacadeService } from '../edit-request/edit-request.facade.service.js';
-import type { RunPipelineRequestDto } from './orchestrator.dto.js';
+import type {
+  RunPipelineRequestDto,
+  SubmitReactVisualEditDto,
+} from './orchestrator.dto.js';
 import { OrchestratorService } from './orchestrator.service.js';
 
 @Controller('pipeline')
@@ -29,6 +32,22 @@ export class OrchestratorController {
       body.editRequest,
     );
     return this.orchestratorService.run(siteId, resolvedEditRequest);
+  }
+
+  @Post('react-visual-edit')
+  async submitReactVisualEdit(@Body() body: SubmitReactVisualEditDto) {
+    const siteId = body?.siteId?.trim();
+    const jobId = body?.jobId?.trim();
+    if (!siteId) {
+      throw new BadRequestException('siteId is required');
+    }
+    if (!jobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    if (!body?.editRequest?.reactSourceTarget) {
+      throw new BadRequestException('editRequest.reactSourceTarget is required');
+    }
+    return this.orchestratorService.submitReactVisualEdit(body);
   }
 
   @Get('status/:jobId')

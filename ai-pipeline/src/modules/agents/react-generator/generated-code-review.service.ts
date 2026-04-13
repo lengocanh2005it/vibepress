@@ -244,6 +244,7 @@ Rules:
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
+- Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - If the component is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
 
@@ -426,6 +427,14 @@ ${component.code}
           'Menu links must use canonical `item.url` directly for internal navigation. Do not prepend an extra `/page` segment to menu URLs.',
       });
     }
+    const missingHoverUnderlineLinks =
+      this.findCanonicalTextLinkSnippetsWithoutHoverUnderline(component.code);
+    if (missingHoverUnderlineLinks.length > 0) {
+      issues.push({
+        severity: 'medium',
+        message: `Visible navigation/content text links should underline on hover (for example \`hover:underline underline-offset-4\`) to match the approved WordPress-style interaction. Offending snippet(s): ${missingHoverUnderlineLinks.join(' | ')}.`,
+      });
+    }
 
     if (sections.length === 0) return issues;
 
@@ -488,6 +497,35 @@ ${component.code}
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
+  }
+
+  private findCanonicalTextLinkSnippetsWithoutHoverUnderline(
+    code: string,
+    max = 3,
+  ): string[] {
+    const snippets: string[] = [];
+    const tagPattern = /<(?:Link|a)\b[\s\S]{0,400}?>/g;
+
+    for (const match of code.matchAll(tagPattern)) {
+      const raw = match[0]?.replace(/\s+/g, ' ').trim();
+      if (!raw || !/\bclassName=/.test(raw)) continue;
+      if (/hover:underline/.test(raw) || /\bno-underline\b/.test(raw)) continue;
+      const looksLikeButton =
+        /\bbg-\[/.test(raw) ||
+        (/\bpx-/.test(raw) && /\bpy-/.test(raw)) ||
+        /\bjustify-center\b/.test(raw);
+      if (looksLikeButton) continue;
+      const isCanonicalTextLink =
+        /\/(?:post|page|author|category|tag)\//.test(raw) ||
+        /\bitem\.url\b/.test(raw) ||
+        /\btoAppPath\(item\.url\)\b/.test(raw) ||
+        /\bhref=["']https?:\/\//.test(raw);
+      if (!isCanonicalTextLink) continue;
+      snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
+      if (snippets.length >= max) break;
+    }
+
+    return snippets;
   }
 
   private getBlockingIssues(
@@ -598,7 +636,7 @@ ${component.code}
     logPath: string | undefined,
     message: string,
   ): Promise<void> {
-    if (!logPath) return;
+    if (!logPath || logPath.endsWith('.json')) return;
     try {
       await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
     } catch {

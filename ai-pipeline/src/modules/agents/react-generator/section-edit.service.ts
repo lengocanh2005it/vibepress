@@ -75,6 +75,7 @@ export class SectionEditService {
       logPath,
       visionImageUrls: visionInput.imageUrls,
       visionContextNote: visionInput.summaryNote,
+      tokenScope: 'edit-request',
     });
     const mutationAudit = assessFocusedEditMutation({
       originalCode: target.component.code,
@@ -92,6 +93,7 @@ export class SectionEditService {
         logPath,
         visionImageUrls: visionInput.imageUrls,
         visionContextNote: visionInput.summaryNote,
+        tokenScope: 'edit-request',
       });
     }
 

@@ -430,6 +430,13 @@ export class ValidatorService {
         `Internal link uses \`<a href>\` for route "${internalAHref[0].match(/href=["']([^"']+)["']/)?.[1]}" — use \`<Link to="...">\` from react-router-dom instead.`,
       );
     }
+    const missingHoverUnderlineSnippets =
+      this.findCanonicalTextLinkSnippetsWithoutHoverUnderline(code);
+    if (missingHoverUnderlineSnippets.length > 0) {
+      violations.push(
+        `Visible navigation/content text links must underline on hover to match the WordPress-style interaction contract. Add \`hover:underline underline-offset-4\` to canonical text links. Offending snippet(s): ${missingHoverUnderlineSnippets.join(' | ')}`,
+      );
+    }
 
     // 8. CSS variable inside Tailwind arbitrary value — never works
     if (/className=["'][^"']*\[var\(--/.test(code)) {
@@ -520,19 +527,6 @@ export class ValidatorService {
           'Layout contract violated: page components must not render shared navigation placeholders such as `No menus available`. Shared Header/Navigation partials own global menus.',
         );
       }
-      if (
-        /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
-        /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
-      ) {
-        const snippets = this.findPlaceholderLinkSnippets(code);
-        const detail =
-          snippets.length > 0
-            ? ` Offending snippet(s): ${snippets.join(' | ')}`
-            : '';
-        violations.push(
-          `Layout/content contract violated: page components must not contain placeholder \`#\` links. Use approved route/content links only; shared footer/navigation links belong to dedicated partials.${detail}`,
-        );
-      }
       if (/All rights reserved|©|&copy;/i.test(code)) {
         violations.push(
           'Layout contract violated: page components must not render copyright/footer copy. Shared Footer partial owns that content.',
@@ -582,19 +576,6 @@ export class ValidatorService {
       if (usesSiteLogo && !hasHomeLinkForLogo) {
         violations.push(
           'Shared chrome contract violated: when Header/Footer/Navigation renders `siteInfo.logoUrl`, the logo must also be inside a home `<Link to=\"/\">...</Link>` so the visible brand cluster is clickable.',
-        );
-      }
-      if (
-        /\b(?:Link\s+to=|href=)\s*["']#["']/.test(code) ||
-        /\b(?:Link\s+to=|href=)\s*\{["']#["']\}/.test(code)
-      ) {
-        const snippets = this.findPlaceholderLinkSnippets(code);
-        const detail =
-          snippets.length > 0
-            ? ` Offending snippet(s): ${snippets.join(' | ')}`
-            : '';
-        violations.push(
-          `Shared chrome contract violated: Header/Footer/Navigation partials must not emit placeholder \`#\` links. Render actual links from \`/api/menus\` or external URLs from data.${detail}`,
         );
       }
       if (/No menus available/i.test(code)) {
@@ -1191,6 +1172,37 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         );
         if (snippets.length >= max) break;
       }
+    }
+
+    return snippets;
+  }
+
+  private findCanonicalTextLinkSnippetsWithoutHoverUnderline(
+    code: string,
+    max = 3,
+  ): string[] {
+    const snippets: string[] = [];
+    const tagPattern = /<(?:Link|a)\b[\s\S]{0,400}?>/g;
+
+    for (const match of code.matchAll(tagPattern)) {
+      const raw = match[0]?.replace(/\s+/g, ' ').trim();
+      if (!raw || !/\bclassName=/.test(raw)) continue;
+      if (/hover:underline/.test(raw) || /\bno-underline\b/.test(raw)) continue;
+      const looksLikeButton =
+        /\bbg-\[/.test(raw) ||
+        (/\bpx-/.test(raw) && /\bpy-/.test(raw)) ||
+        /\bjustify-center\b/.test(raw);
+      if (looksLikeButton) continue;
+
+      const isCanonicalTextLink =
+        /\/(?:post|page|author|category|tag)\//.test(raw) ||
+        /\bitem\.url\b/.test(raw) ||
+        /\btoAppPath\(item\.url\)\b/.test(raw) ||
+        /\bhref=["']https?:\/\//.test(raw);
+      if (!isCanonicalTextLink) continue;
+
+      snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
+      if (snippets.length >= max) break;
     }
 
     return snippets;

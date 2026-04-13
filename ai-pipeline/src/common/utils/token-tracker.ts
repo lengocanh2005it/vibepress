@@ -1,5 +1,4 @@
 import { Logger } from '@nestjs/common';
-import { appendFile, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 // Pricing per 1M tokens (USD)
@@ -17,12 +16,14 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'open-mistral-nemo': { input: 0.15, output: 0.15 },
 };
 
-type TokenPhase = 'plan' | 'gen' | 'review' | 'fix';
+export type TokenPhase = 'plan' | 'gen' | 'review' | 'fix';
+export type TokenScope = 'base' | 'edit-request';
 type TokenEntry = {
   timestamp: string;
   model: string;
   label: string;
   phase: TokenPhase | 'unclassified';
+  scope: TokenScope;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -36,6 +37,27 @@ type TokenSession = {
   initialized: boolean;
   summaryWritten: boolean;
 };
+
+export interface TokenUsagePhaseSummary {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  calls: number;
+}
+
+export interface TokenUsageSummary {
+  generatedAt: string;
+  totals: TokenUsagePhaseSummary;
+  phases: Record<string, TokenUsagePhaseSummary>;
+  scopes: Record<string, TokenUsagePhaseSummary>;
+  scopePhases: Record<string, Record<string, TokenUsagePhaseSummary>>;
+  entries: Array<
+    TokenEntry & {
+      costUsd: number;
+    }
+  >;
+}
 
 const TOKEN_PHASES: TokenPhase[] = ['plan', 'gen', 'review', 'fix'];
 
@@ -78,24 +100,13 @@ export class TokenTracker {
 
   static getTokenLogPath(logPath: string | undefined): string | undefined {
     if (!logPath) return undefined;
+    if (logPath.endsWith('.json')) return logPath;
     return join(dirname(logPath), 'tokens', 'total.tokens.log');
   }
 
-  private async ensureLogInitialized(
-    logFile: string,
-    title = 'TOKEN USAGE LOG',
-  ): Promise<void> {
+  private ensureLogInitialized(logFile: string): void {
     const session = this.getSession(logFile);
     if (!session || session.initialized) return;
-
-    await writeFile(
-      logFile,
-      `${'─'.repeat(80)}\n` +
-        `${title}  ${new Date().toISOString()}\n` +
-        `${'─'.repeat(80)}\n` +
-        `${'TIMESTAMP'.padEnd(26)}${'COMPONENT'.padEnd(36)} ${'IN'.padStart(7)} ${'OUT'.padStart(7)}  ${'COST (USD)'.padStart(12)}\n` +
-        `${'─'.repeat(80)}\n`,
-    );
     session.initialized = true;
     session.summaryWritten = false;
   }
@@ -145,6 +156,7 @@ export class TokenTracker {
     outputTokens: number,
     tag: string,
     phase: TokenPhase | 'unclassified',
+    scope: TokenScope,
   ): Promise<number> {
     const session = this.getSession(logFile);
     if (!session) return 0;
@@ -162,33 +174,24 @@ export class TokenTracker {
       model,
       label: tag,
       phase,
+      scope,
       inputTokens,
       outputTokens,
       totalTokens: inputTokens + outputTokens,
       costUsd,
     });
 
-    const line =
-      `${session.entries[session.entries.length - 1].timestamp}  ` +
-      `${tag.padEnd(36)} ` +
-      `${String(inputTokens).padStart(7)} ` +
-      `${String(outputTokens).padStart(7)}  ` +
-      `$${costUsd.toFixed(6).padStart(11)}\n`;
-    await appendFile(logFile, line).catch(() => {});
     return costUsd;
   }
 
   /** Gọi đầu mỗi job để reset bộ đếm và set file log riêng */
   async init(logFile: string): Promise<void> {
     this.baseLogFile = logFile;
-    await this.ensureLogInitialized(logFile, 'TOKEN USAGE LOG [TOTAL]');
+    this.ensureLogInitialized(logFile);
     for (const phase of TOKEN_PHASES) {
       const phaseFile = this.buildPhaseLogFile(phase);
       if (!phaseFile) continue;
-      await this.ensureLogInitialized(
-        phaseFile,
-        `TOKEN USAGE LOG [${phase.toUpperCase()}]`,
-      );
+      this.ensureLogInitialized(phaseFile);
     }
   }
 
@@ -197,10 +200,12 @@ export class TokenTracker {
     inputTokens: number,
     outputTokens: number,
     label = '',
+    options?: { scope?: TokenScope },
   ): Promise<void> {
     const tag = label || model;
     if (!this.baseLogFile) return;
     const phase = this.classifyPhase(tag) ?? 'unclassified';
+    const scope = options?.scope ?? 'base';
 
     const costUsd = await this.appendEntry(
       this.baseLogFile,
@@ -209,6 +214,7 @@ export class TokenTracker {
       outputTokens,
       tag,
       phase,
+      scope,
     );
 
     const phaseFile =
@@ -221,6 +227,7 @@ export class TokenTracker {
         outputTokens,
         tag,
         phase,
+        scope,
       );
     }
 
@@ -234,14 +241,6 @@ export class TokenTracker {
       const session = this.getSession(logFile);
       if (!session || session.summaryWritten) continue;
 
-      const line =
-        `${'─'.repeat(80)}\n` +
-        `${''.padEnd(26)}${'TOTAL'.padEnd(36)} ` +
-        `${String(session.totalInput).padStart(7)} ` +
-        `${String(session.totalOutput).padStart(7)}  ` +
-        `$${session.totalCost.toFixed(6).padStart(11)}\n` +
-        `${'─'.repeat(80)}\n`;
-
       const phaseName =
         logFile === this.baseLogFile
           ? 'Total'
@@ -250,13 +249,6 @@ export class TokenTracker {
       this.logger.log(
         `[${phaseName}] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
       );
-      await appendFile(logFile, line).catch(() => {});
-      if (logFile === this.baseLogFile) {
-        await writeFile(
-          join(dirname(logFile), 'summary.tokens.json'),
-          JSON.stringify(this.buildJsonSummary(session), null, 2),
-        ).catch(() => {});
-      }
       session.summaryWritten = true;
     }
   }
@@ -265,7 +257,26 @@ export class TokenTracker {
     return this.getSession(this.baseLogFile)?.totalCost ?? 0;
   }
 
-  private buildJsonSummary(session: TokenSession) {
+  getSummary(logFile = this.baseLogFile): TokenUsageSummary | null {
+    const session = this.getSession(logFile);
+    if (!session) return null;
+    return this.buildJsonSummary(session);
+  }
+
+  clear(logFile = this.baseLogFile): void {
+    if (!logFile) return;
+    TokenTracker.sessions.delete(logFile);
+    for (const phase of TOKEN_PHASES) {
+      TokenTracker.sessions.delete(
+        join(dirname(logFile), `${phase}.tokens.log`),
+      );
+    }
+    if (this.baseLogFile === logFile) {
+      this.baseLogFile = undefined;
+    }
+  }
+
+  private buildJsonSummary(session: TokenSession): TokenUsageSummary {
     const phaseTotals = new Map<
       TokenEntry['phase'],
       {
@@ -275,6 +286,29 @@ export class TokenTracker {
         costUsd: number;
         calls: number;
       }
+    >();
+    const scopeTotals = new Map<
+      TokenEntry['scope'],
+      {
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        costUsd: number;
+        calls: number;
+      }
+    >();
+    const scopePhaseTotals = new Map<
+      TokenEntry['scope'],
+      Map<
+        TokenEntry['phase'],
+        {
+          inputTokens: number;
+          outputTokens: number;
+          totalTokens: number;
+          costUsd: number;
+          calls: number;
+        }
+      >
     >();
 
     for (const entry of session.entries) {
@@ -291,6 +325,47 @@ export class TokenTracker {
       current.costUsd += entry.costUsd;
       current.calls += 1;
       phaseTotals.set(entry.phase, current);
+
+      const currentScope = scopeTotals.get(entry.scope) ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        calls: 0,
+      };
+      currentScope.inputTokens += entry.inputTokens;
+      currentScope.outputTokens += entry.outputTokens;
+      currentScope.totalTokens += entry.totalTokens;
+      currentScope.costUsd += entry.costUsd;
+      currentScope.calls += 1;
+      scopeTotals.set(entry.scope, currentScope);
+
+      const phaseMap =
+        scopePhaseTotals.get(entry.scope) ??
+        new Map<
+          TokenEntry['phase'],
+          {
+            inputTokens: number;
+            outputTokens: number;
+            totalTokens: number;
+            costUsd: number;
+            calls: number;
+          }
+        >();
+      const currentScopePhase = phaseMap.get(entry.phase) ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        calls: 0,
+      };
+      currentScopePhase.inputTokens += entry.inputTokens;
+      currentScopePhase.outputTokens += entry.outputTokens;
+      currentScopePhase.totalTokens += entry.totalTokens;
+      currentScopePhase.costUsd += entry.costUsd;
+      currentScopePhase.calls += 1;
+      phaseMap.set(entry.phase, currentScopePhase);
+      scopePhaseTotals.set(entry.scope, phaseMap);
     }
 
     return {
@@ -309,6 +384,29 @@ export class TokenTracker {
             ...totals,
             costUsd: Number(totals.costUsd.toFixed(6)),
           },
+        ]),
+      ),
+      scopes: Object.fromEntries(
+        Array.from(scopeTotals.entries()).map(([scope, totals]) => [
+          scope,
+          {
+            ...totals,
+            costUsd: Number(totals.costUsd.toFixed(6)),
+          },
+        ]),
+      ),
+      scopePhases: Object.fromEntries(
+        Array.from(scopePhaseTotals.entries()).map(([scope, phaseMap]) => [
+          scope,
+          Object.fromEntries(
+            Array.from(phaseMap.entries()).map(([phase, totals]) => [
+              phase,
+              {
+                ...totals,
+                costUsd: Number(totals.costUsd.toFixed(6)),
+              },
+            ]),
+          ),
         ]),
       ),
       entries: session.entries.map((entry) => ({

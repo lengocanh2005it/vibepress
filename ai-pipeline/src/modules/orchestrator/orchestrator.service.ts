@@ -3,7 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { appendFile, mkdir, readdir, stat, writeFile } from 'fs/promises';
+import { mkdir, readdir, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
@@ -18,11 +18,13 @@ import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
 import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
 import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
+import type { PlanResult } from '../agents/planner/planner.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
 import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
 import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
 import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
@@ -38,10 +40,15 @@ import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
-import { TokenTracker } from '../../common/utils/token-tracker.js';
+import {
+  TokenTracker,
+  type TokenUsagePhaseSummary,
+} from '../../common/utils/token-tracker.js';
+import { AiLoggerService } from '../ai-logger/ai-logger.service.js';
 import type {
   PipelineCaptureAttachmentDto,
   RunPipelineDto,
+  SubmitReactVisualEditDto,
 } from './orchestrator.dto.js';
 import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
 import { CaptureReviewService } from '../edit-request/capture-review.service.js';
@@ -69,7 +76,10 @@ export interface ProgressEvent {
 
 interface ProgressEventData {
   previewUrl?: string;
-  metrics: {
+  apiBaseUrl?: string;
+  previewStage?: 'baseline' | 'edited' | 'final';
+  hasEditRequest?: boolean;
+  metrics?: {
     urlA: string;
     urlB: string;
     diffPercentage: number;
@@ -210,8 +220,71 @@ interface JobRuntimeControl {
   stopRequested: boolean;
   deleteRequested: boolean;
   finalized: boolean;
+  hasEditRequest?: boolean;
   logPath?: string;
   preview?: PreviewBuilderResult;
+  runtimeSummary?: PipelineRuntimeSummaryDraft;
+}
+
+interface PipelineRetryCounters {
+  plannerReview: number;
+  visualPlanReview: number;
+  validatorFix: number;
+  generatedCodeFix: number;
+  backendFix: number;
+  buildFix: number;
+  visualFixRounds: number;
+}
+
+interface PipelineRuntimeSummaryDraft {
+  startedAt: string;
+  repoAnalysisSummary: string[];
+  stepDurationsMs: Partial<Record<string, number>>;
+  retries: PipelineRetryCounters;
+}
+
+interface PipelineAccuracySummary {
+  percent: number | null;
+  diffPercentage: number | null;
+  differentPixels: number | null;
+  totalPixels: number | null;
+}
+
+interface PipelineUiAssessment {
+  score: number | null;
+  verdict: string;
+  basis: string[];
+}
+
+interface PipelineRunSummaryFile {
+  jobId: string;
+  status: 'success' | 'failed' | 'stopped' | 'deleted';
+  success: boolean;
+  startedAt: string;
+  finishedAt: string;
+  totalDurationMs: number;
+  totalDurationSeconds: number;
+  failureMessage?: string;
+  retries: {
+    total: number;
+    orchestrator: PipelineRetryCounters;
+    aiAgents: {
+      total: number;
+      planning: number;
+      codeGeneration: number;
+      sectionGeneration: number;
+    };
+  };
+  timing: {
+    planningMs: number | null;
+    generationMs: number | null;
+    stepDurationsMs: Partial<Record<string, number>>;
+  };
+  accuracy: PipelineAccuracySummary;
+  tokenUsage: ReturnType<TokenTracker['getSummary']>;
+  editRequestTokenUsage: TokenUsagePhaseSummary | null;
+  uiAssessment: PipelineUiAssessment;
+  repoAnalysisSummary: string[];
 }
 
 class PipelineControlError extends Error {
@@ -256,6 +329,7 @@ export class OrchestratorService {
     private readonly cleanup: CleanupService,
     private readonly captureReview: CaptureReviewService,
     private readonly editRequestPhase: EditRequestPhaseService,
+    private readonly aiLogger: AiLoggerService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
@@ -312,9 +386,16 @@ export class OrchestratorService {
       stopRequested: false,
       deleteRequested: false,
       finalized: false,
+      hasEditRequest: Boolean(dto.editRequest),
     });
 
-    this.executePipelineLegacy(jobId, dto, state, editRequestContext).catch(
+    this.executePipelineLegacy(
+      jobId,
+      siteId,
+      dto,
+      state,
+      editRequestContext,
+    ).catch(
       (err) => {
         if (err instanceof PipelineControlError) {
           void this.finalizeControlledTermination(jobId, state, err);
@@ -348,6 +429,77 @@ export class OrchestratorService {
         error: 'Job not found',
       }
     );
+  }
+
+  async submitReactVisualEdit(body: SubmitReactVisualEditDto): Promise<{
+    accepted: boolean;
+    jobId: string;
+    siteId: string;
+    logPath: string;
+  }> {
+    const state = this.jobs.get(body.jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${body.jobId}" not found`);
+    }
+
+    const result = (state.result ?? {}) as {
+      previewDir?: string;
+      frontendDir?: string;
+      previewUrl?: string;
+      apiBaseUrl?: string;
+      uiSourceMapPath?: string;
+      routeEntries?: Array<{ route: string; componentName: string }>;
+    };
+
+    const previewDir =
+      body.editRequest.reactSourceTarget.previewDir?.trim() || result.previewDir;
+    const frontendDir =
+      body.editRequest.reactSourceTarget.frontendDir?.trim() ||
+      result.frontendDir ||
+      (previewDir ? join(previewDir, 'frontend') : undefined);
+    const logDir = previewDir || join('./temp/generated', body.jobId);
+    const logPath = join(logDir, 'react-visual-edit-request.json');
+
+    const normalizedDto = {
+      ...body,
+      editRequest: {
+        ...body.editRequest,
+        reactSourceTarget: {
+          ...body.editRequest.reactSourceTarget,
+          previewDir,
+          frontendDir,
+          previewUrl:
+            body.editRequest.reactSourceTarget.previewUrl?.trim() ||
+            result.previewUrl,
+          apiBaseUrl:
+            body.editRequest.reactSourceTarget.apiBaseUrl?.trim() ||
+            result.apiBaseUrl,
+          uiSourceMapPath:
+            body.editRequest.reactSourceTarget.uiSourceMapPath?.trim() ||
+            result.uiSourceMapPath,
+          routeEntries:
+            body.editRequest.reactSourceTarget.routeEntries?.length
+              ? body.editRequest.reactSourceTarget.routeEntries
+              : result.routeEntries,
+        },
+      },
+      submittedAt: new Date().toISOString(),
+    };
+
+    await mkdir(logDir, { recursive: true });
+    await writeFile(logPath, JSON.stringify(normalizedDto, null, 2), 'utf-8');
+
+    this.logger.log(
+      `React visual edit request received for job ${body.jobId}: ${logPath}`,
+    );
+    this.logger.debug(JSON.stringify(normalizedDto));
+
+    return {
+      accepted: true,
+      jobId: body.jobId,
+      siteId: body.siteId,
+      logPath,
+    };
   }
 
   async stop(jobId: string): Promise<PipelineStatus> {
@@ -439,15 +591,75 @@ export class OrchestratorService {
     return new ReplaySubject<ProgressEvent>(100);
   }
 
-  private getStepMeta(name: string) {
-    return (
-      STEP_META[name] ?? {
-        label: name,
-        weight: 1,
-        activeMessage: `AI agent is working on ${name}.`,
-        doneMessage: `${name} has completed.`,
-      }
-    );
+  private getStepMeta(name: string, jobId?: string) {
+    const baseMeta = STEP_META[name] ?? {
+      label: name,
+      weight: 1,
+      activeMessage: `AI agent is working on ${name}.`,
+      doneMessage: `${name} has completed.`,
+    };
+
+    const hasEditRequest = jobId
+      ? Boolean(this.controls.get(jobId)?.hasEditRequest)
+      : false;
+    if (!hasEditRequest) return baseMeta;
+
+    if (name === '5_planner') {
+      return {
+        ...baseMeta,
+        label: 'Plan Routes, Data, And Requested Changes',
+        activeMessage:
+          'Building the component graph, route map, data contracts, and the edit-request-aware visual plan.',
+        doneMessage:
+          'Planning is complete and the requested change scope has been attached to the migration plan.',
+      };
+    }
+
+    if (name === '6_generator') {
+      return {
+        ...baseMeta,
+        label: 'Generate React Baseline',
+        activeMessage:
+          'Generating the baseline React components before the focused edit-request pass is applied in preview.',
+        doneMessage:
+          'Baseline React components are ready for live preview and focused follow-up edits.',
+      };
+    }
+
+    if (name === '8_preview_builder') {
+      return {
+        ...baseMeta,
+        label: 'Launch Preview And Apply Requested Edits',
+        activeMessage:
+          'Starting preview servers so the baseline can be inspected while focused edit-request fixes continue in the background.',
+        doneMessage:
+          'Preview servers are live and any requested edits have been synced into the running preview.',
+      };
+    }
+
+    if (name === '9_visual_compare') {
+      return {
+        ...baseMeta,
+        label: 'Evaluate Edited Preview Metrics',
+        activeMessage:
+          'Comparing the edited preview against WordPress and collecting visual quality metrics.',
+        doneMessage:
+          'Visual metrics for the edited preview have been collected.',
+      };
+    }
+
+    if (name === '11_done') {
+      return {
+        ...baseMeta,
+        label: 'Edited Preview Ready',
+        activeMessage:
+          'Finalizing the edited preview, metrics, and completion metadata.',
+        doneMessage:
+          'Migration workflow is complete and the edited preview is ready.',
+      };
+    }
+
+    return baseMeta;
   }
 
   private calcPercentBefore(name: string): number {
@@ -479,7 +691,7 @@ export class OrchestratorService {
   ): void {
     this.assertJobActive(state.jobId);
 
-    const meta = this.getStepMeta(name);
+    const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
     const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
     const beforeWeight = Object.keys(STEP_META)
@@ -587,34 +799,44 @@ export class OrchestratorService {
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
-    try {
-      await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
-    } catch {
-      // don't crash pipeline if logging fails
-    }
+    void message;
+    if (!logPath || logPath.endsWith('.json')) return;
   }
 
   private async executePipelineLegacy(
     jobId: string,
+    siteId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
     editRequestContext?: ResolvedEditRequestContext,
   ): Promise<void> {
-    // ── Init log file ─────────────────────────────────────────────────────
+    // ── Init structured run summary ───────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
-    await mkdir(join(jobLogDir, 'tokens'), { recursive: true });
-    const logPath = join(jobLogDir, 'pipeline.log');
-    const tokenLogPath = join(jobLogDir, 'tokens', 'total.tokens.log');
+    await mkdir(jobLogDir, { recursive: true });
+    const logPath = join(jobLogDir, 'run-summary.json');
     const pipelineStart = Date.now();
+    const summaryDraft: PipelineRuntimeSummaryDraft = {
+      startedAt: new Date().toISOString(),
+      repoAnalysisSummary: [],
+      stepDurationsMs: {},
+      retries: {
+        plannerReview: 0,
+        visualPlanReview: 0,
+        validatorFix: 0,
+        generatedCodeFix: 0,
+        backendFix: 0,
+        buildFix: 0,
+        visualFixRounds: 0,
+      },
+    };
     const control = this.controls.get(jobId);
-    if (control) control.logPath = logPath;
-    await this.tokenTracker.init(tokenLogPath);
-    await this.logToFile(logPath, `Pipeline ${jobId} started`);
-    await this.logResolvedEditRequestContext(
-      jobId,
-      logPath,
-      editRequestContext,
-    );
+    if (control) {
+      control.logPath = logPath;
+      control.runtimeSummary = summaryDraft;
+    }
+    await this.tokenTracker.init(logPath);
+    let metrics: any = null;
+    let visualRouteResults: any[] = [];
     try {
       const cfgPlanning = this.configService.get<string>(
         'pipeline.planningModel',
@@ -666,6 +888,7 @@ export class OrchestratorService {
       const planningEditRequest = this.editRequestPhase.buildPlanningRequest(
         dto.editRequest,
       );
+      const hasEditRequest = Boolean(dto.editRequest);
       const dbCreds = this.toWpDbCredentials(dbConnectionString);
 
       await this.sqlService.verifyDirectCredentials(dbConnectionString);
@@ -722,7 +945,11 @@ export class OrchestratorService {
             'Scanning theme folders, templates, and structural entry points.',
           );
           const repoAnalysis = await this.repoAnalyzer.analyze(resolvedDir);
-          await this.recordRepoAnalysis(jobLogDir, logPath, repoAnalysis);
+          summaryDraft.repoAnalysisSummary = await this.recordRepoAnalysis(
+            jobLogDir,
+            logPath,
+            repoAnalysis,
+          );
           return repoAnalysis;
         },
       );
@@ -815,7 +1042,11 @@ export class OrchestratorService {
         content,
       });
       repoResult.themeManifest.resolvedSource = resolvedSource;
-      await this.recordRepoAnalysis(jobLogDir, logPath, repoResult);
+      summaryDraft.repoAnalysisSummary = await this.recordRepoAnalysis(
+        jobLogDir,
+        logPath,
+        repoResult,
+      );
       const enrichResult = await this.enrichThemeWithPluginTemplates({
         theme: normalizedTheme,
         themeDir,
@@ -891,6 +1122,7 @@ export class OrchestratorService {
             attempt <= MAX_PLAN_RETRIES && !review.isValid;
             attempt++
           ) {
+            summaryDraft.retries.plannerReview += 1;
             this.logger.warn(
               `[${jobId}] [Stage 3: Phase D] Plan invalid (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${review.errors.join('; ')} — retrying Phases A→C`,
             );
@@ -963,6 +1195,7 @@ export class OrchestratorService {
             vAttempt <= MAX_VISUAL_RETRIES && !visualReview.isValid;
             vAttempt++
           ) {
+            summaryDraft.retries.visualPlanReview += 1;
             this.logger.warn(
               `[${jobId}] [Stage 3: Visual Plan] Review failed (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualReview.errors.join('; ')} — retrying attachVisualPlans`,
             );
@@ -1060,6 +1293,7 @@ export class OrchestratorService {
             attempt <= MAX_VALIDATION_FIX_ATTEMPTS;
             attempt++
           ) {
+            summaryDraft.retries.validatorFix += 1;
             this.logger.warn(
               `[Stage 4: D4 Validator] ${validation.failures.length} component(s) failed validation. Attempting auto-fix (attempt ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS}).`,
             );
@@ -1194,327 +1428,10 @@ export class OrchestratorService {
             );
           }
 
-          const inMemoryUiSourceMapEntries =
-            await buildUiSourceMapForGeneratedComponents({
-              components,
-              plan: reviewResult.plan,
-            });
-          const inMemoryMutationCandidates =
-            await buildUiMutationCandidatesForGeneratedComponents({
-              components,
-            });
-          const exactCaptureTargetsForEditPass =
-            resolveCaptureTargetsFromUiSourceMap({
-              attachments: dto.editRequest?.attachments,
-              uiSourceMap: inMemoryUiSourceMapEntries,
-            });
-          await this.logExactCaptureResolution({
-            jobId,
-            logPath,
-            attachments: dto.editRequest?.attachments,
-            uiSourceMapPath: 'in-memory:baseline-generated-components',
-            uiSourceMapEntryCount: inMemoryUiSourceMapEntries.length,
-            exactCaptureTargets: exactCaptureTargetsForEditPass,
-          });
-          const intentAwareCaptureTargetsForEditPass =
-            this.editRequestPhase.resolveIntentAwareCaptureTargets({
-              request: dto.editRequest,
-              exactCaptureTargets: exactCaptureTargetsForEditPass,
-              mutationCandidates: inMemoryMutationCandidates,
-            });
-          await this.logExactCaptureResolution({
-            jobId,
-            logPath,
-            attachments: dto.editRequest?.attachments,
-            uiSourceMapPath: 'in-memory:intent-aware-mutation-targets',
-            uiSourceMapEntryCount: inMemoryMutationCandidates.length,
-            exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
-          });
-
-          const postMigrationEditTasks =
-            this.editRequestPhase.buildPostMigrationEditTasks({
-              request: dto.editRequest,
-              plan: reviewResult.plan,
-              components,
-              exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
-              mutationCandidates: inMemoryMutationCandidates,
-            });
-          const editedComponentNames: Record<string, string> = {};
-          const applyFocusedTask = async (
-            task: (typeof postMigrationEditTasks)[number],
-            feedbackOverride?: string,
-          ): Promise<boolean> => {
-            const componentIndex = components.findIndex(
-              (component) => component.name === task.componentName,
-            );
-            if (componentIndex === -1) return false;
-
-            const effectiveTask = feedbackOverride
-              ? {
-                  ...task,
-                  feedback: feedbackOverride,
-                  debugSummary: `${task.debugSummary} | refix=true`,
-                }
-              : task;
-            const fixedResult = await this.sectionEdit.applyFocusedTask({
-              task: effectiveTask,
-              request: dto.editRequest,
-              plan: reviewResult.plan,
-              components,
-              modelConfig: { fixAgent: resolvedModels.fixAgent },
-              logPath,
-            });
-            if (!fixedResult) return false;
-
-            const revalidated = this.validator.collectValidationIssues([
-              fixedResult.component,
-            ]);
-            if (revalidated.failures.length > 0) {
-              const validationErr = revalidated.failures[0]?.error;
-              this.logger.warn(
-                `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}" after focused edit — keeping baseline. Error: ${validationErr}`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Post-Migration Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}": ${validationErr}`,
-              );
-              return false;
-            }
-
-            const replacementIndex = components.findIndex(
-              (component) => component.name === fixedResult.editedComponentName,
-            );
-            if (replacementIndex !== -1) {
-              components[replacementIndex] = revalidated.components[0];
-            }
-            editedComponentNames[task.componentName] =
-              fixedResult.editedComponentName;
-            return true;
-          };
-
-          if (postMigrationEditTasks.length > 0) {
-            this.logger.log(
-              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused edit task(s) after baseline generation.`,
-            );
-            this.emitStepProgress(
-              state,
-              '6_generator',
-              0.72,
-              `Applying ${postMigrationEditTasks.length} focused post-migration edit task(s) to the generated baseline.`,
-            );
-            await this.logToFile(
-              logPath,
-              `[Stage 5: Post-Migration Edit Pass] Applying ${postMigrationEditTasks.length} focused task(s).`,
-            );
-
-            for (const task of postMigrationEditTasks) {
-              this.logger.log(
-                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Post-Migration Edit Pass] ${task.debugSummary}`,
-              );
-
-              await applyFocusedTask(task);
-            }
-
-            const finalValidation =
-              this.validator.collectValidationIssues(components);
-            if (finalValidation.failures.length > 0) {
-              throw new Error(
-                `[post-edit] Focused post-migration edits introduced validation failures:\n${finalValidation.failures
-                  .map(
-                    (failure) =>
-                      `Component "${failure.component.name}": ${failure.error}`,
-                  )
-                  .join('\n')}`,
-              );
-            }
-
-            components = finalValidation.components;
-          }
-
-          if (postMigrationEditTasks.length > 0) {
-            this.emitStepProgress(
-              state,
-              '6_generator',
-              0.78,
-              `Reviewing ${postMigrationEditTasks.length} focused capture edit task(s) against the user-requested evidence.`,
-            );
-            let captureReviewResult = this.captureReview.reviewFocusedTasks({
-              tasks: postMigrationEditTasks,
-              request: dto.editRequest,
-              plan: reviewResult.plan,
-              components,
-              editedComponentNames,
-            });
-
-            this.logger.log(
-              `[Stage 5: Capture Review] ${captureReviewResult.summary}`,
-            );
-            await this.logToFile(
-              logPath,
-              `[Stage 5: Capture Review] ${captureReviewResult.summary}`,
-            );
-
-            const advisoryResults = captureReviewResult.results.filter(
-              (result) => result.status !== 'matched',
-            );
-            for (const result of advisoryResults) {
-              const issueText =
-                result.issues.map((issue) => issue.message).join(' | ') ||
-                result.summary;
-              this.logger.warn(
-                `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
-              );
-            }
-
-            const MAX_CAPTURE_REVIEW_FIX_ROUNDS = 2;
-            for (
-              let round = 1;
-              round <= MAX_CAPTURE_REVIEW_FIX_ROUNDS;
-              round++
-            ) {
-              const componentsSnapshot = [...components];
-              const editedComponentNamesSnapshot = {
-                ...editedComponentNames,
-              };
-              const reviewFailures = captureReviewResult.results.filter(
-                (result) =>
-                  result.status !== 'matched' &&
-                  Boolean(result.suggestedFixFeedback),
-              );
-              if (reviewFailures.length === 0) break;
-
-              this.logger.warn(
-                `[Stage 5: Capture Review] ${reviewFailures.length} capture review issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Capture Review] ${reviewFailures.length} issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
-              );
-              this.emitStepProgress(
-                state,
-                '6_generator',
-                0.8,
-                `Capture review re-fix ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: repairing ${reviewFailures.length} attachment-targeted issue(s).`,
-              );
-
-              for (const reviewFailure of reviewFailures) {
-                const relatedTask = postMigrationEditTasks.find(
-                  (task) =>
-                    task.componentName === reviewFailure.componentName &&
-                    task.attachments.some(
-                      (attachment) =>
-                        attachment.id === reviewFailure.attachmentId,
-                    ),
-                );
-                if (!relatedTask || !reviewFailure.suggestedFixFeedback)
-                  continue;
-
-                this.logger.warn(
-                  `[Stage 5: Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
-                );
-                await this.logToFile(
-                  logPath,
-                  `[Stage 5: Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
-                );
-
-                await applyFocusedTask(
-                  relatedTask,
-                  `${relatedTask.feedback}\n\n${reviewFailure.suggestedFixFeedback}`,
-                );
-              }
-
-              const refixValidation =
-                this.validator.collectValidationIssues(components);
-              if (refixValidation.failures.length > 0) {
-                const validationSummary = refixValidation.failures
-                  .map(
-                    (failure) =>
-                      `Component "${failure.component.name}": ${failure.error}`,
-                  )
-                  .join('\n');
-                this.logger.warn(
-                  `[Stage 5: Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid component snapshot and continuing. ${validationSummary}`,
-                );
-                await this.logToFile(
-                  logPath,
-                  `[Stage 5: Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid snapshot.\n${validationSummary}`,
-                );
-                components = componentsSnapshot;
-                for (const key of Object.keys(editedComponentNames)) {
-                  delete editedComponentNames[key];
-                }
-                Object.assign(
-                  editedComponentNames,
-                  editedComponentNamesSnapshot,
-                );
-                break;
-              }
-              components = refixValidation.components;
-
-              captureReviewResult = this.captureReview.reviewFocusedTasks({
-                tasks: postMigrationEditTasks,
-                request: dto.editRequest,
-                plan: reviewResult.plan,
-                components,
-                editedComponentNames,
-              });
-
-              this.logger.log(
-                `[Stage 5: Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
-              );
-
-              const remainingIssues = captureReviewResult.results.filter(
-                (result) => result.status !== 'matched',
-              );
-              for (const result of remainingIssues) {
-                const issueText =
-                  result.issues.map((issue) => issue.message).join(' | ') ||
-                  result.summary;
-                this.logger.warn(
-                  `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
-                );
-                await this.logToFile(
-                  logPath,
-                  `[Stage 5: Capture Review] ${result.debugSummary} :: ${issueText}`,
-                );
-              }
-            }
-
-            const unresolvedCaptureReviewIssues =
-              captureReviewResult.results.filter(
-                (result) => result.status !== 'matched',
-              );
-            if (unresolvedCaptureReviewIssues.length > 0) {
-              const unresolvedSummary = unresolvedCaptureReviewIssues
-                .map((result) => result.debugSummary)
-                .join(' || ');
-              this.logger.warn(
-                `[Stage 5: Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
-              );
-              await this.logToFile(
-                logPath,
-                `[Stage 5: Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
-              );
-            }
-          }
-
           // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
           // Protected shared partials are syntax-checked and syntax-fixed in Stage 4.
-          // Request-specific focused edits run before the AI review loop so review
-          // evaluates the final post-edit baseline instead of the raw baseline.
+          // Focused edit-request refinements run later, after the baseline preview is live.
           const aiComponents = components.filter(
             (c) => c.generationMode !== 'deterministic',
           );
@@ -1533,10 +1450,10 @@ export class OrchestratorService {
               state,
               '6_generator',
               0.82,
-              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking the post-edit generated components against the approved contract.`,
+              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking the generated baseline components against the approved contract.`,
             );
             this.logger.log(
-              `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} components after post-migration edits (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+              `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} baseline generated component(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
             );
             const review = await this.generatedCodeReview.review({
               components: aiComponents,
@@ -1553,6 +1470,7 @@ export class OrchestratorService {
             this.logger.warn(
               `[Stage 5: AI Generated Code Review] ${review.failures.length} components failed review. Attempting auto-fix.`,
             );
+            summaryDraft.retries.generatedCodeFix += 1;
             this.emitStepProgress(
               state,
               '6_generator',
@@ -1657,6 +1575,7 @@ export class OrchestratorService {
           this.logger.warn(
             `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
           );
+          summaryDraft.retries.backendFix += 1;
           this.emitStepProgress(
             state,
             '7_api_builder',
@@ -1767,6 +1686,7 @@ export class OrchestratorService {
 
               const tsErrors = this.parseTsBuildErrors(errMsg);
               if (tsErrors.length === 0) throw err;
+              summaryDraft.retries.buildFix += 1;
 
               this.logger.warn(
                 `[Stage 8: Build Fix] ${tsErrors.length} TS error(s). Attempting auto-fix (attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}).`,
@@ -1821,11 +1741,89 @@ export class OrchestratorService {
       if (runtimeControl) {
         runtimeControl.preview = preview;
       }
+      state.result = {
+        ...(state.result ?? {}),
+        previewDir: preview.previewDir,
+        frontendDir: preview.frontendDir,
+        previewUrl: preview.previewUrl,
+        apiBaseUrl: preview.apiBaseUrl,
+        previewStage: "baseline",
+        hasEditRequest,
+        uiSourceMapPath: preview.uiSourceMapPath,
+        routeEntries: preview.routeEntries,
+      };
+      this.emitStepProgress(
+        state,
+        '8_preview_builder',
+        hasEditRequest ? 0.56 : 0.72,
+        hasEditRequest
+          ? 'Baseline preview is live. The requested edits are now being applied in the background.'
+          : 'Preview is live and ready for inspection.',
+        this.buildPreviewEventData({
+          preview,
+          previewStage: 'baseline',
+          hasEditRequest,
+        }),
+      );
+      if (hasEditRequest) {
+        const editPassResult = await this.applyPostMigrationEditPass({
+          jobId,
+          state,
+          stepName: '8_preview_builder',
+          request: dto.editRequest,
+          plan: reviewResult.plan,
+          components: buildComponents,
+          fixAgentModel: resolvedModels.fixAgent,
+          logPath,
+          applyProgress: 0.64,
+          reviewProgress: 0.74,
+          refixProgress: 0.8,
+        });
+        buildComponents = editPassResult.components;
+
+        if (editPassResult.applied) {
+          this.emitStepProgress(
+            state,
+            '8_preview_builder',
+            0.86,
+            `Syncing ${editPassResult.taskCount} requested edit update(s) into the running preview.`,
+          );
+          await this.previewBuilder.syncGeneratedComponents(
+            preview.previewDir,
+            buildComponents,
+          );
+          await this.validator.assertPreviewBuild(preview.frontendDir);
+          await this.validator.assertPreviewRuntime(
+            preview.previewUrl,
+            preview.routeEntries.map((entry) => entry.route),
+          );
+          this.emitStepProgress(
+            state,
+            '8_preview_builder',
+            0.92,
+            'Requested edits are now visible in the running preview.',
+            this.buildPreviewEventData({
+              preview,
+              previewStage: 'edited',
+              hasEditRequest,
+            }),
+          );
+          state.result = {
+            ...(state.result ?? {}),
+            previewDir: preview.previewDir,
+            frontendDir: preview.frontendDir,
+            previewUrl: preview.previewUrl,
+            apiBaseUrl: preview.apiBaseUrl,
+            previewStage: 'edited',
+            hasEditRequest,
+            uiSourceMapPath: preview.uiSourceMapPath,
+            routeEntries: preview.routeEntries,
+          };
+        }
+      }
       await stepDelay();
 
       // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
-      let metrics: any = null;
-      let visualRouteResults: any[] = [];
       await this.runStep(state, '9_visual_compare', logPath, async () => {
         const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
@@ -1861,6 +1859,7 @@ export class OrchestratorService {
             );
             break;
           }
+          summaryDraft.retries.visualFixRounds += 1;
 
           this.emitStepProgress(
             state,
@@ -1927,6 +1926,7 @@ export class OrchestratorService {
           const response = await axios.post(
             `${this.configService.get<string>('automation.url', '')}/site/compare`,
             {
+              siteId,
               wpBaseUrl,
               reactFeUrl: preview.previewUrl,
               reactBeUrl,
@@ -1946,7 +1946,27 @@ export class OrchestratorService {
           metrics
             ? 'Route-level visual review finished and final compare metrics are attached.'
             : 'Route-level visual review finished without final compare metrics; pipeline will continue with cleanup.',
+          metrics
+            ? this.buildPreviewEventData({
+                preview,
+                previewStage: hasEditRequest ? 'edited' : 'baseline',
+                hasEditRequest,
+                metrics,
+              })
+            : undefined,
         );
+        state.result = {
+          ...(state.result ?? {}),
+          previewDir: preview.previewDir,
+          frontendDir: preview.frontendDir,
+          previewUrl: preview.previewUrl,
+          apiBaseUrl: preview.apiBaseUrl,
+          previewStage: hasEditRequest ? 'edited' : 'baseline',
+          hasEditRequest,
+          uiSourceMapPath: preview.uiSourceMapPath,
+          routeEntries: preview.routeEntries,
+          metrics,
+        };
         return { metrics, routeReviews: visualRouteResults };
       });
       await stepDelay();
@@ -1997,9 +2017,15 @@ export class OrchestratorService {
 
         state.status = 'done';
         state.result = {
+          runSummaryPath: logPath,
           previewDir: preview.previewDir,
+          frontendDir: preview.frontendDir,
           previewUrl: preview.previewUrl,
+          apiBaseUrl: preview.apiBaseUrl,
+          previewStage: 'final',
+          hasEditRequest,
           uiSourceMapPath: preview.uiSourceMapPath,
+          routeEntries: preview.routeEntries,
           ownerCaptureTargets,
           exactCaptureTargets,
           dbCreds,
@@ -2008,18 +2034,26 @@ export class OrchestratorService {
         };
         // Emit final event with previewUrl from within runStep
         const subject = this.progress.get(jobId);
+        const doneMeta = this.getStepMeta('11_done', jobId);
         subject?.next({
           step: '11_done',
-          label: STEP_META['11_done'].label,
+          label: doneMeta.label,
           status: 'done',
           percent: 100,
-          message: `Migration workflow is complete. Preview is ready. (${totalElapsed}s)`,
-          data: {
-            previewUrl: preview.previewUrl,
+          message: `${doneMeta.doneMessage} (${totalElapsed}s)`,
+          data: this.buildPreviewEventData({
+            preview,
+            previewStage: 'final',
+            hasEditRequest,
             metrics,
-          },
+          }),
         });
-        return { success: true, previewUrl: preview.previewUrl, metrics };
+        return {
+          success: true,
+          previewUrl: preview.previewUrl,
+          apiBaseUrl: preview.apiBaseUrl,
+          metrics,
+        };
       });
       await stepDelay();
 
@@ -2035,8 +2069,30 @@ export class OrchestratorService {
         logPath,
         `Pipeline completed — total ${totalElapsed}s`,
       );
+    } catch (err: unknown) {
+      if (err instanceof PipelineControlError) {
+        state.status = err.kind === 'deleted' ? 'deleted' : 'stopped';
+        state.error = err.message;
+      } else if (err instanceof Error) {
+        state.status = 'error';
+        state.error = err.message;
+      } else {
+        state.status = 'error';
+        state.error = String(err);
+      }
+      throw err;
     } finally {
       await this.tokenTracker.writeSummary();
+      await this.writeRunSummary(
+        logPath,
+        state,
+        summaryDraft,
+        metrics,
+        visualRouteResults,
+        pipelineStart,
+      );
+      this.aiLogger.clearJob(jobId);
+      this.tokenTracker.clear(logPath);
     }
   }
 
@@ -2149,7 +2205,7 @@ export class OrchestratorService {
     const step = state.steps.find((s) => s.name === name)!;
     if (step.status === 'skipped') return undefined as T;
 
-    const meta = this.getStepMeta(name);
+    const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
 
     step.status = 'running';
@@ -2176,15 +2232,13 @@ export class OrchestratorService {
         'data' in result
       ) {
         const artifact = result as AgentResult<T>;
-        const reasoningDir = join('./temp/logs', state.jobId, 'reasoning');
-        await mkdir(reasoningDir, { recursive: true });
-        await writeFile(join(reasoningDir, `${name}.md`), artifact.reasoning);
         data = artifact.data;
       } else {
         data = result as T;
       }
 
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      this.recordStepDuration(state.jobId, name, Date.now() - t0);
       step.status = 'done';
 
       // Calculate percent after this step completes
@@ -2202,6 +2256,7 @@ export class OrchestratorService {
     } catch (err: any) {
       if (err instanceof PipelineControlError) {
         const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+        this.recordStepDuration(state.jobId, name, Date.now() - t0);
         step.status = 'stopped';
         step.error = err.message;
         await this.logToFile(
@@ -2211,6 +2266,7 @@ export class OrchestratorService {
         throw err;
       }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      this.recordStepDuration(state.jobId, name, Date.now() - t0);
       step.status = 'error';
       step.error = err.message;
       state.status = 'error';
@@ -2233,17 +2289,14 @@ export class OrchestratorService {
     jobLogDir: string,
     logPath: string,
     repoResult: RepoAnalyzeResult,
-  ): Promise<void> {
-    await writeFile(
-      join(jobLogDir, 'repo-manifest.json'),
-      JSON.stringify(repoResult.themeManifest, null, 2),
-      'utf-8',
-    );
-
-    for (const line of this.buildRepoAnalysisSummaryLines(repoResult)) {
+  ): Promise<string[]> {
+    void jobLogDir;
+    const lines = this.buildRepoAnalysisSummaryLines(repoResult);
+    for (const line of lines) {
       this.logger.log(`[RepoAnalyzer] ${line}`);
       await this.logToFile(logPath, `[RepoAnalyzer] ${line}`);
     }
+    return lines;
   }
 
   private buildRepoAnalysisSummaryLines(
@@ -2273,6 +2326,184 @@ export class OrchestratorService {
           ]
         : []),
     ];
+  }
+
+  private recordStepDuration(
+    jobId: string,
+    stepName: string,
+    durationMs: number,
+  ): void {
+    const control = this.controls.get(jobId);
+    if (!control?.runtimeSummary) return;
+    control.runtimeSummary.stepDurationsMs[stepName] = Math.max(
+      0,
+      Math.round(durationMs),
+    );
+  }
+
+  private async writeRunSummary(
+    summaryPath: string,
+    state: PipelineStatus,
+    summaryDraft: PipelineRuntimeSummaryDraft,
+    metrics: unknown,
+    visualRouteResults: any[],
+    pipelineStart: number,
+  ): Promise<void> {
+    const aiSummary = this.aiLogger.getJobSummary(state.jobId);
+    const tokenUsage = this.tokenTracker.getSummary(summaryPath);
+    const editRequestTokenUsage = tokenUsage?.scopes?.['edit-request'] ?? null;
+    const orchestratorRetryTotal = Object.values(summaryDraft.retries).reduce(
+      (sum, value) => sum + value,
+      0,
+    );
+    const accuracy = this.extractAccuracySummary(metrics);
+    const finishedAt = new Date().toISOString();
+
+    const summary: PipelineRunSummaryFile = {
+      jobId: state.jobId,
+      status: this.toRunSummaryStatus(state.status),
+      success: state.status === 'done',
+      startedAt: summaryDraft.startedAt,
+      finishedAt,
+      totalDurationMs: Math.max(0, Date.now() - pipelineStart),
+      totalDurationSeconds: Number(
+        ((Date.now() - pipelineStart) / 1000).toFixed(1),
+      ),
+      failureMessage: state.error,
+      retries: {
+        total: orchestratorRetryTotal + aiSummary.retries.total,
+        orchestrator: summaryDraft.retries,
+        aiAgents: {
+          total: aiSummary.retries.total,
+          planning: aiSummary.retries.byStep.planning,
+          codeGeneration: aiSummary.retries.byStep['code-generation'],
+          sectionGeneration: aiSummary.retries.byStep['section-generation'],
+        },
+      },
+      timing: {
+        planningMs: summaryDraft.stepDurationsMs['5_planner'] ?? null,
+        generationMs: summaryDraft.stepDurationsMs['6_generator'] ?? null,
+        stepDurationsMs: summaryDraft.stepDurationsMs,
+      },
+      accuracy,
+      tokenUsage,
+      editRequestTokenUsage,
+      uiAssessment: this.buildUiAssessment(accuracy, visualRouteResults),
+      repoAnalysisSummary: summaryDraft.repoAnalysisSummary,
+    };
+
+    await writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf-8');
+  }
+
+  private toRunSummaryStatus(
+    status: PipelineStatus['status'],
+  ): PipelineRunSummaryFile['status'] {
+    if (status === 'done') return 'success';
+    if (status === 'stopped') return 'stopped';
+    if (status === 'deleted') return 'deleted';
+    return 'failed';
+  }
+
+  private extractAccuracySummary(metrics: unknown): PipelineAccuracySummary {
+    const metricObject =
+      metrics && typeof metrics === 'object' && 'metrics' in (metrics as object)
+        ? (metrics as { metrics?: unknown }).metrics
+        : metrics;
+
+    const rawDiff = this.readNumericMetric(metricObject, 'diffPercentage');
+    const diffPercentage =
+      typeof rawDiff === 'number'
+        ? Number((rawDiff <= 1 ? rawDiff * 100 : rawDiff).toFixed(2))
+        : null;
+    const differentPixels = this.readNumericMetric(
+      metricObject,
+      'differentPixels',
+    );
+    const totalPixels = this.readNumericMetric(metricObject, 'totalPixels');
+
+    return {
+      percent:
+        diffPercentage === null
+          ? null
+          : Number(Math.max(0, 100 - diffPercentage).toFixed(2)),
+      diffPercentage,
+      differentPixels,
+      totalPixels,
+    };
+  }
+
+  private readNumericMetric(
+    value: unknown,
+    key: 'diffPercentage' | 'differentPixels' | 'totalPixels',
+  ): number | null {
+    if (!value || typeof value !== 'object') return null;
+    const candidate = (value as Record<string, unknown>)[key];
+    return typeof candidate === 'number' && Number.isFinite(candidate)
+      ? candidate
+      : null;
+  }
+
+  private buildUiAssessment(
+    accuracy: PipelineAccuracySummary,
+    visualRouteResults: any[],
+  ): PipelineUiAssessment {
+    const actionableRoutes = visualRouteResults.filter(
+      (result) => Array.isArray(result?.issues) && result.issues.length > 0,
+    ).length;
+    const totalIssues = visualRouteResults.reduce(
+      (sum, result) =>
+        sum + (Array.isArray(result?.issues) ? result.issues.length : 0),
+      0,
+    );
+    const basis: string[] = [];
+
+    if (accuracy.percent !== null) {
+      basis.push(`độ chính xác=${accuracy.percent}%`);
+    }
+    basis.push(`số lỗi thị giác=${totalIssues}`);
+    basis.push(`số route cần xử lý=${actionableRoutes}`);
+
+    if (accuracy.percent === null) {
+      return {
+        score: null,
+        verdict:
+          'Chưa có visual compare cuối cùng nên chưa đủ cơ sở để đánh giá giao diện.',
+        basis,
+      };
+    }
+
+    const score = Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(accuracy.percent - actionableRoutes * 4 - totalIssues * 1.5),
+      ),
+    );
+
+    if (score >= 92) {
+      return {
+        score,
+        verdict:
+          'Giao diện khá sát bản WordPress, độ lệch thị giác thấp và không còn nhiều điểm gây chú ý.',
+        basis,
+      };
+    }
+
+    if (score >= 80) {
+      return {
+        score,
+        verdict:
+          'Tổng thể giao diện ổn, nhưng vẫn còn một số chỗ lệch thấy được ở khoảng cách, màu sắc hoặc thành phần cục bộ.',
+        basis,
+      };
+    }
+
+    return {
+      score,
+      verdict:
+        'Giao diện vẫn còn lệch khá rõ so với bản gốc, cần thêm một vòng review hình ảnh và chỉnh UI có mục tiêu.',
+      basis,
+    };
   }
 
   private validateDto(dto: RunPipelineDto): void {
@@ -2307,6 +2538,351 @@ export class OrchestratorService {
     ) {
       throw new BadRequestException('dbConnectionString is required');
     }
+  }
+
+  private buildPreviewEventData(input: {
+    preview: PreviewBuilderResult;
+    previewStage: 'baseline' | 'edited' | 'final';
+    hasEditRequest: boolean;
+    metrics?: ProgressEventData['metrics'];
+  }): ProgressEventData {
+    const { preview, previewStage, hasEditRequest, metrics } = input;
+    return {
+      previewUrl: preview.previewUrl,
+      apiBaseUrl: preview.apiBaseUrl,
+      previewStage,
+      hasEditRequest,
+      metrics,
+    };
+  }
+
+  private async applyPostMigrationEditPass(input: {
+    jobId: string;
+    state: PipelineStatus;
+    stepName: string;
+    request?: RunPipelineDto['editRequest'];
+    plan: PlanResult;
+    components: ReactGenerateResult['components'];
+    fixAgentModel?: string;
+    logPath: string;
+    applyProgress: number;
+    reviewProgress: number;
+    refixProgress: number;
+  }): Promise<{
+    components: ReactGenerateResult['components'];
+    applied: boolean;
+    taskCount: number;
+  }> {
+    const {
+      jobId,
+      state,
+      stepName,
+      request,
+      plan,
+      fixAgentModel,
+      logPath,
+      applyProgress,
+      reviewProgress,
+      refixProgress,
+    } = input;
+    let components = [...input.components];
+
+    if (!request) {
+      return { components, applied: false, taskCount: 0 };
+    }
+
+    const inMemoryUiSourceMapEntries =
+      await buildUiSourceMapForGeneratedComponents({
+        components,
+        plan,
+      });
+    const inMemoryMutationCandidates =
+      await buildUiMutationCandidatesForGeneratedComponents({
+        components,
+      });
+    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap({
+      attachments: request.attachments,
+      uiSourceMap: inMemoryUiSourceMapEntries,
+    });
+    await this.logExactCaptureResolution({
+      jobId,
+      logPath,
+      attachments: request.attachments,
+      uiSourceMapPath: 'in-memory:baseline-generated-components',
+      uiSourceMapEntryCount: inMemoryUiSourceMapEntries.length,
+      exactCaptureTargets: exactCaptureTargetsForEditPass,
+    });
+    const intentAwareCaptureTargetsForEditPass =
+      this.editRequestPhase.resolveIntentAwareCaptureTargets({
+        request,
+        exactCaptureTargets: exactCaptureTargetsForEditPass,
+        mutationCandidates: inMemoryMutationCandidates,
+      });
+    await this.logExactCaptureResolution({
+      jobId,
+      logPath,
+      attachments: request.attachments,
+      uiSourceMapPath: 'in-memory:intent-aware-mutation-targets',
+      uiSourceMapEntryCount: inMemoryMutationCandidates.length,
+      exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
+    });
+
+    const postMigrationEditTasks =
+      this.editRequestPhase.buildPostMigrationEditTasks({
+        request,
+        plan,
+        components,
+        exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
+        mutationCandidates: inMemoryMutationCandidates,
+      });
+
+    if (postMigrationEditTasks.length === 0) {
+      return { components, applied: false, taskCount: 0 };
+    }
+
+    const editedComponentNames: Record<string, string> = {};
+    const applyFocusedTask = async (
+      task: (typeof postMigrationEditTasks)[number],
+      feedbackOverride?: string,
+    ): Promise<boolean> => {
+      const componentIndex = components.findIndex(
+        (component) => component.name === task.componentName,
+      );
+      if (componentIndex === -1) return false;
+
+      const effectiveTask = feedbackOverride
+        ? {
+            ...task,
+            feedback: feedbackOverride,
+            debugSummary: `${task.debugSummary} | refix=true`,
+          }
+        : task;
+      const fixedResult = await this.sectionEdit.applyFocusedTask({
+        task: effectiveTask,
+        request,
+        plan,
+        components,
+        modelConfig: { fixAgent: fixAgentModel },
+        logPath,
+      });
+      if (!fixedResult) return false;
+
+      const revalidated = this.validator.collectValidationIssues([
+        fixedResult.component,
+      ]);
+      if (revalidated.failures.length > 0) {
+        const validationErr = revalidated.failures[0]?.error;
+        this.logger.warn(
+          `[Focused Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}" after focused edit. Keeping the previous version. Error: ${validationErr}`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Focused Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}": ${validationErr}`,
+        );
+        return false;
+      }
+
+      const replacementIndex = components.findIndex(
+        (component) => component.name === fixedResult.editedComponentName,
+      );
+      if (replacementIndex !== -1) {
+        components[replacementIndex] = revalidated.components[0];
+      }
+      editedComponentNames[task.componentName] = fixedResult.editedComponentName;
+      return true;
+    };
+
+    this.logger.log(
+      `[Focused Edit Pass] Applying ${postMigrationEditTasks.length} focused edit task(s) after the baseline preview is available.`,
+    );
+    this.emitStepProgress(
+      state,
+      stepName,
+      applyProgress,
+      `Applying ${postMigrationEditTasks.length} focused edit task(s) from the user's request while the baseline preview stays visible.`,
+    );
+    await this.logToFile(
+      logPath,
+      `[Focused Edit Pass] Applying ${postMigrationEditTasks.length} focused task(s).`,
+    );
+
+    for (const task of postMigrationEditTasks) {
+      this.logger.log(`[Focused Edit Pass] ${task.debugSummary}`);
+      await this.logToFile(logPath, `[Focused Edit Pass] ${task.debugSummary}`);
+      await applyFocusedTask(task);
+    }
+
+    const finalValidation = this.validator.collectValidationIssues(components);
+    if (finalValidation.failures.length > 0) {
+      throw new Error(
+        `[focused-edit] Focused edit tasks introduced validation failures:\n${finalValidation.failures
+          .map(
+            (failure) =>
+              `Component "${failure.component.name}": ${failure.error}`,
+          )
+          .join('\n')}`,
+      );
+    }
+
+    components = finalValidation.components;
+
+    this.emitStepProgress(
+      state,
+      stepName,
+      reviewProgress,
+      `Reviewing ${postMigrationEditTasks.length} focused capture edit task(s) against the submitted evidence.`,
+    );
+    let captureReviewResult = this.captureReview.reviewFocusedTasks({
+      tasks: postMigrationEditTasks,
+      request,
+      plan,
+      components,
+      editedComponentNames,
+    });
+
+    this.logger.log(`[Capture Review] ${captureReviewResult.summary}`);
+    await this.logToFile(logPath, `[Capture Review] ${captureReviewResult.summary}`);
+
+    const advisoryResults = captureReviewResult.results.filter(
+      (result) => result.status !== 'matched',
+    );
+    for (const result of advisoryResults) {
+      const issueText =
+        result.issues.map((issue) => issue.message).join(' | ') ||
+        result.summary;
+      this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+      await this.logToFile(
+        logPath,
+        `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+      );
+    }
+
+    const MAX_CAPTURE_REVIEW_FIX_ROUNDS = 2;
+    for (let round = 1; round <= MAX_CAPTURE_REVIEW_FIX_ROUNDS; round++) {
+      const componentsSnapshot = [...components];
+      const editedComponentNamesSnapshot = {
+        ...editedComponentNames,
+      };
+      const reviewFailures = captureReviewResult.results.filter(
+        (result) =>
+          result.status !== 'matched' && Boolean(result.suggestedFixFeedback),
+      );
+      if (reviewFailures.length === 0) break;
+
+      this.logger.warn(
+        `[Capture Review] ${reviewFailures.length} capture review issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
+      );
+      await this.logToFile(
+        logPath,
+        `[Capture Review] ${reviewFailures.length} issue(s) need focused re-fix (round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}).`,
+      );
+      this.emitStepProgress(
+        state,
+        stepName,
+        refixProgress,
+        `Capture review re-fix ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: repairing ${reviewFailures.length} attachment-targeted issue(s).`,
+      );
+
+      for (const reviewFailure of reviewFailures) {
+        const relatedTask = postMigrationEditTasks.find(
+          (task) =>
+            task.componentName === reviewFailure.componentName &&
+            task.attachments.some(
+              (attachment) => attachment.id === reviewFailure.attachmentId,
+            ),
+        );
+        if (!relatedTask || !reviewFailure.suggestedFixFeedback) continue;
+
+        this.logger.warn(
+          `[Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Capture Review] Re-fixing attachment=${reviewFailure.attachmentId} target=${reviewFailure.componentName} status=${reviewFailure.status} confidence=${reviewFailure.confidence.toFixed(2)}`,
+        );
+
+        await applyFocusedTask(
+          relatedTask,
+          `${relatedTask.feedback}\n\n${reviewFailure.suggestedFixFeedback}`,
+        );
+      }
+
+      const refixValidation = this.validator.collectValidationIssues(components);
+      if (refixValidation.failures.length > 0) {
+        const validationSummary = refixValidation.failures
+          .map(
+            (failure) =>
+              `Component "${failure.component.name}": ${failure.error}`,
+          )
+          .join('\n');
+        this.logger.warn(
+          `[Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid component snapshot and continuing. ${validationSummary}`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Capture Review] Re-fix round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS} introduced validation failures. Reverting to the last valid snapshot.\n${validationSummary}`,
+        );
+        components = componentsSnapshot;
+        for (const key of Object.keys(editedComponentNames)) {
+          delete editedComponentNames[key];
+        }
+        Object.assign(editedComponentNames, editedComponentNamesSnapshot);
+        break;
+      }
+      components = refixValidation.components;
+
+      captureReviewResult = this.captureReview.reviewFocusedTasks({
+        tasks: postMigrationEditTasks,
+        request,
+        plan,
+        components,
+        editedComponentNames,
+      });
+
+      this.logger.log(
+        `[Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
+      );
+      await this.logToFile(
+        logPath,
+        `[Capture Review] Re-review round ${round}/${MAX_CAPTURE_REVIEW_FIX_ROUNDS}: ${captureReviewResult.summary}`,
+      );
+
+      const remainingIssues = captureReviewResult.results.filter(
+        (result) => result.status !== 'matched',
+      );
+      for (const result of remainingIssues) {
+        const issueText =
+          result.issues.map((issue) => issue.message).join(' | ') ||
+          result.summary;
+        this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+        await this.logToFile(
+          logPath,
+          `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+        );
+      }
+    }
+
+    const unresolvedCaptureReviewIssues = captureReviewResult.results.filter(
+      (result) => result.status !== 'matched',
+    );
+    if (unresolvedCaptureReviewIssues.length > 0) {
+      const unresolvedSummary = unresolvedCaptureReviewIssues
+        .map((result) => result.debugSummary)
+        .join(' || ');
+      this.logger.warn(
+        `[Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
+      );
+      await this.logToFile(
+        logPath,
+        `[Capture Review] ${unresolvedCaptureReviewIssues.length} issue(s) remain after best-effort re-fix. Continuing pipeline without crashing. ${unresolvedSummary}`,
+      );
+    }
+
+    return {
+      components,
+      applied: true,
+      taskCount: postMigrationEditTasks.length,
+    };
   }
 
   private async logResolvedEditRequestContext(

@@ -298,7 +298,7 @@ ${api.files
     logPath: string | undefined,
     message: string,
   ): Promise<void> {
-    if (!logPath) return;
+    if (!logPath || logPath.endsWith('.json')) return;
     try {
       await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
     } catch {

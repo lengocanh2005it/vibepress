@@ -3,7 +3,10 @@ import { appendFile } from 'fs/promises';
 import OpenAI from 'openai';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { OPENAI_CLIENT } from '../../../common/providers/openai/openai.provider.js';
-import { TokenTracker } from '../../../common/utils/token-tracker.js';
+import {
+  TokenTracker,
+  type TokenScope,
+} from '../../../common/utils/token-tracker.js';
 import {
   AiLoggerService,
   type AttemptLog,
@@ -395,6 +398,7 @@ export class CodeReviewerService {
             3,
             logPath,
             `${componentName}:plan`,
+            editRequestContextNote ? 'edit-request' : 'base',
           );
           const parsedPlan = parseVisualPlanDetailed(s1Raw, componentName, {
             allowedImageSrcs: extractStaticImageSources(templateSource),
@@ -739,6 +743,7 @@ export class CodeReviewerService {
         5,
         logPath,
         sectionName,
+        editRequestContextNote ? 'edit-request' : 'base',
       );
       code = this.stripMarkdownFences(raw);
       code = this.mergeClassNames(code);
@@ -1073,6 +1078,7 @@ export class CodeReviewerService {
         3,
         logPath,
         `${componentName}:fragment:${attempt}`,
+        editRequestContextNote ? 'edit-request' : 'base',
       );
 
       lastFragment = raw
@@ -1264,6 +1270,7 @@ export class CodeReviewerService {
         5,
         logPath,
         `${componentName}:${logLabel}`,
+        editRequestContextNote ? 'edit-request' : 'base',
       );
 
       lastRawOutput = raw;
@@ -1466,6 +1473,7 @@ export class CodeReviewerService {
     logPath?: string,
     label?: string,
     visionImageUrls: string[] = [],
+    tokenScope: TokenScope = 'base',
   ): Promise<string> {
     const result = await this.selfFixDetailed(
       model,
@@ -1474,6 +1482,7 @@ export class CodeReviewerService {
       logPath,
       label,
       visionImageUrls,
+      tokenScope,
     );
     return result.code;
   }
@@ -1485,6 +1494,7 @@ export class CodeReviewerService {
     logPath?: string,
     label?: string,
     visionImageUrls: string[] = [],
+    tokenScope: TokenScope = 'base',
   ): Promise<{
     code: string;
     systemPrompt: string;
@@ -1536,6 +1546,17 @@ export class CodeReviewerService {
         const text = response.choices[0]?.message?.content;
         if (text) {
           const usage = response.usage;
+          const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
+          if (tokenLogPath) {
+            await this.tokenTracker.init(tokenLogPath);
+            await this.tokenTracker.track(
+              model,
+              usage?.prompt_tokens ?? 0,
+              usage?.completion_tokens ?? 0,
+              label ? `${label}:fix` : model,
+              { scope: tokenScope },
+            );
+          }
           return {
             code: this.postProcessCode(text),
             systemPrompt:
@@ -1569,6 +1590,7 @@ export class CodeReviewerService {
       3,
       logPath,
       label ? `${label}:fix` : undefined,
+      tokenScope,
     );
     return {
       code: this.postProcessCode(raw),
@@ -1673,6 +1695,7 @@ export class CodeReviewerService {
     maxRetries = 5,
     logPath?: string,
     label?: string,
+    tokenScope: TokenScope = 'base',
   ): Promise<{
     text: string;
     inputTokens: number;
@@ -1703,6 +1726,7 @@ export class CodeReviewerService {
             result.inputTokens,
             result.outputTokens,
             label ?? model,
+            { scope: tokenScope },
           );
         }
         if (
@@ -1966,6 +1990,15 @@ export class CodeReviewerService {
       );
     }
 
+    if (/hover:underline|underline on hover|wordPress-style interaction/.test(compact)) {
+      instructions.push(
+        'Visible text links for post titles, author/category archive links, menus, footer/sidebar lists, breadcrumbs, and social/footer text links must include hover underline styling such as `hover:underline underline-offset-4`.',
+      );
+      instructions.push(
+        'Keep CTA buttons as buttons, but make ordinary text navigation/content links visibly underlined on hover.',
+      );
+    }
+
     if (/author/.test(compact) && /route|link/.test(compact)) {
       instructions.push(
         'Do not create author archive links unless the contract explicitly approves that route.',
@@ -2056,7 +2089,7 @@ export class CodeReviewerService {
     logPath: string | undefined,
     message: string,
   ): Promise<void> {
-    if (!logPath) return;
+    if (!logPath || logPath.endsWith('.json')) return;
     try {
       await appendFile(logPath, `${new Date().toISOString()} ${message}\n`);
     } catch {

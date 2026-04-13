@@ -250,10 +250,10 @@ function buildForbiddenBehaviorNote(input: {
     lines.push('- Do NOT import or call `useParams` for this route.');
   }
   lines.push(
-    '- Do NOT create internal links to routes that are absent from the approved frontend/app contract. If a route is not explicitly approved, render plain text instead of guessing a path.',
+    '- Do NOT guess internal routes that are absent from the approved frontend/app contract. If a real route is unavailable but the UI should stay clickable, use a temporary placeholder anchor like `href="#"` instead of inventing a path.',
   );
   lines.push(
-    '- Do NOT assume `/author/${slug}` exists. Render author names as plain text unless an author archive route is explicitly approved.',
+    '- Do NOT assume `/author/${slug}` exists. Use the real author archive route only when it is explicitly approved; otherwise you may keep the author clickable temporarily with `href="#"`.',
   );
   lines.push(
     '- Do NOT invent hero sections, widgets, promos, author bios, utility links, or filler content not present in the source template or approved visual plan.',
@@ -393,10 +393,16 @@ function buildScopedApiContractNote(input: {
     '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
   );
   lines.push(
-    '- Use `post.author` as display text. If the contract/known routes approve `/author/:slug`, link the author name with `to={"/author/" + post.authorSlug}`; otherwise keep it plain text.',
+    '- Use `post.author` as display text. If the contract/known routes approve `/author/:slug`, link the author name with `to={"/author/" + post.authorSlug}`; otherwise fall back to a temporary placeholder anchor such as `href="#"`.',
   );
   lines.push(
-    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings may link to that route using `post.categorySlugs[index]` alongside `post.categories[index]`. Do NOT guess a slug from display text when no slug is available.',
+    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings may link to that route using `post.categorySlugs[index]` alongside `post.categories[index]`. Do NOT guess a slug from display text when no slug is available; use a temporary `href="#"` placeholder if you still need a clickable label.',
+  );
+  lines.push(
+    '- Post titles, recent-post titles, search results, and page-list/sidebar titles must link to their canonical detail routes (`/post/${post.slug}` or `/page/${page.slug}`) when those routes are part of the approved app contract.',
+  );
+  lines.push(
+    '- Visible text links for post titles, author/category archive links, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt.',
   );
   lines.push(
     '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
@@ -825,6 +831,9 @@ export function buildDataGroundingNote(
     );
     parts.push(
       '> IMPORTANT: `item.url` from `/api/menus` is already the canonical app path for internal links. Use `<Link to={item.url}>` directly. NEVER prepend `/page`, `/post`, or any extra route segment to `item.url`.',
+    );
+    parts.push(
+      '> Menu, footer, and sidebar text links should visibly underline on hover (`hover:underline underline-offset-4`) to preserve expected WordPress-style navigation behavior.',
     );
     for (const m of menus) {
       const itemPreview = m.items
@@ -1290,6 +1299,12 @@ export function buildVisualPlanContextNote(
     lines.push(
       '⛔ Split/flex-row guardrail: use side-by-side text/image layout ONLY when the approved section itself is `media-text` or a `hero` whose approved `layout=split`. Do NOT introduce `md:flex-row` / two-column hero structure for a section that is approved as a text-only hero followed by a later media/image section.',
     );
+    lines.push(
+      '⛔ Hero layout rule: if an approved `hero` uses `layout=centered` or `layout=left` and also has an image, render it as a vertical stack with text/CTA first and the image BELOW. Do NOT place that image beside the text unless the approved plan explicitly says `layout=split`.',
+    );
+    lines.push(
+      '⛔ Source-structure rule: do NOT infer `md:flex-row`, CSS grid, or a two-column wrapper from visual similarity alone. Use horizontal split only when the approved plan or source structure explicitly proves side-by-side columns/media-text.',
+    );
 
     const trackedSections = visualPlan.sections
       .filter((section) => !!section.sourceRef?.sourceNodeId)
@@ -1341,10 +1356,10 @@ export function buildVisualPlanContextNote(
       '⛔ Do NOT invent extra sidebar widgets such as "Useful Links", "Resources", "Quick Links", social links, footer-style columns, or author bio blocks unless they are explicitly present in the template source or directly supported by approved API data above.',
     );
     lines.push(
-      '⛔ If a URL is not present in the template source or API data, do NOT wrap the text in `<Link>` or `<a>`. Render plain text/spans instead.',
+      'If a URL is not present in the template source or API data, prefer a temporary `href="#"` placeholder over inventing a fake internal route path.',
     );
     lines.push(
-      '⛔ NEVER emit `to="#"`, `href="#"`, or any placeholder route in a sidebar widget.',
+      'If a sidebar item should remain clickable but no real URL is available yet, `href="#"` is an acceptable temporary placeholder. Do NOT invent a fake internal route path.',
     );
   }
 

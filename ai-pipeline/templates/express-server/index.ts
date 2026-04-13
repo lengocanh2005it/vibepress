@@ -11,6 +11,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get('/api', (_req, res) => {
+  res.json({
+    message: 'Hello World from the preview backend',
+    status: 'ok',
+    service: 'express-preview-api',
+    endpoints: [
+      '/api/site-info',
+      '/api/posts',
+      '/api/pages',
+      '/api/menus',
+      '/api/taxonomies',
+      '/api/comments',
+    ],
+  });
+});
+
 const PORT = Number(process.env.API_PORT) || 3100;
 const DEFAULT_POSTS_PER_PAGE = 10;
 const MAX_POSTS_PER_PAGE = 50;
