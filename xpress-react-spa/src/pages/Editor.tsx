@@ -5,10 +5,19 @@ import "react-toastify/dist/ReactToastify.css";
 import { AiProcessError, runAiProcess } from "../services/AiService";
 import {
   captureRegion,
+  deleteCapturesBySite,
+  getCapturesBySite,
   getWpSitePages,
-  type CaptureAssetResponse,
-  type CaptureViewport,
+  saveCapture,
 } from "../services/automationService";
+import type {
+  ViewportCaptureRect,
+  DocumentCaptureRect,
+  CaptureNormalizedRect,
+  CaptureDomTarget,
+  CaptureTargetNode,
+  Capture,
+} from "../types/capture";
 
 interface WpPage {
   id: number;
@@ -18,88 +27,6 @@ interface WpPage {
   status: string;
 }
 
-interface ViewportCaptureRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  coordinateSpace: "iframe-viewport";
-}
-
-interface DocumentCaptureRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  coordinateSpace: "iframe-document";
-}
-
-interface CaptureNormalizedRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  coordinateSpace: "iframe-document-normalized";
-}
-
-interface CaptureGeometry {
-  viewportRect: ViewportCaptureRect;
-  documentRect: DocumentCaptureRect;
-  normalizedRect: CaptureNormalizedRect;
-}
-
-interface CapturePageMetadata {
-  route: string | null;
-  title?: string;
-  documentWidth: number;
-  documentHeight: number;
-}
-
-interface CaptureDomTarget {
-  cssSelector?: string;
-  xpath?: string;
-  tagName?: string;
-  elementId?: string;
-  classNames?: string[];
-  htmlSnippet?: string;
-  textSnippet?: string;
-  blockName?: string;
-  blockClientId?: string;
-  domPath?: string;
-  role?: string;
-  ariaLabel?: string;
-  nearestHeading?: string;
-  nearestLandmark?: string;
-}
-
-interface CaptureTargetNode {
-  nodeId?: string;
-  templateName?: string;
-  route?: string | null;
-  blockName?: string;
-  blockClientId?: string;
-  tagName?: string;
-  domPath?: string;
-  nearestHeading?: string;
-  nearestLandmark?: string;
-}
-
-interface Capture {
-  id: string;
-  filePath: string;
-  fileName?: string;
-  asset?: CaptureAssetResponse;
-  comment: string;
-  pageUrl: string;
-  iframeSrc?: string;
-  capturedAt: string;
-  viewport: CaptureViewport;
-  page: CapturePageMetadata;
-  selection: DocumentCaptureRect;
-  geometry: CaptureGeometry;
-  domTarget?: CaptureDomTarget;
-  targetNode?: CaptureTargetNode;
-}
 
 interface SelectionRect {
   startX: number;
@@ -128,7 +55,9 @@ const stripVietnameseMarks = (value: string) =>
     .replace(/Đ/g, "D");
 
 const normalizeLanguageInput = (value?: string | null) =>
-  value?.trim().toLowerCase() ? stripVietnameseMarks(value.trim().toLowerCase()) : "";
+  value?.trim().toLowerCase()
+    ? stripVietnameseMarks(value.trim().toLowerCase())
+    : "";
 
 const detectRequestLanguage = (
   prompt: string,
@@ -284,9 +213,9 @@ const buildCssSelector = (element: Element): string | undefined => {
     if (classNames.length > 0) {
       segment += `.${classNames.map(escapeCssToken).join(".")}`;
     } else if (current.parentElement) {
-      const siblings = (Array.from(current.parentElement.children) as Element[]).filter(
-        (sibling) => sibling.tagName === current?.tagName,
-      );
+      const siblings = (
+        Array.from(current.parentElement.children) as Element[]
+      ).filter((sibling) => sibling.tagName === current?.tagName);
       if (siblings.length > 1) {
         const index = siblings.indexOf(current) + 1;
         segment += `:nth-of-type(${index})`;
@@ -381,7 +310,9 @@ const getNearestHeading = (element: Element): string | undefined => {
   }
 
   const localContainers: Array<Element | null> = [
-    element.closest('[data-block], [data-type], [data-block-name], [class*="wp-block-"]'),
+    element.closest(
+      '[data-block], [data-type], [data-block-name], [class*="wp-block-"]',
+    ),
     element.closest("section, article, header, aside, footer, nav, form"),
     element.parentElement,
     element.parentElement?.parentElement || null,
@@ -429,15 +360,15 @@ const getBlockMetadata = (element: Element) => {
   };
 };
 
-const resolveInstrumentedNode = (
-  element: Element,
-): HTMLElement | null => {
+const resolveInstrumentedNode = (element: Element): HTMLElement | null => {
   if (element instanceof HTMLElement && element.dataset.vpNodeId) {
     return element;
   }
 
   const closestInstrumented = element.closest("[data-vp-node-id]");
-  return closestInstrumented instanceof HTMLElement ? closestInstrumented : null;
+  return closestInstrumented instanceof HTMLElement
+    ? closestInstrumented
+    : null;
 };
 
 const getViewportIntersectionArea = (
@@ -544,8 +475,7 @@ const resolveDomTargetSnapshot = (
     templateName:
       instrumentedNode?.dataset.vpTemplate || documentTemplate || undefined,
     route: instrumentedNode?.dataset.vpRoute || documentRoute,
-    blockName:
-      instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
+    blockName: instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
     blockClientId:
       instrumentedNode?.dataset.vpBlockClientId || blockMetadata.blockClientId,
     tagName:
@@ -554,8 +484,7 @@ const resolveDomTargetSnapshot = (
       element.tagName.toLowerCase(),
     domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
     nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
-    nearestLandmark:
-      instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+    nearestLandmark: instrumentedNode?.dataset.vpLandmark || nearestLandmark,
   });
 
   return {
@@ -570,13 +499,13 @@ const resolveDomTargetSnapshot = (
       blockName:
         instrumentedNode?.dataset.vpBlockName || blockMetadata.blockName,
       blockClientId:
-        instrumentedNode?.dataset.vpBlockClientId || blockMetadata.blockClientId,
+        instrumentedNode?.dataset.vpBlockClientId ||
+        blockMetadata.blockClientId,
       domPath: instrumentedNode?.dataset.vpDomPath || buildDomPath(element),
       role: element.getAttribute("role") || undefined,
       ariaLabel: element.getAttribute("aria-label") || undefined,
       nearestHeading: instrumentedNode?.dataset.vpHeading || nearestHeading,
-      nearestLandmark:
-        instrumentedNode?.dataset.vpLandmark || nearestLandmark,
+      nearestLandmark: instrumentedNode?.dataset.vpLandmark || nearestLandmark,
     },
     targetNode: Object.keys(targetNode).length > 0 ? targetNode : undefined,
   };
@@ -666,9 +595,7 @@ const getAiErrorMessage = (
   error: AiProcessError,
   language: SupportedLanguage,
 ) => {
-  const messageByCode: Partial<
-    Record<string, keyof typeof EDITOR_MESSAGES>
-  > = {
+  const messageByCode: Partial<Record<string, keyof typeof EDITOR_MESSAGES>> = {
     MAIN_PROMPT_REQUIRED: "mainPromptRequired",
     MAIN_PROMPT_NOT_ALLOWED_WITH_CAPTURES: "mainPromptNotAllowedWithCaptures",
     SUPPLEMENTAL_PROMPT_TOO_VAGUE: "supplementalPromptTooVague",
@@ -710,10 +637,10 @@ const getChatHelperContent = (
         title: "Main prompt",
         body: 'Hãy mô tả migrate toàn site, hoặc migrate toàn site kèm focus cụ thể. Ví dụ: "Migrate toàn bộ site sang React và giảm chiều cao hero ở trang Home".',
       }
-      : {
-          title: "Main prompt",
-          body: 'Describe a full-site migration, or a full-site migration with a clear focus. Example: "Migrate the full site to React and reduce the hero height on the Home page".',
-        };
+    : {
+        title: "Main prompt",
+        body: 'Describe a full-site migration, or a full-site migration with a clear focus. Example: "Migrate the full site to React and reduce the hero height on the Home page".',
+      };
 };
 
 const getChatInputPlaceholder = (language: SupportedLanguage) =>
@@ -785,6 +712,15 @@ const Editor: React.FC = () => {
       colorClasses: "bg-[#f0eede] text-[#8e9892]",
     },
   ]);
+
+  useEffect(() => {
+    if (!siteId) return;
+    const load = async () => {
+      const listCaptures = await getCapturesBySite(siteId);
+      setCaptures(listCaptures);
+    };
+    load();
+  }, [siteId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -912,12 +848,17 @@ const Editor: React.FC = () => {
         normalizedAscii,
       );
 
-    return migrationSignal || ((uiSignal || featureSignal) && (scopeSignal || focusSignal));
+    return (
+      migrationSignal ||
+      ((uiSignal || featureSignal) && (scopeSignal || focusSignal))
+    );
   };
 
   const hasFocusTargetWithoutAction = (value: string) => {
     const normalized = normalizeLanguageInput(value) || "";
-    return mentionsFocusTarget(normalized) && !hasConcreteEditAction(normalized);
+    return (
+      mentionsFocusTarget(normalized) && !hasConcreteEditAction(normalized)
+    );
   };
 
   const isSpecificCaptureNote = (value: string) => {
@@ -1007,7 +948,9 @@ const Editor: React.FC = () => {
         iframeSrc: primaryCapture?.iframeSrc,
         pageTitle:
           primaryPage?.title ||
-          wpPages.find((page) => page.link === selectedPageUrl)?.title?.trim() ||
+          wpPages
+            .find((page) => page.link === selectedPageUrl)
+            ?.title?.trim() ||
           undefined,
         viewport: primaryCapture?.viewport,
         document: primaryPage
@@ -1049,12 +992,12 @@ const Editor: React.FC = () => {
         return;
       }
       if (chatCaptures.some((capture) => !capture.comment.trim())) {
-        showToast(
-          getEditorMessage(requestLanguage, "captureNoteRequired"),
-        );
+        showToast(getEditorMessage(requestLanguage, "captureNoteRequired"));
         return;
       }
-      if (chatCaptures.some((capture) => !isSpecificCaptureNote(capture.comment))) {
+      if (
+        chatCaptures.some((capture) => !isSpecificCaptureNote(capture.comment))
+      ) {
         showToast(getEditorMessage(requestLanguage, "captureNoteTooVague"));
         return;
       }
@@ -1075,7 +1018,6 @@ const Editor: React.FC = () => {
       }
     }
 
-
     setIsSendingAiRequest(true);
 
     const requestBody = buildAiRequestPayload(
@@ -1091,6 +1033,7 @@ const Editor: React.FC = () => {
       setChatInput("");
       setChatCaptures([]);
       console.log("AI process started with job ID:", data.jobId);
+      await deleteCapturesBySite(siteId);
       navigate("/app/editor/split-view", {
         state: { jobId: data.jobId, siteId },
       });
@@ -1263,20 +1206,24 @@ const Editor: React.FC = () => {
         viewport,
         overlayWidth: Math.max(
           1,
-          Math.round(overlayRef.current?.clientWidth || iframeEl.clientWidth || viewport.width),
+          Math.round(
+            overlayRef.current?.clientWidth ||
+              iframeEl.clientWidth ||
+              viewport.width,
+          ),
         ),
         overlayHeight: Math.max(
           1,
           Math.round(
-            overlayRef.current?.clientHeight || iframeEl.clientHeight || viewport.height,
+            overlayRef.current?.clientHeight ||
+              iframeEl.clientHeight ||
+              viewport.height,
           ),
         ),
         frameDocument,
         page: {
           route: instrumentedRoute || fallbackRoute,
-          title:
-            frameDocument?.title?.trim() ||
-            fallbackTitle,
+          title: frameDocument?.title?.trim() || fallbackTitle,
           documentWidth: Math.max(
             viewport.width,
             Math.round(
@@ -1330,8 +1277,16 @@ const Editor: React.FC = () => {
     const maxViewportHeight = Math.max(1, metrics.viewport.height);
 
     const viewportRect: ViewportCaptureRect = {
-      x: clampNumber(roundNumber(overlayRect.x * scaleX), 0, maxViewportWidth - 1),
-      y: clampNumber(roundNumber(overlayRect.y * scaleY), 0, maxViewportHeight - 1),
+      x: clampNumber(
+        roundNumber(overlayRect.x * scaleX),
+        0,
+        maxViewportWidth - 1,
+      ),
+      y: clampNumber(
+        roundNumber(overlayRect.y * scaleY),
+        0,
+        maxViewportHeight - 1,
+      ),
       width: clampNumber(
         roundNumber(overlayRect.width * scaleX),
         1,
@@ -1361,8 +1316,12 @@ const Editor: React.FC = () => {
     };
 
     const documentRect: DocumentCaptureRect = {
-      x: roundNumber(normalizedViewportRect.x + (metrics.viewport.scrollX || 0)),
-      y: roundNumber(normalizedViewportRect.y + (metrics.viewport.scrollY || 0)),
+      x: roundNumber(
+        normalizedViewportRect.x + (metrics.viewport.scrollX || 0),
+      ),
+      y: roundNumber(
+        normalizedViewportRect.y + (metrics.viewport.scrollY || 0),
+      ),
       width: normalizedViewportRect.width,
       height: normalizedViewportRect.height,
       coordinateSpace: "iframe-document",
@@ -1370,10 +1329,18 @@ const Editor: React.FC = () => {
 
     const normalizedRect: CaptureNormalizedRect = {
       x: roundNumber(
-        clampNumber(documentRect.x / Math.max(1, metrics.page.documentWidth), 0, 1),
+        clampNumber(
+          documentRect.x / Math.max(1, metrics.page.documentWidth),
+          0,
+          1,
+        ),
       ),
       y: roundNumber(
-        clampNumber(documentRect.y / Math.max(1, metrics.page.documentHeight), 0, 1),
+        clampNumber(
+          documentRect.y / Math.max(1, metrics.page.documentHeight),
+          0,
+          1,
+        ),
       ),
       width: roundNumber(
         clampNumber(
@@ -1416,18 +1383,11 @@ const Editor: React.FC = () => {
     if (!selection) return;
     const captureLanguage = detectRequestLanguage("", [captureComment]);
     if (!captureComment.trim()) {
-      showToast(
-        getEditorMessage(
-          captureLanguage,
-          "saveCaptureNoteRequired",
-        ),
-      );
+      showToast(getEditorMessage(captureLanguage, "saveCaptureNoteRequired"));
       return;
     }
     if (!isSpecificCaptureNote(captureComment)) {
-      showToast(
-        getEditorMessage(captureLanguage, "captureNoteTooVagueOnSave"),
-      );
+      showToast(getEditorMessage(captureLanguage, "captureNoteTooVagueOnSave"));
       return;
     }
     setIsSubmittingCapture(true);
@@ -1446,26 +1406,24 @@ const Editor: React.FC = () => {
         captureComment,
         captureSnapshot.viewport,
       );
-      setCaptures((prev) => [
-        {
-          id: Date.now().toString(),
-          filePath: result.filePath,
-          fileName: result.fileName,
-          asset: result.asset,
-          comment: captureComment,
-          pageUrl: selectedPageUrl,
-          iframeSrc: previewSrc,
-          capturedAt: new Date().toISOString(),
-          viewport: captureSnapshot.viewport,
-          page: captureSnapshot.page,
-          selection: captureSnapshot.selection,
-          geometry: captureSnapshot.geometry,
-          domTarget: captureSnapshot.domTarget,
-          targetNode: captureSnapshot.targetNode,
-        },
-        ...prev,
-      ]);
-      console.log("Capture saved:", captures);
+      const captureObject = {
+        id: Date.now().toString(),
+        filePath: result.filePath,
+        fileName: result.fileName,
+        asset: result.asset,
+        comment: captureComment,
+        pageUrl: selectedPageUrl,
+        iframeSrc: previewSrc,
+        capturedAt: new Date().toISOString(),
+        viewport: captureSnapshot.viewport,
+        page: captureSnapshot.page,
+        selection: captureSnapshot.selection,
+        geometry: captureSnapshot.geometry,
+        domTarget: captureSnapshot.domTarget,
+        targetNode: captureSnapshot.targetNode,
+      };
+      await saveCapture(siteId,captureObject);
+      setCaptures((prev) => [captureObject, ...prev]);
     } finally {
       setIsSubmittingCapture(false);
       setShowCommentPopup(false);
@@ -1512,7 +1470,9 @@ const Editor: React.FC = () => {
       );
       return;
     }
-    if (capturesToSave.some((capture) => !isSpecificCaptureNote(capture.comment))) {
+    if (
+      capturesToSave.some((capture) => !isSpecificCaptureNote(capture.comment))
+    ) {
       showToast(getEditorMessage(selectionLanguage, "captureNoteTooVague"));
       return;
     }
@@ -1832,7 +1792,7 @@ const Editor: React.FC = () => {
                     <p className="text-[13px] font-bold text-[#233227] mb-2">
                       Describe the change for this area
                     </p>
-                      <textarea
+                    <textarea
                       autoFocus
                       value={captureComment}
                       onChange={(e) => setCaptureComment(e.target.value)}
@@ -1867,7 +1827,9 @@ const Editor: React.FC = () => {
                   <div className="shrink-0 p-3 border-b border-[#e5e8df]">
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                      <h3 className="font-semibold text-sm text-[#2e3e2f]">Live Chat</h3>
+                      <h3 className="font-semibold text-sm text-[#2e3e2f]">
+                        Live Chat
+                      </h3>
                     </div>
                   </div>
 
@@ -1898,16 +1860,36 @@ const Editor: React.FC = () => {
                                 className="block w-full text-left"
                               >
                                 <div className="flex h-20 items-center justify-center bg-[#f7f4ec] p-2">
-                                  <img src={getCaptureDisplayUrl(capture)} alt="chat capture" className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain" />
+                                  <img
+                                    src={getCaptureDisplayUrl(capture)}
+                                    alt="chat capture"
+                                    className="block h-full w-full rounded-xl border border-[#ebe5d7] bg-white object-contain"
+                                  />
                                 </div>
                                 <div className="px-2 py-2">
-                                  <p className="overflow-hidden text-[11px] leading-relaxed text-[#556255]" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                                  <p
+                                    className="overflow-hidden text-[11px] leading-relaxed text-[#556255]"
+                                    style={{
+                                      display: "-webkit-box",
+                                      WebkitLineClamp: 2,
+                                      WebkitBoxOrient: "vertical",
+                                    }}
+                                  >
                                     {capture.comment || "No edit request"}
                                   </p>
                                 </div>
                               </button>
-                              <button type="button" onClick={() => handleRemoveChatCapture(capture.id)} className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors" aria-label="Remove attached capture">
-                                <span className="material-symbols-outlined text-[14px]">close</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleRemoveChatCapture(capture.id)
+                                }
+                                className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full border border-[#d9d1c3] bg-white/95 text-[#6c7466] hover:text-[#233227] transition-colors"
+                                aria-label="Remove attached capture"
+                              >
+                                <span className="material-symbols-outlined text-[14px]">
+                                  close
+                                </span>
                               </button>
                             </div>
                           ))}
@@ -1967,9 +1949,17 @@ const Editor: React.FC = () => {
                 </div>
               )}
 
-              <button type="button" onClick={() => setIsChatOpen((prev) => !prev)} className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white flex items-center gap-2 hover:bg-[#346E56] transition-colors">
-                <span className="material-symbols-outlined text-[18px]">{isChatOpen ? "close" : "auto_awesome"}</span>
-                <span className="text-[12px] font-bold">{isChatOpen ? "Close chat" : "Open AI chat"}</span>
+              <button
+                type="button"
+                onClick={() => setIsChatOpen((prev) => !prev)}
+                className="pointer-events-auto h-12 px-4 rounded-full bg-[#49704F] text-white flex items-center gap-2 hover:bg-[#346E56] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">
+                  {isChatOpen ? "close" : "auto_awesome"}
+                </span>
+                <span className="text-[12px] font-bold">
+                  {isChatOpen ? "Close chat" : "Open AI chat"}
+                </span>
               </button>
             </div>
           )}
@@ -1988,10 +1978,14 @@ const Editor: React.FC = () => {
                   onClick={() => setRightTab("captures")}
                   className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[13px] font-bold border-b-2 transition-colors ${rightTab === "captures" ? "border-[#49704F] text-[#49704F]" : "border-transparent text-[#8e9892] hover:text-[#233227]"}`}
                 >
-                  <span className="material-symbols-outlined text-[15px]">crop</span>
+                  <span className="material-symbols-outlined text-[15px]">
+                    crop
+                  </span>
                   Capture
                   {captures.length > 0 && (
-                    <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold px-1.5 py-0.5 rounded-full">{captures.length}</span>
+                    <span className="bg-[#d9edd9] text-[#2c6e49] text-[9px] font-bold px-1.5 py-0.5 rounded-full">
+                      {captures.length}
+                    </span>
                   )}
                 </button>
                 <button
@@ -1999,10 +1993,14 @@ const Editor: React.FC = () => {
                   onClick={() => setRightTab("notes")}
                   className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[13px] font-bold border-b-2 transition-colors ${rightTab === "notes" ? "border-[#49704F] text-[#49704F]" : "border-transparent text-[#8e9892] hover:text-[#233227]"}`}
                 >
-                  <span className="material-symbols-outlined text-[15px]">comment_bank</span>
+                  <span className="material-symbols-outlined text-[15px]">
+                    comment_bank
+                  </span>
                   Notes
                   {annotations.length > 0 && (
-                    <span className="bg-[#e8d5a1] text-[#7a5e18] text-[9px] font-bold px-1.5 py-0.5 rounded-full">{annotations.length}</span>
+                    <span className="bg-[#e8d5a1] text-[#7a5e18] text-[9px] font-bold px-1.5 py-0.5 rounded-full">
+                      {annotations.length}
+                    </span>
                   )}
                 </button>
                 <button
@@ -2011,7 +2009,9 @@ const Editor: React.FC = () => {
                   title="Hide panel"
                   className="flex h-9 w-9 shrink-0 items-center justify-center mr-2 rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
                 >
-                  <span className="material-symbols-outlined text-[16px]">right_panel_close</span>
+                  <span className="material-symbols-outlined text-[16px]">
+                    right_panel_close
+                  </span>
                 </button>
               </div>
 
@@ -2020,19 +2020,41 @@ const Editor: React.FC = () => {
                 <div className="shrink-0 px-4 py-3 border-b border-[#e8e6df] flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => { if (isCapturing || showCommentPopup) { cancelCaptureFlow(); } else { setIsCapturing(true); } }}
+                    onClick={() => {
+                      if (isCapturing || showCommentPopup) {
+                        cancelCaptureFlow();
+                      } else {
+                        setIsCapturing(true);
+                      }
+                    }}
                     className={`text-[12px] font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${isCapturing ? "bg-red-500 text-white" : "bg-[#49704F] text-white hover:bg-[#346E56]"}`}
                   >
-                    <span className="material-symbols-outlined text-[14px]">{isCapturing ? "close" : "crop"}</span>
+                    <span className="material-symbols-outlined text-[14px]">
+                      {isCapturing ? "close" : "crop"}
+                    </span>
                     {isCapturing ? "Cancel" : "New Capture"}
                   </button>
                   {selectedCaptureIds.length > 0 && (
                     <div className="flex items-center gap-1.5">
-                      <button type="button" onClick={handleSaveCapturesToChat} className="inline-flex items-center gap-1 rounded-full border border-[#cfe0c5] bg-white px-2.5 py-1 text-[11px] font-bold text-[#49704F] hover:bg-[#f3f8ef]">
-                        <span className="material-symbols-outlined text-[13px]">forum</span>Add to Chat
+                      <button
+                        type="button"
+                        onClick={handleSaveCapturesToChat}
+                        className="inline-flex items-center gap-1 rounded-full border border-[#cfe0c5] bg-white px-2.5 py-1 text-[11px] font-bold text-[#49704F] hover:bg-[#f3f8ef]"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">
+                          forum
+                        </span>
+                        Add to Chat
                       </button>
-                      <button type="button" onClick={handleDeleteSelectedCaptures} className="inline-flex items-center gap-1 rounded-full border border-[#e3c3bc] bg-white px-2.5 py-1 text-[11px] font-bold text-[#a94f46] hover:bg-[#fbf2f0]">
-                        <span className="material-symbols-outlined text-[13px]">delete</span>Delete
+                      <button
+                        type="button"
+                        onClick={handleDeleteSelectedCaptures}
+                        className="inline-flex items-center gap-1 rounded-full border border-[#e3c3bc] bg-white px-2.5 py-1 text-[11px] font-bold text-[#a94f46] hover:bg-[#fbf2f0]"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">
+                          delete
+                        </span>
+                        Delete
                       </button>
                     </div>
                   )}
@@ -2047,25 +2069,58 @@ const Editor: React.FC = () => {
                       {captures.length > 1 && (
                         <div className="flex justify-end">
                           {selectedCaptureIds.length < captures.length ? (
-                            <button type="button" onClick={handleSelectAllCaptures} className="text-[12px] font-bold text-[#49704F] hover:text-[#2f5840]">Select all</button>
+                            <button
+                              type="button"
+                              onClick={handleSelectAllCaptures}
+                              className="text-[12px] font-bold text-[#49704F] hover:text-[#2f5840]"
+                            >
+                              Select all
+                            </button>
                           ) : (
-                            <button type="button" onClick={handleClearCaptureSelection} className="text-[12px] font-bold text-[#7a836f] hover:text-[#233227]">Clear selection</button>
+                            <button
+                              type="button"
+                              onClick={handleClearCaptureSelection}
+                              className="text-[12px] font-bold text-[#7a836f] hover:text-[#233227]"
+                            >
+                              Clear selection
+                            </button>
                           )}
                         </div>
                       )}
                       {captures.map((cap) => (
-                        <div key={cap.id} className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#cfd7cb] bg-[#fcfdfb]" : "border-[#e4e0d4]"}`}>
-                          <button type="button" onClick={() => toggleCaptureSelection(cap.id)} className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}>
-                            <span className="material-symbols-outlined text-[16px]">check</span>
+                        <div
+                          key={cap.id}
+                          className={`relative overflow-hidden rounded-[24px] border bg-white transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#cfd7cb] bg-[#fcfdfb]" : "border-[#e4e0d4]"}`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleCaptureSelection(cap.id)}
+                            className={`absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${selectedCaptureIds.includes(cap.id) ? "border-[#49704F] bg-[#49704F] text-white" : "border-[#d9d4c7] bg-white/95 text-transparent hover:border-[#49704F]"}`}
+                          >
+                            <span className="material-symbols-outlined text-[16px]">
+                              check
+                            </span>
                           </button>
-                          <button type="button" onClick={() => setPreviewCapture(cap)} className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left">
+                          <button
+                            type="button"
+                            onClick={() => setPreviewCapture(cap)}
+                            className="block w-full border-b border-[#eee8dc] bg-[#f7f4ec] p-3 text-left"
+                          >
                             <div className="flex h-36 items-center justify-center">
-                              <img src={getCaptureDisplayUrl(cap)} alt="capture" className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain" />
+                              <img
+                                src={getCaptureDisplayUrl(cap)}
+                                alt="capture"
+                                className="block h-full w-full rounded-[18px] border border-[#ebe5d7] bg-white object-contain"
+                              />
                             </div>
                           </button>
                           <div className="space-y-1 px-4 py-3">
-                            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">Edit Request</p>
-                            <p className="text-[13px] leading-relaxed text-[#556255]">{cap.comment || "No edit request provided."}</p>
+                            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#7f9475]">
+                              Edit Request
+                            </p>
+                            <p className="text-[13px] leading-relaxed text-[#556255]">
+                              {cap.comment || "No edit request provided."}
+                            </p>
                           </div>
                         </div>
                       ))}
@@ -2073,10 +2128,17 @@ const Editor: React.FC = () => {
                   ) : (
                     <div className="m-4 rounded-2xl border border-dashed border-[#d6ddd0] bg-white/70 px-5 py-8 text-center">
                       <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[#eef3e8] text-[#49704F]">
-                        <span className="material-symbols-outlined text-[20px]">crop</span>
+                        <span className="material-symbols-outlined text-[20px]">
+                          crop
+                        </span>
                       </div>
-                      <p className="text-[13px] font-bold text-[#233227]">No captures yet</p>
-                      <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">Select an area in the preview and save it. Captures will appear here for AI context and later review.</p>
+                      <p className="text-[13px] font-bold text-[#233227]">
+                        No captures yet
+                      </p>
+                      <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">
+                        Select an area in the preview and save it. Captures will
+                        appear here for AI context and later review.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -2089,39 +2151,89 @@ const Editor: React.FC = () => {
                     {activeTarget && (
                       <div className="bg-white border border-[#49704F]/50 ring-2 ring-[#49704F]/20 rounded-2xl p-4 shadow-sm mb-4">
                         <div className="flex items-center gap-2 mb-3">
-                          <span className="material-symbols-outlined text-[#49704F] text-[16px]">add_comment</span>
-                          <span className="text-[12px] font-bold text-[#49704F]">Comment on {activeTarget.replace("-", " ")}</span>
+                          <span className="material-symbols-outlined text-[#49704F] text-[16px]">
+                            add_comment
+                          </span>
+                          <span className="text-[12px] font-bold text-[#49704F]">
+                            Comment on {activeTarget.replace("-", " ")}
+                          </span>
                         </div>
-                        <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} placeholder="Type your feedback here..." className="w-full bg-[#FAF7F0] border border-[#e8e6df] rounded-lg p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3" autoFocus />
+                        <textarea
+                          value={commentText}
+                          onChange={(e) => setCommentText(e.target.value)}
+                          placeholder="Type your feedback here..."
+                          className="w-full bg-[#FAF7F0] border border-[#e8e6df] rounded-lg p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
+                          autoFocus
+                        />
                         <div className="flex justify-end gap-2">
-                          <button onClick={() => { setActiveTarget(null); setCommentText(""); }} className="text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#e8e6df]/50">Cancel</button>
-                          <button onClick={handleAddComment} disabled={!commentText.trim()} className="bg-[#49704F] disabled:opacity-50 text-white text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#346E56]">Save</button>
+                          <button
+                            onClick={() => {
+                              setActiveTarget(null);
+                              setCommentText("");
+                            }}
+                            className="text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#e8e6df]/50"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleAddComment}
+                            disabled={!commentText.trim()}
+                            className="bg-[#49704F] disabled:opacity-50 text-white text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#346E56]"
+                          >
+                            Save
+                          </button>
                         </div>
                       </div>
                     )}
                     {annotations.map((ann) => (
                       <div key={ann.id} className="relative group">
-                        <div className="absolute -left-2 top-0 w-6 h-6 rounded-full border-2 border-white bg-[#49704F] text-white flex items-center justify-center font-bold text-[10px] z-10">{ann.id}</div>
-                        <div className={`bg-white border rounded-2xl p-5 ml-2 shadow-sm transition-colors ${activeTarget === ann.targetId ? "border-[#49704F] ring-1 ring-[#49704F]" : "border-[#e8e6df]"}`}>
+                        <div className="absolute -left-2 top-0 w-6 h-6 rounded-full border-2 border-white bg-[#49704F] text-white flex items-center justify-center font-bold text-[10px] z-10">
+                          {ann.id}
+                        </div>
+                        <div
+                          className={`bg-white border rounded-2xl p-5 ml-2 shadow-sm transition-colors ${activeTarget === ann.targetId ? "border-[#49704F] ring-1 ring-[#49704F]" : "border-[#e8e6df]"}`}
+                        >
                           <div className="flex items-center gap-3 mb-3">
-                            <div className={`w-8 h-8 rounded-full ${ann.colorClasses} flex items-center justify-center text-[11px] font-bold`}>{ann.initials}</div>
+                            <div
+                              className={`w-8 h-8 rounded-full ${ann.colorClasses} flex items-center justify-center text-[11px] font-bold`}
+                            >
+                              {ann.initials}
+                            </div>
                             <div className="leading-tight">
-                              <p className="text-[13px] font-bold text-[#233227]">{ann.author}</p>
-                              <p className="text-[10px] text-[#8e9892]">{ann.time}</p>
+                              <p className="text-[13px] font-bold text-[#233227]">
+                                {ann.author}
+                              </p>
+                              <p className="text-[10px] text-[#8e9892]">
+                                {ann.time}
+                              </p>
                             </div>
                           </div>
-                          <p className="text-[13px] text-[#5c6860] leading-relaxed mb-4">"{ann.content}"</p>
+                          <p className="text-[13px] text-[#5c6860] leading-relaxed mb-4">
+                            "{ann.content}"
+                          </p>
                           <div className="flex gap-2">
-                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">Reply</button>
-                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">Resolve</button>
+                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">
+                              Reply
+                            </button>
+                            <button className="bg-[#e8e6df]/50 text-[#5c6860] text-[11px] font-bold px-3 py-1.5 rounded-md hover:bg-[#dcd9ce]">
+                              Resolve
+                            </button>
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
                   <div className="shrink-0 p-4 border-t border-[#e8e6df]">
-                    <button onClick={() => { if (!activeTarget) setActiveTarget("block-1"); }} className="w-full bg-[#49704F] text-white text-[13px] font-bold py-3 rounded-full flex items-center justify-center gap-2 hover:bg-[#346E56] shadow-sm">
-                      <span className="material-symbols-outlined text-[16px]">add_comment</span> New Annotation
+                    <button
+                      onClick={() => {
+                        if (!activeTarget) setActiveTarget("block-1");
+                      }}
+                      className="w-full bg-[#49704F] text-white text-[13px] font-bold py-3 rounded-full flex items-center justify-center gap-2 hover:bg-[#346E56] shadow-sm"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">
+                        add_comment
+                      </span>{" "}
+                      New Annotation
                     </button>
                   </div>
                 </div>
@@ -2129,8 +2241,15 @@ const Editor: React.FC = () => {
             </div>
           ) : (
             <div className="flex h-full w-14 items-start justify-center pt-6">
-              <button type="button" onClick={() => setCapturesOpen(true)} title="Show panel" className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]">
-                <span className="material-symbols-outlined text-[16px]">right_panel_open</span>
+              <button
+                type="button"
+                onClick={() => setCapturesOpen(true)}
+                title="Show panel"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-[#e8e6df] bg-white text-[#233227] shadow-sm transition-colors hover:bg-[#f0ece4]"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  right_panel_open
+                </span>
               </button>
             </div>
           )}

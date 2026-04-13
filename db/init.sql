@@ -45,3 +45,50 @@ CREATE TABLE IF NOT EXISTS `wp_sites` (
   KEY `idx_wp_sites_api_key` (`api_key`),
   CONSTRAINT `fk_wp_sites_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------
+-- captures: ảnh chụp màn hình do người dùng tạo kèm comment chỉnh sửa
+-- site_id → wp_sites.site_id
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `captures` (
+  `id`                      VARCHAR(64)    NOT NULL,
+  `site_id`                 VARCHAR(64)    NOT NULL,
+
+  -- file
+  `file_path`               VARCHAR(512)       NULL,
+  `file_name`               VARCHAR(255)       NULL,
+
+  -- asset (Cloudinary / storage provider info)
+  `asset`                  JSON               NULL,
+
+  -- context
+  `comment`                 TEXT               NULL  COMMENT 'Yêu cầu chỉnh sửa của người dùng',
+  `page_url`                VARCHAR(512)       NULL,
+  `iframe_src`              VARCHAR(1024)      NULL,
+  `captured_at`             DATETIME       NOT NULL,
+
+  -- viewport
+  `viewport`                JSON               NULL  COMMENT 'width, height, scrollX, scrollY, dpr',
+
+  -- page
+  `page`                    JSON               NULL,
+
+  -- selection & geometry (coordinate data, stored as JSON)
+  `selection`               JSON               NULL  COMMENT 'x, y, width, height, coordinateSpace',
+  `geometry`                JSON               NULL  COMMENT 'viewportRect, documentRect, normalizedRect',
+
+  -- DOM target (full selector / path info)
+  `dom_target`              JSON               NULL  COMMENT 'cssSelector, xpath, tagName, classNames, htmlSnippet...',
+
+  -- target node (block / template context)
+  `target_node`    JSON               NULL,
+
+
+  `created_at`              DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`              DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (`id`),
+  KEY `idx_captures_site_id`    (`site_id`),
+  KEY `idx_captures_captured_at` (`captured_at`),
+  CONSTRAINT `fk_captures_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -3,6 +3,7 @@ const fse = require('fs-extra');
 const { chromium } = require('playwright');
 const { UPLOAD_ROOT } = require('../config/constants');
 const { uploadCaptureAsset } = require('../services/imageUploadService');
+const { query } = require('../db/mysql');
 
 const CAPTURES_DIR = path.join(UPLOAD_ROOT, 'captures');
 fse.ensureDirSync(CAPTURES_DIR);
@@ -115,4 +116,91 @@ async function captureRegion(req, res) {
   }
 }
 
-module.exports = { captureRegion };
+async function saveCapture(req, res) {
+  const { siteId, captureData } = req.body ?? {};
+
+  if (!siteId || !captureData) {
+    return res.status(400).json({ success: false, error: 'siteId and captureData are required' });
+  }
+
+  try {
+    await query(
+      `INSERT INTO captures (
+        id, site_id,
+        file_path, file_name,
+        asset,
+        comment, page_url, iframe_src, captured_at,
+        viewport,
+        page,
+        selection, geometry,
+        dom_target,
+        target_node
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        captureData.id,
+        siteId,
+        captureData.filePath   ?? null,
+        captureData.fileName   ?? null,
+        captureData.asset      ? JSON.stringify(captureData.asset)      : null,
+        captureData.comment    ?? null,
+        captureData.pageUrl    ?? null,
+        captureData.iframeSrc  ?? null,
+        captureData.capturedAt ? new Date(captureData.capturedAt) : new Date(),
+        captureData.viewport   ? JSON.stringify(captureData.viewport)   : null,
+        captureData.page       ? JSON.stringify(captureData.page)       : null,
+        captureData.selection  ? JSON.stringify(captureData.selection)  : null,
+        captureData.geometry   ? JSON.stringify(captureData.geometry)   : null,
+        captureData.domTarget  ? JSON.stringify(captureData.domTarget)  : null,
+        captureData.targetNode ? JSON.stringify(captureData.targetNode) : null,
+      ],
+    );
+
+    return res.status(201).json({ success: true, id: captureData.id });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+// -------------------------------------------------------
+// DELETE /api/captures/:siteId
+// Xoá toàn bộ capture thuộc về một site
+// -------------------------------------------------------
+async function deleteCapturesBySite(req, res) {
+  const { siteId } = req.params;
+
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: 'siteId is required' });
+  }
+
+  try {
+    const result = await query(
+      'DELETE FROM captures WHERE site_id = ?',
+      [siteId],
+    );
+
+    return res.status(200).json({ success: true, deleted: result.affectedRows });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+async function getCapturesBySite(req, res) {
+  const { siteId } = req.params;
+
+  if (!siteId) {
+    return res.status(400).json({ success: false, error: 'siteId is required' });
+  }
+
+  try {
+    const captures = await query(
+      'SELECT * FROM captures WHERE site_id = ?',
+      [siteId]
+    );
+    return res.status(200).json({ success: true, captures });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+
+module.exports = { captureRegion, saveCapture, deleteCapturesBySite, getCapturesBySite };
