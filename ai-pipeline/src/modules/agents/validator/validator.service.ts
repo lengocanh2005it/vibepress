@@ -4,6 +4,7 @@ import { spawn } from 'child_process';
 import ts from 'typescript';
 import puppeteer, { type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
+import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
 const VIRTUAL_MAIN_FILE = `${VIRTUAL_ROOT}/src/main.tsx`;
@@ -35,6 +36,8 @@ export interface CodeValidationContext {
   isSubComponent?: boolean;
   allowedRelativeImports?: string[];
   requireCommentForm?: boolean;
+  requiredCustomClassNames?: string[];
+  requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
 }
 
 export interface ComponentValidationFailure {
@@ -92,6 +95,8 @@ export class ValidatorService {
         dataNeeds: comp.dataNeeds,
         type: comp.type,
         isSubComponent: comp.isSubComponent,
+        requiredCustomClassNames: comp.requiredCustomClassNames,
+        requiredCustomClassTargets: comp.requiredCustomClassTargets,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -213,6 +218,10 @@ export class ValidatorService {
     let code = this.removeUnusedImports(raw);
     code = this.sanitizeTailwindClasses(code);
     code = this.stripDebugStatements(code);
+    code = this.normalizePlainTextPostMetaArchiveLinks(code);
+    code = this.promotePlainTextPostMetaLinks(code);
+    code = this.ensureHoverUnderlineOnCanonicalTextLinks(code);
+    code = this.ensureReactRouterLinkImport(code);
     return code;
   }
 
@@ -435,6 +444,13 @@ export class ValidatorService {
     if (missingHoverUnderlineSnippets.length > 0) {
       violations.push(
         `Visible navigation/content text links must underline on hover to match the WordPress-style interaction contract. Add \`hover:underline underline-offset-4\` to canonical text links. Offending snippet(s): ${missingHoverUnderlineSnippets.join(' | ')}`,
+      );
+    }
+    const plainTextPostMetaLinks =
+      this.findPlainTextPostMetaArchiveSnippets(code);
+    if (plainTextPostMetaLinks.length > 0) {
+      violations.push(
+        `Post meta author/category labels must link to canonical archive routes when \`authorSlug\` or \`categorySlugs[0]\` already exists. Plain-text \`post.author\` is only allowed when it is the actual heading/title content (for example an \`<h1>\` on author/archive/detail views). Do not render \`post.author\` or \`post.categories[0]\` as plain text spans in post listings/meta rows. Offending snippet(s): ${plainTextPostMetaLinks.join(' | ')}`,
       );
     }
 
@@ -767,10 +783,260 @@ export class ValidatorService {
       return { isValid: false, error: violations.join('\n') };
     }
 
+    code = this.repairMissingRequiredCustomClasses(
+      code,
+      context.requiredCustomClassNames ?? [],
+      context.requiredCustomClassTargets,
+    );
+
+    const missingRequiredCustomClasses = this.findMissingRequiredCustomClasses(
+      code,
+      context.requiredCustomClassNames ?? [],
+      context.requiredCustomClassTargets,
+    );
+    if (missingRequiredCustomClasses.length > 0) {
+      return {
+        isValid: false,
+        error: `Source custom class contract violated: the generated JSX dropped or misplaced required WordPress custom class(es): ${missingRequiredCustomClasses
+          .map((className) => `\`${className}\``)
+          .join(
+            ', ',
+          )}. Preserve these exact classes in \`className\` on the corresponding source-backed element(s).`,
+      };
+    }
+
     return {
       isValid: true,
       ...(code !== rawCode ? { fixedCode: code } : {}),
     };
+  }
+
+  private findMissingRequiredCustomClasses(
+    code: string,
+    requiredCustomClassNames: string[],
+    requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>,
+  ): string[] {
+    const normalized = [
+      ...new Set(
+        requiredCustomClassNames
+          .map((className) => className.trim())
+          .filter(Boolean),
+      ),
+    ];
+    return normalized.filter(
+      (className) =>
+        !this.hasRequiredCustomClassOnExpectedTarget(
+          code,
+          className,
+          requiredCustomClassTargets?.[className],
+        ),
+    );
+  }
+
+  private repairMissingRequiredCustomClasses(
+    code: string,
+    requiredCustomClassNames: string[],
+    requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>,
+  ): string {
+    const missing = this.findMissingRequiredCustomClasses(
+      code,
+      requiredCustomClassNames,
+      requiredCustomClassTargets,
+    );
+    if (missing.length === 0) return code;
+
+    let next = code;
+    for (const className of missing) {
+      next = this.injectCustomClassIntoBestTarget(
+        next,
+        className,
+        requiredCustomClassTargets?.[className],
+      );
+    }
+    return next;
+  }
+
+  private injectCustomClassIntoBestTarget(
+    code: string,
+    className: string,
+    target?: ThemeInteractionTarget,
+  ): string {
+    const normalized = className.trim();
+    if (!normalized) return code;
+
+    if (target === 'image') {
+      return this.injectCustomClassIntoFirstMatchingTag(
+        code,
+        /<img\b[^>]*\/?>/g,
+        normalized,
+      );
+    }
+
+    if (target === 'link') {
+      return this.injectCustomClassIntoFirstMatchingTag(
+        code,
+        /<(?:Link|a)\b[^>]*>/g,
+        normalized,
+        (openTag) => !this.isButtonLikeInteractiveTag(openTag),
+      );
+    }
+
+    if (target === 'button') {
+      return this.injectCustomClassIntoFirstMatchingTag(
+        code,
+        /<(?:button|Link|a)\b[^>]*>/g,
+        normalized,
+        (openTag) =>
+          /<button\b/i.test(openTag) ||
+          this.isButtonLikeInteractiveTag(openTag),
+      );
+    }
+
+    if (target === 'card') {
+      return this.injectCustomClassIntoFirstMatchingTag(
+        code,
+        /<(?:div|section|article|aside|nav|li|figure)\b[^>]*>/g,
+        normalized,
+      );
+    }
+
+    const commentAnchor =
+      /\{\/\*\s*Comments\s*\*\/\}[\s\S]*?(<(?:section|div|article)\b[^>]*>)/;
+    if (/comment/i.test(normalized) && commentAnchor.test(code)) {
+      return code.replace(commentAnchor, (match, openTag: string) =>
+        match.replace(
+          openTag,
+          this.appendClassToOpeningTag(openTag, normalized),
+        ),
+      );
+    }
+
+    const sidebarAnchor =
+      /\{\/\*\s*Sidebar\s*\*\/\}[\s\S]*?(<(?:aside|section|div)\b[^>]*>)/;
+    if (/sidebar/i.test(normalized) && sidebarAnchor.test(code)) {
+      return code.replace(sidebarAnchor, (match, openTag: string) =>
+        match.replace(
+          openTag,
+          this.appendClassToOpeningTag(openTag, normalized),
+        ),
+      );
+    }
+
+    return code.replace(
+      /<(?:div|section|main|article|aside|nav)\b[^>]*>/,
+      (openTag) => this.appendClassToOpeningTag(openTag, normalized),
+    );
+  }
+
+  private hasRequiredCustomClassOnExpectedTarget(
+    code: string,
+    className: string,
+    target?: ThemeInteractionTarget,
+  ): boolean {
+    const normalized = className.trim();
+    if (!normalized) return true;
+
+    if (!target) {
+      return new RegExp(
+        `(^|[^A-Za-z0-9_-])${this.escapeRegex(normalized)}([^A-Za-z0-9_-]|$)`,
+      ).test(code);
+    }
+
+    if (target === 'image') {
+      return this.tagWithClassExists(code, /<img\b[^>]*\/?>/g, normalized);
+    }
+
+    if (target === 'link') {
+      return this.tagWithClassExists(
+        code,
+        /<(?:Link|a)\b[^>]*>/g,
+        normalized,
+        (openTag) => !this.isButtonLikeInteractiveTag(openTag),
+      );
+    }
+
+    if (target === 'button') {
+      return this.tagWithClassExists(
+        code,
+        /<(?:button|Link|a)\b[^>]*>/g,
+        normalized,
+        (openTag) =>
+          /<button\b/i.test(openTag) ||
+          this.isButtonLikeInteractiveTag(openTag),
+      );
+    }
+
+    if (target === 'card') {
+      return this.tagWithClassExists(
+        code,
+        /<(?:div|section|article|aside|nav|li|figure)\b[^>]*>/g,
+        normalized,
+      );
+    }
+
+    return false;
+  }
+
+  private tagWithClassExists(
+    code: string,
+    pattern: RegExp,
+    className: string,
+    predicate?: (openTag: string) => boolean,
+  ): boolean {
+    const classPattern = new RegExp(
+      `(^|[^A-Za-z0-9_-])${this.escapeRegex(className)}([^A-Za-z0-9_-]|$)`,
+    );
+
+    for (const match of code.matchAll(pattern)) {
+      const openTag = match[0];
+      if (predicate && !predicate(openTag)) continue;
+      if (classPattern.test(openTag)) return true;
+    }
+
+    return false;
+  }
+
+  private injectCustomClassIntoFirstMatchingTag(
+    code: string,
+    pattern: RegExp,
+    className: string,
+    predicate?: (openTag: string) => boolean,
+  ): string {
+    let applied = false;
+    return code.replace(pattern, (openTag) => {
+      if (applied) return openTag;
+      if (predicate && !predicate(openTag)) return openTag;
+      applied = true;
+      return this.appendClassToOpeningTag(openTag, className);
+    });
+  }
+
+  private isButtonLikeInteractiveTag(openTag: string): boolean {
+    return (
+      /\bvp-generated-button\b/.test(openTag) ||
+      /\bwp-element-button\b/.test(openTag) ||
+      /\bwp-block-button__link\b/.test(openTag) ||
+      /\binline-flex\b/.test(openTag) ||
+      /\bjustify-center\b/.test(openTag) ||
+      /\bbg-\[/.test(openTag) ||
+      (/\bpx-/.test(openTag) && /\bpy-/.test(openTag))
+    );
+  }
+
+  private appendClassToOpeningTag(openTag: string, className: string): string {
+    if (/\bclassName="[^"]*"/.test(openTag)) {
+      return openTag.replace(
+        /\bclassName="([^"]*)"/,
+        (_match, existingClasses: string) =>
+          `className="${this.appendUniqueClasses(existingClasses, className)}"`,
+      );
+    }
+
+    return openTag.replace(/<([A-Za-z0-9]+)/, `<$1 className="${className}"`);
+  }
+
+  private escapeRegex(input: string): string {
+    return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   /**
@@ -1206,6 +1472,250 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     }
 
     return snippets;
+  }
+
+  private ensureHoverUnderlineOnCanonicalTextLinks(code: string): string {
+    return code.replace(/<(Link|a)\b[\s\S]{0,400}?>/g, (rawTag) => {
+      if (!/\bclassName="[^"]*"/.test(rawTag)) return rawTag;
+      if (/hover:underline/.test(rawTag) || /\bno-underline\b/.test(rawTag)) {
+        return rawTag;
+      }
+
+      const looksLikeButton =
+        /\bbg-\[/.test(rawTag) ||
+        (/\bpx-/.test(rawTag) && /\bpy-/.test(rawTag)) ||
+        /\bjustify-center\b/.test(rawTag);
+      if (looksLikeButton) return rawTag;
+
+      const isCanonicalTextLink =
+        /\/(?:post|page|author|category|tag)\//.test(rawTag) ||
+        /\bitem\.url\b/.test(rawTag) ||
+        /\btoAppPath\(item\.url\)\b/.test(rawTag) ||
+        /\bhref=["']https?:\/\//.test(rawTag);
+      if (!isCanonicalTextLink) return rawTag;
+
+      return rawTag.replace(
+        /\bclassName="([^"]*)"/,
+        (_match, classes: string) =>
+          `className="${this.appendUniqueClasses(
+            classes,
+            'hover:underline underline-offset-4',
+          )}"`,
+      );
+    });
+  }
+
+  private findPlainTextPostMetaArchiveSnippets(
+    code: string,
+    max = 3,
+  ): string[] {
+    const snippets: string[] = [];
+    const patterns = [
+      {
+        pattern:
+          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
+        allowHeadingContext: true,
+      },
+      {
+        pattern:
+          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
+        allowHeadingContext: false,
+      },
+      {
+        pattern:
+          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
+        allowHeadingContext: false,
+      },
+    ];
+
+    for (const { pattern, allowHeadingContext } of patterns) {
+      for (const match of code.matchAll(pattern)) {
+        const raw = match[0]?.replace(/\s+/g, ' ').trim();
+        if (!raw) continue;
+        const offset = match.index ?? 0;
+        if (
+          allowHeadingContext &&
+          this.isWithinHeadingTitleContext(code, offset)
+        ) {
+          continue;
+        }
+        // Skip spans that are already inside an authorSlug/categorySlugs ternary
+        // — they are the safe no-slug fallback emitted by promotePlainTextPostMetaLinks.
+        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
+        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
+        if (snippets.length >= max) return snippets;
+      }
+      if (snippets.length >= max) break;
+    }
+
+    return snippets;
+  }
+
+  /**
+   * Returns true when the JSX at `offset` is inside the `:` (else) branch of
+   * an `authorSlug ?` or `categorySlugs[0] ?` ternary — meaning the span is
+   * the safe no-slug fallback already emitted by promotePlainTextPostMetaLinks
+   * and should NOT be flagged as a violation.
+   */
+  private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
+    // Look at up to 300 chars before the match for a slug ternary guard.
+    const before = code.slice(Math.max(0, offset - 600), offset);
+    return (
+      /\bauthorSlug\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
+      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
+        before,
+      )
+    );
+  }
+
+  private promotePlainTextPostMetaLinks(code: string): string {
+    const isCanonicalMetaLink = (raw: string): boolean =>
+      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
+      /(?:to=|href=)[^>]*\/category\//.test(raw);
+
+    const decorateQuoted = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
+            className,
+            'hover:underline underline-offset-4',
+          )}${quote}`;
+        },
+      );
+
+    const decorateTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className={\`${this.appendUniqueClasses(
+            className,
+            'hover:underline underline-offset-4',
+          )}\`}`;
+        },
+      );
+
+    const decorateWithoutClass = (source: string) =>
+      source.replace(
+        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
+        (match, tag: string, attrs: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
+        },
+      );
+
+    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+  }
+
+  private normalizePlainTextPostMetaArchiveLinks(code: string): string {
+    let next = code;
+
+    next = next.replace(
+      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
+      (_match, record: string, tag: string, attrs: string) =>
+        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
+    );
+
+    next = next.replace(
+      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
+      (match, tag: string, attrs: string, record: string, offset: number) => {
+        if (this.isWithinHeadingTitleContext(next, offset)) return match;
+        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
+        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
+      },
+    );
+
+    next = next.replace(
+      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
+      (_match, record: string, attrs: string) =>
+        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
+    );
+
+    next = next.replace(
+      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
+      (match, attrs: string, record: string, offset: number) => {
+        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
+        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
+      },
+    );
+
+    next = next.replace(
+      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
+      (
+        _match,
+        record: string,
+        categoryVar: string,
+        indexVar: string,
+        attrs: string,
+      ) =>
+        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
+    );
+
+    return next;
+  }
+
+  private isWithinHeadingTitleContext(code: string, offset: number): boolean {
+    const start = Math.max(0, offset - 220);
+    const end = Math.min(code.length, offset + 220);
+    const window = code.slice(start, end);
+    const before = code.slice(start, offset);
+    const openHeading = before.match(/<h[1-6]\b[^>]*>/gi);
+    const closeHeading = before.match(/<\/h[1-6]>/gi);
+    if ((openHeading?.length ?? 0) > (closeHeading?.length ?? 0)) {
+      return true;
+    }
+
+    return /\b(?:title|heading)\b/i.test(window);
+  }
+
+  private ensureReactRouterLinkImport(code: string): string {
+    if (!/<Link\b/.test(code)) return code;
+
+    const namedImportPattern =
+      /import\s*\{([^}]*)\}\s*from\s*['"]react-router-dom['"];?/;
+    if (namedImportPattern.test(code)) {
+      return code.replace(namedImportPattern, (_match, imported: string) => {
+        const next = this.appendUniqueClasses(
+          imported.replace(/\s+/g, ' '),
+          'Link',
+        )
+          .split(' ')
+          .filter(Boolean)
+          .join(', ');
+        return `import { ${next} } from 'react-router-dom';`;
+      });
+    }
+
+    const lines = code.split('\n');
+    const reactImportIndex = lines.findIndex((line) =>
+      /from\s*['"]react['"]/.test(line),
+    );
+    const importLine = `import { Link } from 'react-router-dom';`;
+    if (reactImportIndex !== -1) {
+      lines.splice(reactImportIndex + 1, 0, importLine);
+      return lines.join('\n');
+    }
+
+    lines.unshift(importLine);
+    return lines.join('\n');
+  }
+
+  private appendUniqueClasses(existing: string, addition: string): string {
+    return [
+      ...new Set(`${existing} ${addition}`.split(/[\s,]+/).filter(Boolean)),
+    ]
+      .join(' ')
+      .trim();
   }
 
   private findTypeBody(

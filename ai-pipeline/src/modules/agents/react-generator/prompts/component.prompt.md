@@ -39,16 +39,34 @@ Internal link paths:
 - Single page → `to={'/page/' + page.slug}`
 - Home → `to="/"`
 - Category archive → when the app contract/known routes include `/category/:slug`, use `to={'/category/' + slug}`
-- Author archive → when the app contract/known routes include `/author/:slug`, use `to={'/author/' + post.authorSlug}`
+- Author archive routes may exist in the app contract. In ordinary post meta/listings, author names should link to `/author/${post.authorSlug}` when that route is approved and `post.authorSlug` exists.
 - Archive / taxonomy links → use them ONLY when those routes are explicitly approved in the contract/context above
-- If `/author/:slug` is approved, author names in post meta should link to that route using `post.authorSlug` rather than `post.author`
+- Use `post.author` as display text. Plain-text author is only acceptable when it is the actual heading/title content, such as an `h1` for an author/archive/detail page title.
 - If `/category/:slug` is approved, category names in post meta/listings may link to that route using `post.categorySlugs[index]`; if the matching slug is unavailable, render plain text instead of guessing
+
+⛔ **CRITICAL — route check before every author/category link:**
+
+```tsx
+// ❌ WRONG — if /author/:slug is NOT in the known app routes list above, NEVER write this
+<Link to={`/author/${post.authorSlug}`}>{post.author}</Link>
+
+// ✅ CORRECT — /author/:slug not in known routes → render plain text, no Link
+<span>{post.author}</span>
+
+// ❌ WRONG — if /category/:slug is NOT in the known app routes list above, NEVER write this
+<Link to={`/category/${post.categorySlugs?.[0]}`}>{post.categories?.[0]}</Link>
+
+// ✅ CORRECT — /category/:slug not in known routes → render plain text, no Link
+<span>{post.categories?.[0]}</span>
+```
+
+Check the "known app routes" list in the contract above **before writing any author or category Link**. If the route is absent, output `<span>` only.
 
 **Sidebar / widget link patterns** (use these — NEVER `href="#"`):
 
 - "View all posts" / "Read more" in a post list → `to={'/post/' + post.slug}`
 - Category/archive widget links → when `/category/:slug` is approved, use `to={'/category/' + term.slug}` or `to={'/category/' + post.categorySlugs[index]}` from known data; otherwise render plain text
-- Author meta links → when `/author/:slug` is approved, use `to={'/author/' + post.authorSlug}`
+- Author meta links → when `/author/:slug` is approved and the label is part of a meta row/listing rather than the main heading/title, use `to={'/author/' + post.authorSlug}`.
 - Recent post item → `to={'/post/' + post.slug}`
 - If the target URL is truly unknown → **omit the link entirely**, render plain text instead of `href="#"`
 
@@ -134,69 +152,99 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 | `GET /api/site-info`                            | ONLY when template has `block: "site-title"` / `block: "site-tagline"` |
 | `GET /api/posts` / `GET /api/pages`             | Posts list, pages list                                                 |
 | `GET /api/menus`                                | ALL nav and footer links — NEVER hardcode                              |
+| `GET /api/footer-links`                         | Footer link columns from WordPress template part — shape: `{ heading: string; links: { label: string; url: string }[] }[]` |
 
 ⛔ NEVER invent text, use Lorem ipsum, or paraphrase
 ⛔ NEVER render `siteName` more than once — skip duplicate `text` fields equal to site name
 ⛔ `blogDescription` → ONLY if template has `block: "site-tagline"`, else omit entirely
 ⛔ Images: render `<img>` only when `src` is non-empty in template JSON or `featuredImage` from API — no placeholders, no invented paths
 ⛔ Invented content: testimonial quotes, names, job titles must come exactly from template `text` fields
-⛔ Footer nav: fetch `/api/menus`, group by menu → columns — NEVER hardcode links
+⛔ Footer nav: fetch BOTH `/api/menus` AND `/api/footer-links` in Promise.all — use non-primary menus from `/api/menus` first; if none, fall back to `/api/footer-links` columns — NEVER hardcode links
 
-**Footer multi-menu rendering — MANDATORY pattern when there are multiple menus:**
+**Footer multi-menu rendering — MANDATORY pattern:**
 
 Each menu from `/api/menus` has shape: `{ name: string, slug: string, location: string | null, items: { id, title, url, order, parentId }[] }`.
+Each column from `/api/footer-links` has shape: `{ heading: string; links: { label: string; url: string }[] }`.
 
 - `location` = WP theme location slug (e.g. `"primary"` = main nav, `"footer-about"`, `"social"`, etc.)
 - The **Header/Navigation** component owns the `location === "primary"` menu
-- The **Footer** component must use all menus where `location !== "primary"` — these are the actual footer menus
-- `item.url` from `/api/menus` is already canonical for internal navigation. Use `<Link to={item.url}>` directly — never convert it to `'/page/' + item.url`, `'/page' + item.url`, or any other prefixed route.
+- The **Footer** component must fetch BOTH `/api/menus` AND `/api/footer-links` in a single `Promise.all`
+- Render priority: non-primary menus from `/api/menus` first; if none, use `/api/footer-links` columns; if neither, render nothing
+- `item.url` from `/api/menus` is already canonical. Use `<Link to={item.url}>` directly — never prefix it.
 
 ```tsx
-// ✅ Correct — Footer uses only non-primary menus (the real footer menus)
+// ✅ Correct — fetch both, use footer-links as fallback
 interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }
 interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }
+interface FooterColumn { heading: string; links: { label: string; url: string }[]; }
 
 const [menus, setMenus] = useState<Menu[]>([]);
+const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);
+
 useEffect(() => {
-  fetch('/api/menus').then(r => r.json()).then(setMenus);
+  Promise.all([fetch('/api/menus'), fetch('/api/footer-links')])
+    .then(([r1, r2]) => Promise.all([r1.json(), r2.json()]))
+    .then(([menusData, colsData]) => {
+      setMenus(menusData);
+      setFooterColumns(Array.isArray(colsData) ? colsData : []);
+    });
 }, []);
 
-// Exclude the primary navigation menu (used by Header).
-// Check location first; fall back to slug when nav_menu_locations is not configured in WP.
+// Exclude primary nav menu
 const footerMenus = menus.filter(m => m.location !== 'primary' && m.slug !== 'primary');
-// Fallback: if every menu matches (e.g. custom slug), skip the first menu (assumed to be primary nav)
 const displayMenus = footerMenus.length > 0 ? footerMenus : menus.slice(1);
 
-// In JSX — each footer menu becomes a column:
-<div className="flex flex-wrap gap-8">
-  {displayMenus.map(menu => (
-    <div key={menu.slug}>
-      <h3 className="font-bold mb-4">{menu.name}</h3>
-      <ul className="flex flex-col gap-2">
-        {(menu.items ?? []).map(item => (
-          <li key={item.id}>
-            {item.url.startsWith('http') ? (
-              <a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a>
+// In JSX — menus first, footer-links as fallback:
+{displayMenus.length > 0 ? (
+  <div className="flex flex-wrap gap-8">
+    {displayMenus.map(menu => (
+      <div key={menu.slug}>
+        <h3 className="font-bold mb-4">{menu.name}</h3>
+        <nav className="flex flex-col gap-2">
+          {(menu.items ?? []).map(item => (
+            item.url.startsWith('http') ? (
+              <a key={item.id} href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a>
             ) : (
-              <Link to={item.url}>{item.title}</Link>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
-  ))}
-</div>
+              <Link key={item.id} to={item.url}>{item.title}</Link>
+            )
+          ))}
+        </nav>
+      </div>
+    ))}
+  </div>
+) : footerColumns.length > 0 ? (
+  <div className="flex flex-wrap gap-8">
+    {footerColumns.map(col => (
+      <div key={col.heading}>
+        <h3 className="font-bold mb-4">{col.heading}</h3>
+        <nav className="flex flex-col gap-2">
+          {col.links.map(link => (
+            link.url.startsWith('http') ? (
+              <a key={link.label} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>
+            ) : (
+              <Link key={link.label} to={link.url}>{link.label}</Link>
+            )
+          ))}
+        </nav>
+      </div>
+    ))}
+  </div>
+) : null}
 
 // ❌ Wrong — renders ALL menus including the primary nav menu in the footer
 {menus.map(menu => (...))}
 
 // ❌ Wrong — hardcoded slug breaks if WP menu slugs differ from display names
 const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
+
+// ❌ Wrong — hardcoded fallback columns when API returns empty
+{displayMenus.length === 0 && <div><h3>About</h3><span>Team</span></div>}
 ```
 
 ⛔ NEVER render the `location === "primary"` or `slug === "primary"` menu in the Footer — that belongs to the Header
 ⛔ NEVER choose menus by arbitrary content slugs like `about`, `company`, `resources`, `links`. Use `location` first; `slug === "primary"` is allowed only as a fallback when `location` is missing.
 ⛔ NEVER skip `menu.items` rendering — always map over `(menu.items ?? [])` even if you're unsure items exist
+⛔ NEVER hardcode footer columns/links as fallback — if both APIs return empty, render nothing
 
 {{dataGrounding}}
 
@@ -303,22 +351,25 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
 - Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
-- Brand in shared chrome → when the template includes `site-logo` and/or `site-title`, wrap the entire visible brand cluster in ONE home link, e.g. `<Link to="/" className="flex items-center ...">{logo}{siteInfo.siteName}</Link>`. Do NOT leave the logo outside that link.
+- Brand in shared chrome → when the template includes `site-logo` and/or `site-title`, wrap the entire visible brand cluster in ONE home link. Do NOT leave the logo outside that link.
+  - **Header**: logo and site name are side-by-side → `<Link to="/" className="flex items-center gap-3">{logo}{siteInfo.siteName}</Link>`
+  - **Footer**: logo and site name are stacked vertically (logo above, name below) → `<Link to="/" className="flex flex-col gap-2 w-fit">{logo}<span>{siteInfo.siteName}</span></Link>`
+  - Always follow the block order in the template JSON — if logo block comes before site-title block, logo renders first (top/left).
 - Preserve exact ORDER of blocks in JSON
 
 ## Responsive — MANDATORY (mobile-first: base=mobile, sm=640, md=768, lg=1024)
 
-| Pattern                      | Rule                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------- |
-| `block: "columns"`           | `flex flex-col gap-6 md:flex-row`                                                               |
-| Post/card grids              | `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6`                                          |
-| Section padding              | `px-4 sm:px-6 lg:px-8` on every section/group                                                   |
-| Section with `padding` field | `px-4 sm:px-6 pt-[top] pb-[bottom] lg:px-[right]`                                               |
-| Navigation                   | `hidden md:flex`; wrap: `<nav className="flex items-center justify-between px-4 sm:px-6 py-4">` |
-| Heading ≥ 3rem               | `text-[2rem] md:text-[3rem] lg:text-[4rem]`                                                     |
-| Cover min-height             | `min-h-[300px] md:min-h-[500px] lg:min-h-[600px]`                                               |
+| Pattern                      | Rule                                                                                                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `block: "columns"`           | `flex flex-col gap-6 md:flex-row`                                                                                                                                       |
+| Post/card grids              | `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6`                                                                                                                  |
+| Section padding              | `px-4 sm:px-6 lg:px-8` on every section/group                                                                                                                           |
+| Section with `padding` field | `px-4 sm:px-6 pt-[top] pb-[bottom] lg:px-[right]`                                                                                                                       |
+| Navigation                   | `hidden md:flex`; wrap: `<nav className="flex items-center justify-between px-4 sm:px-6 py-4">`                                                                         |
+| Heading ≥ 3rem               | `text-[2rem] md:text-[3rem] lg:text-[4rem]`                                                                                                                             |
+| Cover min-height             | `min-h-[300px] md:min-h-[500px] lg:min-h-[600px]`                                                                                                                       |
 | Images                       | `w-full object-cover h-[200px] md:h-[350px] lg:h-[450px]` only for decorative crops; for important screenshots/product composites prefer `w-full h-auto object-contain` |
-| `block: "media-text"`        | `flex flex-col md:flex-row gap-6 md:gap-8 items-start`                                          |
+| `block: "media-text"`        | `flex flex-col md:flex-row gap-6 md:gap-8 items-start`                                                                                                                  |
 
 ## Site context
 
@@ -363,11 +414,37 @@ Site: {{siteName}} | URL: {{siteUrl}}
 // ✅ Preserve the full screenshot/product composite unless the source is clearly cropped
 <img src={node.src} className="w-full h-auto object-contain" />
 
+// ❌ Missing customClassNames — hover animation won't fire
+<img src={node.src} className="w-full h-auto object-contain vp-generated-image" />
+// ✅ Image: customClassNames on <img> alongside vp-generated-image
+<img src={node.src} className="w-full h-auto object-contain vp-generated-image vp-hover-lift" />
+
+// ❌ Missing customClassNames on link
+<Link to={item.url} className="vp-generated-link">{item.title}</Link>
+// ✅ Link: customClassNames on <Link> or <a> alongside vp-generated-link
+<Link to={item.url} className="vp-generated-link vp-hover-underline">{item.title}</Link>
+
+// ❌ Missing customClassNames on card wrapper
+<article className="rounded-lg p-4">{/* card content */}</article>
+// ✅ Card: customClassNames on outermost card element
+<article className="rounded-lg p-4 vp-hover-lift">{/* card content */}</article>
+
 // ❌ Non-unique key → "Encountered two children with the same key" warning
 {items.map(item => <li key={item.email}>{item.name}</li>)}
 {items.map(item => <li key={item.title}>{item.title}</li>)}
 // ✅ Always use a unique id, or fall back to index
 {items.map((item, i) => <li key={item.id ?? i}>{item.name}</li>)}
+
+// ❌ BROKEN JSX — nested extra braces around a JSX expression create an invalid object literal
+{post.categories?.[0] && (
+  {post.categories[0] && (<span>{post.categories[0]}</span>)}
+)}
+{post.author && (
+  {post.author && (<span>{post.author}</span>)}
+)}
+// ✅ Single conditional — no extra brace layer around JSX
+{post.categories?.[0] && <span>{post.categories[0]}</span>}
+{post.author && <span>{post.author}</span>}
 ```
 
 ## Final self-check before returning code
@@ -386,28 +463,28 @@ Content from EXACTLY one of: (1) template JSON `text`/`src`/`href` fields, or (2
 
 Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `text`, `src`, `href`, `children`.
 
-| block                   | render                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `site-title`            | for shared Header/Footer/Navigation partials render it inside the brand home link; if `site-logo` is also present, both logo + title belong inside the SAME `<Link to="/">...</Link>` |
-| `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                  |
-| `site-logo`             | render `<img src={node.src ?? siteInfo.logoUrl}>` ONLY when a real logo URL exists; if `site-title` is also rendered, place the logo inside the same home link wrapper as the title |
-| `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                            |
-| `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                       |
-| `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                       |
+| block                   | render                                                                                                                                                                                                               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `site-title`            | for shared Header/Footer/Navigation partials render it inside the brand home link; if `site-logo` is also present, both logo + title belong inside the SAME `<Link to="/">...</Link>`                                |
+| `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                                                                         |
+| `site-logo`             | render `<img src={node.src ?? siteInfo.logoUrl}>` ONLY when a real logo URL exists; if `site-title` is also rendered, place the logo inside the same home link wrapper as the title                                  |
+| `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                                                                                   |
+| `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                              |
+| `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                              |
 | `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
-| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                     |
-| `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                     |
+| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                                                                            |
+| `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                                                                            |
 
 `block: "query"` → fetch `/api/posts`, map over `post` results:
 
-| inner block           | render                                                                      |
-| --------------------- | --------------------------------------------------------------------------- |
-| `post-title`          | `<Link to={'/post/'+post.slug}>{post.title}</Link>`                         |
-| `post-date`           | `<time className="whitespace-nowrap">{post.date}</time>`                    |
-| `post-author`         | `<span>by {post.author}</span>`                                             |
-| `post-excerpt`        | `<p>{post.excerpt}</p>`                                                     |
-| `post-featured-image` | `{post.featuredImage && <img src={post.featuredImage} alt={post.title} />}` |
-| `post-terms`          | `<span>{post.categories[0]}</span>` (plain text, no badge)                  |
+| inner block           | render                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `post-title`          | `<Link to={'/post/'+post.slug} className="hover:underline underline-offset-4">{post.title}</Link>`                                                                                                                 |
+| `post-date`           | `<time className="whitespace-nowrap">{post.date}</time>`                                                                                                                                                           |
+| `post-author`         | `{post.author && (post.authorSlug ? <Link to={'/author/' + post.authorSlug} className="hover:underline underline-offset-4">by {post.author}</Link> : <span>by {post.author}</span>)}`                              |
+| `post-excerpt`        | `<p>{post.excerpt}</p>`                                                                                                                                                                                            |
+| `post-featured-image` | `{post.featuredImage && <img src={post.featuredImage} alt={post.title} />}`                                                                                                                                        |
+| `post-terms`          | `{post.categories[0] && (post.categorySlugs[0] ? <Link to={'/category/' + post.categorySlugs[0]} className="hover:underline underline-offset-4">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}` |
 
 Post list layout: mirror template structure — row layout → `flex items-baseline gap-4` with `flex-1` on title, `whitespace-nowrap shrink-0` on date/meta; card layout → `grid grid-cols-1 gap-6`.
 
@@ -467,6 +544,7 @@ Rules:
 ## Block attributes
 
 Each block may contain an `attrs` object.
+Some nodes may also contain `customClassNames`.
 
 Example:
 
@@ -485,6 +563,18 @@ Example:
 Rules:
 
 - Always read attributes from `attrs`
+- If a node includes `customClassNames`, preserve those classes on the equivalent JSX element:
+  - For **container/card nodes** (group, cover, columns, or any repeating item wrapper): apply to the **outermost wrapper element** — not to a child heading, image, or text.
+  - For **image nodes** (`block: "image"`): apply directly on the `<img>` element alongside `vp-generated-image`. Example: `customClassNames: ["vp-hover-lift"]` → `<img className="vp-generated-image vp-hover-lift ..." />`.
+  - For **button nodes**: apply on the `<button>` or `<a>` element alongside `vp-generated-button`. Example: `customClassNames: ["vp-hover-shadow"]` → `<button className="vp-generated-button vp-hover-shadow ..." />`.
+  - For **link / navigation-link nodes**: apply on the `<Link>` or `<a>` element alongside `vp-generated-link`. Example: `customClassNames: ["vp-hover-underline"]` → `<Link className="vp-generated-link vp-hover-underline ..." />`.
+  - For **card / repeating item wrappers** (post cards, testimonial cards, feature cards): apply on the outermost `<article>` or `<div>` of each card alongside any bridge class. Example: `customClassNames: ["vp-hover-lift"]` → `<article className="vp-hover-lift ..." />`.
+  - These classes drive precise CSS interaction bridges (e.g., hover translate, lift, zoom, shadow) that are pre-generated in `index.css`. **Missing them = no animation.**
+- **NEVER remove `vp-generated-button`, `vp-generated-image`, or `vp-generated-link` classes** from any element. These are injected by the pipeline's interaction bridge and power hover/focus/transition CSS. If you receive code containing these classes, keep them exactly as-is.
+- **NEVER use WordPress block style classes** (`is-style-rounded`, `is-style-default`, `is-style-outline`, etc.) as styling — these have no CSS definition in the React app and silently do nothing. Convert them to Tailwind:
+  - `is-style-rounded` on image → `rounded-[min(1.5rem,2vw)]`
+  - `is-style-outline` on button → `border border-current bg-transparent` (keep `vp-generated-button` alongside)
+- **Card bridge classes**: if the theme tokens list a `card (.some-class)` interaction bridge, that exact class name MUST appear on the outermost `<div>` or `<article>` of each repeated card/item — never implement the effect with Tailwind `hover:` utilities or `onMouseEnter` when the CSS class is already provided.
 - Layout attributes affect the wrapper element
 - Style attributes must be converted to Tailwind utilities
 
@@ -534,8 +624,28 @@ Do NOT invent:
 - feature cards
 - placeholder images
 - lorem ipsum text
+- heading-only sections (e.g. `<section><h2>About</h2></section>` with no real content)
 
 Only render blocks present in the template tree.
+
+⛔ **NEVER generate a section whose only content is a bare heading word like "About", "About Us", "Overview", "Introduction", or any other generic label** without real data-driven content beneath it. If a section plan has a label but no actual content nodes (no paragraphs, no images, no list items, no data), **omit the section entirely**. A heading with no body is always a hallucination artifact.
+
+⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
+
+When the template contains a `post-content` or `html` block that is rendered via `dangerouslySetInnerHTML`, ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside `dangerouslySetInnerHTML`.
+
+```tsx
+// ❌ WRONG — "About" heading is already inside item.content from dangerouslySetInnerHTML
+<div dangerouslySetInnerHTML={{ __html: item.content }} />
+<section>
+  <h2>About</h2>  {/* ← hallucinated duplicate */}
+</section>
+
+// ✅ CORRECT — render page content ONCE via dangerouslySetInnerHTML, nothing else
+<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+```
+
+If the template JSON has individual heading/paragraph/image nodes inside a `post-content` or `page-content` section, treat them as metadata for understanding structure only — do NOT render them as separate JSX blocks.
 
 ## Rendering guard
 

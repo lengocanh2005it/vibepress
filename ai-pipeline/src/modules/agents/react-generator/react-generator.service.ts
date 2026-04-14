@@ -23,7 +23,10 @@ import {
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
-import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type {
+  ThemeInteractionTarget,
+  ThemeTokens,
+} from '../block-parser/block-parser.service.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
@@ -66,6 +69,8 @@ export interface GeneratedComponent {
    * Orchestrator uses this to skip Stage 5 AI review for deterministic components.
    */
   generationMode?: 'deterministic' | 'ai';
+  requiredCustomClassNames?: string[];
+  requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
 }
 
 export interface ReactGenerateResult {
@@ -356,6 +361,13 @@ export class ReactGeneratorService {
         componentPlan,
         filteredNodes ?? [],
       );
+      const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
+        filteredNodes ?? [],
+      );
+      const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
+        requiredCustomClassNames,
+        tokens,
+      );
       const code = this.codeGenerator.generateBlockFaithfulPartial({
         componentName,
         nodes: filteredNodes ?? [],
@@ -376,6 +388,8 @@ export class ReactGeneratorService {
           {
             generationMode: 'deterministic',
             dataNeeds: blockFaithfulDataNeeds,
+            requiredCustomClassNames,
+            requiredCustomClassTargets,
           },
         ),
       ];
@@ -437,6 +451,10 @@ export class ReactGeneratorService {
       return [
         this.attachPlanContext(result.component, componentPlan, {
           generationMode: result.generationMode,
+          requiredCustomClassTargets: this.resolveRequiredCustomClassTargets(
+            result.component.requiredCustomClassNames,
+            tokens,
+          ),
         }),
       ];
     }
@@ -726,6 +744,39 @@ ${renders}
       type: componentPlan?.type ?? component.type,
       ...overrides,
     };
+  }
+
+  private collectCustomClassNamesFromNodes(nodes: WpNode[]): string[] {
+    const result = new Set<string>();
+    const visit = (node: WpNode) => {
+      for (const className of node.customClassNames ?? []) {
+        const normalized = className.trim();
+        if (normalized) result.add(normalized);
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return [...result];
+  }
+
+  private resolveRequiredCustomClassTargets(
+    requiredCustomClassNames: string[] | undefined,
+    tokens?: ThemeTokens,
+  ): Record<string, ThemeInteractionTarget> | undefined {
+    const precise = tokens?.interactions?.precise ?? [];
+    if (!requiredCustomClassNames?.length || precise.length === 0) {
+      return undefined;
+    }
+
+    const targetMap: Record<string, ThemeInteractionTarget> = {};
+    for (const className of requiredCustomClassNames) {
+      const normalized = className.trim();
+      if (!normalized) continue;
+      const match = precise.find((entry) => entry.className === normalized);
+      if (match) targetMap[normalized] = match.target;
+    }
+
+    return Object.keys(targetMap).length > 0 ? targetMap : undefined;
   }
 
   private shouldUseBlockFaithfulSharedPartial(

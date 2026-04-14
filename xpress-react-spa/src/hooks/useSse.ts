@@ -23,6 +23,31 @@ export interface PipelineProgressEvent {
   data?: ProgressEventData;
 }
 
+export interface PipelineProgressCaptureDetail {
+  id: string;
+  note?: string;
+  imageUrl?: string;
+  sourcePageUrl?: string;
+  pageRoute?: string | null;
+  pageTitle?: string;
+  capturedAt?: string;
+  selector?: string;
+  nearestHeading?: string;
+  tagName?: string;
+}
+
+export interface PipelineProgressStepDetails {
+  kind: "edit-request";
+  title: string;
+  summary?: string;
+  prompt?: string;
+  language?: string;
+  targetRoute?: string | null;
+  targetPageTitle?: string;
+  captureCount: number;
+  captures: PipelineProgressCaptureDetail[];
+}
+
 interface MetricPageVisual {
   accuracy: number;
   diffPct: number;
@@ -88,6 +113,7 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: "baseline" | "edited" | "final";
   hasEditRequest?: boolean;
+  stepDetails?: PipelineProgressStepDetails;
   metrics?: {
     summary: MetricsSummary;
     pages: MetricPage[];
@@ -159,6 +185,7 @@ export function useSse(
   const reconnectTimeoutRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const disposedRef = useRef(false);
+  const manuallyDisconnectedRef = useRef(false);
 
   const clearReconnectTimeout = useCallback(() => {
     if (reconnectTimeoutRef.current !== null) {
@@ -222,7 +249,7 @@ export function useSse(
   );
 
   const scheduleReconnect = useCallback(() => {
-    if (disposedRef.current) return;
+    if (disposedRef.current || manuallyDisconnectedRef.current) return;
     clearReconnectTimeout();
 
     const attempt = reconnectAttemptsRef.current + 1;
@@ -241,7 +268,7 @@ export function useSse(
     }));
 
     reconnectTimeoutRef.current = window.setTimeout(() => {
-      if (disposedRef.current) return;
+      if (disposedRef.current || manuallyDisconnectedRef.current) return;
       connect();
     }, delayMs);
   }, [clearReconnectTimeout]);
@@ -265,6 +292,7 @@ export function useSse(
       eventSourceRef.current.close();
     }
     clearReconnectTimeout();
+    manuallyDisconnectedRef.current = false;
 
     const url = `${apiUrl}/pipeline/progress/${jobId}`;
 
@@ -318,6 +346,18 @@ export function useSse(
           eventSource.close();
           if (eventSourceRef.current === eventSource) {
             eventSourceRef.current = null;
+          }
+
+          if (disposedRef.current || manuallyDisconnectedRef.current) {
+            setState((prev) => ({
+              ...prev,
+              isConnected: false,
+              isLoading: false,
+              error: null,
+              connectionState:
+                prev.connectionState === "completed" ? "completed" : "idle",
+            }));
+            return;
           }
 
           if (pipelineCompletedRef.current) {
@@ -385,6 +425,7 @@ export function useSse(
    */
   const disconnect = useCallback(() => {
     clearReconnectTimeout();
+    manuallyDisconnectedRef.current = true;
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;

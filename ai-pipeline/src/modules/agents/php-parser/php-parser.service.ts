@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir, stat } from 'fs/promises';
 import { basename, dirname, join, posix } from 'path';
-import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type {
+  ThemePreciseInteractionBridge,
+  ThemeInteractionState,
+  ThemeTokens,
+} from '../block-parser/block-parser.service.js';
 import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
+import { collectThemeCssSources } from '../../../common/utils/theme-css-sources.js';
 
 export interface PhpParseDiagnostic {
   warnings: string[];
@@ -40,15 +45,8 @@ export class PhpParserService {
 
     const phpSourceMap = await this.buildPhpSourceMap(themeDir);
 
-    let themeName = 'Unknown';
-    let styleCss = '';
-    try {
-      styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
-      const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
-      if (nameMatch) themeName = nameMatch[1].trim();
-    } catch {
-      // style.css might not exist or be readable
-    }
+    const themeCss = await collectThemeCssSources(themeDir);
+    const themeName = themeCss.themeName || 'Unknown';
 
     const diagnostics: PhpParseDiagnostic = {
       warnings: [],
@@ -100,7 +98,7 @@ export class PhpParserService {
       );
     }
 
-    const styleTokens = extractStyleCssTokens(styleCss);
+    const styleTokens = extractStyleCssTokens(themeCss.combinedCss);
 
     return {
       type: 'classic',
@@ -108,11 +106,14 @@ export class PhpParserService {
       themeName,
       tokens: {
         colors: styleTokens.colors,
+        gradients: styleTokens.gradients,
+        shadows: styleTokens.shadows,
         fonts: styleTokens.fonts,
         fontSizes: styleTokens.fontSizes,
         spacing: styleTokens.spacing,
         defaults: styleTokens.defaults,
         blockStyles: styleTokens.blockStyles,
+        interactions: styleTokens.interactions,
       },
       diagnostics,
     };
@@ -120,6 +121,50 @@ export class PhpParserService {
 
   toTemplateMarkup(source: string): string {
     return this.stripPhp(source);
+  }
+
+  applyStyleCssOverride(
+    theme: PhpParseResult,
+    styleCss: string,
+  ): PhpParseResult {
+    if (!styleCss?.trim()) return theme;
+
+    const extracted = extractStyleCssTokens(styleCss, theme.tokens);
+    return {
+      ...theme,
+      tokens: {
+        colors: this.mergeBySlug(theme.tokens?.colors ?? [], extracted.colors),
+        gradients: this.mergeBySlug(
+          theme.tokens?.gradients ?? [],
+          extracted.gradients,
+        ),
+        shadows: this.mergeBySlug(
+          theme.tokens?.shadows ?? [],
+          extracted.shadows,
+        ),
+        fonts: this.mergeBySlug(theme.tokens?.fonts ?? [], extracted.fonts),
+        fontSizes: this.mergeBySlug(
+          theme.tokens?.fontSizes ?? [],
+          extracted.fontSizes,
+        ),
+        spacing: this.mergeBySlug(
+          theme.tokens?.spacing ?? [],
+          extracted.spacing,
+        ),
+        defaults: this.mergeDefaults(
+          theme.tokens?.defaults,
+          extracted.defaults,
+        ),
+        blockStyles: this.mergeBlockStyles(
+          theme.tokens?.blockStyles,
+          extracted.blockStyles,
+        ),
+        interactions: this.mergeInteractions(
+          theme.tokens?.interactions,
+          extracted.interactions,
+        ),
+      },
+    };
   }
 
   private async buildPhpSourceMap(themeDir: string): Promise<PhpSourceMap> {
@@ -464,5 +509,166 @@ export class PhpParserService {
       .replace(/\\/g, '/')
       .replace(/^\.\/+/, '')
       .replace(/\/+/g, '/');
+  }
+
+  private mergeBySlug<T extends { slug: string }>(base: T[], extra: T[]): T[] {
+    const map = new Map<string, T>();
+    for (const item of base) map.set(item.slug, item);
+    for (const item of extra) {
+      if (!map.has(item.slug)) map.set(item.slug, item);
+    }
+    return [...map.values()];
+  }
+
+  private mergeDefaults(
+    primary?: NonNullable<ThemeTokens['defaults']>,
+    fallback?: NonNullable<ThemeTokens['defaults']>,
+  ): ThemeTokens['defaults'] {
+    if (!primary && !fallback) return undefined;
+    return {
+      ...(fallback ?? {}),
+      ...(primary ?? {}),
+      headings: {
+        ...(fallback?.headings ?? {}),
+        ...(primary?.headings ?? {}),
+      },
+    };
+  }
+
+  private mergeBlockStyles(
+    primary?: NonNullable<ThemeTokens['blockStyles']>,
+    fallback?: NonNullable<ThemeTokens['blockStyles']>,
+  ): ThemeTokens['blockStyles'] {
+    if (!primary && !fallback) return undefined;
+
+    const merged: NonNullable<ThemeTokens['blockStyles']> = {
+      ...(fallback ?? {}),
+    };
+    for (const [blockType, style] of Object.entries(primary ?? {})) {
+      merged[blockType] = {
+        ...(fallback?.[blockType] ?? {}),
+        ...style,
+        color: {
+          ...(fallback?.[blockType]?.color ?? {}),
+          ...(style.color ?? {}),
+        },
+        typography: {
+          ...(fallback?.[blockType]?.typography ?? {}),
+          ...(style.typography ?? {}),
+        },
+        border: {
+          ...(fallback?.[blockType]?.border ?? {}),
+          ...(style.border ?? {}),
+        },
+        spacing: {
+          ...(fallback?.[blockType]?.spacing ?? {}),
+          ...(style.spacing ?? {}),
+        },
+      };
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private mergeInteractions(
+    primary?: NonNullable<ThemeTokens['interactions']>,
+    fallback?: NonNullable<ThemeTokens['interactions']>,
+  ): ThemeTokens['interactions'] {
+    if (!primary && !fallback) return undefined;
+
+    const mergeState = (
+      a?: ThemeInteractionState,
+      b?: ThemeInteractionState,
+    ): ThemeInteractionState | undefined => {
+      const merged: ThemeInteractionState = {
+        ...(b ?? {}),
+        ...(a ?? {}),
+      };
+      return Object.keys(merged).length > 0 ? merged : undefined;
+    };
+
+    const button =
+      primary?.button || fallback?.button
+        ? {
+            base: mergeState(primary?.button?.base, fallback?.button?.base),
+            hover: mergeState(primary?.button?.hover, fallback?.button?.hover),
+            focus: mergeState(primary?.button?.focus, fallback?.button?.focus),
+            active: mergeState(
+              primary?.button?.active,
+              fallback?.button?.active,
+            ),
+          }
+        : undefined;
+
+    const precise = this.mergePreciseInteractionBridges(
+      primary?.precise,
+      fallback?.precise,
+    );
+
+    const normalizedButton =
+      button && (button.base || button.hover || button.focus || button.active)
+        ? button
+        : undefined;
+
+    return normalizedButton || precise?.length
+      ? {
+          ...(normalizedButton ? { button: normalizedButton } : {}),
+          ...(precise?.length ? { precise } : {}),
+        }
+      : undefined;
+  }
+
+  private mergePreciseInteractionBridges(
+    primary?: ThemePreciseInteractionBridge[],
+    fallback?: ThemePreciseInteractionBridge[],
+  ): ThemePreciseInteractionBridge[] | undefined {
+    const merged = new Map<string, ThemePreciseInteractionBridge>();
+
+    const upsert = (entry?: ThemePreciseInteractionBridge) => {
+      if (!entry) return;
+      const key = `${entry.target}::${entry.className}`;
+      const previous = merged.get(key);
+      merged.set(key, {
+        className: entry.className,
+        target: entry.target,
+        base: this.mergeInteractionState(entry.base, previous?.base),
+        hover: this.mergeInteractionState(entry.hover, previous?.hover),
+        focus: this.mergeInteractionState(entry.focus, previous?.focus),
+        active: this.mergeInteractionState(entry.active, previous?.active),
+      });
+    };
+
+    for (const entry of fallback ?? []) upsert(entry);
+    for (const entry of primary ?? []) upsert(entry);
+
+    const values = Array.from(merged.values()).filter(
+      (entry) =>
+        this.hasInteractionState(entry.base) ||
+        this.hasInteractionState(entry.hover) ||
+        this.hasInteractionState(entry.focus) ||
+        this.hasInteractionState(entry.active),
+    );
+
+    return values.length > 0
+      ? values.sort(
+          (a, b) =>
+            a.className.localeCompare(b.className) ||
+            a.target.localeCompare(b.target),
+        )
+      : undefined;
+  }
+
+  private mergeInteractionState(
+    primary?: ThemeInteractionState,
+    fallback?: ThemeInteractionState,
+  ): ThemeInteractionState | undefined {
+    const merged: ThemeInteractionState = {
+      ...(fallback ?? {}),
+      ...(primary ?? {}),
+    };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private hasInteractionState(state?: ThemeInteractionState): boolean {
+    return !!state && Object.keys(state).length > 0;
   }
 }

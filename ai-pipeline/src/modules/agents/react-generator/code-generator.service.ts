@@ -979,15 +979,49 @@ export default ${componentName};`;
     markup: string,
     componentName: string,
   ): string {
+    const withCustomClasses = this.applySectionCustomClasses(
+      markup,
+      section.customClassNames,
+    );
     const trackingAttrs = this.buildSectionTrackingAttrs(
       section,
       componentName,
     );
-    if (!trackingAttrs) return markup;
+    if (!trackingAttrs) return withCustomClasses;
 
-    return markup.replace(
+    return withCustomClasses.replace(
       /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-source-node=)/,
       `$1${trackingAttrs}`,
+    );
+  }
+
+  private applySectionCustomClasses(
+    markup: string,
+    customClassNames?: string[],
+  ): string {
+    const normalized = [
+      ...new Set(
+        (customClassNames ?? [])
+          .map((className) => className.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (normalized.length === 0) return markup;
+
+    if (/\bclassName="[^"]*"/.test(markup)) {
+      return markup.replace(
+        /\bclassName="([^"]*)"/,
+        (_match, existingClasses: string) =>
+          `className="${this.appendUniqueClasses(
+            existingClasses,
+            normalized.join(' '),
+          )}"`,
+      );
+    }
+
+    return markup.replace(
+      /(<(?:section|header|footer|main|article|aside|nav|div)\b)/,
+      `$1 className="${normalized.join(' ')}"`,
     );
   }
 
@@ -1069,6 +1103,12 @@ export default ${componentName};`;
     ]
       .filter(Boolean)
       .join(' ');
+  }
+
+  private appendUniqueClasses(existing: string, addition: string): string {
+    return [...new Set(`${existing} ${addition}`.split(/\s+/).filter(Boolean))]
+      .join(' ')
+      .trim();
   }
 
   private opacityLinkClass(extra = ''): string {
@@ -1382,7 +1422,7 @@ ${postCard}
       );
     if (s.showAuthor) {
       parts.push(
-        `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <a href="#" className="${metaLinkClass}">by {post.author}</a>)}`,
+        `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <span>by {post.author}</span>)}`,
       );
     }
     if (s.showCategory)
@@ -1842,7 +1882,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       metaParts.push(`<time>{new Date(item.date).toLocaleDateString()}</time>`);
     if (s.showAuthor) {
       metaParts.push(
-        `{item.author && (item.authorSlug ? <Link to={\`/author/\${item.authorSlug}\`} className="${metaLinkClass}">by {item.author}</Link> : <a href="#" className="${metaLinkClass}">by {item.author}</a>)}`,
+        `{item.author && (item.authorSlug ? <Link to={\`/author/\${item.authorSlug}\`} className="${metaLinkClass}">by {item.author}</Link> : <span>by {item.author}</span>)}`,
       );
     }
     if (s.showCategories)
@@ -2036,7 +2076,7 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
           this.pickBlockStyle(ctx, 'group'),
           this.buildWpLayoutStyle(node),
         );
-        return `${indent}<div className="w-full"${styleAttr}>
+        return `${indent}<div className="${this.mergeWpNodeClassName('w-full', node)}"${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -2046,7 +2086,7 @@ ${indent}</div>`;
           this.pickBlockStyle(ctx, 'columns', 'group'),
           this.buildWpColumnsStyle(node),
         );
-        return `${indent}<div className="w-full min-w-0"${styleAttr}>
+        return `${indent}<div className="${this.mergeWpNodeClassName('w-full min-w-0', node)}"${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -2055,7 +2095,7 @@ ${indent}</div>`;
           node,
           this.pickBlockStyle(ctx, 'column', 'group'),
         );
-        return `${indent}<div className="min-w-0"${styleAttr}>
+        return `${indent}<div className="${this.mergeWpNodeClassName('min-w-0', node)}"${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -2068,26 +2108,26 @@ ${indent}</div>`;
           node.children?.length && node.children.some((child) => child.block)
             ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
             : '';
-    return `${indent}<li className="relative">
+        return `${indent}<li className="relative">
 ${
   hasUsableHref
     ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
-${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
 ${childIndent}) : (
-${childIndent}  <a href="${href}" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <a href="${href}" className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
 ${childIndent})}`
-    : `${childIndent}<a href="#" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node)}>
+    : `${childIndent}<a href="#" className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
 ${childIndent}</a>`
 }${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
-        return `${indent}<Link to="/" className="${this.opacityLinkClass('font-semibold')}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+        return `${indent}<Link to="/" className="${this.mergeWpNodeClassName(this.opacityLinkClass('font-semibold'), node)}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
 ${childIndent}{siteInfo?.siteName}
 ${indent}</Link>`;
       case 'site-tagline':
@@ -2107,7 +2147,7 @@ ${indent}</p>`;
           width ? { width, maxWidth: '100%' } : {},
         );
         return `${indent}{${logoSrcExpr} ? (
-${childIndent}<Link to="/" className="inline-flex items-center"${styleAttr}>
+ ${childIndent}<Link to="/" className="${this.mergeWpNodeClassName('inline-flex items-center', node)}"${styleAttr}>
 ${childIndent}  <img src={${logoSrcExpr}} alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto w-full object-contain" />
 ${childIndent}</Link>
 ${indent}) : null}`;
@@ -2154,15 +2194,15 @@ ${indent}</div>`;
         );
         return hasUsableHref
           ? `${indent}{isInternalPath(${JSON.stringify(href)}) ? (
-${childIndent}<Link to={toAppPath(${JSON.stringify(href)})} className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+ ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})} className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</Link>
 ${indent}) : (
-${childIndent}<a href="${href}" className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+ ${childIndent}<a href="${href}" className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</a>
 ${indent})}`
-          : `${indent}<a href="#" className="inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90"${styleAttr}>
+          : `${indent}<a href="#" className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
 ${childIndent}${node.text ?? ''}
 ${indent}</a>`;
       }
@@ -2175,7 +2215,7 @@ ${indent}</a>`;
             height: node.height ? `${node.height}px` : undefined,
           },
         );
-        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}" className="h-auto max-w-full object-contain"${styleAttr} />`;
+        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}" className="${this.mergeWpNodeClassName('h-auto max-w-full object-contain', node)}"${styleAttr} />`;
       }
       case 'search': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -2329,6 +2369,13 @@ ${indent}</ul>`;
       ...this.wpNodeToStyleMap(node),
       ...extra,
     });
+  }
+
+  private mergeWpNodeClassName(base: string, node: WpNode): string {
+    const classes = [...base.split(/\s+/), ...(node.customClassNames ?? [])]
+      .map((token) => token.trim())
+      .filter(Boolean);
+    return Array.from(new Set(classes)).join(' ');
   }
 
   private blockStyleToStyleMap(

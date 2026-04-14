@@ -33,7 +33,10 @@ import {
   parseVisualPlanDetailed,
 } from './prompts/visual-plan.prompt.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
-import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type {
+  ThemeInteractionTarget,
+  ThemeTokens,
+} from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
@@ -172,6 +175,12 @@ export class CodeReviewerService {
     let validationContext = this.buildValidationContext(
       promptContext,
       componentName,
+      false,
+      undefined,
+      this.resolveRequiredCustomClassTargets(
+        promptContext?.requiredCustomClassNames,
+        tokens,
+      ),
     );
 
     if (preferDirectAi && componentPlan?.visualPlan) {
@@ -203,6 +212,8 @@ export class CodeReviewerService {
                 name: componentName,
                 filePath: '',
                 code: deterministic.code,
+                requiredCustomClassNames:
+                  promptContext?.requiredCustomClassNames,
               },
               fromVisualPlan: true,
               generationMode: 'deterministic',
@@ -221,6 +232,7 @@ export class CodeReviewerService {
               name: componentName,
               filePath: '',
               code: deterministic.code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
             },
             fromVisualPlan: true,
             generationMode: 'deterministic',
@@ -236,6 +248,12 @@ export class CodeReviewerService {
         validationContext = this.buildValidationContext(
           promptContext,
           componentName,
+          false,
+          undefined,
+          this.resolveRequiredCustomClassTargets(
+            promptContext?.requiredCustomClassNames,
+            tokens,
+          ),
         );
         await this.log(
           logPath,
@@ -278,6 +296,7 @@ export class CodeReviewerService {
               name: componentName,
               filePath: '',
               code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
             },
             fromVisualPlan: true,
             generationMode: 'ai',
@@ -330,6 +349,7 @@ export class CodeReviewerService {
               name: componentName,
               filePath: '',
               code: deterministic.code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
             },
             fromVisualPlan: true,
             generationMode: 'deterministic',
@@ -373,6 +393,8 @@ export class CodeReviewerService {
               isDetail: componentPlan.isDetail,
               dataNeeds: visualDataNeeds,
               stripLayoutChrome: componentPlan.type === 'page',
+              sourceBackedAuxiliaryLabels:
+                componentPlan.sourceBackedAuxiliaryLabels,
             }
           : undefined;
 
@@ -387,6 +409,8 @@ export class CodeReviewerService {
             route: componentPlan?.route,
             isDetail: componentPlan?.isDetail,
             dataNeeds: visualDataNeeds,
+            sourceBackedAuxiliaryLabels:
+              componentPlan?.sourceBackedAuxiliaryLabels,
             editRequestContextNote,
           });
 
@@ -411,6 +435,12 @@ export class CodeReviewerService {
             validationContext = this.buildValidationContext(
               promptContext,
               componentName,
+              false,
+              undefined,
+              this.resolveRequiredCustomClassTargets(
+                promptContext?.requiredCustomClassNames,
+                tokens,
+              ),
             );
             await this.log(
               logPath,
@@ -448,7 +478,13 @@ export class CodeReviewerService {
               });
 
               return {
-                component: { name: componentName, filePath: '', code },
+                component: {
+                  name: componentName,
+                  filePath: '',
+                  code,
+                  requiredCustomClassNames:
+                    promptContext?.requiredCustomClassNames,
+                },
                 fromVisualPlan: true,
                 generationMode: 'ai',
                 attempts,
@@ -477,6 +513,8 @@ export class CodeReviewerService {
                   name: componentName,
                   filePath: '',
                   code: deterministic.code,
+                  requiredCustomClassNames:
+                    promptContext?.requiredCustomClassNames,
                 },
                 fromVisualPlan: true,
                 generationMode: 'deterministic',
@@ -550,7 +588,12 @@ export class CodeReviewerService {
         });
 
         return {
-          component: { name: componentName, filePath: '', code },
+          component: {
+            name: componentName,
+            filePath: '',
+            code,
+            requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+          },
           fromVisualPlan: false,
           generationMode: 'ai',
           attempts,
@@ -620,7 +663,12 @@ export class CodeReviewerService {
           });
 
           return {
-            component: { name: componentName, filePath: '', code },
+            component: {
+              name: componentName,
+              filePath: '',
+              code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+            },
             fromVisualPlan: false,
             generationMode: 'ai',
             attempts,
@@ -704,7 +752,14 @@ export class CodeReviewerService {
     const cotAttempts: AttemptLog[] = [];
     const promptContext = this.buildPromptContext(componentPlan, undefined, {
       includeVisualPlan: !preferDirectAi,
+      includeRequiredCustomClasses: false,
     });
+    const requiredCustomClassNames =
+      this.collectCustomClassNamesFromNodesJson(nodesJson);
+    const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
+      requiredCustomClassNames,
+      tokens,
+    );
 
     const userPrompt = buildSectionPrompt({
       sectionName,
@@ -728,6 +783,8 @@ export class CodeReviewerService {
       promptContext,
       sectionName,
       true,
+      requiredCustomClassNames,
+      requiredCustomClassTargets,
     );
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -878,7 +935,14 @@ export class CodeReviewerService {
       finalSuccess: true,
     });
 
-    return { name: sectionName, filePath: '', code, isSubComponent: true };
+    return {
+      name: sectionName,
+      filePath: '',
+      code,
+      isSubComponent: true,
+      requiredCustomClassNames,
+      requiredCustomClassTargets,
+    };
   }
 
   // ── Self-fix (Fix Agent) ───────────────────────────────────────────────────
@@ -886,7 +950,10 @@ export class CodeReviewerService {
   private buildPromptContext(
     componentPlan?: PlanResult[number] | ComponentPromptContext,
     visualPlan?: ComponentVisualPlan,
-    options?: { includeVisualPlan?: boolean },
+    options?: {
+      includeVisualPlan?: boolean;
+      includeRequiredCustomClasses?: boolean;
+    },
   ): ComponentPromptContext | undefined {
     if (!componentPlan && !visualPlan) return undefined;
 
@@ -900,6 +967,13 @@ export class CodeReviewerService {
       : resolvedVisualPlan?.dataNeeds
         ? [...resolvedVisualPlan.dataNeeds]
         : undefined;
+    const requiredCustomClassNames =
+      options?.includeRequiredCustomClasses === false
+        ? undefined
+        : this.resolveRequiredCustomClassNames(
+            componentPlan,
+            resolvedVisualPlan,
+          );
 
     return {
       description: componentPlan?.description,
@@ -907,6 +981,8 @@ export class CodeReviewerService {
       isDetail: componentPlan?.isDetail,
       type: componentPlan?.type,
       dataNeeds,
+      requiredCustomClassNames,
+      sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
       visualPlan: resolvedVisualPlan,
     };
   }
@@ -915,6 +991,8 @@ export class CodeReviewerService {
     componentPlan?: ComponentPromptContext,
     componentName?: string,
     isSubComponent = false,
+    requiredCustomClassNames?: string[],
+    requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>,
   ): CodeValidationContext {
     const commentSection = componentPlan?.visualPlan?.sections.find(
       (section) => section.type === 'comments',
@@ -927,9 +1005,76 @@ export class CodeReviewerService {
       type: componentPlan?.type,
       isSubComponent,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
+      requiredCustomClassNames:
+        requiredCustomClassNames ?? componentPlan?.requiredCustomClassNames,
+      requiredCustomClassTargets,
       requireCommentForm:
         commentSection?.type === 'comments' ? commentSection.showForm : false,
     };
+  }
+
+  private resolveRequiredCustomClassTargets(
+    requiredCustomClassNames: string[] | undefined,
+    tokens?: ThemeTokens,
+  ): Record<string, ThemeInteractionTarget> | undefined {
+    const precise = tokens?.interactions?.precise ?? [];
+    if (!requiredCustomClassNames?.length || precise.length === 0) {
+      return undefined;
+    }
+
+    const targetMap: Record<string, ThemeInteractionTarget> = {};
+    for (const className of requiredCustomClassNames) {
+      const normalized = className.trim();
+      if (!normalized) continue;
+      const match = precise.find((entry) => entry.className === normalized);
+      if (match) targetMap[normalized] = match.target;
+    }
+
+    return Object.keys(targetMap).length > 0 ? targetMap : undefined;
+  }
+
+  private resolveRequiredCustomClassNames(
+    componentPlan?: PlanResult[number] | ComponentPromptContext,
+    visualPlan?: ComponentVisualPlan,
+  ): string[] | undefined {
+    const classNames = [
+      ...(componentPlan && 'customClassNames' in componentPlan
+        ? (componentPlan.customClassNames ?? [])
+        : []),
+      ...((visualPlan ?? componentPlan?.visualPlan)?.sections.flatMap(
+        (section) => section.customClassNames ?? [],
+      ) ?? []),
+    ]
+      .map((className) => className.trim())
+      .filter(Boolean);
+    if (classNames.length === 0) return undefined;
+    return [...new Set(classNames)];
+  }
+
+  private collectCustomClassNamesFromNodesJson(nodesJson: string): string[] {
+    try {
+      const parsed = JSON.parse(nodesJson) as Array<{
+        customClassNames?: string[];
+        children?: unknown[];
+      }>;
+      const result = new Set<string>();
+      const visit = (value: unknown) => {
+        if (!value || typeof value !== 'object') return;
+        const node = value as {
+          customClassNames?: string[];
+          children?: unknown[];
+        };
+        for (const className of node.customClassNames ?? []) {
+          const normalized = className.trim();
+          if (normalized) result.add(normalized);
+        }
+        for (const child of node.children ?? []) visit(child);
+      };
+      for (const node of parsed) visit(node);
+      return [...result];
+    } catch {
+      return [];
+    }
   }
 
   private shouldUseDeterministicFirst(
@@ -1013,6 +1158,7 @@ export class CodeReviewerService {
     templateSource: string;
     modelName: string;
     componentPlan: ComponentPromptContext;
+    tokens?: ThemeTokens;
     editRequestContextNote?: string;
     logPath?: string;
   }): Promise<{
@@ -1048,6 +1194,12 @@ export class CodeReviewerService {
     const validationContext = this.buildValidationContext(
       componentPlan,
       componentName,
+      false,
+      undefined,
+      this.resolveRequiredCustomClassTargets(
+        componentPlan?.requiredCustomClassNames,
+        input.tokens,
+      ),
     );
 
     let lastFragment = '';
@@ -1090,7 +1242,9 @@ export class CodeReviewerService {
         frame,
         lastFragment,
       );
-      const sanitized = this.validator.sanitizeGeneratedCode(assembled);
+      const sanitized = this.validator.sanitizeGeneratedCode(
+        this.postProcessCode(assembled),
+      );
       const check = this.validator.checkCodeStructure(
         sanitized,
         validationContext,
@@ -1198,6 +1352,12 @@ export class CodeReviewerService {
     const validationContext = this.buildValidationContext(
       componentPlan,
       componentName,
+      false,
+      undefined,
+      this.resolveRequiredCustomClassTargets(
+        componentPlan?.requiredCustomClassNames,
+        tokens,
+      ),
     );
 
     // ── D0: Frame + Fragment — try before full-file generation ──────────────
@@ -1213,6 +1373,7 @@ export class CodeReviewerService {
         templateSource,
         modelName,
         componentPlan,
+        tokens,
         editRequestContextNote,
         logPath,
       });
@@ -1990,12 +2151,29 @@ export class CodeReviewerService {
       );
     }
 
-    if (/hover:underline|underline on hover|wordPress-style interaction/.test(compact)) {
+    if (
+      /hover:underline|underline on hover|wordPress-style interaction/.test(
+        compact,
+      )
+    ) {
       instructions.push(
-        'Visible text links for post titles, author/category archive links, menus, footer/sidebar lists, breadcrumbs, and social/footer text links must include hover underline styling such as `hover:underline underline-offset-4`.',
+        'Visible text links for post titles, author/category archive links inside meta rows, menus, footer/sidebar lists, breadcrumbs, and social/footer text links must include hover underline styling such as `hover:underline underline-offset-4`.',
       );
       instructions.push(
         'Keep CTA buttons as buttons, but make ordinary text navigation/content links visibly underlined on hover.',
+      );
+    }
+
+    if (
+      /post meta author\/category labels|post meta category labels|canonical archive routes|post\.author|post\.categories\[0\]/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'In post listings/meta rows, render author/category meta as archive links whenever `post.authorSlug` or `post.categorySlugs[0]` exists.',
+      );
+      instructions.push(
+        'Use `post.authorSlug` with `/author/${post.authorSlug}` and `post.categorySlugs[0]` with `/category/${post.categorySlugs[0]}`. Keep plain-text author only when it is the actual heading/title content, such as an `h1` on author/archive/detail views.',
       );
     }
 
@@ -2029,9 +2207,15 @@ export class CodeReviewerService {
   // ── Code post-processors ──────────────────────────────────────────────────
 
   private postProcessCode(code: string): string {
-    return this.normalizeTailwindFunctionSpacing(
-      this.fixDoublebraces(
-        this.mergeClassNames(this.stripMarkdownFences(code)),
+    return this.promotePlainTextPostMetaLinks(
+      this.ensureHoverUnderlineOnCanonicalTextLinks(
+        this.normalizePlainTextPostMetaArchiveLinks(
+          this.normalizeTailwindFunctionSpacing(
+            this.fixDoublebraces(
+              this.mergeClassNames(this.stripMarkdownFences(code)),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2080,6 +2264,163 @@ export class CodeReviewerService {
       /\[(min|max|clamp)\(([^)\]]+)\)\]/g,
       (_match, fnName: string, inner: string) =>
         `[${fnName}(${inner.replace(/,\s+/g, ',')})]`,
+    );
+  }
+
+  private ensureHoverUnderlineOnCanonicalTextLinks(code: string): string {
+    return code.replace(/<(Link|a)\b[\s\S]{0,400}?>/g, (rawTag) => {
+      if (!/\bclassName="[^"]*"/.test(rawTag)) return rawTag;
+      if (/hover:underline/.test(rawTag) || /\bno-underline\b/.test(rawTag)) {
+        return rawTag;
+      }
+
+      const looksLikeButton =
+        /\bbg-\[/.test(rawTag) ||
+        (/\bpx-/.test(rawTag) && /\bpy-/.test(rawTag)) ||
+        /\bjustify-center\b/.test(rawTag);
+      if (looksLikeButton) return rawTag;
+
+      const isCanonicalTextLink =
+        /\/(?:post|page|author|category|tag)\//.test(rawTag) ||
+        /\bitem\.url\b/.test(rawTag) ||
+        /\btoAppPath\(item\.url\)\b/.test(rawTag) ||
+        /\bhref=["']https?:\/\//.test(rawTag);
+      if (!isCanonicalTextLink) return rawTag;
+
+      return rawTag.replace(
+        /\bclassName="([^"]*)"/,
+        (_match, classes: string) =>
+          `className="${this.appendUniqueClasses(
+            classes,
+            'hover:underline underline-offset-4',
+          )}"`,
+      );
+    });
+  }
+
+  private normalizePlainTextPostMetaArchiveLinks(code: string): string {
+    let next = code;
+
+    next = next.replace(
+      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
+      (_match, record: string, tag: string, attrs: string) =>
+        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
+    );
+
+    next = next.replace(
+      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
+      (match, tag: string, attrs: string, record: string, offset: number) => {
+        if (this.isWithinHeadingTitleContext(next, offset)) return match;
+        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
+        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
+      },
+    );
+
+    next = next.replace(
+      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
+      (_match, record: string, attrs: string) =>
+        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
+    );
+
+    next = next.replace(
+      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
+      (match, attrs: string, record: string, offset: number) => {
+        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
+        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
+      },
+    );
+
+    next = next.replace(
+      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
+      (
+        _match,
+        record: string,
+        categoryVar: string,
+        indexVar: string,
+        attrs: string,
+      ) =>
+        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
+    );
+
+    return next;
+  }
+
+  private promotePlainTextPostMetaLinks(code: string): string {
+    const isCanonicalMetaLink = (raw: string): boolean =>
+      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
+      /(?:to=|href=)[^>]*\/category\//.test(raw);
+
+    const decorateQuoted = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
+            className,
+            'hover:underline underline-offset-4',
+          )}${quote}`;
+        },
+      );
+
+    const decorateTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className={\`${this.appendUniqueClasses(
+            className,
+            'hover:underline underline-offset-4',
+          )}\`}`;
+        },
+      );
+
+    const decorateWithoutClass = (source: string) =>
+      source.replace(
+        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
+        (match, tag: string, attrs: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
+        },
+      );
+
+    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+  }
+
+  private appendUniqueClasses(existing: string, addition: string): string {
+    return [...new Set(`${existing} ${addition}`.split(/\s+/).filter(Boolean))]
+      .join(' ')
+      .trim();
+  }
+
+  private isWithinHeadingTitleContext(code: string, offset: number): boolean {
+    const start = Math.max(0, offset - 220);
+    const end = Math.min(code.length, offset + 220);
+    const window = code.slice(start, end);
+    const before = code.slice(start, offset);
+    const openHeading = before.match(/<h[1-6]\b[^>]*>/gi);
+    const closeHeading = before.match(/<\/h[1-6]>/gi);
+    if ((openHeading?.length ?? 0) > (closeHeading?.length ?? 0)) {
+      return true;
+    }
+
+    return /\b(?:title|heading)\b/i.test(window);
+  }
+
+  private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
+    const before = code.slice(Math.max(0, offset - 600), offset);
+    return (
+      /\bauthorSlug\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
+      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
+        before,
+      )
     );
   }
 

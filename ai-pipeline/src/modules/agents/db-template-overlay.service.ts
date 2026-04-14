@@ -5,22 +5,35 @@ import {
   type BlockParseResult,
 } from './block-parser/block-parser.service.js';
 import type { PhpParseResult } from './php-parser/php-parser.service.js';
+import { PhpParserService } from './php-parser/php-parser.service.js';
 
 @Injectable()
 export class DbTemplateOverlayService {
   private readonly logger = new Logger(DbTemplateOverlayService.name);
 
-  constructor(private readonly blockParser: BlockParserService) {}
+  constructor(
+    private readonly blockParser: BlockParserService,
+    private readonly phpParser: PhpParserService,
+  ) {}
 
   apply(
     theme: PhpParseResult | BlockParseResult,
     content: Pick<
       DbContentResult,
-      'dbTemplates' | 'dbGlobalStyles' | 'readingSettings'
+      'dbTemplates' | 'dbGlobalStyles' | 'customCssEntries' | 'readingSettings'
     >,
   ): PhpParseResult | BlockParseResult {
+    const customCssOverride = this.extractCssOverride({
+      globalStyles: content.dbGlobalStyles,
+      customCssEntries: content.customCssEntries,
+    });
+
     if (theme.type !== 'fse') {
-      return theme;
+      if (!customCssOverride) return theme;
+      this.logger.log(
+        `Applied classic DB CSS overlay: customCssEntries=${content.customCssEntries.length}`,
+      );
+      return this.phpParser.applyStyleCssOverride(theme, customCssOverride);
     }
 
     const globalStylesOverride = this.parseGlobalStylesOverride(
@@ -37,7 +50,8 @@ export class DbTemplateOverlayService {
     if (
       templateRows.length === 0 &&
       partRows.length === 0 &&
-      !globalStylesOverride
+      !globalStylesOverride &&
+      !customCssOverride
     ) {
       return theme;
     }
@@ -45,6 +59,12 @@ export class DbTemplateOverlayService {
     let nextTheme: BlockParseResult = globalStylesOverride
       ? this.blockParser.applyThemeJsonOverride(theme, globalStylesOverride)
       : theme;
+    if (customCssOverride) {
+      nextTheme = this.blockParser.applyStyleCssOverride(
+        nextTheme,
+        customCssOverride,
+      );
+    }
 
     const rawPartMap = new Map<string, string>();
     const repoPartNameByKey = new Map<string, string>();
@@ -168,6 +188,25 @@ export class DbTemplateOverlayService {
     return null;
   }
 
+  private extractCssOverride(input: {
+    globalStyles: Array<{ content: string; slug: string }>;
+    customCssEntries: Array<{ content: string; slug: string }>;
+  }): string {
+    const chunks: string[] = [];
+
+    for (const row of input.globalStyles) {
+      chunks.push(...this.extractCssFragmentsFromContent(row.content));
+    }
+    for (const row of input.customCssEntries) {
+      chunks.push(...this.extractCssFragmentsFromContent(row.content));
+    }
+
+    return chunks
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
   private parseJsonObject(raw: string): Record<string, any> | null {
     const trimmed = String(raw ?? '').trim();
     if (!trimmed) return null;
@@ -194,6 +233,46 @@ export class DbTemplateOverlayService {
     }
 
     return null;
+  }
+
+  private extractCssFragmentsFromContent(raw: string): string[] {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) return [];
+    if (this.looksLikeCss(trimmed)) return [trimmed];
+
+    const parsed = this.parseJsonObject(trimmed);
+    if (!parsed) return [];
+
+    const fragments: string[] = [];
+    const visit = (value: unknown, key?: string) => {
+      if (!value) return;
+      if (typeof value === 'string') {
+        const candidate = value.trim();
+        if (!candidate) return;
+        if (key === 'css' || this.looksLikeCss(candidate)) {
+          fragments.push(candidate);
+        }
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item));
+        return;
+      }
+      if (typeof value === 'object') {
+        for (const [childKey, childValue] of Object.entries(
+          value as Record<string, unknown>,
+        )) {
+          visit(childValue, childKey);
+        }
+      }
+    };
+
+    visit(parsed);
+    return fragments;
+  }
+
+  private looksLikeCss(value: string): boolean {
+    return /[.#:\w\-\[\]\s>,+~()"'=]+\{[^}]+\}/.test(value);
   }
 
   private resolveTemplateParts(

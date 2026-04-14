@@ -34,7 +34,7 @@ export function buildCptRoutesPrompt(
 
 The server already has: getConn(), getPrefix(conn), formatDate() helpers and routes for
 /api/site-info, /api/posts, /api/posts/:slug, /api/pages, /api/pages/:slug,
-/api/menus, /api/taxonomies, /api/taxonomies/:taxonomy,
+/api/menus, /api/footer-links, /api/taxonomies, /api/taxonomies/:taxonomy,
 /api/taxonomies/:taxonomy/:term/posts,
  /api/comments GET (?postId= or ?slug=), /api/comments/submissions GET (?postId= or ?slug=, clientToken),
  and /api/comments POST (body: author, email, content, website?, slug?, postId?, parentId?, clientToken).

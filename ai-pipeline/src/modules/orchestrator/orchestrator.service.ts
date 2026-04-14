@@ -79,18 +79,55 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: 'baseline' | 'edited' | 'final';
   hasEditRequest?: boolean;
+  stepDetails?: ProgressStepDetails;
   metrics?: {
-    urlA: string;
-    urlB: string;
-    diffPercentage: number;
-    differentPixels: number;
-    totalPixels: number;
-    artifacts: {
-      imageA: string;
-      imageB: string;
-      diff: string;
+    urlA?: string;
+    urlB?: string;
+    diffPercentage?: number;
+    differentPixels?: number;
+    totalPixels?: number;
+    summary?: {
+      overall?: {
+        visualAvgAccuracy?: number;
+        visualPassRate?: number;
+        contentAvgOverall?: number;
+        diffPercentage?: number;
+        differentPixels?: number;
+        totalPixels?: number;
+      };
     };
+    artifacts?: {
+      imageA?: string;
+      imageB?: string;
+      diff?: string;
+    };
+    [key: string]: unknown;
   };
+}
+
+interface ProgressStepCapturePreview {
+  id: string;
+  note?: string;
+  imageUrl?: string;
+  sourcePageUrl?: string;
+  pageRoute?: string | null;
+  pageTitle?: string;
+  capturedAt?: string;
+  selector?: string;
+  nearestHeading?: string;
+  tagName?: string;
+}
+
+interface ProgressStepDetails {
+  kind: 'edit-request';
+  title: string;
+  summary?: string;
+  prompt?: string;
+  language?: string;
+  targetRoute?: string | null;
+  targetPageTitle?: string;
+  captureCount: number;
+  captures: ProgressStepCapturePreview[];
 }
 
 const STEP_META: Record<
@@ -169,6 +206,14 @@ const STEP_META: Record<
     doneMessage:
       'Preview app assembly, build checks, and runtime smoke tests have passed.',
   },
+  '8b_edit_request': {
+    label: 'Apply User Edit Request',
+    weight: 6,
+    activeMessage:
+      'Applying the submitted edit request to the generated React output and syncing the changes into the running preview.',
+    doneMessage:
+      'The requested user edits have been applied to the generated React preview.',
+  },
   '9_visual_compare': {
     label: 'Evaluate Visual Metrics',
     weight: 2,
@@ -191,8 +236,6 @@ const STEP_META: Record<
     doneMessage: 'Migration workflow is complete and the preview is ready.',
   },
 };
-
-const TOTAL_WEIGHT = Object.values(STEP_META).reduce((s, m) => s + m.weight, 0);
 
 export type PipelineStepStatus =
   | 'pending'
@@ -303,6 +346,10 @@ export class OrchestratorService {
   private readonly jobs = new Map<string, PipelineStatus>();
   private readonly progress = new Map<string, ReplaySubject<ProgressEvent>>();
   private readonly controls = new Map<string, JobRuntimeControl>();
+  private readonly stepEventData = new Map<
+    string,
+    Map<string, ProgressEventData>
+  >();
 
   constructor(
     private readonly sqlService: SqlService,
@@ -373,6 +420,9 @@ export class OrchestratorService {
         // Stage 6: Build & Preview (E1 API → E2 Vite → E3 Runtime Instrumentation)
         { name: '7_api_builder', status: 'pending' },
         { name: '8_preview_builder', status: 'pending' },
+        ...(dto.editRequest
+          ? [{ name: '8b_edit_request', status: 'pending' as const }]
+          : []),
         // Stage 7: Visual Compare (E4)
         { name: '9_visual_compare', status: 'pending' },
         // Stage 8: Cleanup + completion
@@ -395,27 +445,25 @@ export class OrchestratorService {
       dto,
       state,
       editRequestContext,
-    ).catch(
-      (err) => {
-        if (err instanceof PipelineControlError) {
-          void this.finalizeControlledTermination(jobId, state, err);
-          return;
-        }
+    ).catch((err) => {
+      if (err instanceof PipelineControlError) {
+        void this.finalizeControlledTermination(jobId, state, err);
+        return;
+      }
 
-        state.status = 'error';
-        state.error = err.message;
-        const subject = this.progress.get(jobId);
-        subject?.next({
-          step: 'error',
-          label: 'Pipeline Error',
-          status: 'error',
-          percent: 0,
-          message: `AI workflow stopped because of an error: ${err.message}`,
-        });
-        subject?.complete();
-        this.logger.error(`Pipeline ${jobId} failed:`, err);
-      },
-    );
+      state.status = 'error';
+      state.error = err.message;
+      const subject = this.progress.get(jobId);
+      subject?.next({
+        step: 'error',
+        label: 'Pipeline Error',
+        status: 'error',
+        percent: 0,
+        message: `AI workflow stopped because of an error: ${err.message}`,
+      });
+      subject?.complete();
+      this.logger.error(`Pipeline ${jobId} failed:`, err);
+    });
 
     return { jobId };
   }
@@ -452,7 +500,8 @@ export class OrchestratorService {
     };
 
     const previewDir =
-      body.editRequest.reactSourceTarget.previewDir?.trim() || result.previewDir;
+      body.editRequest.reactSourceTarget.previewDir?.trim() ||
+      result.previewDir;
     const frontendDir =
       body.editRequest.reactSourceTarget.frontendDir?.trim() ||
       result.frontendDir ||
@@ -477,10 +526,9 @@ export class OrchestratorService {
           uiSourceMapPath:
             body.editRequest.reactSourceTarget.uiSourceMapPath?.trim() ||
             result.uiSourceMapPath,
-          routeEntries:
-            body.editRequest.reactSourceTarget.routeEntries?.length
-              ? body.editRequest.reactSourceTarget.routeEntries
-              : result.routeEntries,
+          routeEntries: body.editRequest.reactSourceTarget.routeEntries?.length
+            ? body.editRequest.reactSourceTarget.routeEntries
+            : result.routeEntries,
         },
       },
       submittedAt: new Date().toISOString(),
@@ -629,11 +677,22 @@ export class OrchestratorService {
     if (name === '8_preview_builder') {
       return {
         ...baseMeta,
-        label: 'Launch Preview And Apply Requested Edits',
+        label: 'Launch Preview Baseline',
         activeMessage:
-          'Starting preview servers so the baseline can be inspected while focused edit-request fixes continue in the background.',
+          'Starting preview servers so the generated baseline can be inspected before any requested edit pass runs.',
         doneMessage:
-          'Preview servers are live and any requested edits have been synced into the running preview.',
+          'Preview servers are live and the baseline React app is ready for inspection.',
+      };
+    }
+
+    if (name === '8b_edit_request') {
+      return {
+        ...baseMeta,
+        label: 'Apply Requested Edits',
+        activeMessage:
+          'Applying the user edit request to the running preview and validating the updated React output.',
+        doneMessage:
+          'Requested edits have been applied and synced into the running preview.',
       };
     }
 
@@ -662,24 +721,41 @@ export class OrchestratorService {
     return baseMeta;
   }
 
-  private calcPercentBefore(name: string): number {
-    const stepOrder = Object.keys(STEP_META);
-    let done = 0;
-    for (const stepName of stepOrder) {
-      if (stepName === name) break;
-      done += STEP_META[stepName]?.weight ?? 0;
+  private getStepOrder(jobId?: string): string[] {
+    const state = jobId ? this.jobs.get(jobId) : undefined;
+    if (state?.steps?.length) {
+      return state.steps.map((step) => step.name);
     }
-    return Math.round((done / TOTAL_WEIGHT) * 100);
+    return Object.keys(STEP_META);
   }
 
-  private calcPercentThrough(name: string): number {
-    const stepOrder = Object.keys(STEP_META);
+  private getTotalWeight(jobId?: string): number {
+    return this.getStepOrder(jobId).reduce(
+      (sum, stepName) => sum + (this.getStepMeta(stepName, jobId).weight ?? 0),
+      0,
+    );
+  }
+
+  private calcPercentBefore(name: string, jobId?: string): number {
+    const stepOrder = this.getStepOrder(jobId);
+    const totalWeight = this.getTotalWeight(jobId);
     let done = 0;
     for (const stepName of stepOrder) {
-      done += STEP_META[stepName]?.weight ?? 0;
+      if (stepName === name) break;
+      done += this.getStepMeta(stepName, jobId).weight ?? 0;
+    }
+    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
+  }
+
+  private calcPercentThrough(name: string, jobId?: string): number {
+    const stepOrder = this.getStepOrder(jobId);
+    const totalWeight = this.getTotalWeight(jobId);
+    let done = 0;
+    for (const stepName of stepOrder) {
+      done += this.getStepMeta(stepName, jobId).weight ?? 0;
       if (stepName === name) break;
     }
-    return Math.round((done / TOTAL_WEIGHT) * 100);
+    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
   }
 
   private emitStepProgress(
@@ -690,15 +766,24 @@ export class OrchestratorService {
     data?: ProgressEventData,
   ): void {
     this.assertJobActive(state.jobId);
+    this.rememberStepEventData(state.jobId, name, data);
 
     const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
     const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
-    const beforeWeight = Object.keys(STEP_META)
-      .slice(0, Math.max(Object.keys(STEP_META).indexOf(name), 0))
-      .reduce((sum, stepName) => sum + (STEP_META[stepName]?.weight ?? 0), 0);
+    const stepOrder = this.getStepOrder(state.jobId);
+    const totalWeight = this.getTotalWeight(state.jobId);
+    const beforeWeight = stepOrder
+      .slice(0, Math.max(stepOrder.indexOf(name), 0))
+      .reduce(
+        (sum, stepName) =>
+          sum + (this.getStepMeta(stepName, state.jobId).weight ?? 0),
+        0,
+      );
     const percent = Math.round(
-      ((beforeWeight + meta.weight * bounded) / TOTAL_WEIGHT) * 100,
+      totalWeight > 0
+        ? ((beforeWeight + meta.weight * bounded) / totalWeight) * 100
+        : 0,
     );
 
     subject?.next({
@@ -726,6 +811,30 @@ export class OrchestratorService {
         'Pipeline was stopped by the user',
       );
     }
+  }
+
+  private rememberStepEventData(
+    jobId: string,
+    stepName: string,
+    data?: ProgressEventData,
+  ): void {
+    if (!data) return;
+    const existing =
+      this.stepEventData.get(jobId) ?? new Map<string, ProgressEventData>();
+    const previous = existing.get(stepName);
+    existing.set(stepName, previous ? { ...previous, ...data } : data);
+    this.stepEventData.set(jobId, existing);
+  }
+
+  private getStepEventData(
+    jobId: string,
+    stepName: string,
+  ): ProgressEventData | undefined {
+    return this.stepEventData.get(jobId)?.get(stepName);
+  }
+
+  private clearStepEventData(jobId: string): void {
+    this.stepEventData.delete(jobId);
   }
 
   private async delayWithControl(jobId: string, ms: number): Promise<void> {
@@ -777,6 +886,7 @@ export class OrchestratorService {
       this.jobs.delete(jobId);
       this.controls.delete(jobId);
       this.progress.delete(jobId);
+      this.clearStepEventData(jobId);
       return;
     }
 
@@ -796,6 +906,7 @@ export class OrchestratorService {
       message: 'Pipeline execution was stopped by the user.',
     });
     subject?.complete();
+    this.clearStepEventData(jobId);
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
@@ -1235,6 +1346,12 @@ export class OrchestratorService {
             '5_planner',
             0.92,
             'Planner review passed. Route map, data contracts, and visual sections are locked in.',
+            this.buildEditRequestProgressData({
+              request: dto.editRequest,
+              title: 'Requested changes attached to the migration plan',
+              summary:
+                'The planner has locked the route map and also attached the user edit request so downstream generation and preview-edit steps can act on it.',
+            }),
           );
           return review;
         },
@@ -1668,6 +1785,8 @@ export class OrchestratorService {
                 content: {
                   posts: content.posts,
                   pages: content.pages,
+                  dbGlobalStyles: content.dbGlobalStyles,
+                  customCssEntries: content.customCssEntries,
                 },
                 themeDir,
                 siteInfo: content.siteInfo,
@@ -1747,50 +1866,80 @@ export class OrchestratorService {
         frontendDir: preview.frontendDir,
         previewUrl: preview.previewUrl,
         apiBaseUrl: preview.apiBaseUrl,
-        previewStage: "baseline",
+        previewStage: 'baseline',
         hasEditRequest,
         uiSourceMapPath: preview.uiSourceMapPath,
         routeEntries: preview.routeEntries,
       };
-      this.emitStepProgress(
-        state,
-        '8_preview_builder',
-        hasEditRequest ? 0.56 : 0.72,
-        hasEditRequest
-          ? 'Baseline preview is live. The requested edits are now being applied in the background.'
-          : 'Preview is live and ready for inspection.',
-        this.buildPreviewEventData({
-          preview,
-          previewStage: 'baseline',
-          hasEditRequest,
-        }),
-      );
-      if (hasEditRequest) {
-        const editPassResult = await this.applyPostMigrationEditPass({
-          jobId,
-          state,
-          stepName: '8_preview_builder',
-          request: dto.editRequest,
-          plan: reviewResult.plan,
-          components: buildComponents,
-          fixAgentModel: resolvedModels.fixAgent,
-          logPath,
-          applyProgress: 0.64,
-          reviewProgress: 0.74,
-          refixProgress: 0.8,
+      {
+        const subject = this.progress.get(jobId);
+        const meta = this.getStepMeta('8_preview_builder', jobId);
+        subject?.next({
+          step: '8_preview_builder',
+          label: meta.label,
+          status: 'done',
+          percent: this.calcPercentThrough('8_preview_builder', jobId),
+          message: hasEditRequest
+            ? 'Baseline preview is live. The pipeline will now run a dedicated requested-edit pass.'
+            : 'Preview is live and ready for inspection.',
+          data: this.buildPreviewEventData({
+            preview,
+            previewStage: 'baseline',
+            hasEditRequest,
+          }),
         });
-        buildComponents = editPassResult.components;
-
-        if (editPassResult.applied) {
+      }
+      if (hasEditRequest) {
+        await this.runStep(state, '8b_edit_request', logPath, async () => {
           this.emitStepProgress(
             state,
-            '8_preview_builder',
-            0.86,
+            '8b_edit_request',
+            0.12,
+            'Reviewing the submitted edit request against the generated React baseline.',
+            this.buildEditRequestProgressData({
+              request: dto.editRequest,
+              title: 'Reviewing the submitted user edit request',
+              summary:
+                'The baseline preview is live. This step is now applying the requested visual changes using the submitted prompt and captures.',
+            }),
+          );
+          const editPassResult = await this.applyPostMigrationEditPass({
+            jobId,
+            state,
+            stepName: '8b_edit_request',
+            request: dto.editRequest,
+            plan: reviewResult.plan,
+            components: buildComponents,
+            fixAgentModel: resolvedModels.fixAgent,
+            logPath,
+            applyProgress: 0.38,
+            reviewProgress: 0.58,
+            refixProgress: 0.72,
+          });
+          buildComponents = editPassResult.components;
+
+          if (!editPassResult.applied) {
+            this.emitStepProgress(
+              state,
+              '8b_edit_request',
+              0.92,
+              'No targeted edit mutations were required after reviewing the submitted edit request.',
+            );
+            return { applied: false, taskCount: 0 };
+          }
+
+          this.emitStepProgress(
+            state,
+            '8b_edit_request',
+            0.82,
             `Syncing ${editPassResult.taskCount} requested edit update(s) into the running preview.`,
           );
           await this.previewBuilder.syncGeneratedComponents(
             preview.previewDir,
             buildComponents,
+            'tokens' in normalizedTheme
+              ? (normalizedTheme as any).tokens
+              : undefined,
           );
           await this.validator.assertPreviewBuild(preview.frontendDir);
           await this.validator.assertPreviewRuntime(
@@ -1799,14 +1948,22 @@ export class OrchestratorService {
           );
           this.emitStepProgress(
             state,
-            '8_preview_builder',
-            0.92,
+            '8b_edit_request',
+            0.94,
             'Requested edits are now visible in the running preview.',
-            this.buildPreviewEventData({
-              preview,
-              previewStage: 'edited',
-              hasEditRequest,
-            }),
+            {
+              ...this.buildPreviewEventData({
+                preview,
+                previewStage: 'edited',
+                hasEditRequest,
+              }),
+              ...(this.buildEditRequestProgressData({
+                request: dto.editRequest,
+                title: 'Requested edits are now visible in preview',
+                summary:
+                  'The submitted edit request has been applied and synced into the live React preview.',
+              }) ?? {}),
+            },
           );
           state.result = {
             ...(state.result ?? {}),
@@ -1819,7 +1976,8 @@ export class OrchestratorService {
             uiSourceMapPath: preview.uiSourceMapPath,
             routeEntries: preview.routeEntries,
           };
-        }
+          return { applied: true, taskCount: editPassResult.taskCount };
+        });
       }
       await stepDelay();
 
@@ -1909,6 +2067,9 @@ export class OrchestratorService {
           await this.previewBuilder.syncGeneratedComponents(
             preview.previewDir,
             buildComponents,
+            'tokens' in normalizedTheme
+              ? (normalizedTheme as any).tokens
+              : undefined,
           );
           await this.validator.assertPreviewBuild(preview.frontendDir);
           await this.validator.assertPreviewRuntime(preview.previewUrl, [
@@ -2061,6 +2222,7 @@ export class OrchestratorService {
       const subject = this.progress.get(jobId);
       subject?.complete();
       setTimeout(() => this.progress.delete(jobId), 60_000);
+      this.clearStepEventData(jobId);
       const finalControl = this.controls.get(jobId);
       if (finalControl) finalControl.finalized = true;
 
@@ -2213,7 +2375,7 @@ export class OrchestratorService {
       step: name,
       label: meta.label,
       status: 'running',
-      percent: this.calcPercentBefore(name),
+      percent: this.calcPercentBefore(name, state.jobId),
       message: meta.activeMessage,
     });
     this.logger.log(`[${state.jobId}] Step ${name} started`);
@@ -2240,14 +2402,16 @@ export class OrchestratorService {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       this.recordStepDuration(state.jobId, name, Date.now() - t0);
       step.status = 'done';
+      const stepData = this.getStepEventData(state.jobId, name);
 
       // Calculate percent after this step completes
       subject?.next({
         step: name,
         label: meta.label,
         status: 'done',
-        percent: this.calcPercentThrough(name),
+        percent: this.calcPercentThrough(name, state.jobId),
         message: `${meta.doneMessage} (${elapsed}s)`,
+        data: stepData,
       });
 
       this.logger.log(`[${state.jobId}] Step ${name} done (${elapsed}s)`);
@@ -2274,8 +2438,9 @@ export class OrchestratorService {
         step: name,
         label: meta.label,
         status: 'error',
-        percent: this.calcPercentBefore(name),
+        percent: this.calcPercentBefore(name, state.jobId),
         message: `${meta.label} failed: ${err.message}`,
+        data: this.getStepEventData(state.jobId, name),
       });
       await this.logToFile(
         logPath,
@@ -2405,42 +2570,98 @@ export class OrchestratorService {
   }
 
   private extractAccuracySummary(metrics: unknown): PipelineAccuracySummary {
-    const metricObject =
-      metrics && typeof metrics === 'object' && 'metrics' in (metrics as object)
-        ? (metrics as { metrics?: unknown }).metrics
-        : metrics;
-
-    const rawDiff = this.readNumericMetric(metricObject, 'diffPercentage');
-    const diffPercentage =
-      typeof rawDiff === 'number'
-        ? Number((rawDiff <= 1 ? rawDiff * 100 : rawDiff).toFixed(2))
-        : null;
-    const differentPixels = this.readNumericMetric(
-      metricObject,
-      'differentPixels',
+    const diffFromCompare = this.normalizePercentMetric(
+      this.readFirstNumericMetric(metrics, [
+        ['diffPercentage'],
+        ['metrics', 'diffPercentage'],
+        ['data', 'diffPercentage'],
+        ['summary', 'overall', 'diffPercentage'],
+        ['metrics', 'summary', 'overall', 'diffPercentage'],
+        ['data', 'summary', 'overall', 'diffPercentage'],
+      ]),
     );
-    const totalPixels = this.readNumericMetric(metricObject, 'totalPixels');
+    const accuracyPercent = this.normalizePercentMetric(
+      this.readFirstNumericMetric(metrics, [
+        ['percent'],
+        ['metrics', 'percent'],
+        ['accuracy'],
+        ['metrics', 'accuracy'],
+        ['visualAvgAccuracy'],
+        ['metrics', 'visualAvgAccuracy'],
+        ['summary', 'overall', 'visualAvgAccuracy'],
+        ['metrics', 'summary', 'overall', 'visualAvgAccuracy'],
+        ['data', 'summary', 'overall', 'visualAvgAccuracy'],
+      ]),
+    );
+    const diffPercentage =
+      diffFromCompare !== null
+        ? diffFromCompare
+        : accuracyPercent === null
+          ? null
+          : Number(Math.max(0, 100 - accuracyPercent).toFixed(2));
+    const differentPixels = this.readFirstNumericMetric(metrics, [
+      ['differentPixels'],
+      ['metrics', 'differentPixels'],
+      ['data', 'differentPixels'],
+      ['summary', 'overall', 'differentPixels'],
+      ['metrics', 'summary', 'overall', 'differentPixels'],
+      ['data', 'summary', 'overall', 'differentPixels'],
+    ]);
+    const totalPixels = this.readFirstNumericMetric(metrics, [
+      ['totalPixels'],
+      ['metrics', 'totalPixels'],
+      ['data', 'totalPixels'],
+      ['summary', 'overall', 'totalPixels'],
+      ['metrics', 'summary', 'overall', 'totalPixels'],
+      ['data', 'summary', 'overall', 'totalPixels'],
+    ]);
+    const percent =
+      accuracyPercent !== null
+        ? accuracyPercent
+        : diffPercentage === null
+          ? null
+          : Number(Math.max(0, 100 - diffPercentage).toFixed(2));
 
     return {
-      percent:
-        diffPercentage === null
-          ? null
-          : Number(Math.max(0, 100 - diffPercentage).toFixed(2)),
+      percent,
       diffPercentage,
       differentPixels,
       totalPixels,
     };
   }
 
-  private readNumericMetric(
+  private normalizePercentMetric(value: number | null): number | null {
+    if (value === null) return null;
+    return Number((value <= 1 ? value * 100 : value).toFixed(2));
+  }
+
+  private readFirstNumericMetric(
     value: unknown,
-    key: 'diffPercentage' | 'differentPixels' | 'totalPixels',
+    paths: string[][],
   ): number | null {
-    if (!value || typeof value !== 'object') return null;
-    const candidate = (value as Record<string, unknown>)[key];
-    return typeof candidate === 'number' && Number.isFinite(candidate)
-      ? candidate
-      : null;
+    for (const path of paths) {
+      const candidate = this.readNumericMetricPath(value, path);
+      if (candidate !== null) return candidate;
+    }
+    return null;
+  }
+
+  private readNumericMetricPath(value: unknown, path: string[]): number | null {
+    let cursor: unknown = value;
+    for (const segment of path) {
+      if (!cursor || typeof cursor !== 'object') return null;
+      cursor = (cursor as Record<string, unknown>)[segment];
+    }
+    return this.coerceFiniteNumber(cursor);
+  }
+
+  private coerceFiniteNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
   }
 
   private buildUiAssessment(
@@ -2556,6 +2777,56 @@ export class OrchestratorService {
     };
   }
 
+  private buildEditRequestProgressData(input: {
+    request?: RunPipelineDto['editRequest'];
+    title: string;
+    summary?: string;
+  }): ProgressEventData | undefined {
+    const { request, title, summary } = input;
+    if (!request) return undefined;
+
+    const prompt = request.prompt?.trim() || undefined;
+    const captures = (request.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      note: attachment.note?.trim() || undefined,
+      imageUrl: attachment.asset?.publicUrl?.trim() || undefined,
+      sourcePageUrl: attachment.sourcePageUrl?.trim() || undefined,
+      pageRoute: attachment.captureContext?.page?.route,
+      pageTitle: attachment.captureContext?.page?.title?.trim() || undefined,
+      capturedAt: attachment.captureContext?.capturedAt,
+      selector:
+        attachment.domTarget?.cssSelector?.trim() ||
+        attachment.targetNode?.domPath?.trim() ||
+        attachment.domTarget?.xpath?.trim() ||
+        undefined,
+      nearestHeading:
+        attachment.domTarget?.nearestHeading?.trim() ||
+        attachment.targetNode?.nearestHeading?.trim() ||
+        undefined,
+      tagName:
+        attachment.domTarget?.tagName?.trim() ||
+        attachment.targetNode?.tagName?.trim() ||
+        undefined,
+    }));
+
+    return {
+      stepDetails: {
+        kind: 'edit-request',
+        title,
+        summary,
+        prompt,
+        language: request.language?.trim() || undefined,
+        targetRoute:
+          request.pageContext?.reactRoute ??
+          request.pageContext?.wordpressRoute ??
+          null,
+        targetPageTitle: request.pageContext?.pageTitle?.trim() || undefined,
+        captureCount: captures.length,
+        captures,
+      },
+    };
+  }
+
   private async applyPostMigrationEditPass(input: {
     jobId: string;
     state: PipelineStatus;
@@ -2600,10 +2871,12 @@ export class OrchestratorService {
       await buildUiMutationCandidatesForGeneratedComponents({
         components,
       });
-    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap({
-      attachments: request.attachments,
-      uiSourceMap: inMemoryUiSourceMapEntries,
-    });
+    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap(
+      {
+        attachments: request.attachments,
+        uiSourceMap: inMemoryUiSourceMapEntries,
+      },
+    );
     await this.logExactCaptureResolution({
       jobId,
       logPath,
@@ -2688,7 +2961,8 @@ export class OrchestratorService {
       if (replacementIndex !== -1) {
         components[replacementIndex] = revalidated.components[0];
       }
-      editedComponentNames[task.componentName] = fixedResult.editedComponentName;
+      editedComponentNames[task.componentName] =
+        fixedResult.editedComponentName;
       return true;
     };
 
@@ -2741,7 +3015,10 @@ export class OrchestratorService {
     });
 
     this.logger.log(`[Capture Review] ${captureReviewResult.summary}`);
-    await this.logToFile(logPath, `[Capture Review] ${captureReviewResult.summary}`);
+    await this.logToFile(
+      logPath,
+      `[Capture Review] ${captureReviewResult.summary}`,
+    );
 
     const advisoryResults = captureReviewResult.results.filter(
       (result) => result.status !== 'matched',
@@ -2750,7 +3027,9 @@ export class OrchestratorService {
       const issueText =
         result.issues.map((issue) => issue.message).join(' | ') ||
         result.summary;
-      this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+      this.logger.warn(
+        `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+      );
       await this.logToFile(
         logPath,
         `[Capture Review] ${result.debugSummary} :: ${issueText}`,
@@ -2807,7 +3086,8 @@ export class OrchestratorService {
         );
       }
 
-      const refixValidation = this.validator.collectValidationIssues(components);
+      const refixValidation =
+        this.validator.collectValidationIssues(components);
       if (refixValidation.failures.length > 0) {
         const validationSummary = refixValidation.failures
           .map(
@@ -2854,7 +3134,9 @@ export class OrchestratorService {
         const issueText =
           result.issues.map((issue) => issue.message).join(' | ') ||
           result.summary;
-        this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+        this.logger.warn(
+          `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+        );
         await this.logToFile(
           logPath,
           `[Capture Review] ${result.debugSummary} :: ${issueText}`,
@@ -2883,19 +3165,6 @@ export class OrchestratorService {
       applied: true,
       taskCount: postMigrationEditTasks.length,
     };
-  }
-
-  private async logResolvedEditRequestContext(
-    jobId: string,
-    logPath: string,
-    context?: ResolvedEditRequestContext,
-  ): Promise<void> {
-    const lines = this.buildEditRequestLogLines(context);
-    for (const line of lines) {
-      const formatted = `[${jobId}] [edit-request] ${line}`;
-      this.logger.log(formatted);
-      await this.logToFile(logPath, formatted);
-    }
   }
 
   private async logExactCaptureResolution(input: {
