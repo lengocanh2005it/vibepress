@@ -360,6 +360,7 @@ export class PlanReviewerService {
       isDetail: item.isDetail,
       dataNeeds: nextDataNeeds,
       stripLayoutChrome: item.type === 'page',
+      sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
     const nextSections = sanitizedSections.sections;
 

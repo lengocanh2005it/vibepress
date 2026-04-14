@@ -1,6 +1,10 @@
 import type {
   ThemeBlockStyle,
   ThemeDefaults,
+  ThemeInteractionTarget,
+  ThemePreciseInteractionBridge,
+  ThemeInteractionState,
+  ThemeInteractionTokens,
   ThemeTokens,
 } from '../../modules/agents/block-parser/block-parser.service.js';
 
@@ -13,6 +17,7 @@ export interface StyleTokenExtractionResult {
   spacing: ThemeTokens['spacing'];
   defaults?: ThemeDefaults;
   blockStyles?: Record<string, ThemeBlockStyle>;
+  interactions?: ThemeInteractionTokens;
 }
 
 interface CssRule {
@@ -65,6 +70,7 @@ export function extractStyleCssTokens(
     spacing: inferred.spacing,
     defaults: extractDefaults(rules, ctx),
     blockStyles: extractBlockStyles(rules, ctx),
+    interactions: extractInteractionTokens(rules, ctx),
   };
 }
 
@@ -451,6 +457,89 @@ function extractBlockStyles(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+function extractInteractionTokens(
+  rules: CssRule[],
+  ctx: ResolveContext,
+): ThemeInteractionTokens | undefined {
+  const interactions: ThemeInteractionTokens = {};
+
+  for (const rule of rules) {
+    for (const selector of rule.selectors) {
+      const target = classifyInteractionTarget(selector);
+      if (target !== 'button') continue;
+
+      const state = classifyInteractionState(selector);
+      const declarations = pickInteractionDeclarations(rule.declarations, ctx);
+      if (Object.keys(declarations).length === 0) continue;
+
+      interactions.button ??= {};
+      interactions.button[state] = mergeInteractionState(
+        interactions.button[state],
+        declarations,
+      );
+    }
+  }
+
+  const precise = extractPreciseInteractionBridges(rules, ctx);
+  if (precise?.length) interactions.precise = precise;
+
+  return interactions.button || interactions.precise?.length
+    ? interactions
+    : undefined;
+}
+
+function extractPreciseInteractionBridges(
+  rules: CssRule[],
+  ctx: ResolveContext,
+): ThemePreciseInteractionBridge[] | undefined {
+  const bridges = new Map<string, ThemePreciseInteractionBridge>();
+
+  const upsert = (
+    className: string,
+    target: ThemeInteractionTarget,
+    state: keyof ThemeInteractionStyleStateMap,
+    declarations: ThemeInteractionState,
+  ) => {
+    const key = `${target}::${className}`;
+    const existing = bridges.get(key) ?? { className, target };
+    bridges.set(key, {
+      ...existing,
+      [state]: mergeInteractionState(existing[state], declarations),
+    });
+  };
+
+  for (const rule of rules) {
+    const declarations = pickInteractionDeclarations(rule.declarations, ctx);
+    if (Object.keys(declarations).length === 0) continue;
+
+    for (const selector of rule.selectors) {
+      const target = classifyPreciseInteractionTarget(selector);
+      if (!target) continue;
+      const state = classifyInteractionState(selector);
+      const classes = extractPreciseCustomClasses(selector, target);
+      for (const className of classes) {
+        upsert(className, target, state, declarations);
+      }
+    }
+  }
+
+  const values = Array.from(bridges.values()).filter(
+    (bridge) =>
+      hasInteractionStateValues(bridge.base) ||
+      hasInteractionStateValues(bridge.hover) ||
+      hasInteractionStateValues(bridge.focus) ||
+      hasInteractionStateValues(bridge.active),
+  );
+
+  return values.length > 0
+    ? values.sort(
+        (a, b) =>
+          a.className.localeCompare(b.className) ||
+          a.target.localeCompare(b.target),
+      )
+    : undefined;
+}
+
 function buildThemeBlockStyle(
   decls: Record<string, string>,
   ctx: ResolveContext,
@@ -590,6 +679,181 @@ function pickDecls(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function classifyInteractionTarget(selector: string): 'button' | null {
+  const normalized = selector.trim();
+  if (!normalized) return null;
+  if (
+    /\b(admin|customize|wp-admin|woocommerce|elementor|tribe-|slick-|swiper-)\b/i.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+
+  return /(\.wp-block-button\b|\.wp-block-button__link\b|\.wp-element-button\b|(^|[\s>+~])button\b|input\[type=['"]?(submit|button)['"]?\]|\.(button|btn)\b)/i.test(
+    normalized,
+  )
+    ? 'button'
+    : null;
+}
+
+type ThemeInteractionStyleStateMap = {
+  base?: ThemeInteractionState;
+  hover?: ThemeInteractionState;
+  focus?: ThemeInteractionState;
+  active?: ThemeInteractionState;
+};
+
+function classifyPreciseInteractionTarget(
+  selector: string,
+): ThemeInteractionTarget | null {
+  const normalized = selector.trim();
+  if (!normalized) return null;
+  if (
+    /\b(admin|customize|wp-admin|woocommerce|elementor|tribe-|slick-|swiper-)\b/i.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+  if (classifyInteractionTarget(normalized) === 'button') return 'button';
+  if (
+    /(^|[\s>+~])img\b|\.wp-block-image\b|\.wp-block-post-featured-image\b|\.blocks-gallery-item\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'image';
+  }
+  if (
+    /(^|[\s>+~])a\b|\.wp-block-navigation-link\b|\.wp-block-post-title\b|\.wp-block-read-more\b|\.wp-block-site-title\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'link';
+  }
+  if (
+    /(^|[\s>+~])(article|figure|section|div)\b|\.wp-block-group\b|\.wp-block-cover\b|\.wp-block-column\b|\.wp-block-media-text\b|\.wp-block-post\b|\.wp-block-query\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'card';
+  }
+  return null;
+}
+
+function extractPreciseCustomClasses(
+  selector: string,
+  target: ThemeInteractionTarget,
+): string[] {
+  const matches = selector.match(/\.(-?[_a-zA-Z]+[_a-zA-Z0-9-]*)/g) ?? [];
+  const classes = matches
+    .map((token) => token.slice(1))
+    .filter((className) => isPreciseClassCandidate(className))
+    .filter((className) =>
+      selectorSupportsPreciseClassTarget(selector, className, target),
+    );
+  return Array.from(new Set(classes));
+}
+
+function isPreciseClassCandidate(className: string): boolean {
+  const normalized = className.trim().toLowerCase();
+  if (!normalized) return false;
+  if (!normalized.includes('-') && !normalized.includes('__')) return false;
+  return !/^(wp-|has-|align|is-layout-|current-|menu-item|page-item|post-|blocks-gallery|size-|components-|editor-|screen-reader-text$)/i.test(
+    normalized,
+  );
+}
+
+function selectorSupportsPreciseClassTarget(
+  selector: string,
+  className: string,
+  target: ThemeInteractionTarget,
+): boolean {
+  const escaped = escapeRegex(className);
+  const segmentPattern = new RegExp(`[^>+~\\s]*\\.${escaped}[^>+~\\s]*`, 'i');
+  const segmentMatch = selector.match(segmentPattern);
+  const segment = segmentMatch?.[0] ?? '';
+  if (!segment) return false;
+
+  if (target === 'button') {
+    return /wp-block-button|wp-block-button__link|wp-element-button|button\b|(^|[^a-z])a\b/i.test(
+      selector,
+    );
+  }
+  if (target === 'image') {
+    return /img\b|wp-block-image|wp-block-post-featured-image|blocks-gallery-item/i.test(
+      selector,
+    );
+  }
+  if (target === 'link') {
+    return /(^|[^a-z])a\b|wp-block-navigation-link|wp-block-post-title|wp-block-read-more|wp-block-site-title/i.test(
+      selector,
+    );
+  }
+  return (
+    /:hover|:focus|:active/i.test(segment) ||
+    /wp-block-group|wp-block-cover|wp-block-column|wp-block-media-text|wp-block-post|(^|[^a-z])(article|figure|section|div)\b/i.test(
+      selector,
+    )
+  );
+}
+
+function classifyInteractionState(
+  selector: string,
+): keyof NonNullable<ThemeInteractionTokens['button']> {
+  if (/:hover\b/i.test(selector)) return 'hover';
+  if (/:focus-visible\b/i.test(selector) || /:focus\b/i.test(selector)) {
+    return 'focus';
+  }
+  if (/:active\b/i.test(selector)) return 'active';
+  return 'base';
+}
+
+function pickInteractionDeclarations(
+  declarations: Record<string, string>,
+  ctx: ResolveContext,
+): ThemeInteractionState {
+  const interaction: ThemeInteractionState = {};
+  const mapProp = (
+    key: keyof ThemeInteractionState,
+    prop: string,
+    kind: 'color' | 'plain',
+  ) => {
+    const resolved =
+      kind === 'color'
+        ? resolveValue(declarations[prop], ctx, 'color')
+        : resolveDeclarationValue(declarations[prop] ?? '', ctx);
+    if (resolved) interaction[key] = resolved;
+  };
+
+  mapProp('transition', 'transition', 'plain');
+  mapProp('transform', 'transform', 'plain');
+  mapProp('boxShadow', 'box-shadow', 'plain');
+  mapProp('opacity', 'opacity', 'plain');
+  mapProp('color', 'color', 'color');
+  mapProp('backgroundColor', 'background-color', 'color');
+  mapProp('textDecoration', 'text-decoration', 'plain');
+  if (!interaction.backgroundColor) {
+    mapProp('backgroundColor', 'background', 'color');
+  }
+
+  return interaction;
+}
+
+function mergeInteractionState(
+  base: ThemeInteractionState | undefined,
+  extra: ThemeInteractionState,
+): ThemeInteractionState {
+  return {
+    ...(base ?? {}),
+    ...extra,
+  };
+}
+
+function hasInteractionStateValues(state?: ThemeInteractionState): boolean {
+  return !!state && Object.keys(state).length > 0;
+}
+
 function resolveValue(
   value: string | undefined,
   ctx: ResolveContext,
@@ -601,6 +865,10 @@ function resolveValue(
   if (kind === 'font') return isFontFamily(resolved) ? resolved : undefined;
   if (kind === 'size') return isSize(resolved) ? resolved : undefined;
   return resolved;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function resolveRaw(

@@ -36,6 +36,11 @@ import {
   extractStaticImageSources,
   parseVisualPlanDetailed,
 } from '../react-generator/prompts/visual-plan.prompt.js';
+import {
+  extractAuxiliaryLabelsFromSections,
+  extractSourceBackedAuxiliaryLabels,
+  mergeAuxiliaryLabels,
+} from '../react-generator/auxiliary-section.guard.js';
 import { buildRepoManifestContextNote } from '../repo-analyzer/repo-manifest-context.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type {
@@ -55,6 +60,8 @@ export interface ComponentPlan {
   dataNeeds: string[];
   isDetail: boolean;
   description: string;
+  customClassNames?: string[];
+  sourceBackedAuxiliaryLabels?: string[];
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
 }
@@ -64,6 +71,7 @@ export type PlanResult = ComponentPlan[];
 interface PlanningSourceContext {
   source: string;
   sourceAnalysis: string;
+  sourceBackedAuxiliaryLabels: string[];
 }
 
 interface PlanningVisualReference {
@@ -175,17 +183,17 @@ export class PlannerService {
         userPrompt: prompt,
         maxTokens: 4096,
       });
-        if (tokenLogPath) {
-          await this.tokenTracker.track(
-            resolvedModel,
-            inTok,
-            outTok,
-            `planner:${attempt === 1 ? 'phase-a' : `phase-a-retry-${attempt}`}`,
-            {
-              scope: editRequestContext ? 'edit-request' : 'base',
-            },
-          );
-        }
+      if (tokenLogPath) {
+        await this.tokenTracker.track(
+          resolvedModel,
+          inTok,
+          outTok,
+          `planner:${attempt === 1 ? 'phase-a' : `phase-a-retry-${attempt}`}`,
+          {
+            scope: editRequestContext ? 'edit-request' : 'base',
+          },
+        );
+      }
 
       lastRaw = raw;
       const parsed = this.tryParseResponseDetailed(raw, templateNames);
@@ -494,6 +502,8 @@ export class PlannerService {
     visualReferenceCache?: Map<string, PlanningVisualReference | null>,
   ): Promise<PlanResult[number]> {
     let visualPlan: ComponentVisualPlan | undefined;
+    let detectedCustomClassNames: string[] = [];
+    let sourceBackedAuxiliaryLabels: string[] = [];
     const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
       componentPlan,
       content,
@@ -531,13 +541,6 @@ export class PlannerService {
             isSharedChromePartialComponent(item.componentName),
         ),
       );
-      const visualContract = {
-        componentType: componentPlan.type,
-        route: componentPlan.route,
-        isDetail: componentPlan.isDetail,
-        dataNeeds: visualDataNeeds,
-        stripLayoutChrome: componentPlan.type === 'page',
-      } as const;
       const visualReference = await this.prepareVisualReferenceForComponent(
         componentPlan,
         content,
@@ -570,6 +573,20 @@ export class PlannerService {
           return undefined;
         }
       })();
+      detectedCustomClassNames =
+        this.collectDraftCustomClassNames(draftSections);
+      sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
+        planningSource.sourceBackedAuxiliaryLabels,
+        extractAuxiliaryLabelsFromSections(draftSections),
+      );
+      const visualContract = {
+        componentType: componentPlan.type,
+        route: componentPlan.route,
+        isDetail: componentPlan.isDetail,
+        dataNeeds: visualDataNeeds,
+        stripLayoutChrome: componentPlan.type === 'page',
+        sourceBackedAuxiliaryLabels,
+      } as const;
 
       const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
         componentName: componentPlan.componentName,
@@ -589,6 +606,7 @@ export class PlannerService {
               viewport: visualReference.viewport,
             }
           : undefined,
+        sourceBackedAuxiliaryLabels,
         draftSections,
         editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
           audience: 'visual-plan',
@@ -693,7 +711,16 @@ export class PlannerService {
       );
     }
 
-    return { ...componentPlan, visualPlan };
+    return {
+      ...componentPlan,
+      ...(detectedCustomClassNames.length > 0
+        ? { customClassNames: detectedCustomClassNames }
+        : {}),
+      ...(sourceBackedAuxiliaryLabels.length > 0
+        ? { sourceBackedAuxiliaryLabels }
+        : {}),
+      visualPlan,
+    };
   }
 
   private async requestVisualPlanCompletion(input: {
@@ -1934,11 +1961,79 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (hints.length > 0) {
       summaryLines.push(...hints.map((hint) => `- ${hint}`));
     }
+    const customClassNames =
+      this.extractCustomClassNamesFromSource(fallbackSource);
+    const sourceBackedAuxiliaryLabels = extractSourceBackedAuxiliaryLabels({
+      source: fallbackSource,
+    });
+    if (customClassNames.length > 0) {
+      summaryLines.push(
+        `Custom classes detected in source: ${customClassNames
+          .slice(0, 12)
+          .map((className) => `\`${className}\``)
+          .join(
+            ', ',
+          )}${customClassNames.length > 12 ? ` (+${customClassNames.length - 12} more)` : ''}`,
+      );
+    }
+    if (sourceBackedAuxiliaryLabels.length > 0) {
+      summaryLines.push(
+        `Source-backed auxiliary labels allowed for this component: ${sourceBackedAuxiliaryLabels
+          .map((label) => `\`${label}\``)
+          .join(', ')}`,
+      );
+    }
 
     return {
       source: fallbackSource,
       sourceAnalysis: summaryLines.join('\n'),
+      sourceBackedAuxiliaryLabels,
     };
+  }
+
+  private collectDraftCustomClassNames(
+    draftSections?: SectionPlan[],
+  ): string[] {
+    if (!draftSections?.length) return [];
+    return [
+      ...new Set(
+        draftSections.flatMap((section) => section.customClassNames ?? []),
+      ),
+    ];
+  }
+
+  private extractCustomClassNamesFromSource(source: string): string[] {
+    try {
+      const parsed = JSON.parse(source);
+      return [...new Set(this.collectCustomClassNamesFromValue(parsed))];
+    } catch {
+      return [];
+    }
+  }
+
+  private collectCustomClassNamesFromValue(value: unknown): string[] {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+      return value.flatMap((entry) =>
+        this.collectCustomClassNamesFromValue(entry),
+      );
+    }
+    if (typeof value !== 'object') return [];
+
+    const record = value as Record<string, unknown>;
+    const own = Array.isArray(record.customClassNames)
+      ? record.customClassNames
+          .filter((entry): entry is string => typeof entry === 'string')
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      : [];
+
+    return [
+      ...own,
+      ...Object.values(record).flatMap((entry) =>
+        this.collectCustomClassNamesFromValue(entry),
+      ),
+    ];
   }
 
   private stripClassicSharedIncludes(source: string, hints: string[]): string {

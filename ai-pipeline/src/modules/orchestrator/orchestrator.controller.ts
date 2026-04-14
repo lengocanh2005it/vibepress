@@ -45,7 +45,9 @@ export class OrchestratorController {
       throw new BadRequestException('jobId is required');
     }
     if (!body?.editRequest?.reactSourceTarget) {
-      throw new BadRequestException('editRequest.reactSourceTarget is required');
+      throw new BadRequestException(
+        'editRequest.reactSourceTarget is required',
+      );
     }
     return this.orchestratorService.submitReactVisualEdit(body);
   }

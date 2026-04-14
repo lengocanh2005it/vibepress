@@ -11,6 +11,7 @@ import {
   WpCustomPostType,
   WpDbTemplate,
   WpDbGlobalStyle,
+  WpCustomCssEntry,
   WpReadingSettings,
 } from '../../sql/wp-query.service.js';
 import type {
@@ -27,6 +28,7 @@ export interface DbContentResult {
   menus: WpMenu[];
   dbTemplates: WpDbTemplate[];
   dbGlobalStyles: WpDbGlobalStyle[];
+  customCssEntries: WpCustomCssEntry[];
   readingSettings: WpReadingSettings;
   /** All public taxonomies (categories, tags, custom) with their terms */
   taxonomies: WpTaxonomy[];
@@ -58,6 +60,7 @@ export class DbContentService {
       menus,
       dbTemplates,
       dbGlobalStyles,
+      customCssEntries,
       readingSettings,
       taxonomies,
       runtimeFeatures,
@@ -68,6 +71,7 @@ export class DbContentService {
       this.wpQuery.getMenus(connectionString),
       this.wpQuery.getDbTemplates(connectionString),
       this.wpQuery.getDbGlobalStyles(connectionString),
+      this.wpQuery.getCustomCssEntries(connectionString),
       this.wpQuery.getReadingSettings(connectionString),
       this.wpQuery.getTaxonomies(connectionString),
       this.wpQuery.getRuntimeFeatures(connectionString),
@@ -79,7 +83,7 @@ export class DbContentService {
 
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ` +
-        `${dbTemplates.length} db templates, ${dbGlobalStyles.length} db global styles, ` +
+        `${dbTemplates.length} db templates, ${dbGlobalStyles.length} db global styles, ${customCssEntries.length} custom css entries, ` +
         `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
@@ -91,6 +95,7 @@ export class DbContentService {
       menus,
       dbTemplates,
       dbGlobalStyles,
+      customCssEntries,
       readingSettings,
       taxonomies,
       plugins: runtimeFeatures.plugins,

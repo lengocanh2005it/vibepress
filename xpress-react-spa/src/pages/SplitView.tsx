@@ -10,9 +10,13 @@ const SplitView: React.FC = () => {
   const siteId: string = location.state?.siteId || "";
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [selectedStepEvent, setSelectedStepEvent] =
+    useState<PipelineProgressEvent | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
+  const startedAtRef = useRef<number>(Date.now());
 
   const getConnectionBadge = () => {
     switch (sse.connectionState) {
@@ -57,6 +61,61 @@ const SplitView: React.FC = () => {
   };
 
   const connectionBadge = getConnectionBadge();
+
+  const getStatusLabel = (status: PipelineProgressEvent["status"]) => {
+    switch (status) {
+      case "done":
+        return "Done";
+      case "running":
+        return "Running";
+      case "stopped":
+        return "Stopped";
+      case "skipped":
+        return "Skipped";
+      case "error":
+        return "Error";
+      case "pending":
+      default:
+        return "Pending";
+    }
+  };
+
+  const getStatusBadgeClass = (status: PipelineProgressEvent["status"]) => {
+    switch (status) {
+      case "done":
+        return "border-emerald-300 bg-emerald-50 text-emerald-800";
+      case "running":
+        return "border-sky-300 bg-sky-50 text-sky-800";
+      case "stopped":
+        return "border-red-300 bg-red-50 text-red-800";
+      case "skipped":
+        return "border-slate-300 bg-slate-100 text-slate-700";
+      case "error":
+        return "border-red-300 bg-red-50 text-red-800";
+      case "pending":
+      default:
+        return "border-slate-300 bg-white text-slate-700";
+    }
+  };
+
+  const resolveCaptureImageUrl = (imageUrl?: string) => {
+    if (!imageUrl) return null;
+    if (/^(https?:)?\/\//i.test(imageUrl) || imageUrl.startsWith("data:")) {
+      return imageUrl;
+    }
+    const backendUrl = import.meta.env.VITE_BACKEND_URL?.replace(/\/$/, "");
+    if (imageUrl.startsWith("/") && backendUrl) {
+      return `${backendUrl}${imageUrl}`;
+    }
+    return imageUrl;
+  };
+
+  const formatCapturedAt = (capturedAt?: string) => {
+    if (!capturedAt) return null;
+    const parsed = new Date(capturedAt);
+    if (Number.isNaN(parsed.getTime())) return capturedAt;
+    return parsed.toLocaleString();
+  };
 
   const getStatusIcon = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
@@ -197,21 +256,31 @@ const SplitView: React.FC = () => {
   }, [hasEditRequest, previewStage]);
 
   useEffect(() => {
+    startedAtRef.current = Date.now();
     setElapsedSeconds(0);
-    const startedAt = Date.now();
+  }, [jobId]);
+
+  const isPipelineCompleted =
+    sse.connectionState === "completed" || Boolean(completionEvent);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
-      const isFinished =
-        sse.connectionState === "completed" || Boolean(completionEvent);
-      if (isFinished) {
+      const nextElapsed = Math.max(
+        0,
+        Math.floor((Date.now() - startedAtRef.current) / 1000),
+      );
+
+      if (isPipelineCompleted) {
+        setElapsedSeconds(nextElapsed);
         window.clearInterval(timer);
         return;
       }
 
-      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+      setElapsedSeconds(nextElapsed);
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [completionEvent, jobId, sse.connectionState]);
+  }, [completionEvent, isPipelineCompleted, sse.connectionState]);
 
   const elapsedLabel = useMemo(() => {
     const hours = Math.floor(elapsedSeconds / 3600);
@@ -229,9 +298,11 @@ const SplitView: React.FC = () => {
       .join(":");
   }, [elapsedSeconds]);
 
+  const completionDurationLabel = isPipelineCompleted ? elapsedLabel : null;
+
   useEffect(() => {
     const shouldWarnBeforeRefresh = () =>
-      !completionEvent && sse.connectionState !== "completed";
+      !isPipelineCompleted;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!shouldWarnBeforeRefresh()) return;
@@ -267,11 +338,23 @@ const SplitView: React.FC = () => {
   }, [completionEvent, sse.connectionState]);
   const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
 
+  const openStopConfirm = () => {
+    if (deleteState.loading || deleteState.done) return;
+    setShowStopConfirm(true);
+  };
+
+  const closeStopConfirm = () => {
+    if (deleteState.loading) return;
+    setShowStopConfirm(false);
+  };
+
   const handleDeletePipeline = async () => {
     setDeleteState({ loading: true, done: false });
     try {
       await fetch(`/ai-api/pipeline/delete/${jobId}`, { method: "POST" });
+      sse.disconnect();
       setDeleteState({ loading: false, done: true });
+      setShowStopConfirm(false);
     } catch {
       setDeleteState({ loading: false, done: false });
     }
@@ -323,8 +406,7 @@ const SplitView: React.FC = () => {
   const actionButtonClass =
     "inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2";
 
-  // Group events by step and get the latest status for each step
-  const getLatestStepStatuses = () => {
+  const stepStatuses = useMemo(() => {
     const stepMap = new Map<string, PipelineProgressEvent>();
     sse.allEvents.forEach((event) => {
       stepMap.set(event.step, event);
@@ -334,7 +416,7 @@ const SplitView: React.FC = () => {
       const stepB = parseInt(b.step.split("_")[0]) || 0;
       return stepA - stepB;
     });
-  };
+  }, [sse.allEvents]);
 
   if (!jobId) {
     return (
@@ -376,17 +458,22 @@ const SplitView: React.FC = () => {
             <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
               Job: {jobId.slice(0, 8)}...
             </span>
-            <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
-              Elapsed: {elapsedLabel}
-            </span>
-            <span
-              className={`text-xs font-mono px-2 py-1 rounded ${connectionBadge.className}`}
-            >
+              <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
+                Elapsed: {elapsedLabel}
+              </span>
+              {completionDurationLabel && (
+                <span className="text-xs font-mono px-2 py-1 rounded bg-emerald-500/15 text-emerald-700">
+                  Completed in: {completionDurationLabel}
+                </span>
+              )}
+              <span
+                className={`text-xs font-mono px-2 py-1 rounded ${connectionBadge.className}`}
+              >
               {connectionBadge.label}
             </span>
             {sse.isConnected && !deleteState.done && (
               <button
-                onClick={handleDeletePipeline}
+                onClick={openStopConfirm}
                 disabled={deleteState.loading}
                 className="text-xs font-mono px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
               >
@@ -445,21 +532,33 @@ const SplitView: React.FC = () => {
             </p>
           ) : null}
 
-          {getLatestStepStatuses().map((event) => (
-            <div key={event.step} className="flex gap-3 items-start">
+          {stepStatuses.map((event) => (
+            <button
+              key={event.step}
+              type="button"
+              onClick={() => setSelectedStepEvent(event)}
+              className="group flex w-full items-start gap-3 rounded-2xl border border-transparent bg-white/25 px-3 py-3 text-left transition hover:border-[#d9d1c3] hover:bg-white/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+            >
               <span
-                className={`material-symbols-outlined text-lg ${getStatusColor(event.status)}`}
+                className={`material-symbols-outlined mt-0.5 text-lg ${getStatusColor(event.status)}`}
                 style={{ fontVariationSettings: "'FILL' 1" }}
               >
                 {getStatusIcon(event.status)}
               </span>
-              <div className="space-y-1 flex-1">
-                <p className="text-green-700">{event.label}</p>
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-green-700 transition group-hover:text-green-800">
+                    {event.label}
+                  </p>
+                  <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    View details
+                  </span>
+                </div>
                 {event.message && (
                   <p className="text-black/50 text-xs">{event.message}</p>
                 )}
-                <div className="flex items-center gap-2 mt-2">
-                  <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/10">
                     <div
                       className="h-full bg-primary transition-all duration-300"
                       style={{ width: `${event.percent}%` }}
@@ -470,7 +569,7 @@ const SplitView: React.FC = () => {
                   </span>
                 </div>
               </div>
-            </div>
+            </button>
           ))}
 
           {previewUrl && (
@@ -490,32 +589,24 @@ const SplitView: React.FC = () => {
               <div className="mt-3">
                 <p className="text-sm font-semibold text-slate-900">{previewStatus.title}</p>
                 <p className="mt-1 text-xs text-slate-600">{previewStatus.description}</p>
+                {completionDurationLabel && (
+                  <p className="mt-2 text-xs font-medium text-emerald-800">
+                    Total completion time: {completionDurationLabel}
+                  </p>
+                )}
               </div>
               <div className="mt-4 space-y-2 rounded-xl border border-[#d8cec0] bg-[#d7d1ca] p-3 text-[11px] text-slate-700">
                 <p className="break-all">
-                  Frontend Preview: <span className="text-slate-900">{previewUrl}</span>
+                  Preview URL: <span className="text-slate-900">{previewUrl}</span>
                 </p>
-                {apiBaseUrl && (
-                  <p className="break-all">
-                    Backend API: <span className="text-slate-900">{apiBaseUrl}</span>
-                  </p>
-                )}
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   onClick={() => window.open(previewUrl, "_blank")}
                   className={`${actionButtonClass} border-teal-800 bg-teal-700 text-white hover:bg-teal-800 focus-visible:ring-teal-500`}
                 >
-                  Open Frontend
+                  Open Preview
                 </button>
-                {apiBaseUrl && (
-                  <button
-                    onClick={() => window.open(apiBaseUrl, "_blank")}
-                    className={`${actionButtonClass} border-cyan-800 bg-cyan-700 text-white hover:bg-cyan-800 focus-visible:ring-cyan-500`}
-                  >
-                    Open Backend
-                  </button>
-                )}
                 <button
                   onClick={handleRefreshPreview}
                   className={`${actionButtonClass} border-slate-300 bg-white text-slate-900 hover:bg-slate-100 focus-visible:ring-slate-400`}
@@ -630,19 +721,8 @@ const SplitView: React.FC = () => {
                   <span className="material-symbols-outlined text-[18px]">
                     language
                   </span>
-                  Frontend
+                  Open Preview
                 </button>
-                {apiBaseUrl && (
-                  <button
-                    onClick={() => window.open(apiBaseUrl, "_blank")}
-                    className={`${actionButtonClass} border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100 focus-visible:ring-sky-300`}
-                  >
-                    <span className="material-symbols-outlined text-[18px]">
-                      dns
-                    </span>
-                    Backend
-                  </button>
-                )}
                 <button
                   onClick={handleRefreshPreview}
                   title="Refresh preview"
@@ -716,6 +796,292 @@ const SplitView: React.FC = () => {
           )}
         </div>
       </section>
+
+      {showStopConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={closeStopConfirm}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 border-b border-outline-variant/30 px-6 py-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-red-500/10 text-red-500">
+                <span
+                  className="material-symbols-outlined"
+                  style={{ fontVariationSettings: "'FILL' 1" }}
+                >
+                  stop_circle
+                </span>
+              </div>
+              <div className="min-w-0">
+                <h2 className="font-headline text-lg font-semibold text-on-surface">
+                  Dừng pipeline hiện tại?
+                </h2>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  Tất cả tiến trình đang chạy sẽ bị dừng và preview/artifacts hiện tại sẽ bị xóa.
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                Bạn có muốn dừng workflow AI hiện tại không?
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 pb-6">
+              <button
+                onClick={closeStopConfirm}
+                disabled={deleteState.loading}
+                className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleDeletePipeline}
+                disabled={deleteState.loading}
+                className="inline-flex items-center gap-2 rounded-xl border border-red-700 bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-[18px]">
+                  stop_circle
+                </span>
+                {deleteState.loading ? "Đang dừng..." : "Dừng pipeline"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedStepEvent &&
+        (() => {
+          const details = selectedStepEvent.data?.stepDetails;
+          const previewLink = selectedStepEvent.data?.previewUrl;
+
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+              onClick={() => setSelectedStepEvent(null)}
+            >
+              <div
+                className="w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-[28px] border border-outline-variant/40 bg-[#f8f3eb] shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="sticky top-0 z-10 border-b border-[#e4dac9] bg-[#f8f3eb]/95 px-6 py-5 backdrop-blur">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex min-w-0 items-start gap-4">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white shadow-sm">
+                        <span
+                          className={`material-symbols-outlined text-2xl ${getStatusColor(selectedStepEvent.status)}`}
+                          style={{ fontVariationSettings: "'FILL' 1" }}
+                        >
+                          {getStatusIcon(selectedStepEvent.status)}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${getStatusBadgeClass(selectedStepEvent.status)}`}
+                          >
+                            {getStatusLabel(selectedStepEvent.status)}
+                          </span>
+                          <span className="inline-flex items-center rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-700">
+                            {selectedStepEvent.percent}% complete
+                          </span>
+                          {details?.kind === "edit-request" && (
+                            <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-800">
+                              User Edit Request
+                            </span>
+                          )}
+                        </div>
+                        <h2 className="mt-3 font-headline text-2xl font-semibold text-slate-900">
+                          {details?.title || selectedStepEvent.label}
+                        </h2>
+                        <p className="mt-2 text-sm leading-6 text-slate-600">
+                          {details?.summary ||
+                            selectedStepEvent.message ||
+                            "This workflow step does not expose extra structured details yet."}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSelectedStepEvent(null)}
+                      className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 transition hover:bg-slate-100"
+                    >
+                      <span className="material-symbols-outlined text-[20px]">
+                        close
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-6 px-6 py-6">
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="rounded-2xl border border-[#e4dac9] bg-white p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        Step
+                      </p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">
+                        {selectedStepEvent.label}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-[#e4dac9] bg-white p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        Latest Log
+                      </p>
+                      <p className="mt-2 text-sm leading-6 text-slate-700">
+                        {selectedStepEvent.message || "No additional log message."}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-[#e4dac9] bg-white p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        Preview Context
+                      </p>
+                      <p className="mt-2 text-sm leading-6 text-slate-700">
+                        {previewLink
+                          ? "This step is attached to a live preview context."
+                          : "No preview URL was attached to this step."}
+                      </p>
+                      {previewLink && (
+                        <button
+                          type="button"
+                          onClick={() => window.open(previewLink, "_blank")}
+                          className="mt-3 inline-flex items-center gap-2 rounded-xl border border-emerald-700 bg-emerald-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">
+                            open_in_new
+                          </span>
+                          Open Related Preview
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {details?.kind === "edit-request" && (
+                    <>
+                      <div className="rounded-[24px] border border-[#e4dac9] bg-white p-5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="inline-flex items-center rounded-full bg-[#eef3ea] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#446150]">
+                            Main Request
+                          </span>
+                          {details.language && (
+                            <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-700">
+                              {details.language}
+                            </span>
+                          )}
+                          {details.targetRoute && (
+                            <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-700">
+                              Route: {details.targetRoute}
+                            </span>
+                          )}
+                          <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-700">
+                            Captures: {details.captureCount}
+                          </span>
+                        </div>
+                        <div className="mt-4 rounded-2xl bg-[#f8f3eb] px-4 py-4">
+                          <p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
+                            {details.prompt || "No main prompt was submitted. This run is driven by capture notes only."}
+                          </p>
+                        </div>
+                        {details.targetPageTitle && (
+                          <p className="mt-3 text-xs text-slate-500">
+                            Target page: {details.targetPageTitle}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="rounded-[24px] border border-[#e4dac9] bg-white p-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                              Capture Attachments
+                            </p>
+                            <h3 className="mt-2 font-headline text-xl text-slate-900">
+                              Submitted visual references
+                            </h3>
+                          </div>
+                          <span className="rounded-full bg-[#eef3ea] px-3 py-1 text-xs font-semibold text-[#446150]">
+                            {details.captures.length} item(s)
+                          </span>
+                        </div>
+
+                        {details.captures.length > 0 ? (
+                          <div className="mt-5 grid gap-4 md:grid-cols-2">
+                            {details.captures.map((capture) => {
+                              const imageSrc = resolveCaptureImageUrl(capture.imageUrl);
+                              const capturedAtLabel = formatCapturedAt(capture.capturedAt);
+
+                              return (
+                                <div
+                                  key={capture.id}
+                                  className="overflow-hidden rounded-[22px] border border-[#eadfce] bg-[#fcfaf6]"
+                                >
+                                  <div className="flex h-56 items-center justify-center bg-[#f2e8da]">
+                                    {imageSrc ? (
+                                      <img
+                                        src={imageSrc}
+                                        alt={capture.note || `capture-${capture.id}`}
+                                        className="h-full w-full object-contain"
+                                      />
+                                    ) : (
+                                      <div className="px-6 text-center text-sm text-slate-500">
+                                        This capture does not expose an image URL.
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="space-y-3 px-4 py-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm">
+                                        {capture.pageRoute || capture.sourcePageUrl || "Unknown route"}
+                                      </span>
+                                      {capture.tagName && (
+                                        <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm">
+                                          {capture.tagName}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <p className="text-sm font-semibold leading-6 text-slate-900">
+                                        {capture.note || "No capture note provided."}
+                                      </p>
+                                      {capture.pageTitle && (
+                                        <p className="mt-1 text-xs text-slate-500">
+                                          Page: {capture.pageTitle}
+                                        </p>
+                                      )}
+                                    </div>
+                                    {(capture.selector ||
+                                      capture.nearestHeading ||
+                                      capturedAtLabel) && (
+                                      <div className="rounded-2xl bg-white px-3 py-3 text-xs leading-6 text-slate-600">
+                                        {capture.nearestHeading && (
+                                          <p>Nearest heading: {capture.nearestHeading}</p>
+                                        )}
+                                        {capture.selector && (
+                                          <p className="break-all">Target: {capture.selector}</p>
+                                        )}
+                                        {capturedAtLabel && (
+                                          <p>Captured at: {capturedAtLabel}</p>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="mt-5 rounded-2xl border border-dashed border-[#d8cbb7] bg-[#faf5ec] px-4 py-6 text-sm text-slate-600">
+                            No capture attachments were submitted for this request.
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {showMetrics &&
         metricsData &&

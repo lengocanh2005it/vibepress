@@ -10,6 +10,7 @@ export interface WpNode {
   block: string;
   sourceRef?: SourceRef;
   params?: Record<string, any>;
+  customClassNames?: string[];
   // Extracted content from inner HTML
   text?: string;
   level?: number; // headings: 1-6
@@ -73,6 +74,7 @@ export function wpJsonToString(nodes: WpNode[]): string {
 
 const USEFUL_PARAM_KEYS = new Set([
   'align', // "full" | "wide" | "center" — section width
+  'className', // preserve Gutenberg/custom classes for precise interaction bridge
   'layout', // { type: "flex", justifyContent, orientation, ... }
   'fontSize', // text size slug
   'textAlign', // text alignment
@@ -369,6 +371,11 @@ function parseBlocks(markup: string): WpNode[] {
     if (params?.align) node.align = params.align as string;
     // Lift fontFamily slug
     if (params?.fontFamily) node.fontFamily = params.fontFamily as string;
+    const customClassNames = extractUsefulCustomClassNames([
+      ...(extractUsefulCustomClassNamesFromParam(params?.className) ?? []),
+      ...(node.customClassNames ?? []),
+    ]);
+    if (customClassNames.length > 0) node.customClassNames = customClassNames;
     nodes.push(node);
   }
 
@@ -452,6 +459,13 @@ function buildNode(
     return compact({
       block: blockName,
       params,
+      ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+        ? {
+            customClassNames: extractUsefulCustomClassNamesFromParam(
+              params?.className,
+            ),
+          }
+        : {}),
       ...coverExtras,
       children,
     });
@@ -473,6 +487,13 @@ function buildNode(
   return compact({
     block: blockName,
     params,
+    ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+      ? {
+          customClassNames: extractUsefulCustomClassNamesFromParam(
+            params?.className,
+          ),
+        }
+      : {}),
     ...coverSrc,
     ...leaf,
   });
@@ -482,6 +503,7 @@ function buildNode(
  * Extract meaningful content from leaf HTML (no nested WP blocks).
  */
 function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
+  const customClassNames = extractUsefulCustomClassNamesFromHtml(html);
   const stripped = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\s+class="[^"]*"/g, '')
@@ -510,6 +532,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     return {
       src,
       alt,
+      ...(customClassNames.length ? { customClassNames } : {}),
       ...(width ? { width: parseInt(width) } : {}),
       ...(height ? { height: parseInt(height) } : {}),
     };
@@ -518,7 +541,11 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   // Button / link
   const aMatch = stripped.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
   if (aMatch) {
-    return { href: aMatch[1], text: stripTags(aMatch[2]) };
+    return {
+      href: aMatch[1],
+      text: stripTags(aMatch[2]),
+      ...(customClassNames.length ? { customClassNames } : {}),
+    };
   }
 
   // Paragraph or generic text
@@ -532,10 +559,13 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     ) {
       return { html: stripped };
     }
-    return { text: textContent };
+    return {
+      text: textContent,
+      ...(customClassNames.length ? { customClassNames } : {}),
+    };
   }
 
-  return {};
+  return customClassNames.length ? { customClassNames } : {};
 }
 
 export function stripTags(html: string): string {
@@ -553,4 +583,43 @@ function compact(node: WpNode): WpNode {
         v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0),
     ),
   ) as WpNode;
+}
+
+function extractUsefulCustomClassNamesFromParam(
+  value: unknown,
+): string[] | undefined {
+  if (!value) return undefined;
+  const tokens = String(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  const classes = extractUsefulCustomClassNames(tokens);
+  return classes.length > 0 ? classes : undefined;
+}
+
+function extractUsefulCustomClassNamesFromHtml(html: string): string[] {
+  const matches = Array.from(html.matchAll(/\bclass="([^"]+)"/gi));
+  const tokens = matches.flatMap((match) =>
+    String(match[1] ?? '')
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean),
+  );
+  return extractUsefulCustomClassNames(tokens);
+}
+
+function extractUsefulCustomClassNames(tokens: string[]): string[] {
+  return Array.from(
+    new Set(
+      tokens.filter((token) => {
+        const normalized = token.trim().toLowerCase();
+        if (!normalized) return false;
+        if (!normalized.includes('-') && !normalized.includes('__'))
+          return false;
+        return !/^(wp-|has-|align|is-layout-|current-|menu-item|page-item|post-|blocks-gallery|size-|components-|editor-|screen-reader-text$)/i.test(
+          normalized,
+        );
+      }),
+    ),
+  );
 }

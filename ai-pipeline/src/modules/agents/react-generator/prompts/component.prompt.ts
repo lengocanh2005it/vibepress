@@ -2,12 +2,22 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
 import { stripTags } from '../../../../common/utils/wp-block-to-json.js';
-import type { ThemeTokens } from '../../../agents/block-parser/block-parser.service.js';
+import type {
+  ThemeTokens,
+  ThemeInteractionState,
+  ThemeInteractionStyle,
+  ThemeInteractionTokens,
+} from '../../../agents/block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ComponentVisualPlan } from '../visual-plan.schema.js';
+import {
+  extractAuxiliaryLabelsFromSections,
+  formatInventedAuxiliarySectionLabels,
+  mergeAuxiliaryLabels,
+} from '../auxiliary-section.guard.js';
 import {
   API_CONTRACT_SOURCE_PATH,
   COMMENT_FIELDS,
@@ -80,6 +90,8 @@ export interface ComponentPromptContext {
   route?: string | null;
   isDetail?: boolean;
   type?: 'page' | 'partial';
+  requiredCustomClassNames?: string[];
+  sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
 }
 
@@ -228,6 +240,9 @@ function buildForbiddenBehaviorNote(input: {
     );
     lines.push(
       '- Do NOT fetch `/api/site-info` or `/api/menus` just to rebuild shared layout chrome inside a page component.',
+    );
+    lines.push(
+      `- Do NOT append trailing utility/footer/sidebar-like sections with exact headings such as ${formatInventedAuxiliarySectionLabels()} unless that exact label is already source-backed or explicitly approved in the visual plan.`,
     );
   }
   if (!input.dataNeeds.includes('postDetail')) {
@@ -393,16 +408,19 @@ function buildScopedApiContractNote(input: {
     '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
   );
   lines.push(
-    '- Use `post.author` as display text. If the contract/known routes approve `/author/:slug`, link the author name with `to={"/author/" + post.authorSlug}`; otherwise fall back to a temporary placeholder anchor such as `href="#"`.',
+    '- In ordinary post meta/listings, author names should link to `/author/${post.authorSlug}` when that route is approved and `post.authorSlug` exists. Plain-text `post.author` is only acceptable when it is the actual page/article/archive title or heading (for example an `h1`).',
   );
   lines.push(
-    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings may link to that route using `post.categorySlugs[index]` alongside `post.categories[index]`. Do NOT guess a slug from display text when no slug is available; use a temporary `href="#"` placeholder if you still need a clickable label.',
+    '- If the contract/known routes approve `/category/:slug`, category labels in post meta/listings must link to that route using `post.categorySlugs[index]` alongside `post.categories[index]` when the slug exists. Do NOT guess a slug from display text; if the slug is unavailable, render plain text instead of any fake link.',
+  );
+  lines.push(
+    '- CRITICAL: in post cards, archive rows, search results, recent-post lists, bylines, and any non-heading meta UI, do NOT render bare `<span>{post.author}</span>`, `<span>{post.categories[0]}</span>`, or `post.categories?.map((cat, i) => <span>{cat}</span>)` when the matching `post.authorSlug` or `post.categorySlugs[i]` exists. Those labels must be `<Link>` archive links. Only keep plain text when the label itself is the real heading/title content.',
   );
   lines.push(
     '- Post titles, recent-post titles, search results, and page-list/sidebar titles must link to their canonical detail routes (`/post/${post.slug}` or `/page/${page.slug}`) when those routes are part of the approved app contract.',
   );
   lines.push(
-    '- Visible text links for post titles, author/category archive links, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt.',
+    '- Visible text links for post titles, author/category archive links inside meta rows, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt.',
   );
   lines.push(
     '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
@@ -600,6 +618,13 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     }
   }
 
+  if (tokens.interactions) {
+    const interactionLines = buildInteractionTokensLines(tokens.interactions);
+    if (interactionLines.length > 0) {
+      lines.push(...interactionLines);
+    }
+  }
+
   if (tokens.blockStyles && Object.keys(tokens.blockStyles).length > 0) {
     lines.push(
       '**Per-block-type styles** — apply these to ALL elements of that block type unless the block has an explicit override:',
@@ -644,6 +669,104 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
   }
 
   return lines.join('\n');
+}
+
+function buildInteractionStateProps(state: ThemeInteractionState): string[] {
+  const parts: string[] = [];
+  if (state.transition)
+    parts.push(`transition: \`style={{transition:"${state.transition}"}}\``);
+  if (state.transform)
+    parts.push(`transform: \`style={{transform:"${state.transform}"}}\``);
+  if (state.backgroundColor)
+    parts.push(
+      `bg: \`hover:bg-[${state.backgroundColor}]\` or \`style={{backgroundColor:"${state.backgroundColor}"}}\``,
+    );
+  if (state.color)
+    parts.push(
+      `color: \`hover:text-[${state.color}]\` or \`style={{color:"${state.color}"}}\``,
+    );
+  if (state.opacity)
+    parts.push(`opacity: \`hover:opacity-[${state.opacity}]\``);
+  if (state.boxShadow)
+    parts.push(`shadow: \`style={{boxShadow:"${state.boxShadow}"}}\``);
+  if (state.textDecoration)
+    parts.push(`text-decoration: \`${state.textDecoration}\``);
+  return parts;
+}
+
+function buildInteractionStyleLines(
+  label: string,
+  style: ThemeInteractionStyle,
+): string[] {
+  const lines: string[] = [];
+  if (style.base) {
+    const parts = buildInteractionStateProps(style.base);
+    if (parts.length > 0) lines.push(`  - base: ${parts.join(', ')}`);
+  }
+  if (style.hover) {
+    const parts = buildInteractionStateProps(style.hover);
+    if (parts.length > 0) lines.push(`  - hover: ${parts.join(', ')}`);
+  }
+  if (style.focus) {
+    const parts = buildInteractionStateProps(style.focus);
+    if (parts.length > 0) lines.push(`  - focus: ${parts.join(', ')}`);
+  }
+  if (style.active) {
+    const parts = buildInteractionStateProps(style.active);
+    if (parts.length > 0) lines.push(`  - active: ${parts.join(', ')}`);
+  }
+  if (lines.length === 0) return [];
+  return [`- **${label}**:`, ...lines];
+}
+
+function buildInteractionTokensLines(
+  interactions: ThemeInteractionTokens,
+): string[] {
+  const lines: string[] = [];
+
+  if (interactions.button) {
+    const styleLines = buildInteractionStyleLines(
+      'button',
+      interactions.button,
+    );
+    if (styleLines.length > 0) lines.push(...styleLines);
+  }
+
+  if (interactions.precise && interactions.precise.length > 0) {
+    const cardBridges = interactions.precise.filter((b) => b.target === 'card');
+    const otherBridges = interactions.precise.filter(
+      (b) => b.target !== 'card',
+    );
+
+    if (cardBridges.length > 0) {
+      lines.push(
+        '**Card interaction bridges** — for each bridge below, place the EXACT class name on the outermost wrapper element of every repeating card/item (not a child). The CSS for these classes is pre-generated; do NOT re-implement via Tailwind `hover:` or `onMouseEnter`:',
+      );
+      for (const bridge of cardBridges) {
+        const styleLines = buildInteractionStyleLines(
+          `card (.${bridge.className})`,
+          bridge,
+        );
+        if (styleLines.length > 0) lines.push(...styleLines);
+      }
+    }
+
+    for (const bridge of otherBridges) {
+      const styleLines = buildInteractionStyleLines(
+        `${bridge.target} (.${bridge.className})`,
+        bridge,
+      );
+      if (styleLines.length > 0) lines.push(...styleLines);
+    }
+  }
+
+  if (lines.length === 0) return [];
+
+  return [
+    '**Interaction styles from theme** — apply these hover/focus/active states to matching elements. Use Tailwind `hover:` variants when the value maps cleanly; otherwise use inline `style` with `onMouseEnter`/`onMouseLeave` state:',
+    ...lines,
+    '  ↳ Always add the `base` transition FIRST on the element className/style so hover changes animate smoothly.',
+  ];
 }
 
 function buildTemplateTextsNote(templateSource: string): string {
@@ -893,6 +1016,8 @@ export function buildPlanContextNote(
     dataNeeds?: string[];
     route?: string | null;
     type?: 'page' | 'partial';
+    requiredCustomClassNames?: string[];
+    sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
   },
   componentName?: string,
@@ -1011,6 +1136,27 @@ export function buildPlanContextNote(
       'Data contract: do NOT fetch slug-based detail endpoints unless the plan explicitly requires detail data.',
     );
   }
+  if (plan.type === 'page') {
+    const allowedAuxiliaryLabels = mergeAuxiliaryLabels(
+      plan.sourceBackedAuxiliaryLabels,
+      extractAuxiliaryLabelsFromSections(plan.visualPlan?.sections),
+    );
+    lines.push('');
+    lines.push('Auxiliary-section contract:');
+    lines.push(
+      `- Invalid invented auxiliary headings by default: ${formatInventedAuxiliarySectionLabels()}.`,
+    );
+    lines.push(
+      allowedAuxiliaryLabels.length > 0
+        ? `- Exact auxiliary labels allowed for this component because they are source-backed or already approved: ${allowedAuxiliaryLabels
+            .map((label) => `\`${label}\``)
+            .join(', ')}.`
+        : '- No source-backed auxiliary labels were detected for this component. Treat those banned labels as invalid.',
+    );
+    lines.push(
+      '- If the page is sparse, stop after the approved/source-backed content. Do NOT add generic About/Resources/Privacy-style filler sections at the end.',
+    );
+  }
 
   lines.push('');
   lines.push('## Fidelity goal');
@@ -1032,6 +1178,14 @@ export function buildPlanContextNote(
   lines.push(
     '- Use semantic HTML that matches the role of the original content (`<main>`, `<section>`, `<article>`, `<aside>`, `<nav>`).',
   );
+  if (plan.requiredCustomClassNames?.length) {
+    lines.push(
+      `- Preserve these exact source custom classes in JSX \`className\` output whenever you render the corresponding source-backed elements: ${formatClassList(plan.requiredCustomClassNames)}.`,
+    );
+    lines.push(
+      '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them alongside Tailwind utility classes.',
+    );
+  }
 
   return lines.join('\n');
 }
@@ -1238,6 +1392,11 @@ function buildCompactSectionSummary(
       default:
         break;
     }
+    if (section.customClassNames?.length) {
+      parts.push(
+        `customClassNames=${formatClassList(section.customClassNames)}`,
+      );
+    }
 
     if (componentName && section.sectionKey) {
       parts.push(
@@ -1264,6 +1423,19 @@ export function buildVisualPlanContextNote(
 
   if (visualPlan.dataNeeds.length > 0) {
     lines.push(`Declared data needs: ${visualPlan.dataNeeds.join(', ')}`);
+  }
+  const requiredCustomClassNames = [
+    ...new Set(
+      visualPlan.sections.flatMap((section) => section.customClassNames ?? []),
+    ),
+  ];
+  if (requiredCustomClassNames.length > 0) {
+    lines.push(
+      `Required custom classes from the source: ${formatClassList(requiredCustomClassNames)}.`,
+    );
+    lines.push(
+      'Preserve these exact classes in the rendered JSX for the corresponding source-backed elements. Keep them as literal class tokens inside `className`.',
+    );
   }
 
   // Strict section whitelist — prevents AI from inventing extra sections
@@ -1619,6 +1791,7 @@ function buildSourceTrackingNoteForNodes(
 ): string {
   try {
     const parsed = JSON.parse(nodesJson) as WpNode[];
+    const requiredCustomClassNames = extractCustomClassNamesFromNodes(parsed);
     const trackedNodes = parsed
       .filter((node) => !!node.sourceRef?.sourceNodeId)
       .map((node, index) => {
@@ -1630,22 +1803,53 @@ function buildSourceTrackingNoteForNodes(
           `template=${node.sourceRef?.templateName}`,
           `sourceFile=${node.sourceRef?.sourceFile}`,
           `sectionKey=${sectionKey}`,
-        ].join(' | ');
+          node.customClassNames?.length
+            ? `customClassNames=${formatClassList(node.customClassNames)}`
+            : null,
+        ]
+          .filter((part): part is string => Boolean(part))
+          .join(' | ');
       });
 
-    if (trackedNodes.length === 0) return '';
+    if (trackedNodes.length === 0 && requiredCustomClassNames.length === 0)
+      return '';
 
-    return [
+    const lines = [
       '## Source tracking markers — MANDATORY',
       'For each top-level source node rendered by this section component, keep a stable outer JSX wrapper with exact string-literal attributes:',
       '`data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, `data-vp-section-component`.',
       `Use \`data-vp-component="${componentName}"\` and \`data-vp-section-component="${sectionComponentName}"\` on every tracked wrapper in this file.`,
-      'Tracked top-level source nodes:',
-      ...trackedNodes,
-    ].join('\n');
+    ];
+    if (requiredCustomClassNames.length > 0) {
+      lines.push(
+        `Preserve these exact source custom classes in this section's JSX: ${formatClassList(requiredCustomClassNames)}.`,
+      );
+    }
+    if (trackedNodes.length > 0) {
+      lines.push('Tracked top-level source nodes:');
+      lines.push(...trackedNodes);
+    }
+    return lines.join('\n');
   } catch {
     return '';
   }
+}
+
+function extractCustomClassNamesFromNodes(nodes: WpNode[]): string[] {
+  const result = new Set<string>();
+  const visit = (node: WpNode) => {
+    for (const className of node.customClassNames ?? []) {
+      const normalized = className.trim();
+      if (normalized) result.add(normalized);
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of nodes) visit(node);
+  return [...result];
+}
+
+function formatClassList(classNames: string[]): string {
+  return classNames.map((className) => `\`${className}\``).join(', ');
 }
 
 function buildTrackedSectionComponentName(

@@ -56,6 +56,7 @@ export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
 interface BaseSection {
   sectionKey?: string;
   sourceRef?: SourceRef;
+  customClassNames?: string[];
   background?: string; // overrides palette for this section
   textColor?: string;
   padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl';

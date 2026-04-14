@@ -80,6 +80,15 @@ export interface WpDbGlobalStyle {
   modified: string;
 }
 
+export interface WpCustomCssEntry {
+  id: number;
+  title: string;
+  slug: string;
+  content: string;
+  status: string;
+  modified: string;
+}
+
 export interface WpReadingSettings {
   showOnFront: 'posts' | 'page';
   pageOnFrontId: number | null;
@@ -273,6 +282,15 @@ export class WpQueryService {
           siteUrl,
         );
         if (items.length === 0) continue;
+        // FSE block themes use wp_navigation posts as the authoritative nav source.
+        // If a wp_navigation post exists with items, demote any classic menu that
+        // was heuristically assigned 'primary' (no real WP location assignment).
+        const existingPrimary = result.find((m) => m.location === 'primary');
+        if (existingPrimary && !locationMap.size) {
+          // locationMap is empty → no real WP nav_menu_locations configured →
+          // the classic menu's 'primary' was a heuristic guess. Demote it.
+          existingPrimary.location = null;
+        }
         result.push({
           name: String(navPost.post_title || navPost.post_name || 'Primary'),
           slug: String(navPost.post_name ?? 'primary'),
@@ -530,6 +548,33 @@ export class WpQueryService {
         `SELECT ID, post_title, post_name, post_content, post_status, post_modified
          FROM \`${prefix}posts\`
          WHERE post_type = 'wp_global_styles'
+           AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+         ORDER BY post_modified DESC, ID DESC`,
+      );
+
+      return rows.map((row) => ({
+        id: Number(row.ID),
+        title: String(row.post_title ?? ''),
+        slug: String(row.post_name ?? ''),
+        content: String(row.post_content ?? ''),
+        status: String(row.post_status ?? ''),
+        modified: String(row.post_modified ?? ''),
+      }));
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getCustomCssEntries(
+    connectionString: string,
+  ): Promise<WpCustomCssEntry[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_title, post_name, post_content, post_status, post_modified
+         FROM \`${prefix}posts\`
+         WHERE post_type = 'custom_css'
            AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
          ORDER BY post_modified DESC, ID DESC`,
       );

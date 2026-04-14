@@ -5,6 +5,11 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type { CardGridSection } from './visual-plan.schema.js';
+import {
+  extractAuxiliaryLabelsFromSections,
+  getExactInventedAuxiliaryLabel,
+  mergeAuxiliaryLabels,
+} from './auxiliary-section.guard.js';
 
 interface CodeReviewIssue {
   severity: 'high' | 'medium' | 'low';
@@ -212,6 +217,7 @@ export class GeneratedCodeReviewService {
     const visualSections =
       visualSectionTypes.length > 0 ? visualSectionTypes.join(', ') : '(none)';
     const knownRoutes = this.buildKnownRoutesLines(plan);
+    const isArchive = component.name === 'Archive';
 
     return `Review this generated React component against its approved contract.
 
@@ -244,7 +250,8 @@ Rules:
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
-- Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
+- Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
+- Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
 
@@ -261,7 +268,7 @@ ${this.buildVisualSectionDetailLines(contract)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
-${this.buildApiContractLines(dataNeeds, isDetail, visualSectionTypes)}
+${this.buildApiContractLines(dataNeeds, isDetail, visualSectionTypes, isArchive)}
 
 Generated TSX:
 \`\`\`tsx
@@ -273,6 +280,7 @@ ${component.code}
     dataNeeds: string[],
     isDetail: boolean,
     visualSectionTypes: string[],
+    isArchive = false,
   ): string {
     const normalized = new Set(
       dataNeeds.map((value) => {
@@ -298,13 +306,17 @@ ${component.code}
       lines.push('- /api/posts/${slug} only for post-detail routes');
     if (normalized.has('page-detail'))
       lines.push('- /api/pages/${slug} only for page-detail routes');
-    if (normalized.has('categoryDetail')) {
+    if (normalized.has('categoryDetail') || isArchive) {
       lines.push('- /api/taxonomies/category — list all category terms');
       lines.push(
         '- /api/taxonomies/category/:slug/posts — posts in a category',
       );
     }
-    if (normalized.has('authorDetail')) {
+    if (normalized.has('tagDetail') || isArchive) {
+      lines.push('- /api/taxonomies/post_tag — list all tag terms');
+      lines.push('- /api/taxonomies/post_tag/:slug/posts — posts in a tag');
+    }
+    if (normalized.has('authorDetail') || isArchive) {
       lines.push(
         '- Author archive fetches `/api/posts?author=${slug}` (and may include pagination query params). Use `post.authorSlug`, not `post.author`, for archive matching.',
       );
@@ -340,6 +352,13 @@ ${component.code}
     const lines = plan
       .filter((item) => item.type !== 'partial' && item.route)
       .map((item) => `- ${item.componentName}: ${item.route}`);
+
+    const hasArchive = plan.some((item) => item.componentName === 'Archive');
+    if (hasArchive) {
+      lines.push('- Archive (category): /category/:slug');
+      lines.push('- Archive (author): /author/:slug');
+      lines.push('- Archive (tag): /tag/:slug');
+    }
 
     return lines.length > 0 ? lines.join('\n') : '- (none)';
   }
@@ -402,6 +421,7 @@ ${component.code}
     const issues: CodeReviewIssue[] = [];
     const sections = contract?.visualPlan?.sections ?? [];
     const normalizedCode = this.normalizeForTextMatch(component.code);
+    const isPageComponent = (contract?.type ?? component.type) === 'page';
 
     if (
       normalizedCode.includes('/page/page/') ||
@@ -434,6 +454,32 @@ ${component.code}
         severity: 'medium',
         message: `Visible navigation/content text links should underline on hover (for example \`hover:underline underline-offset-4\`) to match the approved WordPress-style interaction. Offending snippet(s): ${missingHoverUnderlineLinks.join(' | ')}.`,
       });
+    }
+    const plainTextPostMetaLinks = this.findPlainTextPostMetaArchiveSnippets(
+      component.code,
+    );
+    if (plainTextPostMetaLinks.length > 0) {
+      issues.push({
+        severity: 'medium',
+        message: `Post meta author/category labels must link to their canonical archive routes when \`authorSlug\` or \`categorySlugs[0]\` is available. Plain-text \`post.author\` is only allowed when it is the actual heading/title content (for example an \`<h1>\` on author/archive/detail views). Do not render \`post.author\` or \`post.categories[0]\` as plain text spans in post listings/meta rows. Offending snippet(s): ${plainTextPostMetaLinks.join(' | ')}.`,
+      });
+    }
+    if (isPageComponent) {
+      const allowedAuxiliaryLabels = mergeAuxiliaryLabels(
+        contract?.sourceBackedAuxiliaryLabels,
+        extractAuxiliaryLabelsFromSections(sections),
+      );
+      const inventedAuxiliaryHeadings =
+        this.findTrailingInventedAuxiliaryHeadingSnippets(
+          component.code,
+          allowedAuxiliaryLabels,
+        );
+      if (inventedAuxiliaryHeadings.length > 0) {
+        issues.push({
+          severity: 'high',
+          message: `Component contains invented trailing auxiliary section heading(s) not justified by the approved contract/source: ${inventedAuxiliaryHeadings.join(' | ')}. Auxiliary/footer/sidebar-like page sections are invalid unless source-backed.`,
+        });
+      }
     }
 
     if (sections.length === 0) return issues;
@@ -528,6 +574,111 @@ ${component.code}
     return snippets;
   }
 
+  private findPlainTextPostMetaArchiveSnippets(
+    code: string,
+    max = 3,
+  ): string[] {
+    const snippets: string[] = [];
+    const patterns = [
+      {
+        pattern:
+          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
+        allowHeadingContext: true,
+      },
+      {
+        pattern:
+          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
+        allowHeadingContext: false,
+      },
+      {
+        pattern:
+          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
+        allowHeadingContext: false,
+      },
+    ];
+
+    for (const { pattern, allowHeadingContext } of patterns) {
+      for (const match of code.matchAll(pattern)) {
+        const raw = match[0]?.replace(/\s+/g, ' ').trim();
+        if (!raw) continue;
+        const offset = match.index ?? 0;
+        if (
+          allowHeadingContext &&
+          this.isWithinHeadingTitleContext(code, offset)
+        ) {
+          continue;
+        }
+        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
+        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
+        if (snippets.length >= max) return snippets;
+      }
+      if (snippets.length >= max) break;
+    }
+
+    return snippets;
+  }
+
+  private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
+    const before = code.slice(Math.max(0, offset - 600), offset);
+    return (
+      /\bauthorSlug\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
+      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
+        before,
+      )
+    );
+  }
+
+  private isWithinHeadingTitleContext(code: string, offset: number): boolean {
+    const start = Math.max(0, offset - 220);
+    const before = code.slice(start, offset);
+    const openHeading = before.match(/<h[1-6]\b[^>]*>/gi);
+    const closeHeading = before.match(/<\/h[1-6]>/gi);
+    // Only skip when literally inside an unclosed <h1>-<h6> element.
+    // Do NOT check for word "title"/"heading" — appears in class names
+    // like "post-title" and would incorrectly suppress the fix.
+    return (openHeading?.length ?? 0) > (closeHeading?.length ?? 0);
+  }
+
+  private findTrailingInventedAuxiliaryHeadingSnippets(
+    code: string,
+    allowedAuxiliaryLabels: readonly string[],
+    max = 3,
+  ): string[] {
+    const allowed = new Set(mergeAuxiliaryLabels(allowedAuxiliaryLabels));
+    const matches = [...code.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)];
+    if (matches.length === 0) return [];
+
+    const snippets: string[] = [];
+    for (let index = 0; index < matches.length; index++) {
+      const match = matches[index];
+      const rawHeading = (match[2] ?? '')
+        .replace(/\{[^}]+\}/g, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!rawHeading) continue;
+
+      const label = getExactInventedAuxiliaryLabel(rawHeading);
+      if (!label || allowed.has(label)) continue;
+
+      const position = match.index ?? 0;
+      const isTrailing =
+        index >= matches.length - 2 ||
+        position >= Math.floor(code.length * 0.6);
+      if (!isTrailing) continue;
+
+      const snippet = `\`${rawHeading}\``;
+      if (!snippets.includes(snippet)) {
+        snippets.push(snippet);
+      }
+      if (snippets.length >= max) break;
+    }
+
+    return snippets;
+  }
+
   private getBlockingIssues(
     review: CodeReviewResult,
     component: GeneratedComponent,
@@ -583,6 +734,8 @@ ${component.code}
       'duplicated route prefix',
       'extra `/page` segment',
       'menu links must use canonical `item.url` directly',
+      'invented trailing auxiliary section',
+      'auxiliary/footer/sidebar-like page sections are invalid unless source-backed',
     ];
 
     return review.issues.filter(

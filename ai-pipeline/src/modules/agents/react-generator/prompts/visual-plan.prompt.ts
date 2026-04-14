@@ -8,6 +8,10 @@ import type {
   DataNeed,
   SectionPlan,
 } from '../visual-plan.schema.js';
+import {
+  formatInventedAuxiliarySectionLabels,
+  pruneTrailingInventedAuxiliarySections,
+} from '../auxiliary-section.guard.js';
 
 /**
  * Build the Stage 1 prompt: ask AI to analyze a template and return a
@@ -29,6 +33,7 @@ export function buildVisualPlanPrompt(input: {
     sourceUrl: string;
     viewport: string;
   };
+  sourceBackedAuxiliaryLabels?: string[];
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
   draftSections?: SectionPlan[];
@@ -46,6 +51,7 @@ export function buildVisualPlanPrompt(input: {
     dataNeeds,
     sourceAnalysis,
     visualReference,
+    sourceBackedAuxiliaryLabels,
     draftSections,
     editRequestContextNote,
   } = input;
@@ -91,11 +97,11 @@ interface ComponentVisualPlan {
 }
 \`\`\`
 
-Every section also supports optional exact spacing fields from the template:
+Every section also supports optional exact spacing fields and preserved custom class hooks from the template:
 \`\`\`
-{ paddingStyle?: string, marginStyle?: string, gapStyle?: string }
+{ paddingStyle?: string, marginStyle?: string, gapStyle?: string, customClassNames?: string[] }
 \`\`\`
-Use them when the template source exposes real spacing values and you can preserve them exactly.
+Use them when the template source exposes real spacing values or explicit custom classes and you can preserve them exactly.
 
 Typography and exact column-ratio metadata may also appear when the template exposes them:
 \`\`\`
@@ -166,6 +172,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
 - Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
+- Preserve source-level custom classes by carrying them into \`customClassNames\` when a draft section or source node already exposes them. Do NOT drop or rename these classes.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
 - Use the live screenshot only to refine spacing, image treatment, and typography. It does NOT authorize changing deterministic section boundaries from the block tree.
@@ -175,6 +182,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
 - If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
 - If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must be content-only: use \`showPages\` and/or \`showPosts\`, but NEVER set \`menuSlug\` or \`showSiteInfo\`.
+- For page/listing/body components, do NOT add trailing utility/footer/sidebar-like sections or headings such as ${formatInventedAuxiliarySectionLabels()} unless that EXACT label is already source-backed in the scoped template source or deterministic draft sections supplied in the user prompt.
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
@@ -184,6 +192,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
   const userPrompt = `## Component to plan: ${componentName}
 
 ${contractHint}
+
+${buildAuxiliaryGuardHint(sourceBackedAuxiliaryLabels)}
 
 ${visualReferenceHint ? `${visualReferenceHint}\n\n` : ''}
 
@@ -284,6 +294,30 @@ function buildContractHint(input: {
       'Hard rule: any sidebar on this page must be content-only, never menu/site info chrome.',
     );
   }
+  return lines.join('\n');
+}
+
+function buildAuxiliaryGuardHint(
+  sourceBackedAuxiliaryLabels?: string[],
+): string {
+  const lines = ['## Auxiliary section guard'];
+  lines.push(
+    `Invalid invented auxiliary headings by default: ${formatInventedAuxiliarySectionLabels()}.`,
+  );
+  if (sourceBackedAuxiliaryLabels?.length) {
+    lines.push(
+      `These exact auxiliary labels are allowed because the scoped source already contains them: ${sourceBackedAuxiliaryLabels
+        .map((label) => `\`${label}\``)
+        .join(', ')}.`,
+    );
+  } else {
+    lines.push(
+      'No source-backed auxiliary labels were detected in the scoped source. Treat the banned labels above as invalid for this component.',
+    );
+  }
+  lines.push(
+    'If a sparse page ends with a generic utility/footer/sidebar-style section using one of those labels, omit that section entirely.',
+  );
   return lines.join('\n');
 }
 
@@ -403,6 +437,7 @@ export interface VisualPlanContract {
   isDetail?: boolean;
   dataNeeds?: DataNeed[];
   stripLayoutChrome?: boolean;
+  sourceBackedAuxiliaryLabels?: string[];
 }
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -478,6 +513,21 @@ function validateSectionDetailed(
   if (typeof raw.paddingStyle !== 'string') delete raw.paddingStyle;
   if (typeof raw.marginStyle !== 'string') delete raw.marginStyle;
   if (typeof raw.gapStyle !== 'string') delete raw.gapStyle;
+  if (Array.isArray(raw.customClassNames)) {
+    raw.customClassNames = [
+      ...new Set(
+        raw.customClassNames
+          .filter(
+            (value: unknown): value is string => typeof value === 'string',
+          )
+          .map((value: string) => value.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (raw.customClassNames.length === 0) delete raw.customClassNames;
+  } else {
+    delete raw.customClassNames;
+  }
   for (const key of ['headingStyle', 'subheadingStyle', 'bodyStyle'] as const) {
     const value = sanitizeTypographyStyle(raw[key]);
     if (value) raw[key] = value;
@@ -739,7 +789,20 @@ export function sanitizeSectionsForContract(
     })
     .filter((section): section is SectionPlan => !!section);
 
-  return { sections: sanitized, adjustments };
+  const prunedAuxiliarySections = pruneTrailingInventedAuxiliarySections(
+    sanitized,
+    {
+      componentType: contract.componentType,
+      allowedAuxiliaryLabels: contract.sourceBackedAuxiliaryLabels,
+    },
+  );
+  if (prunedAuxiliarySections.droppedLabels.length > 0) {
+    adjustments.push(
+      `removed invented trailing auxiliary section(s): ${prunedAuxiliarySections.droppedLabels.join(', ')}`,
+    );
+  }
+
+  return { sections: prunedAuxiliarySections.sections, adjustments };
 }
 
 /**

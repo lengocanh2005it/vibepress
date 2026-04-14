@@ -564,6 +564,13 @@ function applyNodePresentation<T extends SectionPlan>(
   if (node.gap && !next.gapStyle) {
     next.gapStyle = node.gap;
   }
+  const customClassNames = uniqueClassNames([
+    ...(next.customClassNames ?? []),
+    ...(node.customClassNames ?? []),
+  ]);
+  if (customClassNames.length > 0) {
+    next.customClassNames = customClassNames;
+  }
   return next;
 }
 
@@ -912,4 +919,16 @@ function toTypographyStyle(node?: WpNode): TypographyStyle | undefined {
     }),
   };
   return Object.keys(typography).length > 0 ? typography : undefined;
+}
+
+function uniqueClassNames(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }

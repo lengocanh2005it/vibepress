@@ -1343,6 +1343,14 @@ app.get('/api/menus', async (req, res) => {
         siteUrl,
       );
       if (items.length > 0) {
+        // FSE block themes use wp_navigation as the authoritative nav source.
+        // If termToLocation is empty, no real WP nav_menu_locations are configured,
+        // meaning any classic menu's 'primary' assignment was heuristic. Demote it
+        // so the wp_navigation post becomes the primary menu instead.
+        const existingPrimary = result.find((m) => m.location === 'primary');
+        if (existingPrimary && termToLocation.size === 0) {
+          existingPrimary.location = null;
+        }
         result.push({
           name: navPost.post_title || navPost.post_name,
           slug: navPost.post_name as string,

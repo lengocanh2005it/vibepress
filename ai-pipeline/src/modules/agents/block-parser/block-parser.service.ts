@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir, stat } from 'fs/promises';
 import { basename, join, relative } from 'path';
 import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
+import { collectThemeCssSources } from '../../../common/utils/theme-css-sources.js';
 
 export interface ThemeDefaults {
   textColor?: string;
@@ -54,6 +55,35 @@ export interface ThemeBlockStyle {
   shadow?: string;
 }
 
+export interface ThemeInteractionState {
+  transition?: string;
+  transform?: string;
+  boxShadow?: string;
+  opacity?: string;
+  color?: string;
+  backgroundColor?: string;
+  textDecoration?: string;
+}
+
+export interface ThemeInteractionStyle {
+  base?: ThemeInteractionState;
+  hover?: ThemeInteractionState;
+  focus?: ThemeInteractionState;
+  active?: ThemeInteractionState;
+}
+
+export type ThemeInteractionTarget = 'button' | 'link' | 'image' | 'card';
+
+export interface ThemePreciseInteractionBridge extends ThemeInteractionStyle {
+  className: string;
+  target: ThemeInteractionTarget;
+}
+
+export interface ThemeInteractionTokens {
+  button?: ThemeInteractionStyle;
+  precise?: ThemePreciseInteractionBridge[];
+}
+
 export interface ThemeTokens {
   colors: { slug: string; value: string }[];
   gradients?: { slug: string; value: string }[];
@@ -63,6 +93,7 @@ export interface ThemeTokens {
   spacing: { slug: string; size: string }[];
   defaults?: ThemeDefaults;
   blockStyles?: Record<string, ThemeBlockStyle>;
+  interactions?: ThemeInteractionTokens;
 }
 
 export interface BlockParseResult {
@@ -90,18 +121,11 @@ export class BlockParserService {
   async parse(themeDir: string): Promise<BlockParseResult> {
     this.logger.log(`Parsing FSE/Block theme: ${themeDir}`);
 
-    let themeName = 'Unknown';
-    let styleCss = '';
-    try {
-      styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
-      const nameMatch = styleCss.match(/Theme Name:\s*(.+)/);
-      if (nameMatch) themeName = nameMatch[1].trim();
-    } catch {
-      // style.css might not exist or be readable
-    }
+    const themeCss = await collectThemeCssSources(themeDir);
+    const themeName = themeCss.themeName || 'Unknown';
 
     const themeJson = await this.readJson(join(themeDir, 'theme.json'));
-    const tokens = this.extractTokens(themeJson, styleCss);
+    const tokens = this.extractTokens(themeJson, themeCss.combinedCss);
     const diagnostics: BlockParseDiagnostic = {
       warnings: [],
       unresolvedPatterns: [],
@@ -293,6 +317,32 @@ export class BlockParserService {
       spacing: this.mergeBySlug(spacing, cssTokens.spacing),
       defaults: this.mergeDefaults(defaults, cssTokens.defaults),
       blockStyles: this.mergeBlockStyles(blockStyles, cssTokens.blockStyles),
+      interactions: this.mergeInteractions(undefined, cssTokens.interactions),
+    };
+  }
+
+  applyStyleCssOverride(
+    theme: BlockParseResult,
+    styleCss: string,
+  ): BlockParseResult {
+    if (!styleCss?.trim()) return theme;
+
+    const extracted = extractStyleCssTokens(styleCss, theme.tokens);
+    const cssTokens: ThemeTokens = {
+      colors: extracted.colors,
+      gradients: extracted.gradients,
+      shadows: extracted.shadows,
+      fonts: extracted.fonts,
+      fontSizes: extracted.fontSizes,
+      spacing: extracted.spacing,
+      defaults: extracted.defaults,
+      blockStyles: extracted.blockStyles,
+      interactions: extracted.interactions,
+    };
+
+    return {
+      ...theme,
+      tokens: this.mergeThemeTokens(cssTokens, theme.tokens),
     };
   }
 
@@ -880,6 +930,10 @@ export class BlockParserService {
         primary.blockStyles,
         fallback.blockStyles,
       ),
+      interactions: this.mergeInteractions(
+        primary.interactions,
+        fallback.interactions,
+      ),
     };
   }
 
@@ -971,6 +1025,118 @@ export class BlockParserService {
     }
 
     return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private mergeInteractions(
+    primary?: ThemeInteractionTokens,
+    fallback?: ThemeInteractionTokens,
+  ): ThemeInteractionTokens | undefined {
+    if (!primary && !fallback) return undefined;
+
+    const precise = this.mergePreciseInteractionBridges(
+      primary?.precise,
+      fallback?.precise,
+    );
+
+    const merged: ThemeInteractionTokens = {
+      button: this.mergeInteractionStyle(primary?.button, fallback?.button),
+      ...(precise ? { precise } : {}),
+    };
+
+    return merged.button || merged.precise?.length ? merged : undefined;
+  }
+
+  private mergeInteractionStyle(
+    primary?: ThemeInteractionStyle,
+    fallback?: ThemeInteractionStyle,
+  ): ThemeInteractionStyle | undefined {
+    if (!primary && !fallback) return undefined;
+
+    const merged: ThemeInteractionStyle = {
+      ...(fallback ?? {}),
+      ...(primary ?? {}),
+      base: {
+        ...(fallback?.base ?? {}),
+        ...(primary?.base ?? {}),
+      },
+      hover: {
+        ...(fallback?.hover ?? {}),
+        ...(primary?.hover ?? {}),
+      },
+      focus: {
+        ...(fallback?.focus ?? {}),
+        ...(primary?.focus ?? {}),
+      },
+      active: {
+        ...(fallback?.active ?? {}),
+        ...(primary?.active ?? {}),
+      },
+    };
+
+    const hasValues = (state?: ThemeInteractionState) =>
+      !!state && Object.keys(state).length > 0;
+
+    return hasValues(merged.base) ||
+      hasValues(merged.hover) ||
+      hasValues(merged.focus) ||
+      hasValues(merged.active)
+      ? merged
+      : undefined;
+  }
+
+  private mergePreciseInteractionBridges(
+    primary?: ThemePreciseInteractionBridge[],
+    fallback?: ThemePreciseInteractionBridge[],
+  ): ThemePreciseInteractionBridge[] | undefined {
+    const merged = new Map<string, ThemePreciseInteractionBridge>();
+
+    const upsert = (entry?: ThemePreciseInteractionBridge) => {
+      if (!entry) return;
+      const key = `${entry.target}::${entry.className}`;
+      const previous = merged.get(key);
+      merged.set(key, {
+        className: entry.className,
+        target: entry.target,
+        base: this.mergeInteractionState(entry.base, previous?.base),
+        hover: this.mergeInteractionState(entry.hover, previous?.hover),
+        focus: this.mergeInteractionState(entry.focus, previous?.focus),
+        active: this.mergeInteractionState(entry.active, previous?.active),
+      });
+    };
+
+    for (const entry of fallback ?? []) upsert(entry);
+    for (const entry of primary ?? []) upsert(entry);
+
+    const values = Array.from(merged.values()).filter(
+      (entry) =>
+        this.hasInteractionStateValues(entry.base) ||
+        this.hasInteractionStateValues(entry.hover) ||
+        this.hasInteractionStateValues(entry.focus) ||
+        this.hasInteractionStateValues(entry.active),
+    );
+
+    return values.length > 0
+      ? values.sort(
+          (a, b) =>
+            a.className.localeCompare(b.className) ||
+            a.target.localeCompare(b.target),
+        )
+      : undefined;
+  }
+
+  private mergeInteractionState(
+    primary?: ThemeInteractionState,
+    fallback?: ThemeInteractionState,
+  ): ThemeInteractionState | undefined {
+    const merged: ThemeInteractionState = {
+      ...(fallback ?? {}),
+      ...(primary ?? {}),
+    };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private hasInteractionStateValues(state?: ThemeInteractionState): boolean {
+    return !!state && Object.keys(state).length > 0;
   }
 
   private async readHtmlDir(

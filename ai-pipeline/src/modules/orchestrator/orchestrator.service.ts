@@ -79,18 +79,55 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: 'baseline' | 'edited' | 'final';
   hasEditRequest?: boolean;
+  stepDetails?: ProgressStepDetails;
   metrics?: {
-    urlA: string;
-    urlB: string;
-    diffPercentage: number;
-    differentPixels: number;
-    totalPixels: number;
-    artifacts: {
-      imageA: string;
-      imageB: string;
-      diff: string;
+    urlA?: string;
+    urlB?: string;
+    diffPercentage?: number;
+    differentPixels?: number;
+    totalPixels?: number;
+    summary?: {
+      overall?: {
+        visualAvgAccuracy?: number;
+        visualPassRate?: number;
+        contentAvgOverall?: number;
+        diffPercentage?: number;
+        differentPixels?: number;
+        totalPixels?: number;
+      };
     };
+    artifacts?: {
+      imageA?: string;
+      imageB?: string;
+      diff?: string;
+    };
+    [key: string]: unknown;
   };
+}
+
+interface ProgressStepCapturePreview {
+  id: string;
+  note?: string;
+  imageUrl?: string;
+  sourcePageUrl?: string;
+  pageRoute?: string | null;
+  pageTitle?: string;
+  capturedAt?: string;
+  selector?: string;
+  nearestHeading?: string;
+  tagName?: string;
+}
+
+interface ProgressStepDetails {
+  kind: 'edit-request';
+  title: string;
+  summary?: string;
+  prompt?: string;
+  language?: string;
+  targetRoute?: string | null;
+  targetPageTitle?: string;
+  captureCount: number;
+  captures: ProgressStepCapturePreview[];
 }
 
 const STEP_META: Record<
@@ -309,6 +346,10 @@ export class OrchestratorService {
   private readonly jobs = new Map<string, PipelineStatus>();
   private readonly progress = new Map<string, ReplaySubject<ProgressEvent>>();
   private readonly controls = new Map<string, JobRuntimeControl>();
+  private readonly stepEventData = new Map<
+    string,
+    Map<string, ProgressEventData>
+  >();
 
   constructor(
     private readonly sqlService: SqlService,
@@ -404,27 +445,25 @@ export class OrchestratorService {
       dto,
       state,
       editRequestContext,
-    ).catch(
-      (err) => {
-        if (err instanceof PipelineControlError) {
-          void this.finalizeControlledTermination(jobId, state, err);
-          return;
-        }
+    ).catch((err) => {
+      if (err instanceof PipelineControlError) {
+        void this.finalizeControlledTermination(jobId, state, err);
+        return;
+      }
 
-        state.status = 'error';
-        state.error = err.message;
-        const subject = this.progress.get(jobId);
-        subject?.next({
-          step: 'error',
-          label: 'Pipeline Error',
-          status: 'error',
-          percent: 0,
-          message: `AI workflow stopped because of an error: ${err.message}`,
-        });
-        subject?.complete();
-        this.logger.error(`Pipeline ${jobId} failed:`, err);
-      },
-    );
+      state.status = 'error';
+      state.error = err.message;
+      const subject = this.progress.get(jobId);
+      subject?.next({
+        step: 'error',
+        label: 'Pipeline Error',
+        status: 'error',
+        percent: 0,
+        message: `AI workflow stopped because of an error: ${err.message}`,
+      });
+      subject?.complete();
+      this.logger.error(`Pipeline ${jobId} failed:`, err);
+    });
 
     return { jobId };
   }
@@ -461,7 +500,8 @@ export class OrchestratorService {
     };
 
     const previewDir =
-      body.editRequest.reactSourceTarget.previewDir?.trim() || result.previewDir;
+      body.editRequest.reactSourceTarget.previewDir?.trim() ||
+      result.previewDir;
     const frontendDir =
       body.editRequest.reactSourceTarget.frontendDir?.trim() ||
       result.frontendDir ||
@@ -486,10 +526,9 @@ export class OrchestratorService {
           uiSourceMapPath:
             body.editRequest.reactSourceTarget.uiSourceMapPath?.trim() ||
             result.uiSourceMapPath,
-          routeEntries:
-            body.editRequest.reactSourceTarget.routeEntries?.length
-              ? body.editRequest.reactSourceTarget.routeEntries
-              : result.routeEntries,
+          routeEntries: body.editRequest.reactSourceTarget.routeEntries?.length
+            ? body.editRequest.reactSourceTarget.routeEntries
+            : result.routeEntries,
         },
       },
       submittedAt: new Date().toISOString(),
@@ -727,6 +766,7 @@ export class OrchestratorService {
     data?: ProgressEventData,
   ): void {
     this.assertJobActive(state.jobId);
+    this.rememberStepEventData(state.jobId, name, data);
 
     const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
@@ -771,6 +811,30 @@ export class OrchestratorService {
         'Pipeline was stopped by the user',
       );
     }
+  }
+
+  private rememberStepEventData(
+    jobId: string,
+    stepName: string,
+    data?: ProgressEventData,
+  ): void {
+    if (!data) return;
+    const existing =
+      this.stepEventData.get(jobId) ?? new Map<string, ProgressEventData>();
+    const previous = existing.get(stepName);
+    existing.set(stepName, previous ? { ...previous, ...data } : data);
+    this.stepEventData.set(jobId, existing);
+  }
+
+  private getStepEventData(
+    jobId: string,
+    stepName: string,
+  ): ProgressEventData | undefined {
+    return this.stepEventData.get(jobId)?.get(stepName);
+  }
+
+  private clearStepEventData(jobId: string): void {
+    this.stepEventData.delete(jobId);
   }
 
   private async delayWithControl(jobId: string, ms: number): Promise<void> {
@@ -822,6 +886,7 @@ export class OrchestratorService {
       this.jobs.delete(jobId);
       this.controls.delete(jobId);
       this.progress.delete(jobId);
+      this.clearStepEventData(jobId);
       return;
     }
 
@@ -841,6 +906,7 @@ export class OrchestratorService {
       message: 'Pipeline execution was stopped by the user.',
     });
     subject?.complete();
+    this.clearStepEventData(jobId);
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
@@ -1280,6 +1346,12 @@ export class OrchestratorService {
             '5_planner',
             0.92,
             'Planner review passed. Route map, data contracts, and visual sections are locked in.',
+            this.buildEditRequestProgressData({
+              request: dto.editRequest,
+              title: 'Requested changes attached to the migration plan',
+              summary:
+                'The planner has locked the route map and also attached the user edit request so downstream generation and preview-edit steps can act on it.',
+            }),
           );
           return review;
         },
@@ -1713,6 +1785,8 @@ export class OrchestratorService {
                 content: {
                   posts: content.posts,
                   pages: content.pages,
+                  dbGlobalStyles: content.dbGlobalStyles,
+                  customCssEntries: content.customCssEntries,
                 },
                 themeDir,
                 siteInfo: content.siteInfo,
@@ -1792,7 +1866,7 @@ export class OrchestratorService {
         frontendDir: preview.frontendDir,
         previewUrl: preview.previewUrl,
         apiBaseUrl: preview.apiBaseUrl,
-        previewStage: "baseline",
+        previewStage: 'baseline',
         hasEditRequest,
         uiSourceMapPath: preview.uiSourceMapPath,
         routeEntries: preview.routeEntries,
@@ -1822,6 +1896,12 @@ export class OrchestratorService {
             '8b_edit_request',
             0.12,
             'Reviewing the submitted edit request against the generated React baseline.',
+            this.buildEditRequestProgressData({
+              request: dto.editRequest,
+              title: 'Reviewing the submitted user edit request',
+              summary:
+                'The baseline preview is live. This step is now applying the requested visual changes using the submitted prompt and captures.',
+            }),
           );
           const editPassResult = await this.applyPostMigrationEditPass({
             jobId,
@@ -1857,6 +1937,9 @@ export class OrchestratorService {
           await this.previewBuilder.syncGeneratedComponents(
             preview.previewDir,
             buildComponents,
+            'tokens' in normalizedTheme
+              ? (normalizedTheme as any).tokens
+              : undefined,
           );
           await this.validator.assertPreviewBuild(preview.frontendDir);
           await this.validator.assertPreviewRuntime(
@@ -1868,11 +1951,19 @@ export class OrchestratorService {
             '8b_edit_request',
             0.94,
             'Requested edits are now visible in the running preview.',
-            this.buildPreviewEventData({
-              preview,
-              previewStage: 'edited',
-              hasEditRequest,
-            }),
+            {
+              ...this.buildPreviewEventData({
+                preview,
+                previewStage: 'edited',
+                hasEditRequest,
+              }),
+              ...(this.buildEditRequestProgressData({
+                request: dto.editRequest,
+                title: 'Requested edits are now visible in preview',
+                summary:
+                  'The submitted edit request has been applied and synced into the live React preview.',
+              }) ?? {}),
+            },
           );
           state.result = {
             ...(state.result ?? {}),
@@ -1976,6 +2067,9 @@ export class OrchestratorService {
           await this.previewBuilder.syncGeneratedComponents(
             preview.previewDir,
             buildComponents,
+            'tokens' in normalizedTheme
+              ? (normalizedTheme as any).tokens
+              : undefined,
           );
           await this.validator.assertPreviewBuild(preview.frontendDir);
           await this.validator.assertPreviewRuntime(preview.previewUrl, [
@@ -2128,6 +2222,7 @@ export class OrchestratorService {
       const subject = this.progress.get(jobId);
       subject?.complete();
       setTimeout(() => this.progress.delete(jobId), 60_000);
+      this.clearStepEventData(jobId);
       const finalControl = this.controls.get(jobId);
       if (finalControl) finalControl.finalized = true;
 
@@ -2275,14 +2370,14 @@ export class OrchestratorService {
     const meta = this.getStepMeta(name, state.jobId);
     const subject = this.progress.get(state.jobId);
 
-      step.status = 'running';
-      subject?.next({
-        step: name,
-        label: meta.label,
-        status: 'running',
-        percent: this.calcPercentBefore(name, state.jobId),
-        message: meta.activeMessage,
-      });
+    step.status = 'running';
+    subject?.next({
+      step: name,
+      label: meta.label,
+      status: 'running',
+      percent: this.calcPercentBefore(name, state.jobId),
+      message: meta.activeMessage,
+    });
     this.logger.log(`[${state.jobId}] Step ${name} started`);
     await this.logToFile(logPath, `Step ${name} started`);
     const t0 = Date.now();
@@ -2307,6 +2402,7 @@ export class OrchestratorService {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       this.recordStepDuration(state.jobId, name, Date.now() - t0);
       step.status = 'done';
+      const stepData = this.getStepEventData(state.jobId, name);
 
       // Calculate percent after this step completes
       subject?.next({
@@ -2315,6 +2411,7 @@ export class OrchestratorService {
         status: 'done',
         percent: this.calcPercentThrough(name, state.jobId),
         message: `${meta.doneMessage} (${elapsed}s)`,
+        data: stepData,
       });
 
       this.logger.log(`[${state.jobId}] Step ${name} done (${elapsed}s)`);
@@ -2343,6 +2440,7 @@ export class OrchestratorService {
         status: 'error',
         percent: this.calcPercentBefore(name, state.jobId),
         message: `${meta.label} failed: ${err.message}`,
+        data: this.getStepEventData(state.jobId, name),
       });
       await this.logToFile(
         logPath,
@@ -2472,42 +2570,98 @@ export class OrchestratorService {
   }
 
   private extractAccuracySummary(metrics: unknown): PipelineAccuracySummary {
-    const metricObject =
-      metrics && typeof metrics === 'object' && 'metrics' in (metrics as object)
-        ? (metrics as { metrics?: unknown }).metrics
-        : metrics;
-
-    const rawDiff = this.readNumericMetric(metricObject, 'diffPercentage');
-    const diffPercentage =
-      typeof rawDiff === 'number'
-        ? Number((rawDiff <= 1 ? rawDiff * 100 : rawDiff).toFixed(2))
-        : null;
-    const differentPixels = this.readNumericMetric(
-      metricObject,
-      'differentPixels',
+    const diffFromCompare = this.normalizePercentMetric(
+      this.readFirstNumericMetric(metrics, [
+        ['diffPercentage'],
+        ['metrics', 'diffPercentage'],
+        ['data', 'diffPercentage'],
+        ['summary', 'overall', 'diffPercentage'],
+        ['metrics', 'summary', 'overall', 'diffPercentage'],
+        ['data', 'summary', 'overall', 'diffPercentage'],
+      ]),
     );
-    const totalPixels = this.readNumericMetric(metricObject, 'totalPixels');
+    const accuracyPercent = this.normalizePercentMetric(
+      this.readFirstNumericMetric(metrics, [
+        ['percent'],
+        ['metrics', 'percent'],
+        ['accuracy'],
+        ['metrics', 'accuracy'],
+        ['visualAvgAccuracy'],
+        ['metrics', 'visualAvgAccuracy'],
+        ['summary', 'overall', 'visualAvgAccuracy'],
+        ['metrics', 'summary', 'overall', 'visualAvgAccuracy'],
+        ['data', 'summary', 'overall', 'visualAvgAccuracy'],
+      ]),
+    );
+    const diffPercentage =
+      diffFromCompare !== null
+        ? diffFromCompare
+        : accuracyPercent === null
+          ? null
+          : Number(Math.max(0, 100 - accuracyPercent).toFixed(2));
+    const differentPixels = this.readFirstNumericMetric(metrics, [
+      ['differentPixels'],
+      ['metrics', 'differentPixels'],
+      ['data', 'differentPixels'],
+      ['summary', 'overall', 'differentPixels'],
+      ['metrics', 'summary', 'overall', 'differentPixels'],
+      ['data', 'summary', 'overall', 'differentPixels'],
+    ]);
+    const totalPixels = this.readFirstNumericMetric(metrics, [
+      ['totalPixels'],
+      ['metrics', 'totalPixels'],
+      ['data', 'totalPixels'],
+      ['summary', 'overall', 'totalPixels'],
+      ['metrics', 'summary', 'overall', 'totalPixels'],
+      ['data', 'summary', 'overall', 'totalPixels'],
+    ]);
+    const percent =
+      accuracyPercent !== null
+        ? accuracyPercent
+        : diffPercentage === null
+          ? null
+          : Number(Math.max(0, 100 - diffPercentage).toFixed(2));
 
     return {
-      percent:
-        diffPercentage === null
-          ? null
-          : Number(Math.max(0, 100 - diffPercentage).toFixed(2)),
+      percent,
       diffPercentage,
       differentPixels,
       totalPixels,
     };
   }
 
-  private readNumericMetric(
+  private normalizePercentMetric(value: number | null): number | null {
+    if (value === null) return null;
+    return Number((value <= 1 ? value * 100 : value).toFixed(2));
+  }
+
+  private readFirstNumericMetric(
     value: unknown,
-    key: 'diffPercentage' | 'differentPixels' | 'totalPixels',
+    paths: string[][],
   ): number | null {
-    if (!value || typeof value !== 'object') return null;
-    const candidate = (value as Record<string, unknown>)[key];
-    return typeof candidate === 'number' && Number.isFinite(candidate)
-      ? candidate
-      : null;
+    for (const path of paths) {
+      const candidate = this.readNumericMetricPath(value, path);
+      if (candidate !== null) return candidate;
+    }
+    return null;
+  }
+
+  private readNumericMetricPath(value: unknown, path: string[]): number | null {
+    let cursor: unknown = value;
+    for (const segment of path) {
+      if (!cursor || typeof cursor !== 'object') return null;
+      cursor = (cursor as Record<string, unknown>)[segment];
+    }
+    return this.coerceFiniteNumber(cursor);
+  }
+
+  private coerceFiniteNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
   }
 
   private buildUiAssessment(
@@ -2623,6 +2777,56 @@ export class OrchestratorService {
     };
   }
 
+  private buildEditRequestProgressData(input: {
+    request?: RunPipelineDto['editRequest'];
+    title: string;
+    summary?: string;
+  }): ProgressEventData | undefined {
+    const { request, title, summary } = input;
+    if (!request) return undefined;
+
+    const prompt = request.prompt?.trim() || undefined;
+    const captures = (request.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      note: attachment.note?.trim() || undefined,
+      imageUrl: attachment.asset?.publicUrl?.trim() || undefined,
+      sourcePageUrl: attachment.sourcePageUrl?.trim() || undefined,
+      pageRoute: attachment.captureContext?.page?.route,
+      pageTitle: attachment.captureContext?.page?.title?.trim() || undefined,
+      capturedAt: attachment.captureContext?.capturedAt,
+      selector:
+        attachment.domTarget?.cssSelector?.trim() ||
+        attachment.targetNode?.domPath?.trim() ||
+        attachment.domTarget?.xpath?.trim() ||
+        undefined,
+      nearestHeading:
+        attachment.domTarget?.nearestHeading?.trim() ||
+        attachment.targetNode?.nearestHeading?.trim() ||
+        undefined,
+      tagName:
+        attachment.domTarget?.tagName?.trim() ||
+        attachment.targetNode?.tagName?.trim() ||
+        undefined,
+    }));
+
+    return {
+      stepDetails: {
+        kind: 'edit-request',
+        title,
+        summary,
+        prompt,
+        language: request.language?.trim() || undefined,
+        targetRoute:
+          request.pageContext?.reactRoute ??
+          request.pageContext?.wordpressRoute ??
+          null,
+        targetPageTitle: request.pageContext?.pageTitle?.trim() || undefined,
+        captureCount: captures.length,
+        captures,
+      },
+    };
+  }
+
   private async applyPostMigrationEditPass(input: {
     jobId: string;
     state: PipelineStatus;
@@ -2667,10 +2871,12 @@ export class OrchestratorService {
       await buildUiMutationCandidatesForGeneratedComponents({
         components,
       });
-    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap({
-      attachments: request.attachments,
-      uiSourceMap: inMemoryUiSourceMapEntries,
-    });
+    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap(
+      {
+        attachments: request.attachments,
+        uiSourceMap: inMemoryUiSourceMapEntries,
+      },
+    );
     await this.logExactCaptureResolution({
       jobId,
       logPath,
@@ -2755,7 +2961,8 @@ export class OrchestratorService {
       if (replacementIndex !== -1) {
         components[replacementIndex] = revalidated.components[0];
       }
-      editedComponentNames[task.componentName] = fixedResult.editedComponentName;
+      editedComponentNames[task.componentName] =
+        fixedResult.editedComponentName;
       return true;
     };
 
@@ -2808,7 +3015,10 @@ export class OrchestratorService {
     });
 
     this.logger.log(`[Capture Review] ${captureReviewResult.summary}`);
-    await this.logToFile(logPath, `[Capture Review] ${captureReviewResult.summary}`);
+    await this.logToFile(
+      logPath,
+      `[Capture Review] ${captureReviewResult.summary}`,
+    );
 
     const advisoryResults = captureReviewResult.results.filter(
       (result) => result.status !== 'matched',
@@ -2817,7 +3027,9 @@ export class OrchestratorService {
       const issueText =
         result.issues.map((issue) => issue.message).join(' | ') ||
         result.summary;
-      this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+      this.logger.warn(
+        `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+      );
       await this.logToFile(
         logPath,
         `[Capture Review] ${result.debugSummary} :: ${issueText}`,
@@ -2874,7 +3086,8 @@ export class OrchestratorService {
         );
       }
 
-      const refixValidation = this.validator.collectValidationIssues(components);
+      const refixValidation =
+        this.validator.collectValidationIssues(components);
       if (refixValidation.failures.length > 0) {
         const validationSummary = refixValidation.failures
           .map(
@@ -2921,7 +3134,9 @@ export class OrchestratorService {
         const issueText =
           result.issues.map((issue) => issue.message).join(' | ') ||
           result.summary;
-        this.logger.warn(`[Capture Review] ${result.debugSummary} :: ${issueText}`);
+        this.logger.warn(
+          `[Capture Review] ${result.debugSummary} :: ${issueText}`,
+        );
         await this.logToFile(
           logPath,
           `[Capture Review] ${result.debugSummary} :: ${issueText}`,
@@ -2950,19 +3165,6 @@ export class OrchestratorService {
       applied: true,
       taskCount: postMigrationEditTasks.length,
     };
-  }
-
-  private async logResolvedEditRequestContext(
-    jobId: string,
-    logPath: string,
-    context?: ResolvedEditRequestContext,
-  ): Promise<void> {
-    const lines = this.buildEditRequestLogLines(context);
-    for (const line of lines) {
-      const formatted = `[${jobId}] [edit-request] ${line}`;
-      this.logger.log(formatted);
-      await this.logToFile(logPath, formatted);
-    }
   }
 
   private async logExactCaptureResolution(input: {

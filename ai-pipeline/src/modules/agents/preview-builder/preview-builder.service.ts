@@ -10,6 +10,7 @@ import {
   symlink,
   writeFile,
   copyFile,
+  readdir,
 } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
@@ -17,12 +18,21 @@ import { createHash } from 'crypto';
 import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
-import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type {
+  ThemeInteractionState,
+  ThemeTokens,
+} from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
-import type { WpPage, WpPost, WpSiteInfo } from '../../sql/wp-query.service.js';
+import type {
+  WpDbGlobalStyle,
+  WpCustomCssEntry,
+  WpPage,
+  WpPost,
+  WpSiteInfo,
+} from '../../sql/wp-query.service.js';
 import {
   buildUiSourceMapForProject,
   writeUiSourceMapArtifacts,
@@ -64,7 +74,12 @@ export class PreviewBuilderService {
     jobId: string;
     components: ReactGenerateResult;
     dbCreds: WpDbCredentials;
-    content?: { posts: WpPost[]; pages: WpPage[] };
+    content?: {
+      posts: WpPost[];
+      pages: WpPage[];
+      dbGlobalStyles?: WpDbGlobalStyle[];
+      customCssEntries?: WpCustomCssEntry[];
+    };
     themeDir?: string;
     siteInfo?: WpSiteInfo;
     tokens?: ThemeTokens;
@@ -135,6 +150,11 @@ export class PreviewBuilderService {
     // 3. Write generated components từ AI (code in memory)
     // Relink WordPress image URLs từ /wp-content/uploads/ sang local /assets/images/
     for (const comp of components.components) {
+      comp.code = this.prepareGeneratedComponentCode(
+        comp.code,
+        tokens,
+        comp.name,
+      );
       const isPartial =
         isPartialComponentName(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
@@ -438,7 +458,12 @@ ${routesBlock}
 
     // 4. Generate tailwind.config.js + inject Google Fonts từ theme tokens
     if (tokens) {
-      await this.applyThemeTokens(frontendDir, tokens);
+      await this.applyThemeTokens(
+        frontendDir,
+        tokens,
+        content?.dbGlobalStyles ?? [],
+        content?.customCssEntries ?? [],
+      );
     }
 
     // 5. Generate .env cho từng folder
@@ -498,6 +523,7 @@ ${routesBlock}
   async syncGeneratedComponents(
     previewDir: string,
     components: ReactGenerateResult['components'],
+    tokens?: ThemeTokens,
   ): Promise<void> {
     const frontendDir = join(previewDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
@@ -508,10 +534,16 @@ ${routesBlock}
     await mkdir(pagesDir, { recursive: true });
 
     for (const comp of components) {
+      const code = this.prepareGeneratedComponentCode(
+        comp.code,
+        tokens,
+        comp.name,
+      );
+      comp.code = code;
       const isPartial =
         isPartialComponentName(comp.name) || comp.isSubComponent;
       const targetDir = isPartial ? componentsDir : pagesDir;
-      await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
+      await writeFile(join(targetDir, `${comp.name}.tsx`), code, 'utf-8');
     }
 
     await this.writeUiSourceMap({
@@ -551,6 +583,8 @@ ${routesBlock}
   private async applyThemeTokens(
     frontendDir: string,
     tokens: ThemeTokens,
+    globalStyles: WpDbGlobalStyle[] = [],
+    customCssEntries: WpCustomCssEntry[] = [],
   ): Promise<void> {
     // 1. Generate tailwind.config.js với colors từ theme.json
     const colorEntries = tokens.colors
@@ -645,6 +679,818 @@ ${fontEntries}
         existingCss.trimEnd() + '\n\n' + cssLines.join('\n') + '\n',
       );
     }
+
+    await this.applyWordPressCustomCss(
+      frontendDir,
+      globalStyles,
+      customCssEntries,
+    );
+
+    await this.applyInteractionTokens(frontendDir, tokens);
+    await this.applyBlockStyleBridges(frontendDir);
+  }
+
+  private async applyWordPressCustomCss(
+    frontendDir: string,
+    globalStyles: WpDbGlobalStyle[],
+    customCssEntries: WpCustomCssEntry[],
+  ): Promise<void> {
+    const chunks: string[] = [];
+
+    for (const row of globalStyles) {
+      chunks.push(...this.extractCssFragmentsFromContent(row.content));
+    }
+    for (const row of customCssEntries) {
+      chunks.push(...this.extractCssFragmentsFromContent(row.content));
+    }
+
+    const customCss = chunks
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+      .join('\n\n');
+
+    if (!customCss) return;
+
+    const normalizedCustomCss =
+      this.normalizeWordPressCustomCssSelectors(customCss);
+
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existingCss = await readFile(cssPath, 'utf-8');
+    const marker = '/* Vibepress WordPress custom CSS */';
+    if (existingCss.includes(marker)) return;
+
+    const block = `${marker}\n${normalizedCustomCss}\n`;
+    await writeFile(cssPath, `${existingCss.trimEnd()}\n\n${block}`);
+  }
+
+  private normalizeWordPressCustomCssSelectors(css: string): string {
+    let next = this.sanitizeWordPressCustomCss(css);
+
+    // Additional CSS in block themes often targets WordPress runtime markup like
+    // `.wp-block-button .wp-block-button__link`, but generated React pages render
+    // plain `<button>` / `<a>` elements with bridge classes instead. Add
+    // equivalent selectors for the generated markup without removing the
+    // original WordPress selectors.
+    next = next.replace(
+      new RegExp(
+        String.raw`\.wp-block-button\.([_a-zA-Z][\w-]*)\s+\.wp-block-button__link((?::(?:hover|focus|focus-visible|active))?)`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, .vp-generated-button.${customClass}${pseudo}, button.${customClass}${pseudo}, a.${customClass}${pseudo}`,
+    );
+
+    next = next.replace(
+      new RegExp(
+        String.raw`\.wp-block-button__link\.([_a-zA-Z][\w-]*)((?::(?:hover|focus|focus-visible|active))?)`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, .vp-generated-button.${customClass}${pseudo}, button.${customClass}${pseudo}, a.${customClass}${pseudo}`,
+    );
+
+    next = next.replace(
+      new RegExp(
+        String.raw`\.(?:wp-block-navigation-link|wp-block-post-title|wp-block-read-more|wp-block-site-title)\.([_a-zA-Z][\w-]*)\s+a((?::(?:hover|focus|focus-visible|active))?)`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, .vp-generated-link.${customClass}${pseudo}, a.${customClass}${pseudo}`,
+    );
+
+    next = next.replace(
+      new RegExp(
+        String.raw`\.(?:wp-block-image|wp-block-post-featured-image|blocks-gallery-item)\.([_a-zA-Z][\w-]*)\s+img((?::(?:hover|focus|focus-visible|active))?)`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, .vp-generated-image.${customClass}${pseudo}, img.${customClass}${pseudo}`,
+    );
+
+    next = next.replace(
+      new RegExp(
+        String.raw`\.(?:wp-block-group|wp-block-cover|wp-block-column|wp-block-media-text|wp-block-post|wp-block-query)\.([_a-zA-Z][\w-]*)((?::(?:hover|focus|focus-visible|active))?)`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, .${customClass}${pseudo}, section.${customClass}${pseudo}, div.${customClass}${pseudo}, article.${customClass}${pseudo}, figure.${customClass}${pseudo}`,
+    );
+
+    return next;
+  }
+
+  private sanitizeWordPressCustomCss(css: string): string {
+    const strippedAmpersand = css.replace(
+      /(^|[}\n])\s*&(?=\s*[.#:[a-zA-Z])/g,
+      '$1',
+    );
+
+    return strippedAmpersand
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .join('\n');
+  }
+
+  private extractCssFragmentsFromContent(raw: string): string[] {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) return [];
+
+    // wp_global_styles rows are JSON documents that may contain embedded CSS.
+    // Parse JSON first so we don't accidentally append the whole JSON blob to
+    // index.css just because one nested `css` string contains a selector block.
+    const parsed =
+      trimmed.startsWith('{') || trimmed.startsWith('[')
+        ? this.parseJsonObject(trimmed)
+        : null;
+    if (!parsed) {
+      return this.looksLikeCss(trimmed) ? [trimmed] : [];
+    }
+
+    const fragments: string[] = [];
+    const visit = (value: unknown, key?: string) => {
+      if (!value) return;
+      if (typeof value === 'string') {
+        const candidate = value.trim();
+        if (!candidate) return;
+        if (
+          key === 'css' ||
+          (key === undefined && this.looksLikeCss(candidate))
+        ) {
+          fragments.push(candidate);
+        }
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item));
+        return;
+      }
+      if (typeof value === 'object') {
+        for (const [childKey, childValue] of Object.entries(
+          value as Record<string, unknown>,
+        )) {
+          visit(childValue, childKey);
+        }
+      }
+    };
+
+    visit(parsed);
+    return fragments;
+  }
+
+  private parseJsonObject(raw: string): Record<string, any> | null {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) return null;
+
+    const attempts = [
+      trimmed,
+      trimmed.replace(/\\"/g, '"'),
+      (() => {
+        const start = trimmed.indexOf('{');
+        const end = trimmed.lastIndexOf('}');
+        return start >= 0 && end > start ? trimmed.slice(start, end + 1) : '';
+      })(),
+    ].filter(Boolean);
+
+    for (const candidate of attempts) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, any>;
+        }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+
+    return null;
+  }
+
+  private looksLikeCss(value: string): boolean {
+    return /[.#:\w\-\[\]\s>,+~()"'=]+\{[^}]+\}/.test(value);
+  }
+
+  /**
+   * Inject CSS bridges for WordPress core block styles that have no definition
+   * in the React app (the block editor stylesheet is not loaded).
+   * Only injects a rule when the generated source files actually use the class.
+   */
+  private async applyBlockStyleBridges(frontendDir: string): Promise<void> {
+    const srcDir = join(frontendDir, 'src');
+    const cssPath = join(srcDir, 'index.css');
+
+    // Scan all .tsx files for WordPress is-style-* classes
+    const collectTsx = async (dir: string): Promise<string[]> => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      const files: string[] = [];
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) files.push(...(await collectTsx(full)));
+        else if (e.name.endsWith('.tsx')) files.push(full);
+      }
+      return files;
+    };
+    const tsxFiles = await collectTsx(srcDir);
+    const usedClasses = new Set<string>();
+    for (const file of tsxFiles) {
+      const content = await readFile(file, 'utf-8');
+      const matches = content.match(/is-style-[\w-]+/g) ?? [];
+      for (const cls of matches) usedClasses.add(cls);
+    }
+
+    if (usedClasses.size === 0) return;
+
+    const bridges: Record<string, string> = {
+      'is-style-checkmark-list': `
+.is-style-checkmark-list { list-style: none; padding-left: 0; }
+.is-style-checkmark-list li { padding-left: 1.75em; position: relative; }
+.is-style-checkmark-list li::before { content: "✓"; position: absolute; left: 0; color: currentColor; }`,
+
+      'is-style-rounded': `
+.is-style-rounded img, img.is-style-rounded { border-radius: min(1.5rem, 2vw); }`,
+
+      'is-style-outline': `
+.is-style-outline, .is-style-outline.vp-generated-button { background: transparent; border: 2px solid currentColor; }`,
+
+      'is-style-fill': ``,
+      'is-style-default': ``,
+    };
+
+    const cssBlocks: string[] = [];
+    for (const cls of usedClasses) {
+      const rule = bridges[cls];
+      if (rule && rule.trim()) cssBlocks.push(rule.trim());
+    }
+
+    if (cssBlocks.length === 0) return;
+
+    const existingCss = await readFile(cssPath, 'utf-8');
+    const block =
+      `\n/* WordPress block style bridges */\n` + cssBlocks.join('\n');
+    await writeFile(cssPath, existingCss.trimEnd() + block + '\n');
+  }
+
+  private async applyInteractionTokens(
+    frontendDir: string,
+    tokens: ThemeTokens,
+  ): Promise<void> {
+    const buttonInteraction = tokens.interactions?.button;
+
+    const renderStateRule = (
+      selector: string,
+      state?: ThemeInteractionState,
+    ): string | null => {
+      if (!state || Object.keys(state).length === 0) return null;
+      const declarations = [
+        state.transition ? `transition: ${state.transition};` : null,
+        state.transform ? `transform: ${state.transform};` : null,
+        state.boxShadow ? `box-shadow: ${state.boxShadow};` : null,
+        state.opacity ? `opacity: ${state.opacity};` : null,
+        state.color ? `color: ${state.color};` : null,
+        state.textDecoration
+          ? `text-decoration: ${state.textDecoration};`
+          : null,
+        state.backgroundColor
+          ? `background-color: ${state.backgroundColor};`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      return declarations ? `${selector} { ${declarations} }` : null;
+    };
+
+    const renderAliasedStateRule = (
+      selectors: string[],
+      state?: ThemeInteractionState,
+    ): string | null => {
+      const selectorList = [...new Set(selectors.map((value) => value.trim()))]
+        .filter(Boolean)
+        .join(', ');
+      if (!selectorList) return null;
+      return renderStateRule(selectorList, state);
+    };
+
+    // Collect precise bridges by target for per-target CSS overrides
+    const preciseBridges = tokens.interactions?.precise ?? [];
+    const imagePrecise = preciseBridges.filter((b) => b.target === 'image');
+    const linkPrecise = preciseBridges.filter((b) => b.target === 'link');
+    const cardPrecise = preciseBridges.filter((b) => b.target === 'card');
+    const otherPrecise = preciseBridges.filter(
+      (b) => b.target !== 'image' && b.target !== 'link' && b.target !== 'card',
+    );
+
+    const interactionRules = [
+      // Button generic bridge
+      ...(buttonInteraction
+        ? [
+            renderStateRule('.vp-generated-button', buttonInteraction.base),
+            renderStateRule(
+              '.vp-generated-button:hover',
+              buttonInteraction.hover,
+            ),
+            renderStateRule(
+              '.vp-generated-button:focus, .vp-generated-button:focus-visible',
+              buttonInteraction.focus,
+            ),
+            renderStateRule(
+              '.vp-generated-button:active',
+              buttonInteraction.active,
+            ),
+          ]
+        : []),
+      // Image precise bridge — scope to the extracted source class and alias it
+      // onto generated <img> markup.
+      // Also cover the case where the class lands on an ancestor wrapper
+      // (e.g. applySectionCustomClasses puts it on the section element, not the img).
+      ...imagePrecise.flatMap((bridge) => [
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}`,
+            `.vp-generated-image.${bridge.className}`,
+            `img.${bridge.className}`,
+            `.${bridge.className} img`,
+            `.${bridge.className} .vp-generated-image`,
+          ],
+          bridge.base,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:hover`,
+            `.vp-generated-image.${bridge.className}:hover`,
+            `img.${bridge.className}:hover`,
+            `.${bridge.className}:hover img`,
+            `.${bridge.className}:hover .vp-generated-image`,
+          ],
+          bridge.hover,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:focus`,
+            `.${bridge.className}:focus-visible`,
+            `.vp-generated-image.${bridge.className}:focus`,
+            `.vp-generated-image.${bridge.className}:focus-visible`,
+            `img.${bridge.className}:focus`,
+            `img.${bridge.className}:focus-visible`,
+          ],
+          bridge.focus,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:active`,
+            `.vp-generated-image.${bridge.className}:active`,
+            `img.${bridge.className}:active`,
+          ],
+          bridge.active,
+        ),
+      ]),
+      // Link precise bridge — scope to the extracted source class and alias it
+      // onto generated <a>/<Link> markup.
+      ...linkPrecise.flatMap((bridge) => [
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}`,
+            `.vp-generated-link.${bridge.className}`,
+            `a.${bridge.className}`,
+          ],
+          bridge.base,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:hover`,
+            `.vp-generated-link.${bridge.className}:hover`,
+            `a.${bridge.className}:hover`,
+          ],
+          bridge.hover,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:focus`,
+            `.${bridge.className}:focus-visible`,
+            `.vp-generated-link.${bridge.className}:focus`,
+            `.vp-generated-link.${bridge.className}:focus-visible`,
+            `a.${bridge.className}:focus`,
+            `a.${bridge.className}:focus-visible`,
+          ],
+          bridge.focus,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:active`,
+            `.vp-generated-link.${bridge.className}:active`,
+            `a.${bridge.className}:active`,
+          ],
+          bridge.active,
+        ),
+      ]),
+      // Card precise bridge — apply only to wrappers carrying the extracted
+      // source class, while still aliasing to common React wrapper tags.
+      ...cardPrecise.flatMap((bridge) => [
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}`,
+            `.vp-generated-card.${bridge.className}`,
+            `article.${bridge.className}`,
+            `section.${bridge.className}`,
+            `div.${bridge.className}`,
+            `li.${bridge.className}`,
+            `figure.${bridge.className}`,
+          ],
+          bridge.base,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:hover`,
+            `.vp-generated-card.${bridge.className}:hover`,
+            `article.${bridge.className}:hover`,
+            `section.${bridge.className}:hover`,
+            `div.${bridge.className}:hover`,
+            `li.${bridge.className}:hover`,
+            `figure.${bridge.className}:hover`,
+          ],
+          bridge.hover,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:focus`,
+            `.${bridge.className}:focus-visible`,
+            `.vp-generated-card.${bridge.className}:focus`,
+            `.vp-generated-card.${bridge.className}:focus-visible`,
+            `article.${bridge.className}:focus`,
+            `article.${bridge.className}:focus-visible`,
+            `section.${bridge.className}:focus`,
+            `section.${bridge.className}:focus-visible`,
+            `div.${bridge.className}:focus`,
+            `div.${bridge.className}:focus-visible`,
+            `li.${bridge.className}:focus`,
+            `li.${bridge.className}:focus-visible`,
+            `figure.${bridge.className}:focus`,
+            `figure.${bridge.className}:focus-visible`,
+          ],
+          bridge.focus,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:active`,
+            `.vp-generated-card.${bridge.className}:active`,
+            `article.${bridge.className}:active`,
+            `section.${bridge.className}:active`,
+            `div.${bridge.className}:active`,
+            `li.${bridge.className}:active`,
+            `figure.${bridge.className}:active`,
+          ],
+          bridge.active,
+        ),
+      ]),
+      // Remaining precise bridges (button/card target custom classes)
+      ...otherPrecise.flatMap((bridge) => [
+        renderStateRule(`.${bridge.className}`, bridge.base),
+        renderStateRule(`.${bridge.className}:hover`, bridge.hover),
+        renderStateRule(
+          `.${bridge.className}:focus, .${bridge.className}:focus-visible`,
+          bridge.focus,
+        ),
+        renderStateRule(`.${bridge.className}:active`, bridge.active),
+      ]),
+    ].filter(Boolean);
+
+    if (interactionRules.length === 0) return;
+
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existingCss = await readFile(cssPath, 'utf-8');
+    const block = `/* Vibepress interaction bridge */\n${interactionRules.join('\n')}\n`;
+    if (existingCss.includes('/* Vibepress interaction bridge */')) return;
+    await writeFile(cssPath, `${existingCss.trimEnd()}\n\n${block}`);
+  }
+
+  private prepareGeneratedComponentCode(
+    code: string,
+    tokens?: ThemeTokens,
+    componentName?: string,
+  ): string {
+    let normalized = this.decorateGeneratedInteractionClasses(code, tokens);
+    normalized = this.normalizeCanonicalTextLinkHoverClasses(normalized);
+    normalized = this.normalizeCanonicalPostMetaLinks(normalized);
+    normalized = this.normalizeSinglePostHeroLayout(normalized, componentName);
+    normalized = this.ensureReactRouterLinkImport(normalized);
+    return normalized;
+  }
+
+  private decorateGeneratedInteractionClasses(
+    code: string,
+    tokens?: ThemeTokens,
+  ): string {
+    const appendClass = (value: string, extraClass: string): string => {
+      const classes = value
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+      if (!classes.includes(extraClass)) classes.push(extraClass);
+      return classes.join(' ');
+    };
+
+    const looksLikeButtonClass = (tag: string, className: string): boolean => {
+      if (tag.toLowerCase() === 'button') return true;
+      return (
+        /\b(bg-|inline-flex|justify-center|wp-element-button|wp-block-button__link)\b/.test(
+          className,
+        ) ||
+        (/\bpx-/.test(className) && /\bpy-/.test(className))
+      );
+    };
+
+    const cardBridgeClasses = new Set(
+      (tokens?.interactions?.precise ?? [])
+        .filter((bridge) => bridge.target === 'card')
+        .map((bridge) => bridge.className),
+    );
+    const looksLikeCardWrapper = (tag: string, className: string): boolean => {
+      if (!/^(article|div|section|li|figure)$/i.test(tag)) return false;
+      const classes = className
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+      return classes.some((token) => cardBridgeClasses.has(token));
+    };
+
+    // ── Button decoration ────────────────────────────────────────────────────
+    const decorateButtonsQuoted = (source: string) =>
+      source.replace(
+        /<(button|a|Link)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) =>
+          looksLikeButtonClass(tag, className)
+            ? `<${tag}${before}className=${quote}${appendClass(className, 'vp-generated-button')}${quote}`
+            : match,
+      );
+
+    const decorateButtonsTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(button|a|Link)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) =>
+          looksLikeButtonClass(tag, className)
+            ? `<${tag}${before}className={\`${appendClass(className, 'vp-generated-button')}\`}`
+            : match,
+      );
+
+    // ── Image decoration ─────────────────────────────────────────────────────
+    // Pass 1: <img> with quoted className
+    const decorateImagesQuoted = (source: string) =>
+      source.replace(
+        /<img\b([^>]*?)className=(["'])([^"']*)\2/g,
+        (_, before: string, quote: string, className: string) =>
+          `<img${before}className=${quote}${appendClass(className, 'vp-generated-image')}${quote}`,
+      );
+
+    // Pass 2: <img> with template-literal className
+    const decorateImagesTemplateLiteral = (source: string) =>
+      source.replace(
+        /<img\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (_, before: string, className: string) =>
+          `<img${before}className={\`${appendClass(className, 'vp-generated-image')}\`}`,
+      );
+
+    // Pass 3: <img> without any className — inject it before closing tag
+    const decorateImagesNoClass = (source: string) =>
+      source.replace(
+        /<img\b((?:(?!className=)[^>])*)(\/?>)/g,
+        (_, attrs: string, closing: string) =>
+          `<img${attrs} className="vp-generated-image"${closing}`,
+      );
+
+    // ── Link decoration ──────────────────────────────────────────────────────
+    // Add vp-generated-link to <a>/<Link> that are NOT button-like
+    const decorateLinksQuoted = (source: string) =>
+      source.replace(
+        /<(a|Link)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) => {
+          if (looksLikeButtonClass(tag, className)) return match;
+          return `<${tag}${before}className=${quote}${appendClass(className, 'vp-generated-link')}${quote}`;
+        },
+      );
+
+    const decorateLinksTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(a|Link)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) => {
+          if (looksLikeButtonClass(tag, className)) return match;
+          return `<${tag}${before}className={\`${appendClass(className, 'vp-generated-link')}\`}`;
+        },
+      );
+
+    // ── Card wrapper decoration ──────────────────────────────────────────────
+    const decorateCardsQuoted = (source: string) =>
+      source.replace(
+        /<(article|div|section|li|figure)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) =>
+          looksLikeCardWrapper(tag, className)
+            ? `<${tag}${before}className=${quote}${appendClass(className, 'vp-generated-card')}${quote}`
+            : match,
+      );
+
+    const decorateCardsTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(article|div|section|li|figure)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) =>
+          looksLikeCardWrapper(tag, className)
+            ? `<${tag}${before}className={\`${appendClass(className, 'vp-generated-card')}\`}`
+            : match,
+      );
+
+    // Apply decorations in order: buttons (if token exists), then images, then links
+    let result = code;
+
+    if (tokens?.interactions?.button) {
+      result = decorateButtonsTemplateLiteral(decorateButtonsQuoted(result));
+    }
+
+    // Images and links always get bridge classes (CSS defaults are always written)
+    result = decorateImagesNoClass(
+      decorateImagesTemplateLiteral(decorateImagesQuoted(result)),
+    );
+    result = decorateLinksTemplateLiteral(decorateLinksQuoted(result));
+    result = decorateCardsTemplateLiteral(decorateCardsQuoted(result));
+
+    return result;
+  }
+
+  private normalizeCanonicalPostMetaLinks(code: string): string {
+    const appendTextLinkClasses = (className?: string): string => {
+      const classes = (className ?? '')
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+      for (const token of ['hover:underline', 'underline-offset-4']) {
+        if (!classes.includes(token)) classes.push(token);
+      }
+      return classes.join(' ');
+    };
+
+    const isCanonicalMetaLink = (raw: string): boolean =>
+      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
+      /(?:to=|href=)[^>]*\/category\//.test(raw);
+
+    const decorateQuoted = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className=${quote}${appendTextLinkClasses(className)}${quote}`;
+        },
+      );
+
+    const decorateTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${before}className={\`${appendTextLinkClasses(className)}\`}`;
+        },
+      );
+
+    const decorateWithoutClass = (source: string) =>
+      source.replace(
+        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
+        (match, tag: string, attrs: string) => {
+          if (!isCanonicalMetaLink(match)) return match;
+          return `<${tag}${attrs} className="${appendTextLinkClasses()}"`;
+        },
+      );
+
+    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+  }
+
+  private normalizeSinglePostHeroLayout(
+    code: string,
+    componentName?: string,
+  ): string {
+    if (componentName !== 'Single') return code;
+    if (
+      !/\{post\.title\}/.test(code) ||
+      !/__html:\s*post\.content/.test(code)
+    ) {
+      return code;
+    }
+
+    let normalized = code.replace(
+      /className="max-w-\[1280px\] mx-auto w-full px-4 sm:px-6 lg:px-8 ([^"]*?)flex flex-col gap-\[1rem\]"/,
+      'className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 $1flex flex-col items-center text-center gap-[1rem]"',
+    );
+
+    normalized = normalized.replace(
+      /className="flex flex-wrap items-center gap-\[0\.3em\] text-\[0\.9rem\]"/,
+      'className="flex flex-wrap items-center justify-center gap-[0.3em] text-[0.9rem]"',
+    );
+
+    return normalized;
+  }
+
+  private normalizeCanonicalTextLinkHoverClasses(code: string): string {
+    const appendTextLinkClasses = (className?: string): string => {
+      const classes = (className ?? '')
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+      for (const token of ['hover:underline', 'underline-offset-4']) {
+        if (!classes.includes(token)) classes.push(token);
+      }
+      return classes.join(' ');
+    };
+
+    const looksLikeButtonClass = (className: string): boolean =>
+      /\bbg-\[/.test(className) ||
+      (/\bpx-/.test(className) && /\bpy-/.test(className)) ||
+      /\bjustify-center\b/.test(className);
+
+    const isCanonicalTextLink = (raw: string): boolean =>
+      /\/(?:post|page|author|category|tag)\//.test(raw) ||
+      /\bitem\.url\b/.test(raw) ||
+      /\btoAppPath\(item\.url\)\b/.test(raw) ||
+      /\bhref=["']https?:\/\//.test(raw);
+
+    const decorateQuoted = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) => {
+          if (!isCanonicalTextLink(match)) return match;
+          if (looksLikeButtonClass(className)) return match;
+          return `<${tag}${before}className=${quote}${appendTextLinkClasses(className)}${quote}`;
+        },
+      );
+
+    const decorateTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) => {
+          if (!isCanonicalTextLink(match)) return match;
+          if (looksLikeButtonClass(className)) return match;
+          return `<${tag}${before}className={\`${appendTextLinkClasses(className)}\`}`;
+        },
+      );
+
+    return decorateTemplateLiteral(decorateQuoted(code));
+  }
+
+  private ensureReactRouterLinkImport(code: string): string {
+    if (!/<Link\b/.test(code)) return code;
+    if (
+      /import\s*\{\s*[^}]*\bLink\b[^}]*\}\s*from\s*['"]react-router-dom['"]/.test(
+        code,
+      )
+    ) {
+      return code;
+    }
+
+    if (/from\s*['"]react-router-dom['"]/.test(code)) {
+      return code.replace(
+        /import\s*\{\s*([^}]*)\}\s*from\s*['"]react-router-dom['"];/,
+        (match, imports: string) => {
+          const tokens = imports
+            .split(',')
+            .map((token) => token.trim())
+            .filter(Boolean);
+          if (!tokens.includes('Link')) tokens.push('Link');
+          return `import { ${tokens.join(', ')} } from 'react-router-dom';`;
+        },
+      );
+    }
+
+    const reactImportMatch = code.match(
+      /^import[^\n]*from\s*['"]react['"];\n?/m,
+    );
+    if (!reactImportMatch || reactImportMatch.index == null) {
+      return `import { Link } from 'react-router-dom';\n${code}`;
+    }
+
+    const insertAt = reactImportMatch.index + reactImportMatch[0].length;
+    return `${code.slice(0, insertAt)}import { Link } from 'react-router-dom';\n${code.slice(insertAt)}`;
   }
 
   private runNpmInstall(dir: string): Promise<void> {
