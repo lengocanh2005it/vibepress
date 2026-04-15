@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     git \
     chromium \
     fonts-freefont-ttf \
+    ca-certificates \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
