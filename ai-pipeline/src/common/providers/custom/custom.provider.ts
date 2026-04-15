@@ -6,6 +6,9 @@ export const CUSTOM_CONFIG = 'CUSTOM_CONFIG';
 export interface CustomConfig {
   baseURL: string;
   apiKey: string;
+  chatCompletionsPath: string;
+  authHeader: string;
+  authValuePrefix: string;
 }
 
 export const CustomProvider: Provider = {
@@ -17,5 +20,17 @@ export const CustomProvider: Provider = {
       'http://localhost:8000',
     ),
     apiKey: configService.get<string>('custom.apiKey', ''),
+    chatCompletionsPath: configService.get<string>(
+      'custom.chatCompletionsPath',
+      '/gateway/chat/completions',
+    ),
+    authHeader: configService.get<string>(
+      'custom.authHeader',
+      'Authorization',
+    ),
+    authValuePrefix: configService.get<string>(
+      'custom.authValuePrefix',
+      '',
+    ),
   }),
 };

@@ -2,18 +2,8 @@ import { Inject, Injectable } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
-import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import Groq from 'groq-sdk';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Ollama } from 'ollama';
-import { ANTHROPIC_CLIENT } from '../providers/anthropic/anthropic.provider.js';
-import { MISTRAL_CLIENT } from '../providers/mistral/mistral.provider.js';
-import { GROQ_CLIENT } from '../providers/groq/groq.provider.js';
-import { CEREBRAS_CLIENT } from '../providers/cerebras/cerebras.provider.js';
-import { GEMINI_CLIENT } from '../providers/gemini/gemini.provider.js';
 import { OPENAI_CLIENT } from '../providers/openai/openai.provider.js';
-import { OLLAMA_CLIENT } from '../providers/ollama/ollama.provider.js';
 import {
   CUSTOM_CONFIG,
   type CustomConfig,
@@ -25,33 +15,21 @@ import type {
 } from './llm.interface.js';
 
 const DEFAULT_MODELS: Record<LlmProvider, string> = {
-  anthropic: 'claude-sonnet-4-6',
-  mistral: 'mistral-small-latest',
-  groq: 'llama-3.3-70b-versatile',
-  cerebras: 'llama3.3-70b',
-  gemini: 'gemini-2.0-flash',
-  openai: 'gpt-4o-mini',
-  ollama: 'qwen2.5-coder:7b',
-  custom: 'default',
+  openai: 'gpt-5.3-codex',
+  custom: 'Qwen/Qwen2.5-Coder-14B-Instruct',
 };
 
 @Injectable()
 export class LlmFactoryService {
   constructor(
-    @Inject(ANTHROPIC_CLIENT) private readonly anthropic: Anthropic,
-    @Inject(MISTRAL_CLIENT) private readonly mistral: OpenAI,
-    @Inject(GROQ_CLIENT) private readonly groq: Groq,
-    @Inject(CEREBRAS_CLIENT) private readonly cerebras: OpenAI,
-    @Inject(GEMINI_CLIENT) private readonly gemini: GoogleGenerativeAI,
     @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
-    @Inject(OLLAMA_CLIENT) private readonly ollama: Ollama,
     @Inject(CUSTOM_CONFIG) private readonly customConfig: CustomConfig,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {}
 
   getProvider(): LlmProvider {
-    return this.configService.get<LlmProvider>('aiProvider', 'mistral');
+    return this.configService.get<LlmProvider>('aiProvider', 'openai');
   }
 
   getModel(): string {
@@ -69,16 +47,10 @@ export class LlmFactoryService {
 
   /**
    * Supported providers — used to parse the "provider/model" format.
-   * e.g. "mistral/mistral-large-latest", "ollama/qwen2.5-coder:7b"
+   * e.g. "openai/gpt-5.4", "custom/Qwen/Qwen2.5-Coder-14B-Instruct"
    */
   private static readonly KNOWN_PROVIDERS = new Set<LlmProvider>([
-    'anthropic',
-    'mistral',
-    'groq',
-    'cerebras',
-    'gemini',
     'openai',
-    'ollama',
     'custom',
   ]);
 
@@ -93,13 +65,49 @@ export class LlmFactoryService {
     return typeof cached === 'number' ? cached : undefined;
   }
 
+  private normalizeChatCompletionUrl(baseURL: string, path: string): string {
+    const trimmedBase = baseURL.replace(/\/+$/, '');
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return `${trimmedBase}${normalizedPath}`;
+  }
+
+  private extractTextContent(content: unknown): string | undefined {
+    if (typeof content === 'string') {
+      return content;
+    }
+
+    if (!Array.isArray(content)) {
+      return undefined;
+    }
+
+    const text = content
+      .map((part) => {
+        if (typeof part === 'string') {
+          return part;
+        }
+        if (
+          part &&
+          typeof part === 'object' &&
+          'text' in part &&
+          typeof (part as { text?: unknown }).text === 'string'
+        ) {
+          return (part as { text: string }).text;
+        }
+        return '';
+      })
+      .join('')
+      .trim();
+
+    return text || undefined;
+  }
+
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
     let provider = this.getProvider();
     let model = params.model;
 
     // Parse "provider/model" format for per-call provider routing.
-    // e.g. "mistral/mistral-large-latest" → provider=mistral, model=mistral-large-latest
-    //      "ollama/qwen2.5-coder:7b"      → provider=ollama,  model=qwen2.5-coder:7b
+    // e.g. "openai/gpt-5.4" -> provider=openai, model=gpt-5.4
+    //      "custom/DeepSeek-R1-14B" -> provider=custom, model=DeepSeek-R1-14B
     const slashIdx = model.indexOf('/');
     if (slashIdx !== -1) {
       const prefix = model.slice(0, slashIdx) as LlmProvider;
@@ -116,73 +124,15 @@ export class LlmFactoryService {
     };
 
     switch (provider) {
-      case 'anthropic':
-        return this.chatAnthropic(resolvedParams);
-      case 'gemini':
-        return this.chatGemini(resolvedParams);
-      case 'groq':
-        return this.chatOpenAICompat(
-          this.groq as unknown as OpenAI,
-          resolvedParams,
-        );
-      case 'cerebras':
-        return this.chatOpenAICompat(this.cerebras, resolvedParams);
       case 'openai':
-        return this.chatOpenAINative(resolvedParams);
-      case 'ollama':
-        return this.chatOllama(resolvedParams);
+        return this.chatOpenAI(resolvedParams);
       case 'custom':
-        return this.chatCustom(resolvedParams);
-      case 'mistral':
       default:
-        return this.chatOpenAICompat(this.mistral, resolvedParams);
+        return this.chatCustom(resolvedParams);
     }
   }
 
-  private async chatOpenAICompat(
-    client: OpenAI,
-    params: LlmChatParams,
-  ): Promise<LlmChatResult> {
-    const {
-      model,
-      systemPrompt,
-      userPrompt,
-      maxTokens = 8192,
-      temperature = 0,
-    } = params;
-
-    const response = await client.chat.completions.create({
-      model,
-      max_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(systemPrompt
-          ? [{ role: 'system' as const, content: systemPrompt }]
-          : []),
-        { role: 'user' as const, content: userPrompt },
-      ],
-    });
-
-    const text = response.choices[0]?.message?.content;
-    const finishReason = response.choices[0]?.finish_reason;
-    if (!text) {
-      throw new Error(
-        `Empty response from ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
-      );
-    }
-
-    return {
-      text,
-      inputTokens: response.usage?.prompt_tokens ?? 0,
-      outputTokens: response.usage?.completion_tokens ?? 0,
-      cachedTokens: this.extractCachedTokens(response.usage),
-      truncated: finishReason === 'length',
-    };
-  }
-
-  private async chatOpenAINative(
-    params: LlmChatParams,
-  ): Promise<LlmChatResult> {
+  private async chatOpenAI(params: LlmChatParams): Promise<LlmChatResult> {
     const {
       model,
       systemPrompt,
@@ -220,71 +170,6 @@ export class LlmFactoryService {
     };
   }
 
-  private async chatAnthropic(params: LlmChatParams): Promise<LlmChatResult> {
-    const {
-      model,
-      systemPrompt,
-      userPrompt,
-      maxTokens = 8192,
-      temperature = 0,
-    } = params;
-
-    const response = await this.anthropic.messages.create({
-      model,
-      max_tokens: maxTokens,
-      temperature,
-      ...(systemPrompt ? { system: systemPrompt } : {}),
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-
-    const firstBlock = response.content[0];
-    if (!firstBlock || firstBlock.type !== 'text' || !firstBlock.text) {
-      throw new Error(
-        `Empty response from ${model} (stop_reason: ${response.stop_reason ?? 'unknown'})`,
-      );
-    }
-
-    return {
-      text: firstBlock.text,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      cachedTokens: this.extractCachedTokens(response.usage),
-      truncated: response.stop_reason === 'max_tokens',
-    };
-  }
-
-  private async chatGemini(params: LlmChatParams): Promise<LlmChatResult> {
-    const {
-      model,
-      systemPrompt,
-      userPrompt,
-      maxTokens = 8192,
-      temperature = 0,
-    } = params;
-
-    const genModel = this.gemini.getGenerativeModel({
-      model,
-      ...(systemPrompt ? { systemInstruction: systemPrompt } : {}),
-      generationConfig: { maxOutputTokens: maxTokens, temperature },
-    });
-
-    const result = await genModel.generateContent(userPrompt);
-    const response = result.response;
-    const text = response.text();
-
-    if (!text) {
-      throw new Error(`Empty response from ${model}`);
-    }
-
-    return {
-      text,
-      inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
-      outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
-      cachedTokens: this.extractCachedTokens(response.usageMetadata),
-      truncated: response.candidates?.[0]?.finishReason === 'MAX_TOKENS',
-    };
-  }
-
   private async chatCustom(params: LlmChatParams): Promise<LlmChatResult> {
     const {
       model,
@@ -293,11 +178,24 @@ export class LlmFactoryService {
       maxTokens = 8192,
       temperature = 0,
     } = params;
-    const { baseURL, apiKey } = this.customConfig;
+    const {
+      baseURL,
+      apiKey,
+      chatCompletionsPath,
+      authHeader,
+      authValuePrefix,
+    } = this.customConfig;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const trimmedApiKey = apiKey.trim();
+    if (trimmedApiKey) {
+      headers[authHeader] = `${authValuePrefix}${trimmedApiKey}`;
+    }
 
     const response = await firstValueFrom(
       this.httpService.post(
-        `${baseURL}/gateway/chat/completions`,
+        this.normalizeChatCompletionUrl(baseURL, chatCompletionsPath),
         {
           model,
           max_tokens: maxTokens,
@@ -310,15 +208,21 @@ export class LlmFactoryService {
           ],
         },
         {
-          headers: {
-            Authorization: `${apiKey}`,
-            'Content-Type': 'application/json',
-          },
+          headers,
         },
       ),
     );
 
-    const { text, inputTokens, outputTokens, cachedTokens } = response.data;
+    const text =
+      response.data?.text ??
+      this.extractTextContent(response.data?.choices?.[0]?.message?.content);
+    const inputTokens =
+      response.data?.inputTokens ?? response.data?.usage?.prompt_tokens;
+    const outputTokens =
+      response.data?.outputTokens ?? response.data?.usage?.completion_tokens;
+    const cachedTokens =
+      response.data?.cachedTokens ??
+      this.extractCachedTokens(response.data?.usage);
     const finishReason = response.data.choices?.[0]?.finish_reason;
 
     if (!text) {
@@ -333,41 +237,6 @@ export class LlmFactoryService {
       outputTokens: outputTokens ?? 0,
       cachedTokens: typeof cachedTokens === 'number' ? cachedTokens : undefined,
       truncated: finishReason === 'length',
-    };
-  }
-
-  private async chatOllama(params: LlmChatParams): Promise<LlmChatResult> {
-    const {
-      model,
-      systemPrompt,
-      userPrompt,
-      maxTokens = 8192,
-      temperature = 0,
-    } = params;
-
-    const response = await this.ollama.chat({
-      model,
-      messages: [
-        ...(systemPrompt
-          ? [{ role: 'system' as const, content: systemPrompt }]
-          : []),
-        { role: 'user' as const, content: userPrompt },
-      ],
-      stream: false,
-      options: { temperature, num_predict: maxTokens },
-    });
-
-    const text = response.message.content;
-    if (!text) {
-      throw new Error(`Empty response from ${model}`);
-    }
-
-    return {
-      text,
-      inputTokens: response.prompt_eval_count ?? 0,
-      outputTokens: response.eval_count ?? 0,
-      cachedTokens: this.extractCachedTokens(response),
-      truncated: response.done_reason === 'length',
     };
   }
 }

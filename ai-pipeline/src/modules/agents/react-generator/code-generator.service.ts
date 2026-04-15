@@ -25,6 +25,7 @@ import type {
 import {
   COMMENT_INTERFACE,
   COMMENT_SUBMISSION_INTERFACE,
+  FOOTER_COLUMN_INTERFACE,
   MENU_INTERFACE,
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
@@ -163,11 +164,28 @@ export class CodeGeneratorService {
     if (needsMenus) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
+    if (renderState.componentKind === 'footer') {
+      lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
+    }
     if (needsSiteInfo || needsMenus) {
       lines.push('');
       lines.push('  useEffect(() => {');
       lines.push('    (async () => {');
-      if (needsSiteInfo && needsMenus) {
+      if (needsSiteInfo && needsMenus && renderState.componentKind === 'footer') {
+        lines.push(
+          '      const [siteInfoRes, menusRes, footerLinksRes] = await Promise.all([',
+        );
+        lines.push("        fetch('/api/site-info'),");
+        lines.push("        fetch('/api/menus'),");
+        lines.push("        fetch('/api/footer-links'),");
+        lines.push('      ]);');
+        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push('      setSiteInfo(await siteInfoRes.json());');
+        lines.push('      setMenus(await menusRes.json());');
+        lines.push(
+          '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
+        );
+      } else if (needsSiteInfo && needsMenus) {
         lines.push('      const [siteInfoRes, menusRes] = await Promise.all([');
         lines.push("        fetch('/api/site-info'),");
         lines.push("        fetch('/api/menus'),");
@@ -177,6 +195,16 @@ export class CodeGeneratorService {
       } else if (needsSiteInfo) {
         lines.push("      const siteInfoRes = await fetch('/api/site-info');");
         lines.push('      setSiteInfo(await siteInfoRes.json());');
+      } else if (renderState.componentKind === 'footer') {
+        lines.push('      const [menusRes, footerLinksRes] = await Promise.all([');
+        lines.push("        fetch('/api/menus'),");
+        lines.push("        fetch('/api/footer-links'),");
+        lines.push('      ]);');
+        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push('      setMenus(await menusRes.json());');
+        lines.push(
+          '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
+        );
       } else {
         lines.push("      const menusRes = await fetch('/api/menus');");
         lines.push('      setMenus(await menusRes.json());');
@@ -199,6 +227,11 @@ export class CodeGeneratorService {
       lines.push(
         "  const footerNavigationMenus = navigationMenus.filter((menu) => menu !== primaryMenu && menu.location !== 'primary' && menu.slug !== 'primary');",
       );
+      if (renderState.componentKind === 'footer') {
+        lines.push(
+          '  const displayFooterColumns = footerNavigationMenus.length === 0 ? footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0) : [];',
+        );
+      }
       lines.push(
         '  const scoreMenuByHints = (menu: Menu, hintTitles: string[]) => {',
       );
@@ -1507,7 +1540,7 @@ ${cards}
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => /<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
 
@@ -2507,4 +2540,5 @@ const SHARED_INTERFACES = [
   PAGE_INTERFACE,
   MENU_ITEM_INTERFACE,
   MENU_INTERFACE,
+  FOOTER_COLUMN_INTERFACE,
 ].join('\n\n');

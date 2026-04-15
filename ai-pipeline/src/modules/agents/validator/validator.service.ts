@@ -611,6 +611,14 @@ export class ValidatorService {
       }
       if (
         isFooterPartial &&
+        !/fetch\(\s*['"`]\/api\/footer-links\b/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and use those columns as the fallback when `/api/menus` has no footer/social groups.',
+        );
+      }
+      if (
+        isFooterPartial &&
         dataNeeds.has('menus') &&
         !/location\s*!==\s*['"]primary['"]/.test(code) &&
         !/slug\s*!==\s*['"]primary['"]/.test(code)
@@ -1405,7 +1413,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private fetchesSharedChromeData(code: string): boolean {
-    return /fetch\(\s*['"`]\/api\/(?:site-info|menus)\b/.test(code);
+    return /fetch\(\s*['"`]\/api\/(?:site-info|menus|footer-links)\b/.test(
+      code,
+    );
   }
 
   private usesSharedChromeData(code: string): boolean {

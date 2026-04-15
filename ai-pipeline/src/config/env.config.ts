@@ -1,47 +1,144 @@
-export default () => ({
+type SupportedLlmProfile = 'openai' | 'custom';
+
+const OPENAI_CODE_MODEL = 'gpt-5.3-codex';
+const OPENAI_REASONING_MODEL = 'gpt-5.4';
+const CUSTOM_CODE_MODEL = 'Qwen/Qwen2.5-Coder-14B-Instruct';
+const CUSTOM_REASONING_MODEL = 'DeepSeek-R1-14B';
+
+const OPENAI_ALLOWED_MODELS = new Set([
+  OPENAI_CODE_MODEL,
+  OPENAI_REASONING_MODEL,
+]);
+const CUSTOM_ALLOWED_MODELS = new Set([
+  CUSTOM_CODE_MODEL,
+  CUSTOM_REASONING_MODEL,
+]);
+
+function withProvider(
+  provider: SupportedLlmProfile,
+  model: string,
+): string {
+  return `${provider}/${model}`;
+}
+
+function stripProviderPrefix(
+  value: string,
+  provider: SupportedLlmProfile,
+): string {
+  const prefix = `${provider}/`;
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+}
+
+function normalizeLlmProfile(value?: string): SupportedLlmProfile {
+  return value?.trim().toLowerCase() === 'custom' ? 'custom' : 'openai';
+}
+
+function normalizeSupportedModel(
+  value: string | undefined,
+  fallback: string,
+): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  if (trimmed.startsWith('openai/')) {
+    const model = trimmed.slice('openai/'.length);
+    if (OPENAI_ALLOWED_MODELS.has(model)) {
+      return trimmed;
+    }
+  } else if (trimmed.startsWith('custom/')) {
+    const model = trimmed.slice('custom/'.length);
+    if (CUSTOM_ALLOWED_MODELS.has(model)) {
+      return trimmed;
+    }
+  } else if (OPENAI_ALLOWED_MODELS.has(trimmed)) {
+    return withProvider('openai', trimmed);
+  } else if (CUSTOM_ALLOWED_MODELS.has(trimmed)) {
+    return withProvider('custom', trimmed);
+  }
+
+  throw new Error(
+    `Unsupported LLM model "${trimmed}". Supported models: openai/${OPENAI_CODE_MODEL}, openai/${OPENAI_REASONING_MODEL}, custom/${CUSTOM_CODE_MODEL}, custom/${CUSTOM_REASONING_MODEL}`,
+  );
+}
+
+function buildLlmPreset(profile: SupportedLlmProfile): {
+  provider: SupportedLlmProfile;
+  providerModel: string;
+  planningModel: string;
+  genCodeModel: string;
+  reviewCodeModel: string;
+  backendReviewModel: string;
+  fixAgentModel: string;
+} {
+  if (profile === 'custom') {
+    return {
+      provider: 'custom',
+      providerModel: CUSTOM_CODE_MODEL,
+      planningModel: withProvider('custom', CUSTOM_REASONING_MODEL),
+      genCodeModel: withProvider('custom', CUSTOM_CODE_MODEL),
+      reviewCodeModel: withProvider('custom', CUSTOM_REASONING_MODEL),
+      backendReviewModel: withProvider('custom', CUSTOM_REASONING_MODEL),
+      fixAgentModel: withProvider('custom', CUSTOM_CODE_MODEL),
+    };
+  }
+
+  return {
+    provider: 'openai',
+    providerModel: OPENAI_CODE_MODEL,
+    planningModel: withProvider('openai', OPENAI_REASONING_MODEL),
+    genCodeModel: withProvider('openai', OPENAI_CODE_MODEL),
+    reviewCodeModel: withProvider('openai', OPENAI_REASONING_MODEL),
+    backendReviewModel: withProvider('openai', OPENAI_REASONING_MODEL),
+    fixAgentModel: withProvider('openai', OPENAI_CODE_MODEL),
+  };
+}
+
+export default () => {
+  const llmProfile = normalizeLlmProfile(
+    process.env.LLM_PROFILE ?? process.env.AI_PROVIDER,
+  );
+  const llmPreset = buildLlmPreset(llmProfile);
+
+  return {
   port: process.env.PORT || '3001',
-  aiProvider: process.env.AI_PROVIDER || 'mistral',
+  aiProvider: llmPreset.provider,
   db: {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT ?? '3306', 10),
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
   },
-  groq: {
-    apiKey: process.env.GROQ_API_KEY,
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-  },
-  gemini: {
-    apiKey: process.env.GEMINI_API_KEY,
-    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-  },
-  cerebras: {
-    apiKey: process.env.CEREBRAS_API_KEY,
-    model: process.env.CEREBRAS_MODEL || 'llama3.3-70b',
-  },
-  mistral: {
-    apiKey: process.env.MISTRAL_API_KEY,
-    model: process.env.MISTRAL_MODEL || 'mistral-small-latest',
-    maxTokens: parseInt(process.env.MISTRAL_MAX_TOKENS ?? '16384', 10),
-  },
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
     baseURL: process.env.OPENAI_BASE_URL,
-    model: process.env.OPENAI_MODEL || 'gpt-5.3-codex',
-  },
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
-  },
-  ollama: {
-    baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-    model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b',
+    model: stripProviderPrefix(
+      normalizeSupportedModel(
+        process.env.OPENAI_MODEL,
+        withProvider('openai', OPENAI_CODE_MODEL),
+      ),
+      'openai',
+    ),
   },
   custom: {
     baseURL: process.env.CUSTOM_BASE_URL || 'http://localhost:8000',
     apiKey: process.env.CUSTOM_API_KEY || '',
-    model: process.env.CUSTOM_MODEL || 'default',
+    model: stripProviderPrefix(
+      normalizeSupportedModel(
+        process.env.CUSTOM_MODEL,
+        withProvider('custom', CUSTOM_CODE_MODEL),
+      ),
+      'custom',
+    ),
     maxTokens: parseInt(process.env.CUSTOM_MAX_TOKENS ?? '8192', 10),
+    chatCompletionsPath:
+      process.env.CUSTOM_CHAT_COMPLETIONS_PATH || '/gateway/chat/completions',
+    authHeader: process.env.CUSTOM_AUTH_HEADER || 'Authorization',
+    authValuePrefix: process.env.CUSTOM_AUTH_VALUE_PREFIX || '',
+  },
+  llm: {
+    profile: llmProfile,
   },
   reactGenerator: {
     delayBetweenComponents: parseInt(
@@ -65,17 +162,6 @@ export default () => ({
       10,
     ),
     minimalVisualPlan: process.env.PLANNER_MINIMAL_VISUAL_PLAN === 'true',
-    visualReferenceEnabled:
-      process.env.PLANNER_VISUAL_REFERENCE_ENABLED !== 'false',
-    visualWpBaseUrl: process.env.PLANNER_VISUAL_WP_BASE_URL,
-    visualViewportWidth: parseInt(
-      process.env.PLANNER_VISUAL_VIEWPORT_WIDTH ?? '1440',
-      10,
-    ),
-    visualViewportHeight: parseInt(
-      process.env.PLANNER_VISUAL_VIEWPORT_HEIGHT ?? '1400',
-      10,
-    ),
   },
   preview: {
     runtimeRouteDelayMs: parseInt(
@@ -91,50 +177,38 @@ export default () => ({
       10,
     ),
   },
-  // Per-step model overrides — format: "provider/model" or plain model name.
-  // Preferred env names:
-  //   PLANNING_MODEL=mistral/mistral-large-latest
-  //   GEN_CODE_MODEL=mistral/codestral-latest
-  //   REVIEW_CODE_MODEL=mistral/codestral-latest
-  //   AI_REVIEW_MODE=warn
-  //   BACKEND_AI_REVIEW_MODE=warn
-  // Backward-compatible aliases:
-  //   PLANNER_MODEL, CODE_REVIEWER_MODEL, FIX_AGENT_MODEL
+  // Primary switch:
+  //   LLM_PROFILE=openai -> planning/review use gpt-5.4, code/fix use gpt-5.3-codex
+  //   LLM_PROFILE=custom -> planning/review use DeepSeek-R1-14B, code/fix use Qwen2.5-Coder-14B-Instruct
+  // Optional per-step overrides still exist, but they are validated against the supported model allowlist.
   pipeline: {
-    planningModel:
-      process.env.PLANNING_MODEL ??
-      process.env.PLANNER_MODEL ??
-      'openai/gpt-5.4',
-    genCodeModel: process.env.GEN_CODE_MODEL ?? 'openai/gpt-5.3-codex',
-    reviewCodeModel:
-      process.env.REVIEW_CODE_MODEL ??
-      process.env.CODE_REVIEWER_MODEL ??
-      'openai/gpt-5.3-codex',
-    backendReviewModel:
+    planningModel: normalizeSupportedModel(
+      process.env.PLANNING_MODEL ?? process.env.PLANNER_MODEL,
+      llmPreset.planningModel,
+    ),
+    genCodeModel: normalizeSupportedModel(
+      process.env.GEN_CODE_MODEL,
+      llmPreset.genCodeModel,
+    ),
+    reviewCodeModel: normalizeSupportedModel(
+      process.env.REVIEW_CODE_MODEL ?? process.env.CODE_REVIEWER_MODEL,
+      llmPreset.reviewCodeModel,
+    ),
+    backendReviewModel: normalizeSupportedModel(
       process.env.BACKEND_REVIEW_MODEL ??
-      process.env.REVIEW_CODE_MODEL ??
-      process.env.CODE_REVIEWER_MODEL ??
-      'openai/gpt-5.4',
-    fixAgentModel:
+        process.env.REVIEW_CODE_MODEL ??
+        process.env.CODE_REVIEWER_MODEL,
+      llmPreset.backendReviewModel,
+    ),
+    fixAgentModel: normalizeSupportedModel(
       process.env.FIX_AGENT_MODEL ??
-      process.env.REVIEW_CODE_MODEL ??
-      process.env.CODE_REVIEWER_MODEL ??
-      process.env.GEN_CODE_MODEL ??
-      'openai/gpt-5.3-codex',
+        process.env.REVIEW_CODE_MODEL ??
+        process.env.CODE_REVIEWER_MODEL ??
+        process.env.GEN_CODE_MODEL,
+      llmPreset.fixAgentModel,
+    ),
     aiReviewMode: process.env.AI_REVIEW_MODE ?? 'warn',
     backendAiReviewMode: process.env.BACKEND_AI_REVIEW_MODE ?? 'warn',
-  },
-  visualReview: {
-    model:
-      process.env.VISUAL_REVIEW_MODEL ??
-      process.env.PLANNING_MODEL ??
-      process.env.PLANNER_MODEL ??
-      'openai/gpt-5.4',
-    maxRoutes: parseInt(process.env.VISUAL_REVIEW_MAX_ROUTES ?? '4', 10),
-    maxFixRounds: parseInt(process.env.VISUAL_REVIEW_MAX_FIX_ROUNDS ?? '1', 10),
-    minCheapDiffScore: parseFloat(
-      process.env.VISUAL_REVIEW_MIN_CHEAP_DIFF_SCORE ?? '0.18',
-    ),
   },
   github: {
     wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
@@ -143,4 +217,5 @@ export default () => ({
   automation: {
     url: process.env.AUTOMATION_URL,
   },
-});
+  };
+};

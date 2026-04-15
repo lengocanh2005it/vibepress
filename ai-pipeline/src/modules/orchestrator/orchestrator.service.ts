@@ -1,67 +1,65 @@
+import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import type { AgentResult } from '@/common/types/pipeline.type.js';
 import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
 import { mkdir, readdir, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
-import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
-import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
-import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
-import { CleanupService } from '../agents/cleanup/cleanup.service.js';
-import { DbContentService } from '../agents/db-content/db-content.service.js';
-import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
-import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
-import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
-import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
-import { PlannerService } from '../agents/planner/planner.service.js';
-import type { PlanResult } from '../agents/planner/planner.service.js';
-import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
-import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
-import { VisualRouteReviewService } from '../agents/preview-builder/visual-route-review.service.js';
-import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
-import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
-import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
-import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
-import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
-import type { RepoAnalyzeResult } from '../agents/repo-analyzer/repo-analyzer.service.js';
-import type {
-  RepoResolvedSourceSummary,
-  RepoThemeManifest,
-} from '../agents/repo-analyzer/repo-analyzer.service.js';
-import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
-import { ValidatorService } from '../agents/validator/validator.service.js';
-import { GenerationContractAuditService } from '../agents/validator/generation-contract-audit.service.js';
-import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
-import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
-import { SqlService } from '../sql/sql.service.js';
-import { WpQueryService } from '../sql/wp-query.service.js';
-import { ThemeDetectorService } from '../theme/theme-detector.service.js';
+import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 import {
   TokenTracker,
   type TokenUsagePhaseSummary,
 } from '../../common/utils/token-tracker.js';
-import { AiLoggerService } from '../ai-logger/ai-logger.service.js';
+import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
+import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
+import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
+import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
+import { CleanupService } from '../agents/cleanup/cleanup.service.js';
+import { DbContentService } from '../agents/db-content/db-content.service.js';
+import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
+import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
+import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
+import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
+import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
+import type { PlanResult } from '../agents/planner/planner.service.js';
+import { PlannerService } from '../agents/planner/planner.service.js';
+import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
+import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
+import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
+import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
+import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
+import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
 import type {
-  PipelineCaptureAttachmentDto,
-  RunPipelineDto,
-  SubmitReactVisualEditDto,
-} from './orchestrator.dto.js';
-import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
+  RepoAnalyzeResult,
+  RepoResolvedSourceSummary,
+  RepoThemeManifest,
+} from '../agents/repo-analyzer/repo-analyzer.service.js';
+import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
+import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
+import { GenerationContractAuditService } from '../agents/validator/generation-contract-audit.service.js';
+import { ValidatorService } from '../agents/validator/validator.service.js';
+import { AiLoggerService } from '../ai-logger/ai-logger.service.js';
 import { CaptureReviewService } from '../edit-request/capture-review.service.js';
 import { EditRequestPhaseService } from '../edit-request/edit-request-phase.service.js';
+import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
+import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.types.js';
 import {
   buildUiMutationCandidatesForGeneratedComponents,
   buildUiSourceMapForGeneratedComponents,
   readUiSourceMapEntries,
   resolveCaptureTargetsFromUiSourceMap,
 } from '../edit-request/ui-source-map.util.js';
-import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.types.js';
-import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
-import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
+import { SqlService } from '../sql/sql.service.js';
+import { WpQueryService } from '../sql/wp-query.service.js';
+import { ThemeDetectorService } from '../theme/theme-detector.service.js';
+import type {
+  PipelineCaptureAttachmentDto,
+  RunPipelineDto,
+  SubmitReactVisualEditDto,
+} from './orchestrator.dto.js';
 
 // ── Vietnamese step labels + progress weights ─────────────────────────────────
 
@@ -215,12 +213,12 @@ const STEP_META: Record<
       'The requested user edits have been applied to the generated React preview.',
   },
   '9_visual_compare': {
-    label: 'Evaluate Visual Metrics',
+    label: 'Evaluate Final Compare Metrics',
     weight: 2,
     activeMessage:
-      'Comparing the WordPress site and the React preview to compute visual diff metrics and artifacts.',
+      'Calling backend automation to compare the WordPress site and the React preview.',
     doneMessage:
-      'Visual comparison metrics and diff artifacts have been collected.',
+      'Final site-compare metrics have been collected from backend automation.',
   },
   '10_cleanup': {
     label: 'Clean Temporary Workspace',
@@ -276,7 +274,6 @@ interface PipelineRetryCounters {
   generatedCodeFix: number;
   backendFix: number;
   buildFix: number;
-  visualFixRounds: number;
 }
 
 interface PipelineRuntimeSummaryDraft {
@@ -368,7 +365,6 @@ export class OrchestratorService {
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
     private readonly previewBuilder: PreviewBuilderService,
-    private readonly visualRouteReview: VisualRouteReviewService,
     private readonly validator: ValidatorService,
     private readonly contractAudit: GenerationContractAuditService,
     private readonly sourceResolver: SourceResolverService,
@@ -397,8 +393,6 @@ export class OrchestratorService {
 
     this.validateDto(dto);
 
-    console.log('AI Pipeline dto: ', dto);
-
     const jobId = uuidv4();
     const state: PipelineStatus = {
       jobId,
@@ -423,9 +417,8 @@ export class OrchestratorService {
         ...(dto.editRequest
           ? [{ name: '8b_edit_request', status: 'pending' as const }]
           : []),
-        // Stage 7: Visual Compare (E4)
         { name: '9_visual_compare', status: 'pending' },
-        // Stage 8: Cleanup + completion
+        // Stage 7: Cleanup + completion
         { name: '10_cleanup', status: 'pending' },
         { name: '11_done', status: 'pending' },
       ],
@@ -439,13 +432,7 @@ export class OrchestratorService {
       hasEditRequest: Boolean(dto.editRequest),
     });
 
-    this.executePipelineLegacy(
-      jobId,
-      siteId,
-      dto,
-      state,
-      editRequestContext,
-    ).catch((err) => {
+    this.executePipelineLegacy(jobId, siteId, dto, state).catch((err) => {
       if (err instanceof PipelineControlError) {
         void this.finalizeControlledTermination(jobId, state, err);
         return;
@@ -701,9 +688,9 @@ export class OrchestratorService {
         ...baseMeta,
         label: 'Evaluate Edited Preview Metrics',
         activeMessage:
-          'Comparing the edited preview against WordPress and collecting visual quality metrics.',
+          'Calling backend automation to compare the edited preview against WordPress.',
         doneMessage:
-          'Visual metrics for the edited preview have been collected.',
+          'Final compare metrics for the edited preview have been collected.',
       };
     }
 
@@ -712,7 +699,7 @@ export class OrchestratorService {
         ...baseMeta,
         label: 'Edited Preview Ready',
         activeMessage:
-          'Finalizing the edited preview, metrics, and completion metadata.',
+          'Finalizing the edited preview, compare metrics, and completion metadata.',
         doneMessage:
           'Migration workflow is complete and the edited preview is ready.',
       };
@@ -919,7 +906,6 @@ export class OrchestratorService {
     siteId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
-    editRequestContext?: ResolvedEditRequestContext,
   ): Promise<void> {
     // ── Init structured run summary ───────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
@@ -937,7 +923,6 @@ export class OrchestratorService {
         generatedCodeFix: 0,
         backendFix: 0,
         buildFix: 0,
-        visualFixRounds: 0,
       },
     };
     const control = this.controls.get(jobId);
@@ -973,8 +958,8 @@ export class OrchestratorService {
         'pipeline.fixAgentModel',
       );
       const resolvedModels = {
-        planning: cfgPlanning ?? 'mistral/mistral-large-latest',
-        genCode: cfgGenCode ?? 'mistral/codestral-latest',
+        planning: cfgPlanning ?? 'openai/gpt-5.4',
+        genCode: cfgGenCode ?? 'openai/gpt-5.3-codex',
         reviewCode: cfgReviewCode,
         backendReview: cfgBackendReview,
         aiReviewMode: (cfgAiReviewMode === 'blocking' ? 'blocking' : 'warn') as
@@ -999,6 +984,7 @@ export class OrchestratorService {
       const planningEditRequest = this.editRequestPhase.buildPlanningRequest(
         dto.editRequest,
       );
+
       const hasEditRequest = Boolean(dto.editRequest);
       const dbCreds = this.toWpDbCredentials(dbConnectionString);
 
@@ -1094,9 +1080,6 @@ export class OrchestratorService {
         },
       );
       await stepDelay();
-
-      // Record evidence AC1, AC2, AC3, AC7
-      // Removed cotEvidence logging
 
       // Bước 3: Normalize & Clean HTML
       let normalizedTheme = await this.runStep(
@@ -1744,8 +1727,6 @@ export class OrchestratorService {
         return api;
       });
       await stepDelay();
-      // Removed cotEvidence logging
-      // Removed cotEvidence logging
 
       // E2+E3: Preview Builder — Vite + React Router (E2) + Runtime Instrumentation (E3)
       // Mutable component list — allows the build fix-loop below to patch TS errors
@@ -1981,132 +1962,45 @@ export class OrchestratorService {
       }
       await stepDelay();
 
-      // ── Stage 7: Visual Compare (E4) ──────────────────────────────────────
       await this.runStep(state, '9_visual_compare', logPath, async () => {
         const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
-        this.emitStepProgress(
-          state,
-          '9_visual_compare',
-          0.15,
-          'Capturing representative routes and running cheap visual diff gates before AI review.',
-        );
-        const maxVisualFixRounds =
-          this.configService.get<number>('visualReview.maxFixRounds') ?? 1;
-
-        for (let round = 1; round <= maxVisualFixRounds; round++) {
-          visualRouteResults = await this.visualRouteReview.reviewRoutes({
-            jobId,
-            preview,
-            wpBaseUrl,
-            plan: reviewResult.plan,
-            components: buildComponents,
-            content,
-            logPath,
-            modelName: resolvedModels.planning,
-          });
-
-          const actionableResults = visualRouteResults.filter(
-            (result) =>
-              Array.isArray(result.issues) && result.issues.length > 0,
-          );
-          if (actionableResults.length === 0) {
-            await this.logToFile(
-              logPath,
-              `[Stage 9] Visual route review round ${round}: no actionable issues`,
-            );
-            break;
-          }
-          summaryDraft.retries.visualFixRounds += 1;
-
-          this.emitStepProgress(
-            state,
-            '9_visual_compare',
-            0.45,
-            `Visual review round ${round}/${maxVisualFixRounds}: fixing ${actionableResults.length} route(s) with actionable UI drift.`,
-          );
-
-          const feedbackByComponent = new Map<string, string[]>();
-          const routesToSmoke = new Set<string>();
-          for (const result of actionableResults) {
-            routesToSmoke.add(result.route);
-            for (const issue of result.issues) {
-              if (!feedbackByComponent.has(issue.componentName)) {
-                feedbackByComponent.set(issue.componentName, []);
-              }
-              feedbackByComponent
-                .get(issue.componentName)!
-                .push(`[route ${result.route}] ${issue.feedback}`);
-            }
-          }
-
-          let fixedCount = 0;
-          for (const [componentName, feedbacks] of feedbackByComponent) {
-            const idx = buildComponents.findIndex(
-              (c) => c.name === componentName,
-            );
-            if (idx === -1) continue;
-            buildComponents[idx] = await this.reactGenerator.fixComponent({
-              component: buildComponents[idx],
-              plan: reviewResult.plan,
-              feedback: `Visual review feedback:\n${feedbacks.join('\n\n')}`,
-              modelConfig: { fixAgent: resolvedModels.fixAgent },
-              logPath,
-            });
-            fixedCount++;
-          }
-
-          if (fixedCount === 0) {
-            await this.logToFile(
-              logPath,
-              `[Stage 9] Visual route review round ${round}: issues found but no matching components to fix`,
-            );
-            break;
-          }
-
-          await this.previewBuilder.syncGeneratedComponents(
-            preview.previewDir,
-            buildComponents,
-            'tokens' in normalizedTheme
-              ? (normalizedTheme as any).tokens
-              : undefined,
-          );
-          await this.validator.assertPreviewBuild(preview.frontendDir);
-          await this.validator.assertPreviewRuntime(preview.previewUrl, [
-            ...routesToSmoke,
-          ]);
-        }
 
         this.emitStepProgress(
           state,
           '9_visual_compare',
-          0.72,
-          'Collecting final whole-site compare metrics after route-level visual fixes.',
+          0.2,
+          'Calling backend automation for final site compare metrics.',
         );
-        try {
-          const response = await axios.post(
-            `${this.configService.get<string>('automation.url', '')}/site/compare`,
-            {
-              siteId,
-              wpBaseUrl,
-              reactFeUrl: preview.previewUrl,
-              reactBeUrl,
-            },
+
+          try {
+            const response = await lastValueFrom(
+              this.httpService.post(
+                `${this.configService.get<string>('automation.url', '')}/site/compare`,
+                {
+                  siteId,
+                  wpSiteId: siteId,
+                  wpBaseUrl,
+                  reactFeUrl: preview.previewUrl,
+                  reactBeUrl,
+                },
+              ),
           );
           metrics = response.data?.result ?? response.data;
         } catch (err: any) {
           this.logger.error(
-            `[visual/compare] failed — ${err?.message ?? err}`,
+            `[site-compare] failed — ${err?.message ?? err}`,
             err?.response?.data ?? err?.stack,
           );
         }
+
         this.emitStepProgress(
           state,
           '9_visual_compare',
-          0.85,
+          0.9,
           metrics
-            ? 'Route-level visual review finished and final compare metrics are attached.'
-            : 'Route-level visual review finished without final compare metrics; pipeline will continue with cleanup.',
+            ? 'Final site-compare metrics are attached.'
+            : 'Backend site compare did not return metrics; pipeline will continue.',
           metrics
             ? this.buildPreviewEventData({
                 preview,
@@ -2116,6 +2010,7 @@ export class OrchestratorService {
               })
             : undefined,
         );
+
         state.result = {
           ...(state.result ?? {}),
           previewDir: preview.previewDir,
@@ -2128,7 +2023,8 @@ export class OrchestratorService {
           routeEntries: preview.routeEntries,
           metrics,
         };
-        return { metrics, routeReviews: visualRouteResults };
+
+        return { metrics };
       });
       await stepDelay();
 
@@ -2190,7 +2086,6 @@ export class OrchestratorService {
           ownerCaptureTargets,
           exactCaptureTargets,
           dbCreds,
-          visualRouteResults,
           metrics,
         };
         // Emit final event with previewUrl from within runStep
@@ -2688,7 +2583,7 @@ export class OrchestratorService {
       return {
         score: null,
         verdict:
-          'Chưa có visual compare cuối cùng nên chưa đủ cơ sở để đánh giá giao diện.',
+          'Backend site compare chưa trả về đủ số liệu nên chưa thể chấm điểm giao diện tự động.',
         basis,
       };
     }

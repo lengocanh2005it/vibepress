@@ -274,7 +274,7 @@ export class WpQueryService {
         `SELECT p.ID, p.post_title, p.post_content, p.post_name
          FROM \`${prefix}posts\` p
          WHERE p.post_type = 'wp_navigation' AND p.post_status = 'publish'
-         ORDER BY p.ID`,
+         ORDER BY p.post_modified DESC, p.ID DESC`,
       );
       for (const navPost of wpNavPosts) {
         const items = parseNavigationBlockItems(
@@ -1287,13 +1287,35 @@ function parseNavigationBlockItems(
   siteUrl?: string | null,
 ): WpMenuItem[] {
   const items: WpMenuItem[] = [];
-  const pattern = /<!--\s*wp:navigation-link\s+(\{[^}]*\})\s*(?:\/-->|-->)/g;
-  let match: RegExpExecArray | null;
+  // Match the opening of a navigation-link block comment, then extract the
+  // full JSON attrs by walking balanced braces (attributes may contain nested
+  // objects like {"metadata":{"bindings":{...}}} that break a [^}]* pattern).
+  const blockStart = /<!--\s*wp:navigation-link\s+/g;
   let order = 0;
+  let startMatch: RegExpExecArray | null;
 
-  while ((match = pattern.exec(content)) !== null) {
+  while ((startMatch = blockStart.exec(content)) !== null) {
+    const jsonStart = startMatch.index + startMatch[0].length;
+    if (content[jsonStart] !== '{') continue;
+
+    // Walk balanced braces to find the end of the JSON object
+    let depth = 0;
+    let jsonEnd = jsonStart;
+    for (let i = jsonStart; i < content.length; i++) {
+      if (content[i] === '{') depth++;
+      else if (content[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          jsonEnd = i + 1;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) continue; // unbalanced — skip
+
+    const jsonStr = content.slice(jsonStart, jsonEnd);
     try {
-      const attrs = JSON.parse(match[1]) as {
+      const attrs = JSON.parse(jsonStr) as {
         label?: string;
         url?: string;
         id?: number;

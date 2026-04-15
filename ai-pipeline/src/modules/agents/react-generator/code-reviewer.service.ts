@@ -172,6 +172,22 @@ export class CodeReviewerService {
     let promptContext = this.buildPromptContext(componentPlan, undefined, {
       includeVisualPlan: !forceDirectAi,
     });
+    // Merge node-level customClassNames from templateSource into promptContext
+    // so that custom classes on buttons, images, links, cards are not lost even
+    // when the AI-generated visual plan omits them at the section level.
+    const nodeCustomClassNames =
+      this.collectCustomClassNamesFromNodesJson(templateSource);
+    if (nodeCustomClassNames.length > 0) {
+      const merged = [
+        ...new Set([
+          ...(promptContext?.requiredCustomClassNames ?? []),
+          ...nodeCustomClassNames,
+        ]),
+      ];
+      promptContext = promptContext
+        ? { ...promptContext, requiredCustomClassNames: merged }
+        : { requiredCustomClassNames: merged };
+    }
     let validationContext = this.buildValidationContext(
       promptContext,
       componentName,
@@ -245,6 +261,17 @@ export class CodeReviewerService {
           componentPlan,
           componentPlan.visualPlan,
         );
+        if (nodeCustomClassNames.length > 0) {
+          const merged = [
+            ...new Set([
+              ...(promptContext?.requiredCustomClassNames ?? []),
+              ...nodeCustomClassNames,
+            ]),
+          ];
+          promptContext = promptContext
+            ? { ...promptContext, requiredCustomClassNames: merged }
+            : { requiredCustomClassNames: merged };
+        }
         validationContext = this.buildValidationContext(
           promptContext,
           componentName,
@@ -432,6 +459,17 @@ export class CodeReviewerService {
 
           if (visualPlan) {
             promptContext = this.buildPromptContext(componentPlan, visualPlan);
+            if (nodeCustomClassNames.length > 0) {
+              const merged = [
+                ...new Set([
+                  ...(promptContext?.requiredCustomClassNames ?? []),
+                  ...nodeCustomClassNames,
+                ]),
+              ];
+              promptContext = promptContext
+                ? { ...promptContext, requiredCustomClassNames: merged }
+                : { requiredCustomClassNames: merged };
+            }
             validationContext = this.buildValidationContext(
               promptContext,
               componentName,
@@ -1243,7 +1281,10 @@ export class CodeReviewerService {
         lastFragment,
       );
       const sanitized = this.validator.sanitizeGeneratedCode(
-        this.postProcessCode(assembled),
+        this.stripSpuriousHardcodedSections(
+          this.postProcessCode(assembled),
+          input.componentName,
+        ),
       );
       const check = this.validator.checkCodeStructure(
         sanitized,
@@ -1435,7 +1476,10 @@ export class CodeReviewerService {
       );
 
       lastRawOutput = raw;
-      code = this.postProcessCode(raw);
+      code = this.stripSpuriousHardcodedSections(
+        this.postProcessCode(raw),
+        componentName,
+      );
 
       const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.fixedCode) code = check.fixedCode;
@@ -1834,11 +1878,7 @@ export class CodeReviewerService {
   }
 
   private canUseOpenAiVisionModel(modelName: string): boolean {
-    const slashIdx = modelName.indexOf('/');
-    if (slashIdx !== -1) {
-      return modelName.slice(0, slashIdx) === 'openai';
-    }
-    return this.llmFactory.getProvider() === 'openai';
+    return this.resolveOpenAiModelName(modelName) === 'gpt-5.4';
   }
 
   private resolveOpenAiModelName(modelName: string): string {
@@ -2422,6 +2462,77 @@ export class CodeReviewerService {
         before,
       )
     );
+  }
+
+  /**
+   * Remove JSX `<section>` blocks that contain only hardcoded static text with
+   * no references to dynamic data (item/page/post/data state variables).
+   * Only applied to detail-type components (Page, Single and their variants)
+   * where the only valid content source is `item.content` via dangerouslySetInnerHTML.
+   */
+  private stripSpuriousHardcodedSections(
+    code: string,
+    componentName: string,
+  ): string {
+    const isDetailComponent =
+      /^(Page|Single|PageNoTitle|PageWide|PageWithSidebar|SingleWithSidebar)$/.test(
+        componentName,
+      );
+    if (!isDetailComponent) return code;
+
+    // Dynamic-data reference pattern — any section containing these is kept.
+    const dynamicRef =
+      /\{(?:item|page|post|data|loading|error)\b|\{[a-zA-Z]+\s*&&|\{[a-zA-Z]+\s*\?/;
+
+    // Walk through the code finding top-level <section> tags and remove those
+    // that have no dynamic references and no dangerouslySetInnerHTML.
+    let result = '';
+    let i = 0;
+    while (i < code.length) {
+      // Find next <section opening tag
+      const sectionStart = code.indexOf('<section', i);
+      if (sectionStart === -1) {
+        result += code.slice(i);
+        break;
+      }
+      // Copy everything before this section
+      result += code.slice(i, sectionStart);
+
+      // Find the matching </section> by tracking depth
+      let depth = 0;
+      let j = sectionStart;
+      while (j < code.length) {
+        const openIdx = code.indexOf('<section', j);
+        const closeIdx = code.indexOf('</section>', j);
+        if (closeIdx === -1) {
+          // No closing tag found — keep as-is
+          j = code.length;
+          break;
+        }
+        if (openIdx !== -1 && openIdx < closeIdx) {
+          depth++;
+          j = openIdx + 8; // skip past '<section'
+        } else {
+          depth--;
+          j = closeIdx + 10; // skip past '</section>'
+          if (depth === 0) break;
+        }
+      }
+
+      const sectionContent = code.slice(sectionStart, j);
+
+      // Keep the section if it has dynamic refs or dangerouslySetInnerHTML
+      if (
+        dynamicRef.test(sectionContent) ||
+        /dangerouslySetInnerHTML/.test(sectionContent)
+      ) {
+        result += sectionContent;
+      }
+      // else: silently drop the spurious hardcoded section
+
+      i = j;
+    }
+    return result;
   }
 
   // ── Logger ────────────────────────────────────────────────────────────────

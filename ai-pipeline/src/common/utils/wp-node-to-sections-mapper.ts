@@ -8,7 +8,7 @@
  * The draft is injected into the AI visual-plan prompt as a hard-ordered
  * skeleton.  AI is only allowed to fill in content fields (headings, image
  * src, menu slugs, etc.) — it must NOT reorder, merge, or drop sections
- * unless a live screenshot explicitly contradicts the draft.
+ * unless the underlying source structure explicitly contradicts the draft.
  */
 
 import type { WpNode } from './wp-block-to-json.js';
@@ -778,7 +778,7 @@ function buildMediaTextFromColumns(
   );
   const listItems = textFlat
     .filter((c) => c.block === 'core/list-item' || c.block === 'list-item')
-    .map((c) => c.text ?? '')
+    .map((c) => c.html ?? c.text ?? '')
     .filter(Boolean);
 
   const s: MediaTextSection = {

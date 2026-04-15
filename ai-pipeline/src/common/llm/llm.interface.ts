@@ -15,11 +15,5 @@ export interface LlmChatResult {
 }
 
 export type LlmProvider =
-  | 'anthropic'
-  | 'mistral'
-  | 'groq'
-  | 'cerebras'
-  | 'gemini'
   | 'openai'
-  | 'ollama'
   | 'custom';
