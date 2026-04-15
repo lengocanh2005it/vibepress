@@ -1,5 +1,8 @@
 const http = require('http');
 
+// Hostname của ai_pipeline container — dùng service name trong Docker network
+const AI_PIPELINE_HOST = process.env.AI_PIPELINE_HOST || 'localhost';
+
 // pipelineId → port (in-memory, reset khi server restart)
 const registry = new Map();
 
@@ -45,13 +48,13 @@ function proxyPreview(req, res) {
   const targetPath = req.originalUrl.replace(`/preview/${pipelineId}`, '') || '/';
 
   const options = {
-    hostname: 'localhost',
+    hostname: AI_PIPELINE_HOST,
     port,
     path: targetPath,
     method: req.method,
     headers: {
       ...req.headers,
-      host: `localhost:${port}`,
+      host: `${AI_PIPELINE_HOST}:${port}`,
     },
   };
 

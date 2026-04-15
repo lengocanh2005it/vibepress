@@ -34,6 +34,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-vibepress_pass}
       MYSQL_ROOT_USER: root
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-vibepress_root}
+      AI_PIPELINE_HOST: ai_pipeline
     ports:
       - "5000:5000"
     depends_on:

@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
     cacheDir: '.vite',
     server: {
       port: parseInt(env.VITE_PORT || '5173', 10),
+      host: '0.0.0.0',
       proxy: {
         '/api': {
           target: `http://localhost:${apiPort}`,
