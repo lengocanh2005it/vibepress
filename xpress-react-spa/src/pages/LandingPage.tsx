@@ -41,8 +41,9 @@ const LandingPage: React.FC = () => {
                           Làm mới Website của bạn ngay
                           <span className="material-symbols-outlined">arrow_forward</span>
                       </button>
-                      <button className="bg-white border-2 border-[#4a7c59]/20 text-[#4a7c59] px-8 py-4 rounded-xl font-bold text-lg hover:bg-[#4a7c59]/5 transition-all">
-                          Xem demo thực tế
+                      <button onClick={()=>{navigate('/template-store')}}
+                        className="bg-white border-2 border-[#4a7c59]/20 text-[#4a7c59] px-8 py-4 rounded-xl font-bold text-lg hover:bg-[#4a7c59]/5 transition-all">
+                          Thử demo thực tế
                       </button>
                   </div>
               </div>

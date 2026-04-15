@@ -3,4 +3,3 @@ dist
 .env*
 *.log
 temp
-templates

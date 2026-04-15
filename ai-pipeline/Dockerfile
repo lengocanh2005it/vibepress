@@ -7,6 +7,7 @@ RUN npm ci
 
 COPY . .
 RUN npm run build
+RUN cd templates/express-server && npm ci --omit=dev
 
 # -------------------------------------------------------
 FROM node:20-alpine
@@ -18,6 +19,7 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/src ./src
+COPY --from=builder /app/templates ./templates   # <-- thêm dòng này
 
 EXPOSE 3001
 
