@@ -28,11 +28,6 @@ export function buildVisualPlanPrompt(input: {
   isDetail?: boolean;
   dataNeeds?: DataNeed[];
   sourceAnalysis?: string;
-  visualReference?: {
-    route: string;
-    sourceUrl: string;
-    viewport: string;
-  };
   sourceBackedAuxiliaryLabels?: string[];
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
@@ -50,7 +45,6 @@ export function buildVisualPlanPrompt(input: {
     isDetail,
     dataNeeds,
     sourceAnalysis,
-    visualReference,
     sourceBackedAuxiliaryLabels,
     draftSections,
     editRequestContextNote,
@@ -68,7 +62,6 @@ export function buildVisualPlanPrompt(input: {
     isDetail,
     dataNeeds,
   });
-  const visualReferenceHint = buildVisualReferenceHint(visualReference);
 
   const systemPrompt = `You are a WordPress-to-React UI planner.
 Given a WordPress template (block JSON tree or PHP markup) and site context, you output a JSON ComponentVisualPlan describing the visual layout.
@@ -155,13 +148,13 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 
 ## Rules
 - Preserve the original WordPress layout hierarchy and reading order as closely as possible.
-- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections unless a live screenshot contradicts the listed order.
+- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
 - When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`sectionKey\` or different \`sourceRef.sourceNodeId\`.
-- Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related in the screenshot.
+- Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
 - If an earlier draft section owns the heading/body/CTA and a later draft section owns the image, keep them as two separate sections in the JSON output. The later image must NOT be pulled up beside the earlier text block.
 - \`hero.layout: "split"\` is allowed ONLY when that SAME single draft section already contains both the text content and the image/media content under one shared wrapper/source node.
 - If a single hero section contains both text and image but the source does NOT show an explicit side-by-side wrapper, columns block, media-text block, or left/right column ratio, use \`layout: "centered"\` or \`layout: "left"\` and keep the image BELOW the text content.
-- Do NOT use \`hero.layout: "split"\` just because a screenshot contains both copy and an image in the same broad hero area. Split is only valid when the source structure itself proves a horizontal two-column relationship.
+- Do NOT use \`hero.layout: "split"\` just because the overall page contains both copy and an image in the same broad hero area. Split is only valid when the source structure itself proves a horizontal two-column relationship.
 - \`media-text\` is allowed ONLY when the source wrapper itself is a real image-beside-text block (for example a WordPress media-text block or one columns/group wrapper that clearly contains both sides). It must NOT be used to fuse separate sibling sections.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
@@ -175,7 +168,6 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Preserve source-level custom classes by carrying them into \`customClassNames\` when a draft section or source node already exposes them. Do NOT drop or rename these classes.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
-- Use the live screenshot only to refine spacing, image treatment, and typography. It does NOT authorize changing deterministic section boundaries from the block tree.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
 - When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
@@ -194,8 +186,6 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 ${contractHint}
 
 ${buildAuxiliaryGuardHint(sourceBackedAuxiliaryLabels)}
-
-${visualReferenceHint ? `${visualReferenceHint}\n\n` : ''}
 
 ${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${repoContext ? `${repoContext}\n\n` : ''}${patternHints ? `${patternHints}\n\n` : ''}${siteCtx}
 
@@ -224,7 +214,7 @@ function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
     'The following sections were detected in the EXACT order they appear in the WordPress template.',
     'You MUST preserve this order in the `sections` array.',
     'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
-    'You MUST NOT reorder, merge, split, or drop sections unless a live screenshot explicitly contradicts this list.',
+    'You MUST NOT reorder, merge, split, or drop sections from this list.',
     'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
     'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
     '',
@@ -319,21 +309,6 @@ function buildAuxiliaryGuardHint(
     'If a sparse page ends with a generic utility/footer/sidebar-style section using one of those labels, omit that section entirely.',
   );
   return lines.join('\n');
-}
-
-function buildVisualReferenceHint(visualReference?: {
-  route: string;
-  sourceUrl: string;
-  viewport: string;
-}): string {
-  if (!visualReference) return '';
-
-  return [
-    '## Live WordPress visual reference',
-    `A live screenshot of the real WordPress page is attached for route \`${visualReference.route}\` (${visualReference.sourceUrl}) at viewport ${visualReference.viewport}.`,
-    'Use that screenshot to preserve visible section grouping, spacing rhythm, content density, image treatment, and overall layout order.',
-    'The screenshot is a visual reference only. The approved component contract and template source remain authoritative for data, routing, and what may be rendered.',
-  ].join('\n');
 }
 
 function buildPatternSuggestionsHint(repoManifest?: RepoThemeManifest): string {

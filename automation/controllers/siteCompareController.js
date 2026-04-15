@@ -5,7 +5,8 @@ const { compareSite } = require("../services/siteCompareService");
 async function compareSiteHandler(req, res) {
   const {
     wpBaseUrl,
-    wpSiteId,
+    wpSiteId: rawWpSiteId,
+    siteId,
     reactFeUrl,
     reactBeUrl,
     postTypes,
@@ -13,12 +14,20 @@ async function compareSiteHandler(req, res) {
     viewportWidth,
     viewportHeight,
   } = req.body || {};
+  const wpSiteId = rawWpSiteId || siteId;
 
-  if (!wpBaseUrl || !wpSiteId || !reactFeUrl || !reactBeUrl) {
+  const missingFields = [
+    !wpBaseUrl ? "wpBaseUrl" : null,
+    !wpSiteId ? "wpSiteId" : null,
+    !reactFeUrl ? "reactFeUrl" : null,
+    !reactBeUrl ? "reactBeUrl" : null,
+  ].filter(Boolean);
+
+  if (missingFields.length > 0) {
     return res.status(400).json({
       success: false,
       code: "INVALID_REQUEST",
-      message: "wpBaseUrl, wpSiteId, reactFeUrl and reactBeUrl are required",
+      message: `Missing required field(s): ${missingFields.join(", ")}`,
     });
   }
 

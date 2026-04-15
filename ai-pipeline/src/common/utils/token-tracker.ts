@@ -2,19 +2,7 @@ import { Logger } from '@nestjs/common';
 import { dirname, join } from 'path';
 
 // Pricing per 1M tokens (USD)
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  // Anthropic — https://www.anthropic.com/pricing
-  'claude-opus-4-6': { input: 15.0, output: 75.0 },
-  'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
-  'claude-haiku-4-5': { input: 0.8, output: 4.0 },
-  // Mistral — https://mistral.ai/technology/#pricing
-  'mistral-large-latest': { input: 2.0, output: 6.0 },
-  'mistral-small-latest': { input: 0.1, output: 0.3 },
-  'codestral-latest': { input: 0.3, output: 0.9 },
-  'devstral-2512': { input: 0.4, output: 2.0 },
-  'labs-devstral-small-2512': { input: 0.1, output: 0.3 },
-  'open-mistral-nemo': { input: 0.15, output: 0.15 },
-};
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {};
 
 export type TokenPhase = 'plan' | 'gen' | 'review' | 'fix';
 export type TokenScope = 'base' | 'edit-request';

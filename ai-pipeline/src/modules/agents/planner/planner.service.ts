@@ -1,11 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { mkdir, readFile } from 'fs/promises';
-import { basename, join } from 'path';
-import OpenAI from 'openai';
-import puppeteer from 'puppeteer';
+import { basename } from 'path';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
-import { OPENAI_CLIENT } from '../../../common/providers/openai/openai.provider.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
@@ -74,13 +70,6 @@ interface PlanningSourceContext {
   sourceBackedAuxiliaryLabels: string[];
 }
 
-interface PlanningVisualReference {
-  route: string;
-  url: string;
-  screenshotPath: string;
-  viewport: string;
-}
-
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
@@ -88,7 +77,6 @@ export class PlannerService {
   private readonly tokenTracker = new TokenTracker();
 
   constructor(
-    @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly aiLogger: AiLoggerService,
@@ -320,7 +308,6 @@ export class PlannerService {
       options?.editRequest,
       resolvedModel,
       options?.logPath,
-      jobId,
     );
   }
 
@@ -370,7 +357,6 @@ export class PlannerService {
       editRequest,
       resolvedModel,
       undefined,
-      undefined,
     );
   }
 
@@ -387,7 +373,6 @@ export class PlannerService {
     editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
-    jobId?: string,
   ): Promise<PlanResult> {
     const concurrency =
       this.configService.get<number>('planner.visualPlanConcurrency') ?? 3;
@@ -396,84 +381,41 @@ export class PlannerService {
       3000;
 
     const result: PlanResult = new Array(plan.length);
-    const canUseVisualReferences =
-      (this.configService.get<boolean>('planner.visualReferenceEnabled') ??
-        true) &&
-      this.canUseOpenAiVisionModel(modelName);
-    const wpBaseUrl = canUseVisualReferences
-      ? this.resolveWordPressVisualBaseUrl(content.siteInfo.siteUrl)
-      : null;
-    const artifactRoot = wpBaseUrl
-      ? await this.ensurePlannerVisualArtifactRoot(jobId)
-      : null;
-    const visualReferenceCache = new Map<
-      string,
-      PlanningVisualReference | null
-    >();
-    let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
-
-    if (canUseVisualReferences && !wpBaseUrl) {
-      this.logger.warn(
-        '[Phase C: AI Visual Sections] WordPress visual references enabled, but no valid browser-accessible WP base URL was found; falling back to template-only planning',
-      );
-    }
-
-    if (artifactRoot) {
-      try {
-        browser = await puppeteer.launch({
-          headless: true,
-          args: ['--no-sandbox'],
-        });
-      } catch (err: any) {
-        this.logger.warn(
-          `[Phase C: AI Visual Sections] Failed to launch browser for WordPress screenshots: ${err?.message ?? 'unknown error'}; falling back to template-only planning`,
-        );
+    for (
+      let batchStart = 0;
+      batchStart < plan.length;
+      batchStart += concurrency
+    ) {
+      if (batchStart > 0) {
+        await new Promise((res) => setTimeout(res, batchDelay));
       }
-    }
 
-    try {
-      for (
-        let batchStart = 0;
-        batchStart < plan.length;
-        batchStart += concurrency
-      ) {
-        if (batchStart > 0) {
-          await new Promise((res) => setTimeout(res, batchDelay));
-        }
-
-        const batch = plan.slice(batchStart, batchStart + concurrency);
-        const batchResults = await Promise.all(
-          batch.map((componentPlan) =>
-            this.generateVisualPlanForComponent(
-              componentPlan,
-              sourceMap.get(componentPlan.templateName) ?? '',
-              content,
-              tokens,
-              globalPalette,
-              globalTypography,
-              plan,
-              repoManifest,
-              editRequest,
-              modelName,
-              logPath,
-              browser,
-              wpBaseUrl,
-              artifactRoot,
-              visualReferenceCache,
-            ),
+      const batch = plan.slice(batchStart, batchStart + concurrency);
+      const batchResults = await Promise.all(
+        batch.map((componentPlan) =>
+          this.generateVisualPlanForComponent(
+            componentPlan,
+            sourceMap.get(componentPlan.templateName) ?? '',
+            content,
+            tokens,
+            globalPalette,
+            globalTypography,
+            plan,
+            repoManifest,
+            editRequest,
+            modelName,
+            logPath,
           ),
-        );
+        ),
+      );
 
-        for (let j = 0; j < batchResults.length; j++) {
-          result[batchStart + j] = batchResults[j];
-        }
-
-        this.logger.log(
-          `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
-        );
+      for (let j = 0; j < batchResults.length; j++) {
+        result[batchStart + j] = batchResults[j];
       }
-    } finally {
-      await browser?.close();
+
+      this.logger.log(
+        `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+      );
     }
 
     const withPlan = result.filter((c) => c.visualPlan).length;
@@ -496,10 +438,6 @@ export class PlannerService {
     editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
-    browser?: Awaited<ReturnType<typeof puppeteer.launch>> | null,
-    wpBaseUrl?: string | null,
-    artifactRoot?: string | null,
-    visualReferenceCache?: Map<string, PlanningVisualReference | null>,
   ): Promise<PlanResult[number]> {
     let visualPlan: ComponentVisualPlan | undefined;
     let detectedCustomClassNames: string[] = [];
@@ -540,14 +478,6 @@ export class PlannerService {
             item.type === 'partial' &&
             isSharedChromePartialComponent(item.componentName),
         ),
-      );
-      const visualReference = await this.prepareVisualReferenceForComponent(
-        componentPlan,
-        content,
-        browser ?? null,
-        wpBaseUrl ?? null,
-        artifactRoot ?? null,
-        visualReferenceCache,
       );
       // Deterministically parse the WordPress block tree to get an ordered
       // draft of sections. This is injected into the prompt as a hard-ordered
@@ -599,13 +529,6 @@ export class PlannerService {
         isDetail: componentPlan.isDetail,
         dataNeeds: visualDataNeeds,
         sourceAnalysis: planningSource.sourceAnalysis,
-        visualReference: visualReference
-          ? {
-              route: visualReference.route,
-              sourceUrl: visualReference.url,
-              viewport: visualReference.viewport,
-            }
-          : undefined,
         sourceBackedAuxiliaryLabels,
         draftSections,
         editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
@@ -642,7 +565,6 @@ export class PlannerService {
           systemPrompt,
           userPrompt: prompt,
           maxTokens: 4096,
-          screenshotPath: visualReference?.screenshotPath,
         });
         if (tokenLogPath) {
           await this.tokenTracker.track(
@@ -728,282 +650,19 @@ export class PlannerService {
     systemPrompt: string;
     userPrompt: string;
     maxTokens: number;
-    screenshotPath?: string;
   }): Promise<{
     text: string;
     inputTokens: number;
     outputTokens: number;
     truncated?: boolean;
   }> {
-    const { model, systemPrompt, userPrompt, maxTokens, screenshotPath } =
-      input;
-    if (!screenshotPath || !this.canUseOpenAiVisionModel(model)) {
-      return this.llmFactory.chat({
-        model,
-        systemPrompt,
-        userPrompt,
-        maxTokens,
-      });
-    }
-
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: this.resolveOpenAiModelName(model),
-        temperature: 0,
-        max_completion_tokens: maxTokens,
-        messages: [
-          ...(systemPrompt
-            ? [{ role: 'system' as const, content: systemPrompt }]
-            : []),
-          {
-            role: 'user' as const,
-            content: [
-              { type: 'text' as const, text: userPrompt },
-              {
-                type: 'image_url' as const,
-                image_url: {
-                  url: await this.fileToDataUrl(screenshotPath),
-                  detail: 'high',
-                },
-              },
-            ],
-          },
-        ],
-      });
-
-      const text = response.choices[0]?.message?.content;
-      const finishReason = response.choices[0]?.finish_reason;
-      if (!text) {
-        throw new Error(
-          `Empty response from ${model} (finish_reason: ${finishReason ?? 'unknown'})`,
-        );
-      }
-
-      return {
-        text,
-        inputTokens: response.usage?.prompt_tokens ?? 0,
-        outputTokens: response.usage?.completion_tokens ?? 0,
-        truncated: finishReason === 'length',
-      };
-    } catch (err: any) {
-      this.logger.warn(
-        `[Phase C: AI Visual Sections] OpenAI multimodal visual-plan call failed (${err?.message ?? 'unknown error'}); retrying without screenshot context`,
-      );
-      return this.llmFactory.chat({
-        model,
-        systemPrompt,
-        userPrompt,
-        maxTokens,
-      });
-    }
-  }
-
-  private canUseOpenAiVisionModel(modelName: string): boolean {
-    const slashIdx = modelName.indexOf('/');
-    if (slashIdx !== -1) {
-      return modelName.slice(0, slashIdx) === 'openai';
-    }
-    return this.llmFactory.getProvider() === 'openai';
-  }
-
-  private resolveOpenAiModelName(modelName: string): string {
-    return modelName.startsWith('openai/')
-      ? modelName.slice('openai/'.length)
-      : modelName;
-  }
-
-  private async prepareVisualReferenceForComponent(
-    componentPlan: PlanResult[number],
-    content: DbContentResult,
-    browser: Awaited<ReturnType<typeof puppeteer.launch>> | null,
-    wpBaseUrl: string | null,
-    artifactRoot: string | null,
-    visualReferenceCache?: Map<string, PlanningVisualReference | null>,
-  ): Promise<PlanningVisualReference | null> {
-    if (
-      componentPlan.type !== 'page' ||
-      !componentPlan.route ||
-      !browser ||
-      !wpBaseUrl ||
-      !artifactRoot
-    ) {
-      return null;
-    }
-
-    const route = this.resolveConcreteVisualRoute(componentPlan, content);
-    if (!route) return null;
-
-    const cached = visualReferenceCache?.get(route);
-    if (cached !== undefined) {
-      return cached;
-    }
-
-    const screenshotPath = join(
-      artifactRoot,
-      `${this.routeToArtifactKey(route)}.png`,
-    );
-    const url = new URL(route, wpBaseUrl).toString();
-    const viewport = this.getPlannerVisualViewport();
-
-    try {
-      await this.captureVisualReference(browser, url, screenshotPath, viewport);
-      const reference: PlanningVisualReference = {
-        route,
-        url,
-        screenshotPath,
-        viewport: `${viewport.width}x${viewport.height}`,
-      };
-      visualReferenceCache?.set(route, reference);
-      return reference;
-    } catch (err: any) {
-      this.logger.warn(
-        `[Phase C: AI Visual Sections] Failed to capture WordPress screenshot for "${componentPlan.componentName}" at ${url}: ${err?.message ?? 'unknown error'}`,
-      );
-      visualReferenceCache?.set(route, null);
-      return null;
-    }
-  }
-
-  private async ensurePlannerVisualArtifactRoot(
-    jobId?: string,
-  ): Promise<string> {
-    const root = jobId
-      ? join('temp', 'generated', jobId, 'artifacts', 'planning-visual')
-      : join(
-          'temp',
-          'generated',
-          'planner-visual',
-          `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        );
-    await mkdir(root, { recursive: true });
-    return root;
-  }
-
-  private getPlannerVisualViewport(): { width: number; height: number } {
-    return {
-      width:
-        this.configService.get<number>('planner.visualViewportWidth') ?? 1440,
-      height:
-        this.configService.get<number>('planner.visualViewportHeight') ?? 1400,
-    };
-  }
-
-  private resolveWordPressVisualBaseUrl(siteUrl?: string): string | null {
-    const configured =
-      this.configService.get<string>('planner.visualWpBaseUrl')?.trim() ?? '';
-    const candidate = configured || siteUrl?.trim();
-    if (!candidate) return null;
-
-    try {
-      const url = new URL(candidate);
-      return this.ensureTrailingSlash(url.toString());
-    } catch {
-      return null;
-    }
-  }
-
-  private resolveConcreteVisualRoute(
-    componentPlan: PlanResult[number],
-    content: DbContentResult,
-  ): string | null {
-    const routePattern = componentPlan.route;
-    if (!routePattern) return null;
-    if (!routePattern.includes(':')) return routePattern;
-
-    if (
-      routePattern.startsWith('/page/') ||
-      componentPlan.dataNeeds.includes('page-detail')
-    ) {
-      const page = this.findRepresentativePage(componentPlan, content);
-      return page?.slug ? routePattern.replace(':slug', page.slug) : null;
-    }
-    if (
-      routePattern.startsWith('/post/') ||
-      componentPlan.dataNeeds.includes('post-detail')
-    ) {
-      const post = content.posts[0];
-      return post?.slug ? routePattern.replace(':slug', post.slug) : null;
-    }
-    if (routePattern.startsWith('/category/')) {
-      const slug = this.findTaxonomySlug(content, 'category');
-      return slug ? routePattern.replace(':slug', slug) : null;
-    }
-    if (routePattern.startsWith('/tag/')) {
-      const slug = this.findTaxonomySlug(content, 'post_tag');
-      return slug ? routePattern.replace(':slug', slug) : null;
-    }
-
-    return null;
-  }
-
-  private findRepresentativePage(
-    componentPlan: PlanResult[number],
-    content: DbContentResult,
-  ): DbContentResult['pages'][number] | undefined {
-    const normalizedTemplate = componentPlan.templateName
-      .replace(/\.(php|html)$/i, '')
-      .toLowerCase();
-
-    const matchingPage = content.pages.find((page) => {
-      const template = (page.template ?? '')
-        .replace(/\.(php|html)$/i, '')
-        .replace(/^templates?\//i, '')
-        .toLowerCase();
-      return template === normalizedTemplate;
+    const { model, systemPrompt, userPrompt, maxTokens } = input;
+    return this.llmFactory.chat({
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens,
     });
-
-    return matchingPage ?? content.pages[0];
-  }
-
-  private findTaxonomySlug(
-    content: DbContentResult,
-    taxonomy: string,
-  ): string | null {
-    const match = content.taxonomies.find((item) => item.taxonomy === taxonomy);
-    return match?.terms[0]?.slug ?? null;
-  }
-
-  private async captureVisualReference(
-    browser: Awaited<ReturnType<typeof puppeteer.launch>>,
-    url: string,
-    screenshotPath: string,
-    viewport: { width: number; height: number },
-  ): Promise<void> {
-    const page = await browser.newPage();
-    try {
-      await page.setViewport({
-        width: viewport.width,
-        height: viewport.height,
-        deviceScaleFactor: 1,
-      });
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 45_000 });
-      await page.addStyleTag({
-        content:
-          '#wpadminbar{display:none !important;} html{margin-top:0 !important;} body{margin-top:0 !important;}',
-      });
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-    } finally {
-      await page.close();
-    }
-  }
-
-  private async fileToDataUrl(filePath: string): Promise<string> {
-    const buffer = await readFile(filePath);
-    return `data:image/png;base64,${buffer.toString('base64')}`;
-  }
-
-  private routeToArtifactKey(route: string): string {
-    return (
-      route
-        .replace(/^\//, '')
-        .replace(/[^a-z0-9/_-]+/gi, '-')
-        .replace(/\//g, '__') || 'home'
-    );
-  }
-
-  private ensureTrailingSlash(url: string): string {
-    return url.endsWith('/') ? url : `${url}/`;
   }
 
   private buildDeterministicVisualPlanForComponent(

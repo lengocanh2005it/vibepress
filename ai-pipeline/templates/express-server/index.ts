@@ -1694,6 +1694,7 @@ app.post('/api/comments', async (req, res) => {
 // Extracts <!-- wp:heading --> + <!-- wp:navigation-link --> sequences.
 function parseFooterBlocks(
   content: string,
+  siteUrl?: string | null,
 ): Array<{ heading: string; links: Array<{ label: string; url: string }> }> {
   const columns: Array<{
     heading: string;
@@ -1711,8 +1712,10 @@ function parseFooterBlocks(
     while ((m = re.exec(part)) !== null) {
       try {
         const attrs = JSON.parse(m[1]);
-        if (attrs.label)
-          links.push({ label: attrs.label, url: attrs.url ?? '#' });
+        if (attrs.label) {
+          const url = normalizeMenuUrl(attrs.url ?? '', siteUrl);
+          links.push({ label: attrs.label, url: url || '#' });
+        }
       } catch {
         /* skip malformed */
       }
@@ -1726,12 +1729,16 @@ app.get('/api/footer-links', async (req, res) => {
   const conn = await getConn();
   try {
     const prefix = await getPrefix(conn);
+    const [[siteUrlRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'siteurl' LIMIT 1`,
+    );
+    const siteUrl = (siteUrlRow?.option_value as string | undefined) ?? null;
     const [[row]] = await conn.query<any[]>(
       `SELECT post_content FROM \`${prefix}posts\`
        WHERE post_type = 'wp_template_part' AND post_name = 'footer' AND post_status = 'publish' LIMIT 1`,
     );
     if (!row?.post_content) return res.json([]);
-    res.json(parseFooterBlocks(row.post_content));
+    res.json(parseFooterBlocks(row.post_content, siteUrl));
   } finally {
     await conn.end();
   }

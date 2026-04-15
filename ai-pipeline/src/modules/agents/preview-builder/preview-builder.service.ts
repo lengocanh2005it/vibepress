@@ -767,6 +767,31 @@ ${fontEntries}
         `${match}, .vp-generated-image.${customClass}${pseudo}, img.${customClass}${pseudo}`,
     );
 
+    // Pattern: .wp-block-image.class:hover img { ... }
+    // WP: pseudo on the wrapper triggers styles on the img descendant.
+    // React: customClass is on <img> itself, so normalise to img.class:hover { ... }.
+    next = next.replace(
+      new RegExp(
+        String.raw`\.(?:wp-block-image|wp-block-post-featured-image|blocks-gallery-item)\.([_a-zA-Z][\w-]*)((?::(?:hover|focus|focus-visible|active))+)\s+img`,
+        'g',
+      ),
+      (match, customClass: string, pseudo: string) =>
+        `${match}, img.${customClass}${pseudo}`,
+    );
+
+    // Pattern: .wp-block-image.class { wrapper-only styles (no img descendant) }
+    // WP: styles on the <figure> wrapper (overflow:hidden, border-radius, etc.).
+    // React: class is on <img>, so add a :has() rule targeting the parent as a
+    // best-effort — works in all modern browsers.
+    next = next.replace(
+      new RegExp(
+        String.raw`\.(?:wp-block-image|wp-block-post-featured-image)\.([_a-zA-Z][\w-]*)(?!(?::[\w-]+)?\s+img)(?=\s*[{,])`,
+        'g',
+      ),
+      (match, customClass: string) =>
+        `${match}, figure:has(> img.${customClass}), div:has(> img.${customClass})`,
+    );
+
     next = next.replace(
       new RegExp(
         String.raw`\.(?:wp-block-group|wp-block-cover|wp-block-column|wp-block-media-text|wp-block-post|wp-block-query)\.([_a-zA-Z][\w-]*)((?::(?:hover|focus|focus-visible|active))?)`,
@@ -900,6 +925,33 @@ ${fontEntries}
     if (usedClasses.size === 0) return;
 
     const bridges: Record<string, string> = {
+      'is-style-asterisk': `
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk::before {
+  content: "";
+  width: 1.5rem;
+  height: 3rem;
+  background: var(--wp--preset--color--contrast-2, currentColor);
+  clip-path: path("M11.93.684v8.039l5.633-5.633 1.216 1.23-5.66 5.66h8.04v1.737H13.2l5.701 5.701-1.23 1.23-5.742-5.742V21h-1.737v-8.094l-5.77 5.77-1.23-1.217 5.743-5.742H.842V9.98h8.162l-5.701-5.7 1.23-1.231 5.66 5.66V.684h1.737Z");
+  display: block;
+}
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk:empty::before {
+  content: none;
+}
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk:-moz-only-whitespace::before {
+  content: none;
+}
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-center::before,
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-center::before {
+  margin: 0 auto;
+}
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-right::before,
+:is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-right::before {
+  margin-left: auto;
+}
+.rtl :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-left::before {
+  margin-right: auto;
+}`,
+
       'is-style-checkmark-list': `
 .is-style-checkmark-list { list-style: none; padding-left: 0; }
 .is-style-checkmark-list li { padding-left: 1.75em; position: relative; }

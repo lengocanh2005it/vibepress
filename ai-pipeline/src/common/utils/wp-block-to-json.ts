@@ -559,6 +559,19 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     ) {
       return { html: stripped };
     }
+    // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
+    // renderer can use dangerouslySetInnerHTML to keep bold/italic formatting.
+    const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(stripped);
+    if (
+      (blockName === 'core/list-item' || blockName === 'list-item') &&
+      hasInlineHtml
+    ) {
+      return {
+        text: textContent,
+        html: stripped,
+        ...(customClassNames.length ? { customClassNames } : {}),
+      };
+    }
     return {
       text: textContent,
       ...(customClassNames.length ? { customClassNames } : {}),
