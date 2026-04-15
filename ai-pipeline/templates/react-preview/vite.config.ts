@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: parseInt(env.VITE_PORT || '5173', 10),
       host: '0.0.0.0',
+      allowedHosts: 'all',
       proxy: {
         '/api': {
           target: `http://localhost:${apiPort}`,
