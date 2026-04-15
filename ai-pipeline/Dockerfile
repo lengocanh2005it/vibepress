@@ -9,9 +9,20 @@ COPY . .
 RUN npm run build
 
 # -------------------------------------------------------
-FROM node:20-alpine
+# Đổi từ alpine sang slim (Debian)
+FROM node:20-slim
 
-RUN apk add --no-cache git
+# Cài Chrome + git
+RUN apt-get update && apt-get install -y \
+    git \
+    chromium \
+    fonts-freefont-ttf \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# Báo cho Puppeteer dùng Chromium đã cài thay vì tự download
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
