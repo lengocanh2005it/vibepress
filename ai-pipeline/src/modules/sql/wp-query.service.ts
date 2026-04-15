@@ -816,6 +816,7 @@ export class WpQueryService {
   private async resolveCustomLogoUrl(
     conn: Awaited<ReturnType<typeof createConnection>>,
     prefix: string,
+    siteUrl: string,
   ): Promise<string | null> {
     try {
       const [[stylesheetRow]] = await conn.query<any[]>(
@@ -843,7 +844,10 @@ export class WpQueryService {
         [customLogoId],
       );
       const logoUrl = logoRow?.guid as string | undefined;
-      return logoUrl?.trim() ? logoUrl : null;
+      if (!logoUrl?.trim()) return null;
+      return siteUrl
+        ? this.rebaseToSiteOrigin(logoUrl.trim(), siteUrl)
+        : logoUrl.trim();
     } catch {
       return null;
     }
@@ -881,7 +885,7 @@ export class WpQueryService {
       return siteLogoOptionUrl;
     }
 
-    const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix);
+    const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix, siteUrl);
     if (customLogoUrl) return customLogoUrl;
 
     const fallbackLogoUrl = await this.resolveLogoUrlFromTemplateMarkup(
@@ -1008,6 +1012,27 @@ export class WpQueryService {
     }
   }
 
+  /**
+   * Rebase an attachment guid URL to the siteUrl origin.
+   * This fixes the common WordPress migration issue where guid values
+   * still reference the old host (e.g. localhost:8000) even after the
+   * site has been moved to a different URL.
+   */
+  private rebaseToSiteOrigin(url: string, siteUrl: string): string {
+    try {
+      const parsed = new URL(url);
+      const site = new URL(siteUrl);
+      if (parsed.origin !== site.origin) {
+        parsed.protocol = site.protocol;
+        parsed.hostname = site.hostname;
+        parsed.port = site.port;
+      }
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  }
+
   private normalizeLogoCandidateUrl(
     raw: string | null | undefined,
     siteUrl: string,
@@ -1018,7 +1043,9 @@ export class WpQueryService {
 
     try {
       if (/^https?:\/\//i.test(trimmed)) {
-        return new URL(trimmed).toString();
+        return siteUrl
+          ? this.rebaseToSiteOrigin(trimmed, siteUrl)
+          : new URL(trimmed).toString();
       }
       if (siteUrl) {
         if (trimmed.startsWith('/')) {

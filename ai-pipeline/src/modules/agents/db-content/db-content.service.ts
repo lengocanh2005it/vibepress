@@ -21,6 +21,21 @@ import type {
 import { PluginDiscoveryService } from '../plugin-discovery/plugin-discovery.service.js';
 import { parseDbConnectionString } from '../../../common/utils/db-connection-parser.js';
 
+function rebaseToSiteOrigin(url: string, siteUrl: string): string {
+  try {
+    const parsed = new URL(url);
+    const site = new URL(siteUrl);
+    if (parsed.origin !== site.origin) {
+      parsed.protocol = site.protocol;
+      parsed.hostname = site.hostname;
+      parsed.port = site.port;
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 export interface DbContentResult {
   siteInfo: WpSiteInfo;
   posts: WpPost[];
@@ -87,6 +102,20 @@ export class DbContentService {
         `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
+
+    // Normalize featured image URLs — guid values can still reference the old
+    // host (e.g. localhost:8000) when a DB was migrated without search-replace.
+    const siteUrl = siteInfo.siteUrl;
+    if (siteUrl) {
+      for (const post of posts) {
+        if (post.featuredImage)
+          post.featuredImage = rebaseToSiteOrigin(post.featuredImage, siteUrl);
+      }
+      for (const page of pages) {
+        if (page.featuredImage)
+          page.featuredImage = rebaseToSiteOrigin(page.featuredImage, siteUrl);
+      }
+    }
 
     return {
       siteInfo,

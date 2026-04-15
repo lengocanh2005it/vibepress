@@ -57,6 +57,21 @@ function formatDate(mysqlDate: string | Date | null): string {
   });
 }
 
+function rebaseToSiteOrigin(url: string, siteUrl: string): string {
+  try {
+    const parsed = new URL(url);
+    const site = new URL(siteUrl);
+    if (parsed.origin !== site.origin) {
+      parsed.protocol = site.protocol;
+      parsed.hostname = site.hostname;
+      parsed.port = site.port;
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function rewriteWpContentAssetUrls(html: string | null | undefined): string {
   if (!html) return '';
   return String(html).replace(
@@ -70,8 +85,10 @@ function normalizeWpUploadAssetUrl(raw: string | null | undefined): string | nul
   const trimmed = String(raw).trim();
   if (!trimmed || !/\/wp-content\/uploads\//i.test(trimmed)) return null;
   try {
-    if (/^https?:\/\//i.test(trimmed)) return new URL(trimmed).toString();
     const siteUrl = process.env.SITE_URL?.trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      return siteUrl ? rebaseToSiteOrigin(trimmed, siteUrl) : new URL(trimmed).toString();
+    }
     if (siteUrl) return new URL(trimmed, siteUrl).toString();
   } catch {
     // Fall through to returning the original string.
@@ -615,6 +632,7 @@ function phpUnserializeSimple(input: string): Record<string, any> | null {
 async function resolveCustomLogoUrl(
   conn: Awaited<ReturnType<typeof getConn>>,
   prefix: string,
+  siteUrl: string,
 ): Promise<string | null> {
   try {
     const [[stylesheetRow]] = await conn.query<any[]>(
@@ -642,7 +660,8 @@ async function resolveCustomLogoUrl(
       [customLogoId],
     );
     const logoUrl = logoRow?.guid as string | undefined;
-    return logoUrl?.trim() ? logoUrl : null;
+    if (!logoUrl?.trim()) return null;
+    return siteUrl ? rebaseToSiteOrigin(logoUrl.trim(), siteUrl) : logoUrl.trim();
   } catch {
     return null;
   }
@@ -677,7 +696,7 @@ async function resolveSiteLogoUrl(
   );
   if (siteLogoOptionUrl) return siteLogoOptionUrl;
 
-  const customLogoUrl = await resolveCustomLogoUrl(conn, prefix);
+  const customLogoUrl = await resolveCustomLogoUrl(conn, prefix, siteUrl);
   if (customLogoUrl) return customLogoUrl;
   return resolveLogoUrlFromTemplateMarkup(conn, prefix, siteUrl);
 }
