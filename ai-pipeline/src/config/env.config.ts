@@ -14,10 +14,7 @@ const CUSTOM_ALLOWED_MODELS = new Set([
   CUSTOM_REASONING_MODEL,
 ]);
 
-function withProvider(
-  provider: SupportedLlmProfile,
-  model: string,
-): string {
+function withProvider(provider: SupportedLlmProfile, model: string): string {
   return `${provider}/${model}`;
 }
 
@@ -102,120 +99,120 @@ export default () => {
   const llmPreset = buildLlmPreset(llmProfile);
 
   return {
-  port: process.env.PORT || '3001',
-  aiProvider: llmPreset.provider,
-  db: {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT ?? '3306', 10),
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-  },
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_BASE_URL,
-    model: stripProviderPrefix(
-      normalizeSupportedModel(
-        process.env.OPENAI_MODEL,
-        withProvider('openai', OPENAI_CODE_MODEL),
+    port: process.env.PORT || '3001',
+    aiProvider: llmPreset.provider,
+    db: {
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT ?? '3306', 10),
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+    },
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL,
+      model: stripProviderPrefix(
+        normalizeSupportedModel(
+          process.env.OPENAI_MODEL,
+          withProvider('openai', OPENAI_CODE_MODEL),
+        ),
+        'openai',
       ),
-      'openai',
-    ),
-  },
-  custom: {
-    baseURL: process.env.CUSTOM_BASE_URL || 'http://localhost:8000',
-    apiKey: process.env.CUSTOM_API_KEY || '',
-    model: stripProviderPrefix(
-      normalizeSupportedModel(
-        process.env.CUSTOM_MODEL,
-        withProvider('custom', CUSTOM_CODE_MODEL),
+    },
+    custom: {
+      baseURL: process.env.CUSTOM_BASE_URL || 'http://localhost:8000',
+      apiKey: process.env.CUSTOM_API_KEY || '',
+      model: stripProviderPrefix(
+        normalizeSupportedModel(
+          process.env.CUSTOM_MODEL,
+          withProvider('custom', CUSTOM_CODE_MODEL),
+        ),
+        'custom',
       ),
-      'custom',
-    ),
-    maxTokens: parseInt(process.env.CUSTOM_MAX_TOKENS ?? '8192', 10),
-    chatCompletionsPath:
-      process.env.CUSTOM_CHAT_COMPLETIONS_PATH || '/gateway/chat/completions',
-    authHeader: process.env.CUSTOM_AUTH_HEADER || 'Authorization',
-    authValuePrefix: process.env.CUSTOM_AUTH_VALUE_PREFIX || '',
-  },
-  llm: {
-    profile: llmProfile,
-  },
-  reactGenerator: {
-    delayBetweenComponents: parseInt(
-      process.env.REACT_GEN_DELAY_MS ?? '1500',
-      10,
-    ),
-    generationConcurrency: parseInt(
-      process.env.REACT_GEN_CONCURRENCY ?? '2',
-      10,
-    ),
-    sectionConcurrency: parseInt(
-      process.env.REACT_GEN_SECTION_CONCURRENCY ?? '2',
-      10,
-    ),
-  },
-  planner: {
-    agentEnabled: process.env.PLANNER_AGENT_ENABLED !== 'false',
-    agentMaxRounds: parseInt(process.env.PLANNER_AGENT_MAX_ROUNDS ?? '6', 10),
-    visualPlanConcurrency: parseInt(
-      process.env.PLANNER_VISUAL_CONCURRENCY ?? '3',
-      10,
-    ),
-    minimalVisualPlan: process.env.PLANNER_MINIMAL_VISUAL_PLAN === 'true',
-  },
-  preview: {
-    runtimeRouteDelayMs: parseInt(
-      process.env.PREVIEW_RUNTIME_ROUTE_DELAY_MS ?? '400',
-      10,
-    ),
-    runtimeServerReadyTimeoutMs: parseInt(
-      process.env.PREVIEW_RUNTIME_READY_TIMEOUT_MS ?? '30000',
-      10,
-    ),
-    wpAssetCopyConcurrency: parseInt(
-      process.env.PREVIEW_WP_ASSET_COPY_CONCURRENCY ?? '6',
-      10,
-    ),
-  },
-  // Primary switch:
-  //   LLM_PROFILE=openai -> planning/review use gpt-5.4, code/fix use gpt-5.3-codex
-  //   LLM_PROFILE=custom -> planning/review use DeepSeek-R1-14B, code/fix use Qwen2.5-Coder-14B-Instruct
-  // Optional per-step overrides still exist, but they are validated against the supported model allowlist.
-  pipeline: {
-    planningModel: normalizeSupportedModel(
-      process.env.PLANNING_MODEL ?? process.env.PLANNER_MODEL,
-      llmPreset.planningModel,
-    ),
-    genCodeModel: normalizeSupportedModel(
-      process.env.GEN_CODE_MODEL,
-      llmPreset.genCodeModel,
-    ),
-    reviewCodeModel: normalizeSupportedModel(
-      process.env.REVIEW_CODE_MODEL ?? process.env.CODE_REVIEWER_MODEL,
-      llmPreset.reviewCodeModel,
-    ),
-    backendReviewModel: normalizeSupportedModel(
-      process.env.BACKEND_REVIEW_MODEL ??
-        process.env.REVIEW_CODE_MODEL ??
-        process.env.CODE_REVIEWER_MODEL,
-      llmPreset.backendReviewModel,
-    ),
-    fixAgentModel: normalizeSupportedModel(
-      process.env.FIX_AGENT_MODEL ??
-        process.env.REVIEW_CODE_MODEL ??
-        process.env.CODE_REVIEWER_MODEL ??
+      maxTokens: parseInt(process.env.CUSTOM_MAX_TOKENS ?? '8192', 10),
+      chatCompletionsPath:
+        process.env.CUSTOM_CHAT_COMPLETIONS_PATH || '/gateway/chat/completions',
+      authHeader: process.env.CUSTOM_AUTH_HEADER || 'Authorization',
+      authValuePrefix: process.env.CUSTOM_AUTH_VALUE_PREFIX || '',
+    },
+    llm: {
+      profile: llmProfile,
+    },
+    reactGenerator: {
+      delayBetweenComponents: parseInt(
+        process.env.REACT_GEN_DELAY_MS ?? '1500',
+        10,
+      ),
+      generationConcurrency: parseInt(
+        process.env.REACT_GEN_CONCURRENCY ?? '2',
+        10,
+      ),
+      sectionConcurrency: parseInt(
+        process.env.REACT_GEN_SECTION_CONCURRENCY ?? '2',
+        10,
+      ),
+    },
+    planner: {
+      agentEnabled: process.env.PLANNER_AGENT_ENABLED !== 'false',
+      agentMaxRounds: parseInt(process.env.PLANNER_AGENT_MAX_ROUNDS ?? '6', 10),
+      visualPlanConcurrency: parseInt(
+        process.env.PLANNER_VISUAL_CONCURRENCY ?? '3',
+        10,
+      ),
+      minimalVisualPlan: process.env.PLANNER_MINIMAL_VISUAL_PLAN === 'true',
+    },
+    preview: {
+      runtimeRouteDelayMs: parseInt(
+        process.env.PREVIEW_RUNTIME_ROUTE_DELAY_MS ?? '400',
+        10,
+      ),
+      runtimeServerReadyTimeoutMs: parseInt(
+        process.env.PREVIEW_RUNTIME_READY_TIMEOUT_MS ?? '30000',
+        10,
+      ),
+      wpAssetCopyConcurrency: parseInt(
+        process.env.PREVIEW_WP_ASSET_COPY_CONCURRENCY ?? '6',
+        10,
+      ),
+    },
+    // Primary switch:
+    //   LLM_PROFILE=openai -> planning/review use gpt-5.4, code/fix use gpt-5.3-codex
+    //   LLM_PROFILE=custom -> planning/review use DeepSeek-R1-14B, code/fix use Qwen2.5-Coder-14B-Instruct
+    // Optional per-step overrides still exist, but they are validated against the supported model allowlist.
+    pipeline: {
+      planningModel: normalizeSupportedModel(
+        process.env.PLANNING_MODEL ?? process.env.PLANNER_MODEL,
+        llmPreset.planningModel,
+      ),
+      genCodeModel: normalizeSupportedModel(
         process.env.GEN_CODE_MODEL,
-      llmPreset.fixAgentModel,
-    ),
-    aiReviewMode: process.env.AI_REVIEW_MODE ?? 'warn',
-    backendAiReviewMode: process.env.BACKEND_AI_REVIEW_MODE ?? 'warn',
-  },
-  github: {
-    wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
-    reactRepoToken: process.env.GITHUB_REACT_REPO_TOKEN,
-  },
-  automation: {
-    url: process.env.AUTOMATION_URL,
-  },
+        llmPreset.genCodeModel,
+      ),
+      reviewCodeModel: normalizeSupportedModel(
+        process.env.REVIEW_CODE_MODEL ?? process.env.CODE_REVIEWER_MODEL,
+        llmPreset.reviewCodeModel,
+      ),
+      backendReviewModel: normalizeSupportedModel(
+        process.env.BACKEND_REVIEW_MODEL ??
+          process.env.REVIEW_CODE_MODEL ??
+          process.env.CODE_REVIEWER_MODEL,
+        llmPreset.backendReviewModel,
+      ),
+      fixAgentModel: normalizeSupportedModel(
+        process.env.FIX_AGENT_MODEL ??
+          process.env.REVIEW_CODE_MODEL ??
+          process.env.CODE_REVIEWER_MODEL ??
+          process.env.GEN_CODE_MODEL,
+        llmPreset.fixAgentModel,
+      ),
+      aiReviewMode: process.env.AI_REVIEW_MODE ?? 'warn',
+      backendAiReviewMode: process.env.BACKEND_AI_REVIEW_MODE ?? 'warn',
+    },
+    github: {
+      wpRepoToken: process.env.GITHUB_WP_REPO_TOKEN,
+      reactRepoToken: process.env.GITHUB_REACT_REPO_TOKEN,
+    },
+    automation: {
+      url: process.env.AUTOMATION_URL,
+    },
   };
 };

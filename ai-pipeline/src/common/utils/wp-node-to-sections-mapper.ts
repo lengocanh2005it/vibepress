@@ -28,6 +28,9 @@ import type {
   BreadcrumbSection,
   SidebarSection,
   TestimonialSection,
+  TabsSection,
+  SliderSection,
+  ModalSection,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -106,6 +109,34 @@ function mergeAdjacentCardGridRows(
 
 function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   const block = node.block;
+
+  // uagb/tabs (Spectra plugin)
+  if (block === 'uagb/tabs' && node.tabs && node.tabs.length > 0) {
+    const tabsSection: TabsSection = { type: 'tabs', tabs: node.tabs };
+    return toMappedSections(tabsSection, node);
+  }
+
+  // uagb/slider (Spectra plugin) — always emit even when slides extraction yielded 0 items,
+  // so the AI planner is aware a slider exists and doesn't silently drop it.
+  if (block === 'uagb/slider') {
+    const sliderSection: SliderSection = {
+      type: 'slider',
+      slides: node.slides ?? [],
+    };
+    return toMappedSections(sliderSection, node);
+  }
+
+  // uagb/modal (Spectra plugin)
+  if (block === 'uagb/modal' && node.modalTrigger) {
+    const modalSection: ModalSection = {
+      type: 'modal',
+      triggerText: node.modalTrigger,
+      heading: node.modalHeading,
+      description: node.modalDescription,
+      cta: node.modalCta,
+    };
+    return toMappedSections(modalSection, node);
+  }
 
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {

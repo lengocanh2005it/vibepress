@@ -167,6 +167,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
 - Preserve source-level custom classes by carrying them into \`customClassNames\` when a draft section or source node already exposes them. Do NOT drop or rename these classes.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
+- When a source WP node has \`typography.fontWeight\` (e.g. "700" or "bold"), propagate it to the section's \`bodyStyle.fontWeight\` or \`headingStyle.fontWeight\` accordingly. Do NOT drop bold/weight overrides set on individual blocks.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
 - For sidebar page templates, place the \`sidebar\` section immediately after the main \`page-content\` or \`post-content\` section.
@@ -209,6 +210,11 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
   if (!draftSections || draftSections.length === 0) return '';
 
+  const interactiveTypes = ['slider', 'tabs', 'modal', 'accordion'];
+  const hasInteractive = draftSections.some((s) =>
+    interactiveTypes.includes(s.type),
+  );
+
   const lines = [
     '## Detected section order (deterministic, from WordPress block tree)',
     'The following sections were detected in the EXACT order they appear in the WordPress template.',
@@ -217,6 +223,17 @@ function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
     'You MUST NOT reorder, merge, split, or drop sections from this list.',
     'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
     'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
+    ...(hasInteractive
+      ? [
+          '',
+          '### Interactive block types — LOCKED',
+          'Some draft sections have interactive types (slider, tabs, modal, accordion) that come from Spectra/UAGB plugin blocks.',
+          'You MUST output exactly the same `type` value for those sections — do NOT change "slider" to "features", "tabs" to "grid", "modal" to "cta", etc.',
+          'For `type: "slider"`: populate the `slides` array from the source. Each slide has `heading`, `description`, and optional `imageUrl`.',
+          'For `type: "tabs"`: populate the `tabs` array from the source. Each tab has `label` and `content`.',
+          'For `type: "modal"`: populate `modalTrigger`, `modalHeading`, `modalDescription`, and optional `modalCta` from the source.',
+        ]
+      : []),
     '',
     '```json',
     JSON.stringify(draftSections, null, 2),

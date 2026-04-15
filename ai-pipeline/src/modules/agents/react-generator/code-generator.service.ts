@@ -20,6 +20,9 @@ import type {
   CommentsSection,
   SearchSection,
   SidebarSection,
+  TabsSection,
+  SliderSection,
+  ModalSection,
   DataNeed,
 } from './visual-plan.schema.js';
 import {
@@ -165,13 +168,19 @@ export class CodeGeneratorService {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
     if (renderState.componentKind === 'footer') {
-      lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
+      lines.push(
+        `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
+      );
     }
     if (needsSiteInfo || needsMenus) {
       lines.push('');
       lines.push('  useEffect(() => {');
       lines.push('    (async () => {');
-      if (needsSiteInfo && needsMenus && renderState.componentKind === 'footer') {
+      if (
+        needsSiteInfo &&
+        needsMenus &&
+        renderState.componentKind === 'footer'
+      ) {
         lines.push(
           '      const [siteInfoRes, menusRes, footerLinksRes] = await Promise.all([',
         );
@@ -179,7 +188,9 @@ export class CodeGeneratorService {
         lines.push("        fetch('/api/menus'),");
         lines.push("        fetch('/api/footer-links'),");
         lines.push('      ]);');
-        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
         lines.push('      setSiteInfo(await siteInfoRes.json());');
         lines.push('      setMenus(await menusRes.json());');
         lines.push(
@@ -196,11 +207,15 @@ export class CodeGeneratorService {
         lines.push("      const siteInfoRes = await fetch('/api/site-info');");
         lines.push('      setSiteInfo(await siteInfoRes.json());');
       } else if (renderState.componentKind === 'footer') {
-        lines.push('      const [menusRes, footerLinksRes] = await Promise.all([');
+        lines.push(
+          '      const [menusRes, footerLinksRes] = await Promise.all([',
+        );
         lines.push("        fetch('/api/menus'),");
         lines.push("        fetch('/api/footer-links'),");
         lines.push('      ]);');
-        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
         lines.push('      setMenus(await menusRes.json());');
         lines.push(
           '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
@@ -963,6 +978,15 @@ export default ${componentName};`;
       case 'sidebar':
         markup = this.renderSidebar(section, ctx, py);
         break;
+      case 'tabs':
+        markup = this.renderTabs(section, ctx, bg, tc, py);
+        break;
+      case 'slider':
+        markup = this.renderSlider(section, ctx, bg, tc, py);
+        break;
+      case 'modal':
+        markup = this.renderModal(section, ctx, bg, tc, py);
+        break;
     }
 
     return this.annotateSectionMarkup(section, markup, componentName);
@@ -1540,7 +1564,7 @@ ${cards}
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => /<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`)).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
 
@@ -1947,6 +1971,147 @@ ${this.renderSidebarCard(s, ctx, 10)}
               <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
             </article>
           )}`;
+  }
+
+  private renderTabs(
+    s: TabsSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+  ): string {
+    const p = ctx.p;
+    const tabsVar = `activeTab_${Math.random().toString(36).slice(2, 7)}`;
+    return `
+      <section className="${bg} ${py} w-full px-4 sm:px-6 lg:px-8">
+        <div className="max-w-[1280px] mx-auto w-full flex flex-col gap-6">
+          {(() => {
+            const [${tabsVar}, set${tabsVar.charAt(0).toUpperCase() + tabsVar.slice(1)}] = React.useState(0);
+            return (
+              <>
+                <div className="flex gap-0 border-b border-[#e0e0e0]" role="tablist">
+                  ${s.tabs
+                    .map(
+                      (tab, i) =>
+                        `<button
+                    key={${i}}
+                    role="tab"
+                    aria-selected={${tabsVar} === ${i}}
+                    onClick={() => set${tabsVar.charAt(0).toUpperCase() + tabsVar.slice(1)}(${i})}
+                    className={\`px-5 py-3 text-[0.95rem] font-medium border-b-2 transition-colors \${${tabsVar} === ${i} ? 'border-[${p.accent}] text-[${p.accent}]' : 'border-transparent text-[#636363] hover:text-[${tc}]'}\`}
+                  >
+                    ${tab.label}
+                  </button>`,
+                    )
+                    .join('\n                  ')}
+                </div>
+                <div className="text-[1.05rem] text-[${tc}]">
+                  ${s.tabs
+                    .map(
+                      (tab, i) =>
+                        `{${tabsVar} === ${i} && <div role="tabpanel">${tab.content}</div>}`,
+                    )
+                    .join('\n                  ')}
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      </section>`;
+  }
+
+  private renderSlider(
+    s: SliderSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+  ): string {
+    const p = ctx.p;
+    const idxVar = `slideIdx_${Math.random().toString(36).slice(2, 7)}`;
+    const setIdx = `set${idxVar.charAt(0).toUpperCase() + idxVar.slice(1)}`;
+    const totalSlides = s.slides.length;
+    const slidesMarkup = s.slides
+      .map((slide, i) => {
+        const ctaBtn = slide.cta
+          ? `<a href="${slide.cta.link}" className="inline-block mt-4 px-6 py-3 bg-[${p.accent}] text-[${p.accentText}] rounded font-medium hover:opacity-90 transition-opacity">${slide.cta.text}</a>`
+          : '';
+        return `{${idxVar} === ${i} && (
+              <div className="flex flex-col items-center text-center gap-4 px-12">
+                ${slide.heading ? `<h2 className="${ctx.t.h2} text-[${tc}]">${slide.heading}</h2>` : ''}
+                ${slide.description ? `<p className="${ctx.t.body} text-[${p.textMuted}] max-w-2xl">${slide.description}</p>` : ''}
+                ${ctaBtn}
+              </div>
+            )}`;
+      })
+      .join('\n            ');
+    const dotsMarkup = s.slides
+      .map(
+        (_, i) =>
+          `<button onClick={() => ${setIdx}(${i})} className={\`w-2.5 h-2.5 rounded-full transition-colors \${${idxVar} === ${i} ? 'bg-[${p.accent}]' : 'bg-[#ccc]'}\`} aria-label="Slide ${i + 1}" />`,
+      )
+      .join('\n            ');
+    return `
+      <section className="${bg} ${py} w-full px-4 sm:px-6 lg:px-8">
+        <div className="max-w-[1280px] mx-auto w-full">
+          {(() => {
+            const [${idxVar}, ${setIdx}] = React.useState(0);
+            return (
+              <div className="relative flex flex-col items-center gap-6">
+                <div className="relative w-full overflow-hidden min-h-[300px] flex items-center justify-center">
+                  ${slidesMarkup}
+                  <button onClick={() => ${setIdx}((${idxVar} - 1 + ${totalSlides}) % ${totalSlides})} className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full bg-white/80 shadow hover:bg-white transition-colors text-[${tc}]" aria-label="Previous">&#8249;</button>
+                  <button onClick={() => ${setIdx}((${idxVar} + 1) % ${totalSlides})} className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full bg-white/80 shadow hover:bg-white transition-colors text-[${tc}]" aria-label="Next">&#8250;</button>
+                </div>
+                <div className="flex gap-2 justify-center">
+                  ${dotsMarkup}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </section>`;
+  }
+
+  private renderModal(
+    s: ModalSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+  ): string {
+    const p = ctx.p;
+    const openVar = `modalOpen_${Math.random().toString(36).slice(2, 7)}`;
+    const setOpen = `set${openVar.charAt(0).toUpperCase() + openVar.slice(1)}`;
+    const ctaBtn = s.cta
+      ? `<a href="${s.cta.link}" className="inline-block mt-4 px-6 py-3 bg-[${p.accent}] text-[${p.accentText}] rounded font-medium hover:opacity-90 transition-opacity">${s.cta.text}</a>`
+      : '';
+    return `
+      <section className="${bg} ${py} w-full px-4 sm:px-6 lg:px-8">
+        <div className="max-w-[1280px] mx-auto w-full flex justify-center">
+          {(() => {
+            const [${openVar}, ${setOpen}] = React.useState(false);
+            return (
+              <>
+                <button onClick={() => ${setOpen}(true)} className="px-6 py-3 bg-[${p.accent}] text-[${p.accentText}] rounded font-medium hover:opacity-90 transition-opacity">
+                  ${s.triggerText}
+                </button>
+                {${openVar} && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+                    <div className="absolute inset-0 bg-black/50" onClick={() => ${setOpen}(false)} />
+                    <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 flex flex-col items-center text-center gap-4">
+                      <button onClick={() => ${setOpen}(false)} className="absolute top-4 right-4 text-[#636363] hover:text-[${tc}] text-2xl leading-none" aria-label="Close">&times;</button>
+                      ${s.heading ? `<h3 className="${ctx.t.h3} text-[${tc}]">${s.heading}</h3>` : ''}
+                      ${s.description ? `<p className="${ctx.t.body} text-[${p.textMuted}]">${s.description}</p>` : ''}
+                      ${ctaBtn}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      </section>`;
   }
 
   private renderSidebarCard(

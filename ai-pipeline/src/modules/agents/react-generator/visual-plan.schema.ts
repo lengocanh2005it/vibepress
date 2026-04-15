@@ -192,6 +192,29 @@ export interface SidebarSection extends BaseSection {
   maxItems?: number;
 }
 
+export interface TabsSection extends BaseSection {
+  type: 'tabs';
+  tabs: { label: string; content: string }[];
+}
+
+export interface SliderSection extends BaseSection {
+  type: 'slider';
+  slides: {
+    heading?: string;
+    description?: string;
+    cta?: { text: string; link: string };
+  }[];
+  autoplay?: boolean;
+}
+
+export interface ModalSection extends BaseSection {
+  type: 'modal';
+  triggerText: string;
+  heading?: string;
+  description?: string;
+  cta?: { text: string; link: string };
+}
+
 export type SectionPlan =
   | NavbarSection
   | HeroSection
@@ -207,7 +230,10 @@ export type SectionPlan =
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
-  | SidebarSection;
+  | SidebarSection
+  | TabsSection
+  | SliderSection
+  | ModalSection;
 
 /**
  * Typography tokens derived from theme.json / style.css.

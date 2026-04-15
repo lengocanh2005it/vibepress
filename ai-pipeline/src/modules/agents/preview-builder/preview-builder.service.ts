@@ -652,12 +652,11 @@ ${fontEntries}
     if (bodyProps.length > 0)
       cssLines.push(`body { ${bodyProps.join('; ')}; }`);
 
-    const headingProps: string[] = [];
+    const headingProps: string[] = ['font-weight: 700'];
     if (d?.headingFontFamily)
       headingProps.push(`font-family: ${d.headingFontFamily}`);
     if (d?.headingColor) headingProps.push(`color: ${d.headingColor}`);
-    if (headingProps.length > 0)
-      cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
+    cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
 
     if (d?.headings) {
       for (const [level, style] of Object.entries(d.headings)) {
@@ -954,8 +953,8 @@ ${fontEntries}
 
       'is-style-checkmark-list': `
 .is-style-checkmark-list { list-style: none; padding-left: 0; }
-.is-style-checkmark-list li { padding-left: 1.75em; position: relative; }
-.is-style-checkmark-list li::before { content: "✓"; position: absolute; left: 0; color: currentColor; }`,
+.is-style-checkmark-list li { padding-left: 1.75em; position: relative; font-weight: 600; }
+.is-style-checkmark-list li::before { content: "✓"; position: absolute; left: 0; color: currentColor; font-weight: 600; }`,
 
       'is-style-rounded': `
 .is-style-rounded img, img.is-style-rounded { border-radius: min(1.5rem, 2vw); }`,

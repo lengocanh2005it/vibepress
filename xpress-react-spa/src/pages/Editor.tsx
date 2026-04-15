@@ -1259,9 +1259,11 @@ const Editor: React.FC = () => {
       setChatInput("");
       setChatCaptures([]);
       console.log("AI process started with job ID:", data.jobId);
-      await deleteCapturesBySite(siteId);
       navigate("/app/editor/split-view", {
         state: { jobId: data.jobId, siteId },
+      });
+      void deleteCapturesBySite(siteId).catch((error) => {
+        console.error("Error deleting captures after starting AI process:", error);
       });
     } catch (error) {
       if (error instanceof AiProcessError) {

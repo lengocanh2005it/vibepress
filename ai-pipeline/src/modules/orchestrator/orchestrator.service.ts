@@ -1973,18 +1973,18 @@ export class OrchestratorService {
           'Calling backend automation for final site compare metrics.',
         );
 
-          try {
-            const response = await lastValueFrom(
-              this.httpService.post(
-                `${this.configService.get<string>('automation.url', '')}/site/compare`,
-                {
-                  siteId,
-                  wpSiteId: siteId,
-                  wpBaseUrl,
-                  reactFeUrl: preview.previewUrl,
-                  reactBeUrl,
-                },
-              ),
+        try {
+          const response = await lastValueFrom(
+            this.httpService.post(
+              `${this.configService.get<string>('automation.url', '')}/site/compare`,
+              {
+                siteId,
+                wpSiteId: siteId,
+                wpBaseUrl,
+                reactFeUrl: preview.previewUrl,
+                reactBeUrl,
+              },
+            ),
           );
           metrics = response.data?.result ?? response.data;
         } catch (err: any) {

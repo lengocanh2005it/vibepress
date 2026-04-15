@@ -1306,7 +1306,16 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     section: SectionPlan,
     draft?: SectionPlan,
   ): SectionPlan {
-    if (!draft || draft.type !== section.type) return section;
+    if (!draft) return section;
+    // For interactive plugin block types, the draft is authoritative — if the AI
+    // changed "slider" to "features" etc., override it back to the draft.
+    const interactiveTypes = ['slider', 'tabs', 'modal', 'accordion'];
+    if (draft.type !== section.type) {
+      if (interactiveTypes.includes(draft.type)) {
+        return draft; // force the correct interactive section from the deterministic mapper
+      }
+      return section;
+    }
 
     const mergedBase = {
       ...section,

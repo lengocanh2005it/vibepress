@@ -43,6 +43,19 @@ export interface WpNode {
     fontFamily?: string;
   };
   children?: WpNode[];
+  // uagb/tabs block
+  tabs?: { label: string; content: string }[];
+  // uagb/slider block
+  slides?: {
+    heading?: string;
+    description?: string;
+    cta?: { text: string; link: string };
+  }[];
+  // uagb/modal block
+  modalTrigger?: string;
+  modalHeading?: string;
+  modalDescription?: string;
+  modalCta?: { text: string; link: string };
 }
 
 /**
@@ -421,6 +434,30 @@ function findClosingIndex(
   return -1;
 }
 
+function extractAnchorContentByClass(
+  html: string,
+  classToken: string,
+): { text: string; link: string } | undefined {
+  const anchorPattern = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const attrs = match[1] ?? '';
+    const classValue = attrs.match(/\bclass="([^"]*)"/i)?.[1] ?? '';
+    if (!classValue.split(/\s+/).includes(classToken)) continue;
+
+    const text = stripTags(match[2] ?? '').trim();
+    if (!text) continue;
+
+    return {
+      text,
+      link: attrs.match(/\bhref="([^"]*)"/i)?.[1] || '#',
+    };
+  }
+
+  return undefined;
+}
+
 /**
  * Build a WpNode from a block name, params, and inner markup.
  * Decides whether to recurse into children or extract leaf content.
@@ -431,6 +468,106 @@ function buildNode(
   innerMarkup: string,
 ): WpNode {
   const hasNestedBlocks = /<!-- wp:[a-z]/.test(innerMarkup);
+
+  // uagb/tabs: extract tab labels from HTML <ul> and tab content from
+  // uagb/tabs-child blocks, then return a flat node with a tabs array.
+  if (blockName === 'uagb/tabs') {
+    const labelMatches = [
+      ...innerMarkup.matchAll(/<div[^>]*>\s*([^<]+?)\s*<\/div>\s*<\/a>/g),
+    ];
+    const labels = labelMatches.map((m) => m[1].trim()).filter(Boolean);
+
+    const childPattern =
+      /<!-- wp:uagb\/tabs-child[^>]*-->([\s\S]*?)<!-- \/wp:uagb\/tabs-child -->/g;
+    const contents: string[] = [];
+    let childMatch: RegExpExecArray | null;
+    while ((childMatch = childPattern.exec(innerMarkup)) !== null) {
+      const childInner = childMatch[1];
+      // Extract plain text from inner blocks
+      const text = stripTags(childInner.replace(/<!--[\s\S]*?-->/g, ''))
+        .replace(/\s+/g, ' ')
+        .trim();
+      contents.push(text);
+    }
+
+    const tabs = labels.map((label, i) => ({
+      label,
+      content: contents[i] ?? '',
+    }));
+
+    return compact({ block: 'uagb/tabs', tabs });
+  }
+
+  // uagb/slider: extract slides from uagb/slider-child blocks.
+  // Each child contains a uagb/info-box with title, desc, and optional CTA link.
+  if (blockName === 'uagb/slider') {
+    const childPattern =
+      /<!-- wp:uagb\/slider-child[^>]*-->([\s\S]*?)<!-- \/wp:uagb\/slider-child -->/g;
+    const slides: WpNode['slides'] = [];
+    let childMatch: RegExpExecArray | null;
+    while ((childMatch = childPattern.exec(innerMarkup)) !== null) {
+      const childInner = childMatch[1];
+      // Match any heading level (h1-h6) whose class contains uagb-ifb-title; fall back to first heading.
+      const headingMatch =
+        /<h[1-6][^>]*class="[^"]*uagb-ifb-title[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/.exec(
+          childInner,
+        ) ?? /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/.exec(childInner);
+      // Match any <p> whose class contains uagb-ifb-desc; fall back to first <p>.
+      const descMatch =
+        /<p[^>]*class="[^"]*uagb-ifb-desc[^"]*"[^>]*>([\s\S]*?)<\/p>/.exec(
+          childInner,
+        ) ?? /<p[^>]*>([\s\S]*?)<\/p>/.exec(childInner);
+      const cta = extractAnchorContentByClass(
+        childInner,
+        'uagb-infobox-cta-link',
+      );
+      const slide: NonNullable<WpNode['slides']>[number] = {};
+      if (headingMatch) slide.heading = stripTags(headingMatch[1]).trim();
+      if (descMatch) slide.description = stripTags(descMatch[1]).trim();
+      if (cta) {
+        slide.cta = cta;
+      }
+      slides.push(slide);
+    }
+    return compact({ block: 'uagb/slider', slides });
+  }
+
+  // uagb/modal: extract trigger button text and popup content (info-box inside modal).
+  if (blockName === 'uagb/modal') {
+    const trigger = extractAnchorContentByClass(
+      innerMarkup,
+      'uagb-modal-button-link',
+    );
+    const popupContent =
+      /<!-- wp:uagb\/info-box[^>]*-->([\s\S]*?)<!-- \/wp:uagb\/info-box -->/.exec(
+        innerMarkup,
+      );
+    const triggerText = trigger?.text || 'Open Modal';
+    let modalHeading: string | undefined;
+    let modalDescription: string | undefined;
+    let modalCta: { text: string; link: string } | undefined;
+    if (popupContent) {
+      const inner = popupContent[1];
+      const hMatch =
+        /<h3[^>]*class="uagb-ifb-title"[^>]*>([\s\S]*?)<\/h3>/.exec(inner);
+      const dMatch = /<p[^>]*class="uagb-ifb-desc"[^>]*>([\s\S]*?)<\/p>/.exec(
+        inner,
+      );
+      const cta = extractAnchorContentByClass(inner, 'uagb-infobox-cta-link');
+      if (hMatch) modalHeading = stripTags(hMatch[1]).trim();
+      if (dMatch) modalDescription = stripTags(dMatch[1]).trim();
+      if (cta) {
+        modalCta = cta;
+      }
+    }
+    return compact({
+      block: 'uagb/modal',
+      modalTrigger: triggerText,
+      modalHeading,
+      modalDescription,
+      modalCta,
+    });
+  }
 
   if (hasNestedBlocks) {
     const children = parseBlocks(innerMarkup);
@@ -482,6 +619,19 @@ function buildNode(
   if (blockName === 'image') {
     if (!leaf.width && params?.width) leaf.width = params.width as number;
     if (!leaf.height && params?.height) leaf.height = params.height as number;
+  }
+
+  // When a paragraph/heading block has fontWeight="700" set via Gutenberg typography,
+  // wrap the text in <strong> and expose it as node.html so the AI renders it bold
+  // via dangerouslySetInnerHTML instead of losing the formatting as plain text.
+  const blockFontWeight = (params as any)?.style?.typography?.fontWeight;
+  if (
+    (blockName === 'paragraph' || blockName === 'core/paragraph') &&
+    (blockFontWeight === '700' || blockFontWeight === 'bold') &&
+    leaf.text &&
+    !leaf.html
+  ) {
+    leaf.html = `<strong>${leaf.text}</strong>`;
   }
 
   return compact({
@@ -561,7 +711,9 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     }
     // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
     // renderer can use dangerouslySetInnerHTML to keep bold/italic formatting.
-    const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(stripped);
+    const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(
+      stripped,
+    );
     if (
       (blockName === 'core/list-item' || blockName === 'list-item') &&
       hasInlineHtml
