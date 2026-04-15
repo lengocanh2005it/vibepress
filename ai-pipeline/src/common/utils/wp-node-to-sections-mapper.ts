@@ -14,6 +14,7 @@
 import type { WpNode } from './wp-block-to-json.js';
 import type {
   SectionPlan,
+  SourceLayoutHint,
   TypographyStyle,
   NavbarSection,
   HeroSection,
@@ -141,6 +142,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
     return toMappedSections(mapTemplatePart(node), node);
+  }
+
+  if (block === 'vibepress/source-scope' && node.children?.length) {
+    return mapNodes(node.children, node.children);
   }
 
   // Navigation / site header chrome
@@ -367,11 +372,6 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(groupedCardGrid, node);
   }
 
-  // Group acting as a hero: has heading + paragraph (+ optional button)
-  if (isHeroGroup(children)) {
-    return toMappedSections(buildHeroFromChildren(node, children), node);
-  }
-
   // Group acting as a 2-column media-text layout
   if (isMediaTextGroup(children)) {
     return toMappedSections(buildMediaTextFromColumns(children), node);
@@ -397,12 +397,26 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(s, node);
   }
 
-  // Nested group that contains further sub-sections — recurse and keep them all.
+  // Wrapper groups often contain a centered intro group followed by one or more
+  // real sub-sections (columns/media rows/card rows). Prefer the recursively
+  // discovered child sections when there is more than one, otherwise we risk
+  // collapsing the whole wrapper into a single hero and losing the following
+  // source-backed sections.
   const nestedSections = mapNodes(children, children);
+  if (nestedSections.length > 1) {
+    return inheritWrapperHints(nestedSections, node);
+  }
+
+  // Group acting as a hero: has heading + paragraph (+ optional button)
+  if (isHeroGroup(children)) {
+    return toMappedSections(buildHeroFromChildren(node, children), node);
+  }
+
+  // Nested group that contains further sub-sections — recurse and keep them all.
   if (nestedSections.length === 1) {
     return [applyNodePresentation(nestedSections[0], node)];
   }
-  return nestedSections;
+  return inheritWrapperHints(nestedSections, node);
 }
 
 // ── query block (post list) ─────────────────────────────────────────────────
@@ -542,11 +556,15 @@ function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
 
 function mapStandaloneHeading(node: WpNode): HeroSection | null {
   if (!node.text?.trim()) return null;
+  const textAlign = extractNodeTextAlign(node);
   const hero: HeroSection = {
     type: 'hero',
-    layout: node.textAlign === 'center' ? 'centered' : 'left',
+    layout: textAlign === 'center' ? 'centered' : 'left',
     heading: node.text ?? '',
   };
+  if (textAlign && textAlign !== 'left') {
+    hero.textAlign = textAlign;
+  }
   if (node.typography || node.fontFamily) {
     hero.headingStyle = toTypographyStyle(node);
   }
@@ -586,6 +604,18 @@ function applyNodePresentation<T extends SectionPlan>(
   }
   if (node.bgColor && !next.background) next.background = node.bgColor;
   if (node.textColor && !next.textColor) next.textColor = node.textColor;
+  const textAlign = extractNodeTextAlign(node);
+  if (textAlign && shouldApplySectionTextAlign(next) && !next.textAlign) {
+    next.textAlign = textAlign;
+  }
+  const sourceLayout = extractSourceLayout(node);
+  if (sourceLayout && !next.sourceLayout) {
+    next.sourceLayout = sourceLayout;
+  }
+  const contentWidth = extractContentWidth(node);
+  if (contentWidth && shouldApplyContentWidth(next) && !next.contentWidth) {
+    next.contentWidth = contentWidth;
+  }
   if (node.padding && !next.paddingStyle) {
     next.paddingStyle = boxSpacingToCss(node.padding);
   }
@@ -603,6 +633,56 @@ function applyNodePresentation<T extends SectionPlan>(
     next.customClassNames = customClassNames;
   }
   return next;
+}
+
+function extractSourceLayout(node: WpNode): SourceLayoutHint | undefined {
+  const layout = node.params?.layout;
+  if (!layout || typeof layout !== 'object') return undefined;
+
+  const sourceLayout: SourceLayoutHint = {};
+  if (typeof layout.type === 'string') sourceLayout.type = layout.type;
+  if (typeof layout.orientation === 'string') {
+    sourceLayout.orientation = layout.orientation;
+  }
+  if (typeof layout.justifyContent === 'string') {
+    sourceLayout.justifyContent = layout.justifyContent;
+  }
+  if (typeof layout.flexWrap === 'string') {
+    sourceLayout.flexWrap = layout.flexWrap;
+  }
+  if (typeof layout.verticalAlignment === 'string') {
+    sourceLayout.verticalAlignment = layout.verticalAlignment;
+  }
+
+  const columnCount = Number(layout.columnCount ?? layout.columns ?? 0);
+  if (Number.isFinite(columnCount) && columnCount > 0) {
+    sourceLayout.columnCount = columnCount;
+  }
+
+  const minimumColumnWidth = normalizeCssLength(
+    typeof layout.minimumColumnWidth === 'string'
+      ? layout.minimumColumnWidth
+      : undefined,
+  );
+  if (minimumColumnWidth) {
+    sourceLayout.minimumColumnWidth = minimumColumnWidth;
+  }
+
+  const contentSize = normalizeCssLength(
+    typeof layout.contentSize === 'string' ? layout.contentSize : undefined,
+  );
+  if (contentSize) {
+    sourceLayout.contentSize = contentSize;
+  }
+
+  const wideSize = normalizeCssLength(
+    typeof layout.wideSize === 'string' ? layout.wideSize : undefined,
+  );
+  if (wideSize) {
+    sourceLayout.wideSize = wideSize;
+  }
+
+  return Object.keys(sourceLayout).length > 0 ? sourceLayout : undefined;
 }
 
 function buildSectionKey(
@@ -734,7 +814,10 @@ function buildHeroFromChildren(
   );
   const img = flat.find((c) => c.block === 'core/image' || c.block === 'image');
 
-  const align = groupNode.textAlign ?? groupNode.params?.textAlign ?? 'left';
+  const align =
+    extractNodeTextAlign(groupNode) ??
+    extractChildTextAlign([h, p, btn]) ??
+    'left';
   const layout: HeroSection['layout'] =
     align === 'center' ? 'centered' : img ? 'split' : 'left';
 
@@ -743,6 +826,9 @@ function buildHeroFromChildren(
     layout,
     heading: h?.text ?? '',
   };
+  if (align === 'center' || align === 'right') {
+    s.textAlign = align;
+  }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   if (p?.text) s.subheading = p.text;
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
@@ -824,7 +910,7 @@ function buildMediaTextFromColumns(
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   if (h?.text) s.heading = h.text;
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  if (p?.text) s.body = p.text;
+  if (p?.html ?? p?.text) s.body = p.html ?? p.text;
   if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
   if (listItems.length > 0) s.listItems = listItems;
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
@@ -902,6 +988,83 @@ function normalizeCssLength(value?: string): string | undefined {
   const normalized = value.trim();
   if (!normalized) return undefined;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function extractNodeTextAlign(
+  node?: WpNode,
+): 'left' | 'center' | 'right' | undefined {
+  const raw = node?.textAlign ?? node?.params?.textAlign;
+  if (raw === 'left' || raw === 'center' || raw === 'right') return raw;
+  return undefined;
+}
+
+function extractChildTextAlign(
+  nodes: Array<WpNode | undefined>,
+): 'left' | 'center' | 'right' | undefined {
+  for (const node of nodes) {
+    const align = extractNodeTextAlign(node);
+    if (align) return align;
+  }
+  return undefined;
+}
+
+function extractContentWidth(node?: WpNode): string | undefined {
+  const layout = node?.params?.layout;
+  if (!layout || typeof layout !== 'object') return undefined;
+  return normalizeCssLength(
+    typeof layout.contentSize === 'string' ? layout.contentSize : undefined,
+  );
+}
+
+function shouldApplySectionTextAlign(section: SectionPlan): boolean {
+  return (
+    section.type === 'hero' ||
+    section.type === 'cover' ||
+    section.type === 'testimonial' ||
+    section.type === 'newsletter' ||
+    section.type === 'search'
+  );
+}
+
+function shouldApplyContentWidth(section: SectionPlan): boolean {
+  return (
+    section.type === 'hero' ||
+    section.type === 'cover' ||
+    section.type === 'testimonial' ||
+    section.type === 'newsletter' ||
+    section.type === 'search' ||
+    section.type === 'page-content' ||
+    section.type === 'post-content'
+  );
+}
+
+function inheritWrapperHints(
+  sections: SectionPlan[],
+  wrapperNode: WpNode,
+): SectionPlan[] {
+  if (sections.length === 0) return sections;
+
+  const contentWidth = extractContentWidth(wrapperNode);
+  const textAlign = extractNodeTextAlign(wrapperNode);
+  if (!contentWidth && !textAlign) return sections;
+
+  const next = [...sections];
+  const targetIndex = next.findIndex(
+    (section) =>
+      (contentWidth && shouldApplyContentWidth(section)) ||
+      (textAlign && shouldApplySectionTextAlign(section)),
+  );
+  if (targetIndex === -1) return sections;
+
+  const target = { ...next[targetIndex] };
+  if (contentWidth && shouldApplyContentWidth(target) && !target.contentWidth) {
+    target.contentWidth = contentWidth;
+  }
+  if (textAlign && shouldApplySectionTextAlign(target) && !target.textAlign) {
+    target.textAlign = textAlign;
+  }
+  next[targetIndex] = target;
+  return next;
 }
 
 function booleanAttr(value: unknown, fallback: boolean): boolean {

@@ -52,8 +52,17 @@ export class GeneratedApiReviewService {
     modelName?: string;
     mode?: 'warn' | 'blocking';
     logPath?: string;
+    jobId?: string;
   }): Promise<GeneratedApiReviewResult> {
-    const { api, plan, content, modelName, mode = 'warn', logPath } = input;
+    const {
+      api,
+      plan,
+      content,
+      modelName,
+      mode = 'warn',
+      logPath,
+      jobId,
+    } = input;
     const resolvedModel = modelName ?? this.llmFactory.getModel();
 
     this.logger.log(
@@ -69,6 +78,7 @@ export class GeneratedApiReviewService {
       reviewPrompt,
       resolvedModel,
       logPath,
+      jobId,
     );
 
     const blockingIssues = this.getBlockingIssues(review);
@@ -112,6 +122,7 @@ export class GeneratedApiReviewService {
     reviewPrompt: string,
     modelName: string,
     logPath?: string,
+    jobId?: string,
   ): Promise<ApiReviewResult> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const { text, inputTokens, outputTokens } = await this.llmFactory.chat({
@@ -120,6 +131,7 @@ export class GeneratedApiReviewService {
           'You are a strict senior backend reviewer. Review generated Express/TypeScript server code against the approved frontend data contract. Return ONLY valid JSON.',
         userPrompt: reviewPrompt,
         maxTokens: 2200,
+        jobId,
       });
       const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
       if (tokenLogPath) {

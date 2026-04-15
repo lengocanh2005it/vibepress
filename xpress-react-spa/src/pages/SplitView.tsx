@@ -351,7 +351,12 @@ const SplitView: React.FC = () => {
   const handleDeletePipeline = async () => {
     setDeleteState({ loading: true, done: false });
     try {
-      await fetch(`/ai-api/pipeline/delete/${jobId}`, { method: "POST" });
+      const response = await fetch(`/ai-api/pipeline/delete/${jobId}`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to delete pipeline (${response.status})`);
+      }
       sse.disconnect();
       setDeleteState({ loading: false, done: true });
       setShowStopConfirm(false);
@@ -477,8 +482,8 @@ const SplitView: React.FC = () => {
                 disabled={deleteState.loading}
                 className="text-xs font-mono px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
               >
-                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>stop_circle</span>
-                {deleteState.loading ? "Stopping..." : "Stop"}
+                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>delete_forever</span>
+                {deleteState.loading ? "Deleting..." : "Delete"}
               </button>
             )}
           </div>
@@ -744,10 +749,10 @@ const SplitView: React.FC = () => {
           {deleteState.done ? (
             <div className="text-center space-y-4">
               <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">
-                <span className="material-symbols-outlined text-red-400 text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>stop_circle</span>
+                <span className="material-symbols-outlined text-red-400 text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>delete_forever</span>
               </div>
-              <p className="text-on-surface font-medium">Pipeline đã tạm dừng</p>
-              <p className="text-xs text-on-surface-variant">Tất cả tiến trình đã được dừng lại và artifacts đã được xóa.</p>
+              <p className="text-on-surface font-medium">Pipeline đã được xóa</p>
+              <p className="text-xs text-on-surface-variant">Job hiện tại đã bị hủy và artifacts tạm đã được dọn dẹp.</p>
               <button
                 onClick={() => navigate("/app/projects")}
                 className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-medium"
@@ -812,21 +817,21 @@ const SplitView: React.FC = () => {
                   className="material-symbols-outlined"
                   style={{ fontVariationSettings: "'FILL' 1" }}
                 >
-                  stop_circle
+                  delete_forever
                 </span>
               </div>
               <div className="min-w-0">
                 <h2 className="font-headline text-lg font-semibold text-on-surface">
-                  Dừng pipeline hiện tại?
+                  Xóa pipeline hiện tại?
                 </h2>
                 <p className="mt-1 text-sm text-on-surface-variant">
-                  Tất cả tiến trình đang chạy sẽ bị dừng và preview/artifacts hiện tại sẽ bị xóa.
+                  Pipeline sẽ bị hủy, preview đang chạy sẽ tắt, và artifacts tạm của job này sẽ bị xóa.
                 </p>
               </div>
             </div>
             <div className="px-6 py-4">
               <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                Bạn có muốn dừng workflow AI hiện tại không?
+                Bạn có muốn xóa hẳn workflow AI hiện tại không?
               </div>
             </div>
             <div className="flex items-center justify-end gap-3 px-6 pb-6">
@@ -843,9 +848,9 @@ const SplitView: React.FC = () => {
                 className="inline-flex items-center gap-2 rounded-xl border border-red-700 bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <span className="material-symbols-outlined text-[18px]">
-                  stop_circle
+                  delete_forever
                 </span>
-                {deleteState.loading ? "Đang dừng..." : "Dừng pipeline"}
+                {deleteState.loading ? "Đang xóa..." : "Xóa pipeline"}
               </button>
             </div>
           </div>

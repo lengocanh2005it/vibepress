@@ -114,6 +114,11 @@ export interface BlockParseDiagnostic {
   partCount: number;
 }
 
+interface ResolvedPattern {
+  markup: string;
+  sourceFile: string;
+}
+
 @Injectable()
 export class BlockParserService {
   private readonly logger = new Logger(BlockParserService.name);
@@ -719,10 +724,11 @@ export class BlockParserService {
     return markup.replace(
       /<!-- wp:template-part \{[^}]*"slug":"([^"]+)"[^}]*\} \/-->/g,
       (_, slug) => {
-        const partMarkup =
-          this.findPartMarkup(slug, partMap) ??
-          `<!-- part:${slug} not found -->`;
-        return this.wrapResolvedPart(slug, partMarkup);
+        const resolvedName = this.findPartName(slug, partMap);
+        const partMarkup = resolvedName
+          ? (partMap.get(resolvedName) ?? `<!-- part:${slug} not found -->`)
+          : `<!-- part:${slug} not found -->`;
+        return this.wrapResolvedPart(resolvedName ?? slug, partMarkup);
       },
     );
   }
@@ -770,7 +776,9 @@ export class BlockParserService {
   private wrapResolvedPart(slug: string, markup: string): string {
     return [
       `<!-- vibepress:part:start ${slug} -->`,
+      `<!-- vibepress:source:start parts/${slug}.html -->`,
       markup,
+      `<!-- vibepress:source:end parts/${slug}.html -->`,
       `<!-- vibepress:part:end ${slug} -->`,
     ].join('\n');
   }
@@ -808,8 +816,8 @@ export class BlockParserService {
    */
   private async buildPatternMap(
     patternsDir: string,
-  ): Promise<Map<string, string>> {
-    const map = new Map<string, string>();
+  ): Promise<Map<string, ResolvedPattern>> {
+    const map = new Map<string, ResolvedPattern>();
     try {
       const files = await this.walkFiles(patternsDir, '.php');
       for (const file of files) {
@@ -818,7 +826,10 @@ export class BlockParserService {
         if (!slugMatch) continue;
         const slug = slugMatch[1].trim();
         const markup = this.stripPhp(raw);
-        map.set(slug, markup);
+        map.set(slug, {
+          markup,
+          sourceFile: `patterns/${file.replace(/\\/g, '/')}`,
+        });
       }
     } catch {
       // patterns dir may not exist
@@ -832,7 +843,7 @@ export class BlockParserService {
    */
   private resolvePatterns(
     markup: string,
-    patternMap: Map<string, string>,
+    patternMap: Map<string, ResolvedPattern>,
     _diagnostics?: BlockParseDiagnostic,
     depth = 0,
   ): string {
@@ -840,16 +851,25 @@ export class BlockParserService {
     return markup.replace(
       /<!-- wp:pattern \{"slug":"([^"]+)"\} \/-->/g,
       (_, slug) => {
-        const patternMarkup = patternMap.get(slug);
-        if (!patternMarkup) return `<!-- pattern:${slug} not found -->`;
-        return this.resolvePatterns(
-          patternMarkup,
+        const pattern = patternMap.get(slug);
+        if (!pattern) return `<!-- pattern:${slug} not found -->`;
+        const resolvedMarkup = this.resolvePatterns(
+          pattern.markup,
           patternMap,
           _diagnostics,
           depth + 1,
         );
+        return this.wrapResolvedPattern(pattern.sourceFile, resolvedMarkup);
       },
     );
+  }
+
+  private wrapResolvedPattern(sourceFile: string, markup: string): string {
+    return [
+      `<!-- vibepress:source:start ${sourceFile} -->`,
+      markup,
+      `<!-- vibepress:source:end ${sourceFile} -->`,
+    ].join('\n');
   }
 
   private collectUnresolvedRefs(markups: string[], re: RegExp): string[] {

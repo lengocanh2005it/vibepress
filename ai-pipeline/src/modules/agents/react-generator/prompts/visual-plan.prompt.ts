@@ -90,11 +90,10 @@ interface ComponentVisualPlan {
 }
 \`\`\`
 
-Every section also supports optional exact spacing fields and preserved custom class hooks from the template:
+Every section also supports optional exact spacing fields, preserved custom class hooks, and source layout metadata from the template: \`\`\`
+{ textAlign?: "left"|"center"|"right", contentWidth?: string, paddingStyle?: string, marginStyle?: string, gapStyle?: string, customClassNames?: string[], sourceLayout?: { type?, orientation?, justifyContent?, flexWrap?, verticalAlignment?, columnCount?, minimumColumnWidth?, contentSize?, wideSize? } }
 \`\`\`
-{ paddingStyle?: string, marginStyle?: string, gapStyle?: string, customClassNames?: string[] }
-\`\`\`
-Use them when the template source exposes real spacing values or explicit custom classes and you can preserve them exactly.
+Use them when the template source exposes real alignment, constrained widths, spacing values, explicit custom classes, or concrete wrapper layout attrs and you can preserve them exactly.
 
 Typography and exact column-ratio metadata may also appear when the template exposes them:
 \`\`\`
@@ -125,6 +124,9 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
 | \`sidebar\` | sidebar column for page/post layouts with menus, page links, or recent posts |
+| \`tabs\` | interactive tabbed content block |
+| \`slider\` | interactive slide/carousel block |
+| \`modal\` | interactive modal/dialog trigger + content |
 
 ## Section schemas (key fields only)
 
@@ -144,6 +146,9 @@ comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
+tabs:         { tabs: [{label,content}] }
+slider:       { slides: [{heading?,description?,cta?}], autoplay? }
+modal:        { triggerText, heading?, description?, cta? }
 \`\`\`
 
 ## Rules
@@ -160,12 +165,17 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
 - Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
 - Text content in sections (headings, body text, card copy) must come EXACTLY from the template source — no invented text.
+- If the source already contains inline HTML formatting such as \`<strong>\`, \`<em>\`, or links inside body text or list items, preserve that markup in the JSON string instead of flattening it to plain text.
 - If you need to output a dynamic variable (e.g. {item.title} or {post.title}), use EXACTLY ONE pair of curly braces. NEVER use double braces like {{item.title}} or {{post.title}}, as it breaks JSX syntax.
 - If a section has a background image, use the exact \`src\` from the template.
 - Never invent image URLs, avatars, featured artwork, or placeholder media. If the template source does not contain an image source for that section, omit the image/avatar field entirely.
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
 - Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
+- Preserve exact text alignment from source blocks by filling \`textAlign\` when the original heading/body is explicitly left/center/right aligned.
+- Preserve constrained inner widths from source wrappers by filling \`contentWidth\` when a section's intro/body content sits inside a real WordPress \`contentSize\`-style container (for example \`620px\` prose width inside a wider full-width section).
+- If a centered intro section sits inside a wide/full wrapper and the source shows long centered paragraph copy but no explicit \`contentSize\`, do NOT leave that body copy edge-to-edge. Add a reasonable \`contentWidth\` for the intro/body copy so it wraps similarly to WordPress instead of stretching across the whole wide container.
 - Preserve source-level custom classes by carrying them into \`customClassNames\` when a draft section or source node already exposes them. Do NOT drop or rename these classes.
+- Preserve source-level wrapper layout metadata by carrying \`sourceLayout\` forward when the draft already exposes real WordPress block layout attrs such as \`type: "flex"\`, \`justifyContent: "space-between"\`, \`orientation\`, \`flexWrap\`, or constrained layout widths like \`contentSize\` / \`wideSize\`.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - When a source WP node has \`typography.fontWeight\` (e.g. "700" or "bold"), propagate it to the section's \`bodyStyle.fontWeight\` or \`headingStyle.fontWeight\` accordingly. Do NOT drop bold/weight overrides set on individual blocks.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
@@ -411,6 +421,9 @@ const VALID_SECTION_TYPES = new Set<string>([
   'search',
   'breadcrumb',
   'sidebar',
+  'tabs',
+  'slider',
+  'modal',
 ]);
 
 const VALID_DATA_NEEDS = new Set<string>([
@@ -505,6 +518,17 @@ function validateSectionDetailed(
   if (typeof raw.paddingStyle !== 'string') delete raw.paddingStyle;
   if (typeof raw.marginStyle !== 'string') delete raw.marginStyle;
   if (typeof raw.gapStyle !== 'string') delete raw.gapStyle;
+  if (!['left', 'center', 'right'].includes(raw.textAlign)) {
+    delete raw.textAlign;
+  }
+  if (typeof raw.contentWidth === 'string' && raw.contentWidth.trim()) {
+    raw.contentWidth = normalizeCssLengthString(raw.contentWidth.trim());
+  } else {
+    delete raw.contentWidth;
+  }
+  const sourceLayout = sanitizeSourceLayout(raw.sourceLayout);
+  if (sourceLayout) raw.sourceLayout = sourceLayout;
+  else delete raw.sourceLayout;
   if (Array.isArray(raw.customClassNames)) {
     raw.customClassNames = [
       ...new Set(
@@ -676,6 +700,70 @@ function validateSectionDetailed(
       if (typeof raw.showPosts !== 'boolean') raw.showPosts = false;
       if (typeof raw.maxItems !== 'number' || raw.maxItems <= 0)
         raw.maxItems = 6;
+      break;
+
+    case 'tabs':
+      if (!Array.isArray(raw.tabs)) raw.tabs = [];
+      raw.tabs = raw.tabs
+        .filter((tab: unknown) => tab && typeof tab === 'object')
+        .map((tab: any) => ({
+          label: typeof tab.label === 'string' ? tab.label : '',
+          content: typeof tab.content === 'string' ? tab.content : '',
+        }))
+        .filter(
+          (tab: { label: string; content: string }) =>
+            tab.label.trim() || tab.content.trim(),
+        );
+      break;
+
+    case 'slider':
+      if (!Array.isArray(raw.slides)) raw.slides = [];
+      raw.slides = raw.slides
+        .filter((slide: unknown) => slide && typeof slide === 'object')
+        .map((slide: any) => {
+          const next: {
+            heading?: string;
+            description?: string;
+            cta?: { text: string; link: string };
+          } = {};
+          if (typeof slide.heading === 'string') next.heading = slide.heading;
+          if (typeof slide.description === 'string')
+            next.description = slide.description;
+          if (
+            slide.cta &&
+            typeof slide.cta === 'object' &&
+            typeof slide.cta.text === 'string' &&
+            typeof slide.cta.link === 'string'
+          ) {
+            next.cta = { text: slide.cta.text, link: slide.cta.link };
+          }
+          return next;
+        })
+        .filter(
+          (slide: {
+            heading?: string;
+            description?: string;
+            cta?: { text: string; link: string };
+          }) =>
+            !!(slide.heading?.trim() || slide.description?.trim() || slide.cta),
+        );
+      if (typeof raw.autoplay !== 'boolean') delete raw.autoplay;
+      break;
+
+    case 'modal':
+      if (typeof raw.triggerText !== 'string' || !raw.triggerText.trim()) {
+        raw.triggerText = 'Open Modal';
+      }
+      if (typeof raw.heading !== 'string') delete raw.heading;
+      if (typeof raw.description !== 'string') delete raw.description;
+      if (
+        !raw.cta ||
+        typeof raw.cta !== 'object' ||
+        typeof raw.cta.text !== 'string' ||
+        typeof raw.cta.link !== 'string'
+      ) {
+        delete raw.cta;
+      }
       break;
 
     // search, breadcrumb — no required fields
@@ -1088,6 +1176,63 @@ function sanitizeTypographyStyle(value: unknown):
       : {}),
     ...(typeof raw.textTransform === 'string' && raw.textTransform.trim()
       ? { textTransform: raw.textTransform }
+      : {}),
+  };
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeSourceLayout(value: unknown):
+  | {
+      type?: string;
+      orientation?: string;
+      justifyContent?: string;
+      flexWrap?: string;
+      verticalAlignment?: string;
+      columnCount?: number;
+      minimumColumnWidth?: string;
+    }
+  | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const next = {
+    ...(typeof raw.type === 'string' && raw.type.trim()
+      ? { type: raw.type.trim() }
+      : {}),
+    ...(typeof raw.orientation === 'string' && raw.orientation.trim()
+      ? { orientation: raw.orientation.trim() }
+      : {}),
+    ...(typeof raw.justifyContent === 'string' && raw.justifyContent.trim()
+      ? { justifyContent: raw.justifyContent.trim() }
+      : {}),
+    ...(typeof raw.flexWrap === 'string' && raw.flexWrap.trim()
+      ? { flexWrap: raw.flexWrap.trim() }
+      : {}),
+    ...(typeof raw.verticalAlignment === 'string' &&
+    raw.verticalAlignment.trim()
+      ? { verticalAlignment: raw.verticalAlignment.trim() }
+      : {}),
+    ...(typeof raw.columnCount === 'number' &&
+    Number.isFinite(raw.columnCount) &&
+    raw.columnCount > 0
+      ? { columnCount: raw.columnCount }
+      : {}),
+    ...(typeof raw.minimumColumnWidth === 'string' &&
+    raw.minimumColumnWidth.trim()
+      ? {
+          minimumColumnWidth: normalizeCssLengthString(
+            raw.minimumColumnWidth.trim(),
+          ),
+        }
+      : {}),
+    ...(typeof raw.contentSize === 'string' && raw.contentSize.trim()
+      ? {
+          contentSize: normalizeCssLengthString(raw.contentSize.trim()),
+        }
+      : {}),
+    ...(typeof raw.wideSize === 'string' && raw.wideSize.trim()
+      ? {
+          wideSize: normalizeCssLengthString(raw.wideSize.trim()),
+        }
       : {}),
   };
   return Object.keys(next).length > 0 ? next : undefined;

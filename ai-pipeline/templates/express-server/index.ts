@@ -788,39 +788,6 @@ function tryParseBlockAttrs(raw: string | null | undefined): Record<string, any>
   }
 }
 
-function extractSiteLogoWidth(markup: string): number | null {
-  if (!markup) return null;
-  const pattern = /<!--\s*wp:site-logo(?:\s+(\{[\s\S]*?\}))?[\s/]*-->/gi;
-  for (const match of markup.matchAll(pattern)) {
-    const attrs = tryParseBlockAttrs(match[1]);
-    const w = Number(attrs?.width ?? 0);
-    if (Number.isFinite(w) && w > 0) return w;
-  }
-  return null;
-}
-
-async function resolveSiteLogoWidth(
-  conn: Awaited<ReturnType<typeof getConn>>,
-  prefix: string,
-): Promise<number | null> {
-  try {
-    const [rows] = await conn.query<any[]>(
-      `SELECT post_content FROM \`${prefix}posts\`
-       WHERE post_type IN ('wp_template', 'wp_template_part')
-         AND post_status IN ('publish', 'auto-draft')
-         AND post_content LIKE '%wp:site-logo%'
-       ORDER BY post_modified DESC LIMIT 10`,
-    );
-    for (const row of rows) {
-      const width = extractSiteLogoWidth(row.post_content as string);
-      if (width) return width;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeLogoCandidateUrl(
   raw: string | null | undefined,
   siteUrl: string,
@@ -935,7 +902,6 @@ app.get('/api/site-info', async (req, res) => {
       logoUrl:
         process.env.SITE_LOGO_URL ||
         (await resolveSiteLogoUrl(conn, prefix, opts['siteurl'] ?? '')),
-      logoWidth: await resolveSiteLogoWidth(conn, prefix),
       adminEmail: opts['admin_email'] ?? '',
       language: opts['WPLANG'] ?? 'en',
     });

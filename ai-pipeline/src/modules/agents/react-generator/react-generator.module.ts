@@ -1,8 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ReactGeneratorService } from './react-generator.service.js';
-import { CodeGeneratorService } from './code-generator.service.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
-import { FrameGeneratorService } from './frame-generator.service.js';
 import { GeneratedCodeReviewService } from './generated-code-review.service.js';
 import { SectionEditService } from './section-edit.service.js';
 import { StyleResolverModule } from '../../../common/style-resolver/style-resolver.module.js';
@@ -19,9 +17,7 @@ import { EditRequestModule } from '../../edit-request/edit-request.module.js';
   ],
   providers: [
     ReactGeneratorService,
-    CodeGeneratorService,
     CodeReviewerService,
-    FrameGeneratorService,
     GeneratedCodeReviewService,
     SectionEditService,
   ],

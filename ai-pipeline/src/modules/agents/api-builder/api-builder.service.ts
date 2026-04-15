@@ -133,6 +133,7 @@ export class ApiBuilderService {
       userPrompt: prompt,
       maxTokens: 4096,
       temperature: 0,
+      jobId,
     });
     const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
     if (tokenLogPath) {
@@ -182,8 +183,9 @@ export class ApiBuilderService {
     feedback: string;
     modelName?: string;
     logPath?: string;
+    jobId?: string;
   }): Promise<ApiBuilderResult> {
-    const { result, feedback, modelName } = input;
+    const { result, feedback, modelName, jobId } = input;
     const resolvedModel = modelName ?? this.llm.getModel();
     const tokenLogPath = TokenTracker.getTokenLogPath(input.logPath);
 
@@ -199,6 +201,7 @@ export class ApiBuilderService {
         'You are an Express/TypeScript expert. Fix the reported issue in the server code. Return ONLY the complete corrected code, no explanation.',
       userPrompt: `The following Express server code has a review failure: ${feedback}\n\nFix it and return the complete corrected code:\n\`\`\`ts\n${indexFile.code}\n\`\`\``,
       maxTokens: 4096,
+      jobId,
     });
     if (tokenLogPath) {
       await this.tokenTracker.init(tokenLogPath);

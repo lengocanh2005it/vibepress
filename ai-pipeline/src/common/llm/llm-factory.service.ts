@@ -13,6 +13,7 @@ import type {
   LlmChatResult,
   LlmProvider,
 } from './llm.interface.js';
+import { PipelineSignalRegistry } from './pipeline-signal.registry.js';
 
 const DEFAULT_MODELS: Record<LlmProvider, string> = {
   openai: 'gpt-5.3-codex',
@@ -26,6 +27,7 @@ export class LlmFactoryService {
     @Inject(CUSTOM_CONFIG) private readonly customConfig: CustomConfig,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    private readonly signalRegistry: PipelineSignalRegistry,
   ) {}
 
   getProvider(): LlmProvider {
@@ -102,6 +104,10 @@ export class LlmFactoryService {
   }
 
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
+    const signal = params.jobId
+      ? this.signalRegistry.getSignal(params.jobId)
+      : undefined;
+
     let provider = this.getProvider();
     let model = params.model;
 
@@ -125,14 +131,17 @@ export class LlmFactoryService {
 
     switch (provider) {
       case 'openai':
-        return this.chatOpenAI(resolvedParams);
+        return this.chatOpenAI(resolvedParams, signal);
       case 'custom':
       default:
-        return this.chatCustom(resolvedParams);
+        return this.chatCustom(resolvedParams, signal);
     }
   }
 
-  private async chatOpenAI(params: LlmChatParams): Promise<LlmChatResult> {
+  private async chatOpenAI(
+    params: LlmChatParams,
+    signal?: AbortSignal,
+  ): Promise<LlmChatResult> {
     const {
       model,
       systemPrompt,
@@ -141,17 +150,20 @@ export class LlmFactoryService {
       temperature = 0,
     } = params;
 
-    const response = await this.openai.chat.completions.create({
-      model,
-      max_completion_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(systemPrompt
-          ? [{ role: 'system' as const, content: systemPrompt }]
-          : []),
-        { role: 'user' as const, content: userPrompt },
-      ],
-    });
+    const response = await this.openai.chat.completions.create(
+      {
+        model,
+        max_completion_tokens: maxTokens,
+        temperature,
+        messages: [
+          ...(systemPrompt
+            ? [{ role: 'system' as const, content: systemPrompt }]
+            : []),
+          { role: 'user' as const, content: userPrompt },
+        ],
+      },
+      { signal },
+    );
 
     const text = response.choices[0]?.message?.content;
     const finishReason = response.choices[0]?.finish_reason;
@@ -170,7 +182,10 @@ export class LlmFactoryService {
     };
   }
 
-  private async chatCustom(params: LlmChatParams): Promise<LlmChatResult> {
+  private async chatCustom(
+    params: LlmChatParams,
+    signal?: AbortSignal,
+  ): Promise<LlmChatResult> {
     const {
       model,
       systemPrompt,
@@ -209,6 +224,7 @@ export class LlmFactoryService {
         },
         {
           headers,
+          ...(signal ? { signal } : {}),
         },
       ),
     );

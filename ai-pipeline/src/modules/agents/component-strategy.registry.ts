@@ -12,7 +12,6 @@ interface ComponentStrategyRule {
   kind: ComponentStrategyKind;
   deterministicFirst: boolean;
   skipAiVisualPlan: boolean;
-  allowFramePath: boolean;
 }
 
 const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
@@ -21,7 +20,6 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     kind: 'not-found',
     deterministicFirst: true,
     skipAiVisualPlan: false,
-    allowFramePath: false,
   },
   {
     match: /^(Header|Navigation|Nav)$/i,
@@ -30,7 +28,6 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     // and produces layouts that diverge significantly from the original site.
     deterministicFirst: false,
     skipAiVisualPlan: false,
-    allowFramePath: false,
   },
   {
     match: /^Footer$/i,
@@ -38,35 +35,30 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     // Same reason as header — allow AI to faithfully recreate the WP footer.
     deterministicFirst: false,
     skipAiVisualPlan: false,
-    allowFramePath: false,
   },
   {
     match: /^Sidebar$/i,
     kind: 'sidebar',
     deterministicFirst: true,
     skipAiVisualPlan: false,
-    allowFramePath: false,
   },
   {
     match: /^Breadcrumb$/i,
     kind: 'breadcrumb',
     deterministicFirst: true,
     skipAiVisualPlan: false,
-    allowFramePath: true,
   },
   {
     match: /^(Comments|Comment)$/i,
     kind: 'comments',
     deterministicFirst: true,
     skipAiVisualPlan: false,
-    allowFramePath: false,
   },
   {
     match: /^(PostMeta|Widget|Pagination|Loop|ContentNone|NoResults)$/i,
     kind: 'meta-only',
     deterministicFirst: false,
     skipAiVisualPlan: true,
-    allowFramePath: true,
   },
 ];
 
@@ -74,7 +66,6 @@ export function getComponentStrategy(componentName: string): {
   kind?: ComponentStrategyKind;
   deterministicFirst: boolean;
   skipAiVisualPlan: boolean;
-  allowFramePath: boolean;
 } {
   const match = COMPONENT_STRATEGY_RULES.find((rule) =>
     rule.match.test(componentName),
@@ -83,14 +74,12 @@ export function getComponentStrategy(componentName: string): {
     return {
       deterministicFirst: false,
       skipAiVisualPlan: false,
-      allowFramePath: false,
     };
   }
   return {
     kind: match.kind,
     deterministicFirst: match.deterministicFirst,
     skipAiVisualPlan: match.skipAiVisualPlan,
-    allowFramePath: match.allowFramePath,
   };
 }
 

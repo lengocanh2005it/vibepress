@@ -41,6 +41,7 @@ export class StyleResolverService {
     if (colorMap) result = this.resolveColors(result, colorMap);
     if (fontMap || fontSizeMap)
       result = this.resolveTypography(result, fontMap, fontSizeMap);
+    result = this.resolveLayout(result, tokens);
     return result;
   }
 
@@ -184,5 +185,61 @@ export class StyleResolverService {
     const cssVar = trimmed.match(/var\(--wp--preset--font-size--([^)]+)\)/);
     if (cssVar) return map.get(cssVar[1]) ?? value;
     return trimmed;
+  }
+
+  // ── Layout ──────────────────────────────────────────────────────────────
+
+  private resolveLayout(nodes: WpNode[], tokens?: ThemeTokens): WpNode[] {
+    const defaults = tokens?.defaults;
+    return nodes.map((node) => {
+      const out: WpNode = { ...node };
+      const layout =
+        out.params?.layout && typeof out.params.layout === 'object'
+          ? { ...(out.params.layout as Record<string, unknown>) }
+          : null;
+
+      if (layout) {
+        if (typeof layout.contentSize === 'string') {
+          layout.contentSize = this.normalizeLayoutLength(layout.contentSize);
+        } else if (
+          layout.type === 'constrained' &&
+          typeof defaults?.contentWidth === 'string' &&
+          defaults.contentWidth.trim()
+        ) {
+          // Gutenberg omits contentSize on many groups and falls back to
+          // theme.json.settings.layout.contentSize at render time. Preserve
+          // that implicit contract here so mapper/prompt don't lose prose width.
+          layout.contentSize = defaults.contentWidth.trim();
+        }
+
+        if (typeof layout.wideSize === 'string') {
+          layout.wideSize = this.normalizeLayoutLength(layout.wideSize);
+        } else if (
+          layout.type === 'constrained' &&
+          typeof defaults?.wideWidth === 'string' &&
+          defaults.wideWidth.trim()
+        ) {
+          layout.wideSize = defaults.wideWidth.trim();
+        }
+
+        if (typeof layout.minimumColumnWidth === 'string') {
+          layout.minimumColumnWidth = this.normalizeLayoutLength(
+            layout.minimumColumnWidth,
+          );
+        }
+
+        out.params = {
+          ...out.params,
+          layout,
+        };
+      }
+
+      if (out.children) out.children = this.resolveLayout(out.children, tokens);
+      return out;
+    });
+  }
+
+  private normalizeLayoutLength(value: string): string {
+    return value.trim();
   }
 }

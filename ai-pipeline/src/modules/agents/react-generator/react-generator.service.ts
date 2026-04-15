@@ -14,7 +14,6 @@ import { BlockParseResult } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
-import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
@@ -64,9 +63,7 @@ export interface GeneratedComponent {
   // Sub-components are assembled into their parent; they are not standalone pages.
   isSubComponent?: boolean;
   /**
-   * 'deterministic' = code came from CodeGeneratorService (no AI TSX gen).
-   * 'ai'            = code was produced (fully or partially) by an LLM.
-   * Orchestrator uses this to skip Stage 5 AI review for deterministic components.
+   * 'ai' = code was produced (fully or partially) by an LLM.
    */
   generationMode?: 'deterministic' | 'ai';
   requiredCustomClassNames?: string[];
@@ -87,7 +84,6 @@ export class ReactGeneratorService {
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly styleResolver: StyleResolverService,
-    private readonly codeGenerator: CodeGeneratorService,
     private readonly codeReviewer: CodeReviewerService,
     private readonly capturePlanning: CapturePlanningService,
     private readonly aiLogger: AiLoggerService,
@@ -349,52 +345,6 @@ export class ReactGeneratorService {
         ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
         : templateNodes;
 
-    if (
-      this.shouldUseBlockFaithfulSharedPartial(
-        componentName,
-        componentPlan,
-        filteredNodes,
-      )
-    ) {
-      const blockFaithfulDataNeeds = this.inferBlockFaithfulDataNeeds(
-        componentName,
-        componentPlan,
-        filteredNodes ?? [],
-      );
-      const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
-        filteredNodes ?? [],
-      );
-      const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
-        requiredCustomClassNames,
-        tokens,
-      );
-      const code = this.codeGenerator.generateBlockFaithfulPartial({
-        componentName,
-        nodes: filteredNodes ?? [],
-        dataNeeds: blockFaithfulDataNeeds,
-        palette: componentPlan?.visualPlan?.palette,
-        typography: componentPlan?.visualPlan?.typography,
-        layout: componentPlan?.visualPlan?.layout,
-        blockStyles: tokens?.blockStyles,
-      });
-      await this.logToFile(
-        logPath,
-        `[block-faithful] "${componentName}": generated directly from WordPress block tree (${(filteredNodes ?? []).length} top-level nodes)`,
-      );
-      return [
-        this.attachPlanContext(
-          { name: componentName, filePath: '', code },
-          componentPlan,
-          {
-            generationMode: 'deterministic',
-            dataNeeds: blockFaithfulDataNeeds,
-            requiredCustomClassNames,
-            requiredCustomClassTargets,
-          },
-        ),
-      ];
-    }
-
     const promptTemplateSource = filteredNodes
       ? wpJsonToString(filteredNodes)
       : templateSource;
@@ -600,6 +550,7 @@ export class ReactGeneratorService {
     visionImageUrls?: string[];
     visionContextNote?: string;
     tokenScope?: TokenScope;
+    jobId?: string;
   }): Promise<GeneratedComponent> {
     const {
       component,
@@ -611,51 +562,27 @@ export class ReactGeneratorService {
       visionImageUrls,
       visionContextNote,
       tokenScope = 'base',
+      jobId,
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
-    const isProtectedDeterministicSharedPartial =
-      component.generationMode === 'deterministic' &&
-      /^(Header|Footer|Navigation|Nav)$/i.test(component.name);
-
-    if (isProtectedDeterministicSharedPartial && fixMode !== 'syntax-only') {
-      this.logger.log(
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure`,
-      );
-      await this.logToFile(
-        logPath,
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure. Feedback: ${feedback}`,
-      );
-      return this.attachPlanContext(component, componentPlan);
-    }
-
-    const effectiveFeedback =
-      fixMode === 'syntax-only'
-        ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
-        : feedback;
-
     this.logger.log(
-      fixMode === 'syntax-only'
-        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}"`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+      `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
     );
     await this.logToFile(
       logPath,
-      fixMode === 'syntax-only'
-        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${effectiveFeedback}`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${effectiveFeedback}`,
+      `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${feedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
       fixAgentModel,
       component.code,
-      visionContextNote
-        ? `${effectiveFeedback}\n\n${visionContextNote}`
-        : effectiveFeedback,
+      visionContextNote ? `${feedback}\n\n${visionContextNote}` : feedback,
       logPath,
       component.name,
       visionImageUrls,
       tokenScope,
+      jobId,
     );
 
     return this.attachPlanContext(
@@ -777,49 +704,6 @@ ${renders}
     }
 
     return Object.keys(targetMap).length > 0 ? targetMap : undefined;
-  }
-
-  private shouldUseBlockFaithfulSharedPartial(
-    componentName: string,
-    componentPlan: PlanResult[number] | undefined,
-    nodes: WpNode[] | undefined,
-  ): boolean {
-    // Header/Footer are visually sensitive shared chrome. Let them go through
-    // the AI-assisted reviewer path so layout can stay closer to the original
-    // WordPress site, while validator rules still enforce the hard data contract.
-    if (/^(header|footer)$/i.test(componentName)) {
-      return false;
-    }
-
-    return !!(
-      componentPlan?.type === 'partial' &&
-      /^(header|footer)/i.test(componentName) &&
-      nodes &&
-      nodes.length > 0
-    );
-  }
-
-  private inferBlockFaithfulDataNeeds(
-    componentName: string,
-    componentPlan: PlanResult[number] | undefined,
-    nodes: WpNode[],
-  ): string[] {
-    const needs = new Set(componentPlan?.dataNeeds ?? []);
-    const visit = (node: WpNode) => {
-      const block = node.block.replace(/^core\//, '');
-      if (['site-title', 'site-tagline', 'site-logo'].includes(block)) {
-        needs.add('siteInfo');
-      }
-      if (block === 'navigation') {
-        needs.add('menus');
-      }
-      for (const child of node.children ?? []) visit(child);
-    };
-    for (const node of nodes) visit(node);
-    if (/^(header|footer)/i.test(componentName)) {
-      needs.add('siteInfo');
-    }
-    return Array.from(needs);
   }
 
   // ── File logger ────────────────────────────────────────────────────────────

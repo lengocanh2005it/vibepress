@@ -13,6 +13,7 @@ import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ComponentVisualPlan } from '../visual-plan.schema.js';
+import type { SourceLayoutHint } from '../visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   formatInventedAuxiliarySectionLabels,
@@ -832,10 +833,10 @@ function buildClassicThemeNote(
   // Suppress those hints so the AI does not fetch site-info/menus or render site chrome.
   const headerHint = isPageComponent
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
+    : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items. Preserve any logo sizing that comes from the source block/template; otherwise use a reasonable visible fallback and do NOT arbitrarily shrink or enlarge it.`;
   const footerHint = isPageComponent
     ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links`;
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links. Preserve any footer logo sizing that comes from the source block/template, even when it is small like \`20\`. Only use a generic visible fallback when the source does not specify size.`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -901,6 +902,8 @@ export function buildDataGroundingNote(
   );
   parts.push(
     '> If shared chrome renders `siteInfo.logoUrl` and/or `siteInfo.siteName`, the visible brand must navigate home as a single clickable cluster. Prefer one `<Link to="/">` that wraps both logo and title.',
+    '> Shared chrome logo sizing is source-driven per block/partial. Preserve explicit width/height from the parsed WordPress source when available.',
+    '> Only when the source does not specify logo size should you fall back to a generic visible size such as `h-auto max-h-[72px] max-w-[240px] object-contain`.',
   );
   parts.push('');
 
@@ -1400,6 +1403,15 @@ function buildCompactSectionSummary(
         `customClassNames=${formatClassList(section.customClassNames)}`,
       );
     }
+    if (section.textAlign) {
+      parts.push(`textAlign=${section.textAlign}`);
+    }
+    if (section.contentWidth) {
+      parts.push(`contentWidth=${JSON.stringify(section.contentWidth)}`);
+    }
+    if (section.sourceLayout) {
+      parts.push(`sourceLayout=${formatSourceLayout(section.sourceLayout)}`);
+    }
 
     if (componentName && section.sectionKey) {
       parts.push(
@@ -1438,6 +1450,15 @@ export function buildVisualPlanContextNote(
     );
     lines.push(
       'Preserve these exact classes in the rendered JSX for the corresponding source-backed elements. Keep them as literal class tokens inside `className`.',
+    );
+  }
+  if (
+    visualPlan.sections.some(
+      (section) => section.textAlign || section.contentWidth,
+    )
+  ) {
+    lines.push(
+      'Preserve exact section-level alignment and constrained content widths from the approved plan. When a section says `textAlign=center`, apply real centered text classes to the actual heading/body elements, not just an outer wrapper. When a section says `contentWidth="620px"` (or similar), keep the readable inner text wrapper constrained to that exact max width instead of stretching it across the full section.',
     );
   }
 
@@ -1553,6 +1574,9 @@ export function buildVisualPlanContextNote(
       '⛔ Do NOT wrap the entire page in the prose container unless the whole template is genuinely a single-column article view.',
     );
   }
+  lines.push(
+    '- For centered intro/hero copy inside a full-width or wide section: do NOT let long paragraph text span the full section width. Use a centered inner wrapper with a readable max width. If the approved section provides `contentWidth`, follow it exactly. Otherwise, when the section is centered and contains long copy, constrain the paragraph/body to roughly 85-90% of the theme wide width instead of the full container width.',
+  );
 
   lines.push('');
   lines.push('## Compact visual plan summary');
@@ -1853,6 +1877,14 @@ function extractCustomClassNamesFromNodes(nodes: WpNode[]): string[] {
 
 function formatClassList(classNames: string[]): string {
   return classNames.map((className) => `\`${className}\``).join(', ');
+}
+
+function formatSourceLayout(layout: SourceLayoutHint): string {
+  const entries = Object.entries(layout as Record<string, unknown>).filter(
+    ([, value]) => value !== undefined && value !== null && value !== '',
+  );
+  if (entries.length === 0) return '{}';
+  return `{${entries.map(([key, value]) => `${key}:${JSON.stringify(value)}`).join(', ')}}`;
 }
 
 function buildTrackedSectionComponentName(

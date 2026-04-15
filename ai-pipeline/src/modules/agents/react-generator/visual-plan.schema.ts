@@ -51,18 +51,33 @@ export interface BlockStyleToken {
 
 export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
 
+export interface SourceLayoutHint {
+  type?: string;
+  orientation?: string;
+  justifyContent?: string;
+  flexWrap?: string;
+  verticalAlignment?: string;
+  columnCount?: number;
+  minimumColumnWidth?: string;
+  contentSize?: string;
+  wideSize?: string;
+}
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
   sectionKey?: string;
   sourceRef?: SourceRef;
   customClassNames?: string[];
+  sourceLayout?: SourceLayoutHint; // exact layout metadata lifted from WP block attrs
   background?: string; // overrides palette for this section
   textColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
   padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl';
   paddingStyle?: string; // exact CSS shorthand from template, e.g. "2rem 1.5rem"
   marginStyle?: string; // exact CSS shorthand from template
   gapStyle?: string; // exact CSS gap between direct children inside the section
+  contentWidth?: string; // exact constrained inner width, e.g. "620px"
 }
 
 export interface NavbarSection extends BaseSection {

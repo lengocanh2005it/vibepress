@@ -4,6 +4,10 @@ export interface LlmChatParams {
   userPrompt: string;
   maxTokens?: number;
   temperature?: number;
+  /** Optional pipeline job ID. When provided, the LlmFactoryService will
+   *  automatically thread the job's AbortSignal so that stopping the pipeline
+   *  immediately cancels any in-flight HTTP request to the LLM provider. */
+  jobId?: string;
 }
 
 export interface LlmChatResult {

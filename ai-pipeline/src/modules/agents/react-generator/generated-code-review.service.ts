@@ -3,6 +3,7 @@ import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import { ValidatorService } from '../validator/validator.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type { CardGridSection } from './visual-plan.schema.js';
 import {
@@ -35,7 +36,10 @@ export class GeneratedCodeReviewService {
   private readonly logger = new Logger(GeneratedCodeReviewService.name);
   private readonly tokenTracker = new TokenTracker();
 
-  constructor(private readonly llmFactory: LlmFactoryService) {}
+  constructor(
+    private readonly llmFactory: LlmFactoryService,
+    private readonly validator: ValidatorService,
+  ) {}
 
   async review(input: {
     components: GeneratedComponent[];
@@ -43,8 +47,16 @@ export class GeneratedCodeReviewService {
     modelName?: string;
     mode?: 'warn' | 'blocking';
     logPath?: string;
+    jobId?: string;
   }): Promise<GeneratedCodeReviewResult> {
-    const { components, plan, modelName, mode = 'warn', logPath } = input;
+    const {
+      components,
+      plan,
+      modelName,
+      mode = 'warn',
+      logPath,
+      jobId,
+    } = input;
     const resolvedModel = modelName ?? this.llmFactory.getModel();
     const topLevelComponents = components.filter(
       (comp) => !comp.isSubComponent,
@@ -60,24 +72,29 @@ export class GeneratedCodeReviewService {
     );
 
     for (const component of topLevelComponents) {
+      const sanitizedComponent: GeneratedComponent = {
+        ...component,
+        code: this.validator.sanitizeGeneratedCode(component.code),
+      };
       const contract =
         plan.find((item) => item.componentName === component.name) ?? null;
       const review = await this.reviewComponent(
-        component,
+        sanitizedComponent,
         contract,
         plan,
         resolvedModel,
         logPath,
+        jobId,
       );
       const effectiveReview = this.applyDeterministicIssues(
         review,
-        component,
+        sanitizedComponent,
         contract,
       );
 
       const blockingIssues = this.getBlockingIssues(
         effectiveReview,
-        component,
+        sanitizedComponent,
         contract,
       );
 
@@ -136,6 +153,7 @@ export class GeneratedCodeReviewService {
     plan: PlanResult,
     modelName: string,
     logPath?: string,
+    jobId?: string,
   ): Promise<CodeReviewResult> {
     const reviewPrompt = this.buildReviewPrompt(component, contract, plan);
 
@@ -146,6 +164,7 @@ export class GeneratedCodeReviewService {
           'You are a strict senior React reviewer. Review generated TSX against the approved contract. Return ONLY valid JSON.',
         userPrompt: reviewPrompt,
         maxTokens: 2000,
+        jobId,
       });
       const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
       if (tokenLogPath) {
@@ -248,6 +267,7 @@ Rules:
  - If the template/source clearly includes an important screenshot, product composite, UI mockup, or other full illustrative image, DO flag fixed-height \`object-cover\` cropping when it visibly cuts off meaningful content that should remain visible.
  - If a media-text/photo section in the approved/source layout clearly uses rounded image corners or strong heading/list emphasis, DO flag generated code that flattens those into sharp-corner images or weak muted regular-weight text.
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
+- For runtime-title components, do NOT treat one leaked sample title from the approved plan as a hard literal requirement. Archive/search headings may be dynamic (\`Archive\`, \`Category: ...\`, \`Author: ...\`, \`Tag: ...\`, \`Search\`), and generic detail routes may render the fetched record title (\`item.title\`, \`post.title\`, etc.) instead of a sample label like \`About\`.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
@@ -264,7 +284,7 @@ Approved contract:
 - description: ${description}
 - approved visual sections: ${visualSections}
 - approved visual section details:
-${this.buildVisualSectionDetailLines(contract)}
+${this.buildVisualSectionDetailLines(component, contract)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
@@ -364,10 +384,12 @@ ${component.code}
   }
 
   private buildVisualSectionDetailLines(
+    component: GeneratedComponent,
     contract: PlanResult[number] | null,
   ): string {
     const sections = contract?.visualPlan?.sections ?? [];
     if (sections.length === 0) return '- (none)';
+    const runtimeHeading = this.usesRuntimeHeadingContract(component, contract);
 
     return sections
       .map((section) => {
@@ -380,13 +402,19 @@ ${component.code}
           return `- card-grid title="${section.title ?? ''}" cards=${section.cards.length}${headings ? ` headings=${headings}` : ''}`;
         }
         if (section.type === 'hero') {
-          return `- hero heading="${section.heading}"`;
+          return runtimeHeading
+            ? '- hero heading=(runtime title allowed)'
+            : `- hero heading="${section.heading}"`;
         }
         if (section.type === 'cover') {
-          return `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+          return runtimeHeading
+            ? `- cover heading=(runtime title allowed) image="${section.imageSrc}"`
+            : `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
         if (section.type === 'media-text') {
-          return `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+          return runtimeHeading
+            ? `- media-text heading=(runtime title allowed) image="${section.imageSrc}"`
+            : `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
         if (section.type === 'post-list') {
           return `- post-list layout=${section.layout}`;
@@ -394,6 +422,38 @@ ${component.code}
         return `- ${section.type}`;
       })
       .join('\n');
+  }
+
+  private usesRuntimeHeadingContract(
+    component: GeneratedComponent,
+    contract: PlanResult[number] | null,
+  ): boolean {
+    const route = contract?.route ?? component.route ?? '';
+    const rawDataNeeds = contract?.dataNeeds ?? component.dataNeeds ?? [];
+    const normalizedNeeds = new Set(
+      rawDataNeeds.map((value) => {
+        switch (value) {
+          case 'postDetail':
+            return 'post-detail';
+          case 'pageDetail':
+            return 'page-detail';
+          default:
+            return value;
+        }
+      }),
+    );
+
+    return (
+      component.name === 'Archive' ||
+      component.name === 'Search' ||
+      normalizedNeeds.has('page-detail') ||
+      normalizedNeeds.has('post-detail') ||
+      route === '/archive' ||
+      route === '/search' ||
+      /\/:(slug|id)\b/.test(route) ||
+      /\/page(?:-[^/]+)?\/:slug$/.test(route) ||
+      /\/post\/:slug$/.test(route)
+    );
   }
 
   private applyDeterministicIssues(
@@ -619,14 +679,18 @@ ${component.code}
   }
 
   private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
-    const before = code.slice(Math.max(0, offset - 600), offset);
+    const before = code.slice(Math.max(0, offset - 1400), offset);
+    const isFallbackFor = (pattern: RegExp): boolean => {
+      const matches = [...before.matchAll(pattern)];
+      const last = matches.at(-1);
+      if (last?.index == null) return false;
+      const tail = before.slice(last.index);
+      return /:\s*(?:\(\s*)?(?:<>\s*)?$/.test(tail);
+    };
+
     return (
-      /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
-      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
-      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
-        before,
-      )
+      isFallbackFor(/\bauthorSlug\s*\?/g) ||
+      isFallbackFor(/\bcategorySlugs(?:\?\.)?\[0\]\s*\?/g)
     );
   }
 

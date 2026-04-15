@@ -219,7 +219,9 @@ export class ValidatorService {
     code = this.sanitizeTailwindClasses(code);
     code = this.stripDebugStatements(code);
     code = this.normalizePlainTextPostMetaArchiveLinks(code);
+    code = this.repairMalformedPostMetaTernaries(code);
     code = this.promotePlainTextPostMetaLinks(code);
+    code = this.repairMalformedPostMetaTernaries(code);
     code = this.ensureHoverUnderlineOnCanonicalTextLinks(code);
     code = this.ensureReactRouterLinkImport(code);
     return code;
@@ -575,6 +577,22 @@ export class ValidatorService {
         /<Link\b[^>]*\bto=\{["']\/["']\}[^>]*>[\s\S]*siteInfo\??\.logoUrl[\s\S]*<\/Link>/.test(
           code,
         );
+      const hasTinyFixedLogoHeight =
+        usesSiteLogo &&
+        (/<img\b[\s\S]{0,400}?siteInfo\??\.logoUrl[\s\S]{0,400}?(?:h-\[(?:[1-3]?\d|40)px\]|h-(?:8|9|10)\b)/.test(
+          code,
+        ) ||
+          /<img\b[\s\S]{0,400}?(?:h-\[(?:[1-3]?\d|40)px\]|h-(?:8|9|10)\b)[\s\S]{0,400}?siteInfo\??\.logoUrl/.test(
+            code,
+          ));
+      const hasReasonableLogoSizing =
+        !usesSiteLogo ||
+        /<img\b[\s\S]{0,500}?siteInfo\??\.logoUrl[\s\S]{0,500}?(?:style=\{\{[\s\S]*?\bwidth\s*:|width=\{|\b(?:max-h-\[(?:5[6-9]|[6-9]\d|1\d{2,})px\]|max-h-(?:14|16|20|24)\b|max-w-\[(?:1[6-9]\d|[2-9]\d{2,})px\]|w-\[(?:1[2-9]\d|[2-9]\d{2,})px\]|h-\[(?:5[6-9]|[6-9]\d|1\d{2,})px\]|h-(?:14|16|20|24)\b))/i.test(
+          code,
+        ) ||
+        /<img\b[\s\S]{0,500}?(?:style=\{\{[\s\S]*?\bwidth\s*:|width=\{|\b(?:max-h-\[(?:5[6-9]|[6-9]\d|1\d{2,})px\]|max-h-(?:14|16|20|24)\b|max-w-\[(?:1[6-9]\d|[2-9]\d{2,})px\]|w-\[(?:1[2-9]\d|[2-9]\d{2,})px\]|h-\[(?:5[6-9]|[6-9]\d|1\d{2,})px\]|h-(?:14|16|20|24)\b))[\s\S]{0,500}?siteInfo\??\.logoUrl/i.test(
+          code,
+        );
       if (
         dataNeeds.has('menus') &&
         !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) &&
@@ -592,6 +610,16 @@ export class ValidatorService {
       if (usesSiteLogo && !hasHomeLinkForLogo) {
         violations.push(
           'Shared chrome contract violated: when Header/Footer/Navigation renders `siteInfo.logoUrl`, the logo must also be inside a home `<Link to=\"/\">...</Link>` so the visible brand cluster is clickable.',
+        );
+      }
+      if (hasTinyFixedLogoHeight) {
+        violations.push(
+          'Shared chrome contract violated: do not force `siteInfo.logoUrl` into a tiny fixed-height logo (for example `h-[40px]` / `h-10`). Preserve `site-logo` sizing from the source when available; otherwise use `h-auto` with a reasonable max size.',
+        );
+      }
+      if (isFooterPartial && usesSiteLogo && !hasReasonableLogoSizing) {
+        violations.push(
+          'Shared chrome contract violated: Footer logo must preserve explicit source sizing when available or define an explicit visible fallback size. Do not leave `siteInfo.logoUrl` at intrinsic tiny size.',
         );
       }
       if (/No menus available/i.test(code)) {
@@ -1568,15 +1596,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
    * and should NOT be flagged as a violation.
    */
   private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
-    // Look at up to 300 chars before the match for a slug ternary guard.
-    const before = code.slice(Math.max(0, offset - 600), offset);
+    const before = code.slice(Math.max(0, offset - 1400), offset);
+    const isFallbackFor = (pattern: RegExp): boolean => {
+      const matches = [...before.matchAll(pattern)];
+      const last = matches.at(-1);
+      if (last?.index == null) return false;
+      const tail = before.slice(last.index);
+      return /:\s*(?:\(\s*)?(?:\{\s*)?$/.test(tail);
+    };
+
     return (
-      /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
-      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
-      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
-        before,
-      )
+      isFallbackFor(/\bauthorSlug\s*\?/g) ||
+      isFallbackFor(/\bcategorySlugs(?:\?\.)?\[0\]\s*\?/g)
     );
   }
 
@@ -1631,6 +1662,19 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     let next = code;
 
     next = next.replace(
+      /\{\s*(post|item|postDetail)\.authorSlug\s*\?\s*(\(?\s*)<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\3>(\s*\)?\s*:)/g,
+      (
+        _match,
+        record: string,
+        wrapperStart: string,
+        _tag: string,
+        attrs: string,
+        wrapperEnd: string,
+      ) =>
+        `{${record}.authorSlug ? ${wrapperStart}<Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link>${wrapperEnd}`,
+    );
+
+    next = next.replace(
       /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
       (_match, record: string, tag: string, attrs: string) =>
         `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
@@ -1643,6 +1687,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         if (this.isWithinSlugTernaryFallback(next, offset)) return match;
         return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
       },
+    );
+
+    next = next.replace(
+      /\{\s*(post|item|postDetail)\.categorySlugs(?:\?\.)?\[0\]\s*\?\s*(\(?\s*)<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>(\s*\)?\s*:)/g,
+      (
+        _match,
+        record: string,
+        wrapperStart: string,
+        attrs: string,
+        wrapperEnd: string,
+      ) =>
+        `{${record}.categorySlugs?.[0] ? ${wrapperStart}<Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link>${wrapperEnd}`,
     );
 
     next = next.replace(
@@ -1669,6 +1725,22 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         attrs: string,
       ) =>
         `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
+    );
+
+    return next;
+  }
+
+  private repairMalformedPostMetaTernaries(code: string): string {
+    let next = code;
+
+    next = next.replace(
+      /:\s*\(\s*\{(post|item|postDetail)\.authorSlug\s*\?\s*<Link\b[\s\S]{0,800}?<\/Link>\s*:\s*(<(span|p)\b[\s\S]{0,260}?<\/\3>)\s*\}\s*\)/g,
+      ': ($2)',
+    );
+
+    next = next.replace(
+      /:\s*\(\s*\{(post|item|postDetail)\.categorySlugs(?:\?\.)?\[0\]\s*\?\s*<Link\b[\s\S]{0,800}?<\/Link>\s*:\s*(<span\b[\s\S]{0,260}?<\/span>)\s*\}\s*\)/g,
+      ': ($2)',
     );
 
     return next;

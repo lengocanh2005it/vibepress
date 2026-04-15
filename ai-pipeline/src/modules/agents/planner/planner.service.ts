@@ -170,6 +170,7 @@ export class PlannerService {
         systemPrompt,
         userPrompt: prompt,
         maxTokens: 4096,
+        jobId,
       });
       if (tokenLogPath) {
         await this.tokenTracker.track(
@@ -308,6 +309,7 @@ export class PlannerService {
       options?.editRequest,
       resolvedModel,
       options?.logPath,
+      jobId,
     );
   }
 
@@ -373,6 +375,7 @@ export class PlannerService {
     editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
+    jobId?: string,
   ): Promise<PlanResult> {
     const concurrency =
       this.configService.get<number>('planner.visualPlanConcurrency') ?? 3;
@@ -405,6 +408,7 @@ export class PlannerService {
             editRequest,
             modelName,
             logPath,
+            jobId,
           ),
         ),
       );
@@ -438,6 +442,7 @@ export class PlannerService {
     editRequest: PipelineEditRequestDto | undefined,
     modelName: string,
     logPath?: string,
+    jobId?: string,
   ): Promise<PlanResult[number]> {
     let visualPlan: ComponentVisualPlan | undefined;
     let detectedCustomClassNames: string[] = [];
@@ -565,6 +570,7 @@ export class PlannerService {
           systemPrompt,
           userPrompt: prompt,
           maxTokens: 4096,
+          jobId,
         });
         if (tokenLogPath) {
           await this.tokenTracker.track(
@@ -650,18 +656,20 @@ export class PlannerService {
     systemPrompt: string;
     userPrompt: string;
     maxTokens: number;
+    jobId?: string;
   }): Promise<{
     text: string;
     inputTokens: number;
     outputTokens: number;
     truncated?: boolean;
   }> {
-    const { model, systemPrompt, userPrompt, maxTokens } = input;
+    const { model, systemPrompt, userPrompt, maxTokens, jobId } = input;
     return this.llmFactory.chat({
       model,
       systemPrompt,
       userPrompt,
       maxTokens,
+      jobId,
     });
   }
 
@@ -1321,11 +1329,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       ...section,
       ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
       ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
+      ...(draft.sourceLayout ? { sourceLayout: draft.sourceLayout } : {}),
       ...(draft.background ? { background: draft.background } : {}),
       ...(draft.textColor ? { textColor: draft.textColor } : {}),
+      ...(draft.textAlign ? { textAlign: draft.textAlign } : {}),
       ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
       ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
       ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+      ...(draft.contentWidth ? { contentWidth: draft.contentWidth } : {}),
     };
 
     switch (section.type) {
@@ -1376,6 +1387,17 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         const mediaTextDraft = draft as typeof section;
         return {
           ...mergedBase,
+          ...(mediaTextDraft.body &&
+          (!section.body || this.containsInlineHtml(mediaTextDraft.body))
+            ? { body: mediaTextDraft.body }
+            : {}),
+          ...(mediaTextDraft.listItems?.length &&
+          (!section.listItems?.length ||
+            mediaTextDraft.listItems.some((item) =>
+              this.containsInlineHtml(item),
+            ))
+            ? { listItems: mediaTextDraft.listItems }
+            : {}),
           ...(mediaTextDraft.columnWidths
             ? { columnWidths: mediaTextDraft.columnWidths }
             : {}),
@@ -1390,6 +1412,10 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       default:
         return mergedBase as SectionPlan;
     }
+  }
+
+  private containsInlineHtml(value?: string): boolean {
+    return typeof value === 'string' && /<[a-z][\s\S]*>/i.test(value);
   }
 
   private buildValidationFeedbackPrompt(

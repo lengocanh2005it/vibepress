@@ -89,6 +89,8 @@ const USEFUL_PARAM_KEYS = new Set([
   'align', // "full" | "wide" | "center" — section width
   'className', // preserve Gutenberg/custom classes for precise interaction bridge
   'layout', // { type: "flex", justifyContent, orientation, ... }
+  'width', // explicit block width (notably site-logo / image sizing)
+  'height', // explicit block height when present
   'fontSize', // text size slug
   'textAlign', // text alignment
   'dimRatio', // cover block overlay opacity
@@ -247,6 +249,11 @@ function annotateSourceRefs(
               ...context,
               topLevelIndex,
               parentSourceNodeId: sourceRef.sourceNodeId,
+              sourceFile:
+                node.block === 'vibepress/source-scope' &&
+                typeof node.params?.sourceFile === 'string'
+                  ? node.params.sourceFile
+                  : context.sourceFile,
               childPath,
             }),
           }
@@ -262,6 +269,48 @@ function parseBlocks(markup: string): WpNode[] {
   while (remaining.length > 0) {
     remaining = remaining.trimStart();
     if (!remaining) break;
+
+    const partBoundaryMatch = remaining.match(
+      /^<!-- vibepress:part:(?:start|end) [^>]+-->/,
+    );
+    if (partBoundaryMatch) {
+      remaining = remaining.slice(partBoundaryMatch[0].length);
+      continue;
+    }
+
+    const sourceScopeMatch = remaining.match(
+      /^<!-- vibepress:source:start ([^>]+?) -->/,
+    );
+    if (sourceScopeMatch) {
+      const sourceFile = sourceScopeMatch[1].trim();
+      remaining = remaining.slice(sourceScopeMatch[0].length);
+      const endIdx = findSourceScopeClosingIndex(remaining, sourceFile);
+      if (endIdx === -1) {
+        const children = parseBlocks(remaining);
+        nodes.push(
+          compact({
+            block: 'vibepress/source-scope',
+            params: { sourceFile },
+            children: children.length > 0 ? children : undefined,
+          }),
+        );
+        break;
+      }
+
+      const innerMarkup = remaining.slice(0, endIdx);
+      remaining = remaining.slice(
+        endIdx + `<!-- vibepress:source:end ${sourceFile} -->`.length,
+      );
+      const children = parseBlocks(innerMarkup);
+      nodes.push(
+        compact({
+          block: 'vibepress/source-scope',
+          params: { sourceFile },
+          children: children.length > 0 ? children : undefined,
+        }),
+      );
+      continue;
+    }
 
     // Match opening or self-closing block comment
     const blockMatch = remaining.match(
@@ -429,6 +478,35 @@ function findClosingIndex(
       if (depth === 0) return nextClose;
       pos = nextClose + closeTag.length;
     }
+  }
+
+  return -1;
+}
+
+function findSourceScopeClosingIndex(
+  markup: string,
+  sourceFile: string,
+): number {
+  const startTag = `<!-- vibepress:source:start ${sourceFile} -->`;
+  const endTag = `<!-- vibepress:source:end ${sourceFile} -->`;
+  let depth = 1;
+  let pos = 0;
+
+  while (pos < markup.length && depth > 0) {
+    const nextStart = markup.indexOf(startTag, pos);
+    const nextEnd = markup.indexOf(endTag, pos);
+
+    if (nextEnd === -1) return -1;
+
+    if (nextStart !== -1 && nextStart < nextEnd) {
+      depth++;
+      pos = nextStart + startTag.length;
+      continue;
+    }
+
+    depth--;
+    if (depth === 0) return nextEnd;
+    pos = nextEnd + endTag.length;
   }
 
   return -1;

@@ -943,8 +943,14 @@ ${fontEntries}
 :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-center::before {
   margin: 0 auto;
 }
+.text-center > :is(h1, h2, h3, h4, h5, h6).is-style-asterisk::before {
+  margin: 0 auto;
+}
 :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-right::before,
 :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-right::before {
+  margin-left: auto;
+}
+.text-right > :is(h1, h2, h3, h4, h5, h6).is-style-asterisk::before {
   margin-left: auto;
 }
 .rtl :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-left::before {
@@ -953,7 +959,7 @@ ${fontEntries}
 
       'is-style-checkmark-list': `
 .is-style-checkmark-list { list-style: none; padding-left: 0; }
-.is-style-checkmark-list li { padding-left: 1.75em; position: relative; font-weight: 600; }
+.is-style-checkmark-list li { padding-left: 1.75em; position: relative; font-weight: inherit; }
 .is-style-checkmark-list li::before { content: "✓"; position: absolute; left: 0; color: currentColor; font-weight: 600; }`,
 
       'is-style-rounded': `
