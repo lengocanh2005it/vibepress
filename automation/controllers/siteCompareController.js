@@ -5,8 +5,7 @@ const { compareSite } = require("../services/siteCompareService");
 async function compareSiteHandler(req, res) {
   const {
     wpBaseUrl,
-    siteId,
-    dbInfo,
+    wpSiteId,
     reactFeUrl,
     reactBeUrl,
     postTypes,
@@ -15,21 +14,18 @@ async function compareSiteHandler(req, res) {
     viewportHeight,
   } = req.body || {};
 
-  if (!wpBaseUrl || !reactFeUrl || !reactBeUrl) {
+  if (!wpBaseUrl || !wpSiteId || !reactFeUrl || !reactBeUrl) {
     return res.status(400).json({
       success: false,
       code: "INVALID_REQUEST",
-      message: "wpBaseUrl, reactFeUrl and reactBeUrl are required",
+      message: "wpBaseUrl, wpSiteId, reactFeUrl and reactBeUrl are required",
     });
   }
-
-  // dbInfo object > siteId string > fallback lấy site đầu tiên trong db.json
-  const dbInfoOrSiteId = dbInfo ?? siteId ?? null;
 
   try {
     const result = await compareSite({
       wpBaseUrl,
-      dbInfoOrSiteId,
+      wpSiteId,
       reactFeUrl,
       reactBeUrl,
       postTypes:      Array.isArray(postTypes) ? postTypes : undefined,

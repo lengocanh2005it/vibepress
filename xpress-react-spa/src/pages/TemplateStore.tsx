@@ -1,19 +1,25 @@
-import React, { useState } from "react";
 import {
-  Sparkles,
+  ArrowRight,
+  Check,
+  CheckCircle,
+  CheckCircle2,
+  Copy,
+  Database,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Globe,
+  GraduationCap,
+  Key,
+  Layers,
+  RefreshCw,
   Rocket,
   ShoppingBag,
-  GraduationCap,
-  Plus,
-  CheckCircle2,
-  CheckCircle,
-  ArrowRight,
-  ExternalLink,
-  Key,
-  Database,
-  RefreshCw,
-  Terminal,
+  Sparkles,
+  Terminal
 } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import TopNav from "../components/TopNav";
 
 // ─── Color tokens (xpress01 palette) ────────────────────────────────────────
@@ -32,52 +38,24 @@ const C = {
   dashedBorder: "#BCCABF",
 };
 
+const PRESET_ICONS = [Sparkles, Rocket, ShoppingBag, GraduationCap, Globe, Layers];
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 type View = "landing" | "deploying" | "dashboard";
 
-interface Template {
+interface WpPreset {
   id: string;
-  title: string;
-  category: string;
-  icon: React.ReactNode;
-  image: string;
+  site_name: string;
+  description: string | null;
+  image_url?: string | null;
 }
 
-// ─── Data ────────────────────────────────────────────────────────────────────
-const templates: Template[] = [
-  {
-    id: "architect",
-    title: "Architect Portfolio",
-    category: "Professional / Portfolio",
-    icon: <Sparkles className="w-5 h-5" style={{ color: C.green700 }} />,
-    image:
-      "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?q=80&w=800&auto=format&fit=crop",
-  },
-  {
-    id: "minimal",
-    title: "Studio Minimal",
-    category: "Creative / Agency",
-    icon: <Rocket className="w-5 h-5" style={{ color: C.green700 }} />,
-    image:
-      "https://images.unsplash.com/photo-1497366216548-37526070297c?q=80&w=800&auto=format&fit=crop",
-  },
-  {
-    id: "eco",
-    title: "Eco Commerce",
-    category: "Retail / E-commerce",
-    icon: <ShoppingBag className="w-5 h-5" style={{ color: C.green700 }} />,
-    image:
-      "https://images.unsplash.com/photo-1542838132-92c53300491e?q=80&w=800&auto=format&fit=crop",
-  },
-  {
-    id: "lumina",
-    title: "Lumina LMS",
-    category: "Education / Learning",
-    icon: <GraduationCap className="w-5 h-5" style={{ color: C.green700 }} />,
-    image:
-      "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?q=80&w=800&auto=format&fit=crop",
-  },
-];
+interface WpPresetDetail extends WpPreset {
+  username: string;
+  password: string;
+  url_page: string;
+  url_wpadmin: string;
+}
 
 const deploymentMessages = [
   "Khởi tạo tiến trình...",
@@ -163,7 +141,15 @@ function DeploymentModal({ step }: { step: number }) {
 }
 
 // ─── Landing View ─────────────────────────────────────────────────────────────
-function LandingView({ onClone }: { onClone: () => void }) {
+function LandingView({
+  onClone,
+  presets,
+  loading,
+}: {
+  onClone: (id: string) => void;
+  presets: WpPreset[];
+  loading: boolean;
+}) {
   return (
     <main
       className="flex min-h-screen flex-col"
@@ -192,52 +178,71 @@ function LandingView({ onClone }: { onClone: () => void }) {
 
         {/* Template Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-          {templates.map((tpl) => (
-            <div
-              key={tpl.id}
-              className="bg-white rounded-xl overflow-hidden border hover:shadow-xl transition-all duration-300 group flex flex-col"
-              style={{ borderColor: "#f0f0f0", height: 400 }}
-            >
-              {/* Image */}
+          {loading ? (
+            Array.from({ length: 3 }).map((_, i) => (
               <div
-                className="overflow-hidden bg-gray-100"
-                style={{ height: 216 }}
-              >
-                <img
-                  src={tpl.image}
-                  alt={tpl.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                />
-              </div>
-
-              {/* Content */}
-              <div className="p-6 flex-1 flex flex-col justify-between">
-                <div className="flex justify-between items-start mb-4">
-                  <div>
-                    <h3
-                      className="font-bold text-lg mb-1"
-                      style={{ color: C.text1 }}
-                    >
-                      {tpl.title}
-                    </h3>
-                    <p className="text-sm" style={{ color: C.text2 }}>
-                      {tpl.category}
-                    </p>
-                  </div>
-                  {tpl.icon}
-                </div>
-
-                <button
-                  onClick={onClone}
-                  className="w-full bg-black hover:bg-gray-800 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                key={i}
+                className="bg-white rounded-xl border animate-pulse"
+                style={{ borderColor: "#f0f0f0", height: 280 }}
+              />
+            ))
+          ) : (
+            presets.map((preset, idx) => {
+              const Icon = PRESET_ICONS[idx % PRESET_ICONS.length];
+              return (
+                <div
+                  key={preset.id}
+                  className="bg-white rounded-xl overflow-hidden border hover:shadow-xl transition-all duration-300 group flex flex-col"
+                  style={{ borderColor: "#f0f0f0" }}
                 >
-                  Clone Template
-                </button>
-              </div>
-            </div>
-          ))}
+                  {/* Image banner */}
+                  <div
+                    className="overflow-hidden flex items-center justify-center"
+                    style={{ height: 216, backgroundColor: C.greenBg }}
+                  >
+                    {preset.image_url ? (
+                      <img
+                        src={preset.image_url}
+                        alt={preset.site_name}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+                    ) : (
+                      <Icon className="w-16 h-16" style={{ color: C.green700, opacity: 0.4 }} />
+                    )}
+                  </div>
 
-          {/* Custom Build Card */}
+                  {/* Content */}
+                  <div className="p-6 flex-1 flex flex-col justify-between">
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h3
+                          className="font-bold text-lg mb-1"
+                          style={{ color: C.text1 }}
+                        >
+                          {preset.site_name}
+                        </h3>
+                        {preset.description && (
+                          <p className="text-sm" style={{ color: C.text2 }}>
+                            {preset.description}
+                          </p>
+                        )}
+                      </div>
+                      <Icon className="w-5 h-5 flex-shrink-0" style={{ color: C.green700 }} />
+                    </div>
+
+                    <button
+                      onClick={() => onClone(preset.id)}
+                      className="w-full bg-black hover:bg-gray-800 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                    >
+                      Clone Template
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+
+          {/* Custom Build Card
           <div
             className="rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer group transition-colors"
             style={{
@@ -269,7 +274,7 @@ function LandingView({ onClone }: { onClone: () => void }) {
             >
               Bắt đầu từ trang trắng với AI Assistant
             </p>
-          </div>
+          </div> */}
         </div>
       </div>
     </main>
@@ -277,8 +282,15 @@ function LandingView({ onClone }: { onClone: () => void }) {
 }
 
 // ─── Dashboard View ───────────────────────────────────────────────────────────
-function DashboardView() {
+function DashboardView({ preset }: { preset: WpPresetDetail }) {
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const navigate = useNavigate();
+  const handleCopy = () => {
+    navigator.clipboard.writeText(preset.password);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: C.bg }}>
@@ -332,7 +344,9 @@ function DashboardView() {
 
                   <div className="flex flex-col sm:flex-row gap-4 justify-center md:justify-start">
                     <a
-                      href="#"
+                      href={preset.url_wpadmin}
+                      target="_blank"
+                      rel="noreferrer"
                       className="inline-flex items-center justify-center gap-2 text-white px-6 py-3.5 rounded-lg font-bold transition-all shadow-sm"
                       style={{ backgroundColor: C.green900 }}
                       onMouseEnter={(e) =>
@@ -348,13 +362,23 @@ function DashboardView() {
                       <ArrowRight className="w-4 h-4 ml-1" />
                     </a>
                     <a
-                      href="#"
+                      href={preset.url_page}
+                      target="_blank"
+                      rel="noreferrer"
                       className="inline-flex items-center justify-center gap-2 bg-white border-2 border-gray-100 hover:border-gray-200 px-6 py-3.5 rounded-lg font-bold transition-all shadow-sm"
                       style={{ color: C.text1 }}
                     >
                       Xem Website Khách
                       <ExternalLink className="w-4 h-4 text-gray-500" />
                     </a>
+                    <button
+                      onClick={() => navigate('/app/onboarding')}
+                      className="inline-flex items-center justify-center gap-2 bg-white border-2 border-gray-100 hover:border-gray-200 px-6 py-3.5 rounded-lg font-bold transition-all shadow-sm"
+                      style={{ color: C.text1 }}
+                    >
+                      Bắt đầu Migrate
+                      <ExternalLink className="w-4 h-4 text-gray-500" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -381,11 +405,8 @@ function DashboardView() {
 
                 <div className="space-y-6">
                   {[
-                    {
-                      label: "URL Đăng nhập",
-                      value: "https://demo-instance-8x2d.casso.press/wp-admin",
-                    },
-                    { label: "Tài khoản (Username)", value: "admin_casso_user" },
+                    { label: "URL Đăng nhập", value: preset.url_wpadmin },
+                    { label: "Tài khoản (Username)", value: preset.username },
                   ].map(({ label, value }) => (
                     <div key={label}>
                       <label
@@ -417,21 +438,35 @@ function DashboardView() {
                     </label>
                     <div className="flex gap-2">
                       <div
-                        className="p-3.5 rounded-lg font-mono text-sm flex-1 border shadow-inner flex items-center"
-                        style={{
-                          backgroundColor: C.bg,
-                          color: C.text1,
-                          borderColor: "#e5e7eb",
-                        }}
+                        className="flex-1 flex items-center border rounded-lg shadow-inner px-3.5"
+                        style={{ backgroundColor: C.bg, borderColor: "#e5e7eb" }}
                       >
-                        {passwordVisible ? "X3k#9mPq!2wZ" : "••••••••••••"}
+                        <span className="font-mono text-sm flex-1" style={{ color: C.text1 }}>
+                          {passwordVisible ? preset.password : "••••••••••••"}
+                        </span>
+                        <button
+                          onClick={() => setPasswordVisible((v) => !v)}
+                          className="ml-2 p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0"
+                          style={{ color: C.text3 }}
+                        >
+                          {passwordVisible
+                            ? <EyeOff className="w-4 h-4" />
+                            : <Eye className="w-4 h-4" />
+                          }
+                        </button>
                       </div>
                       <button
-                        onClick={() => setPasswordVisible((v) => !v)}
-                        className="px-5 py-2 bg-white hover:bg-gray-50 text-sm font-bold rounded-lg transition-colors border-2 border-gray-100 shadow-sm"
-                        style={{ color: C.text1 }}
+                        onClick={handleCopy}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-gray-50 text-sm font-bold rounded-lg transition-colors border-2 shadow-sm"
+                        style={{
+                          color: copied ? C.green700 : C.text1,
+                          borderColor: copied ? C.green500 : "#e5e7eb",
+                        }}
                       >
-                        {passwordVisible ? "Hide" : "Copy"}
+                        {copied
+                          ? <><Check className="w-4 h-4" />Đã copy</>
+                          : <><Copy className="w-4 h-4" />Copy</>
+                        }
                       </button>
                     </div>
                   </div>
@@ -530,10 +565,26 @@ function DashboardView() {
 const TemplateStore: React.FC = () => {
   const [view, setView] = useState<View>("landing");
   const [deployStep, setDeployStep] = useState(0);
+  const [presets, setPresets] = useState<WpPreset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedPreset, setSelectedPreset] = useState<WpPresetDetail | null>(null);
 
-  const handleClone = () => {
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp-presets`)
+      .then((r) => r.json())
+      .then((json) => setPresets(json.data ?? []))
+      .catch(() => setPresets([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleClone = async (id: string) => {
     setView("deploying");
     setDeployStep(0);
+
+    const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/wp-presets/${id}`);
+    const json = await res.json();
+    setSelectedPreset(json.data ?? null);
+
     let step = 0;
     const interval = setInterval(() => {
       step += 1;
@@ -558,11 +609,11 @@ const TemplateStore: React.FC = () => {
         }
       `}</style>
 
-      {view === "dashboard" ? (
-        <DashboardView />
+      {view === "dashboard" && selectedPreset ? (
+        <DashboardView preset={selectedPreset} />
       ) : (
         <>
-          <LandingView onClone={handleClone} />
+          <LandingView onClone={handleClone} presets={presets} loading={loading} />
           {view === "deploying" && <DeploymentModal step={deployStep} />}
         </>
       )}

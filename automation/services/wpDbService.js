@@ -1,56 +1,45 @@
 "use strict";
 
 const mysql = require("mysql2/promise");
-const path  = require("path");
-const fs    = require("fs");
 
 const { stripHtml, normalizeContent } = require("./textUtils");
-
-const DB_FILE = path.join(__dirname, "..", "db.json");
+const db = require("../db/mysql");
 
 // ─── DB CONNECTION ────────────────────────────────────────────────────────────
 
 /**
- * Đọc DB info từ db.json (lấy site đầu tiên)
- * hoặc truyền thẳng dbInfo object / siteId vào
+ * Lấy cloned_db info từ bảng wp_sites theo site_id
+ * hoặc dùng thẳng object nếu đã có sẵn
  */
-function resolveDbInfo(dbInfoOrSiteId) {
-  if (dbInfoOrSiteId && typeof dbInfoOrSiteId === "object") {
-    return dbInfoOrSiteId;
+async function resolveDbInfo(wpSiteId) {
+  if (!wpSiteId) {
+    throw new Error("Cần truyền siteId để lấy thông tin DB");
   }
 
-  if (!fs.existsSync(DB_FILE)) {
-    throw new Error("db.json not found — plugin chưa register?");
-  }
+  const site = await db.queryOne(
+    "SELECT cloned_db FROM wp_sites WHERE site_id = ?",
+    [wpSiteId]
+  );
 
-  const db    = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  const sites = Object.values(db.wpSites ?? {});
+  if (!site) throw new Error(`Site không tìm thấy: ${wpSiteId}`);
+  if (!site.cloned_db) throw new Error(`Site ${wpSiteId} chưa có cloned_db`);
 
-  if (!sites.length) throw new Error("Không có site nào trong db.json");
+  const clonedDb = typeof site.cloned_db === "string"
+    ? JSON.parse(site.cloned_db)
+    : site.cloned_db;
 
-  const site = dbInfoOrSiteId
-    ? sites.find((s) => s.siteId === dbInfoOrSiteId)
-    : sites[0];
-
-  if (!site) throw new Error(`Site không tìm thấy: ${dbInfoOrSiteId}`);
-
-  return site.dbInfo;
+  return clonedDb;
 }
 
 async function getConn(dbInfo) {
-  const [rawHost, portStr] = String(dbInfo.db_host).split(":");
-  // "db" là Docker-internal hostname — remap về localhost khi chạy ngoài container.
-  // Override qua env DB_HOST nếu cần.
-  const host = process.env.DB_HOST
-    || (rawHost === "db" ? "localhost" : rawHost)
-    || "localhost";
+  const uri = new URL(dbInfo.connectionString);
   return mysql.createConnection({
-    host,
-    port:     Number(portStr || dbInfo.db_port || 3306),
-    user:     dbInfo.db_user,
-    password: dbInfo.db_password,
-    database: dbInfo.db_name,
-    charset:  dbInfo.db_charset || "utf8mb4",
+    host:     process.env.DB_HOST || uri.hostname,
+    port:     Number(uri.port || 3306),
+    user:     uri.username,
+    password: uri.password,
+    database: uri.pathname.slice(1),
+    charset:  "utf8mb4",
   });
 }
 
@@ -92,15 +81,15 @@ function normalizeDbItem(row) {
 /**
  * Lấy toàn bộ nội dung từ WP DB theo từng post type
  *
- * @param {object|string} dbInfoOrSiteId
+ * @param {object|string} wpSiteId
  * @param {object}   [opts]
  * @param {string[]} [opts.postTypes]  - giới hạn post types (mặc định tự detect)
  * @param {number}   [opts.limit]      - giới hạn số bài mỗi type (mặc định không giới hạn)
  */
-async function fetchAllWpContent(dbInfoOrSiteId, { postTypes, limit } = {}) {
-  const dbInfo = resolveDbInfo(dbInfoOrSiteId);
+async function fetchAllWpContent(wpSiteId, { postTypes, limit } = {}) {
+  const dbInfo = await resolveDbInfo(wpSiteId);
   const conn   = await getConn(dbInfo);
-  const prefix = dbInfo.db_prefix || "wp_";
+  const prefix = "wp_";
 
   try {
     const types = postTypes ?? await discoverPostTypes(conn, prefix);

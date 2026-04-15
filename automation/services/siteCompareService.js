@@ -11,11 +11,11 @@ const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 /**
  * Chạy song song visual compare + content compare rồi gộp vào 1 report.json
  *
- * @param {object}        opts
- * @param {string}        opts.wpBaseUrl       - WP frontend URL (dùng cho visual)
- * @param {object|string} opts.dbInfoOrSiteId  - dbInfo object hoặc siteId (dùng cho content)
- * @param {string}        opts.reactFeUrl      - React frontend URL (dùng cho visual)
- * @param {string}        opts.reactBeUrl      - React backend URL (dùng cho content)
+ * @param {object} opts
+ * @param {string} opts.wpBaseUrl   - WP frontend URL (dùng cho visual)
+ * @param {string} opts.wpSiteId    - site_id trong bảng wp_sites (dùng cho content)
+ * @param {string} opts.reactFeUrl  - React frontend URL (dùng cho visual)
+ * @param {string} opts.reactBeUrl  - React backend URL (dùng cho content)
  * @param {string[]}      [opts.postTypes]     - giới hạn post types
  * @param {boolean}       [opts.fullPage]
  * @param {number}        [opts.viewportWidth]
@@ -23,7 +23,7 @@ const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
  */
 async function compareSite({
   wpBaseUrl,
-  dbInfoOrSiteId,
+  wpSiteId,
   reactFeUrl,
   reactBeUrl,
   postTypes,
@@ -38,7 +38,7 @@ async function compareSite({
 
   const [visualResult, contentResult] = await Promise.allSettled([
     compareMultiplePages({ wpBaseUrl, reactBaseUrl: reactFeUrl, fullPage, viewportWidth, viewportHeight }),
-    compareAllContent(dbInfoOrSiteId, reactBeUrl, { postTypes }),
+    compareAllContent(wpSiteId, reactBeUrl, { postTypes }),
   ]);
 
   const visual  = visualResult.status  === "fulfilled" ? visualResult.value  : { error: visualResult.reason?.message };

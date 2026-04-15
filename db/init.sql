@@ -47,6 +47,25 @@ CREATE TABLE IF NOT EXISTS `wp_sites` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------
+-- wp_presets: các WordPress site được cấu hình sẵn (preset)
+-- dùng để nạp nhanh thông tin đăng nhập và URL vào editor
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `wp_presets` (
+  `id`           VARCHAR(36)   NOT NULL,
+  `site_name`    VARCHAR(255)  NOT NULL  COMMENT 'Tên hiển thị của site',
+  `username`     VARCHAR(255)  NOT NULL  COMMENT 'Tài khoản đăng nhập WordPress',
+  `password`     VARCHAR(255)  NOT NULL  COMMENT 'Mật khẩu đăng nhập WordPress',
+  `url_page`     VARCHAR(512)  NOT NULL  COMMENT 'URL trang front-end của site',
+  `url_wpadmin`  VARCHAR(512)  NOT NULL  COMMENT 'URL trang wp-admin của site',
+  `created_at`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `description`  TEXT          NULL  COMMENT 'Mô tả thêm về preset này',
+  `image_url`    TEXT  NULL  COMMENT 'URL ảnh đại diện cho site (nếu có)',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_wp_presets_url_page` (`url_page`(255))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------
 -- captures: ảnh chụp màn hình do người dùng tạo kèm comment chỉnh sửa
 -- site_id → wp_sites.site_id
 -- -------------------------------------------------------

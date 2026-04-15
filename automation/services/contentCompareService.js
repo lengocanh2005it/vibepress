@@ -70,16 +70,16 @@ function compareItems(wpItem, reactItem) {
 /**
  * So sánh toàn bộ nội dung WP (DB) vs React backend (API)
  *
- * @param {object|string} dbInfoOrSiteId  - dbInfo object hoặc siteId từ db.json
+ * @param {object|string} wpSiteId  - dbInfo object hoặc siteId từ db.json
  * @param {string}        reactBeUrl      - e.g. "http://localhost:3100"
  * @param {object}        [opts]
  * @param {string[]}      [opts.postTypes] - giới hạn post types, mặc định lấy hết
  */
-async function compareAllContent(dbInfoOrSiteId, reactBeUrl, { postTypes } = {}) {
+async function compareAllContent(wpSiteId, reactBeUrl, { postTypes } = {}) {
   console.log("🔍 Fetching content from both sources...");
-
+  console.log(`   WP BE: ${wpSiteId}\n`);
   const [wpItems, reactItems] = await Promise.all([
-    fetchAllWpContent(dbInfoOrSiteId, { postTypes }),
+    fetchAllWpContent(wpSiteId, { postTypes }),
     fetchAllReactContent(reactBeUrl),
   ]);
 

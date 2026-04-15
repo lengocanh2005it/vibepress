@@ -3,18 +3,18 @@
 const { compareAllContent } = require("../services/contentCompareService");
 
 async function compareContent(req, res) {
-  const { wpBaseUrl, reactBaseUrl } = req.body || {};
+  const { wpSiteId, reactBaseUrl } = req.body || {};
 
-  if (!wpBaseUrl || !reactBaseUrl) {
+  if (!wpSiteId || !reactBaseUrl) {
     return res.status(400).json({
       success: false,
       code: "INVALID_REQUEST",
-      message: "wpBaseUrl and reactBaseUrl are required",
+      message: "wpSiteId and reactBaseUrl are required",
     });
   }
 
   try {
-    const result = await compareAllContent(wpBaseUrl, reactBaseUrl);
+    const result = await compareAllContent(wpSiteId, reactBaseUrl);
     return res.status(200).json({ success: true, result });
   } catch (error) {
     return res.status(500).json({
