@@ -506,6 +506,7 @@ ${routesBlock}
     const apiBaseUrl = `http://localhost:${apiPort}/api`;
     await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
+    await this.registerPreview(jobId, vitePort);
     return {
       jobId,
       previewDir: rootDir,
@@ -518,6 +519,21 @@ ${routesBlock}
       frontendPid: frontendProc.pid,
       serverPid: serverProc.pid,
     };
+  }
+
+  private async registerPreview(pipelineId: string, port: number): Promise<void> {
+    const automationUrl = this.configService.get<string>('automation.url', '');
+    if (!automationUrl) return;
+    try {
+      await fetch(`${automationUrl}/api/preview/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pipelineId, port }),
+      });
+      this.logger.log(`[preview] registered pipeline ${pipelineId} → port ${port}`);
+    } catch (err) {
+      this.logger.warn(`[preview] failed to register preview: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   async syncGeneratedComponents(
