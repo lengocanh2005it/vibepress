@@ -216,6 +216,7 @@ export default () => {
   },
   automation: {
     url: process.env.AUTOMATION_URL,
+    previewPublicBaseUrl: process.env.PREVIEW_PUBLIC_BASE_URL?.replace(/\/$/, ''),
   },
   };
 };
