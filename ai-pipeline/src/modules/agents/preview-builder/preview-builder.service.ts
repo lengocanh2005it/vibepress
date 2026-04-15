@@ -528,7 +528,7 @@ ${routesBlock}
     const automationUrl = this.configService.get<string>('automation.url', '');
     if (!automationUrl) return null;
     try {
-      await fetch(`${automationUrl}/api/preview/register`, {
+      await fetch(`${automationUrl}/preview/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pipelineId, port }),
