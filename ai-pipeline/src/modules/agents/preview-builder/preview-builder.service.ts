@@ -474,7 +474,7 @@ ${routesBlock}
     // frontend/.env — chỉ cần biết API chạy ở đâu
     await writeFile(
       join(frontendDir, '.env'),
-      `VITE_PORT=${vitePort}\nVITE_API_PORT=${apiPort}\nVITE_API_BASE=http://localhost:${apiPort}/api\n`,
+      `VITE_PORT=${vitePort}\nVITE_API_PORT=${apiPort}\nVITE_API_BASE=/preview/${jobId}/api\nVITE_BASE=/preview/${jobId}/\n`,
     );
 
     // server/.env — DB credentials + port
@@ -506,7 +506,7 @@ ${routesBlock}
     const apiBaseUrl = `http://localhost:${apiPort}/api`;
     await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
-    const publicPreviewUrl = await this.registerPreview(jobId, vitePort);
+    const publicPreviewUrl = await this.registerPreview(jobId, vitePort, apiPort);
     return {
       jobId,
       previewDir: rootDir,
@@ -524,6 +524,7 @@ ${routesBlock}
   private async registerPreview(
     pipelineId: string,
     port: number,
+    apiPort: number,
   ): Promise<string | null> {
     const automationUrl = this.configService.get<string>('automation.url', '');
     if (!automationUrl) return null;
@@ -531,9 +532,9 @@ ${routesBlock}
       await fetch(`${automationUrl}/preview/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pipelineId, port }),
+        body: JSON.stringify({ pipelineId, port, apiPort }),
       });
-      this.logger.log(`[preview] registered pipeline ${pipelineId} → port ${port}`);
+      this.logger.log(`[preview] registered pipeline ${pipelineId} → vite:${port}, api:${apiPort}`);
       const publicBase = this.configService.get<string>('automation.previewPublicBaseUrl', '');
       return publicBase ? `${publicBase}/preview/${pipelineId}` : null;
     } catch (err) {
