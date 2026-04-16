@@ -1,7 +1,7 @@
 import { All, Controller, Param, Req, Res } from '@nestjs/common';
 import { createHash } from 'crypto';
 import * as http from 'http';
-import { Request, Response } from 'express';
+import type { Request, Response } from 'express';
 
 function pickDeterministicPort(
   jobId: string,
