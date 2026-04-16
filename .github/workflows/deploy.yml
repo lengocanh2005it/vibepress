@@ -17,6 +17,7 @@ jobs:
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
+            set -e
             cd ~/app
             git pull origin main
             docker compose up -d --build
