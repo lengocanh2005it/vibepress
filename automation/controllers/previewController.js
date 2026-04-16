@@ -1,10 +1,17 @@
 const http = require('http');
+const crypto = require('crypto');
 
-// Hostname của ai_pipeline container — dùng service name trong Docker network
 const AI_PIPELINE_HOST = process.env.AI_PIPELINE_HOST || 'localhost';
 
-// pipelineId → { vitePort, apiPort }
-const registry = new Map();
+function pickDeterministicPort(jobId, salt, base, span) {
+  const hash = crypto.createHash('sha1').update(`${salt}:${jobId}`).digest('hex');
+  const offset = parseInt(hash.slice(0, 8), 16) % span;
+  return base + offset;
+}
+
+function pickApiPort(jobId) {
+  return pickDeterministicPort(jobId, 'api', 3700, 200);
+}
 
 function forwardRequest(req, res, hostname, port, targetPath) {
   const options = {
@@ -12,10 +19,7 @@ function forwardRequest(req, res, hostname, port, targetPath) {
     port,
     path: targetPath,
     method: req.method,
-    headers: {
-      ...req.headers,
-      host: `${hostname}:${port}`,
-    },
+    headers: { ...req.headers, host: `${hostname}:${port}` },
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
@@ -24,66 +28,15 @@ function forwardRequest(req, res, hostname, port, targetPath) {
   });
 
   proxyReq.on('error', () => {
-    res.status(502).send('Preview server is not responding.');
+    if (!res.headersSent) res.status(502).send('Preview server is not responding.');
   });
 
   req.pipe(proxyReq, { end: true });
 }
 
 /**
- * POST /api/preview/register
- * Body: { pipelineId: string, port: number, apiPort: number }
- */
-function registerPreview(req, res) {
-  const { pipelineId, port, apiPort } = req.body;
-  if (!pipelineId || !port) {
-    return res.status(400).json({ error: 'pipelineId and port are required' });
-  }
-  registry.set(String(pipelineId), { vitePort: Number(port), apiPort: Number(apiPort) });
-  console.log(`[preview] registered: ${pipelineId} → vite:${port}, api:${apiPort}`);
-  res.json({ ok: true, pipelineId, port, apiPort });
-}
-
-/**
- * DELETE /api/preview/:pipelineId
- */
-function unregisterPreview(req, res) {
-  const { pipelineId } = req.params;
-  registry.delete(pipelineId);
-  console.log(`[preview] unregistered: ${pipelineId}`);
-  res.json({ ok: true });
-}
-
-/**
- * GET /preview/:pipelineId/*
- * - /preview/{id}/api/... → Express backend (strip prefix)
- * - /preview/{id}/...     → Vite dev server (full path)
- */
-function proxyPreview(req, res) {
-  const { pipelineId } = req.params;
-  const registration = registry.get(pipelineId);
-
-  if (!registration) {
-    return res.status(404).send(`Preview "${pipelineId}" not found or has expired.`);
-  }
-
-  const { vitePort, apiPort } = registration;
-  const apiPrefix = `/preview/${pipelineId}/api`;
-
-  if (req.originalUrl.startsWith(apiPrefix) && apiPort) {
-    // Route API calls to Express backend, strip /preview/{id}
-    const targetPath = req.originalUrl.replace(`/preview/${pipelineId}`, '');
-    return forwardRequest(req, res, AI_PIPELINE_HOST, apiPort, targetPath);
-  }
-
-  // Route everything else to Vite with full path
-  return forwardRequest(req, res, AI_PIPELINE_HOST, vitePort, req.originalUrl);
-}
-
-/**
  * Middleware: intercept /api/ calls from preview pages via Referer header.
- * Browser calls /api/foo from preview → Nginx → app → this middleware
- * → forward to preview's Express backend instead of automation backend.
+ * Port tính deterministic từ pipelineId — không cần registry.
  */
 function proxyApiIfFromPreview(req, res, next) {
   const referer = req.headers.referer || req.headers.referrer || '';
@@ -91,10 +44,8 @@ function proxyApiIfFromPreview(req, res, next) {
   if (!match) return next();
 
   const pipelineId = match[1];
-  const registration = registry.get(pipelineId);
-  if (!registration?.apiPort) return next();
-
-  return forwardRequest(req, res, AI_PIPELINE_HOST, registration.apiPort, req.originalUrl);
+  const apiPort = pickApiPort(pipelineId);
+  return forwardRequest(req, res, AI_PIPELINE_HOST, apiPort, req.originalUrl);
 }
 
-module.exports = { registerPreview, unregisterPreview, proxyPreview, proxyApiIfFromPreview };
+module.exports = { proxyApiIfFromPreview };

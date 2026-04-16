@@ -11,15 +11,12 @@ const contentRoutes = require('./routes/contentRoutes');
 const siteCompareRoutes = require('./routes/siteCompareRoutes');
 const deployRoutes = require('./routes/deployRoutes');
 const wpPresetRoutes = require('./routes/wpPresetRoutes');
-const previewRoutes = require('./routes/previewRoutes');
-const { proxyRouter: previewProxyRouter } = require('./routes/previewRoutes');
 const { proxyApiIfFromPreview } = require('./controllers/previewController');
 const { ensureFileSystemState } = require('./controllers/projectController');
 
 const app = express();
 
 app.use(express.json());
-
 app.use(cors(corsOptions));
 app.options('/{*splat}', cors(corsOptions));
 
@@ -35,8 +32,6 @@ app.use('/api', contentRoutes);
 app.use('/api', siteCompareRoutes);
 app.use('/api', deployRoutes);
 app.use('/api', wpPresetRoutes);
-app.use('/api', previewRoutes);
-app.use('/preview', previewProxyRouter);
 app.use('/captures', express.static(require('path').join(__dirname, 'uploads/captures')));
 app.use('/artifacts', express.static(require('path').join(__dirname, 'artifacts')));
 

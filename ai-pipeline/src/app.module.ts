@@ -8,6 +8,7 @@ import { ThemeModule } from './modules/theme/theme.module.js';
 import { SqlModule } from './modules/sql/sql.module.js';
 import { OrchestratorModule } from './modules/orchestrator/orchestrator.module.js';
 import { LlmModule } from './common/llm/llm.module.js';
+import { PreviewProxyModule } from './modules/preview-proxy/preview-proxy.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { LlmModule } from './common/llm/llm.module.js';
     ThemeModule,
     SqlModule,
     OrchestratorModule,
+    PreviewProxyModule,
   ],
 })
 export class AppModule {}
