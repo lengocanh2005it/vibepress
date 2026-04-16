@@ -1,10 +1,5 @@
-const fs = require('fs');
-const { DB_FILE } = require('../config/constants');
+const { queryOne } = require('../db/mysql');
 const { deployFullStack, pushToGit } = require('../services/deployService');
-
-function readDb() {
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-}
 
 async function deployJob(req, res) {
   const { jobId, repoName, branch, siteId } = req.body;
@@ -12,16 +7,21 @@ async function deployJob(req, res) {
   if (!jobId) return res.status(400).json({ error: 'jobId is required' });
   if (!siteId) return res.status(400).json({ error: 'siteId is required' });
 
-  const db = readDb();
-  const site = db.wpSites?.[siteId];
-  if (!site) return res.status(404).json({ error: 'No site found for this siteId' });
+  const row = await queryOne('SELECT cloned_db FROM wp_sites WHERE site_id = ? LIMIT 1', [siteId]);
+  if (!row) return res.status(404).json({ error: 'No site found for this siteId' });
+
+  const clonedDb = row.cloned_db
+    ? (typeof row.cloned_db === 'string' ? JSON.parse(row.cloned_db) : row.cloned_db)
+    : null;
+
+  if (!clonedDb) return res.status(400).json({ error: 'Site has no cloned database' });
 
   const dbCreds = {
-    host:     site.dbInfo?.db_host?.split(':')[0] ?? 'localhost',
-    port:     site.dbInfo?.db_port ?? 3306,
-    user:     site.dbInfo?.db_user,
-    password: site.dbInfo?.db_password,
-    dbName:   site.dbInfo?.db_name,
+    host:     clonedDb.host,
+    port:     clonedDb.port ?? 3306,
+    user:     clonedDb.user,
+    password: clonedDb.password,
+    dbName:   clonedDb.dbName,
   };
 
   try {
