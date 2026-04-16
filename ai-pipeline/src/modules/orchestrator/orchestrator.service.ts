@@ -18,7 +18,10 @@ import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-r
 import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
 import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
 import { CleanupService } from '../agents/cleanup/cleanup.service.js';
-import { DbContentService } from '../agents/db-content/db-content.service.js';
+import {
+  DbContentService,
+  type DbContentResult,
+} from '../agents/db-content/db-content.service.js';
 import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
 import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
@@ -54,7 +57,10 @@ import {
 } from '../edit-request/ui-source-map.util.js';
 import { PipelineSignalRegistry } from '../../common/llm/pipeline-signal.registry.js';
 import { SqlService } from '../sql/sql.service.js';
-import { WpQueryService } from '../sql/wp-query.service.js';
+import {
+  type WpTemplateDebugEntity,
+  WpQueryService,
+} from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import type {
   PipelineCaptureAttachmentDto,
@@ -1155,12 +1161,26 @@ export class OrchestratorService {
         logPath,
       });
       normalizedTheme = enrichResult.theme;
+      await this.dumpFseTemplateSourceDebug({
+        connectionString: dbConnectionString,
+        jobLogDir,
+        label: 'pre-overlay',
+        theme: normalizedTheme,
+        content,
+      });
       const overlaidTheme = this.dbTemplateOverlay.apply(
         normalizedTheme,
         content,
       );
       if (overlaidTheme !== normalizedTheme) {
         normalizedTheme = await this.normalizer.normalize(overlaidTheme);
+        await this.dumpFseTemplateSourceDebug({
+          connectionString: dbConnectionString,
+          jobLogDir,
+          label: 'post-overlay',
+          theme: normalizedTheme,
+          content,
+        });
         await this.logToFile(
           logPath,
           `[Stage 2] Applied DB template overlay from wp_template/wp_template_part before planner.`,
@@ -1342,6 +1362,7 @@ export class OrchestratorService {
                 'The planner has locked the route map and also attached the user edit request so downstream generation and preview-edit steps can act on it.',
             }),
           );
+          await this.writePlanArtifact(jobId, review.plan);
           return review;
         },
       );
@@ -1840,7 +1861,11 @@ export class OrchestratorService {
           );
           await this.previewBuilder.syncGeneratedComponents(
             preview.previewDir,
-            buildComponents,
+            {
+              components: buildComponents,
+              requiredFrontendPackages:
+                generationResult.requiredFrontendPackages,
+            },
             'tokens' in normalizedTheme
               ? (normalizedTheme as any).tokens
               : undefined,
@@ -2281,6 +2306,143 @@ export class OrchestratorService {
       await this.logToFile(logPath, `[RepoAnalyzer] ${line}`);
     }
     return lines;
+  }
+
+  private async dumpFseTemplateSourceDebug(input: {
+    connectionString: string;
+    jobLogDir: string;
+    label: string;
+    theme: PhpParseResult | BlockParseResult;
+    content: DbContentResult;
+  }): Promise<void> {
+    const { connectionString, jobLogDir, label, theme, content } = input;
+    if (theme.type !== 'fse') return;
+
+    const debugDir = join(jobLogDir, 'template-debug');
+    await mkdir(debugDir, { recursive: true });
+
+    const homeTemplate = theme.templates.find(
+      (template) => template.name.toLowerCase() === 'home',
+    );
+    if (homeTemplate?.markup) {
+      await writeFile(
+        join(debugDir, `home.${label}.html`),
+        homeTemplate.markup,
+        'utf-8',
+      );
+    }
+
+    const dbEntities = content.dbTemplates.filter((row) =>
+      ['home', 'header', 'footer', 'post-meta'].includes(
+        String(row.slug).toLowerCase(),
+      ),
+    );
+    if (dbEntities.length > 0) {
+      await writeFile(
+        join(debugDir, `db-entities.${label}.json`),
+        JSON.stringify(
+          dbEntities.map((row) => ({
+            id: row.id,
+            postType: row.postType,
+            slug: row.slug,
+            status: row.status,
+            modified: row.modified,
+            contentLength: row.content.length,
+            hasSlider: row.content.includes('wp:uagb/slider'),
+            hasModal: row.content.includes('wp:uagb/modal'),
+            hasAccordion: row.content.includes('wp:accordion'),
+            hasFooterPart:
+              row.content.includes('"slug":"footer"') ||
+              row.content.includes('"slug":"footer","theme"'),
+          })),
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+
+      for (const row of dbEntities) {
+        await writeFile(
+          join(
+            debugDir,
+            `${row.postType}.${row.slug}.${row.status}.${label}.html`,
+          ),
+          row.content,
+          'utf-8',
+        );
+      }
+    }
+
+    try {
+      const debugCandidates =
+        await this.wpQuery.getTemplateDebugEntities(connectionString);
+      if (debugCandidates.length > 0) {
+        const summarizedCandidates = debugCandidates.map((row) =>
+          this.summarizeTemplateDebugEntity(row),
+        );
+        await writeFile(
+          join(debugDir, `db-candidate-entities.${label}.json`),
+          JSON.stringify(summarizedCandidates, null, 2),
+          'utf-8',
+        );
+
+        for (const row of debugCandidates.filter((candidate) =>
+          this.shouldDumpTemplateDebugEntityHtml(candidate),
+        )) {
+          await writeFile(
+            join(
+              debugDir,
+              `${sanitizeDebugFilename(row.postType)}.${sanitizeDebugFilename(row.slug || row.title || `id-${row.id}`)}.${row.id}.${label}.html`,
+            ),
+            row.content,
+            'utf-8',
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `[TemplateDebug] Failed to dump extended DB candidates for ${label}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private summarizeTemplateDebugEntity(row: WpTemplateDebugEntity) {
+    return {
+      id: row.id,
+      parentId: row.parentId,
+      postType: row.postType,
+      slug: row.slug,
+      title: row.title,
+      status: row.status,
+      modified: row.modified,
+      contentLength: row.content.length,
+      hasSlider: row.content.includes('wp:uagb/slider'),
+      hasModal: row.content.includes('wp:uagb/modal'),
+      hasAccordion: row.content.includes('wp:accordion'),
+      hasHomeSlug:
+        row.slug.toLowerCase().includes('home') ||
+        row.title.toLowerCase().includes('home'),
+      hasHeaderRef:
+        row.content.includes('"slug":"header"') ||
+        row.content.includes('"slug":"header","theme"'),
+      hasFooterRef:
+        row.content.includes('"slug":"footer"') ||
+        row.content.includes('"slug":"footer","theme"'),
+    };
+  }
+
+  private shouldDumpTemplateDebugEntityHtml(
+    row: WpTemplateDebugEntity,
+  ): boolean {
+    return (
+      row.content.includes('wp:uagb/slider') ||
+      row.content.includes('wp:uagb/modal') ||
+      row.content.includes('wp:accordion') ||
+      row.slug.toLowerCase().includes('home') ||
+      row.title.toLowerCase().includes('home')
+    );
   }
 
   private buildRepoAnalysisSummaryLines(
@@ -2986,6 +3148,25 @@ export class OrchestratorService {
     };
   }
 
+  private async writePlanArtifact(
+    jobId: string,
+    plan: PlanResult,
+  ): Promise<void> {
+    const artifactDir = join('./temp/generated', jobId);
+    await mkdir(artifactDir, { recursive: true });
+    const payload = {
+      jobId,
+      generatedAt: new Date().toISOString(),
+      componentCount: plan.length,
+      plan,
+    };
+    await writeFile(
+      join(artifactDir, 'plan-result.json'),
+      JSON.stringify(payload, null, 2),
+      'utf-8',
+    );
+  }
+
   private async logExactCaptureResolution(input: {
     jobId: string;
     logPath: string;
@@ -3334,6 +3515,16 @@ function truncateForLog(value: string, maxLength: number): string {
   return value.length <= maxLength
     ? value
     : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function sanitizeDebugFilename(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return sanitized || 'untitled';
 }
 
 function formatResolvedCaptureTargetForLog(

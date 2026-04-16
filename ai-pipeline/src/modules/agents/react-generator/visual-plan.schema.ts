@@ -3,11 +3,20 @@ import type { SourceRef } from '../../../common/utils/source-node-id.util.js';
 // ── Visual Plan Schema ─────────────────────────────────────────────────────
 // Planner builds ComponentVisualPlan and injects it into ComponentPlan.
 // Code generator consumes the complete plan to produce deterministic TSX.
-// AI only contributes `sections[]` — palette, typography, layout are all
-// derived deterministically from theme.tokens by the planner.
+//
+// ARCHITECTURE:
+// When a deterministic draft exists (FSE/block theme):
+//   - Draft = immutable structural source of truth (type, order, count, interactive data)
+//   - AI outputs only a ComponentPresentationPlan with SectionPresentationPatch[]
+//   - Patches are keyed by sectionKey and may only set presentation/content fields
+//   - applyPresentationPatches() applies patches onto draft — draft always wins on structure
+//
+// When no draft exists (classic PHP theme):
+//   - AI outputs full ComponentVisualPlan with sections[] (legacy mode)
 
 export type DataNeed =
   | 'siteInfo'
+  | 'footerLinks'
   | 'posts'
   | 'pages'
   | 'menus'
@@ -230,6 +239,17 @@ export interface ModalSection extends BaseSection {
   cta?: { text: string; link: string };
 }
 
+export interface AccordionSection extends BaseSection {
+  type: 'accordion';
+  items: { title: string; content?: string }[];
+}
+
+export interface ButtonGroupSection extends BaseSection {
+  type: 'button-group';
+  align: 'left' | 'center' | 'right';
+  buttons: { text: string; link: string }[];
+}
+
 export type SectionPlan =
   | NavbarSection
   | HeroSection
@@ -248,7 +268,9 @@ export type SectionPlan =
   | SidebarSection
   | TabsSection
   | SliderSection
-  | ModalSection;
+  | ModalSection
+  | AccordionSection
+  | ButtonGroupSection;
 
 /**
  * Typography tokens derived from theme.json / style.css.
@@ -281,6 +303,95 @@ export interface LayoutTokens {
   cardPadding?: string; // exact CSS padding shorthand for group/card-like surfaces
   /** Partial component names this page should import, e.g. ["Header", "Footer"] */
   includes: string[];
+}
+
+// ── Presentation-patch mode (FSE/block theme) ──────────────────────────────
+//
+// AI is NOT allowed to decide structure. It only fills presentation/content
+// fields keyed by the sectionKey that the deterministic mapper assigned.
+//
+// Structural fields (type, slides[], tabs[], cards[], columns, sectionKey,
+// sourceRef) are always taken from the draft and cannot be overridden.
+
+export interface SectionPresentationPatch {
+  /** Must match a sectionKey in the deterministic draft */
+  sectionKey: string;
+
+  // ── Presentation fields (apply to all section types) ──────────────────
+  background?: string;
+  textColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
+  paddingStyle?: string;
+  marginStyle?: string;
+  gapStyle?: string;
+  contentWidth?: string;
+  customClassNames?: string[];
+
+  // ── Content fills (allowed; must come from source, not invented) ───────
+  heading?: string;
+  subheading?: string;
+  headingStyle?: TypographyStyle;
+  subheadingStyle?: TypographyStyle;
+  body?: string;
+  bodyStyle?: TypographyStyle;
+  cta?: { text: string; link: string };
+
+  // ── Type-specific presentation fields ─────────────────────────────────
+
+  // hero
+  layout?: 'centered' | 'left' | 'split';
+  image?: { src: string; alt: string; position: 'right' | 'below' };
+
+  // cover / media-text
+  imageSrc?: string;
+  imageAlt?: string;
+  dimRatio?: number;
+  minHeight?: string;
+  contentAlign?: 'center' | 'left' | 'right';
+  imagePosition?: 'left' | 'right';
+  columnWidths?: string[];
+  listItems?: string[];
+
+  // card-grid
+  title?: string;
+  subtitle?: string;
+
+  // post-list
+  showDate?: boolean;
+  showAuthor?: boolean;
+  showCategory?: boolean;
+  showExcerpt?: boolean;
+  showFeaturedImage?: boolean;
+
+  // slider
+  autoplay?: boolean;
+
+  // modal
+  triggerText?: string;
+  description?: string;
+
+  // testimonial
+  quote?: string;
+  authorName?: string;
+  authorTitle?: string;
+  authorAvatar?: string;
+
+  // navbar
+  menuSlug?: string;
+  sticky?: boolean;
+
+  // footer
+  menuColumns?: { title: string; menuSlug: string }[];
+  copyright?: string;
+  brandDescription?: string;
+}
+
+/** AI response format when a deterministic draft exists (FSE/block theme). */
+export interface ComponentPresentationPlan {
+  componentName: string;
+  palette: ColorPalette;
+  /** One patch per draft section — ordered to match the draft, keyed by sectionKey. */
+  patches: SectionPresentationPatch[];
 }
 
 export interface ComponentVisualPlan {

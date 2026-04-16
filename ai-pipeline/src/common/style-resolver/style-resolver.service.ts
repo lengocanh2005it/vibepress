@@ -51,8 +51,9 @@ export class StyleResolverService {
     return nodes.map((node) => {
       const out: WpNode = { ...node };
 
-      if (out.gap != null)
-        out.gap = this.resolveSpacingVar(out.gap as string, map);
+      if (typeof out.gap === 'string') {
+        out.gap = this.resolveSpacingVar(out.gap, map);
+      }
 
       if (out.padding) {
         out.padding = {
@@ -88,6 +89,27 @@ export class StyleResolverService {
         };
       }
 
+      if (out.params && typeof out.params === 'object') {
+        const params = { ...out.params };
+        if (typeof params.height === 'string') {
+          params.height = this.resolveSpacingVar(params.height, map);
+        }
+        const style =
+          params.style && typeof params.style === 'object'
+            ? { ...(params.style as Record<string, unknown>) }
+            : undefined;
+        const spacing =
+          style?.spacing && typeof style.spacing === 'object'
+            ? { ...(style.spacing as Record<string, unknown>) }
+            : undefined;
+        if (spacing && typeof spacing.height === 'string') {
+          spacing.height = this.resolveSpacingVar(spacing.height, map);
+          style!.spacing = spacing;
+          params.style = style;
+        }
+        out.params = params;
+      }
+
       if (out.children) out.children = this.resolveSpacing(out.children, map);
       return out;
     });
@@ -96,12 +118,16 @@ export class StyleResolverService {
   private resolveSpacingVar(value: string, map: Map<string, string>): string {
     const str = typeof value === 'string' ? value : String(value);
     if (!str.includes('var')) return str;
-    value = str;
-    const shorthand = value.match(/var:preset\|spacing\|([^|)\s]+)/);
-    if (shorthand) return map.get(shorthand[1]) ?? value;
-    const cssVar = value.match(/var\(--wp--preset--spacing--([^)]+)\)/);
-    if (cssVar) return map.get(cssVar[1]) ?? value;
-    return value;
+
+    return str
+      .replace(
+        /var:preset\|spacing\|([^|)\s]+)/g,
+        (match, slug: string) => map.get(slug) ?? match,
+      )
+      .replace(
+        /var\(--wp--preset--spacing--([^)]+)\)/g,
+        (match, slug: string) => map.get(slug) ?? match,
+      );
   }
 
   // ── Colors ──────────────────────────────────────────────────────────────

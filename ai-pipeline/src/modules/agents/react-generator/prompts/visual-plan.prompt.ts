@@ -5,6 +5,8 @@ import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-
 import type {
   ColorPalette,
   ComponentVisualPlan,
+  ComponentPresentationPlan,
+  SectionPresentationPatch,
   DataNeed,
   SectionPlan,
 } from '../visual-plan.schema.js';
@@ -127,6 +129,8 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | \`tabs\` | interactive tabbed content block |
 | \`slider\` | interactive slide/carousel block |
 | \`modal\` | interactive modal/dialog trigger + content |
+| \`accordion\` | interactive accordion / FAQ block |
+| \`button-group\` | standalone row of one or more CTA buttons |
 
 ## Section schemas (key fields only)
 
@@ -149,6 +153,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 tabs:         { tabs: [{label,content}] }
 slider:       { slides: [{heading?,description?,cta?}], autoplay? }
 modal:        { triggerText, heading?, description?, cta? }
+accordion:    { items: [{title,content?}] }
+button-group: { align: left|center|right, buttons: [{text,link}] }
 \`\`\`
 
 ## Rules
@@ -220,31 +226,62 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
   if (!draftSections || draftSections.length === 0) return '';
 
-  const interactiveTypes = ['slider', 'tabs', 'modal', 'accordion'];
+  const interactiveTypes = new Set(['slider', 'tabs', 'modal', 'accordion']);
+  const sourceBackedTypes = new Set([
+    'slider',
+    'tabs',
+    'modal',
+    'accordion',
+    'button-group',
+    'cover',
+    'post-list',
+    'card-grid',
+    'media-text',
+  ]);
+
   const hasInteractive = draftSections.some((s) =>
-    interactiveTypes.includes(s.type),
+    interactiveTypes.has(s.type),
+  );
+  const sourceBackedSections = draftSections.filter((s) =>
+    sourceBackedTypes.has(s.type),
   );
 
   const lines = [
     '## Detected section order (deterministic, from WordPress block tree)',
-    'The following sections were detected in the EXACT order they appear in the WordPress template.',
-    'You MUST preserve this order in the `sections` array.',
-    'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
-    'You MUST NOT reorder, merge, split, or drop sections from this list.',
-    'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
-    'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
-    ...(hasInteractive
+    `The following ${draftSections.length} sections were detected in the EXACT order they appear in the WordPress template.`,
+    '',
+    '### HARD CONSTRAINTS — violating any of these will cause the plan to be rejected:',
+    `⛔ Your \`sections\` array MUST contain exactly ${draftSections.length} items — same count as the draft below.`,
+    '⛔ You MUST preserve the EXACT order of sections as listed below.',
+    '⛔ You MUST NOT merge two or more draft sections into one output section.',
+    '⛔ You MUST NOT split one draft section into multiple output sections.',
+    '⛔ You MUST carry forward the `sectionKey` of each draft section into your output.',
+    ...(sourceBackedSections.length > 0
       ? [
-          '',
-          '### Interactive block types — LOCKED',
-          'Some draft sections have interactive types (slider, tabs, modal, accordion) that come from Spectra/UAGB plugin blocks.',
-          'You MUST output exactly the same `type` value for those sections — do NOT change "slider" to "features", "tabs" to "grid", "modal" to "cta", etc.',
-          'For `type: "slider"`: populate the `slides` array from the source. Each slide has `heading`, `description`, and optional `imageUrl`.',
-          'For `type: "tabs"`: populate the `tabs` array from the source. Each tab has `label` and `content`.',
-          'For `type: "modal"`: populate `modalTrigger`, `modalHeading`, `modalDescription`, and optional `modalCta` from the source.',
+          `⛔ The following ${sourceBackedSections.length} section(s) are SOURCE-BACKED (detected from WordPress blocks) and MUST appear in your output with the exact same \`type\`:`,
+          ...sourceBackedSections.map(
+            (s) =>
+              `   - sectionKey="${s.sectionKey ?? s.type}" type="${s.type}" — DO NOT drop, rename, or merge this section`,
+          ),
         ]
       : []),
     '',
+    '### What you MAY do:',
+    'You MAY fill in missing content fields (headings, image srcs, cta text, colors) from the template source and site context.',
+    'You MAY improve presentation fields (background, textAlign, padding) based on WordPress styling.',
+    '',
+    ...(hasInteractive
+      ? [
+          '### Interactive block types — TYPE IS LOCKED',
+          'Some draft sections are interactive Spectra/UAGB plugin blocks. You MUST output the exact same `type` value:',
+          '- `type: "slider"` → populate `slides[]` with heading, description, optional cta from source.',
+          '- `type: "tabs"` → populate `tabs[]` with label and content from source.',
+          '- `type: "modal"` → populate triggerText, heading, description, optional cta from source.',
+          '- `type: "accordion"` → preserve accordion structure from source.',
+          '',
+        ]
+      : []),
+    '### Draft sections (your output must mirror this structure exactly):',
     '```json',
     JSON.stringify(draftSections, null, 2),
     '```',
@@ -766,6 +803,37 @@ function validateSectionDetailed(
       }
       break;
 
+    case 'accordion':
+      if (!Array.isArray(raw.items)) raw.items = [];
+      raw.items = raw.items
+        .filter((item: unknown) => item && typeof item === 'object')
+        .map((item: any) => ({
+          title: typeof item.title === 'string' ? item.title : '',
+          ...(typeof item.content === 'string'
+            ? { content: item.content }
+            : {}),
+        }))
+        .filter(
+          (item: { title: string; content?: string }) =>
+            item.title.trim() || item.content?.trim(),
+        );
+      break;
+
+    case 'button-group':
+      if (!['left', 'center', 'right'].includes(raw.align)) raw.align = 'left';
+      if (!Array.isArray(raw.buttons)) raw.buttons = [];
+      raw.buttons = raw.buttons
+        .filter((button: unknown) => button && typeof button === 'object')
+        .map((button: any) => ({
+          text: typeof button.text === 'string' ? button.text : '',
+          link: typeof button.link === 'string' ? button.link : '#',
+        }))
+        .filter((button: { text: string; link: string }) => button.text.trim());
+      if (raw.buttons.length === 0) {
+        return { section: null, reason: 'button-group.buttons is required' };
+      }
+      break;
+
     // search, breadcrumb — no required fields
   }
 
@@ -1242,4 +1310,452 @@ function normalizeCssLengthString(value: string): string {
   const normalized = value.trim();
   if (!normalized) return value;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+// ── Presentation-patch mode ────────────────────────────────────────────────
+//
+// Used when a deterministic draft exists (FSE/block theme).
+// AI only fills presentation/content fields per sectionKey — it does NOT
+// decide structure, type, order, or count. Draft is immutable source of truth.
+
+/**
+ * Build a prompt that asks AI to output a ComponentPresentationPlan (patches only).
+ * Used instead of buildVisualPlanPrompt when draftSections are available.
+ */
+export function buildPresentationPatchPrompt(input: {
+  componentName: string;
+  templateSource: string;
+  content: DbContentResult;
+  tokens?: ThemeTokens;
+  draftSections: SectionPlan[];
+  editRequestContextNote?: string;
+}): { systemPrompt: string; userPrompt: string } {
+  const {
+    componentName,
+    templateSource,
+    content,
+    tokens,
+    draftSections,
+    editRequestContextNote,
+  } = input;
+
+  const palette = buildPaletteHint(tokens);
+  const siteCtx = buildSiteContext(content);
+  const imageHints = buildImageSourcesHint(templateSource);
+
+  const draftJson = JSON.stringify(
+    draftSections.map((s) => ({
+      sectionKey: s.sectionKey ?? s.type,
+      type: s.type,
+    })),
+    null,
+    2,
+  );
+
+  const systemPrompt = `You are a WordPress-to-React presentation analyst.
+You are given a FIXED list of sections (the structural source of truth) extracted deterministically from a WordPress block template.
+Your job is to fill in ONLY presentation and content fields for each section — you do NOT decide the section structure, type, or order.
+
+## Your output format: ComponentPresentationPlan
+
+\`\`\`typescript
+interface ComponentPresentationPlan {
+  componentName: string;
+  palette: {
+    background: string; surface: string; text: string; textMuted: string;
+    accent: string; accentText: string; dark?: string; darkText?: string;
+  };
+  patches: SectionPresentationPatch[];
+}
+
+interface SectionPresentationPatch {
+  sectionKey: string;  // MUST match a key from the fixed section list
+
+  // Presentation fields (all optional — only set what you can identify from source):
+  background?: string;       // hex color for this section's background
+  textColor?: string;        // hex
+  textAlign?: "left"|"center"|"right";
+  paddingStyle?: string;     // exact CSS e.g. "4rem 1.5rem"
+  marginStyle?: string;
+  gapStyle?: string;
+  contentWidth?: string;     // e.g. "620px"
+
+  // Content fills (only from template source — do NOT invent):
+  heading?: string;
+  subheading?: string;
+  body?: string;             // may contain inline HTML (<strong>, <em>, links)
+  cta?: { text: string; link: string };
+  imageSrc?: string;         // exact src from source only
+  imageAlt?: string;
+  layout?: "centered"|"left"|"split";   // hero sections only
+  contentAlign?: "center"|"left"|"right"; // cover sections only
+  imagePosition?: "left"|"right";       // media-text only
+  listItems?: string[];
+  title?: string;            // section heading for post-list / card-grid
+  autoplay?: boolean;        // slider
+  triggerText?: string;      // modal trigger button text
+  menuSlug?: string;         // navbar: slug of the menu to display
+  menuColumns?: { title: string; menuSlug: string }[];  // footer
+  copyright?: string;        // footer
+  quote?: string;            // testimonial
+  authorName?: string;       // testimonial
+  authorTitle?: string;      // testimonial
+  showDate?: boolean; showAuthor?: boolean; showCategory?: boolean;
+  showExcerpt?: boolean; showFeaturedImage?: boolean;  // post-list
+}
+\`\`\`
+
+## Hard rules
+- Output exactly ONE patch per section in the fixed list (same count, same order, matching sectionKeys).
+- NEVER add extra patches or omit a patch for a section in the fixed list.
+- NEVER change a section's type — type is fixed by the structure.
+- NEVER invent image URLs, avatar URLs, or placeholder media. If source has no image for a section, omit imageSrc.
+- Text content must come EXACTLY from the template source — no invented headings or body text.
+- Use ONLY hex colors derived from theme tokens or explicit template colors.
+- Output ONLY valid JSON — no markdown fences, no explanation.`;
+
+  const userPrompt = `## Component: ${componentName}
+
+## Fixed section structure (immutable — do NOT change type, order, or count):
+\`\`\`json
+${draftJson}
+\`\`\`
+
+${palette}
+
+${siteCtx}
+
+${imageHints}
+
+${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}## Template source (read for content and presentation details only):
+
+${templateSource}
+
+## Output
+Return a single valid JSON object matching ComponentPresentationPlan.
+Patches array must have exactly ${draftSections.length} items, in the same order as the fixed section list above.
+No markdown, no explanation.`;
+
+  return { systemPrompt, userPrompt };
+}
+
+export interface PresentationPlanParseResult {
+  plan: ComponentPresentationPlan | null;
+  diagnostic?: { reason: string; rawOutput: string };
+}
+
+export interface PresentationPlanParseOptions {
+  expectedSectionKeys?: string[];
+  allowedImageSrcs?: string[];
+}
+
+/**
+ * Parse AI response in patch mode.
+ * Returns null when JSON is invalid, patches are malformed, sectionKey order
+ * diverges from the deterministic draft, or AI references images outside the
+ * template source allowlist.
+ */
+export function parsePresentationPlan(
+  raw: string,
+  componentName: string,
+  options?: PresentationPlanParseOptions,
+): PresentationPlanParseResult {
+  const cleaned = raw
+    .replace(/^```[\w]*\n?/gm, '')
+    .replace(/^```$/gm, '')
+    .trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // try repair
+    for (const candidate of [
+      cleaned.replace(/,\s*([}\]])/g, '$1'), // trailing commas
+      cleaned.replace(/([{,]\s*)(\w+):/g, '$1"$2":'), // unquoted keys
+    ]) {
+      try {
+        parsed = JSON.parse(candidate);
+        break;
+      } catch {
+        // continue
+      }
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      plan: null,
+      diagnostic: { reason: 'invalid JSON or not an object', rawOutput: raw },
+    };
+  }
+
+  if (!Array.isArray(parsed.patches)) {
+    return {
+      plan: null,
+      diagnostic: { reason: 'missing patches array', rawOutput: raw },
+    };
+  }
+
+  const palette = sanitizePalette(parsed.palette);
+  const expectedSectionKeys = options?.expectedSectionKeys ?? [];
+  if (
+    expectedSectionKeys.length > 0 &&
+    parsed.patches.length !== expectedSectionKeys.length
+  ) {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: `patch count mismatch: expected ${expectedSectionKeys.length}, got ${parsed.patches.length}`,
+        rawOutput: raw,
+      },
+    };
+  }
+
+  const seenKeys = new Set<string>();
+  const patches: SectionPresentationPatch[] = [];
+  for (let index = 0; index < parsed.patches.length; index++) {
+    const current = parsed.patches[index];
+    if (!current || typeof current !== 'object') {
+      return {
+        plan: null,
+        diagnostic: {
+          reason: `patch at index ${index} is not an object`,
+          rawOutput: raw,
+        },
+      };
+    }
+    if (typeof current.sectionKey !== 'string' || !current.sectionKey.trim()) {
+      return {
+        plan: null,
+        diagnostic: {
+          reason: `patch at index ${index} is missing sectionKey`,
+          rawOutput: raw,
+        },
+      };
+    }
+
+    const sectionKey = current.sectionKey.trim();
+    if (seenKeys.has(sectionKey)) {
+      return {
+        plan: null,
+        diagnostic: {
+          reason: `duplicate patch sectionKey "${sectionKey}"`,
+          rawOutput: raw,
+        },
+      };
+    }
+    seenKeys.add(sectionKey);
+
+    if (
+      expectedSectionKeys.length > 0 &&
+      sectionKey !== expectedSectionKeys[index]
+    ) {
+      return {
+        plan: null,
+        diagnostic: {
+          reason: `patch order mismatch at index ${index}: expected "${expectedSectionKeys[index]}", got "${sectionKey}"`,
+          rawOutput: raw,
+        },
+      };
+    }
+
+    const patch: SectionPresentationPatch = { sectionKey };
+    if (typeof current.background === 'string')
+      patch.background = current.background;
+    if (typeof current.textColor === 'string')
+      patch.textColor = current.textColor;
+    if (['left', 'center', 'right'].includes(current.textAlign)) {
+      patch.textAlign = current.textAlign;
+    }
+    if (typeof current.paddingStyle === 'string') {
+      patch.paddingStyle = current.paddingStyle;
+    }
+    if (typeof current.marginStyle === 'string') {
+      patch.marginStyle = current.marginStyle;
+    }
+    if (typeof current.gapStyle === 'string') patch.gapStyle = current.gapStyle;
+    if (typeof current.contentWidth === 'string') {
+      patch.contentWidth = current.contentWidth;
+    }
+    if (Array.isArray(current.customClassNames)) {
+      patch.customClassNames = Array.from(
+        new Set(
+          current.customClassNames
+            .filter(
+              (value: unknown): value is string => typeof value === 'string',
+            )
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      );
+    }
+    if (typeof current.heading === 'string') patch.heading = current.heading;
+    if (typeof current.subheading === 'string') {
+      patch.subheading = current.subheading;
+    }
+    if (typeof current.body === 'string') patch.body = current.body;
+    if (
+      current.cta &&
+      typeof current.cta === 'object' &&
+      typeof current.cta.text === 'string' &&
+      typeof current.cta.link === 'string'
+    ) {
+      patch.cta = current.cta;
+    }
+    if (typeof current.imageSrc === 'string') {
+      if (!isAllowedStaticImage(current.imageSrc, options?.allowedImageSrcs)) {
+        return {
+          plan: null,
+          diagnostic: {
+            reason: `patch "${sectionKey}" has imageSrc outside allowed template sources`,
+            rawOutput: raw,
+          },
+        };
+      }
+      patch.imageSrc = current.imageSrc.trim();
+    }
+    if (typeof current.imageAlt === 'string') patch.imageAlt = current.imageAlt;
+    if (typeof current.title === 'string') patch.title = current.title;
+    if (typeof current.subtitle === 'string') patch.subtitle = current.subtitle;
+    if (typeof current.quote === 'string') patch.quote = current.quote;
+    if (typeof current.authorName === 'string')
+      patch.authorName = current.authorName;
+    if (typeof current.authorTitle === 'string') {
+      patch.authorTitle = current.authorTitle;
+    }
+    if (typeof current.authorAvatar === 'string') {
+      if (
+        !isAllowedStaticImage(current.authorAvatar, options?.allowedImageSrcs)
+      ) {
+        return {
+          plan: null,
+          diagnostic: {
+            reason: `patch "${sectionKey}" has authorAvatar outside allowed template sources`,
+            rawOutput: raw,
+          },
+        };
+      }
+      patch.authorAvatar = current.authorAvatar.trim();
+    }
+    if (typeof current.triggerText === 'string') {
+      patch.triggerText = current.triggerText;
+    }
+    if (typeof current.description === 'string') {
+      patch.description = current.description;
+    }
+    if (typeof current.menuSlug === 'string') patch.menuSlug = current.menuSlug;
+    if (typeof current.copyright === 'string') {
+      patch.copyright = current.copyright;
+    }
+    if (typeof current.brandDescription === 'string') {
+      patch.brandDescription = current.brandDescription;
+    }
+    if (Array.isArray(current.menuColumns)) {
+      patch.menuColumns = current.menuColumns
+        .filter(
+          (value: unknown): value is { title: string; menuSlug: string } =>
+            !!value &&
+            typeof value === 'object' &&
+            typeof (value as any).title === 'string' &&
+            typeof (value as any).menuSlug === 'string',
+        )
+        .map((value) => ({
+          title: value.title.trim(),
+          menuSlug: value.menuSlug.trim(),
+        }))
+        .filter((value) => value.title && value.menuSlug);
+    }
+    if (Array.isArray(current.listItems)) {
+      patch.listItems = current.listItems
+        .filter((value: unknown): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+    if (['centered', 'left', 'split'].includes(current.layout)) {
+      patch.layout = current.layout;
+    }
+    if (['center', 'left', 'right'].includes(current.contentAlign)) {
+      patch.contentAlign = current.contentAlign;
+    }
+    if (['left', 'right'].includes(current.imagePosition)) {
+      patch.imagePosition = current.imagePosition;
+    }
+    if (typeof current.autoplay === 'boolean')
+      patch.autoplay = current.autoplay;
+    if (typeof current.sticky === 'boolean') patch.sticky = current.sticky;
+    if (typeof current.showDate === 'boolean')
+      patch.showDate = current.showDate;
+    if (typeof current.showAuthor === 'boolean') {
+      patch.showAuthor = current.showAuthor;
+    }
+    if (typeof current.showCategory === 'boolean') {
+      patch.showCategory = current.showCategory;
+    }
+    if (typeof current.showExcerpt === 'boolean') {
+      patch.showExcerpt = current.showExcerpt;
+    }
+    if (typeof current.showFeaturedImage === 'boolean') {
+      patch.showFeaturedImage = current.showFeaturedImage;
+    }
+    if (current.headingStyle && typeof current.headingStyle === 'object') {
+      patch.headingStyle = current.headingStyle;
+    }
+    if (
+      current.subheadingStyle &&
+      typeof current.subheadingStyle === 'object'
+    ) {
+      patch.subheadingStyle = current.subheadingStyle;
+    }
+    if (current.bodyStyle && typeof current.bodyStyle === 'object') {
+      patch.bodyStyle = current.bodyStyle;
+    }
+    if (Array.isArray(current.columnWidths)) {
+      patch.columnWidths = current.columnWidths
+        .filter((value: unknown): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+    if (current.image && typeof current.image.src === 'string') {
+      if (!isAllowedStaticImage(current.image.src, options?.allowedImageSrcs)) {
+        return {
+          plan: null,
+          diagnostic: {
+            reason: `patch "${sectionKey}" has image.src outside allowed template sources`,
+            rawOutput: raw,
+          },
+        };
+      }
+      patch.image = {
+        src: current.image.src.trim(),
+        alt: typeof current.image.alt === 'string' ? current.image.alt : '',
+        position: current.image.position === 'right' ? 'right' : 'below',
+      };
+    }
+    if (typeof current.dimRatio === 'number') patch.dimRatio = current.dimRatio;
+    if (typeof current.minHeight === 'string')
+      patch.minHeight = current.minHeight;
+    patches.push(patch);
+  }
+
+  if (
+    expectedSectionKeys.length > 0 &&
+    patches.length !== expectedSectionKeys.length
+  ) {
+    return {
+      plan: null,
+      diagnostic: {
+        reason: `sanitized patch count mismatch: expected ${expectedSectionKeys.length}, got ${patches.length}`,
+        rawOutput: raw,
+      },
+    };
+  }
+
+  return {
+    plan: {
+      componentName: parsed.componentName ?? componentName,
+      palette,
+      patches,
+    },
+  };
 }

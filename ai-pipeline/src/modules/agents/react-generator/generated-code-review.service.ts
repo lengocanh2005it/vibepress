@@ -271,6 +271,7 @@ Rules:
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
+- If the approved plan or preserved HTML body includes WordPress/Spectra-style tabs, do flag tabs that behave like plain links/text instead of real tabs. Match WordPress interaction cues: if labels are underlined at rest, hover/focus should remove that underline, and keyboard focus should show a visible tab border/outline/ring.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
 - Severity must be one of: "high", "medium", "low".
@@ -307,6 +308,8 @@ ${component.code}
         switch (value) {
           case 'siteInfo':
             return 'site-info';
+          case 'footerLinks':
+            return 'footer-links';
           case 'postDetail':
             return 'post-detail';
           case 'pageDetail':
@@ -319,6 +322,7 @@ ${component.code}
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
     if (normalized.has('menus')) lines.push('- /api/menus');
+    if (normalized.has('footer-links')) lines.push('- /api/footer-links');
     if (normalized.has('posts') || normalized.has('authorDetail'))
       lines.push('- /api/posts');
     if (normalized.has('pages')) lines.push('- /api/pages');
@@ -383,6 +387,21 @@ ${component.code}
     return lines.length > 0 ? lines.join('\n') : '- (none)';
   }
 
+  private formatSourceLayoutSummary(layout: {
+    type?: string;
+    contentSize?: string;
+    wideSize?: string;
+  }): string {
+    const parts = [layout.type].filter(Boolean);
+    if (layout.contentSize) {
+      parts.push(`content=${layout.contentSize}`);
+    }
+    if (layout.wideSize) {
+      parts.push(`wide=${layout.wideSize}`);
+    }
+    return parts.join(',');
+  }
+
   private buildVisualSectionDetailLines(
     component: GeneratedComponent,
     contract: PlanResult[number] | null,
@@ -402,9 +421,28 @@ ${component.code}
           return `- card-grid title="${section.title ?? ''}" cards=${section.cards.length}${headings ? ` headings=${headings}` : ''}`;
         }
         if (section.type === 'hero') {
-          return runtimeHeading
-            ? '- hero heading=(runtime title allowed)'
-            : `- hero heading="${section.heading}"`;
+          const parts = [
+            runtimeHeading
+              ? '- hero heading=(runtime title allowed)'
+              : `- hero heading="${section.heading}"`,
+            `layout=${section.layout}`,
+          ];
+          if (section.subheading) {
+            parts.push(`subheading="${section.subheading}"`);
+          }
+          if (section.cta?.text) {
+            parts.push(`ctaText="${section.cta.text}"`);
+          }
+          if (section.contentWidth) {
+            parts.push(`contentWidth="${section.contentWidth}"`);
+          }
+          if (section.paddingStyle) {
+            parts.push(`paddingStyle="${section.paddingStyle}"`);
+          }
+          if (section.gapStyle) {
+            parts.push(`gapStyle="${section.gapStyle}"`);
+          }
+          return parts.join(' ');
         }
         if (section.type === 'cover') {
           return runtimeHeading
@@ -418,6 +456,50 @@ ${component.code}
         }
         if (section.type === 'post-list') {
           return `- post-list layout=${section.layout}`;
+        }
+        if (section.type === 'tabs') {
+          const labels = section.tabs.map((t) => t.label).join(' | ');
+          return `- tabs tabCount=${section.tabs.length}${labels ? ` labels="${labels}"` : ''}`;
+        }
+        if (section.type === 'slider') {
+          const parts = [`- slider slideCount=${section.slides.length}`];
+          const headings = section.slides
+            .map((s) => s.heading?.trim())
+            .filter(Boolean)
+            .join(' | ');
+          if (headings) {
+            parts.push(`headings="${headings}"`);
+          }
+          if (typeof section.autoplay === 'boolean') {
+            parts.push(`autoplay=${section.autoplay}`);
+          }
+          if (section.contentWidth) {
+            parts.push(`contentWidth="${section.contentWidth}"`);
+          }
+          if (section.paddingStyle) {
+            parts.push(`paddingStyle="${section.paddingStyle}"`);
+          }
+          if (section.gapStyle) {
+            parts.push(`gapStyle="${section.gapStyle}"`);
+          }
+          if (section.sourceLayout) {
+            parts.push(
+              `sourceLayout=${this.formatSourceLayoutSummary(section.sourceLayout)}`,
+            );
+          }
+          return parts.join(' ');
+        }
+        if (section.type === 'modal') {
+          return `- modal triggerText="${section.triggerText ?? ''}"${section.heading ? ` heading="${section.heading}"` : ''}`;
+        }
+        if (section.type === 'accordion') {
+          return `- accordion itemCount=${section.items.length}`;
+        }
+        if (section.type === 'button-group') {
+          const labels = section.buttons
+            .map((button) => button.text)
+            .join(' | ');
+          return `- button-group buttonCount=${section.buttons.length}${labels ? ` labels="${labels}"` : ''}`;
         }
         return `- ${section.type}`;
       })
@@ -569,6 +651,63 @@ ${component.code}
       }
     }
 
+    for (const { section, sectionKey } of trackedSections) {
+      const needsStructuredStackSpacing =
+        (section.type === 'hero' &&
+          section.layout !== 'split' &&
+          !!section.subheading?.trim() &&
+          !!section.cta?.text?.trim()) ||
+        (section.type === 'newsletter' &&
+          !!section.subheading?.trim() &&
+          !!section.buttonText?.trim());
+      if (!needsStructuredStackSpacing) continue;
+
+      const sectionMarkup = this.findTrackedSectionMarkup(
+        component.code,
+        sectionKey,
+      );
+      if (!sectionMarkup) continue;
+
+      if (this.sectionMarkupHasGenericSpacerDivs(sectionMarkup)) {
+        issues.push({
+          severity: 'high',
+          message: `Approved ${section.type} section "${sectionKey}" relies on empty spacer divs instead of preserving the source stack spacing between heading/body/CTA. Replace placeholder blocks like \`<div className="h-[1rem]" />\` with real gap/margin spacing on the content elements.`,
+        });
+        continue;
+      }
+
+      if (!this.sectionMarkupHasStructuredStackSpacing(sectionMarkup)) {
+        issues.push({
+          severity: 'high',
+          message: `Approved ${section.type} section "${sectionKey}" materially compresses the vertical rhythm of its heading/body/CTA stack. Keep visible separation with real \`gap-*\`, \`space-y-*\`, or explicit margins so the CTA does not sit flush against the paragraph.`,
+        });
+      }
+    }
+
+    for (const expectation of component.requiredSectionExpectations ?? []) {
+      const normalizedSnippets = [
+        ...new Set(
+          (expectation.requiredTextSnippets ?? [])
+            .map((value) => this.normalizeForTextMatch(value))
+            .filter(Boolean),
+        ),
+      ];
+      if (normalizedSnippets.length === 0) continue;
+      const matched = normalizedSnippets.filter((snippet) =>
+        normalizedCode.includes(snippet),
+      );
+      const minMatches =
+        expectation.minTextMatches ?? normalizedSnippets.length;
+      if (matched.length >= minMatches) continue;
+      const missing = normalizedSnippets.filter(
+        (snippet) => !matched.includes(snippet),
+      );
+      issues.push({
+        severity: 'high',
+        message: `Approved ${expectation.sectionType} section "${expectation.sectionKey}" is materially incomplete in generated code: matched ${matched.length}/${minMatches} required source snippet(s). Missing: ${missing.join(', ')}.`,
+      });
+    }
+
     const cardGrids = sections.filter(
       (section): section is CardGridSection => section.type === 'card-grid',
     );
@@ -592,6 +731,77 @@ ${component.code}
       });
     }
 
+    const requiredMenuSlug =
+      component.requiredMenuSlug?.trim() ||
+      sections
+        .find(
+          (
+            section,
+          ): section is Extract<
+            (typeof sections)[number],
+            { type: 'navbar' }
+          > => section.type === 'navbar' && !!section.menuSlug?.trim(),
+        )
+        ?.menuSlug?.trim();
+    const isHeaderLikePartial = /^(Header|Navigation|Nav)$/i.test(
+      contract?.componentName ?? component.name,
+    );
+    const declaresMenus = (
+      contract?.dataNeeds ??
+      component.dataNeeds ??
+      []
+    ).some((need) => /^(menus|menu)$/i.test(need));
+    if (isHeaderLikePartial && declaresMenus && requiredMenuSlug) {
+      const hasRequiredMenuSelection =
+        new RegExp(
+          `location\\s*===\\s*['"]${this.escapeRegExp(requiredMenuSlug)}['"]`,
+        ).test(component.code) ||
+        new RegExp(
+          `slug\\s*===\\s*['"]${this.escapeRegExp(requiredMenuSlug)}['"]`,
+        ).test(component.code);
+      if (!hasRequiredMenuSelection) {
+        issues.push({
+          severity: 'high',
+          message: `Approved header/navigation menu slug is \`${requiredMenuSlug}\`, but the generated code does not prefer that slug before generic fallbacks. Select \`menus.find(m => m.location === "${requiredMenuSlug}") ?? menus.find(m => m.slug === "${requiredMenuSlug}")\` before falling back to \`primary\` or \`menus[0]\`.`,
+        });
+      }
+    }
+
+    const isFooterPartial = /^(Footer)(?:[-_].+)?$/i.test(
+      contract?.componentName ?? component.name,
+    );
+    if (isFooterPartial) {
+      if (!/fetch\(\s*['"`]\/api\/footer-links\b/.test(component.code)) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Footer partial must fetch `/api/footer-links` and render footer columns from that endpoint instead of hardcoding plain text column items.',
+        });
+      }
+
+      const hasClickableFooterLinkRender =
+        /<Link\b[\s\S]{0,240}?\bto=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\}/.test(
+          component.code,
+        ) ||
+        /<Link\b[\s\S]{0,240}?\bto=\{(?:[^}]*toAppPath\((?:link|item)\.url\)[^}]*)\}/.test(
+          component.code,
+        ) ||
+        /<a\b[\s\S]{0,240}?\bhref=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\}/.test(
+          component.code,
+        );
+      const hasPlainTextFooterItems =
+        /<span\b[\s\S]{0,240}?>\s*\{(?:link|item)\.(?:label|title)\}\s*<\/span>/.test(
+          component.code,
+        );
+      if (!hasClickableFooterLinkRender || hasPlainTextFooterItems) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Footer link columns must render each `/api/footer-links` item as a clickable `<Link>` or `<a>` using its `url`. Plain text `<span>{link.label}</span>` footer items are not acceptable.',
+        });
+      }
+    }
+
     return issues;
   }
 
@@ -603,6 +813,39 @@ ${component.code}
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private findTrackedSectionMarkup(
+    code: string,
+    sectionKey: string,
+  ): string | null {
+    const pattern = new RegExp(
+      `<section\\b[^>]*data-vp-section-key=["']${this.escapeRegExp(
+        sectionKey,
+      )}["'][\\s\\S]{0,8000}?<\\/section>`,
+      'i',
+    );
+    return code.match(pattern)?.[0] ?? null;
+  }
+
+  private sectionMarkupHasStructuredStackSpacing(markup: string): boolean {
+    return (
+      /\b(?:gap|space-y)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)/.test(markup) ||
+      /\b(?:mt|mb)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)/.test(markup) ||
+      /\b(?:gap|rowGap|marginTop|marginBottom)\s*:\s*['"][^'"]+['"]/.test(
+        markup,
+      )
+    );
+  }
+
+  private sectionMarkupHasGenericSpacerDivs(markup: string): boolean {
+    return /<div\b[^>]*className="[^"]*\b(?:h|min-h)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)[^"]*"[^>]*>\s*<\/div>/i.test(
+      markup,
+    );
   }
 
   private findCanonicalTextLinkSnippetsWithoutHoverUnderline(
@@ -685,7 +928,7 @@ ${component.code}
       const last = matches.at(-1);
       if (last?.index == null) return false;
       const tail = before.slice(last.index);
-      return /:\s*(?:\(\s*)?(?:<>\s*)?$/.test(tail);
+      return /:\s*(?:\(\s*)?(?:\{\s*)?(?:<>\s*)?$/.test(tail);
     };
 
     return (
@@ -798,6 +1041,7 @@ ${component.code}
       'duplicated route prefix',
       'extra `/page` segment',
       'menu links must use canonical `item.url` directly',
+      'approved header/navigation menu slug',
       'invented trailing auxiliary section',
       'auxiliary/footer/sidebar-like page sections are invalid unless source-backed',
     ];

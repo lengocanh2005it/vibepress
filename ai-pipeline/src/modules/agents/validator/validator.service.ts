@@ -38,6 +38,32 @@ export interface CodeValidationContext {
   requireCommentForm?: boolean;
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  requiredTrackedSectionKeys?: string[];
+  requiredSectionExpectations?: Array<{
+    sectionKey: string;
+    sectionType: string;
+    requiredTextSnippets?: string[];
+    minTextMatches?: number;
+  }>;
+  requiredSectionPresentationHints?: Array<{
+    sectionKey: string;
+    sectionType: string;
+    textAlign?: 'left' | 'center' | 'right';
+    contentWidth?: string;
+    paddingStyle?: string;
+    gapStyle?: string;
+    headingLineHeight?: string;
+    bodyLineHeight?: string;
+    requireStructuredStackSpacing?: boolean;
+    forbidGenericSpacerDivs?: boolean;
+    requireVerticalBreathingRoom?: boolean;
+    requireAnimatedTransition?: boolean;
+    requireEdgeControls?: boolean;
+    requireOverlayBackdrop?: boolean;
+    requireDialogSemantics?: boolean;
+    requireEscapeClose?: boolean;
+  }>;
+  requiredMenuSlug?: string;
 }
 
 export interface ComponentValidationFailure {
@@ -97,6 +123,10 @@ export class ValidatorService {
         isSubComponent: comp.isSubComponent,
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
+        requiredTrackedSectionKeys: comp.requiredTrackedSectionKeys,
+        requiredSectionPresentationHints: comp.requiredSectionPresentationHints,
+        requiredMenuSlug: comp.requiredMenuSlug,
+        requiredSectionExpectations: comp.requiredSectionExpectations,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -214,10 +244,31 @@ export class ValidatorService {
       .join('\n');
   }
 
+  normalizeApiDateRendering(raw: string): string {
+    return raw
+      .replace(
+        /new\s+Date\(\s*([A-Za-z_$][\w$]*\.date)\s*\)\.toLocaleDateString\([^)]*\)/g,
+        '$1',
+      )
+      .replace(
+        /new\s+Date\(\s*([A-Za-z_$][\w$]*\.date)\s*\)\.toLocaleString\([^)]*\)/g,
+        '$1',
+      )
+      .replace(
+        /Intl\.DateTimeFormat\([^)]*\)\.format\(\s*new\s+Date\(\s*([A-Za-z_$][\w$]*\.date)\s*\)\s*\)/g,
+        '$1',
+      )
+      .replace(
+        /Intl\.DateTimeFormat\([^)]*\)\.format\(\s*([A-Za-z_$][\w$]*\.date)\s*\)/g,
+        '$1',
+      );
+  }
+
   sanitizeGeneratedCode(raw: string): string {
     let code = this.removeUnusedImports(raw);
     code = this.sanitizeTailwindClasses(code);
     code = this.stripDebugStatements(code);
+    code = this.normalizeApiDateRendering(code);
     code = this.normalizePlainTextPostMetaArchiveLinks(code);
     code = this.repairMalformedPostMetaTernaries(code);
     code = this.promotePlainTextPostMetaLinks(code);
@@ -272,13 +323,20 @@ export class ValidatorService {
     }
 
     // 4. External CSS / inline <style>
+    const codeWithoutAllowedPackageCss = code.replace(
+      /import\s+['"]swiper\/css(?:\/[a-z-]+)*['"];?\s*/g,
+      '',
+    );
     if (
-      /import\s+(?:.+?\s+from\s+)?['"][^'"]+\.s?css['"];?/s.test(code) ||
+      /import\s+(?:.+?\s+from\s+)?['"][^'"]+\.s?css['"];?/s.test(
+        codeWithoutAllowedPackageCss,
+      ) ||
       /<style[\s>]/i.test(code)
     ) {
       return {
         isValid: false,
-        error: 'External CSS or inline <style> tags are not allowed.',
+        error:
+          'External CSS or inline <style> tags are not allowed, except approved package CSS imports such as `swiper/css`.',
       };
     }
 
@@ -391,8 +449,189 @@ export class ValidatorService {
       'post-detail': 'postDetail',
       'page-detail': 'pageDetail',
       'site-info': 'siteInfo',
+      'footer-links': 'footerLinks',
     };
     const violations: string[] = [];
+    const requiredTrackedSectionKeys = [
+      ...new Set(
+        (context.requiredTrackedSectionKeys ?? [])
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (requiredTrackedSectionKeys.length > 0) {
+      const missingTrackedSectionKeys = requiredTrackedSectionKeys.filter(
+        (sectionKey) => !code.includes(`data-vp-section-key="${sectionKey}"`),
+      );
+      if (missingTrackedSectionKeys.length > 0) {
+        violations.push(
+          `Component is missing required approved section marker(s): ${missingTrackedSectionKeys.join(', ')}. Re-generate the full component and preserve every approved source-backed section with its exact \`data-vp-section-key\` marker before continuing.`,
+        );
+      }
+    }
+    const normalizedCode = this.normalizeForTextMatch(code);
+    for (const expectation of context.requiredSectionExpectations ?? []) {
+      const normalizedSnippets = [
+        ...new Set(
+          (expectation.requiredTextSnippets ?? [])
+            .map((value) => this.normalizeForTextMatch(value))
+            .filter(Boolean),
+        ),
+      ];
+      if (normalizedSnippets.length === 0) continue;
+      const matchedSnippets = normalizedSnippets.filter((snippet) =>
+        normalizedCode.includes(snippet),
+      );
+      const requiredMatches =
+        expectation.minTextMatches ?? normalizedSnippets.length;
+      if (matchedSnippets.length >= requiredMatches) continue;
+      const missingSnippets = normalizedSnippets.filter(
+        (snippet) => !matchedSnippets.includes(snippet),
+      );
+      violations.push(
+        `Approved ${expectation.sectionType} section "${expectation.sectionKey}" is materially incomplete: matched ${matchedSnippets.length}/${requiredMatches} required source snippet(s). Missing: ${missingSnippets
+          .slice(0, 8)
+          .map((value) => `\`${value}\``)
+          .join(', ')}.`,
+      );
+    }
+    const requiresSwiperSlider = (
+      context.requiredSectionPresentationHints ?? []
+    ).some((hint) => hint.sectionType === 'slider');
+    if (requiresSwiperSlider && !this.codeUsesSwiperReactLibrary(code)) {
+      violations.push(
+        'Approved slider sections must use Swiper (`swiper/react`) with the corresponding Swiper CSS imports instead of a hand-rolled carousel implementation.',
+      );
+    }
+    for (const hint of context.requiredSectionPresentationHints ?? []) {
+      const sectionMarkup = this.findTrackedSectionMarkup(
+        code,
+        hint.sectionKey,
+      );
+      if (!sectionMarkup) continue;
+      if (hint.textAlign === 'left' && /\btext-center\b/.test(sectionMarkup)) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must preserve a left-aligned reading column from the source/plan. Do not center the title/meta cluster independently; keep it on the same left edge as the constrained content column.`,
+        );
+      }
+      if (
+        hint.textAlign === 'center' &&
+        !(
+          /\btext-center\b/.test(sectionMarkup) ||
+          (hint.sectionType === 'button-group' &&
+            /\bjustify-center\b/.test(sectionMarkup))
+        )
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must preserve centered alignment from the source/plan. Add real \`text-center\` alignment to the rendered heading/body cluster instead of defaulting to left-aligned text.`,
+        );
+      }
+      if (hint.textAlign === 'right' && !/\btext-right\b/.test(sectionMarkup)) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must preserve right-aligned text from the source/plan. Add real \`text-right\` alignment to the rendered heading/body cluster.`,
+        );
+      }
+      if (
+        hint.contentWidth &&
+        !this.sectionMarkupIncludesContentWidth(
+          sectionMarkup,
+          hint.contentWidth,
+        )
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must preserve its constrained content width of \`${hint.contentWidth}\`. Keep an inner wrapper with that exact readable max width instead of stretching the text cluster across the full section.`,
+        );
+      }
+      if (
+        hint.headingLineHeight &&
+        !this.sectionMarkupIncludesLineHeight(
+          sectionMarkup,
+          hint.headingLineHeight,
+        )
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" is missing its heading line-height override \`${hint.headingLineHeight}\`. Apply the plan's heading typography instead of falling back to a generic heading rhythm.`,
+        );
+      }
+      if (
+        hint.bodyLineHeight &&
+        !this.sectionMarkupIncludesLineHeight(
+          sectionMarkup,
+          hint.bodyLineHeight,
+        )
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" is missing its body line-height override \`${hint.bodyLineHeight}\`. Apply the plan's body/subheading typography instead of using only the root default line height.`,
+        );
+      }
+      if (
+        hint.requireStructuredStackSpacing &&
+        !this.sectionMarkupHasStructuredStackSpacing(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must preserve visible vertical spacing between heading/body/CTA. Use real stack spacing (\`gap-*\`, \`space-y-*\`, or explicit margins) on the content elements instead of compressing the CTA directly against the text.`,
+        );
+      }
+      if (
+        hint.forbidGenericSpacerDivs &&
+        this.sectionMarkupHasGenericSpacerDivs(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" uses generic empty spacer divs for layout. Replace placeholder blocks like \`<div className="h-[1rem]" />\` with real spacing on the text/CTA stack so the source spacing is preserved structurally.`,
+        );
+      }
+      if (
+        hint.requireVerticalBreathingRoom &&
+        !this.sectionMarkupHasVerticalBreathingRoom(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" needs more vertical breathing room. Avoid collapsed \`py-0\` / \`pt-0\` / \`pb-0\` spacing on standalone interactive sections; use non-zero section padding so adjacent blocks do not stick together.`,
+        );
+      }
+      if (
+        hint.requireAnimatedTransition &&
+        !this.sectionMarkupHasAnimatedTransition(
+          sectionMarkup,
+          hint.sectionType,
+        )
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must use a visible animated state transition. Do not instantly swap content; animate the section with opacity/translate/scale classes plus a real transition duration.`,
+        );
+      }
+      if (
+        hint.requireEdgeControls &&
+        !this.sectionMarkupHasEdgeControls(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must include visible previous/next controls near the left and right edges of the slider, not dot indicators alone.`,
+        );
+      }
+      if (
+        hint.requireOverlayBackdrop &&
+        !this.sectionMarkupHasOverlayBackdrop(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must render a real full-screen backdrop/overlay around the active panel, not just a floating box.`,
+        );
+      }
+      if (
+        hint.requireDialogSemantics &&
+        !this.sectionMarkupHasDialogSemantics(sectionMarkup)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must include dialog semantics on the modal panel such as \`role="dialog"\` and \`aria-modal="true"\`.`,
+        );
+      }
+      if (
+        hint.requireEscapeClose &&
+        !this.codeHasEscapeCloseHandling(code, hint.sectionKey)
+      ) {
+        violations.push(
+          `Approved ${hint.sectionType} section "${hint.sectionKey}" must support closing on the Escape key instead of relying only on a click target.`,
+        );
+      }
+    }
     const dataNeeds = new Set(
       (context.dataNeeds ?? []).map((n) => DATA_NEED_ALIASES[n] ?? n),
     );
@@ -453,6 +692,14 @@ export class ValidatorService {
     if (plainTextPostMetaLinks.length > 0) {
       violations.push(
         `Post meta author/category labels must link to canonical archive routes when \`authorSlug\` or \`categorySlugs[0]\` already exists. Plain-text \`post.author\` is only allowed when it is the actual heading/title content (for example an \`<h1>\` on author/archive/detail views). Do not render \`post.author\` or \`post.categories[0]\` as plain text spans in post listings/meta rows. Offending snippet(s): ${plainTextPostMetaLinks.join(' | ')}`,
+      );
+    }
+    const localizedDateFormattingMatch = code.match(
+      /(?:new\s+Date\(\s*[A-Za-z_$][\w$]*\.date\s*\)\s*\.\s*toLocale(?:DateString|String)\s*\(|Intl\.DateTimeFormat\([^)]*\)\.format\(\s*(?:new\s+Date\(\s*)?[A-Za-z_$][\w$]*\.date)/,
+    );
+    if (localizedDateFormattingMatch) {
+      violations.push(
+        'Date formatting contract violated: do not reformat API date strings with `new Date(...).toLocaleDateString()`, `toLocaleString()`, or `Intl.DateTimeFormat(...)`. Render `post.date` / `comment.date` directly so the React output preserves the WordPress/source display format.',
       );
     }
 
@@ -532,7 +779,7 @@ export class ValidatorService {
       }
       if (this.fetchesSharedChromeData(code)) {
         violations.push(
-          'Layout data contract violated: page components must NOT fetch `/api/site-info` or `/api/menus` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
+          'Layout data contract violated: page components must NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
         );
       }
       if (this.usesSharedChromeData(code)) {
@@ -594,12 +841,13 @@ export class ValidatorService {
           code,
         );
       if (
+        isHeaderLikePartial &&
         dataNeeds.has('menus') &&
         !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) &&
         !/\bmenu\.items\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
+          'Shared chrome contract violated: Header/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
         );
       }
       if (usesSiteTitle && !hasHomeLinkForBrand) {
@@ -624,7 +872,27 @@ export class ValidatorService {
       }
       if (/No menus available/i.test(code)) {
         violations.push(
-          'Shared chrome contract violated: do not emit `No menus available` placeholders in Header/Footer/Navigation partials. Render the API menus or a structurally empty nav.',
+          'Shared chrome contract violated: do not emit `No menus available` placeholders in Header/Footer/Navigation partials. Render the API data or a structurally empty container.',
+        );
+      }
+      if (isFooterPartial && dataNeeds.has('menus')) {
+        violations.push(
+          'Shared chrome contract violated: Footer must not declare or fetch `menus`. Footer owns only `siteInfo` and `footerLinks`.',
+        );
+      }
+      if (
+        isHeaderLikePartial &&
+        dataNeeds.has('menus') &&
+        context.requiredMenuSlug &&
+        !new RegExp(
+          `location\\s*===\\s*['"]${this.escapeRegExp(context.requiredMenuSlug)}['"]`,
+        ).test(code) &&
+        !new RegExp(
+          `slug\\s*===\\s*['"]${this.escapeRegExp(context.requiredMenuSlug)}['"]`,
+        ).test(code)
+      ) {
+        violations.push(
+          `Shared chrome contract violated: Header/Navigation partial must prefer the approved menu slug \`${context.requiredMenuSlug}\` before any generic fallback. Select \`menus.find(m => m.location === "${context.requiredMenuSlug}") ?? menus.find(m => m.slug === "${context.requiredMenuSlug}")\` first.`,
         );
       }
       if (
@@ -642,17 +910,36 @@ export class ValidatorService {
         !/fetch\(\s*['"`]\/api\/footer-links\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and use those columns as the fallback when `/api/menus` has no footer/social groups.',
+          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and render footer columns from that endpoint.',
         );
       }
       if (
         isFooterPartial &&
-        dataNeeds.has('menus') &&
-        !/location\s*!==\s*['"]primary['"]/.test(code) &&
-        !/slug\s*!==\s*['"]primary['"]/.test(code)
+        /<span\b[\s\S]{0,240}?>\s*\{(?:link|item)\.(?:label|title)\}\s*<\/span>/.test(
+          code,
+        ) &&
+        !/(?:<Link\b[\s\S]{0,240}?\bto=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\}|<a\b[\s\S]{0,240}?\bhref=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\})/.test(
+          code,
+        )
       ) {
         violations.push(
-          'Shared chrome contract violated: Footer must exclude the primary navigation menu (`location !== "primary"` and slug fallback) and render only footer/social menu groups.',
+          "Shared chrome contract violated: Footer link items from `/api/footer-links` must render as clickable `<Link>` or `<a>` elements using each item's `url`, not as plain text `<span>` labels.",
+        );
+      }
+      if (
+        isFooterPartial &&
+        /\bfooterColumns\b/.test(code) &&
+        !/(?:<Link\b[\s\S]{0,240}?\bto=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\}|<a\b[\s\S]{0,240}?\bhref=\{(?:[^}]*\b(?:link|item)\.url[^}]*)\})/.test(
+          code,
+        )
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Footer columns are present, but the code does not render their entries with `link.url` as clickable navigation. Map `col.links[]` to real `<Link>` or `<a>` elements.',
+        );
+      }
+      if (isFooterPartial && /fetch\(\s*['"`]\/api\/menus\b/.test(code)) {
+        violations.push(
+          'Shared chrome contract violated: Footer must not fetch `/api/menus`. Use `/api/footer-links` for footer columns instead.',
         );
       }
     }
@@ -714,7 +1001,14 @@ export class ValidatorService {
     // This avoids false positives when static text content in section headings or
     // body copy happens to contain the word (e.g. "Browse all pages and posts.").
     // "all pages." → `pages.` is followed by a space, not \w → no match.
-    const dataVars = ['menus', 'posts', 'pages', 'siteInfo'];
+    const dataVars = [
+      'menus',
+      'posts',
+      'pages',
+      'siteInfo',
+      'footerColumns',
+      'footerLinks',
+    ];
     const missingState: string[] = [];
     for (const varName of dataVars) {
       const jsUsage = new RegExp(
@@ -1030,6 +1324,166 @@ export class ValidatorService {
     }
 
     return false;
+  }
+
+  private normalizeForTextMatch(raw: string): string {
+    return raw
+      .replace(/&amp;/gi, '&')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&quot;/gi, '"')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  private findTrackedSectionMarkup(
+    code: string,
+    sectionKey: string,
+  ): string | null {
+    const pattern = new RegExp(
+      `<section\\b[^>]*data-vp-section-key=["']${this.escapeRegExp(
+        sectionKey,
+      )}["'][\\s\\S]{0,8000}?<\\/section>`,
+      'i',
+    );
+    return code.match(pattern)?.[0] ?? null;
+  }
+
+  private sectionMarkupIncludesContentWidth(
+    markup: string,
+    contentWidth: string,
+  ): boolean {
+    const normalized = contentWidth.trim();
+    if (!normalized) return true;
+    const compactMarkup = markup.replace(/\s+/g, '');
+    const compactWidth = normalized.replace(/\s+/g, '');
+    return (
+      compactMarkup.includes(`max-w-[${compactWidth}]`) ||
+      new RegExp(
+        `maxWidth\\s*:\\s*['"]${this.escapeRegExp(normalized)}['"]`,
+      ).test(markup)
+    );
+  }
+
+  private sectionMarkupIncludesLineHeight(
+    markup: string,
+    lineHeight: string,
+  ): boolean {
+    const normalized = lineHeight.trim();
+    if (!normalized) return true;
+    const compactMarkup = markup.replace(/\s+/g, '');
+    const compactValue = normalized.replace(/\s+/g, '');
+    return (
+      compactMarkup.includes(`leading-[${compactValue}]`) ||
+      new RegExp(
+        `lineHeight\\s*:\\s*['"]${this.escapeRegExp(normalized)}['"]`,
+      ).test(markup)
+    );
+  }
+
+  private sectionMarkupHasStructuredStackSpacing(markup: string): boolean {
+    return (
+      /\b(?:gap|space-y)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)/.test(markup) ||
+      /\b(?:mt|mb)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)/.test(markup) ||
+      /\b(?:gap|rowGap|marginTop|marginBottom)\s*:\s*['"][^'"]+['"]/.test(
+        markup,
+      )
+    );
+  }
+
+  private sectionMarkupHasGenericSpacerDivs(markup: string): boolean {
+    return /<div\b[^>]*className="[^"]*\b(?:h|min-h)-(?:\[[^\]]+\]|[A-Za-z0-9:/.-]+)[^"]*"[^>]*>\s*<\/div>/i.test(
+      markup,
+    );
+  }
+
+  private sectionMarkupHasVerticalBreathingRoom(markup: string): boolean {
+    const classNameMatch = markup.match(/\bclassName="([^"]+)"/);
+    const className = classNameMatch?.[1] ?? '';
+    if (!className) return true;
+
+    if (/\bpy-0\b/.test(className)) return false;
+    if (/\bpt-0\b/.test(className) || /\bpb-0\b/.test(className)) return false;
+
+    return (
+      /\bpy-(?:\[[^\]]+\]|\d+)\b/.test(className) ||
+      (/\bpt-(?:\[[^\]]+\]|\d+)\b/.test(className) &&
+        /\bpb-(?:\[[^\]]+\]|\d+)\b/.test(className))
+    );
+  }
+
+  private sectionMarkupHasEdgeControls(markup: string): boolean {
+    const hasPrev =
+      /aria-label=["']Previous slide["']/.test(markup) ||
+      /aria-label=["']Prev/i.test(markup);
+    const hasNext =
+      /aria-label=["']Next slide["']/.test(markup) ||
+      /aria-label=["']Next/i.test(markup);
+    return hasPrev && hasNext;
+  }
+
+  private sectionMarkupHasAnimatedTransition(
+    markup: string,
+    sectionType: string,
+  ): boolean {
+    const hasTransitionPrimitive =
+      /\btransition-(?:all|opacity|transform)\b/.test(markup) ||
+      /\bduration-\[\d+ms\]\b/.test(markup) ||
+      /\bduration-\d+\b/.test(markup) ||
+      /transition\s*:/.test(markup);
+    const hasMotionClasses =
+      /\b(?:opacity-\d+|translate-[xy]-[^"\s}]+|scale-\[[^\]]+\]|scale-\d+)\b/.test(
+        markup,
+      ) || /\banimate-[a-z0-9-]+\b/.test(markup);
+
+    if (!hasTransitionPrimitive || !hasMotionClasses) {
+      return false;
+    }
+
+    if (sectionType === 'slider') {
+      return /activeSlide|currentSlide|slideIndex|selectedSlide/.test(markup);
+    }
+
+    if (sectionType === 'modal') {
+      return /isModalOpen|openModal|isOpen|dialogOpen|showModal/.test(markup);
+    }
+
+    return true;
+  }
+
+  private codeUsesSwiperReactLibrary(code: string): boolean {
+    return (
+      /from\s*['"]swiper\/react['"]/.test(code) &&
+      /<Swiper\b/.test(code) &&
+      /<SwiperSlide\b/.test(code) &&
+      /import\s+['"]swiper\/css(?:\/[a-z-]+)*['"]/.test(code)
+    );
+  }
+
+  private sectionMarkupHasOverlayBackdrop(markup: string): boolean {
+    return (
+      /className="[^"]*\bfixed\b[^"]*\binset-0\b[^"]*"/.test(markup) ||
+      /className="[^"]*\binset-0\b[^"]*\bfixed\b[^"]*"/.test(markup)
+    );
+  }
+
+  private sectionMarkupHasDialogSemantics(markup: string): boolean {
+    return (
+      /role=["']dialog["']/.test(markup) &&
+      /aria-modal=["']true["']/.test(markup)
+    );
+  }
+
+  private codeHasEscapeCloseHandling(
+    code: string,
+    _sectionKey?: string,
+  ): boolean {
+    return (
+      (/addEventListener\(\s*['"]keydown['"]/.test(code) &&
+        /Escape/.test(code)) ||
+      /onKeyDown=\{[^}]*Escape/.test(code)
+    );
   }
 
   private injectCustomClassIntoFirstMatchingTag(
@@ -1602,7 +2056,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       const last = matches.at(-1);
       if (last?.index == null) return false;
       const tail = before.slice(last.index);
-      return /:\s*(?:\(\s*)?(?:\{\s*)?$/.test(tail);
+      return /:\s*(?:\(\s*)?(?:\{\s*)?(?:<>\s*)?$/.test(tail);
     };
 
     return (
@@ -1685,6 +2139,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       (match, tag: string, attrs: string, record: string, offset: number) => {
         if (this.isWithinHeadingTitleContext(next, offset)) return match;
         if (this.isWithinSlugTernaryFallback(next, offset)) return match;
+        if (this.isWithinAuthorPresenceBranch(next, offset, record))
+          return match;
         return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
       },
     );
@@ -1734,6 +2190,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     let next = code;
 
     next = next.replace(
+      /(\:\s*(post|item|postDetail)\.author\s*\?\s*)\(\s*\{\s*((?:post|item|postDetail)\.authorSlug\s*\?[\s\S]{0,900}?<(span|p)\b[\s\S]{0,260}?<\/\4>)\s*\}\s*\)(\s*:\s*null)/g,
+      (
+        _match,
+        prefix: string,
+        _record: string,
+        inner: string,
+        _fallbackTag: string,
+        suffix: string,
+      ) => `${prefix}(${inner})${suffix}`,
+    );
+
+    next = next.replace(
       /:\s*\(\s*\{(post|item|postDetail)\.authorSlug\s*\?\s*<Link\b[\s\S]{0,800}?<\/Link>\s*:\s*(<(span|p)\b[\s\S]{0,260}?<\/\3>)\s*\}\s*\)/g,
       ': ($2)',
     );
@@ -1744,6 +2212,23 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     );
 
     return next;
+  }
+
+  private isWithinAuthorPresenceBranch(
+    code: string,
+    offset: number,
+    record: string,
+  ): boolean {
+    const before = code.slice(Math.max(0, offset - 1400), offset);
+    const pattern = new RegExp(
+      `\\b${this.escapeRegex(record)}\\.author\\s*\\?`,
+      'g',
+    );
+    const matches = [...before.matchAll(pattern)];
+    const last = matches.at(-1);
+    if (last?.index == null) return false;
+    const tail = before.slice(last.index);
+    return /\?\s*(?:\(\s*)?$/.test(tail);
   }
 
   private isWithinHeadingTitleContext(code: string, offset: number): boolean {

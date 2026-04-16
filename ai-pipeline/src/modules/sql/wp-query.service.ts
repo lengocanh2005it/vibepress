@@ -71,6 +71,17 @@ export interface WpDbTemplate {
   modified: string;
 }
 
+export interface WpTemplateDebugEntity {
+  id: number;
+  parentId: number | null;
+  postType: string;
+  title: string;
+  slug: string;
+  content: string;
+  status: string;
+  modified: string;
+}
+
 export interface WpDbGlobalStyle {
   id: number;
   title: string;
@@ -527,6 +538,57 @@ export class WpQueryService {
       return rows.map((row) => ({
         id: Number(row.ID),
         postType: String(row.post_type) as 'wp_template' | 'wp_template_part',
+        title: String(row.post_title ?? ''),
+        slug: String(row.post_name ?? ''),
+        content: String(row.post_content ?? ''),
+        status: String(row.post_status ?? ''),
+        modified: String(row.post_modified ?? ''),
+      }));
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getTemplateDebugEntities(
+    connectionString: string,
+  ): Promise<WpTemplateDebugEntity[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_parent, post_type, post_title, post_name, post_content, post_status, post_modified
+         FROM \`${prefix}posts\`
+         WHERE post_content IS NOT NULL
+           AND post_content <> ''
+           AND (
+             post_type IN ('wp_template', 'wp_template_part', 'wp_block', 'wp_navigation', 'revision')
+             OR post_name LIKE '%home%'
+             OR post_title LIKE '%home%'
+             OR post_content LIKE '%wp:uagb/slider%'
+             OR post_content LIKE '%wp:uagb/modal%'
+             OR post_content LIKE '%wp:accordion%'
+           )
+         ORDER BY
+           CASE
+             WHEN post_content LIKE '%wp:uagb/slider%'
+               OR post_content LIKE '%wp:uagb/modal%'
+               OR post_content LIKE '%wp:accordion%' THEN 0
+             WHEN post_type IN ('wp_template', 'wp_template_part', 'wp_block', 'wp_navigation') THEN 1
+             WHEN post_type = 'revision' THEN 2
+             ELSE 3
+           END,
+           post_modified DESC,
+           ID DESC
+         LIMIT 500`,
+      );
+
+      return rows.map((row) => ({
+        id: Number(row.ID),
+        parentId:
+          row.post_parent === null || row.post_parent === undefined
+            ? null
+            : Number(row.post_parent),
+        postType: String(row.post_type ?? ''),
         title: String(row.post_title ?? ''),
         slug: String(row.post_name ?? ''),
         content: String(row.post_content ?? ''),

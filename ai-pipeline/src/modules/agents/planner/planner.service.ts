@@ -29,8 +29,10 @@ import type {
 } from '../block-parser/block-parser.service.js';
 import {
   buildVisualPlanPrompt,
+  buildPresentationPatchPrompt,
   extractStaticImageSources,
   parseVisualPlanDetailed,
+  parsePresentationPlan,
 } from '../react-generator/prompts/visual-plan.prompt.js';
 import {
   extractAuxiliaryLabelsFromSections,
@@ -46,6 +48,7 @@ import type {
   TypographyTokens,
   LayoutTokens,
   SectionPlan,
+  SectionPresentationPatch,
 } from '../react-generator/visual-plan.schema.js';
 
 export interface ComponentPlan {
@@ -491,6 +494,11 @@ export class PlannerService {
         try {
           const rawMarkup = templateSource;
           if (!rawMarkup) return undefined;
+          if (componentPlan.componentName === 'Home') {
+            this.logger.debug(
+              `[DraftSource] "${componentPlan.componentName}" template="${componentPlan.templateName}" rawLength=${rawMarkup.length} hasSlider=${rawMarkup.includes('wp:uagb/slider')} hasModal=${rawMarkup.includes('wp:uagb/modal')} hasAccordion=${rawMarkup.includes('wp:accordion')} hasFooterPart=${rawMarkup.includes('"slug":"footer"') || rawMarkup.includes('"slug":"footer",') || rawMarkup.includes('"slug":"footer"') || rawMarkup.includes('"slug":"footer","theme"')}`,
+            );
+          }
           const nodes = this.styleResolver.resolve(
             wpBlocksToJsonWithSourceRefs({
               markup: rawMarkup,
@@ -503,8 +511,14 @@ export class PlannerService {
             tokens,
           );
           const draft = mapWpNodesToDraftSections(nodes);
+          this.logger.debug(
+            `[DraftSections] "${componentPlan.componentName}": ${draft.length} sections → [${draft.map((s) => s.type).join(', ')}]`,
+          );
           return draft.length > 0 ? draft : undefined;
-        } catch {
+        } catch (err) {
+          this.logger.warn(
+            `[DraftSections] "${componentPlan.componentName}": failed to generate draft sections — ${err instanceof Error ? err.message : String(err)}`,
+          );
           return undefined;
         }
       })();
@@ -523,25 +537,60 @@ export class PlannerService {
         sourceBackedAuxiliaryLabels,
       } as const;
 
-      const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
-        componentName: componentPlan.componentName,
-        templateSource: planningSource.source,
-        content,
-        tokens,
-        repoManifest,
-        componentType: componentPlan.type,
-        route: componentPlan.route,
-        isDetail: componentPlan.isDetail,
-        dataNeeds: visualDataNeeds,
-        sourceAnalysis: planningSource.sourceAnalysis,
-        sourceBackedAuxiliaryLabels,
-        draftSections,
-        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
-          audience: 'visual-plan',
-          componentName: componentPlan.componentName,
-          route: componentPlan.route,
-        }),
-      });
+      // ── Choose planning mode ─────────────────────────────────────────────
+      // PATCH MODE: deterministic draft exists → AI fills presentation only.
+      //   Draft is the immutable structural source of truth; AI cannot change
+      //   section type, order, count, or interactive data (slides/tabs/cards).
+      // LEGACY MODE: no draft (classic PHP theme) → AI outputs full sections[].
+      const usePatchMode = !!draftSections?.length;
+
+      const builtPrompt = usePatchMode
+        ? buildPresentationPatchPrompt({
+            componentName: componentPlan.componentName,
+            templateSource: planningSource.source,
+            content,
+            tokens,
+            draftSections: draftSections!,
+            editRequestContextNote: buildEditRequestContextNote(
+              scopedEditRequest,
+              {
+                audience: 'visual-plan',
+                componentName: componentPlan.componentName,
+                route: componentPlan.route,
+              },
+            ),
+          })
+        : buildVisualPlanPrompt({
+            componentName: componentPlan.componentName,
+            templateSource: planningSource.source,
+            content,
+            tokens,
+            repoManifest,
+            componentType: componentPlan.type,
+            route: componentPlan.route,
+            isDetail: componentPlan.isDetail,
+            dataNeeds: visualDataNeeds,
+            sourceAnalysis: planningSource.sourceAnalysis,
+            sourceBackedAuxiliaryLabels,
+            draftSections,
+            editRequestContextNote: buildEditRequestContextNote(
+              scopedEditRequest,
+              {
+                audience: 'visual-plan',
+                componentName: componentPlan.componentName,
+                route: componentPlan.route,
+              },
+            ),
+          });
+
+      const { systemPrompt, userPrompt } = builtPrompt;
+
+      if (usePatchMode) {
+        this.logger.log(
+          `[Phase C] "${componentPlan.componentName}": using PATCH MODE — ${draftSections!.length} sections locked, AI fills presentation only`,
+        );
+      }
+
       const allowedImageSrcs = extractStaticImageSources(planningSource.source);
       let lastRaw = '';
       let lastReason = 'unknown visual plan parse failure';
@@ -555,11 +604,18 @@ export class PlannerService {
         const prompt =
           attempt === 1
             ? userPrompt
-            : this.buildVisualPlanRetryPrompt(
-                componentPlan.componentName,
-                lastReason,
-                lastRaw,
-              );
+            : usePatchMode
+              ? this.buildPresentationPatchRetryPrompt(
+                  componentPlan.componentName,
+                  draftSections!,
+                  lastReason,
+                  lastRaw,
+                )
+              : this.buildVisualPlanRetryPrompt(
+                  componentPlan.componentName,
+                  lastReason,
+                  lastRaw,
+                );
 
         const {
           text: raw,
@@ -585,6 +641,61 @@ export class PlannerService {
         }
 
         lastRaw = raw;
+
+        // ── PATCH MODE: parse patches and apply onto immutable draft ────
+        if (usePatchMode) {
+          const patchResult = parsePresentationPlan(
+            raw,
+            componentPlan.componentName,
+            {
+              expectedSectionKeys: draftSections!.map(
+                (section) => section.sectionKey ?? section.type,
+              ),
+              allowedImageSrcs,
+            },
+          );
+          if (!patchResult.plan && attempt < 2) {
+            lastReason =
+              patchResult.diagnostic?.reason ?? 'patch parse failure';
+            this.logger.warn(
+              `[Phase C: Patch] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason} — retrying`,
+            );
+            continue;
+          }
+          if (!patchResult.plan) {
+            lastReason =
+              patchResult.diagnostic?.reason ?? 'patch parse failure';
+            this.logger.warn(
+              `[Phase C: Patch] "${componentPlan.componentName}" parse failed after retries: ${lastReason} — using deterministic draft as-is`,
+            );
+          }
+          const layout = this.deriveComponentLayout(
+            tokens,
+            componentPlan.componentName,
+          );
+          const finalSections = patchResult.plan
+            ? this.applyPresentationPatches(
+                draftSections!,
+                patchResult.plan.patches,
+              )
+            : draftSections!; // fallback: use draft as-is if parse failed after retries
+          visualPlan = {
+            componentName: componentPlan.componentName,
+            dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+            palette: globalPalette,
+            typography: globalTypography,
+            layout,
+            blockStyles: tokens?.blockStyles,
+            sections: finalSections,
+          };
+          const patchCount = patchResult.plan?.patches.length ?? 0;
+          this.logger.log(
+            `[Phase C: Patch] "${componentPlan.componentName}": ${patchCount} patches applied onto ${draftSections!.length} draft sections ✓ (attempt ${attempt}) final=[${finalSections.map((s) => s.type).join(', ')}]`,
+          );
+          break;
+        }
+
+        // ── LEGACY MODE: parse full sections[] ─────────────────────────
         const parsedResult = parseVisualPlanDetailed(
           raw,
           componentPlan.componentName,
@@ -603,13 +714,10 @@ export class PlannerService {
             typography: globalTypography,
             layout,
             blockStyles: tokens?.blockStyles,
-            sections: this.mergeDraftSectionPresentation(
-              parsed.sections,
-              draftSections,
-            ),
+            sections: parsed.sections,
           };
           this.logger.log(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt})`,
+            `[Phase C: Legacy] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) types=[${parsed.sections.map((s) => s.type).join(', ')}]`,
           );
           break;
         }
@@ -623,7 +731,7 @@ export class PlannerService {
 
         if (attempt < 2) {
           this.logger.warn(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+            `[Phase C: Legacy] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
           );
         }
       }
@@ -1005,11 +1113,20 @@ export class PlannerService {
       )
         needs.add('comments');
 
+      const isFooterPartial =
+        item.type === 'partial' &&
+        /^(footer)(?:[-_].+)?$/i.test(item.componentName);
+      if (isFooterPartial) {
+        needs.delete('menus');
+        needs.add('footer-links');
+      }
+
       // When the plan already has dedicated Header/Footer/Nav partials, page
       // components must not keep site chrome data needs for duplicated layout.
       if (item.type === 'page' && hasSharedChromePartials) {
         needs.delete('menus');
         needs.delete('site-info');
+        needs.delete('footer-links');
       }
 
       return { ...item, dataNeeds: Array.from(needs) };
@@ -1046,16 +1163,17 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
 - "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
 - Page templates MUST use "page-detail" — NEVER "post-detail"
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
-- Dedicated Header / Footer / Navigation partials may include "menus"
+- Dedicated Header / Navigation partials may include "menus"
+- Dedicated Footer partials should use "footer-links", not "menus"
 - Dedicated Header / Footer partials that render site title or tagline may include "site-info"
-- Ordinary page components MUST NOT request "menus" or "site-info" just because the original WordPress template referenced shared header/footer chrome.
+- Ordinary page components MUST NOT request "menus", "site-info", or "footer-links" just because the original WordPress template referenced shared header/footer chrome.
 - Global chrome belongs to shared layout partials. Page components MUST NOT own header/footer/navigation data.
 - If a page template has a content sidebar, keep it content-only (recent posts / page links). Do NOT model shared nav menus or site branding inside a page sidebar.
 
@@ -1300,14 +1418,316 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     return `${this.rawOutputDivider}${raw || '(empty)'}\n----- RAW OUTPUT END -----`;
   }
 
+  /**
+   * PATCH MODE: Apply AI presentation patches onto the immutable deterministic draft.
+   *
+   * Draft sections are the source of truth for:
+   *   - type, order, count
+   *   - slides[], tabs[], cards[] (interactive data extracted from WP blocks)
+   *   - sectionKey, sourceRef, sourceLayout
+   *
+   * AI patches may only override presentation/content fields:
+   *   - heading, subheading, body, cta, imageSrc, background, textAlign, etc.
+   *
+   * Any draft section with no matching patch is returned as-is (never dropped).
+   */
+  private applyPresentationPatches(
+    draftSections: SectionPlan[],
+    patches: SectionPresentationPatch[],
+  ): SectionPlan[] {
+    const patchByKey = new Map<string, SectionPresentationPatch>();
+    for (const patch of patches) {
+      if (!patchByKey.has(patch.sectionKey)) {
+        patchByKey.set(patch.sectionKey, patch);
+      }
+    }
+
+    return draftSections.map((draft): SectionPlan => {
+      const key = draft.sectionKey ?? draft.type;
+      const patch = patchByKey.get(key);
+      if (!patch) return draft; // no patch → keep draft as-is
+
+      // Presentation fields — AI may set these
+      const presentationOverrides: Partial<SectionPlan> = {};
+      if (patch.background)
+        (presentationOverrides as any).background = patch.background;
+      if (patch.textColor)
+        (presentationOverrides as any).textColor = patch.textColor;
+      if (patch.textAlign)
+        (presentationOverrides as any).textAlign = patch.textAlign;
+      if (patch.paddingStyle)
+        (presentationOverrides as any).paddingStyle = patch.paddingStyle;
+      if (patch.marginStyle)
+        (presentationOverrides as any).marginStyle = patch.marginStyle;
+      if (patch.gapStyle)
+        (presentationOverrides as any).gapStyle = patch.gapStyle;
+      if (patch.contentWidth)
+        (presentationOverrides as any).contentWidth = patch.contentWidth;
+      if (patch.customClassNames?.length) {
+        (presentationOverrides as any).customClassNames = Array.from(
+          new Set([
+            ...(draft.customClassNames ?? []),
+            ...patch.customClassNames,
+          ]),
+        );
+      }
+
+      // Type-specific content fills — applied carefully so structural fields are never overwritten
+      const base = { ...draft, ...presentationOverrides };
+
+      switch (draft.type) {
+        case 'hero': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            heading: patch.heading ?? d.heading,
+            subheading: patch.subheading ?? d.subheading,
+            layout: patch.layout ?? d.layout,
+            ...(patch.cta ? { cta: patch.cta } : {}),
+            ...(patch.image ? { image: patch.image } : {}),
+            ...(patch.headingStyle ? { headingStyle: patch.headingStyle } : {}),
+            ...(patch.subheadingStyle
+              ? { subheadingStyle: patch.subheadingStyle }
+              : {}),
+          } as SectionPlan;
+        }
+        case 'cover': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            heading: patch.heading ?? d.heading,
+            subheading: patch.subheading ?? d.subheading,
+            imageSrc: patch.imageSrc ?? d.imageSrc,
+            dimRatio: patch.dimRatio ?? d.dimRatio,
+            minHeight: patch.minHeight ?? d.minHeight,
+            contentAlign: patch.contentAlign ?? d.contentAlign,
+            ...(patch.cta ? { cta: patch.cta } : {}),
+            ...(patch.headingStyle ? { headingStyle: patch.headingStyle } : {}),
+            ...(patch.subheadingStyle
+              ? { subheadingStyle: patch.subheadingStyle }
+              : {}),
+          } as SectionPlan;
+        }
+        case 'media-text': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            imageSrc: patch.imageSrc ?? d.imageSrc,
+            imageAlt: patch.imageAlt ?? d.imageAlt,
+            imagePosition: patch.imagePosition ?? d.imagePosition,
+            ...(patch.heading ? { heading: patch.heading } : {}),
+            ...(patch.body ? { body: patch.body } : {}),
+            ...(patch.listItems?.length ? { listItems: patch.listItems } : {}),
+            ...(patch.cta ? { cta: patch.cta } : {}),
+            ...(patch.columnWidths ? { columnWidths: patch.columnWidths } : {}),
+            ...(patch.headingStyle ? { headingStyle: patch.headingStyle } : {}),
+            ...(patch.bodyStyle ? { bodyStyle: patch.bodyStyle } : {}),
+          } as SectionPlan;
+        }
+        case 'card-grid': {
+          const d = base as typeof draft;
+          // cards[] is always from draft — AI cannot change card count or structure
+          return {
+            ...d,
+            ...(patch.title ? { title: patch.title } : {}),
+            ...(patch.subtitle ? { subtitle: patch.subtitle } : {}),
+          } as SectionPlan;
+        }
+        case 'post-list': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            ...(patch.title ? { title: patch.title } : {}),
+            ...(typeof patch.showDate === 'boolean'
+              ? { showDate: patch.showDate }
+              : {}),
+            ...(typeof patch.showAuthor === 'boolean'
+              ? { showAuthor: patch.showAuthor }
+              : {}),
+            ...(typeof patch.showCategory === 'boolean'
+              ? { showCategory: patch.showCategory }
+              : {}),
+            ...(typeof patch.showExcerpt === 'boolean'
+              ? { showExcerpt: patch.showExcerpt }
+              : {}),
+            ...(typeof patch.showFeaturedImage === 'boolean'
+              ? { showFeaturedImage: patch.showFeaturedImage }
+              : {}),
+          } as SectionPlan;
+        }
+        case 'slider': {
+          // slides[] is from draft (extracted deterministically from uagb/slider blocks)
+          // AI may only set autoplay
+          const d = base as typeof draft;
+          return {
+            ...d,
+            ...(typeof patch.autoplay === 'boolean'
+              ? { autoplay: patch.autoplay }
+              : {}),
+          } as SectionPlan;
+        }
+        case 'tabs': {
+          // tabs[] is from draft — AI cannot change tab count/labels
+          return base as SectionPlan;
+        }
+        case 'accordion': {
+          return base as SectionPlan;
+        }
+        case 'button-group': {
+          return base as SectionPlan;
+        }
+        case 'modal': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            ...(patch.triggerText ? { triggerText: patch.triggerText } : {}),
+            ...(patch.heading ? { heading: patch.heading } : {}),
+            ...(patch.description ? { description: patch.description } : {}),
+            ...(patch.cta ? { cta: patch.cta } : {}),
+          } as SectionPlan;
+        }
+        case 'testimonial': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            quote: patch.quote ?? d.quote,
+            authorName: patch.authorName ?? d.authorName,
+            ...(patch.authorTitle ? { authorTitle: patch.authorTitle } : {}),
+            // authorAvatar: only if AI found a real src (never invent)
+            ...(patch.authorAvatar ? { authorAvatar: patch.authorAvatar } : {}),
+          } as SectionPlan;
+        }
+        case 'navbar': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            menuSlug: patch.menuSlug ?? d.menuSlug,
+            ...(typeof patch.sticky === 'boolean'
+              ? { sticky: patch.sticky }
+              : {}),
+          } as SectionPlan;
+        }
+        case 'footer': {
+          const d = base as typeof draft;
+          return {
+            ...d,
+            menuColumns: patch.menuColumns ?? d.menuColumns,
+            ...(patch.copyright ? { copyright: patch.copyright } : {}),
+            ...(patch.brandDescription
+              ? { brandDescription: patch.brandDescription }
+              : {}),
+          } as SectionPlan;
+        }
+        default:
+          return base as SectionPlan;
+      }
+    });
+  }
+
+  /**
+   * SOURCE-AUTHORITATIVE MERGE
+   *
+   * Strategy:
+   * 1. Build a lookup map of draft sections by sectionKey.
+   * 2. Walk the AI sections; for each one, find the best matching draft section
+   *    by sectionKey first, then by type-proximity.
+   * 3. After walking AI sections, insert any source-backed draft sections that
+   *    the AI dropped (slider, tabs, modal, accordion, query, cover, etc.) back
+   *    into the result at their original draft positions.
+   *
+   * This replaces the old index-based merge which broke whenever AI produced a
+   * different section count than the draft (dropped or merged sections would
+   * shift all subsequent indices, losing source-backed blocks entirely).
+   */
   private mergeDraftSectionPresentation(
     sections: SectionPlan[],
     draftSections?: SectionPlan[],
   ): SectionPlan[] {
     if (!draftSections?.length) return sections;
-    return sections.map((section, index) =>
-      this.mergeDraftSection(section, draftSections[index]),
-    );
+
+    // Types that are deterministically sourced from WP blocks — AI must never drop these.
+    const sourceBackedTypes = new Set([
+      'slider',
+      'tabs',
+      'modal',
+      'accordion',
+      'button-group',
+      'cover',
+      'post-list',
+      'card-grid',
+      'media-text',
+    ]);
+
+    // Build key → draft map and an ordered list of draft keys.
+    const draftByKey = new Map<string, SectionPlan>();
+    const draftOrder: string[] = [];
+    for (const d of draftSections) {
+      const key = d.sectionKey ?? d.type;
+      if (!draftByKey.has(key)) {
+        draftByKey.set(key, d);
+        draftOrder.push(key);
+      }
+    }
+
+    // Track which draft keys have been consumed by an AI section.
+    const consumed = new Set<string>();
+
+    // Walk AI sections, find best matching draft, merge.
+    const merged: SectionPlan[] = sections.map((section) => {
+      // 1. Exact key match (AI preserved the sectionKey).
+      const aiKey = section.sectionKey;
+      if (aiKey && draftByKey.has(aiKey) && !consumed.has(aiKey)) {
+        consumed.add(aiKey);
+        return this.mergeDraftSection(section, draftByKey.get(aiKey));
+      }
+
+      // 2. Same-type match — find the first unconsumed draft of the same type.
+      for (const key of draftOrder) {
+        if (consumed.has(key)) continue;
+        const d = draftByKey.get(key)!;
+        if (d.type === section.type) {
+          consumed.add(key);
+          return this.mergeDraftSection(section, d);
+        }
+      }
+
+      // 3. No matching draft — return AI section as-is.
+      return section;
+    });
+
+    // Re-insert source-backed draft sections that the AI dropped.
+    // Insert them at the position corresponding to their draft order.
+    const dropped = draftOrder
+      .filter((key) => !consumed.has(key))
+      .map((key) => draftByKey.get(key)!)
+      .filter((d) => sourceBackedTypes.has(d.type));
+
+    if (dropped.length > 0) {
+      const droppedTypes = dropped.map((d) => d.type).join(', ');
+      this.logger.warn(
+        `[MergeDraft] AI dropped ${dropped.length} source-backed section(s): [${droppedTypes}] — restoring at draft positions`,
+      );
+
+      for (const droppedSection of dropped) {
+        // Find insertion position: insert before the first merged section whose
+        // draft index comes after the dropped section's draft index.
+        const droppedIdx = draftOrder.indexOf(
+          droppedSection.sectionKey ?? droppedSection.type,
+        );
+        let insertAt = merged.length; // default: append
+        for (let i = 0; i < merged.length; i++) {
+          const mKey = merged[i].sectionKey ?? merged[i].type;
+          const mDraftIdx = draftOrder.indexOf(mKey);
+          if (mDraftIdx > droppedIdx) {
+            insertAt = i;
+            break;
+          }
+        }
+        merged.splice(insertAt, 0, droppedSection);
+      }
+    }
+
+    return merged;
   }
 
   private mergeDraftSection(
@@ -1414,6 +1834,46 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     }
   }
 
+  /**
+   * Checks that all source-backed draft sections are present in the merged result.
+   * Returns a list of error strings (empty = passed).
+   */
+  private checkPlanFidelity(
+    mergedSections: SectionPlan[],
+    draftSections?: SectionPlan[],
+  ): string[] {
+    if (!draftSections?.length) return [];
+    const sourceBackedTypes = new Set([
+      'slider',
+      'tabs',
+      'modal',
+      'accordion',
+      'button-group',
+      'cover',
+      'post-list',
+      'card-grid',
+      'media-text',
+    ]);
+    const errors: string[] = [];
+    for (const draft of draftSections) {
+      if (!sourceBackedTypes.has(draft.type)) continue;
+      const key = draft.sectionKey ?? draft.type;
+      const found = mergedSections.some(
+        (s) =>
+          s.type === draft.type &&
+          (s.sectionKey === key ||
+            s.sectionKey === draft.type ||
+            !s.sectionKey),
+      );
+      if (!found) {
+        errors.push(
+          `missing source-backed section type="${draft.type}" key="${key}"`,
+        );
+      }
+    }
+    return errors;
+  }
+
   private containsInlineHtml(value?: string): boolean {
     return typeof value === 'string' && /<[a-z][\s\S]*>/i.test(value);
   }
@@ -1436,7 +1896,7 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - Pages must have a non-null route starting with "/"
 - Partials must have route: null, isDetail: false
 - isDetail must be true when route contains :slug
-- Valid dataNeeds values: posts, pages, menus, site-info, post-detail, page-detail, comments, categoryDetail
+- Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
 
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
   }
@@ -1478,6 +1938,34 @@ ${preview}${badRaw.length > 700 ? '\n... (truncated)' : ''}
 \`\`\`
 
 Return ONLY a single valid JSON object matching ComponentVisualPlan.
+Do not include markdown fences, comments, extra prose, or malformed JSON.`;
+  }
+
+  private buildPresentationPatchRetryPrompt(
+    componentName: string,
+    draftSections: SectionPlan[],
+    reason: string,
+    badRaw: string,
+  ): string {
+    const preview = badRaw.slice(0, 700);
+    const expectedKeys = draftSections.map(
+      (section) => section.sectionKey ?? section.type,
+    );
+    return `Your previous response for component "${componentName}" could not be parsed as a valid ComponentPresentationPlan.
+
+Failure reason: ${reason}
+
+The patches array MUST match the deterministic draft exactly:
+- same count: ${expectedKeys.length}
+- same order
+- exact sectionKeys: ${expectedKeys.join(', ')}
+
+Start of previous response:
+\`\`\`
+${preview}${badRaw.length > 700 ? '\n... (truncated)' : ''}
+\`\`\`
+
+Return ONLY a single valid JSON object matching ComponentPresentationPlan.
 Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
@@ -1548,6 +2036,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         dataNeeds = ['page-detail'];
         route = '/:slug';
         isDetail = true;
+      } else if (name.toLowerCase() === 'footer') {
+        dataNeeds = ['site-info', 'footer-links'];
+        route = null;
+        isDetail = false;
+      } else if (
+        name.toLowerCase() === 'header' ||
+        name.toLowerCase() === 'navigation' ||
+        name.toLowerCase() === 'nav'
+      ) {
+        dataNeeds = ['site-info', 'menus'];
+        route = null;
+        isDetail = false;
       }
 
       return {
@@ -1843,6 +2343,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       'posts',
       'pages',
       'menus',
+      'footerLinks',
       'siteInfo',
     ];
     const mapped = new Set<DataNeed>();
@@ -1851,6 +2352,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');

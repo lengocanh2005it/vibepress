@@ -68,11 +68,39 @@ export interface GeneratedComponent {
   generationMode?: 'deterministic' | 'ai';
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  requiredTrackedSectionKeys?: string[];
+  requiredSectionExpectations?: Array<{
+    sectionKey: string;
+    sectionType: string;
+    requiredTextSnippets?: string[];
+    minTextMatches?: number;
+  }>;
+  requiredSectionPresentationHints?: Array<{
+    sectionKey: string;
+    sectionType: string;
+    textAlign?: 'left' | 'center' | 'right';
+    contentWidth?: string;
+    headingLineHeight?: string;
+    bodyLineHeight?: string;
+    requireVerticalBreathingRoom?: boolean;
+    requireAnimatedTransition?: boolean;
+    requireEdgeControls?: boolean;
+    requireOverlayBackdrop?: boolean;
+    requireDialogSemantics?: boolean;
+    requireEscapeClose?: boolean;
+  }>;
+  requiredMenuSlug?: string;
+}
+
+export interface FrontendPackageRequirement {
+  name: string;
+  version: string;
 }
 
 export interface ReactGenerateResult {
   jobId?: string;
   components: GeneratedComponent[];
+  requiredFrontendPackages?: FrontendPackageRequirement[];
   outDir: string;
 }
 
@@ -282,7 +310,12 @@ export class ReactGeneratorService {
     this.logger.log(summary);
     await this.logToFile(logPath, summary);
 
-    return { jobId, components, outDir: '' };
+    return {
+      jobId,
+      components,
+      requiredFrontendPackages: this.inferRequiredFrontendPackages(plan),
+      outDir: '',
+    };
   }
 
   // ── Per-template routing: single vs chunked ────────────────────────────────
@@ -345,9 +378,13 @@ export class ReactGeneratorService {
         ? templateNodes.filter((node) => !isSharedLayoutBlock(node))
         : templateNodes;
 
-    const promptTemplateSource = filteredNodes
+    const analysisTemplateSource = filteredNodes
       ? wpJsonToString(filteredNodes)
       : templateSource;
+    const promptTemplateSource =
+      themeType === 'fse' && this.looksLikeBlockMarkup(templateSource)
+        ? templateSource
+        : analysisTemplateSource;
     const promptSourceLength = promptTemplateSource.length;
     const chunkThreshold =
       themeType === 'fse'
@@ -369,7 +406,8 @@ export class ReactGeneratorService {
     if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
         componentName,
-        templateSource: promptTemplateSource,
+        templateSource: analysisTemplateSource,
+        promptTemplateSource,
         modelName: codeGeneratorModel,
         fixAgentModel,
         preferDirectAi,
@@ -486,6 +524,20 @@ export class ReactGeneratorService {
     ];
   }
 
+  private inferRequiredFrontendPackages(
+    plan?: PlanResult,
+  ): FrontendPackageRequirement[] | undefined {
+    if (!plan?.length) return undefined;
+
+    const hasSlider = plan.some((item) =>
+      item.visualPlan?.sections?.some((section) => section.type === 'slider'),
+    );
+
+    if (!hasSlider) return undefined;
+
+    return [{ name: 'swiper', version: '^11.2.10' }];
+  }
+
   private stripSharedLayoutSectionsFromPlan(
     componentPlan: PlanResult[number] | undefined,
     hasSharedHeader: boolean,
@@ -583,6 +635,13 @@ export class ReactGeneratorService {
       visionImageUrls,
       tokenScope,
       jobId,
+      componentPlan
+        ? {
+            type: componentPlan.type,
+            sourceBackedAuxiliaryLabels:
+              componentPlan.sourceBackedAuxiliaryLabels,
+          }
+        : undefined,
     );
 
     return this.attachPlanContext(
@@ -669,8 +728,275 @@ ${renders}
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
+      requiredTrackedSectionKeys:
+        component.requiredTrackedSectionKeys ??
+        this.extractRequiredTrackedSectionKeys(componentPlan),
+      requiredSectionPresentationHints:
+        component.requiredSectionPresentationHints ??
+        this.extractRequiredSectionPresentationHints(componentPlan),
+      requiredMenuSlug:
+        component.requiredMenuSlug ??
+        this.extractRequiredMenuSlug(componentPlan),
+      requiredSectionExpectations:
+        component.requiredSectionExpectations ??
+        this.extractRequiredSectionExpectations(componentPlan),
       ...overrides,
     };
+  }
+
+  private extractRequiredTrackedSectionKeys(
+    componentPlan?: Pick<PlanResult[number], 'visualPlan'>,
+  ): string[] | undefined {
+    const keys = componentPlan?.visualPlan?.sections
+      ?.filter((section) => !!section.sourceRef?.sourceNodeId)
+      .map(
+        (section, index) =>
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`,
+      )
+      .filter((value): value is string => Boolean(value));
+    if (!keys?.length) return undefined;
+    return [...new Set(keys)];
+  }
+
+  private extractRequiredSectionPresentationHints(
+    componentPlan?: Pick<PlanResult[number], 'visualPlan'>,
+  ):
+    | Array<{
+        sectionKey: string;
+        sectionType: string;
+        textAlign?: 'left' | 'center' | 'right';
+        contentWidth?: string;
+        headingLineHeight?: string;
+        bodyLineHeight?: string;
+        requireVerticalBreathingRoom?: boolean;
+        requireAnimatedTransition?: boolean;
+        requireEdgeControls?: boolean;
+        requireOverlayBackdrop?: boolean;
+        requireDialogSemantics?: boolean;
+        requireEscapeClose?: boolean;
+      }>
+    | undefined {
+    const hints = componentPlan?.visualPlan?.sections
+      ?.map((section, index) => {
+        const hint = {
+          sectionKey:
+            section.sectionKey ??
+            `${section.type}${index === 0 ? '' : `-${index}`}`,
+          sectionType: section.type,
+          textAlign: section.textAlign,
+          contentWidth: section.contentWidth,
+          headingLineHeight:
+            'headingStyle' in section
+              ? section.headingStyle?.lineHeight
+              : undefined,
+          bodyLineHeight:
+            'bodyStyle' in section
+              ? section.bodyStyle?.lineHeight
+              : 'subheadingStyle' in section
+                ? section.subheadingStyle?.lineHeight
+                : undefined,
+          requireVerticalBreathingRoom: [
+            'slider',
+            'modal',
+            'button-group',
+          ].includes(section.type),
+          requireAnimatedTransition:
+            section.type === 'slider'
+              ? section.slides.length > 1
+              : section.type === 'modal',
+          requireEdgeControls:
+            section.type === 'slider' ? section.slides.length > 1 : undefined,
+          requireOverlayBackdrop: section.type === 'modal',
+          requireDialogSemantics: section.type === 'modal',
+          requireEscapeClose: section.type === 'modal',
+        };
+        return hint;
+      })
+      .filter(
+        (section) =>
+          !!section.textAlign ||
+          !!section.contentWidth ||
+          !!section.headingLineHeight ||
+          !!section.bodyLineHeight ||
+          !!section.requireVerticalBreathingRoom ||
+          !!section.requireAnimatedTransition ||
+          !!section.requireEdgeControls ||
+          !!section.requireOverlayBackdrop ||
+          !!section.requireDialogSemantics ||
+          !!section.requireEscapeClose,
+      );
+    return hints?.length ? hints : undefined;
+  }
+
+  private extractRequiredMenuSlug(
+    componentPlan?: Pick<PlanResult[number], 'visualPlan'>,
+  ): string | undefined {
+    const navSection = componentPlan?.visualPlan?.sections.find(
+      (section) => section.type === 'navbar' && section.menuSlug?.trim(),
+    );
+    return navSection?.type === 'navbar'
+      ? navSection.menuSlug.trim()
+      : undefined;
+  }
+
+  private extractRequiredSectionExpectations(
+    componentPlan?: Pick<PlanResult[number], 'visualPlan'>,
+  ):
+    | Array<{
+        sectionKey: string;
+        sectionType: string;
+        requiredTextSnippets?: string[];
+        minTextMatches?: number;
+      }>
+    | undefined {
+    type RequiredSectionExpectation = {
+      sectionKey: string;
+      sectionType: string;
+      requiredTextSnippets?: string[];
+      minTextMatches?: number;
+    };
+    const sections = componentPlan?.visualPlan?.sections ?? [];
+    const expectations: RequiredSectionExpectation[] = [];
+    for (let index = 0; index < sections.length; index += 1) {
+      const section = sections[index];
+      const sectionKey =
+        section.sectionKey ??
+        `${section.type}${index === 0 ? '' : `-${index}`}`;
+      switch (section.type) {
+        case 'card-grid': {
+          const snippets = section.cards
+            .flatMap((card) => [card.heading, card.body])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(
+                section.cards.length,
+                Math.min(snippets.length, section.cards.length + 1),
+              ),
+            });
+          }
+          break;
+        }
+        case 'accordion': {
+          const snippets = section.items
+            .flatMap((item) => [item.title, item.content])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(1, section.items.length),
+            });
+          }
+          break;
+        }
+        case 'button-group': {
+          const snippets = section.buttons
+            .map((button) => button.text?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: section.buttons.length,
+            });
+          }
+          break;
+        }
+        case 'slider': {
+          const snippets = section.slides
+            .flatMap((slide) => [
+              slide.heading,
+              slide.description,
+              slide.cta?.text,
+            ])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          const headingOrCtaCount = section.slides.filter(
+            (slide) => !!slide.heading?.trim() || !!slide.cta?.text?.trim(),
+          ).length;
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(1, headingOrCtaCount),
+            });
+          }
+          break;
+        }
+        case 'modal': {
+          const snippets = [
+            section.triggerText,
+            section.heading,
+            section.description,
+            section.cta?.text,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(snippets.length, 2),
+            });
+          }
+          break;
+        }
+        case 'media-text': {
+          const snippets = [
+            section.heading,
+            section.body,
+            ...(section.listItems ?? []),
+            section.cta?.text,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length >= 2) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(
+                snippets.length,
+                Math.max(2, (section.listItems?.length ?? 0) > 0 ? 3 : 2),
+              ),
+            });
+          }
+          break;
+        }
+        case 'testimonial': {
+          const snippets = [
+            section.quote,
+            section.authorName,
+            section.authorTitle,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(snippets.length, 2),
+            });
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    return expectations.length > 0 ? expectations : undefined;
   }
 
   private collectCustomClassNamesFromNodes(nodes: WpNode[]): string[] {

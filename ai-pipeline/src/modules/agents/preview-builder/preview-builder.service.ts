@@ -17,7 +17,10 @@ import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
-import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
+import {
+  ReactGenerateResult,
+  type FrontendPackageRequirement,
+} from '../react-generator/react-generator.service.js';
 import type {
   ThemeInteractionState,
   ThemeTokens,
@@ -102,6 +105,7 @@ export class PreviewBuilderService {
     const componentsDir = join(srcDir, 'components');
     const pagesDir = join(srcDir, 'pages');
     const allComponents = components.components;
+    const requiredFrontendPackages = components.requiredFrontendPackages;
     const headerComp = allComponents.find(
       (c) => /^header/i.test(c.name) && !c.isSubComponent,
     );
@@ -114,6 +118,10 @@ export class PreviewBuilderService {
     // 1. Copy toàn bộ template vào frontend/
     this.logger.log(`Copying template to: ${frontendDir}`);
     await cp(TEMPLATE_DIR, frontendDir, { recursive: true });
+    await this.ensureFrontendPackageRequirements(
+      frontendDir,
+      requiredFrontendPackages,
+    );
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
@@ -522,16 +530,29 @@ ${routesBlock}
 
   async syncGeneratedComponents(
     previewDir: string,
-    components: ReactGenerateResult['components'],
+    generated: Pick<
+      ReactGenerateResult,
+      'components' | 'requiredFrontendPackages'
+    >,
     tokens?: ThemeTokens,
   ): Promise<void> {
     const frontendDir = join(previewDir, 'frontend');
     const srcDir = join(frontendDir, 'src');
     const componentsDir = join(srcDir, 'components');
     const pagesDir = join(srcDir, 'pages');
+    const { components, requiredFrontendPackages } = generated;
 
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
+    await this.ensureFrontendPackageRequirements(
+      frontendDir,
+      requiredFrontendPackages,
+    );
+    await this.attachTemplateDependencies(
+      TEMPLATE_DIR,
+      frontendDir,
+      'react-preview',
+    );
 
     for (const comp of components) {
       const code = this.prepareGeneratedComponentCode(
@@ -687,6 +708,7 @@ ${fontEntries}
 
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
+    await this.applySpectraTabsBridge(frontendDir);
   }
 
   private async applyWordPressCustomCss(
@@ -986,6 +1008,102 @@ ${fontEntries}
     await writeFile(cssPath, existingCss.trimEnd() + block + '\n');
   }
 
+  private async applySpectraTabsBridge(frontendDir: string): Promise<void> {
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existingCss = await readFile(cssPath, 'utf-8');
+    const marker = '/* Vibepress Spectra tabs bridge */';
+    if (existingCss.includes(marker)) return;
+
+    const block = `
+${marker}
+.wp-block-uagb-tabs {
+  margin: 2rem 0;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  list-style: none;
+  margin: 0 0 0.75rem 0;
+  padding: 0;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__panel li {
+  margin: 0;
+  padding: 0;
+}
+
+.wp-block-uagb-tabs .uagb-tabs-list {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 5.75rem;
+  border: 1px solid #d8d8d8;
+  border-radius: 0;
+  background: #ffffff;
+  color: #111111;
+  padding: 0.75rem 1rem;
+  text-decoration: underline;
+  text-underline-offset: 0.22em;
+  outline: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    text-decoration-color 0.16s ease;
+}
+
+.wp-block-uagb-tabs .uagb-tabs-list:hover,
+.wp-block-uagb-tabs .uagb-tabs-list:active {
+  text-decoration: none;
+}
+
+.wp-block-uagb-tabs .uagb-tabs-list:focus,
+.wp-block-uagb-tabs .uagb-tabs-list:focus-visible {
+  border-color: #111111;
+  box-shadow: inset 0 0 0 1px #111111;
+}
+
+.wp-block-uagb-tabs .uagb-tabs-list:focus:not(:focus-visible) {
+  border-color: #d8d8d8;
+  box-shadow: none;
+}
+
+.wp-block-uagb-tabs .uagb-tab.uagb-tabs__active .uagb-tabs-list,
+.wp-block-uagb-tabs .uagb-tabs-list[aria-selected='true'] {
+  border-color: #111111;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #111111;
+  text-decoration: underline;
+  text-underline-offset: 0.22em;
+}
+
+.wp-block-uagb-tabs .uagb-tab.uagb-tabs__active .uagb-tabs-list:hover,
+.wp-block-uagb-tabs .uagb-tabs-list[aria-selected='true']:hover {
+  text-decoration: none;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__body-wrap {
+  border: 1px solid #dedede;
+  background: #ffffff;
+  padding: 2rem;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__body-container[hidden] {
+  display: none !important;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__body-container > :first-child {
+  margin-top: 0;
+}
+
+.wp-block-uagb-tabs .uagb-tabs__body-container > :last-child {
+  margin-bottom: 0;
+}`;
+
+    await writeFile(cssPath, `${existingCss.trimEnd()}\n${block}\n`);
+  }
+
   private async applyInteractionTokens(
     frontendDir: string,
     tokens: ThemeTokens,
@@ -1030,9 +1148,14 @@ ${fontEntries}
     const preciseBridges = tokens.interactions?.precise ?? [];
     const imagePrecise = preciseBridges.filter((b) => b.target === 'image');
     const linkPrecise = preciseBridges.filter((b) => b.target === 'link');
+    const buttonPrecise = preciseBridges.filter((b) => b.target === 'button');
     const cardPrecise = preciseBridges.filter((b) => b.target === 'card');
     const otherPrecise = preciseBridges.filter(
-      (b) => b.target !== 'image' && b.target !== 'link' && b.target !== 'card',
+      (b) =>
+        b.target !== 'image' &&
+        b.target !== 'link' &&
+        b.target !== 'button' &&
+        b.target !== 'card',
     );
 
     const interactionRules = [
@@ -1138,6 +1261,60 @@ ${fontEntries}
           bridge.active,
         ),
       ]),
+      // Button precise bridge — preserve plugin/source button interactions
+      // on the clickable element itself, and also support wrapper-applied
+      // source classes that style an inner button/link on hover.
+      ...buttonPrecise.flatMap((bridge) => [
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}`,
+            `.vp-generated-button.${bridge.className}`,
+            `button.${bridge.className}`,
+            `a.${bridge.className}`,
+            `.${bridge.className} .vp-generated-button`,
+            `.${bridge.className} button`,
+            `.${bridge.className} a`,
+          ],
+          bridge.base,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:hover`,
+            `.vp-generated-button.${bridge.className}:hover`,
+            `button.${bridge.className}:hover`,
+            `a.${bridge.className}:hover`,
+            `.${bridge.className}:hover .vp-generated-button`,
+            `.${bridge.className}:hover button`,
+            `.${bridge.className}:hover a`,
+          ],
+          bridge.hover,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:focus`,
+            `.${bridge.className}:focus-visible`,
+            `.vp-generated-button.${bridge.className}:focus`,
+            `.vp-generated-button.${bridge.className}:focus-visible`,
+            `button.${bridge.className}:focus`,
+            `button.${bridge.className}:focus-visible`,
+            `a.${bridge.className}:focus`,
+            `a.${bridge.className}:focus-visible`,
+          ],
+          bridge.focus,
+        ),
+        renderAliasedStateRule(
+          [
+            `.${bridge.className}:active`,
+            `.vp-generated-button.${bridge.className}:active`,
+            `button.${bridge.className}:active`,
+            `a.${bridge.className}:active`,
+            `.${bridge.className}:active .vp-generated-button`,
+            `.${bridge.className}:active button`,
+            `.${bridge.className}:active a`,
+          ],
+          bridge.active,
+        ),
+      ]),
       // Card precise bridge — apply only to wrappers carrying the extracted
       // source class, while still aliasing to common React wrapper tags.
       ...cardPrecise.flatMap((bridge) => [
@@ -1197,7 +1374,7 @@ ${fontEntries}
           bridge.active,
         ),
       ]),
-      // Remaining precise bridges (button/card target custom classes)
+      // Remaining precise bridges
       ...otherPrecise.flatMap((bridge) => [
         renderStateRule(`.${bridge.className}`, bridge.base),
         renderStateRule(`.${bridge.className}:hover`, bridge.hover),
@@ -1213,8 +1390,17 @@ ${fontEntries}
 
     const cssPath = join(frontendDir, 'src', 'index.css');
     const existingCss = await readFile(cssPath, 'utf-8');
-    const block = `/* Vibepress interaction bridge */\n${interactionRules.join('\n')}\n`;
-    if (existingCss.includes('/* Vibepress interaction bridge */')) return;
+    const startMarker = '/* Vibepress interaction bridge */';
+    const endMarker = '/* End Vibepress interaction bridge */';
+    const block = `${startMarker}\n${interactionRules.join('\n')}\n${endMarker}\n`;
+    if (existingCss.includes(startMarker)) {
+      const replaced = existingCss.replace(
+        /\/\* Vibepress interaction bridge \*\/[\s\S]*$/m,
+        block.trimEnd(),
+      );
+      await writeFile(cssPath, `${replaced.trimEnd()}\n`);
+      return;
+    }
     await writeFile(cssPath, `${existingCss.trimEnd()}\n\n${block}`);
   }
 
@@ -1451,13 +1637,13 @@ ${fontEntries}
     }
 
     let normalized = code.replace(
-      /className="max-w-\[1280px\] mx-auto w-full px-4 sm:px-6 lg:px-8 ([^"]*?)flex flex-col gap-\[1rem\]"/,
-      'className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 $1flex flex-col items-center text-center gap-[1rem]"',
+      /className="max-w-\[1280px\] mx-auto w-full px-4 sm:px-6 lg:px-8 ([^"]*?)flex flex-col items-center text-center gap-\[1rem\]"/,
+      'className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 $1flex flex-col gap-[1rem]"',
     );
 
     normalized = normalized.replace(
-      /className="flex flex-wrap items-center gap-\[0\.3em\] text-\[0\.9rem\]"/,
-      'className="flex flex-wrap items-center justify-center gap-[0.3em] text-[0.9rem]"',
+      /className="flex flex-wrap items-center justify-center gap-\[0\.3em\] text-\[0\.9rem\]"/,
+      'className="flex flex-wrap items-center gap-[0.3em] text-[0.9rem]"',
     );
 
     return normalized;
@@ -1575,6 +1761,7 @@ ${fontEntries}
     const cacheDir = await this.ensureTemplateDependencyCache(
       templateDir,
       cacheName,
+      await this.readRuntimePackageJson(runtimeDir),
     );
     await this.linkNodeModules(cacheDir, runtimeDir);
     await this.copyLockfileIfPresent(cacheDir, runtimeDir);
@@ -1583,11 +1770,13 @@ ${fontEntries}
   private async ensureTemplateDependencyCache(
     templateDir: string,
     cacheName: string,
+    packageJsonOverride?: string,
   ): Promise<string> {
-    const packageJson = await readFile(
+    const templatePackageJson = await readFile(
       join(templateDir, 'package.json'),
       'utf-8',
     );
+    const packageJson = packageJsonOverride ?? templatePackageJson;
     const cacheKey = createHash('sha1')
       .update(packageJson)
       .digest('hex')
@@ -1602,11 +1791,59 @@ ${fontEntries}
     await mkdir(DEP_CACHE_ROOT, { recursive: true });
     await rm(cacheDir, { recursive: true, force: true });
     await cp(templateDir, cacheDir, { recursive: true });
+    if (packageJsonOverride && packageJsonOverride !== templatePackageJson) {
+      await writeFile(
+        join(cacheDir, 'package.json'),
+        packageJsonOverride,
+        'utf-8',
+      );
+    }
 
     this.logger.log(`Bootstrapping dependency cache: ${cacheName}-${cacheKey}`);
     await this.runNpmInstall(cacheDir);
     await writeFile(readyMarker, new Date().toISOString(), 'utf-8');
     return cacheDir;
+  }
+
+  private async ensureFrontendPackageRequirements(
+    frontendDir: string,
+    requirements?: FrontendPackageRequirement[],
+  ): Promise<void> {
+    if (!requirements?.length) return;
+
+    const packageJsonPath = join(frontendDir, 'package.json');
+    const raw = await readFile(packageJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as {
+      dependencies?: Record<string, string>;
+    };
+    const dependencies = { ...(parsed.dependencies ?? {}) };
+    let changed = false;
+
+    for (const requirement of requirements) {
+      if (dependencies[requirement.name] === requirement.version) continue;
+      dependencies[requirement.name] = requirement.version;
+      changed = true;
+    }
+
+    if (!changed) return;
+
+    parsed.dependencies = Object.fromEntries(
+      Object.entries(dependencies).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
+    await writeFile(
+      `${packageJsonPath}`,
+      `${JSON.stringify(parsed, null, 2)}\n`,
+    );
+  }
+
+  private async readRuntimePackageJson(
+    runtimeDir: string,
+  ): Promise<string | undefined> {
+    const packageJsonPath = join(runtimeDir, 'package.json');
+    if (!(await this.pathExists(packageJsonPath))) return undefined;
+    return await readFile(packageJsonPath, 'utf-8');
   }
 
   private async linkNodeModules(

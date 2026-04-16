@@ -10,6 +10,12 @@ import { PhpParserService } from './php-parser/php-parser.service.js';
 @Injectable()
 export class DbTemplateOverlayService {
   private readonly logger = new Logger(DbTemplateOverlayService.name);
+  private readonly knownBareCustomBlocks = new Set([
+    'accordion',
+    'accordion-item',
+    'accordion-panel',
+    'accordion-pane',
+  ]);
 
   constructor(
     private readonly blockParser: BlockParserService,
@@ -39,17 +45,22 @@ export class DbTemplateOverlayService {
     const globalStylesOverride = this.parseGlobalStylesOverride(
       content.dbGlobalStyles,
     );
-    const templateRows = content.dbTemplates.filter(
-      (row) => row.postType === 'wp_template' && row.content.trim().length > 0,
+    const selectedTemplateRows = this.selectPreferredEntities(
+      content.dbTemplates.filter(
+        (row) =>
+          row.postType === 'wp_template' && row.content.trim().length > 0,
+      ),
     );
-    const partRows = content.dbTemplates.filter(
-      (row) =>
-        row.postType === 'wp_template_part' && row.content.trim().length > 0,
+    const selectedPartRows = this.selectPreferredEntities(
+      content.dbTemplates.filter(
+        (row) =>
+          row.postType === 'wp_template_part' && row.content.trim().length > 0,
+      ),
     );
 
     if (
-      templateRows.length === 0 &&
-      partRows.length === 0 &&
+      selectedTemplateRows.length === 0 &&
+      selectedPartRows.length === 0 &&
       !globalStylesOverride &&
       !customCssOverride
     ) {
@@ -75,9 +86,27 @@ export class DbTemplateOverlayService {
     }
 
     let appliedParts = 0;
-    for (const row of partRows) {
+    let skippedStaleParts = 0;
+    for (const row of selectedPartRows) {
       const key = this.normalizeEntityName(row.slug);
       if (!key) continue;
+      const existingKey = this.findEntityKey(key, rawPartMap);
+      if (existingKey) {
+        const repoMarkup = rawPartMap.get(existingKey) ?? '';
+        const missingPluginBlocks = this.findMissingPluginBlocks(
+          repoMarkup,
+          row.content,
+        );
+        if (missingPluginBlocks.length > 0) {
+          this.logger.warn(
+            `[DbTemplateOverlay] Skipping stale DB part override for "${key}": ` +
+              `DB is missing custom blocks present in repo: [${missingPluginBlocks.join(', ')}]. ` +
+              `Using repo version.`,
+          );
+          skippedStaleParts++;
+          continue;
+        }
+      }
       rawPartMap.set(key, row.content);
       appliedParts++;
     }
@@ -137,7 +166,8 @@ export class DbTemplateOverlayService {
 
     const nextTemplates = [...nextTheme.templates];
     let appliedTemplates = 0;
-    for (const row of templateRows) {
+    let skippedStaleTemplates = 0;
+    for (const row of selectedTemplateRows) {
       const key = this.normalizeEntityName(row.slug);
       if (!key) continue;
 
@@ -146,6 +176,26 @@ export class DbTemplateOverlayService {
         resolvedPartMap,
       );
       const existingIndex = this.findEntityIndex(nextTemplates, key);
+
+      // Guard: if repo already has plugin blocks that DB is missing, DB is stale —
+      // skip the override for this template to avoid losing blocks added after last DB save.
+      if (existingIndex !== -1) {
+        const repoMarkup = nextTemplates[existingIndex].markup;
+        const missingPluginBlocks = this.findMissingPluginBlocks(
+          repoMarkup,
+          resolvedMarkup,
+        );
+        if (missingPluginBlocks.length > 0) {
+          this.logger.warn(
+            `[DbTemplateOverlay] Skipping stale DB template override for "${key}": ` +
+              `DB is missing custom blocks present in repo: [${missingPluginBlocks.join(', ')}]. ` +
+              `Using repo version.`,
+          );
+          skippedStaleTemplates++;
+          continue;
+        }
+      }
+
       const name =
         existingIndex === -1 ? key : nextTemplates[existingIndex].name;
 
@@ -160,9 +210,17 @@ export class DbTemplateOverlayService {
       appliedTemplates++;
     }
 
-    if (appliedTemplates > 0 || appliedParts > 0) {
+    if (
+      appliedTemplates > 0 ||
+      appliedParts > 0 ||
+      skippedStaleTemplates > 0 ||
+      skippedStaleParts > 0
+    ) {
       this.logger.log(
-        `Applied DB template overlay: templates=${appliedTemplates}, parts=${appliedParts}, show_on_front=${content.readingSettings.showOnFront}, dbGlobalStyles=${content.dbGlobalStyles.length}`,
+        `Applied DB template overlay: templates=${appliedTemplates}, parts=${appliedParts}, skippedStaleTemplates=${skippedStaleTemplates}, skippedStaleParts=${skippedStaleParts}, show_on_front=${content.readingSettings.showOnFront}, dbGlobalStyles=${content.dbGlobalStyles.length}`,
+      );
+      this.logger.debug(
+        `[DbTemplateOverlay] templates=[${selectedTemplateRows.map((row) => `${row.slug}:${row.status}`).join(', ')}] parts=[${selectedPartRows.map((row) => `${row.slug}:${row.status}`).join(', ')}]`,
       );
     }
 
@@ -275,6 +333,85 @@ export class DbTemplateOverlayService {
     return /[.#:\w\-\[\]\s>,+~()"'=]+\{[^}]+\}/.test(value);
   }
 
+  private selectPreferredEntities<
+    T extends { slug: string; status: string; modified: string; id: number },
+  >(rows: T[]): T[] {
+    const byKey = new Map<string, T>();
+    const skipped: string[] = [];
+
+    for (const row of rows) {
+      const key = this.normalizeEntityName(row.slug);
+      if (!key) continue;
+
+      const current = byKey.get(key);
+      if (!current) {
+        byKey.set(key, row);
+        continue;
+      }
+
+      if (this.compareOverlayPriority(row, current) < 0) {
+        skipped.push(`${current.slug}:${current.status}`);
+        byKey.set(key, row);
+      } else {
+        skipped.push(`${row.slug}:${row.status}`);
+      }
+    }
+
+    const selected = Array.from(byKey.values()).filter((row) =>
+      this.isOverlayUsableStatus(row.status),
+    );
+    const filteredOut = Array.from(byKey.values()).filter(
+      (row) => !this.isOverlayUsableStatus(row.status),
+    );
+
+    if (skipped.length > 0 || filteredOut.length > 0) {
+      this.logger.debug(
+        `[DbTemplateOverlay] skipped duplicate/non-usable DB entities: ${[
+          ...skipped,
+          ...filteredOut.map((row) => `${row.slug}:${row.status}`),
+        ].join(', ')}`,
+      );
+    }
+
+    return selected;
+  }
+
+  private compareOverlayPriority(
+    left: { status: string; modified: string; id: number },
+    right: { status: string; modified: string; id: number },
+  ): number {
+    const statusDiff =
+      this.overlayStatusPriority(left.status) -
+      this.overlayStatusPriority(right.status);
+    if (statusDiff !== 0) return statusDiff;
+
+    const modifiedDiff =
+      new Date(right.modified).getTime() - new Date(left.modified).getTime();
+    if (modifiedDiff !== 0) return modifiedDiff;
+
+    return right.id - left.id;
+  }
+
+  private overlayStatusPriority(status: string): number {
+    switch (String(status).toLowerCase()) {
+      case 'publish':
+        return 0;
+      case 'private':
+        return 1;
+      case 'draft':
+        return 2;
+      case 'auto-draft':
+        return 3;
+      default:
+        return 4;
+    }
+  }
+
+  private isOverlayUsableStatus(status: string): boolean {
+    const normalized = String(status).toLowerCase();
+    return normalized === 'publish' || normalized === 'private';
+  }
+
   private resolveTemplateParts(
     markup: string,
     resolvedPartMap: Map<string, string>,
@@ -326,6 +463,42 @@ export class DbTemplateOverlayService {
         key.split('/').pop() === normalized,
     );
     return matches.length > 0 ? matches[0] : undefined;
+  }
+
+  /**
+   * Returns plugin block types that are present in `repoMarkup` but absent in `dbMarkup`.
+   * Plugin blocks are non-core blocks (e.g. uagb/*, spectra/*, kadence/*, etc.).
+   * If the DB is missing blocks the repo has, the DB version is considered stale.
+   */
+  private findMissingPluginBlocks(
+    repoMarkup: string,
+    dbMarkup: string,
+  ): string[] {
+    const extractBlockTypes = (markup: string): Set<string> => {
+      const types = new Set<string>();
+      const re =
+        /<!--\s+wp:([a-z][a-z0-9-]*(?:\/[a-z][a-z0-9-]*)?)(?=[\s{\/])/g;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(markup)) !== null) {
+        const blockName = match[1];
+        if (blockName === 'template-part' || blockName.startsWith('core/')) {
+          continue;
+        }
+        if (blockName.includes('/')) {
+          types.add(blockName);
+          continue;
+        }
+        if (this.knownBareCustomBlocks.has(blockName)) {
+          types.add(blockName);
+        }
+      }
+      return types;
+    };
+
+    const repoBlocks = extractBlockTypes(repoMarkup);
+    const dbBlocks = extractBlockTypes(dbMarkup);
+
+    return [...repoBlocks].filter((blockType) => !dbBlocks.has(blockType));
   }
 
   private normalizeEntityName(value: string): string {

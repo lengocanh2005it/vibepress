@@ -128,7 +128,7 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 
 - `useEffect` + `useState`, fetch on mount, show loading/error states
 - Define TypeScript interfaces above the component
-- ⛔ PAGE components must NEVER fetch `/api/site-info` or `/api/menus`. Those endpoints are owned exclusively by `Header` / `Footer` / `Navigation` partials. If the template JSON contains a `header` or `footer` block, skip it entirely — the shared Layout wrapper already renders it.
+- ⛔ PAGE components must NEVER fetch `/api/site-info`, `/api/menus`, or `/api/footer-links`. Those endpoints are owned exclusively by `Header` / `Footer` / `Navigation` partials. If the template source contains a `header` or `footer` block, skip it entirely — the shared Layout wrapper already renders it.
 - Menu guard — always use optional chaining. Each menu object now includes a `location` field (the WP theme location slug, e.g. `"primary"`, `"footer-about"`, or `null` if unassigned):
 
   ```tsx
@@ -136,115 +136,96 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
   const navMenu = menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0];
   {navMenu?.items?.map(item => (...))}
 
-  // Footer — exclude the primary nav menu by location AND by slug (slug fallback
-  // handles sites where nav_menu_locations is not configured in WordPress)
-  const footerMenus = menus.filter(m => m.location !== 'primary' && m.slug !== 'primary');
-  // Fallback: if every menu matched (custom slugs), skip the first one (assumed primary nav)
-  const displayMenus = footerMenus.length > 0 ? footerMenus : menus.slice(1);
+  // Footer does NOT use /api/menus in this pipeline.
+  // Use /api/footer-links instead.
   ```
 
 ## Content — two sources only
 
-| Source                                          | When                                                                   |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| `text` field in template JSON (outside `query`) | Static theme text — hardcode EXACTLY, never rephrase                   |
-| `text` inside `block: "query"`                  | Dynamic — use `post.title`, `post.excerpt`, etc.                       |
-| `GET /api/site-info`                            | ONLY when template has `block: "site-title"` / `block: "site-tagline"` |
-| `GET /api/posts` / `GET /api/pages`             | Posts list, pages list                                                 |
-| `GET /api/menus`                                | ALL nav and footer links — NEVER hardcode                              |
-| `GET /api/footer-links`                         | Footer link columns from WordPress template part — shape: `{ heading: string; links: { label: string; url: string }[] }[]` |
+| Source                                            | When                                                                                                                       |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `text` field in template source (outside `query`) | Static theme text — hardcode EXACTLY, never rephrase                                                                       |
+| `text` inside `block: "query"`                    | Dynamic — use `post.title`, `post.excerpt`, etc.                                                                           |
+| `GET /api/site-info`                              | ONLY when template has `block: "site-title"` / `block: "site-tagline"`                                                     |
+| `GET /api/posts` / `GET /api/pages`               | Posts list, pages list                                                                                                     |
+| `GET /api/menus`                                  | Header/navigation links — NEVER hardcode                                                                                   |
+| `GET /api/footer-links`                           | Footer link columns from WordPress template part — shape: `{ heading: string; links: { label: string; url: string }[] }[]` |
 
 ⛔ NEVER invent text, use Lorem ipsum, or paraphrase
 ⛔ NEVER render `siteName` more than once — skip duplicate `text` fields equal to site name
 ⛔ `blogDescription` → ONLY if template has `block: "site-tagline"`, else omit entirely
-⛔ Images: render `<img>` only when `src` is non-empty in template JSON or `featuredImage` from API — no placeholders, no invented paths
+⛔ Images: render `<img>` only when `src` is non-empty in template source or `featuredImage` from API — no placeholders, no invented paths
 ⛔ Invented content: testimonial quotes, names, job titles must come exactly from template `text` fields
-⛔ Footer nav: fetch BOTH `/api/menus` AND `/api/footer-links` in Promise.all — use non-primary menus from `/api/menus` first; if none, fall back to `/api/footer-links` columns — NEVER hardcode links
+⛔ Footer nav: Footer must use `/api/footer-links` for footer columns/links — NEVER hardcode links and do NOT substitute `/api/menus`.
 
-**Footer multi-menu rendering — MANDATORY pattern:**
+**Footer link rendering — MANDATORY pattern:**
 
-Each menu from `/api/menus` has shape: `{ name: string, slug: string, location: string | null, items: { id, title, url, order, parentId }[] }`.
 Each column from `/api/footer-links` has shape: `{ heading: string; links: { label: string; url: string }[] }`.
 
-- `location` = WP theme location slug (e.g. `"primary"` = main nav, `"footer-about"`, `"social"`, etc.)
-- The **Header/Navigation** component owns the `location === "primary"` menu
-- The **Footer** component must fetch BOTH `/api/menus` AND `/api/footer-links` in a single `Promise.all`
-- Render priority: non-primary menus from `/api/menus` first; if none, use `/api/footer-links` columns; if neither, render nothing
-- `item.url` from `/api/menus` is already canonical. Use `<Link to={item.url}>` directly — never prefix it.
+- The **Header/Navigation** component owns `/api/menus`
+- The **Footer** component must fetch `/api/footer-links`
+- Render footer columns directly from `/api/footer-links`; if the endpoint returns empty, render no footer link columns
 
 ```tsx
-// ✅ Correct — fetch both, use footer-links as fallback
-interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }
-interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }
-interface FooterColumn { heading: string; links: { label: string; url: string }[]; }
+// ✅ Correct — fetch footer-links directly
+interface FooterColumn {
+  heading: string;
+  links: { label: string; url: string }[];
+}
 
-const [menus, setMenus] = useState<Menu[]>([]);
 const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);
 
 useEffect(() => {
-  Promise.all([fetch('/api/menus'), fetch('/api/footer-links')])
-    .then(([r1, r2]) => Promise.all([r1.json(), r2.json()]))
-    .then(([menusData, colsData]) => {
-      setMenus(menusData);
+  fetch('/api/footer-links')
+    .then((r) => r.json())
+    .then((colsData) => {
       setFooterColumns(Array.isArray(colsData) ? colsData : []);
     });
 }, []);
 
-// Exclude primary nav menu
-const footerMenus = menus.filter(m => m.location !== 'primary' && m.slug !== 'primary');
-const displayMenus = footerMenus.length > 0 ? footerMenus : menus.slice(1);
-
-// In JSX — menus first, footer-links as fallback:
-{displayMenus.length > 0 ? (
-  <div className="flex flex-wrap gap-8">
-    {displayMenus.map(menu => (
-      <div key={menu.slug}>
-        <h3 className="font-bold mb-4">{menu.name}</h3>
-        <nav className="flex flex-col gap-2">
-          {(menu.items ?? []).map(item => (
-            item.url.startsWith('http') ? (
-              <a key={item.id} href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a>
-            ) : (
-              <Link key={item.id} to={item.url}>{item.title}</Link>
-            )
-          ))}
-        </nav>
-      </div>
-    ))}
-  </div>
-) : footerColumns.length > 0 ? (
-  <div className="flex flex-wrap gap-8">
-    {footerColumns.map(col => (
-      <div key={col.heading}>
-        <h3 className="font-bold mb-4">{col.heading}</h3>
-        <nav className="flex flex-col gap-2">
-          {col.links.map(link => (
-            link.url.startsWith('http') ? (
-              <a key={link.label} href={link.url} target="_blank" rel="noopener noreferrer">{link.label}</a>
-            ) : (
-              <Link key={link.label} to={link.url}>{link.label}</Link>
-            )
-          ))}
-        </nav>
-      </div>
-    ))}
-  </div>
-) : null}
-
-// ❌ Wrong — renders ALL menus including the primary nav menu in the footer
-{menus.map(menu => (...))}
-
-// ❌ Wrong — hardcoded slug breaks if WP menu slugs differ from display names
-const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
+{
+  footerColumns.length > 0 ? (
+    <div className="flex flex-wrap gap-8">
+      {footerColumns.map((col) => (
+        <div key={col.heading}>
+          <h3 className="font-bold mb-4">{col.heading}</h3>
+          <nav className="flex flex-col gap-2">
+            {col.links.map((link) =>
+              link.url.startsWith('http') ? (
+                <a
+                  key={link.label}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {link.label}
+                </a>
+              ) : (
+                <Link key={link.label} to={link.url}>
+                  {link.label}
+                </Link>
+              ),
+            )}
+          </nav>
+        </div>
+      ))}
+    </div>
+  ) : null;
+}
 
 // ❌ Wrong — hardcoded fallback columns when API returns empty
-{displayMenus.length === 0 && <div><h3>About</h3><span>Team</span></div>}
+{
+  footerColumns.length === 0 && (
+    <div>
+      <h3>About</h3>
+      <span>Team</span>
+    </div>
+  );
+}
 ```
 
-⛔ NEVER render the `location === "primary"` or `slug === "primary"` menu in the Footer — that belongs to the Header
-⛔ NEVER choose menus by arbitrary content slugs like `about`, `company`, `resources`, `links`. Use `location` first; `slug === "primary"` is allowed only as a fallback when `location` is missing.
-⛔ NEVER skip `menu.items` rendering — always map over `(menu.items ?? [])` even if you're unsure items exist
-⛔ NEVER hardcode footer columns/links as fallback — if both APIs return empty, render nothing
+⛔ NEVER fetch `/api/menus` in the Footer — that belongs to Header/Navigation
+⛔ NEVER hardcode footer columns/links as fallback — if `/api/footer-links` returns empty, render nothing
 
 {{dataGrounding}}
 
@@ -303,8 +284,9 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 
 - Root wrapper: use theme tokens to reproduce the WordPress layout with Tailwind classes.
 - Body/heading fonts should come from the provided theme tokens and inline `fontFamily` only when needed.
-- Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
-- **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
+- Default block gap (from tokens table): apply it where the WordPress source actually shows sibling spacing. Use it on inner flex/grid containers with no explicit `gap`, but do not force a single root `gap` between every top-level tracked section.
+- If adjacent tracked sections come from the same parent WordPress group/background cluster, keep the wrappers separate for tracking but render them flush with no artificial vertical seam between them.
+- **Fallback** (no blockGap in tokens): prefer per-section padding/spacing over a blanket root gap; ungapped inner containers can use `gap-8`; group sections with no padding can use `py-12 px-4 sm:px-6`
 - Headings: exact token size/weight per level (`text-[3rem] font-[700]`)
 - Buttons: apply theme border-radius + padding from tokens
 - Per-block-type styles: apply as defaults, override only when block has explicit attribute
@@ -356,8 +338,8 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 - Brand in shared chrome → when the template includes `site-logo` and/or `site-title`, wrap the entire visible brand cluster in ONE home link. Do NOT leave the logo outside that link.
   - **Header**: logo and site name are side-by-side → `<Link to="/" className="flex items-center gap-3">{logo}{siteInfo.siteName}</Link>`
   - **Footer**: logo and site name are stacked vertically (logo above, name below) → `<Link to="/" className="flex flex-col gap-2 w-fit">{logo}<span>{siteInfo.siteName}</span></Link>`
-  - Always follow the block order in the template JSON — if logo block comes before site-title block, logo renders first (top/left).
-- Preserve exact ORDER of blocks in JSON
+  - Always follow the block order in the template source — if logo block comes before site-title block, logo renders first (top/left).
+- Preserve exact ORDER of blocks in the provided source
 
 ## Responsive — MANDATORY (mobile-first: base=mobile, sm=640, md=768, lg=1024)
 
@@ -457,25 +439,25 @@ Site: {{siteName}} | URL: {{siteUrl}}
 
 ## GOLDEN RULE
 
-Content from EXACTLY one of: (1) template JSON `text`/`src`/`href` fields, or (2) API. Not in either → **omit entirely**.
+Content from EXACTLY one of: (1) template source `text`/`src`/`href`/HTML fields, or (2) API. Not in either → **omit entirely**.
 
 {{templateTexts}}
 
-## Template JSON
+## Template source
 
-Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `text`, `src`, `href`, `children`.
+The source below may be raw WordPress block markup (`<!-- wp:... -->`) or a pre-parsed block tree. Treat it as canonical. Preserve its block order, HTML structure, and nested layout. When raw HTML/list markup is present, do NOT flatten it into plain paragraphs.
 
-| block                   | render                                                                                                                                                                                                               |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `site-title`            | for shared Header/Footer/Navigation partials render it inside the brand home link; if `site-logo` is also present, both logo + title belong inside the SAME `<Link to="/">...</Link>`                                |
-| `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                                                                         |
+| block                   | render                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `site-title`            | for shared Header/Footer/Navigation partials render it inside the brand home link; if `site-logo` is also present, both logo + title belong inside the SAME `<Link to="/">...</Link>`                                                                                                                                                          |
+| `site-tagline`          | `{siteInfo.blogDescription}`                                                                                                                                                                                                                                                                                                                   |
 | `site-logo`             | render `<img src={node.src ?? siteInfo.logoUrl}>` ONLY when a real logo URL exists; if `site-title` is also rendered, place the logo inside the same home link wrapper as the title; preserve any explicit width/height from the parsed source block, otherwise use a visible fallback like `h-auto max-h-[72px] max-w-[240px] object-contain` |
-| `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                                                                                   |
-| `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                              |
-| `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                              |
-| `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
-| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                                                                            |
-| `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                                                                            |
+| `cover`                 | CSS backgroundImage div (see Cover block above) — ⛔ NEVER `<img>`                                                                                                                                                                                                                                                                             |
+| `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                                                                                                                                                        |
+| `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                                                                                                                                                        |
+| `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]`                                                                                                                           |
+| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                                                                                                                                                                                                      |
+| `query-pagination`      | render ONLY if present in the source, else omit                                                                                                                                                                                                                                                                                                |
 
 `block: "query"` → fetch `/api/posts`, map over `post` results:
 
@@ -534,9 +516,9 @@ Rules:
 **For Header and Footer partial components** (when `componentName` starts with `Header` or `Footer`):
 
 - `header` should become `<header>` with its child blocks and compound layout.
-- `footer` should become `<footer>` with link columns, menus, site info, and credit elements.
+- `footer` should become `<footer>` with link columns from `/api/footer-links`, site info, and credit elements.
 - Respect block order and spacing (e.g., if header has nav + banner, keep order).
-- Fetch menus from `/api/menus` and render ALL navigation items — never hardcode links.
+- Header/Navigation uses `/api/menus`; Footer uses `/api/footer-links`.
 - Do not produce a generic placeholder when the template explicitly defines these blocks.
 
 **For PAGE components** (any other component): ⛔ Do NOT render a `<header>` or `<footer>` — they are provided by the shared Layout wrapper.
@@ -617,7 +599,7 @@ posts.map((post) => (
 
 ## Anti-hallucination rules
 
-⛔ NEVER create sections that do not exist in the template JSON.
+⛔ NEVER create sections that do not exist in the template source.
 
 Do NOT invent:
 
@@ -628,7 +610,7 @@ Do NOT invent:
 - lorem ipsum text
 - heading-only sections (e.g. `<section><h2>About</h2></section>` with no real content)
 
-Only render blocks present in the template tree.
+Only render blocks present in the template source/tree.
 
 ⛔ **NEVER generate a section whose only content is a bare heading word like "About", "About Us", "Overview", "Introduction", or any other generic label** without real data-driven content beneath it. If a section plan has a label but no actual content nodes (no paragraphs, no images, no list items, no data), **omit the section entirely**. A heading with no body is always a hallucination artifact.
 
@@ -647,7 +629,7 @@ When the template contains a `post-content` or `html` block that is rendered via
 <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
 ```
 
-If the template JSON has individual heading/paragraph/image nodes inside a `post-content` or `page-content` section, treat them as metadata for understanding structure only — do NOT render them as separate JSX blocks.
+If the template source has individual heading/paragraph/image nodes inside a `post-content` or `page-content` section, treat them as metadata for understanding structure only — do NOT render them as separate JSX blocks.
 
 ## Rendering guard
 
@@ -681,8 +663,8 @@ File order must be:
 
 Before writing code:
 
-1. Identify blocks in the template tree
-2. If this is a **PAGE component**: remove all `header` and `footer` blocks from consideration — do NOT render them and do NOT fetch `/api/site-info` or `/api/menus` for them
+1. Identify blocks in the template source/tree
+2. If this is a **PAGE component**: remove all `header` and `footer` blocks from consideration — do NOT render them and do NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` for them
 3. Determine required API endpoints from the remaining blocks only
 4. Map remaining blocks → React layout
 5. Determine dynamic vs static content

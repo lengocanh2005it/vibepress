@@ -56,6 +56,8 @@ export interface WpNode {
   modalHeading?: string;
   modalDescription?: string;
   modalCta?: { text: string; link: string };
+  // accordion / faq-like blocks
+  accordionItems?: { title: string; content?: string }[];
 }
 
 /**
@@ -166,6 +168,27 @@ function normalizeBoxSpacing(
 
   const [top, right, bottom, left] = parts;
   return { top, right, bottom, left };
+}
+
+function normalizeGapSpacing(value: unknown): string | undefined {
+  if (!value) return undefined;
+
+  if (typeof value === 'object') {
+    const gap = value as Record<string, unknown>;
+    const vertical = normalizeCssLength(
+      gap.vertical ?? gap.row ?? gap.top ?? gap.blockGap ?? gap.y,
+    );
+    const horizontal = normalizeCssLength(
+      gap.horizontal ?? gap.column ?? gap.left ?? gap.inline ?? gap.x,
+    );
+
+    if (vertical && horizontal) {
+      return vertical === horizontal ? vertical : `${vertical} ${horizontal}`;
+    }
+    return vertical ?? horizontal;
+  }
+
+  return normalizeCssLength(value);
 }
 
 function normalizeCssLength(value: unknown): string | undefined {
@@ -396,7 +419,8 @@ function parseBlocks(markup: string): WpNode[] {
     if (borderRadius) node.borderRadius = borderRadius as string;
     // Lift gap from params.style.spacing.blockGap or params.gap
     const gap = params?.style?.spacing?.blockGap ?? params?.gap;
-    if (gap) node.gap = gap as string;
+    const normalizedGap = normalizeGapSpacing(gap);
+    if (normalizedGap) node.gap = normalizedGap;
     // Lift padding from params.style.spacing.padding
     const pad = params?.style?.spacing?.padding;
     const normalizedPadding = normalizeBoxSpacing(pad);
@@ -644,6 +668,29 @@ function buildNode(
       modalHeading,
       modalDescription,
       modalCta,
+    });
+  }
+
+  if (
+    blockName === 'accordion' ||
+    blockName === 'uagb/accordion' ||
+    blockName === 'kadence/accordion'
+  ) {
+    const items: NonNullable<WpNode['accordionItems']> = [];
+    for (const match of innerMarkup.matchAll(
+      /<details[^>]*>[\s\S]*?<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi,
+    )) {
+      const title = stripTags(match[1] ?? '').trim();
+      const content = stripTags(match[2] ?? '').trim();
+      if (!title && !content) continue;
+      items.push({
+        title,
+        ...(content ? { content } : {}),
+      });
+    }
+    return compact({
+      block: 'accordion',
+      ...(items.length > 0 ? { accordionItems: items } : {}),
     });
   }
 

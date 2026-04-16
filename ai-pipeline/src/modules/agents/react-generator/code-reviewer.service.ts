@@ -29,6 +29,11 @@ import {
   extractStaticImageSources,
   parseVisualPlanDetailed,
 } from './prompts/visual-plan.prompt.js';
+import {
+  wpBlocksToJsonWithSourceRefs,
+  type WpNode,
+} from '../../../common/utils/wp-block-to-json.js';
+import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type {
   ThemeInteractionTarget,
@@ -42,6 +47,7 @@ import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
 export interface ReviewInput {
   componentName: string;
   templateSource: string;
+  promptTemplateSource?: string;
   modelName: string;
   /** Model for the Fix Agent (R3 repair pass). Defaults to modelName if omitted. */
   fixAgentModel?: string;
@@ -129,6 +135,7 @@ export class CodeReviewerService {
     const {
       componentName,
       templateSource,
+      promptTemplateSource = templateSource,
       modelName,
       fixAgentModel = modelName,
       preferDirectAi = false,
@@ -237,7 +244,7 @@ export class CodeReviewerService {
 
         const planned = await this.generateComponentWithPlan({
           componentName,
-          templateSource,
+          templateSource: promptTemplateSource,
           modelName,
           content,
           tokens,
@@ -320,11 +327,16 @@ export class CodeReviewerService {
                 componentPlan.sourceBackedAuxiliaryLabels,
             }
           : undefined;
+        const draftSections = this.buildDraftSectionsForVisualPlan(
+          templateSource,
+          componentPlan,
+          componentName,
+        );
 
         const { systemPrompt: s1System, userPrompt: s1User } =
           buildVisualPlanPrompt({
             componentName,
-            templateSource,
+            templateSource: promptTemplateSource,
             content,
             tokens,
             repoManifest,
@@ -334,6 +346,7 @@ export class CodeReviewerService {
             dataNeeds: visualDataNeeds,
             sourceBackedAuxiliaryLabels:
               componentPlan?.sourceBackedAuxiliaryLabels,
+            draftSections,
             editRequestContextNote,
           });
 
@@ -383,7 +396,7 @@ export class CodeReviewerService {
             );
             const planned = await this.generateComponentWithPlan({
               componentName,
-              templateSource,
+              templateSource: promptTemplateSource,
               modelName,
               content,
               tokens,
@@ -468,7 +481,7 @@ export class CodeReviewerService {
       );
       const direct = await this.generateComponentWithPlan({
         componentName,
-        templateSource,
+        templateSource: promptTemplateSource,
         modelName,
         content,
         tokens,
@@ -527,7 +540,11 @@ export class CodeReviewerService {
           logPath,
           componentName,
         );
-        code = fixResult.code;
+        code = this.sanitizeComponentCode(
+          fixResult.code,
+          componentName,
+          promptContext,
+        );
         cotAttempts.push({
           attemptNumber: cotAttempts.length + 1,
           promptSent: {
@@ -767,7 +784,7 @@ export class CodeReviewerService {
           logPath,
           sectionName,
         );
-        code = fixResult.code;
+        code = this.sanitizeComponentCode(fixResult.code, sectionName);
         cotAttempts.push({
           attemptNumber: cotAttempts.length + 1,
           promptSent: {
@@ -876,11 +893,22 @@ export class CodeReviewerService {
         ? undefined
         : (visualPlan ?? componentPlan?.visualPlan);
     const hasExplicitDataNeeds = Array.isArray(componentPlan?.dataNeeds);
-    const dataNeeds = hasExplicitDataNeeds
+    const rawDataNeeds = hasExplicitDataNeeds
       ? [...(componentPlan?.dataNeeds ?? [])]
       : resolvedVisualPlan?.dataNeeds
         ? [...resolvedVisualPlan.dataNeeds]
         : undefined;
+    const componentName =
+      (componentPlan &&
+      typeof componentPlan === 'object' &&
+      'componentName' in componentPlan
+        ? componentPlan.componentName
+        : undefined) ?? resolvedVisualPlan?.componentName;
+    const dataNeeds = this.normalizeSharedChromePromptDataNeeds(
+      componentName,
+      componentPlan?.type,
+      rawDataNeeds,
+    );
     const requiredCustomClassNames =
       options?.includeRequiredCustomClasses === false
         ? undefined
@@ -899,6 +927,35 @@ export class CodeReviewerService {
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
       visualPlan: resolvedVisualPlan,
     };
+  }
+
+  private normalizeSharedChromePromptDataNeeds(
+    componentName: string | undefined,
+    componentType: 'page' | 'partial' | undefined,
+    dataNeeds?: string[],
+  ): string[] | undefined {
+    if (!dataNeeds?.length && !componentName) return dataNeeds;
+
+    const normalized = new Set(dataNeeds ?? []);
+    const isFooterPartial =
+      componentType === 'partial' &&
+      /^(footer)(?:[-_].+)?$/i.test(componentName ?? '');
+    const isHeaderLikePartial =
+      componentType === 'partial' &&
+      /^(header|navigation|nav)(?:[-_].+)?$/i.test(componentName ?? '');
+
+    if (isFooterPartial) {
+      normalized.delete('menus');
+      normalized.add('site-info');
+      normalized.add('footer-links');
+    }
+
+    if (isHeaderLikePartial) {
+      normalized.add('site-info');
+      normalized.add('menus');
+    }
+
+    return normalized.size > 0 ? [...normalized] : undefined;
   }
 
   private buildValidationContext(
@@ -922,9 +979,295 @@ export class CodeReviewerService {
       requiredCustomClassNames:
         requiredCustomClassNames ?? componentPlan?.requiredCustomClassNames,
       requiredCustomClassTargets,
+      requiredTrackedSectionKeys:
+        this.extractRequiredTrackedSectionKeys(componentPlan),
+      requiredSectionPresentationHints:
+        this.extractRequiredSectionPresentationHints(componentPlan),
+      requiredMenuSlug: this.extractRequiredMenuSlug(componentPlan),
+      requiredSectionExpectations:
+        this.extractRequiredSectionExpectations(componentPlan),
       requireCommentForm:
         commentSection?.type === 'comments' ? commentSection.showForm : false,
     };
+  }
+
+  private extractRequiredTrackedSectionKeys(
+    componentPlan?: ComponentPromptContext,
+  ): string[] | undefined {
+    const keys = componentPlan?.visualPlan?.sections
+      ?.filter((section) => !!section.sourceRef?.sourceNodeId)
+      .map(
+        (section, index) =>
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`,
+      )
+      .filter((value): value is string => Boolean(value));
+    if (!keys?.length) return undefined;
+    return [...new Set(keys)];
+  }
+
+  private extractRequiredSectionPresentationHints(
+    componentPlan?: ComponentPromptContext,
+  ):
+    | Array<{
+        sectionKey: string;
+        sectionType: string;
+        textAlign?: 'left' | 'center' | 'right';
+        contentWidth?: string;
+        paddingStyle?: string;
+        gapStyle?: string;
+        headingLineHeight?: string;
+        bodyLineHeight?: string;
+        requireStructuredStackSpacing?: boolean;
+        forbidGenericSpacerDivs?: boolean;
+        requireAnimatedTransition?: boolean;
+        requireEdgeControls?: boolean;
+        requireOverlayBackdrop?: boolean;
+        requireDialogSemantics?: boolean;
+        requireEscapeClose?: boolean;
+      }>
+    | undefined {
+    const sections = componentPlan?.visualPlan?.sections ?? [];
+    const hints = sections
+      .map((section, index) => ({
+        sectionKey:
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`,
+        sectionType: section.type,
+        textAlign: section.textAlign,
+        contentWidth: section.contentWidth,
+        paddingStyle: section.paddingStyle,
+        gapStyle: section.gapStyle,
+        headingLineHeight:
+          'headingStyle' in section
+            ? section.headingStyle?.lineHeight
+            : undefined,
+        bodyLineHeight:
+          'bodyStyle' in section
+            ? section.bodyStyle?.lineHeight
+            : 'subheadingStyle' in section
+              ? section.subheadingStyle?.lineHeight
+              : undefined,
+        requireStructuredStackSpacing:
+          (section.type === 'hero' &&
+            section.layout !== 'split' &&
+            !!section.subheading?.trim() &&
+            !!section.cta?.text?.trim()) ||
+          (section.type === 'newsletter' &&
+            !!section.subheading?.trim() &&
+            !!section.buttonText?.trim()),
+        forbidGenericSpacerDivs:
+          (section.type === 'hero' &&
+            section.layout !== 'split' &&
+            !!section.subheading?.trim() &&
+            !!section.cta?.text?.trim()) ||
+          (section.type === 'newsletter' &&
+            !!section.subheading?.trim() &&
+            !!section.buttonText?.trim()),
+        requireVerticalBreathingRoom: [
+          'slider',
+          'modal',
+          'button-group',
+        ].includes(section.type),
+        requireAnimatedTransition:
+          section.type === 'slider'
+            ? section.slides.length > 1
+            : section.type === 'modal',
+        requireEdgeControls:
+          section.type === 'slider' ? section.slides.length > 1 : undefined,
+        requireOverlayBackdrop: section.type === 'modal',
+        requireDialogSemantics: section.type === 'modal',
+        requireEscapeClose: section.type === 'modal',
+      }))
+      .filter(
+        (section) =>
+          !!section.textAlign ||
+          !!section.contentWidth ||
+          !!section.paddingStyle ||
+          !!section.gapStyle ||
+          !!section.headingLineHeight ||
+          !!section.bodyLineHeight ||
+          !!section.requireStructuredStackSpacing ||
+          !!section.forbidGenericSpacerDivs ||
+          !!section.requireVerticalBreathingRoom ||
+          !!section.requireAnimatedTransition ||
+          !!section.requireEdgeControls ||
+          !!section.requireOverlayBackdrop ||
+          !!section.requireDialogSemantics ||
+          !!section.requireEscapeClose,
+      );
+
+    return hints.length > 0 ? hints : undefined;
+  }
+
+  private extractRequiredMenuSlug(
+    componentPlan?: ComponentPromptContext,
+  ): string | undefined {
+    const navSection = componentPlan?.visualPlan?.sections.find(
+      (section) => section.type === 'navbar' && section.menuSlug?.trim(),
+    );
+    return navSection?.type === 'navbar'
+      ? navSection.menuSlug.trim()
+      : undefined;
+  }
+
+  private extractRequiredSectionExpectations(
+    componentPlan?: ComponentPromptContext,
+  ):
+    | Array<{
+        sectionKey: string;
+        sectionType: string;
+        requiredTextSnippets?: string[];
+        minTextMatches?: number;
+      }>
+    | undefined {
+    type RequiredSectionExpectation = {
+      sectionKey: string;
+      sectionType: string;
+      requiredTextSnippets?: string[];
+      minTextMatches?: number;
+    };
+    const sections = componentPlan?.visualPlan?.sections ?? [];
+    const expectations: RequiredSectionExpectation[] = [];
+    for (let index = 0; index < sections.length; index += 1) {
+      const section = sections[index];
+      const sectionKey =
+        section.sectionKey ??
+        `${section.type}${index === 0 ? '' : `-${index}`}`;
+      switch (section.type) {
+        case 'card-grid': {
+          const snippets = section.cards
+            .flatMap((card) => [card.heading, card.body])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(
+                section.cards.length,
+                Math.min(snippets.length, section.cards.length + 1),
+              ),
+            });
+          }
+          break;
+        }
+        case 'accordion': {
+          const snippets = section.items
+            .flatMap((item) => [item.title, item.content])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(1, section.items.length),
+            });
+          }
+          break;
+        }
+        case 'button-group': {
+          const snippets = section.buttons
+            .map((button) => button.text?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: section.buttons.length,
+            });
+          }
+          break;
+        }
+        case 'slider': {
+          const snippets = section.slides
+            .flatMap((slide) => [
+              slide.heading,
+              slide.description,
+              slide.cta?.text,
+            ])
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          const headingOrCtaCount = section.slides.filter(
+            (slide) => !!slide.heading?.trim() || !!slide.cta?.text?.trim(),
+          ).length;
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.max(1, headingOrCtaCount),
+            });
+          }
+          break;
+        }
+        case 'modal': {
+          const snippets = [
+            section.triggerText,
+            section.heading,
+            section.description,
+            section.cta?.text,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(snippets.length, 2),
+            });
+          }
+          break;
+        }
+        case 'media-text': {
+          const snippets = [
+            section.heading,
+            section.body,
+            ...(section.listItems ?? []),
+            section.cta?.text,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length >= 2) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(
+                snippets.length,
+                Math.max(2, (section.listItems?.length ?? 0) > 0 ? 3 : 2),
+              ),
+            });
+          }
+          break;
+        }
+        case 'testimonial': {
+          const snippets = [
+            section.quote,
+            section.authorName,
+            section.authorTitle,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value));
+          if (snippets.length > 0) {
+            expectations.push({
+              sectionKey,
+              sectionType: section.type,
+              requiredTextSnippets: snippets,
+              minTextMatches: Math.min(snippets.length, 2),
+            });
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    return expectations.length > 0 ? expectations : undefined;
   }
 
   private resolveRequiredCustomClassTargets(
@@ -991,6 +1334,57 @@ export class CodeReviewerService {
     }
   }
 
+  private buildDraftSectionsForVisualPlan(
+    templateSource: string,
+    componentPlan: PlanResult[number] | undefined,
+    componentName: string,
+  ) {
+    try {
+      const parsed = JSON.parse(templateSource) as unknown;
+      const nodes = this.normalizeWpNodes(parsed);
+      if (!nodes?.length) return undefined;
+      const draft = mapWpNodesToDraftSections(nodes);
+      return draft.length > 0 ? draft : undefined;
+    } catch {
+      // Fall back to block-markup parsing below.
+    }
+
+    try {
+      if (!templateSource.includes('<!-- wp:')) return undefined;
+      const nodes = wpBlocksToJsonWithSourceRefs({
+        markup: templateSource,
+        templateName: componentPlan?.templateName ?? componentName,
+        sourceFile: this.inferSourceFileForVisualPlan(
+          componentPlan?.templateName ?? componentName,
+          componentPlan?.type,
+        ),
+      });
+      const draft = mapWpNodesToDraftSections(nodes);
+      return draft.length > 0 ? draft : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private normalizeWpNodes(parsed: unknown): WpNode[] | undefined {
+    if (Array.isArray(parsed)) return parsed as WpNode[];
+    if (parsed && typeof parsed === 'object' && 'block' in parsed) {
+      return [parsed as WpNode];
+    }
+    return undefined;
+  }
+
+  private inferSourceFileForVisualPlan(
+    templateName: string,
+    componentType?: 'page' | 'partial',
+  ): string {
+    const normalized = templateName.endsWith('.html')
+      ? templateName
+      : `${templateName}.html`;
+    if (normalized.includes('/')) return normalized;
+    return `${componentType === 'partial' ? 'parts' : 'templates'}/${normalized}`;
+  }
+
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
     const ordered: DataNeed[] = [
       'postDetail',
@@ -999,6 +1393,7 @@ export class CodeReviewerService {
       'posts',
       'pages',
       'menus',
+      'footerLinks',
       'siteInfo',
     ];
     const mapped = new Set<DataNeed>();
@@ -1007,6 +1402,9 @@ export class CodeReviewerService {
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -1120,11 +1518,7 @@ export class CodeReviewerService {
       );
 
       lastRawOutput = raw;
-      code = this.stripSpuriousHardcodedSections(
-        this.postProcessCode(raw),
-        componentName,
-        componentPlan,
-      );
+      code = this.sanitizeComponentCode(raw, componentName, componentPlan);
 
       const check = this.validator.checkCodeStructure(code, validationContext);
       if (check.fixedCode) code = check.fixedCode;
@@ -1284,6 +1678,10 @@ export class CodeReviewerService {
     visionImageUrls: string[] = [],
     tokenScope: TokenScope = 'base',
     jobId?: string,
+    componentPlan?: Pick<
+      ComponentPromptContext,
+      'type' | 'sourceBackedAuxiliaryLabels'
+    >,
   ): Promise<string> {
     const result = await this.selfFixDetailed(
       model,
@@ -1295,7 +1693,11 @@ export class CodeReviewerService {
       tokenScope,
       jobId,
     );
-    return result.code;
+    return this.sanitizeComponentCode(
+      result.code,
+      label ?? 'Component',
+      componentPlan,
+    );
   }
 
   private async selfFixDetailed(
@@ -1320,8 +1722,17 @@ export class CodeReviewerService {
       .map((value) => value.trim())
       .filter(Boolean)
       .slice(0, 3);
+    const targetedInstructions = this.buildTargetedFixInstructions(
+      error,
+      undefined,
+      {},
+    );
+    const targetedInstructionBlock =
+      targetedInstructions.length > 0
+        ? `\n\nTargeted fix instructions:\n${targetedInstructions.map((instruction) => `- ${instruction}`).join('\n')}`
+        : '';
 
-    const userPrompt = `This component has a validation error or targeted edit request:\n${error}\n\nFix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
+    const userPrompt = `This component has a validation error or targeted edit request:\n${error}${targetedInstructionBlock}\n\nFix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
 
     if (
       normalizedVisionUrls.length > 0 &&
@@ -1344,7 +1755,7 @@ export class CodeReviewerService {
                 {
                   type: 'text',
                   text:
-                    `This component has a validation or targeted edit request:\n${error}\n\n` +
+                    `This component has a validation or targeted edit request:\n${error}${targetedInstructionBlock}\n\n` +
                     `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
                 },
                 ...normalizedVisionUrls.map((url) => ({
@@ -1761,6 +2172,18 @@ export class CodeReviewerService {
         'Do not hardcode nav/footer links. If this component declares menus, render them from `/api/menus` only.',
       );
     }
+    if (
+      /approved menu slug|must prefer the approved menu slug|header\/navigation menu slug/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'For Header/Navigation partials, prefer the exact approved menu slug from the visual plan first, using `menus.find(m => m.location === "<approved-slug>") ?? menus.find(m => m.slug === "<approved-slug>")` before any generic `primary` or `menus[0]` fallback.',
+      );
+      instructions.push(
+        'Do not pick a generic primary/content menu when the approved header navigation already names a specific slug such as `navigation`.',
+      );
+    }
 
     if (
       /card-grid|card grid|expected card headings|approved cards|missing:/.test(
@@ -1785,6 +2208,35 @@ export class CodeReviewerService {
       );
       instructions.push(
         'Do not merge two approved sections into one shared hero/grid wrapper. If text and image belong to different approved sections, render them in separate wrappers in the original order.',
+      );
+      instructions.push(
+        'Reuse the exact approved `data-vp-section-key` strings from the existing code/contract. Do not rename keys like `hero-group-1` to generic replacements such as `hero` or `hero-1`.',
+      );
+    }
+
+    if (
+      /left-aligned reading column|same left edge|constrained content column/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Keep the affected title/meta/text cluster left-aligned inside its readable column. Remove `text-center`, `items-center`, or `justify-center` from the affected wrapper/meta row unless the contract explicitly requires centered alignment.',
+      );
+      instructions.push(
+        'If the column itself is centered on the page with `mx-auto`, that is fine, but the text and meta inside that column must still start from the same left edge as the prose body.',
+      );
+    }
+
+    if (
+      /constrained content width|readable max width|620px|max-w-\[620px\]/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Preserve the exact readable inner width required by the contract. Add or keep an inner wrapper such as `max-w-[620px] w-full` around the affected title/body/content cluster instead of letting it stretch to the full section width.',
+      );
+      instructions.push(
+        'Do not move the constrained content width to only one child while leaving sibling title/meta/body blocks outside it; the related cluster must share the same constrained inner wrapper when the validator says they belong to one reading column.',
       );
     }
 
@@ -1811,6 +2263,74 @@ export class CodeReviewerService {
       );
       instructions.push(
         'Keep CTA buttons as buttons, but make ordinary text navigation/content links visibly underlined on hover.',
+      );
+    }
+
+    if (
+      /spectra\/uagb-style tabs|wordPress\/spectra-style tabs|tab border\/outline|keyboard focus should show a visible tab border|real tabs/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'If the section/body contains WordPress-style tabs, keep them as an interactive tab UI instead of plain text or a static list.',
+      );
+      instructions.push(
+        'Match the WordPress tab states: labels may stay underlined at rest if the source shows that, but on hover/focus remove the underline and give the focused tab a visible border/outline/ring so keyboard users can see focus clearly.',
+      );
+    }
+
+    if (
+      /approved slider section|slider section|carousel|animated state transition/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'For the slider section, do not instantly replace the active slide text. Render the slides with animated state classes such as `opacity-*`, `translate-*`, or `scale-*` and add a real transition duration so the slide visibly moves/fades between states.',
+      );
+      instructions.push(
+        'Keep the approved slider copy order intact while introducing motion on the slide container or track, not only on a CTA button or dot indicator.',
+      );
+      instructions.push(
+        'For multi-slide sliders, include visible previous/next arrow controls near the left and right edges of the slider, not dots alone.',
+      );
+    }
+
+    if (
+      /approved modal section|modal section|role="dialog"|aria-modal|escape key|backdrop\/overlay|overlay around the active panel/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'For the modal section, keep a real full-screen fixed backdrop plus a dialog panel with `role="dialog"` and `aria-modal="true"`.',
+      );
+      instructions.push(
+        'Animate both the backdrop and the modal panel with opacity plus translate/scale transitions, and add Escape-key close handling instead of relying only on click interactions.',
+      );
+    }
+
+    if (
+      /breathing room|vertical spacing|collapsed zero spacing|py-0|pt-0|pb-0|spacing is too tight/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Restore vertical breathing room for the affected top-level section. Do not leave standalone slider, modal trigger, or button-group sections at `py-0` or with a zero top/bottom edge on both sides.',
+      );
+      instructions.push(
+        'Use real section padding such as `py-[min(2rem,3vw)]` or a non-zero `pt-*` plus `pb-*` pair so adjacent sections are visually separated without changing the approved content order.',
+      );
+    }
+
+    if (
+      /line height|lineheight|leading-\[|typography override|bodystyle|headingstyle/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'If the approved section provides typography overrides like `headingStyle.lineHeight` or `bodyStyle.lineHeight`, apply them directly to the matching heading/body elements using `leading-[...]` or `style={{lineHeight:"..."}}`.',
+      );
+      instructions.push(
+        'Do not leave the section on the root/default line height when the plan provides a tighter or looser text rhythm for that specific content block.',
       );
     }
 
@@ -2199,6 +2719,21 @@ export class CodeReviewerService {
       .replace(/\s+/g, ' ')
       .trim();
     return getExactInventedAuxiliaryLabel(rawHeading);
+  }
+
+  private sanitizeComponentCode(
+    code: string,
+    componentName: string,
+    componentPlan?: Pick<
+      ComponentPromptContext,
+      'type' | 'sourceBackedAuxiliaryLabels'
+    >,
+  ): string {
+    return this.stripSpuriousHardcodedSections(
+      this.postProcessCode(code),
+      componentName,
+      componentPlan,
+    );
   }
 
   // ── Logger ────────────────────────────────────────────────────────────────

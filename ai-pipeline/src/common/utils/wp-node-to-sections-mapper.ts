@@ -32,6 +32,8 @@ import type {
   TabsSection,
   SliderSection,
   ModalSection,
+  AccordionSection,
+  ButtonGroupSection,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -42,12 +44,22 @@ import type {
  * AI-only planning).
  */
 export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
-  return mapNodes(nodes, nodes);
+  return mapNodes(nodes, nodes, {
+    rootTemplateName: inferRootTemplateName(nodes),
+  });
+}
+
+interface MapContext {
+  rootTemplateName?: string;
 }
 
 // ── Per-node dispatch ───────────────────────────────────────────────────────
 
-function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
+function mapNodes(
+  nodes: WpNode[],
+  siblings: WpNode[],
+  context: MapContext,
+): SectionPlan[] {
   const sections: SectionPlan[] = [];
   let pendingSpacer: string | undefined;
   for (const node of nodes) {
@@ -56,7 +68,7 @@ function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
       continue;
     }
 
-    const mapped = mapNode(node, siblings);
+    const mapped = mapNode(node, siblings, context);
     if (mapped.length === 0) continue;
 
     if (pendingSpacer) {
@@ -108,7 +120,11 @@ function mergeAdjacentCardGridRows(
   };
 }
 
-function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
+function mapNode(
+  node: WpNode,
+  siblings: WpNode[],
+  context: MapContext,
+): SectionPlan[] {
   const block = node.block;
 
   // uagb/tabs (Spectra plugin)
@@ -139,13 +155,24 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(modalSection, node);
   }
 
+  if (block === 'accordion' || block === 'uagb/accordion') {
+    const accordionSection: AccordionSection = {
+      type: 'accordion',
+      items: node.accordionItems ?? [],
+    };
+    return toMappedSections(accordionSection, node);
+  }
+
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
     return toMappedSections(mapTemplatePart(node), node);
   }
 
   if (block === 'vibepress/source-scope' && node.children?.length) {
-    return mapNodes(node.children, node.children);
+    if (shouldSkipSharedSourceScope(node, context.rootTemplateName)) {
+      return [];
+    }
+    return mapNodes(node.children, node.children, context);
   }
 
   // Navigation / site header chrome
@@ -153,9 +180,17 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(mapNavigation(node), node);
   }
 
+  if (block === 'core/buttons' || block === 'buttons') {
+    return toMappedSections(mapButtons(node), node);
+  }
+
+  if (block === 'core/button' || block === 'button') {
+    return toMappedSections(mapSingleButton(node), node);
+  }
+
   // Group acting as a page-level wrapper — recurse into children
   if ((block === 'core/group' || block === 'group') && node.children?.length) {
-    return mapGroup(node, siblings);
+    return mapGroup(node, siblings, context);
   }
 
   // Cover block (hero with background image)
@@ -180,7 +215,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 
   // Columns: media-text or card-grid depending on content
   if (block === 'core/columns' || block === 'columns') {
-    return toMappedSections(mapColumns(node), node);
+    return toMappedSections(mapColumns(node, context), node);
   }
 
   // Post / page content placeholder blocks
@@ -275,9 +310,54 @@ function mapNavigation(node: WpNode): NavbarSection {
 }
 
 function inferMenuSlugFromNavChildren(children: WpNode[]): string | undefined {
-  // If the WP navigation block has a `ref` (menu ID), we can't resolve it here.
-  // Return undefined so AI will fill in the correct menuSlug from live menus.
+  const labels = flattenChildren({ children } as WpNode)
+    .filter(
+      (child) =>
+        child.block === 'core/navigation-link' ||
+        child.block === 'navigation-link',
+    )
+    .map((child) => child.text?.trim().toLowerCase())
+    .filter((value): value is string => !!value);
+
+  if (labels.length === 0) return undefined;
+
+  const joined = labels.join(' ');
+  if (/\b(home|about|services|pricing|blog|contact)\b/.test(joined)) {
+    return 'primary';
+  }
+  if (/\b(privacy|terms|policy|support|faq|help)\b/.test(joined)) {
+    return 'footer';
+  }
   return undefined;
+}
+
+function mapButtons(node: WpNode): ButtonGroupSection | null {
+  const buttons = flattenChildren(node)
+    .filter(
+      (child) => child.block === 'core/button' || child.block === 'button',
+    )
+    .map((child) => ({
+      text: child.text?.trim() ?? '',
+      link: child.href ?? '#',
+    }))
+    .filter((button) => button.text);
+
+  if (buttons.length === 0) return null;
+
+  return {
+    type: 'button-group',
+    align: resolveButtonGroupAlign(node),
+    buttons,
+  };
+}
+
+function mapSingleButton(node: WpNode): ButtonGroupSection | null {
+  if (!node.text?.trim()) return null;
+  return {
+    type: 'button-group',
+    align: resolveButtonGroupAlign(node),
+    buttons: [{ text: node.text.trim(), link: node.href ?? '#' }],
+  };
 }
 
 // ── cover block ─────────────────────────────────────────────────────────────
@@ -363,9 +443,18 @@ function mapImage(node: WpNode): CoverSection | null {
 
 // ── group block ─────────────────────────────────────────────────────────────
 
-function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
+function mapGroup(
+  node: WpNode,
+  _siblings: WpNode[],
+  context: MapContext,
+): SectionPlan[] {
   const children = node.children ?? [];
   if (children.length === 0) return [];
+
+  const groupedTestimonial = buildGroupedTestimonial(node, children);
+  if (groupedTestimonial) {
+    return toMappedSections(groupedTestimonial, node);
+  }
 
   const groupedCardGrid = buildGroupedCardGrid(children);
   if (groupedCardGrid) {
@@ -397,12 +486,25 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(s, node);
   }
 
+  const buttonGroup = mapButtons(node);
+  if (buttonGroup && mapNodes(children, children, context).length === 0) {
+    return toMappedSections(buttonGroup, node);
+  }
+
   // Wrapper groups often contain a centered intro group followed by one or more
   // real sub-sections (columns/media rows/card rows). Prefer the recursively
   // discovered child sections when there is more than one, otherwise we risk
   // collapsing the whole wrapper into a single hero and losing the following
   // source-backed sections.
-  const nestedSections = mapNodes(children, children);
+  const nestedSections = mapNodes(children, children, context);
+
+  // If the group produced [hero/cover, button-group], merge the button into
+  // the preceding section's cta instead of emitting a separate section.
+  const mergedSections = mergeTrailingButtonGroupIntoCta(nestedSections);
+  if (mergedSections) {
+    return inheritWrapperHints(mergedSections, node);
+  }
+
   if (nestedSections.length > 1) {
     return inheritWrapperHints(nestedSections, node);
   }
@@ -433,16 +535,18 @@ function mapQuery(node: WpNode): PostListSection {
       postTemplate?.params?.layout?.columns ??
       0,
   );
-  const columnsInTemplate =
-    postTemplate?.children?.some(
-      (c) => c.block === 'core/columns' || c.block === 'columns',
-    ) ?? false;
+  const displayLayoutType = String(
+    node.params?.displayLayout?.type ??
+      postTemplate?.params?.layout?.type ??
+      node.params?.layout?.type ??
+      '',
+  ).toLowerCase();
   const layout: PostListSection['layout'] =
     Number.isFinite(displayColumns) && displayColumns >= 3
       ? 'grid-3'
       : displayColumns === 2
         ? 'grid-2'
-        : columnsInTemplate
+        : displayLayoutType.includes('grid')
           ? 'grid-3'
           : 'list';
 
@@ -484,13 +588,29 @@ function mapQuery(node: WpNode): PostListSection {
 
 // ── columns block ───────────────────────────────────────────────────────────
 
-function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
+function mapColumns(
+  node: WpNode,
+  context?: MapContext,
+):
+  | CardGridSection
+  | MediaTextSection
+  | PostContentSection
+  | PageContentSection
+  | null {
   const cols =
     node.children?.filter(
       (c) => c.block === 'core/column' || c.block === 'column',
     ) ?? [];
 
   if (cols.length === 0) return null;
+
+  const detailContentSection = buildDetailContentSectionFromColumns(
+    cols,
+    context,
+  );
+  if (detailContentSection) {
+    return detailContentSection;
+  }
 
   // 2-col: check if one side is image and other is text → media-text
   if (cols.length === 2) {
@@ -534,6 +654,46 @@ function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   return s;
+}
+
+function buildDetailContentSectionFromColumns(
+  cols: WpNode[],
+  context?: MapContext,
+): PostContentSection | PageContentSection | null {
+  const flattened = cols.flatMap((col) => flattenChildren(col));
+  const hasContent = flattened.some((child) =>
+    ['core/post-content', 'post-content'].includes(child.block),
+  );
+
+  if (!hasContent) return null;
+
+  const hasTitle = flattened.some((child) =>
+    ['core/post-title', 'post-title'].includes(child.block),
+  );
+  const hasAuthor = flattened.some((child) =>
+    ['core/post-author', 'post-author'].includes(child.block),
+  );
+  const hasDate = flattened.some((child) =>
+    ['core/post-date', 'post-date'].includes(child.block),
+  );
+  const hasCategories = flattened.some((child) =>
+    ['core/post-terms', 'post-terms'].includes(child.block),
+  );
+
+  if (isPageLikeTemplateName(context?.rootTemplateName)) {
+    return {
+      type: 'page-content',
+      showTitle: true,
+    };
+  }
+
+  return {
+    type: 'post-content',
+    showTitle: true,
+    showAuthor: hasAuthor,
+    showDate: hasDate,
+    showCategories: hasCategories,
+  };
 }
 
 // ── post-content ────────────────────────────────────────────────────────────
@@ -600,7 +760,7 @@ function applyNodePresentation<T extends SectionPlan>(
   const next: T = { ...section };
   if (node.sourceRef && !next.sourceRef) next.sourceRef = node.sourceRef;
   if (!next.sectionKey) {
-    next.sectionKey = buildSectionKey(next.type, node.sourceRef?.topLevelIndex);
+    next.sectionKey = buildSectionKey(next.type, node.sourceRef);
   }
   if (node.bgColor && !next.background) next.background = node.bgColor;
   if (node.textColor && !next.textColor) next.textColor = node.textColor;
@@ -623,7 +783,8 @@ function applyNodePresentation<T extends SectionPlan>(
     next.marginStyle = boxSpacingToCss(node.margin);
   }
   if (node.gap && !next.gapStyle) {
-    next.gapStyle = node.gap;
+    const gapStyle = normalizeGapStyle(node.gap);
+    if (gapStyle) next.gapStyle = gapStyle;
   }
   const customClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
@@ -687,12 +848,26 @@ function extractSourceLayout(node: WpNode): SourceLayoutHint | undefined {
 
 function buildSectionKey(
   type: SectionPlan['type'],
-  topLevelIndex?: number,
+  sourceRef?: WpNode['sourceRef'],
 ): string {
-  if (typeof topLevelIndex !== 'number' || topLevelIndex <= 0) {
-    return type;
+  const sourceNodeId = sourceRef?.sourceNodeId?.trim();
+  if (sourceNodeId) {
+    const suffix = sourceNodeId
+      .replace(/^[^:]+::/, '')
+      .replace(/[^a-z0-9]+/gi, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase();
+    if (suffix) {
+      return `${type}-${suffix}`;
+    }
   }
-  return `${type}-${topLevelIndex}`;
+  if (
+    typeof sourceRef?.topLevelIndex === 'number' &&
+    sourceRef.topLevelIndex >= 0
+  ) {
+    return `${type}-${sourceRef.topLevelIndex}`;
+  }
+  return type;
 }
 
 // ── helpers: recognise group intent ────────────────────────────────────────
@@ -824,13 +999,14 @@ function buildHeroFromChildren(
   const s: HeroSection = {
     type: 'hero',
     layout,
-    heading: h?.text ?? '',
+    heading: h ? extractNodeText(h) : '',
   };
   if (align === 'center' || align === 'right') {
     s.textAlign = align;
   }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  if (p?.text) s.subheading = p.text;
+  const paragraphText = p ? extractNodeText(p) : '';
+  if (paragraphText) s.subheading = paragraphText;
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   if (img?.src)
@@ -839,6 +1015,102 @@ function buildHeroFromChildren(
     s.paddingStyle = boxSpacingToCss(groupNode.padding);
   }
   return s;
+}
+
+function buildGroupedTestimonial(
+  groupNode: WpNode,
+  children: WpNode[],
+): TestimonialSection | null {
+  const flat = flattenChildren({ children } as WpNode);
+  if (
+    flat.some((child) =>
+      [
+        'core/heading',
+        'heading',
+        'core/image',
+        'image',
+        'core/button',
+        'button',
+        'core/buttons',
+        'buttons',
+        'core/query',
+        'query',
+        'core/columns',
+        'columns',
+      ].includes(child.block),
+    )
+  ) {
+    return null;
+  }
+
+  const paragraphs = flat.filter(
+    (child) => child.block === 'core/paragraph' || child.block === 'paragraph',
+  );
+  if (paragraphs.length < 2) return null;
+
+  const metadataName = String(
+    groupNode.params?.metadata?.name ?? '',
+  ).toLowerCase();
+  const quoteNode = paragraphs[0];
+  const authorNode = paragraphs[1];
+  const titleNode = paragraphs[2];
+  const quote = quoteNode.html ?? quoteNode.text ?? '';
+  const authorName = authorNode.text?.trim() ?? '';
+  const authorTitle = titleNode?.text?.trim();
+  const quoteText = stripInlineHtml(quote);
+
+  const looksLikeTestimonial =
+    metadataName.includes('testimonial') ||
+    (quoteText.length >= 80 && !!authorName && authorName.length <= 80);
+  if (!looksLikeTestimonial) return null;
+
+  return {
+    type: 'testimonial',
+    quote,
+    authorName,
+    ...(authorTitle ? { authorTitle } : {}),
+  };
+}
+
+/**
+ * When a group's mapped children are [hero|cover, button-group], the button-group
+ * is a CTA for the preceding hero/cover — merge it in and drop the separate section.
+ * Returns the merged array, or null if the pattern does not match.
+ */
+function mergeTrailingButtonGroupIntoCta(
+  sections: SectionPlan[],
+): SectionPlan[] | null {
+  if (sections.length < 2) return null;
+  const last = sections[sections.length - 1];
+  const prev = sections[sections.length - 2];
+  if (last.type !== 'button-group') return null;
+  if (prev.type !== 'hero' && prev.type !== 'cover') return null;
+
+  const btnGroup = last as ButtonGroupSection;
+  if (btnGroup.buttons.length === 0) return null;
+
+  // Only merge when the preceding section has no cta yet
+  const prevSection = prev as HeroSection | CoverSection;
+  if (prevSection.cta) return null;
+
+  const firstBtn = btnGroup.buttons[0];
+  const merged: SectionPlan = {
+    ...prevSection,
+    cta: { text: firstBtn.text, link: firstBtn.link },
+  };
+
+  return [...sections.slice(0, -2), merged];
+}
+
+function resolveButtonGroupAlign(node: WpNode): ButtonGroupSection['align'] {
+  const justify = String(
+    node.params?.layout?.justifyContent ?? '',
+  ).toLowerCase();
+  if (justify === 'center') return 'center';
+  if (justify === 'right' || justify === 'end') return 'right';
+  const textAlign = extractNodeTextAlign(node);
+  if (textAlign === 'center' || textAlign === 'right') return textAlign;
+  return 'left';
 }
 
 function isMediaTextGroup(children: WpNode[]): boolean {
@@ -983,6 +1255,38 @@ function boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
   return `${top} ${right} ${bottom} ${left}`;
 }
 
+function normalizeGapStyle(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return normalizeCssLength(value);
+  }
+  if (!value || typeof value !== 'object') return undefined;
+
+  const record = value as Record<string, unknown>;
+  const vertical = normalizeCssLength(
+    asString(
+      record.vertical ??
+        record.row ??
+        record.top ??
+        record.blockGap ??
+        record.y,
+    ),
+  );
+  const horizontal = normalizeCssLength(
+    asString(
+      record.horizontal ??
+        record.column ??
+        record.left ??
+        record.inline ??
+        record.x,
+    ),
+  );
+
+  if (vertical && horizontal) {
+    return vertical === horizontal ? vertical : `${vertical} ${horizontal}`;
+  }
+  return vertical ?? horizontal;
+}
+
 function normalizeCssLength(value?: string): string | undefined {
   if (!value) return undefined;
   const normalized = value.trim();
@@ -995,6 +1299,31 @@ function extractNodeTextAlign(
 ): 'left' | 'center' | 'right' | undefined {
   const raw = node?.textAlign ?? node?.params?.textAlign;
   if (raw === 'left' || raw === 'center' || raw === 'right') return raw;
+
+  const className =
+    typeof node?.params?.className === 'string' ? node.params.className : '';
+  if (/\bhas-text-align-center\b|\baligncenter\b/i.test(className)) {
+    return 'center';
+  }
+  if (/\bhas-text-align-right\b|\balignright\b/i.test(className)) {
+    return 'right';
+  }
+  if (/\bhas-text-align-left\b|\balignleft\b/i.test(className)) {
+    return 'left';
+  }
+
+  const inlineStyle =
+    typeof node?.html === 'string'
+      ? node.html.match(/\btext-align\s*:\s*(left|center|right)\b/i)?.[1]
+      : undefined;
+  if (
+    inlineStyle === 'left' ||
+    inlineStyle === 'center' ||
+    inlineStyle === 'right'
+  ) {
+    return inlineStyle;
+  }
+
   return undefined;
 }
 
@@ -1020,6 +1349,7 @@ function shouldApplySectionTextAlign(section: SectionPlan): boolean {
   return (
     section.type === 'hero' ||
     section.type === 'cover' ||
+    section.type === 'slider' ||
     section.type === 'testimonial' ||
     section.type === 'newsletter' ||
     section.type === 'search'
@@ -1030,6 +1360,7 @@ function shouldApplyContentWidth(section: SectionPlan): boolean {
   return (
     section.type === 'hero' ||
     section.type === 'cover' ||
+    section.type === 'slider' ||
     section.type === 'testimonial' ||
     section.type === 'newsletter' ||
     section.type === 'search' ||
@@ -1125,4 +1456,56 @@ function uniqueClassNames(values: string[]): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function inferRootTemplateName(nodes: WpNode[]): string | undefined {
+  for (const node of nodes) {
+    const templateName =
+      node.sourceRef?.templateName ??
+      inferRootTemplateName(node.children ?? []);
+    if (templateName) return templateName;
+  }
+  return undefined;
+}
+
+function shouldSkipSharedSourceScope(
+  node: WpNode,
+  rootTemplateName?: string,
+): boolean {
+  const normalizedRoot = String(rootTemplateName ?? '')
+    .trim()
+    .toLowerCase();
+  if (
+    normalizedRoot === 'header' ||
+    normalizedRoot === 'footer' ||
+    normalizedRoot === 'sidebar' ||
+    normalizedRoot === 'post-meta'
+  ) {
+    return false;
+  }
+
+  const sourceFile = String(node.params?.sourceFile ?? '')
+    .trim()
+    .toLowerCase();
+  if (!sourceFile) return false;
+  const baseName = sourceFile.split(/[\\/]/).pop() ?? sourceFile;
+  return /^(header|footer|sidebar|post-meta)(?:[-_].+)?\.(php|html)$/i.test(
+    baseName,
+  );
+}
+
+function isPageLikeTemplateName(templateName?: string): boolean {
+  const normalized = String(templateName ?? '')
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'page' ||
+    normalized.startsWith('page-') ||
+    normalized.startsWith('page_')
+  );
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }

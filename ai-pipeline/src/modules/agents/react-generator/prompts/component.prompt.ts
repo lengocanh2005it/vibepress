@@ -1,7 +1,10 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import {
+  stripTags,
+  wpBlocksToJsonWithSourceRefs,
+} from '../../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
-import { stripTags } from '../../../../common/utils/wp-block-to-json.js';
 import type {
   ThemeTokens,
   ThemeInteractionState,
@@ -12,8 +15,11 @@ import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.servic
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
-import type { ComponentVisualPlan } from '../visual-plan.schema.js';
-import type { SourceLayoutHint } from '../visual-plan.schema.js';
+import type {
+  ComponentVisualPlan,
+  SectionPlan,
+  SourceLayoutHint,
+} from '../visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   formatInventedAuxiliarySectionLabels,
@@ -22,6 +28,7 @@ import {
 import {
   API_CONTRACT_SOURCE_PATH,
   COMMENT_FIELDS,
+  FOOTER_COLUMN_INTERFACE,
   MENU_FIELDS,
   MENU_ITEM_FIELDS,
   PAGE_FRONTEND_FIELDS,
@@ -37,8 +44,13 @@ export function extractTexts(nodes: WpNode[]): string[] {
     } else if (node.text) {
       result.push(node.text);
     } else if (node.html) {
-      const plain = stripTags(node.html).replace(/\s+/g, ' ').trim();
-      if (plain.length > 0) result.push(plain);
+      const htmlSnippet = compactHtmlSnippet(node.html);
+      if (htmlSnippet) {
+        result.push(`[html] ${htmlSnippet}`);
+      } else {
+        const plain = stripTags(node.html).replace(/\s+/g, ' ').trim();
+        if (plain.length > 0) result.push(plain);
+      }
     }
     if (node.children) result.push(...extractTexts(node.children));
   }
@@ -74,16 +86,18 @@ const PAGE_TEMPLATES = new Set([
 
 const DATA_NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
+  'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
 };
 
-const MAX_TEMPLATE_TEXT_ITEMS = 12;
-const MAX_STATIC_IMAGE_HINTS = 8;
+const MAX_TEMPLATE_TEXT_ITEMS = 24;
+const MAX_STATIC_IMAGE_HINTS = 16;
 const MAX_SAMPLE_ITEMS = 3;
 const MAX_TAXONOMY_TERMS = 5;
 const MAX_RETRY_ERROR_CHARS = 700;
-const MAX_PLAN_TEXT_CHARS = 180;
+const MAX_PLAN_TEXT_CHARS = 320;
+const MAX_TEMPLATE_HTML_SNIPPET_CHARS = 420;
 
 export interface ComponentPromptContext {
   description?: string;
@@ -103,6 +117,22 @@ function compactPlanText(
   if (!value) return null;
   const cleaned = stripTags(value).replace(/\s+/g, ' ').trim();
   if (!cleaned) return null;
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function compactHtmlSnippet(
+  value?: string | null,
+  maxChars: number = MAX_TEMPLATE_HTML_SNIPPET_CHARS,
+): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/>\s+</g, '><')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  if (!/<[a-z][^>]*>/i.test(cleaned)) return null;
   if (cleaned.length <= maxChars) return cleaned;
   return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
@@ -138,6 +168,108 @@ function pushPlanListPart(
   }
 }
 
+function pushTypographyStyleParts(
+  parts: string[],
+  key: string,
+  style?: {
+    fontSize?: string;
+    fontFamily?: string;
+    fontWeight?: string;
+    letterSpacing?: string;
+    lineHeight?: string;
+    textTransform?: string;
+  },
+): void {
+  if (!style) return;
+  if (style.fontSize)
+    parts.push(`${key}FontSize=${JSON.stringify(style.fontSize)}`);
+  if (style.fontFamily)
+    parts.push(`${key}FontFamily=${JSON.stringify(style.fontFamily)}`);
+  if (style.fontWeight)
+    parts.push(`${key}FontWeight=${JSON.stringify(style.fontWeight)}`);
+  if (style.letterSpacing)
+    parts.push(`${key}LetterSpacing=${JSON.stringify(style.letterSpacing)}`);
+  if (style.lineHeight)
+    parts.push(`${key}LineHeight=${JSON.stringify(style.lineHeight)}`);
+  if (style.textTransform)
+    parts.push(`${key}TextTransform=${JSON.stringify(style.textTransform)}`);
+}
+
+function deriveSourceClusterKey(sourceNodeId?: string | null): string | null {
+  if (!sourceNodeId) return null;
+  const parts = sourceNodeId.split('::');
+  if (parts.length < 3) return null;
+  const path = parts[2]?.trim();
+  if (!path) return null;
+  const pathParts = path.split('.');
+  if (pathParts.length <= 1) return `${parts[0]}::${path}`;
+  return `${parts[0]}::${pathParts.slice(0, -1).join('.')}`;
+}
+
+function collectContiguousSourceClusters(
+  visualPlan?: ComponentVisualPlan,
+): Array<{
+  clusterKey: string;
+  startIndex: number;
+  endIndex: number;
+  sectionTypes: string[];
+  sectionKeys: string[];
+}> {
+  if (!visualPlan?.sections?.length) return [];
+  const groups: Array<{
+    clusterKey: string;
+    startIndex: number;
+    endIndex: number;
+    sectionTypes: string[];
+    sectionKeys: string[];
+  }> = [];
+
+  let current: {
+    clusterKey: string;
+    startIndex: number;
+    endIndex: number;
+    sectionTypes: string[];
+    sectionKeys: string[];
+  } | null = null;
+
+  for (let index = 0; index < visualPlan.sections.length; index += 1) {
+    const section = visualPlan.sections[index];
+    const clusterKey = deriveSourceClusterKey(section.sourceRef?.sourceNodeId);
+    if (!clusterKey) {
+      current = null;
+      continue;
+    }
+
+    const sectionKey =
+      section.sectionKey ?? `${section.type}${index === 0 ? '' : `-${index}`}`;
+
+    if (current && current.clusterKey === clusterKey) {
+      current.endIndex = index;
+      current.sectionTypes.push(section.type);
+      current.sectionKeys.push(sectionKey);
+      continue;
+    }
+
+    if (current && current.endIndex > current.startIndex) {
+      groups.push(current);
+    }
+
+    current = {
+      clusterKey,
+      startIndex: index,
+      endIndex: index,
+      sectionTypes: [section.type],
+      sectionKeys: [sectionKey],
+    };
+  }
+
+  if (current && current.endIndex > current.startIndex) {
+    groups.push(current);
+  }
+
+  return groups;
+}
+
 function shouldIncludeRepoManifestContext(
   componentName?: string,
   plan?: ComponentPromptContext,
@@ -166,6 +298,8 @@ function buildAllowedEndpointsNote(input: {
 
   if (input.dataNeeds.includes('siteInfo')) allowed.add('GET /api/site-info');
   if (input.dataNeeds.includes('menus')) allowed.add('GET /api/menus');
+  if (input.dataNeeds.includes('footerLinks'))
+    allowed.add('GET /api/footer-links');
   if (input.dataNeeds.includes('posts')) allowed.add('GET /api/posts');
   if (input.dataNeeds.includes('pages')) allowed.add('GET /api/pages');
   if (input.dataNeeds.includes('postDetail') && routeHasParams)
@@ -240,7 +374,7 @@ function buildForbiddenBehaviorNote(input: {
       '- Do NOT render shared site chrome (`<header>`, navigation bar, `<footer>`, site logo/title, footer columns) inside this page component.',
     );
     lines.push(
-      '- Do NOT fetch `/api/site-info` or `/api/menus` just to rebuild shared layout chrome inside a page component.',
+      '- Do NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` just to rebuild shared layout chrome inside a page component.',
     );
     lines.push(
       `- Do NOT append trailing utility/footer/sidebar-like sections with exact headings such as ${formatInventedAuxiliarySectionLabels()} unless that exact label is already source-backed or explicitly approved in the visual plan.`,
@@ -262,6 +396,11 @@ function buildForbiddenBehaviorNote(input: {
       '- Do NOT fetch `/api/pages` unless the approved plan explicitly allows page navigation/sidebar content.',
     );
   }
+  if (!input.dataNeeds.includes('footerLinks')) {
+    lines.push(
+      '- Do NOT fetch `/api/footer-links` unless the approved contract explicitly marks this component as a footer partial.',
+    );
+  }
   if (!routeHasParams) {
     lines.push('- Do NOT import or call `useParams` for this route.');
   }
@@ -277,6 +416,12 @@ function buildForbiddenBehaviorNote(input: {
   if (isPageDetail || isPostDetail) {
     lines.push(
       `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside \`dangerouslySetInnerHTML\`.`,
+    );
+    lines.push(
+      '- If that HTML body can contain interactive WordPress/plugin markup such as Spectra/UAGB tabs (`.wp-block-uagb-tabs`), do NOT leave it as inert HTML. Render the body through a small client-side content hydrator/wrapper that preserves the original HTML but restores tab interaction and hides inactive panels correctly.',
+    );
+    lines.push(
+      '- WordPress/Spectra tab fidelity: preserve the original tab interaction cues. Default tab labels may remain underlined like the source, but on hover/focus they must drop the underline, and keyboard focus must show a visible tab outline/border instead of looking like plain body text.',
     );
     lines.push(
       '- Do NOT append footer-style link columns such as "About", "Privacy", "Social", "Resources", or "Useful Links" after the main content unless those exact blocks are already inside the HTML body being rendered.',
@@ -366,6 +511,10 @@ function buildScopedApiContractNote(input: {
     entityLines.push(`- Menu: ${formatContractFields(MENU_FIELDS)}`);
     entityLines.push(`- MenuItem: ${formatContractFields(MENU_ITEM_FIELDS)}`);
   }
+  if (needs.includes('footerLinks')) {
+    endpoints.add('GET /api/footer-links -> FooterColumn[]');
+    entityLines.push(`- FooterColumn: ${FOOTER_COLUMN_INTERFACE}`);
+  }
   if (needs.includes('comments')) {
     endpoints.add('GET /api/comments?slug=${slug} -> Comment[]');
     endpoints.add(
@@ -421,7 +570,7 @@ function buildScopedApiContractNote(input: {
     '- Post titles, recent-post titles, search results, and page-list/sidebar titles must link to their canonical detail routes (`/post/${post.slug}` or `/page/${page.slug}`) when those routes are part of the approved app contract.',
   );
   lines.push(
-    '- Visible text links for post titles, author/category archive links inside meta rows, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt.',
+    '- Visible text links for post titles, author/category archive links inside meta rows, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons and logo/brand links (the `<Link to="/">` wrapping the site logo + site name in the header) are exempt — do NOT add `hover:underline` to logo links.',
   );
   lines.push(
     '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
@@ -462,6 +611,9 @@ export function buildMenusNote(menus: WpMenu[]): string {
   }
   lines.push(
     "→ Select menus by `location` first. Use `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` only as a primary-nav fallback. Do NOT guess content menus by arbitrary slugs such as `about` or `resources`.",
+  );
+  lines.push(
+    "→ If the approved visual plan names a specific header/navigation `menuSlug`, you MUST select that menu first via `menus.find(m => m.location === '<menuSlug>') ?? menus.find(m => m.slug === '<menuSlug>')` before any generic `primary` fallback.",
   );
   return lines.join('\n');
 }
@@ -539,7 +691,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.blockGap)
       lines.push(
-        `- Default block gap: \`${d.blockGap}\` — WordPress applies this as \`margin-block-start\` between ALL direct children of the root wrapper (not just flex/grid). Replicate this by:\n  1. Root wrapper → \`flex flex-col gap-[${d.blockGap}]\` (this is the most critical rule)\n  2. Every inner flex/grid container with NO explicit \`gap\` field → also add \`gap-[${d.blockGap}]\``,
+        `- Default block gap: \`${d.blockGap}\` — apply it where the WordPress source actually shows sibling block spacing. Use it on inner flex/grid containers with no explicit gap, but do NOT blindly force one global root \`gap-[${d.blockGap}]\` between every tracked top-level section when that would split a single contiguous source group into separate visual bands.`,
       );
     if (d.rootPadding)
       lines.push(
@@ -580,7 +732,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.colors.length > 0) {
     lines.push(
-      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Apply them directly:',
+      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields extracted from the template source are already resolved to hex. Apply them directly:',
     );
     lines.push(
       '- `bgColor` → prefer `bg-[#hex]`; use `style={{backgroundColor:"#hex"}}` only when the value is dynamic',
@@ -785,9 +937,26 @@ function buildTemplateTextsNote(templateSource: string): string {
     const nodes: WpNode[] = JSON.parse(templateSource);
     return toBulletList(
       extractTexts(nodes),
-      '## Static text in this template — hardcode EXACTLY as-is (do NOT paraphrase or invent)',
+      '## Static source-backed text / HTML snippets — preserve EXACT wording and structure',
     );
   } catch {
+    // Raw block markup: parse it back into nodes so lists/inline HTML survive.
+    try {
+      if (templateSource.includes('<!-- wp:')) {
+        const nodes = wpBlocksToJsonWithSourceRefs({
+          markup: templateSource,
+          templateName: 'prompt-source',
+          sourceFile: 'prompt-source.html',
+        });
+        return toBulletList(
+          extractTexts(nodes),
+          '## Static source-backed text / HTML snippets — preserve EXACT wording and structure',
+        );
+      }
+    } catch {
+      // Fall back to generic HTML stripping below.
+    }
+
     // Classic PHP theme: templateSource is HTML with {/* WP: ... */} hints.
     // Extract any visible static text that survived PHP stripping.
     const stripped = templateSource
@@ -802,9 +971,33 @@ function buildTemplateTextsNote(templateSource: string): string {
       .filter((t) => t.length > 3 && t.length < 400);
     return toBulletList(
       texts,
-      '## Static text extracted from classic PHP template — hardcode EXACTLY as-is',
+      '## Static text extracted from classic PHP template — preserve EXACT wording',
     );
   }
+}
+
+function buildSourceFidelityNote(templateSource: string): string {
+  const lines = ['## Source fidelity — CRITICAL'];
+  lines.push(
+    '- Treat the provided template source at the end of this prompt as the canonical WordPress source. The approved visual plan only constrains/labels it; the source still wins for exact content structure.',
+  );
+  lines.push(
+    '- Preserve HTML semantics from the source exactly when present: real lists stay `<ul>/<ol>/<li>`, emphasized text stays `<strong>/<b>/<em>`, line breaks stay line breaks, and inline links stay links.',
+  );
+  lines.push(
+    '- Do NOT flatten structured source into generic paragraphs. If the source shows a list, button group, accordion body, slider copy, or multi-line rich text, reproduce that structure in React.',
+  );
+  lines.push(
+    '- Use source-backed colors, spacing, classes, images, and block ordering before guessing. If the source proves a value or structure, do not replace it with a prettier approximation.',
+  );
+
+  if (templateSource.includes('<!-- wp:')) {
+    lines.push(
+      '- This source is raw WordPress block markup. Read the real block HTML/comments carefully and preserve nested group/columns/media structure instead of collapsing it into a simpler layout.',
+    );
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -821,7 +1014,7 @@ function buildClassicThemeNote(
 
   const contentHint =
     isSingle || isPage
-      ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
+      ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array). If the HTML may include interactive plugin blocks such as Spectra/UAGB tabs, wrap it in a small content hydrator so \`.wp-block-uagb-tabs\` behaves like real tabs instead of a static list. Preserve WordPress tab states too: tab labels may be underlined by default, but hover/focus should remove that underline and keyboard focus should show a clear tab border/outline.`
       : `- \`{/* WP: post.content (HTML) */}\` → render content ONLY from the endpoint(s) explicitly approved in the component plan. ⛔ NEVER fetch a full list and pick \`pages[0]\` or \`posts[0]\`.`;
 
   const loopHint =
@@ -835,8 +1028,8 @@ function buildClassicThemeNote(
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
     : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items. Preserve any logo sizing that comes from the source block/template; otherwise use a reasonable visible fallback and do NOT arbitrarily shrink or enlarge it.`;
   const footerHint = isPageComponent
-    ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links. Preserve any footer logo sizing that comes from the source block/template, even when it is small like \`20\`. Only use a generic visible fallback when the source does not specify size.`;
+    ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or footer-links for it.`
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/footer-links\` for footer columns. Preserve any footer logo sizing that comes from the source block/template, even when it is small like \`20\`. Only use a generic visible fallback when the source does not specify size.`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -877,6 +1070,7 @@ export function buildDataGroundingNote(
   );
   const wantsPages = hasAnyDataNeed(dataNeeds, 'pages', 'pageDetail');
   const wantsMenus = dataNeeds.includes('menus');
+  const wantsFooterLinks = dataNeeds.includes('footerLinks');
   const wantsComments = dataNeeds.includes('comments');
   const wantsTaxonomies = hasAnyDataNeed(
     dataNeeds,
@@ -959,7 +1153,7 @@ export function buildDataGroundingNote(
       '> IMPORTANT: `item.url` from `/api/menus` is already the canonical app path for internal links. Use `<Link to={item.url}>` directly. NEVER prepend `/page`, `/post`, or any extra route segment to `item.url`.',
     );
     parts.push(
-      '> Menu, footer, and sidebar text links should visibly underline on hover (`hover:underline underline-offset-4`) to preserve expected WordPress-style navigation behavior.',
+      '> Menu, footer, and sidebar text links should visibly underline on hover (`hover:underline underline-offset-4`) to preserve expected WordPress-style navigation behavior. The logo/brand link (the `<Link to="/">` that wraps the site logo image and site name) is NOT a text link — do NOT add `hover:underline` to it.',
     );
     for (const m of menus) {
       const itemPreview = m.items
@@ -975,6 +1169,17 @@ export function buildDataGroundingNote(
       );
     }
     if (menus.length === 0) parts.push('- (empty)');
+    parts.push('');
+  }
+
+  if (wantsFooterLinks) {
+    parts.push('### Footer links (GET /api/footer-links)');
+    parts.push(
+      '- FooterColumn shape: `{ heading: string; links: { label: string; url: string }[] }`.',
+    );
+    parts.push(
+      '- Use footer link columns from this endpoint for Footer partials. Do NOT substitute `/api/menus`.',
+    );
     parts.push('');
   }
 
@@ -1179,6 +1384,18 @@ export function buildPlanContextNote(
     '- Avoid oversized display classes like `text-[4rem]`, `text-[5rem]`, giant centered hero copy, or overly narrow text wrappers unless the approved visual plan explicitly requires that scale.',
   );
   lines.push(
+    '- Preserve alignment fidelity from the source/approved plan. If a heading, intro block, meta row, or article title cluster is centered in WordPress, keep it centered in React instead of defaulting to `text-left`.',
+  );
+  lines.push(
+    '- For single/detail article layouts, keep the title/meta cluster and the prose body in the SAME readable content column. Center the column on the page if needed, but keep the title and meta left-aligned within that column unless the source explicitly centers them. Concretely: a wrapper like `max-w-[620px] mx-auto w-full` is acceptable, but do NOT add `text-center`, `items-center`, or `justify-center` to the inner title/meta cluster when the source body column is left-aligned.',
+  );
+  lines.push(
+    '- Preserve WordPress date/time display strings from the API as-is. Render `post.date`, `comment.date`, and similar runtime date fields directly unless the source explicitly provides a different formatted field. Do NOT wrap them in `new Date(...)`, `toLocaleDateString()`, `toLocaleString()`, or `Intl.DateTimeFormat(...)`.',
+  );
+  lines.push(
+    '- Card-grid and repeated column copy must not collapse to browser-default sizing. If the theme body token is larger than 1rem (for example `text-[1.05rem]`), apply that scale or the source block typography to card body text instead of leaving it at the default browser size.',
+  );
+  lines.push(
     '- Use semantic HTML that matches the role of the original content (`<main>`, `<section>`, `<article>`, `<aside>`, `<nav>`).',
   );
   if (plan.requiredCustomClassNames?.length) {
@@ -1195,22 +1412,40 @@ export function buildPlanContextNote(
 
 function extractStaticImageSources(templateSource: string): string[] {
   const result = new Set<string>();
+  const collectFromParsedNode = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    const node = value as {
+      src?: string;
+      imageSrc?: string;
+      children?: unknown[];
+    };
+    if (typeof node.src === 'string' && node.src.trim()) {
+      result.add(node.src.trim());
+    }
+    if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
+      result.add(node.imageSrc.trim());
+    }
+    if (Array.isArray(node.children))
+      node.children.forEach(collectFromParsedNode);
+  };
 
   try {
     const parsed = JSON.parse(templateSource);
-    const visit = (node: any) => {
-      if (!node || typeof node !== 'object') return;
-      if (typeof node.src === 'string' && node.src.trim()) {
-        result.add(node.src.trim());
-      }
-      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
-        result.add(node.imageSrc.trim());
-      }
-      if (Array.isArray(node.children)) node.children.forEach(visit);
-      if (Array.isArray(node)) node.forEach(visit);
-    };
-    visit(parsed);
+    if (Array.isArray(parsed)) parsed.forEach(collectFromParsedNode);
+    else collectFromParsedNode(parsed);
   } catch {
+    try {
+      if (templateSource.includes('<!-- wp:')) {
+        const nodes = wpBlocksToJsonWithSourceRefs({
+          markup: templateSource,
+          templateName: 'prompt-source',
+          sourceFile: 'prompt-source.html',
+        });
+        nodes.forEach(collectFromParsedNode);
+      }
+    } catch {
+      // Fall back to regex extraction below.
+    }
     for (const match of templateSource.matchAll(
       /(?:src|imageSrc)="([^"]+)"/g,
     )) {
@@ -1289,6 +1524,12 @@ function buildCompactSectionSummary(
         parts.push(`layout=${section.layout}`);
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushTypographyStyleParts(parts, 'headingStyle', section.headingStyle);
+        pushTypographyStyleParts(
+          parts,
+          'subheadingStyle',
+          section.subheadingStyle,
+        );
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
         pushPlanTextPart(parts, 'imageSrc', section.image?.src);
@@ -1327,6 +1568,12 @@ function buildCompactSectionSummary(
         parts.push(`dimRatio=${section.dimRatio}`);
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'subheading', section.subheading);
+        pushTypographyStyleParts(parts, 'headingStyle', section.headingStyle);
+        pushTypographyStyleParts(
+          parts,
+          'subheadingStyle',
+          section.subheadingStyle,
+        );
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
@@ -1350,6 +1597,8 @@ function buildCompactSectionSummary(
         parts.push(`imagePosition=${section.imagePosition}`);
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'body', section.body, 240);
+        pushTypographyStyleParts(parts, 'headingStyle', section.headingStyle);
+        pushTypographyStyleParts(parts, 'bodyStyle', section.bodyStyle);
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
         pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
         pushPlanListPart(parts, 'listItems', section.listItems, {
@@ -1395,6 +1644,73 @@ function buildCompactSectionSummary(
         parts.push(`requireName=${section.requireName}`);
         parts.push(`requireEmail=${section.requireEmail}`);
         break;
+      case 'tabs':
+        parts.push(`tabCount=${section.tabs.length}`);
+        section.tabs.forEach((tab, tabIndex) => {
+          pushPlanTextPart(parts, `tab${tabIndex + 1}Label`, tab.label);
+          pushPlanTextPart(
+            parts,
+            `tab${tabIndex + 1}Content`,
+            tab.content,
+            180,
+          );
+        });
+        break;
+      case 'slider':
+        parts.push(`slideCount=${section.slides.length}`);
+        if (typeof section.autoplay === 'boolean') {
+          parts.push(`autoplay=${section.autoplay}`);
+        }
+        section.slides.forEach((slide, slideIndex) => {
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}Heading`,
+            slide.heading,
+          );
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}Description`,
+            slide.description,
+            180,
+          );
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}CtaText`,
+            slide.cta?.text,
+          );
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}CtaLink`,
+            slide.cta?.link,
+          );
+        });
+        break;
+      case 'modal':
+        pushPlanTextPart(parts, 'triggerText', section.triggerText);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'description', section.description, 220);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'accordion':
+        parts.push(`itemCount=${section.items.length}`);
+        section.items.forEach((item, itemIndex) => {
+          pushPlanTextPart(parts, `item${itemIndex + 1}Title`, item.title);
+          pushPlanTextPart(
+            parts,
+            `item${itemIndex + 1}Content`,
+            item.content,
+            180,
+          );
+        });
+        break;
+      case 'button-group':
+        parts.push(`align=${section.align}`);
+        section.buttons.forEach((button, buttonIndex) => {
+          pushPlanTextPart(parts, `button${buttonIndex + 1}Text`, button.text);
+          pushPlanTextPart(parts, `button${buttonIndex + 1}Link`, button.link);
+        });
+        break;
       default:
         break;
     }
@@ -1408,6 +1724,15 @@ function buildCompactSectionSummary(
     }
     if (section.contentWidth) {
       parts.push(`contentWidth=${JSON.stringify(section.contentWidth)}`);
+    }
+    if (section.paddingStyle) {
+      parts.push(`paddingStyle=${JSON.stringify(section.paddingStyle)}`);
+    }
+    if (section.gapStyle) {
+      parts.push(`gapStyle=${JSON.stringify(section.gapStyle)}`);
+    }
+    if (section.marginStyle) {
+      parts.push(`marginStyle=${JSON.stringify(section.marginStyle)}`);
     }
     if (section.sourceLayout) {
       parts.push(`sourceLayout=${formatSourceLayout(section.sourceLayout)}`);
@@ -1451,6 +1776,12 @@ export function buildVisualPlanContextNote(
     lines.push(
       'Preserve these exact classes in the rendered JSX for the corresponding source-backed elements. Keep them as literal class tokens inside `className`.',
     );
+    lines.push(
+      'If a source-backed custom class comes from a Spectra/UAGB button, keep that exact class on the actual clickable `<button>`, `<a>`, or `<Link>` element whenever possible, not only on a surrounding wrapper. Those plugin classes may carry the real hover background/text/border interaction and must not be replaced by generic WordPress button styling alone.',
+    );
+    lines.push(
+      'When a heading element carries the `is-style-asterisk` class and the section or its container uses centered alignment (`textAlign=center` / `text-center`), you MUST also add `text-center` directly on that heading element (e.g. `className="... text-center is-style-asterisk"`). The asterisk CSS uses a direct-child combinator so the heading must have `text-center` on itself to center the asterisk icon — inheriting it from a parent wrapper is NOT sufficient.',
+    );
   }
   if (
     visualPlan.sections.some(
@@ -1458,7 +1789,38 @@ export function buildVisualPlanContextNote(
     )
   ) {
     lines.push(
-      'Preserve exact section-level alignment and constrained content widths from the approved plan. When a section says `textAlign=center`, apply real centered text classes to the actual heading/body elements, not just an outer wrapper. When a section says `contentWidth="620px"` (or similar), keep the readable inner text wrapper constrained to that exact max width instead of stretching it across the full section.',
+      'Preserve exact section-level alignment and constrained content widths from the approved plan. When a section says `textAlign=center`, apply real centered text classes to the actual heading/body elements, not just an outer wrapper. When a section says `textAlign=left`, do NOT sneak in `text-center`, `items-center`, or `justify-center` on the section intro/title/meta cluster. When a section says `contentWidth="620px"` (or similar), keep the readable inner text wrapper constrained to that exact max width instead of stretching it across the full section.',
+    );
+  }
+  if (
+    visualPlan.sections.some(
+      (section) => section.paddingStyle || section.gapStyle,
+    )
+  ) {
+    lines.push(
+      'Preserve source-backed section spacing from the approved plan. When a section provides `paddingStyle` or `gapStyle`, keep that breathing room in the rendered JSX instead of collapsing the stack into a tight generic card.',
+    );
+    lines.push(
+      'For centered `hero`/`newsletter` sections with heading + body/subheading + CTA, use real vertical spacing on the actual content stack (`flex flex-col` with `gap-*` / `space-y-*` or explicit margins). Do NOT fake spacing with empty spacer divs like `<div className="h-[1rem]" />`, and do NOT leave the button glued directly under the paragraph.',
+    );
+  }
+  const navbarMenuSlugs = [
+    ...new Set(
+      visualPlan.sections
+        .filter(
+          (section): section is Extract<SectionPlan, { type: 'navbar' }> =>
+            section.type === 'navbar' && !!section.menuSlug?.trim(),
+        )
+        .map((section) => section.menuSlug.trim()),
+    ),
+  ];
+  if (navbarMenuSlugs.length > 0) {
+    lines.push(
+      `Header/navigation menu contract: the approved navbar must prefer these menu slug(s) before any generic fallback: ${navbarMenuSlugs
+        .map((slug) => `\`${slug}\``)
+        .join(
+          ', ',
+        )}. Select with \`menus.find(m => m.location === slug) ?? menus.find(m => m.slug === slug)\` first, then fall back to \`primary\` only if no approved slug matches.`,
     );
   }
 
@@ -1487,7 +1849,75 @@ export function buildVisualPlanContextNote(
       '⛔ For `hero`, `cover`, `media-text`, `testimonial`, and `newsletter`, preserve the approved heading/body/image/CTA pairing for that exact section. Do NOT swap content between sections.',
     );
     lines.push(
-      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different `sectionKey` / `sourceNodeId`, keep them as separate top-level JSX wrappers in the same order. Do NOT merge two approved sections into one split row or one shared wrapper.',
+      '⛔ When the approved plan includes `headingStyle`, `subheadingStyle`, or `bodyStyle` fields such as `lineHeight`, `fontWeight`, `fontFamily`, or `fontSize`, apply them to the matching JSX text elements. Do NOT fall back to generic root typography when the plan provides explicit text styling.',
+    );
+    lines.push(
+      '⛔ For centered `hero`/`newsletter` sections that contain heading + subheading/body + CTA, preserve the original vertical rhythm from the source-backed plan. Use a real text/CTA stack with non-trivial spacing (`gap-*`, `space-y-*`, or explicit margins on the text/button wrappers). Do NOT compress the CTA directly against the paragraph, and do NOT substitute that spacing with empty spacer divs.',
+    );
+    lines.push(
+      '⛔ For `cover` with `dimRatio=0` and no heading/subheading/cta fields: this is a standalone image block, NOT a hero. Render it as a plain `<img src={imageSrc} alt="" className="vp-generated-image w-full h-auto object-contain" />` inside a `max-w-[1280px]` wrapper. Do NOT use `background-image` CSS or a fixed-height div for these image-only cover sections.',
+    );
+    lines.push(
+      '⛔ For `tabs`, render a real interactive tab UI using the approved `tabs[]` labels/content in the same order. Do NOT flatten tabs into one long static text block or convert them into cards/grid items.',
+    );
+    lines.push(
+      '⛔ Tab interaction fidelity: when rendering WordPress-style tabs, keep tab labels visually tab-like rather than plain inline text. If the source shows underlined labels at rest, preserve that default state, but on hover/focus remove the underline and show a visible tab border/outline for keyboard focus.',
+    );
+    lines.push(
+      '⛔ For `slider`, render a real carousel/slider UI using the approved `slides[]` content in the same order. Do NOT collapse it into a plain stacked list unless the source data contains only one slide.',
+    );
+    lines.push(
+      '⛔ Slider implementation contract: use Swiper for approved `slider` sections. Import `Swiper` / `SwiperSlide` from `swiper/react`, import the needed modules from `swiper/modules` (for example `Navigation`, `Pagination`, `Autoplay`, `A11y`, `EffectFade`), and import the matching package CSS such as `swiper/css`, `swiper/css/navigation`, `swiper/css/pagination`, and `swiper/css/effect-fade` when those features are used. Do NOT hand-roll the slider with only `useState`, array indexing, and conditional text swaps when Swiper is available.',
+    );
+    lines.push(
+      '⛔ Slider interaction quality: when a `slider` has more than one slide, the slide change MUST have visible motion. Do NOT instantly replace heading/paragraph text. Use either a translating track or stacked slides with active/inactive classes such as `opacity-*`, `translate-*`, or `scale-*` plus `transition-all`/`transition-opacity`/`transition-transform` and a real duration (roughly 300-700ms).',
+    );
+    lines.push(
+      'For multi-slide sliders, keep obvious controls in the section itself: dot indicators at minimum, and visible prev/next controls near the left/right edges by default unless the source explicitly proves a dots-only carousel. Autoplay, if enabled by the plan, must reuse the same animated transition instead of a hard content swap.',
+    );
+    lines.push(
+      'If `lucide-react` is available in the project, prefer icons such as `ChevronLeft` / `ChevronRight` for slider edge controls instead of raw text glyphs like `<`, `>`, `‹`, or `›`.',
+    );
+    lines.push(
+      'Slider width contract: match the source slider shell width instead of blindly using the page-wide container. If the WordPress source shows a visibly constrained, centered carousel block, keep the OUTER slider wrapper constrained and centered in React too. Only use the full wide section container when the source actually stretches the carousel that wide. Treat `contentWidth` as the readable max width for the inner text/copy stack, not automatic proof that the whole slider shell must be full-width.',
+    );
+    lines.push(
+      'Slider framing contract: do NOT invent an outline, border, ring, or card chrome around the whole slider unless the source clearly shows a framed carousel shell. If the WordPress source is an open, borderless slider, keep the React version borderless too.',
+    );
+    lines.push(
+      'Standalone `slider` sections also need breathing room from neighboring sections. Unless the source explicitly nests the slider inside the same card/container as the surrounding content, do NOT collapse it to `py-0`; keep non-zero top and bottom spacing so the section does not visually stick to the next CTA or trigger block.',
+    );
+    lines.push(
+      '⛔ For `modal`, render a real trigger + dialog/modal interaction using the approved `triggerText`, `heading`, `description`, and `cta` content. Do NOT downgrade it to an inline CTA block.',
+    );
+    lines.push(
+      '⛔ Modal interaction quality: opening/closing must animate both the backdrop and the dialog panel. Use a fixed `inset-0` backdrop with opacity transition, and a panel that animates with opacity plus `translate-y-*` or `scale-*` classes. Do NOT let the modal appear/disappear instantly.',
+    );
+    lines.push(
+      '⛔ Modal accessibility contract: the modal panel must include `role="dialog"` and `aria-modal="true"`, provide a visible close button, close on Escape, and close when the user clicks the backdrop unless the source explicitly indicates otherwise.',
+    );
+    lines.push(
+      'If `lucide-react` is available in the project, prefer a real icon component such as `X` for the modal close button instead of a raw `×`/`✕` character.',
+    );
+    lines.push(
+      'If a `modal` trigger is its own top-level section, preserve vertical spacing around that trigger section too. Do not leave it glued to the previous/next section with `py-0` unless the source clearly shows a shared wrapper.',
+    );
+    lines.push(
+      '⛔ For `accordion`, render a real accordion/disclosure UI using the approved `items[]` titles/content in the same order. Do NOT flatten it into static paragraphs or convert it into cards.',
+    );
+    lines.push(
+      '⛔ For `button-group`, render the approved buttons in the SAME order with the approved text/link values and aligned according to `align`. Do NOT invent extra headings.' +
+        " TRAILING CTA EXCEPTION: If the `button-group` section immediately follows a `hero`, `cover`, or `newsletter` section that already has a styled card/container (white box, rounded bg, etc.), render the button(s) INSIDE that preceding section's container — at the bottom of its flex-col content — instead of wrapping them in a new outer `<section>`. Keep the `data-vp-section-key` attribute on the button element itself.",
+    );
+    lines.push(
+      'When a `button-group` remains a standalone top-level section, do not compress it with `py-0`. Give it visible section padding so the CTA has enough separation from a slider, modal trigger, or neighboring content block.',
+    );
+    lines.push(
+      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different `sectionKey` / `sourceNodeId`, keep them as separate top-level JSX wrappers in the same order. Do NOT merge two approved sections into one split row or one shared wrapper.' +
+        ' Exception: a trailing `button-group` that is a CTA for the immediately preceding content section may be rendered inline per the rule above.',
+    );
+    lines.push(
+      '⛔ CONTIGUOUS GROUP RULE: Separate tracked wrappers do NOT automatically mean visible spacing between them. When adjacent approved sections come from the same parent WordPress group/cluster, keep the wrappers separate for tracking but render them flush with no artificial root gap, divider, stripe, or duplicated outer padding between them.',
     );
     lines.push(
       '⛔ If one approved section is text-first and a later approved section owns the image, keep the image in the later section. Do NOT pull that image up beside the earlier text block.',
@@ -1535,6 +1965,20 @@ export function buildVisualPlanContextNote(
         'Do NOT rename, hash, omit, or move these attributes to a child element. They are required for exact capture-to-source resolution after React generation.',
       );
       lines.push(...trackedSections);
+    }
+
+    const contiguousClusters = collectContiguousSourceClusters(visualPlan);
+    if (contiguousClusters.length > 0) {
+      lines.push('');
+      lines.push('## Contiguous source clusters — preserve seamless flow');
+      lines.push(
+        'These adjacent approved sections came from the same parent WordPress group/cluster. Keep separate tracked wrappers, but do NOT create extra vertical gap/banding between them.',
+      );
+      for (const cluster of contiguousClusters) {
+        lines.push(
+          `- sections ${cluster.startIndex + 1}-${cluster.endIndex + 1} share source cluster ${cluster.clusterKey}: types=${cluster.sectionTypes.join(' -> ')} | sectionKeys=${cluster.sectionKeys.join(', ')}`,
+        );
+      }
     }
   }
 
@@ -1637,6 +2081,7 @@ export function buildComponentPrompt(
   const planContext = [
     buildPlanContextNote(componentPlan, componentName),
     buildVisualPlanContextNote(componentPlan?.visualPlan, componentName),
+    buildSourceFidelityNote(templateSource),
     repoContext,
     editRequestContextNote,
   ]
@@ -1663,6 +2108,10 @@ ${
     ? '- This is a NoTitle variant: do NOT render the record title in any heading element.'
     : `- Render \`${isSingle ? 'post' : 'page'}.title\` as the primary heading above the content.`
 }
+- Preserve approved/source heading alignment for the detail intro/title cluster. If the source centers the title/meta block, keep the generated heading/meta wrapper centered rather than drifting to \`text-left\`.
+- When the detail page uses a constrained reading column, the title/meta cluster must share that SAME column width and left edge as the article body. Do NOT center the title text independently while the prose below starts from a different left edge.
+- Preferred pattern for left-aligned post/page detail intros: one shared wrapper such as \`<div className="max-w-[620px] mx-auto w-full flex flex-col gap-[...]">\` containing the heading and meta row, followed by the content body in that same readable width. Avoid inner wrappers like \`text-center\`, \`items-center\`, or \`justify-center\` unless the approved source explicitly centers the intro.
+- Render runtime date strings directly (\`post.date\`, \`comment.date\`) to preserve the source WordPress display order. Do NOT format them with \`new Date(...).toLocaleDateString()\`, \`toLocaleString()\`, or \`Intl.DateTimeFormat\`.
 ${
   isPage
     ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, \`comments\`.
@@ -1771,6 +2220,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
       input.componentPlan?.visualPlan,
       input.parentName,
     ),
+    buildSourceFidelityNote(input.nodesJson),
     sourceTrackingNote,
     repoContext,
     input.editRequestContextNote,

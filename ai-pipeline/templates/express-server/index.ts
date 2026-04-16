@@ -1310,11 +1310,10 @@ app.get('/api/menus', async (req, res) => {
       );
       if (items.length > 0) {
         // FSE block themes use wp_navigation as the authoritative nav source.
-        // If termToLocation is empty, no real WP nav_menu_locations are configured,
-        // meaning any classic menu's 'primary' assignment was heuristic. Demote it
-        // so the wp_navigation post becomes the primary menu instead.
+        // wp_navigation posts always take priority over classic nav_menu items —
+        // even when nav_menu_locations is populated (leftover from a pre-FSE classic theme).
         const existingPrimary = result.find((m) => m.location === 'primary');
-        if (existingPrimary && termToLocation.size === 0) {
+        if (existingPrimary) {
           existingPrimary.location = null;
         }
         result.push({
