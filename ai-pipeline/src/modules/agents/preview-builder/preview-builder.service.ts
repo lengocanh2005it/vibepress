@@ -478,9 +478,10 @@ ${routesBlock}
     );
 
     // server/.env — DB credentials + port
+    const previewBase = `/preview/${jobId}/`;
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${copiedLogoPublicPath}\n` : ''}`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\nPREVIEW_BASE=${previewBase}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${previewBase}${copiedLogoPublicPath.replace(/^\//, '')}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss

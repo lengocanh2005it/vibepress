@@ -28,6 +28,7 @@ app.get('/api', (_req, res) => {
 });
 
 const PORT = Number(process.env.API_PORT) || 3100;
+const PREVIEW_BASE = process.env.PREVIEW_BASE ?? '';
 const DEFAULT_POSTS_PER_PAGE = 10;
 const MAX_POSTS_PER_PAGE = 50;
 const BUILTIN_POST_TYPES = new Set([
@@ -119,7 +120,7 @@ function buildWpUploadAssetFileName(raw: string): string {
 function localizeWpUploadAssetUrl(raw: string | null | undefined): string | null {
   const normalized = normalizeWpUploadAssetUrl(raw);
   if (!normalized) return raw?.trim() ? String(raw).trim() : null;
-  return `/assets/images/${buildWpUploadAssetFileName(normalized)}`;
+  return `${PREVIEW_BASE}assets/images/${buildWpUploadAssetFileName(normalized)}`;
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -222,7 +223,7 @@ async function renderLatestPostsBlock(
   return `<ul class="wp-block-latest-posts">${rows
     .map(
       (row) =>
-        `<li><a href="/post/${row.post_name}">${row.post_title}</a>${
+        `<li><a href="${PREVIEW_BASE}post/${row.post_name}">${row.post_title}</a>${
           showDate
             ? ` <time datetime="${new Date(row.post_date).toISOString()}">${formatDate(row.post_date)}</time>`
             : ''
@@ -287,7 +288,7 @@ async function renderArchivesBlock(
         month: 'long',
         year: 'numeric',
       });
-      return `<li><a href="/archive?month=${row.year}-${String(row.month).padStart(2, '0')}">${monthLabel}</a> (${row.count})</li>`;
+      return `<li><a href="${PREVIEW_BASE}archive?month=${row.year}-${String(row.month).padStart(2, '0')}">${monthLabel}</a> (${row.count})</li>`;
     })
     .join('')}</ul>`;
 }
@@ -309,7 +310,7 @@ async function renderDynamicGutenbergBlock(
         prefix,
         'category',
         'wp-block-categories-list',
-        '/category',
+        `${PREVIEW_BASE}category`,
       );
     case 'core/tag-cloud':
     case 'tag-cloud':
@@ -318,7 +319,7 @@ async function renderDynamicGutenbergBlock(
         prefix,
         'post_tag',
         'wp-block-tag-cloud',
-        '/tag',
+        `${PREVIEW_BASE}tag`,
       );
     case 'core/archives':
     case 'archives':
@@ -326,6 +327,21 @@ async function renderDynamicGutenbergBlock(
     default:
       return null;
   }
+}
+
+function rewriteInternalLinks(html: string): string {
+  if (!PREVIEW_BASE || PREVIEW_BASE === '/') return html;
+  // Rewrite <a href="/internal/path"> → <a href="${PREVIEW_BASE}internal/path">
+  // Leave external URLs (http/https/mailto/tel/#) unchanged.
+  return html.replace(
+    /(<a\b[^>]*?\bhref=)(["'])(\/(?!\/)[^"']*)\2/gi,
+    (_match, tagPart: string, quote: string, path: string) => {
+      // Already has preview prefix → skip
+      if (path.startsWith(PREVIEW_BASE)) return _match;
+      const joined = `${PREVIEW_BASE}${path.replace(/^\//, '')}`;
+      return `${tagPart}${quote}${joined}${quote}`;
+    },
+  );
 }
 
 async function normalizeRichContent(
@@ -352,6 +368,7 @@ async function normalizeRichContent(
     },
   );
 
+  normalized = rewriteInternalLinks(normalized);
   return stripGutenbergBlockComments(normalized).trim();
 }
 
