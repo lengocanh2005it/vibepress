@@ -13,6 +13,7 @@ const deployRoutes = require('./routes/deployRoutes');
 const wpPresetRoutes = require('./routes/wpPresetRoutes');
 const previewRoutes = require('./routes/previewRoutes');
 const { proxyRouter: previewProxyRouter } = require('./routes/previewRoutes');
+const { proxyApiIfFromPreview } = require('./controllers/previewController');
 const { ensureFileSystemState } = require('./controllers/projectController');
 
 const app = express();
@@ -23,6 +24,8 @@ app.use(cors(corsOptions));
 app.options('/{*splat}', cors(corsOptions));
 
 app.use('/', systemRoutes);
+// Intercept /api/ calls from preview pages → route to preview's Express backend
+app.use('/api', proxyApiIfFromPreview);
 app.use('/api', authRoutes);
 app.use('/api', projectRoutes);
 app.use('/api', visualRoutes);

@@ -80,4 +80,21 @@ function proxyPreview(req, res) {
   return forwardRequest(req, res, AI_PIPELINE_HOST, vitePort, req.originalUrl);
 }
 
-module.exports = { registerPreview, unregisterPreview, proxyPreview };
+/**
+ * Middleware: intercept /api/ calls from preview pages via Referer header.
+ * Browser calls /api/foo from preview → Nginx → app → this middleware
+ * → forward to preview's Express backend instead of automation backend.
+ */
+function proxyApiIfFromPreview(req, res, next) {
+  const referer = req.headers.referer || req.headers.referrer || '';
+  const match = referer.match(/\/preview\/([^/]+)\//);
+  if (!match) return next();
+
+  const pipelineId = match[1];
+  const registration = registry.get(pipelineId);
+  if (!registration?.apiPort) return next();
+
+  return forwardRequest(req, res, AI_PIPELINE_HOST, registration.apiPort, req.originalUrl);
+}
+
+module.exports = { registerPreview, unregisterPreview, proxyPreview, proxyApiIfFromPreview };

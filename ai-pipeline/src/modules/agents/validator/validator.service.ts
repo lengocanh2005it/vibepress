@@ -2109,7 +2109,11 @@ export {};
   }
 
   private shouldIgnoreRequestFailure(url: string): boolean {
-    return /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url);
+    return (
+      /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url) ||
+      // External resources (fonts, analytics, CDN) may be blocked by ORB or network restrictions
+      /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(url)
+    );
   }
 
   /**

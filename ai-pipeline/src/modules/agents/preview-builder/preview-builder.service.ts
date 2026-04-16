@@ -536,7 +536,7 @@ ${routesBlock}
       });
       this.logger.log(`[preview] registered pipeline ${pipelineId} → vite:${port}, api:${apiPort}`);
       const publicBase = this.configService.get<string>('automation.previewPublicBaseUrl', '');
-      return publicBase ? `${publicBase}/preview/${pipelineId}` : null;
+      return publicBase ? `${publicBase}/preview/${pipelineId}/` : null;
     } catch (err) {
       this.logger.warn(`[preview] failed to register preview: ${err instanceof Error ? err.message : err}`);
       return null;
