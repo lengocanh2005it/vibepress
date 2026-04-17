@@ -171,7 +171,7 @@ async function createRenderService({ repoName, repoHtmlUrl, branch = 'main', dbC
 
 // ── Vercel ────────────────────────────────────────────────────────────────────
 
-async function createVercelProject({ repoName, branch = 'main' }) {
+async function createVercelProject({ repoName, branch = 'main', githubOwner }) {
   if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
 
   console.log(`[Vercel] Creating project: ${repoName} (branch: ${branch})`);
@@ -182,7 +182,7 @@ async function createVercelProject({ repoName, branch = 'main' }) {
     rootDirectory: 'frontend',
     gitRepository: {
       type: 'github',
-      repo: `${GITHUB_OWNER}/${repoName}`,
+      repo: `${githubOwner}/${repoName}`,
       productionBranch: branch,
     },
     buildCommand: 'npm run build',
@@ -217,7 +217,7 @@ async function createVercelProject({ repoName, branch = 'main' }) {
         name: repoName,
         gitSource: {
           type: 'github',
-          org: GITHUB_OWNER,
+          org: githubOwner,
           repo: repoName,
           ref: branch,
         },
@@ -250,7 +250,6 @@ async function pushToGit({ jobId, repoName, branch = 'main' }) {
   console.log(`\n[PushToGit] ── Start jobId=${jobId} ──────────────────────`);
 
   if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is not configured');
-  if (!GITHUB_OWNER) throw new Error('GITHUB_OWNER is not configured');
 
   const generatedDir = path.join(AI_PIPELINE_GENERATED_DIR, jobId);
   console.log(`[PushToGit] Checking generated dir: ${generatedDir}`);
@@ -295,7 +294,12 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   console.log(`\n[Deploy] ── Start jobId=${jobId} ──────────────────────`);
 
   if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is not configured');
-  if (!GITHUB_OWNER) throw new Error('GITHUB_OWNER is not configured');
+  if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
+  if (!RENDER_API_KEY) throw new Error('RENDER_API_KEY is not configured');
+  if (!RENDER_OWNER_ID) throw new Error('RENDER_OWNER_ID is not configured');
+
+  const githubHeaders = { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' };
+  const githubOwner = await getGithubOwner(githubHeaders);
 
   const generatedDir = path.join(AI_PIPELINE_GENERATED_DIR, jobId);
   console.log(`[Deploy] Checking generated dir: ${generatedDir}`);
@@ -368,7 +372,7 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
 
   // 7. Tạo Vercel project
   console.log(`\n[Deploy] Step 7/6 — Create Vercel project`);
-  const { vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch });
+  const { vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
 
   await fse.remove(workDir);
   console.log(`\n[Deploy] ── Done ───────────────────────────────────────`);
