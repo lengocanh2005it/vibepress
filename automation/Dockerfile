@@ -5,6 +5,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
+RUN apt-get update && apt-get install -y git --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
 # Install Playwright system dependencies + Chromium browser
 RUN npx playwright install --with-deps chromium
 
