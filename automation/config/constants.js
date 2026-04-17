@@ -12,6 +12,8 @@ const AI_PIPELINE_URL = `http://localhost:${AI_PIPELINE_PORT}`;
 const VERCEL_TOKEN = process.env.VERCEL_TOKEN || null;
 const RENDER_API_KEY = process.env.RENDER_API_KEY || null;
 const RENDER_OWNER_ID = process.env.RENDER_OWNER_ID || null;
+const PUBLIC_DB_HOST = process.env.PUBLIC_DB_HOST || null;
+const PUBLIC_DB_PORT = process.env.PUBLIC_DB_PORT ? Number(process.env.PUBLIC_DB_PORT) : null;
 const CLOUD_IMAGE_PROVIDER = process.env.CLOUD_IMAGE_PROVIDER || null;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || null;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || null;
@@ -44,6 +46,8 @@ module.exports = {
 	VERCEL_TOKEN,
 	RENDER_API_KEY,
 	RENDER_OWNER_ID,
+	PUBLIC_DB_HOST,
+	PUBLIC_DB_PORT,
 	CLOUD_IMAGE_PROVIDER,
 	CLOUDINARY_CLOUD_NAME,
 	CLOUDINARY_API_KEY,

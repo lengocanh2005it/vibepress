@@ -11,6 +11,8 @@ const {
   RENDER_API_KEY,
   RENDER_OWNER_ID,
   TEMP_ROOT,
+  PUBLIC_DB_HOST,
+  PUBLIC_DB_PORT,
 } = require('../config/constants');
 
 const AI_PIPELINE_GENERATED_DIR = path.resolve(
@@ -18,35 +20,13 @@ const AI_PIPELINE_GENERATED_DIR = path.resolve(
   '../../ai-pipeline/temp/generated',
 );
 
-// ── Ngrok ─────────────────────────────────────────────────────────────────────
-
-async function getMysqlNgrokTunnel() {
-  console.log(`[Ngrok] Fetching active tunnels from localhost:4040...`);
-  let tunnels;
-  try {
-    const res = await axios.get('http://localhost:4040/api/tunnels');
-    tunnels = res.data.tunnels;
-  } catch {
-    throw new Error('Ngrok is not running. Start it with: ngrok tcp 3306');
-  }
-
-  // Tìm tunnel TCP trỏ vào port 3306
-  const tunnel = tunnels.find(
-    (t) => t.proto === 'tcp' && t.config?.addr?.toString().endsWith('3306'),
-  );
-
-  if (!tunnel) {
-    throw new Error('No ngrok TCP tunnel found for port 3306. Run: ngrok tcp 3306');
-  }
-
-  // public_url dạng: tcp://0.tcp.ngrok.io:12345
-  const publicUrl = tunnel.public_url;
-  const [host, port] = publicUrl.replace('tcp://', '').split(':');
-  console.log(`[Ngrok] MySQL tunnel found — ${host}:${port}`);
-  return { host, port: Number(port) };
-}
-
 // ── GitHub ────────────────────────────────────────────────────────────────────
+
+async function getGithubOwner(headers) {
+  if (GITHUB_OWNER) return GITHUB_OWNER;
+  const res = await axios.get('https://api.github.com/user', { headers });
+  return res.data.login;
+}
 
 async function createGithubRepo(repoName) {
   const headers = {
@@ -67,14 +47,19 @@ async function createGithubRepo(repoName) {
     // 422 = repo đã tồn tại → lấy thông tin repo hiện có
     if (err.response?.status === 422) {
       console.log(`[GitHub] Repo "${repoName}" already exists — fetching existing repo`);
-      const existing = await axios.get(
-        `https://api.github.com/repos/${GITHUB_OWNER}/${repoName}`,
-        { headers },
-      );
-      console.log(`[GitHub] Using existing repo: ${existing.data.html_url}`);
-      return { name: existing.data.name, htmlUrl: existing.data.html_url, cloneUrl: existing.data.clone_url };
+      try {
+        const owner = await getGithubOwner(headers);
+        const existing = await axios.get(
+          `https://api.github.com/repos/${owner}/${repoName}`,
+          { headers },
+        );
+        console.log(`[GitHub] Using existing repo: ${existing.data.html_url}`);
+        return { name: existing.data.name, htmlUrl: existing.data.html_url, cloneUrl: existing.data.clone_url };
+      } catch (fetchErr) {
+        throw new Error(`GitHub: failed to fetch existing repo "${repoName}" (${fetchErr.response?.status ?? fetchErr.message})`);
+      }
     }
-    throw err;
+    throw new Error(`GitHub: create repo failed (${err.response?.status ?? err.message}): ${JSON.stringify(err.response?.data)}`);
   }
 }
 
@@ -341,13 +326,14 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   // 4. Deploy server lên Render
   console.log(`\n[Deploy] Step 4/6 — Deploy server to Render`);
 
-  // Nếu host là Docker internal (không public) → dùng ngrok tunnel thay thế
-  const isLocalHost = !dbCreds.host || ['localhost', '127.0.0.1', 'db'].includes(dbCreds.host.split(':')[0]);
+  // Nếu host là Docker internal hostname → resolve sang PUBLIC_DB_HOST
+  const DOCKER_INTERNAL_HOSTS = ['localhost', '127.0.0.1', 'db', 'mysql'];
+  const isLocalHost = !dbCreds.host || DOCKER_INTERNAL_HOSTS.includes(dbCreds.host.split(':')[0]);
   let finalDbCreds = dbCreds;
   if (isLocalHost) {
-    console.log(`[Deploy] DB host "${dbCreds.host}" is local — fetching ngrok tunnel...`);
-    const { host, port } = await getMysqlNgrokTunnel();
-    finalDbCreds = { ...dbCreds, host, port };
+    if (!PUBLIC_DB_HOST) throw new Error('DB host is internal but PUBLIC_DB_HOST is not configured');
+    console.log(`[Deploy] DB host "${dbCreds.host}" is internal — using PUBLIC_DB_HOST: ${PUBLIC_DB_HOST}:${PUBLIC_DB_PORT ?? dbCreds.port}`);
+    finalDbCreds = { ...dbCreds, host: PUBLIC_DB_HOST, ...(PUBLIC_DB_PORT && { port: PUBLIC_DB_PORT }) };
   }
 
   const { renderUrl } = await createRenderService({
