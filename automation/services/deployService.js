@@ -175,6 +175,29 @@ async function createRenderService({ repoName, repoHtmlUrl, branch = 'main', dbC
   const serviceId = res.data.service?.id;
   const renderUrl = `https://${serviceName}.onrender.com`;
   console.log(`[Render] Service created — id: ${serviceId}, url: ${renderUrl}`);
+
+  // Set env vars riêng vì creation payload không phải lúc nào cũng apply
+  if (serviceId) {
+    const envVars = [
+      { key: 'DB_HOST',     value: dbCreds.host     ?? 'localhost' },
+      { key: 'DB_PORT',     value: String(dbCreds.port ?? 3306)    },
+      { key: 'DB_USER',     value: dbCreds.user     ?? 'root'      },
+      { key: 'DB_PASSWORD', value: dbCreds.password ?? ''          },
+      { key: 'DB_NAME',     value: dbCreds.dbName   ?? 'wordpress' },
+      { key: 'NODE_ENV',    value: 'production'                    },
+    ];
+    try {
+      await axios.put(
+        `https://api.render.com/v1/services/${serviceId}/env-vars`,
+        envVars.map(v => ({ key: v.key, value: String(v.value) })),
+        { headers: { Authorization: `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' } },
+      );
+      console.log(`[Render] Env vars set for service: ${serviceId}`);
+    } catch (err) {
+      console.warn(`[Render] Failed to set env vars: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+    }
+  }
+
   return { serviceId, renderUrl };
 }
 
@@ -217,6 +240,28 @@ async function createVercelProject({ repoName, branch = 'main', githubOwner }) {
   const vercelUrl = `https://${repoName}.vercel.app`;
   console.log(`[Vercel] Project created — id: ${projectId}, url: ${vercelUrl}`);
 
+  return { projectId, vercelUrl };
+}
+
+async function setVercelEnvVars({ projectId }) {
+  const vercelHeaders = { Authorization: `Bearer ${VERCEL_TOKEN}`, 'Content-Type': 'application/json' };
+  const envVars = [
+    { key: 'VITE_BASE',     value: '/',    type: 'plain', target: ['production', 'preview'] },
+    { key: 'VITE_API_BASE', value: '/api', type: 'plain', target: ['production', 'preview'] },
+  ];
+  try {
+    await axios.post(
+      `https://api.vercel.com/v10/projects/${projectId}/env`,
+      envVars,
+      { headers: vercelHeaders },
+    );
+    console.log(`[Vercel] Env vars set for project: ${projectId}`);
+  } catch (err) {
+    console.warn(`[Vercel] Failed to set env vars: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+  }
+}
+
+async function triggerVercelDeployment({ repoName, branch, githubOwner }) {
   // Trigger deployment thủ công vì project tạo sau khi push → Vercel không tự deploy
   console.log(`[Vercel] Triggering deployment for branch: ${branch}`);
   try {
@@ -249,8 +294,6 @@ async function createVercelProject({ repoName, branch = 'main', githubOwner }) {
   } catch (err) {
     console.warn(`[Vercel] Trigger deployment warning (${err.response?.status}):`, JSON.stringify(err.response?.data, null, 2));
   }
-
-  return { projectId, vercelUrl };
 }
 
 // ── Push to Git only ─────────────────────────────────────────────────────────
@@ -352,7 +395,7 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
     finalDbCreds = { ...dbCreds, host: PUBLIC_DB_HOST, ...(PUBLIC_DB_PORT && { port: PUBLIC_DB_PORT }) };
   }
 
-  const { renderUrl } = await createRenderService({
+  const { renderUrl, serviceId } = await createRenderService({
     repoName: finalRepoName,
     repoHtmlUrl: repo.htmlUrl,
     branch,
@@ -379,9 +422,15 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
     message: `chore: set Render API URL in vercel.json [jobId=${jobId}]`,
   });
 
-  // 7. Tạo Vercel project
+  // 7. Tạo Vercel project + set env vars + trigger deploy
   console.log(`\n[Deploy] Step 7/6 — Create Vercel project`);
-  const { vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
+  const { projectId, vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
+
+  console.log(`\n[Deploy] Step 7b — Set Vercel env vars`);
+  await setVercelEnvVars({ projectId });
+
+  console.log(`\n[Deploy] Step 7c — Trigger Vercel deployment`);
+  await triggerVercelDeployment({ repoName: finalRepoName, branch, githubOwner });
 
   await fse.remove(workDir);
   console.log(`\n[Deploy] ── Done ───────────────────────────────────────`);
