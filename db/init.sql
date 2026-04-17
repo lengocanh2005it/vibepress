@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS `wp_sites` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------
+-- wp_site_members: quan hệ nhiều-nhiều user ↔ site
+-- owner = người đăng ký đầu tiên, member = người connect sau
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `wp_site_members` (
+  `site_id`   VARCHAR(64)  NOT NULL,
+  `user_id`   VARCHAR(36)  NOT NULL,
+  `joined_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`site_id`, `user_id`),
+  CONSTRAINT `fk_wsm_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_wsm_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)          ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------
 -- wp_presets: các WordPress site được cấu hình sẵn (preset)
 -- dùng để nạp nhanh thông tin đăng nhập và URL vào editor
 -- -------------------------------------------------------

@@ -14,6 +14,8 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY || null;
 const RENDER_OWNER_ID = process.env.RENDER_OWNER_ID || null;
 const PUBLIC_DB_HOST = process.env.PUBLIC_DB_HOST || null;
 const PUBLIC_DB_PORT = process.env.PUBLIC_DB_PORT ? Number(process.env.PUBLIC_DB_PORT) : null;
+const RENDER_DB_USER = process.env.RENDER_DB_USER || null;
+const RENDER_DB_PASSWORD = process.env.RENDER_DB_PASSWORD ?? null;
 const CLOUD_IMAGE_PROVIDER = process.env.CLOUD_IMAGE_PROVIDER || null;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || null;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || null;
@@ -48,6 +50,8 @@ module.exports = {
 	RENDER_OWNER_ID,
 	PUBLIC_DB_HOST,
 	PUBLIC_DB_PORT,
+	RENDER_DB_USER,
+	RENDER_DB_PASSWORD,
 	CLOUD_IMAGE_PROVIDER,
 	CLOUDINARY_CLOUD_NAME,
 	CLOUDINARY_API_KEY,

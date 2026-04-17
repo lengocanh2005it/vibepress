@@ -13,6 +13,8 @@ const {
   TEMP_ROOT,
   PUBLIC_DB_HOST,
   PUBLIC_DB_PORT,
+  RENDER_DB_USER,
+  RENDER_DB_PASSWORD,
 } = require('../config/constants');
 
 const AI_PIPELINE_GENERATED_DIR = path.resolve(
@@ -73,9 +75,13 @@ async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
     `https://x-access-token:${encodeURIComponent(GITHUB_TOKEN)}@`,
   );
   const gitignore = [
-    '**/node_modules/',
+    'node_modules',
+    '**/node_modules',
+    '.env',
     '**/.env',
     '**/.env.*',
+    'dist/',
+    '.vite/',
     'draft/',
     'ui-source-map.json',
   ].join('\n');
@@ -146,8 +152,8 @@ async function createRenderService({ repoName, repoHtmlUrl, branch = 'main', dbC
       envVars: [
         { key: 'DB_HOST',     value: dbCreds.host     ?? 'localhost' },
         { key: 'DB_PORT',     value: String(dbCreds.port ?? 3306)    },
-        { key: 'DB_USER',     value: dbCreds.user     ?? 'root'      },
-        { key: 'DB_PASSWORD', value: dbCreds.password ?? ''          },
+        { key: 'DB_USER',     value: RENDER_DB_USER     ?? dbCreds.user     ?? 'root' },
+        { key: 'DB_PASSWORD', value: RENDER_DB_PASSWORD ?? dbCreds.password ?? ''   },
         { key: 'DB_NAME',     value: dbCreds.dbName   ?? 'wordpress' },
         { key: 'NODE_ENV',    value: 'production'                    },
       ],

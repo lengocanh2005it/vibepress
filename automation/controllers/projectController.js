@@ -495,14 +495,10 @@ async function registerWpSite(req, res) {
   const existingSite = await findSiteBySiteUrl(siteUrl);
 
   if (existingSite) {
-    // RECONNECT — cập nhật user_id + thông tin site
+    // RECONNECT — cập nhật metadata site, thêm user vào wp_site_members nếu chưa có
     await query(
-      `UPDATE wp_sites
-          SET user_id = ?, api_key = ?, site_name = ?, wp_version = ?, admin_email = ?
-        WHERE site_id = ?`,
+      `UPDATE wp_sites SET site_name = ?, wp_version = ?, admin_email = ? WHERE site_id = ?`,
       [
-        user.id,
-        apiKey,
         siteName ?? existingSite.siteName,
         wpVersion ?? existingSite.wpVersion,
         adminEmail ?? existingSite.adminEmail,
@@ -510,16 +506,14 @@ async function registerWpSite(req, res) {
       ],
     );
 
-    const githubRepo = existingSite.wpRepoUrl.replace(
-      "https://github.com/",
-      "",
+    await query(
+      `INSERT IGNORE INTO wp_site_members (site_id, user_id) VALUES (?, ?)`,
+      [existingSite.siteId, user.id],
     );
-    console.log(
-      `[WP] register (reconnect) OK — siteUrl=${siteUrl} userId=${user.id}`,
-    );
-    res
-      .status(200)
-      .json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: false });
+
+    const githubRepo = existingSite.wpRepoUrl.replace("https://github.com/", "");
+    console.log(`[WP] register (reconnect) OK — siteUrl=${siteUrl} userId=${user.id}`);
+    res.status(200).json({ githubToken: GITHUB_TOKEN, githubRepo, isFirstConnect: false });
     triggerDbSync(existingSite.siteId, siteUrl, apiKey);
     return;
   }
@@ -546,17 +540,12 @@ async function registerWpSite(req, res) {
   await query(
     `INSERT INTO wp_sites (site_id, user_id, site_url, site_name, wp_version, admin_email, api_key, wp_repo_name, wp_repo_url)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      siteId,
-      user.id,
-      siteUrl,
-      siteName ?? null,
-      wpVersion ?? null,
-      adminEmail ?? null,
-      apiKey,
-      wpRepo.name,
-      wpRepo.htmlUrl,
-    ],
+    [siteId, user.id, siteUrl, siteName ?? null, wpVersion ?? null, adminEmail ?? null, apiKey, wpRepo.name, wpRepo.htmlUrl],
+  );
+
+  await query(
+    `INSERT IGNORE INTO wp_site_members (site_id, user_id) VALUES (?, ?)`,
+    [siteId, user.id],
   );
 
   console.log(
@@ -655,7 +644,11 @@ async function getReposByEmail(req, res) {
   const userId = req.user.id;
 
   const rows = await query(
-    "SELECT * FROM wp_sites WHERE user_id = ? ORDER BY registered_at DESC",
+    `SELECT s.*, m.joined_at
+     FROM wp_sites s
+     INNER JOIN wp_site_members m ON m.site_id = s.site_id
+     WHERE m.user_id = ?
+     ORDER BY m.joined_at DESC`,
     [userId],
   );
 

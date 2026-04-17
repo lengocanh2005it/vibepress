@@ -582,6 +582,11 @@ async function getConn() {
   });
 }
 
+process.on('unhandledRejection', (err: any) => {
+  const code = err?.code;
+  console.error(`[DB Error] ${code ?? 'Unknown'}: ${err?.message ?? err}`);
+});
+
 async function getPrefix(
   conn: Awaited<ReturnType<typeof getConn>>,
 ): Promise<string> {
@@ -867,7 +872,7 @@ function normalizeLogoCandidateUrl(
 
   try {
     if (/^https?:\/\//i.test(trimmed)) {
-      return new URL(trimmed).toString();
+      return siteUrl ? rebaseToSiteOrigin(trimmed, siteUrl) : new URL(trimmed).toString();
     }
     if (siteUrl) {
       if (trimmed.startsWith('/')) {
