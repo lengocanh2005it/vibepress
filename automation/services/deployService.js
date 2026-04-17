@@ -72,6 +72,15 @@ async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
     'https://',
     `https://x-access-token:${encodeURIComponent(GITHUB_TOKEN)}@`,
   );
+  const gitignore = [
+    '**/node_modules/',
+    '**/.env',
+    '**/.env.*',
+    'draft/',
+    'ui-source-map.json',
+  ].join('\n');
+  await fse.writeFile(path.join(workDir, '.gitignore'), gitignore);
+
   const git = simpleGit(workDir);
   await git.init();
   await git.addConfig('user.email', GIT_AUTHOR_EMAIL);
