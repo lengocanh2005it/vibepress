@@ -22,10 +22,13 @@ const AI_PIPELINE_GENERATED_DIR = path.resolve(
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
+let _cachedGithubOwner = null;
 async function getGithubOwner(headers) {
-  if (GITHUB_OWNER) return GITHUB_OWNER;
+  if (_cachedGithubOwner) return _cachedGithubOwner;
   const res = await axios.get('https://api.github.com/user', { headers });
-  return res.data.login;
+  _cachedGithubOwner = res.data.login;
+  console.log(`[GitHub] Authenticated as: ${_cachedGithubOwner}`);
+  return _cachedGithubOwner;
 }
 
 async function createGithubRepo(repoName) {
@@ -81,7 +84,7 @@ async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
 
   await git.commit(message);
   await git.addRemote('origin', authedUrl);
-  await git.push('origin', branch, ['--set-upstream']);
+  await git.push('origin', branch, ['--set-upstream', '--force']);
 
   const log = await git.log({ maxCount: 1 });
   const sha = log.latest?.hash ?? '';
