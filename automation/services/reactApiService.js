@@ -27,8 +27,16 @@ function normalizeReactItem(item, type) {
  *
  * @param {string} baseUrl  - e.g. "http://localhost:3100"
  */
+function resolveDockerUrl(url) {
+  const base = normalizeBaseUrl(url);
+  if (process.env.AI_PIPELINE_HOST) {
+    return base.replace(/(?:localhost|127\.0\.0\.1)/, 'host.docker.internal');
+  }
+  return base;
+}
+
 async function fetchAllReactContent(baseUrl) {
-  const base = normalizeBaseUrl(baseUrl);
+  const base = resolveDockerUrl(baseUrl);
 
   const [posts, pages] = await Promise.all([
     axios.get(`${base}/api/posts`, { timeout: DEFAULT_TIMEOUT })
