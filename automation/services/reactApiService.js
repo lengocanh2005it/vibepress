@@ -29,8 +29,9 @@ function normalizeReactItem(item, type) {
  */
 function resolveDockerUrl(url) {
   const base = normalizeBaseUrl(url);
-  if (process.env.AI_PIPELINE_HOST) {
-    return base.replace(/(?:localhost|127\.0\.0\.1)/, 'host.docker.internal');
+  const host = process.env.AI_PIPELINE_HOST;
+  if (host) {
+    return base.replace(/(?:localhost|127\.0\.0\.1)/, host);
   }
   return base;
 }

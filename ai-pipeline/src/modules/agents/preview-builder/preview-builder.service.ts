@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
+import * as net from 'net';
 import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
@@ -467,8 +468,10 @@ ${routesBlock}
     }
 
     // 5. Generate .env cho từng folder
-    const apiPort = this.pickApiPort(jobId);
-    const vitePort = this.pickVitePort(jobId);
+    const [apiPort, vitePort] = await Promise.all([
+      this.pickApiPort(jobId),
+      this.pickVitePort(jobId),
+    ]);
     const serverDir = join(rootDir, 'server');
 
     // frontend/.env — chỉ cần biết API chạy ở đâu
@@ -1817,7 +1820,7 @@ ${fontEntries}
     }
   }
 
-  private spawnDevServer(dir: string) {
+  private spawnDevServer(dir: string, ttlMs = 30 * 60 * 1000) {
     const proc = spawn('npm', ['run', 'dev'], {
       cwd: dir,
       shell: true,
@@ -1825,16 +1828,21 @@ ${fontEntries}
       detached: true,
     });
     proc.unref();
-    this.logger.log(`Dev server started (pid=${proc.pid}) in ${dir}`);
+    setTimeout(() => {
+      try {
+        process.kill(-proc.pid!, 'SIGTERM');
+      } catch {}
+    }, ttlMs).unref();
+    this.logger.log(`Dev server started (pid=${proc.pid}) in ${dir}, TTL=${ttlMs / 60000}m`);
     return proc;
   }
 
-  private pickApiPort(jobId: string): number {
-    return this.pickDeterministicPort(jobId, 'api', 3700, 200);
+  private async pickApiPort(jobId: string): Promise<number> {
+    return this.findFreePort(jobId, 'api', 3700, 200);
   }
 
-  private pickVitePort(jobId: string): number {
-    return this.pickDeterministicPort(jobId, 'vite', 5300, 200);
+  private async pickVitePort(jobId: string): Promise<number> {
+    return this.findFreePort(jobId, 'vite', 5300, 200);
   }
 
   private pickDeterministicPort(
@@ -1846,6 +1854,29 @@ ${fontEntries}
     const hash = createHash('sha1').update(`${salt}:${jobId}`).digest('hex');
     const offset = parseInt(hash.slice(0, 8), 16) % span;
     return base + offset;
+  }
+
+  private isPortFree(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.once('listening', () => server.close(() => resolve(true)));
+      server.listen(port, '127.0.0.1');
+    });
+  }
+
+  private async findFreePort(
+    jobId: string,
+    salt: string,
+    base: number,
+    span: number,
+  ): Promise<number> {
+    const start = this.pickDeterministicPort(jobId, salt, base, span);
+    for (let i = 0; i < span; i++) {
+      const port = base + ((start - base + i) % span);
+      if (await this.isPortFree(port)) return port;
+    }
+    throw new Error(`No free port found in range [${base}, ${base + span})`);
   }
 
   private stripSharedLayoutSectionsFromPageCode(

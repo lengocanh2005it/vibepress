@@ -230,7 +230,8 @@ function mapWpUrlToReactUrl(wpUrl, wpBaseUrl, reactBaseUrl, type = null) {
       pathname = "/post" + pathname;
     }
 
-    const mapped = new URL(pathname + wp.search + wp.hash, reactBase);
+    const reactBasePath = reactBase.pathname.replace(/\/$/, '');
+    const mapped = new URL(reactBase.origin + reactBasePath + pathname + wp.search + wp.hash);
     return mapped.toString();
   } catch {
     return null;
