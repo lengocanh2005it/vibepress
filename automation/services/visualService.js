@@ -134,6 +134,38 @@ async function runInteractions(page, interactions = []) {
   }
 }
 
+async function waitForPageReady(page) {
+  // Wait for fonts and all images (including lazy-loaded) to finish
+  await Promise.all([
+    page.waitForFunction(() => document.fonts.ready, { timeout: 10000 }).catch(() => {}),
+    page.waitForFunction(
+      () => [...document.images].every((img) => img.complete),
+      { timeout: 15000 },
+    ).catch(() => {}),
+  ]);
+}
+
+async function autoScroll(page) {
+  // Scroll through entire page to trigger lazy-loaded images/components
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      const distance = 300;
+      const delay = 80;
+      const timer = setInterval(() => {
+        window.scrollBy(0, distance);
+        if (window.scrollY + window.innerHeight >= document.body.scrollHeight) {
+          clearInterval(timer);
+          window.scrollTo(0, 0);
+          resolve();
+        }
+      }, delay);
+    });
+  });
+  // Allow lazy-loaded content time to render after scroll
+  await page.waitForTimeout(600);
+  await waitForPageReady(page);
+}
+
 async function captureScreenshot(
   page,
   url,
@@ -149,7 +181,10 @@ async function captureScreenshot(
       .waitForLoadState("domcontentloaded", { timeout: 10000 })
       .catch(() => {});
   }
-  await page.waitForTimeout(1200);
+  await waitForPageReady(page);
+  if (fullPage) {
+    await autoScroll(page);
+  }
   await runInteractions(page, interactions);
   await page.screenshot({ path: filePath, fullPage });
   return navigationMode;
