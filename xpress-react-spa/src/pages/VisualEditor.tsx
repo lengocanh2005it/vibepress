@@ -7,7 +7,6 @@ import {
   type ReactVisualEditRouteEntry,
 } from "../services/AiService";
 import { useInspector } from "../hooks/useInspector";
-import { InspectorPanel } from "../components/InspectorPanel";
 
 interface SourceMapEntry {
   sourceNodeId: string;
@@ -167,7 +166,6 @@ const VisualEditor: React.FC = () => {
     isActive: inspectorActive,
     selectedComponent,
     toggle: toggleInspector,
-    clear: clearInspector,
   } = useInspector();
 
   const [statusData, setStatusData] = useState<PipelineStatusResponse | null>(null);
@@ -205,6 +203,14 @@ const VisualEditor: React.FC = () => {
       text: "Chọn route trong preview, dùng Inspector để chọn component, rồi nhập yêu cầu chỉnh sửa.",
     },
   ]);
+  const [annotationComment, setAnnotationComment] = useState("");
+  const [savedAnnotations, setSavedAnnotations] = useState<Array<{
+    id: string;
+    component: import("../types/inspector").ComponentInfo;
+    comment: string;
+    route: string;
+    savedAt: string;
+  }>>([]);
 
   const previewUrl = statusData?.result?.previewUrl || state.previewUrl || "";
   const apiBaseUrl = statusData?.result?.apiBaseUrl || state.apiBaseUrl || "";
@@ -324,6 +330,20 @@ const VisualEditor: React.FC = () => {
     };
   };
 
+  const handleSaveAnnotation = () => {
+    if (!selectedComponent) return;
+    const item = {
+      id: `annotation-${Date.now()}`,
+      component: selectedComponent,
+      comment: annotationComment.trim(),
+      route: selectedRoute?.route || "/",
+      savedAt: new Date().toISOString(),
+    };
+    setSavedAnnotations((prev) => [...prev, item]);
+    console.log("[VisualEditor] Saved annotation:", item);
+    setAnnotationComment("");
+  };
+
   const handleSubmitRequest = async () => {
     if (!jobId || !siteId) return;
     if (!prompt.trim()) {
@@ -371,67 +391,39 @@ const VisualEditor: React.FC = () => {
   return (
     <div className="h-[calc(100vh-96px)] overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(244,228,200,0.55),_transparent_34%),linear-gradient(135deg,_#f7f1e7_0%,_#f2ece2_42%,_#ece7df_100%)] px-4 pb-4 pt-4">
       <div className="flex h-full flex-col gap-4">
-        <section className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_360px] gap-4">
-
-          {/* Left sidebar: Routes + Inspector */}
-          <aside className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-[#ddd2c4] bg-[#fffaf3] shadow-sm">
-            <div className="flex-none border-b border-[#ede4d8] px-5 py-4">
-              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">React Routes</p>
-              <p className="mt-1 text-sm text-[#617067]">Chọn page, post hoặc route trong preview React.</p>
-            </div>
-            <div className="flex-1 overflow-y-auto px-3 py-3">
-              {loading ? (
-                <div className="rounded-2xl border border-dashed border-[#dccfbc] bg-white px-4 py-5 text-sm text-[#677164]">Đang tải context...</div>
-              ) : error ? (
-                <div className="rounded-2xl border border-[#e7c8c1] bg-[#fff2ef] px-4 py-5 text-sm text-[#9c4b3d]">{error}</div>
-              ) : (
-                <div className="space-y-2">
-                  {routes.map((route) => (
-                    <button
-                      key={route.id}
-                      onClick={() => setSelectedRouteId(route.id)}
-                      className={`w-full rounded-[22px] border px-4 py-3 text-left transition ${
-                        route.id === effectiveRouteId
-                          ? "border-[#3f6b58] bg-[#eef6f1] shadow-sm"
-                          : "border-[#e7dfd3] bg-white hover:bg-[#faf6ef]"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-semibold text-[#213129]">{route.label}</p>
-                        <span className="rounded-full bg-[#efe7d8] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-[#7f6846]">
-                          {route.typeLabel}
-                        </span>
-                      </div>
-                      <p className="mt-1 truncate text-xs text-[#6e746b]">{route.route}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {(inspectorActive || selectedComponent) && (
-              <div className="flex-none border-t border-[#ede4d8]">
-                <div className="border-b border-[#ede4d8] px-5 py-3">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">Inspector</p>
-                  <p className="mt-0.5 text-xs text-[#617067]">Click vào element để xem thông tin.</p>
-                </div>
-                <InspectorPanel info={selectedComponent} onClear={clearInspector} />
-              </div>
-            )}
-          </aside>
+        <section className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-4">
 
           {/* Preview Canvas */}
           <div className="min-h-0 overflow-hidden rounded-[30px] border border-[#ddd2c4] bg-[#f9f6ef] shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#ece2d6] px-5 py-4">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">Preview Canvas</p>
-                <p className="mt-1 text-sm font-semibold text-[#1f2a24]">{selectedRoute?.label || "React Preview"}</p>
-                <p className="mt-1 text-xs text-[#687067]">{selectedRoute?.route || "/"}</p>
+            <div className="flex items-center justify-between gap-4 border-b border-[#ece2d6] px-5 py-3">
+              {/* Route selector */}
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">
+                  Preview Canvas
+                </p>
+                {loading ? (
+                  <span className="text-xs text-[#9ca3af]">Đang tải...</span>
+                ) : error ? (
+                  <span className="text-xs text-[#e57373]">{error}</span>
+                ) : (
+                  <select
+                    value={effectiveRouteId}
+                    onChange={(e) => setSelectedRouteId(e.target.value)}
+                    className="w-1/4 min-w-[160px] rounded-full border border-[#d8cfbf] bg-white px-3 py-1 text-xs font-medium text-[#1f2a24] outline-none transition focus:border-[#3f6b58] cursor-pointer"
+                  >
+                    {routes.map((route) => (
+                      <option key={route.id} value={route.id}>
+                        {route.label} — {route.route}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              {/* Actions */}
+              <div className="flex shrink-0 items-center gap-2">
                 <button
                   onClick={toggleInspector}
-                  className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  className={`rounded-full px-4 py-1.5 text-sm font-semibold transition ${
                     inspectorActive
                       ? "bg-[#6d3aa3] text-white hover:bg-[#5c2f8f]"
                       : "border border-[#d8cfbf] bg-white text-[#30483d] hover:bg-[#f6f2eb]"
@@ -444,13 +436,13 @@ const VisualEditor: React.FC = () => {
                     setLoadedSrc("");
                     iframeRef.current?.contentWindow?.location.reload();
                   }}
-                  className="rounded-full border border-[#d8cfbf] bg-white px-4 py-2 text-sm font-semibold text-[#30483d] transition hover:bg-[#f6f2eb]"
+                  className="rounded-full border border-[#d8cfbf] bg-white px-4 py-1.5 text-sm font-semibold text-[#30483d] transition hover:bg-[#f6f2eb]"
                 >
-                  Tải lại preview
+                  Tải lại
                 </button>
               </div>
             </div>
-            <div className="relative h-[calc(100%-82px)] p-5">
+            <div className="relative h-[calc(100%-57px)] p-4">
               <div className="relative h-full overflow-hidden rounded-[26px] border border-[#d9d0c4] bg-white shadow-inner">
                 <iframe
                   ref={iframeRef}
@@ -476,51 +468,147 @@ const VisualEditor: React.FC = () => {
             </div>
           </div>
 
-          {/* Right sidebar: AI Chat */}
+          {/* Right sidebar: Inspector + Annotation */}
           <aside className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-[#ddd2c4] bg-[#fffaf5] shadow-sm">
+
+            {/* Header */}
             <div className="flex-none border-b border-[#ede4d8] px-5 py-4">
-              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">AI Visual Edit</p>
-              <p className="mt-1 text-sm text-[#617067]">Dùng Inspector chọn component, rồi nhập yêu cầu chỉnh sửa.</p>
+              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">Inspector</p>
+              <p className="mt-1 text-sm text-[#617067]">
+                {inspectorActive ? "Click vào element để xem thông tin." : "Bật Inspector rồi click vào element trong preview."}
+              </p>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-              <div className="space-y-3">
-                {messages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`rounded-[22px] px-4 py-3 ${
-                      message.role === "user"
-                        ? "ml-6 bg-[#315f4e] text-white"
-                        : message.tone === "success"
-                          ? "mr-6 border border-[#cae0d1] bg-[#eef7f1] text-[#2b5643]"
-                          : message.tone === "error"
-                            ? "mr-6 border border-[#f0c9c0] bg-[#fff2ef] text-[#984b3f]"
-                            : "mr-6 border border-[#e8dfd1] bg-white text-[#31473d]"
-                    }`}
-                  >
-                    <p className="text-sm leading-6">{message.text}</p>
+
+            {/* Scrollable body */}
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-3">
+
+              {/* Selected element info */}
+              {selectedComponent ? (
+                <div className="rounded-[20px] border border-[#ddd2c4] bg-white overflow-hidden">
+                  {/* Component name + tag */}
+                  <div className="px-4 pt-4 pb-3 border-b border-[#f0ebe3]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-[#6366f1] text-sm">{selectedComponent.component}</span>
+                      <code className="rounded bg-[#efe7d8] px-1.5 py-0.5 text-[10px] font-bold text-[#7f6846]">
+                        {selectedComponent.tag.toLowerCase()}
+                      </code>
+                    </div>
+                    {selectedComponent.text && (
+                      <p className="mt-1.5 truncate text-[11px] text-[#9ca3af]">"{selectedComponent.text}"</p>
+                    )}
+                    <p className="mt-1 text-[11px] text-[#b4ada4]">{selectedComponent.rect.w} × {selectedComponent.rect.h} px</p>
                   </div>
-                ))}
-              </div>
-            </div>
-            <div className="flex-none border-t border-[#ede4d8] px-5 py-4">
-              <div className="rounded-[24px] border border-[#e6dece] bg-white p-4">
-                <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8a7a62]">Yêu cầu chỉnh sửa</label>
-                <textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  placeholder="Ví dụ: đổi màu nút CTA thành xanh lá, tăng font-size heading..."
-                  className="mt-3 h-32 w-full resize-none rounded-[18px] border border-[#e7dfd2] bg-[#fcfaf6] px-4 py-3 text-sm text-[#243129] outline-none transition focus:border-[#3a6b57] focus:bg-white"
-                />
-                <div className="mt-3 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => void handleSubmitRequest()}
-                    disabled={isSubmittingRequest}
-                    className="w-[50%] rounded-full bg-[#8b5c32] px-5 py-2.5 text-xs text-white transition hover:bg-[#744a26] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isSubmittingRequest ? "Đang gửi..." : "Gửi cho AI"}
-                  </button>
+
+                  {/* Source file */}
+                  {selectedComponent.source?.file && (
+                    <div className="bg-[#1e1e2e] px-4 py-3">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6366f1] mb-1">Source</p>
+                      <p className="break-all font-mono text-[11px] text-[#a5b4fc]">{selectedComponent.source.file}</p>
+                      <p className="mt-0.5 font-mono text-[10px] text-[#f59e0b]">line {selectedComponent.source.line}</p>
+                    </div>
+                  )}
+
+                  {/* Section identity */}
+                  {selectedComponent.vpSourceNode && (
+                    <div className="px-4 py-3 border-t border-[#f0ebe3]">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f] mb-1.5">Section</p>
+                      <p className="font-mono text-[11px] text-[#374151]">{selectedComponent.vpSourceNode}</p>
+                      {selectedComponent.vpSectionKey && (
+                        <p className="mt-0.5 text-[11px] text-[#6b7280]">
+                          key: <span className="font-semibold text-[#374151]">{selectedComponent.vpSectionKey}</span>
+                          {selectedComponent.vpComponent && <span className="ml-1.5 text-[#9ca3af]">· {selectedComponent.vpComponent}</span>}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <div className="rounded-[20px] border border-dashed border-[#ddd2c4] bg-white px-4 py-8 text-center">
+                  <p className="text-[13px] text-[#9ca3af]">Chưa chọn element nào</p>
+                  <p className="mt-1 text-[11px] text-[#b4ada4]">Bật Inspector và click vào element trong preview</p>
+                </div>
+              )}
+
+              {/* Comment input */}
+              <div className="rounded-[20px] border border-[#e6dece] bg-white p-4">
+                <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8a7a62]">Ghi chú</label>
+                <textarea
+                  value={annotationComment}
+                  onChange={(e) => setAnnotationComment(e.target.value)}
+                  placeholder="Nhập ghi chú hoặc yêu cầu chỉnh sửa cho element này..."
+                  className="mt-2 h-24 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#6366f1] focus:bg-white"
+                />
+                <button
+                  onClick={handleSaveAnnotation}
+                  disabled={!selectedComponent}
+                  className="mt-2.5 w-full rounded-full bg-[#6366f1] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#4f46e5] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Lưu annotation
+                </button>
               </div>
+
+              {/* Saved annotations list */}
+              {savedAnnotations.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8b826f] px-1">
+                    Đã lưu ({savedAnnotations.length})
+                  </p>
+                  {savedAnnotations.map((item) => (
+                    <div key={item.id} className="rounded-[16px] border border-[#e7dfd3] bg-white px-4 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[12px] font-semibold text-[#6366f1]">{item.component.component}</span>
+                        <code className="rounded bg-[#efe7d8] px-1.5 py-0.5 text-[9px] font-bold text-[#7f6846]">
+                          {item.component.tag.toLowerCase()}
+                        </code>
+                      </div>
+                      <p className="mt-0.5 text-[10px] text-[#9ca3af]">{item.route}</p>
+                      {item.comment && (
+                        <p className="mt-1.5 text-[12px] text-[#374151] leading-5">"{item.comment}"</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* AI submit messages */}
+              {messages.filter(m => m.role !== "system").length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8b826f] px-1">AI</p>
+                  {messages.filter(m => m.role !== "system").map((message) => (
+                    <div
+                      key={message.id}
+                      className={`rounded-[16px] px-4 py-3 text-sm ${
+                        message.role === "user"
+                          ? "bg-[#315f4e] text-white"
+                          : message.tone === "success"
+                            ? "border border-[#cae0d1] bg-[#eef7f1] text-[#2b5643]"
+                            : message.tone === "error"
+                              ? "border border-[#f0c9c0] bg-[#fff2ef] text-[#984b3f]"
+                              : "border border-[#e8dfd1] bg-white text-[#31473d]"
+                      }`}
+                    >
+                      {message.text}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Footer: Send to AI */}
+            <div className="flex-none border-t border-[#ede4d8] px-4 py-3">
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Yêu cầu AI chỉnh sửa (dựa trên element đã chọn)..."
+                className="h-20 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#3a6b57] focus:bg-white"
+              />
+              <button
+                onClick={() => void handleSubmitRequest()}
+                disabled={isSubmittingRequest}
+                className="mt-2 w-full rounded-full bg-[#8b5c32] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#744a26] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSubmittingRequest ? "Đang gửi..." : "Gửi cho AI"}
+              </button>
             </div>
           </aside>
 
