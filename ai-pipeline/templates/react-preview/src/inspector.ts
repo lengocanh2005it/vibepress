@@ -11,13 +11,24 @@ interface ComponentInfo {
     line: number;
     column?: number;
   };
+  // Section identity — extracted from data-vp-* on nearest ancestor
+  vpSourceNode?: string;
+  vpTemplate?: string;
+  vpSourceFile?: string;
+  vpSectionKey?: string;
+  vpComponent?: string;
+  vpSectionComponent?: string;
+  // Child node targeting — describes the specific element clicked
+  targetNodeRole?: string;
+  targetElementTag?: string;
+  targetTextPreview?: string;
+  targetStartLine?: number;
 }
 
 type InspectorCommand = 'INSPECTOR_ENABLE' | 'INSPECTOR_DISABLE';
 
 // ── React Fiber helpers ───────────────────────────────────
 interface ReactFiber {
-  // type có thể là string ('div'), function, hoặc object (memo/forwardRef)
   type?: unknown;
   elementType?: unknown;
   return?: ReactFiber;
@@ -38,7 +49,6 @@ function getReactFiber(el: Element): ReactFiber | null {
   return key ? (el as unknown as Record<string, ReactFiber>)[key] : null;
 }
 
-// Giải ra tên từ type bất kể là function, memo, forwardRef, lazy...
 function resolveTypeName(type: unknown): string | null {
   if (!type) return null;
   if (typeof type === 'function') {
@@ -52,14 +62,13 @@ function resolveTypeName(type: unknown): string | null {
       name?: string;
       render?: unknown;
       type?: unknown;
-      // memo wrap
       $$typeof?: symbol;
     };
     return (
       t.displayName
       || t.name
-      || resolveTypeName(t.render)  // forwardRef
-      || resolveTypeName(t.type)    // memo
+      || resolveTypeName(t.render)
+      || resolveTypeName(t.type)
       || null
     );
   }
@@ -72,7 +81,6 @@ function getComponentName(el: Element): string {
 
   let current: ReactFiber | undefined = fiber;
   while (current) {
-    // Thử cả type lẫn elementType — React dùng cả hai tùy phiên bản
     const name =
       resolveTypeName(current.type) ||
       resolveTypeName(current.elementType);
@@ -87,7 +95,6 @@ function getComponentName(el: Element): string {
 function extractSource(
   src: NonNullable<ReactFiber['_debugSource']>,
 ): ComponentInfo['source'] | null {
-  // Bỏ qua source từ node_modules hoặc virtual module của Vite
   if (src.fileName.includes('node_modules') || src.fileName.startsWith('\0')) {
     return null;
   }
@@ -102,9 +109,6 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
   const fiber = getReactFiber(el);
   if (!fiber) return undefined;
 
-  // ── Strategy 1: _debugOwner trực tiếp ────────────────────
-  // _debugOwner là component đã viết JSX element này.
-  // Đây là nguồn chính xác nhất — thử trước tiên.
   {
     let owner: ReactFiber | undefined = fiber._debugOwner;
     while (owner) {
@@ -116,8 +120,6 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
     }
   }
 
-  // ── Strategy 2: _debugSource trực tiếp trên fiber ────────
-  // _debugSource của chính element — nơi JSX element này được viết.
   {
     let current: ReactFiber | undefined = fiber;
     while (current) {
@@ -130,6 +132,49 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
   }
 
   return undefined;
+}
+
+// ── data-vp-* section identity ────────────────────────────
+function getVpSectionData(el: Element): Pick<
+  ComponentInfo,
+  'vpSourceNode' | 'vpTemplate' | 'vpSourceFile' | 'vpSectionKey' | 'vpComponent' | 'vpSectionComponent'
+> {
+  let current: Element | null = el;
+  while (current) {
+    if (current instanceof HTMLElement && current.dataset.vpSourceNode) {
+      return {
+        vpSourceNode: current.dataset.vpSourceNode || undefined,
+        vpTemplate: current.dataset.vpTemplate || undefined,
+        vpSourceFile: current.dataset.vpSourceFile || undefined,
+        vpSectionKey: current.dataset.vpSectionKey || undefined,
+        vpComponent: current.dataset.vpComponent || undefined,
+        vpSectionComponent: current.dataset.vpSectionComponent || undefined,
+      };
+    }
+    current = current.parentElement;
+  }
+  return {};
+}
+
+// ── Target node role inference ────────────────────────────
+function inferNodeRole(el: Element): string {
+  const tag = el.tagName.toLowerCase();
+  const role = el.getAttribute('role')?.toLowerCase();
+
+  if (role === 'button' || tag === 'button') return 'button';
+  if (role === 'link' || tag === 'a') return 'link';
+  if (/^h[1-6]$/.test(tag)) return 'heading';
+  if (['img', 'picture', 'figure', 'video', 'svg', 'canvas'].includes(tag)) return 'media';
+  if (tag === 'form') return 'form';
+  if (['input', 'textarea', 'select'].includes(tag)) return 'input';
+  if (['ul', 'ol', 'li', 'dl'].includes(tag)) return 'list';
+  if (['header', 'nav', 'main', 'section', 'article', 'aside', 'footer'].includes(tag)) return 'section';
+
+  const className = String((el instanceof HTMLElement ? el.className : '') || '');
+  if (/card|panel|tile|badge|banner/i.test(className)) return 'card';
+  if (['p', 'span', 'label', 'small', 'strong', 'em'].includes(tag)) return 'text';
+
+  return 'container';
 }
 
 export function startInspectorClient(): void {
@@ -148,7 +193,6 @@ export function startInspectorClient(): void {
     display: 'none',
   } satisfies Partial<CSSStyleDeclaration>);
 
-  // Label hiển thị tên component + source
   const label = document.createElement('div');
   Object.assign(label.style, {
     position: 'absolute',
@@ -204,13 +248,21 @@ export function startInspectorClient(): void {
     e.stopPropagation();
 
     const r = e.target.getBoundingClientRect();
+    const source = getSourceInfo(e.target);
+    const vpData = getVpSectionData(e.target);
+
     const payload: ComponentInfo = {
       component: getComponentName(e.target),
       tag: e.target.tagName,
       text: (e.target as HTMLElement).innerText?.slice(0, 100) ?? '',
       classes: [...e.target.classList],
       rect: { w: Math.round(r.width), h: Math.round(r.height) },
-      source: getSourceInfo(e.target),
+      source,
+      ...vpData,
+      targetNodeRole: inferNodeRole(e.target),
+      targetElementTag: e.target.tagName.toLowerCase(),
+      targetTextPreview: (e.target as HTMLElement).innerText?.slice(0, 120) ?? '',
+      targetStartLine: source?.line,
     };
 
     window.parent.postMessage({ type: 'INSPECTOR_DATA', payload }, '*');

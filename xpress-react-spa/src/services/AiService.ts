@@ -142,11 +142,24 @@ export interface ReactVisualEditRouteEntry {
 
 export interface ReactVisualEditPayload extends AiEditRequestPayload {
     targetHint?: {
-        templateName?: string;
-        componentName?: string;
+        // Route-level context
         route?: string | null;
-        sectionIndex?: number;
-        sectionType?: string;
+        // Section identity (from data-vp-* / ui-source-map)
+        sourceNodeId?: string;
+        sectionKey?: string;
+        componentName?: string;
+        sectionComponentName?: string;
+        templateName?: string;
+        sourceFile?: string;
+        // Code location (from ui-source-map)
+        outputFilePath?: string;
+        startLine?: number;
+        endLine?: number;
+        // Child node targeting
+        targetNodeRole?: string;
+        targetElementTag?: string;
+        targetTextPreview?: string;
+        targetStartLine?: number;
     };
     constraints?: {
         preserveOutsideSelection?: boolean;

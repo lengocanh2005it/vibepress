@@ -95,6 +95,22 @@ export function InspectorPanel({ info, onClear }: Props) {
         </p>
       </div>
 
+      {/* Section identity */}
+      {info.vpSourceNode && (
+        <div className="rounded-[12px] border border-[#ede4d8] bg-[#fdfaf6] px-4 py-3">
+          <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f]">Section</span>
+          <p className="mt-1.5 font-mono text-[11px] text-[#374151]">{info.vpSourceNode}</p>
+          {info.vpSectionKey && (
+            <p className="mt-0.5 text-[11px] text-[#6b7280]">
+              key: <span className="font-semibold text-[#374151]">{info.vpSectionKey}</span>
+              {info.vpComponent && (
+                <span className="ml-2 text-[#9ca3af]">· {info.vpComponent}</span>
+              )}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* CSS classes */}
       {info.classes.length > 0 && (
         <div>

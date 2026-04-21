@@ -9,6 +9,20 @@ import {
 import { useInspector } from "../hooks/useInspector";
 import { InspectorPanel } from "../components/InspectorPanel";
 
+interface SourceMapEntry {
+  sourceNodeId: string;
+  templateName?: string;
+  sourceFile?: string;
+  topLevelIndex?: number;
+  blockName?: string;
+  componentName?: string;
+  sectionKey?: string;
+  sectionComponentName?: string;
+  outputFilePath?: string;
+  startLine?: number;
+  endLine?: number;
+}
+
 type PipelineJobStatus =
   | "running"
   | "stopping"
@@ -177,6 +191,7 @@ const VisualEditor: React.FC = () => {
       });
   }, [jobId]);
 
+  const [sourceMap, setSourceMap] = useState<SourceMapEntry[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState("");
   const [frameTitle, setFrameTitle] = useState("");
   const [loadedSrc, setLoadedSrc] = useState("");
@@ -192,6 +207,26 @@ const VisualEditor: React.FC = () => {
 
   const previewUrl = statusData?.result?.previewUrl || state.previewUrl || "";
   const apiBaseUrl = statusData?.result?.apiBaseUrl || state.apiBaseUrl || "";
+
+  useEffect(() => {
+    if (!previewUrl) return;
+    let resolved = previewUrl;
+    try {
+      const parsed = new URL(previewUrl);
+      const isInternal =
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "ai_pipeline";
+      if (isInternal && window.location.hostname !== "localhost") {
+        resolved = parsed.pathname + parsed.search + parsed.hash;
+      }
+    } catch { /* relative URL — use as-is */ }
+    const mapUrl = (resolved.endsWith("/") ? resolved : `${resolved}/`) + "ui-source-map.json";
+    fetch(mapUrl)
+      .then((r) => (r.ok ? (r.json() as Promise<SourceMapEntry[]>) : Promise.reject()))
+      .then(setSourceMap)
+      .catch(() => {});
+  }, [previewUrl]);
 
   const resolvePreviewUrl = (url: string): string => {
     try {
@@ -236,36 +271,57 @@ const VisualEditor: React.FC = () => {
     setFrameTitle(frameDocument.title || selectedRoute?.label || "React Preview");
   };
 
-  const buildPayload = (): ReactVisualEditPayload => ({
-    prompt: prompt.trim() || undefined,
-    language: /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(prompt)
-      ? "vi"
-      : "en",
-    pageContext: {
-      reactUrl: selectedPageUrl,
-      reactRoute: selectedRoute?.route || "/",
-      iframeSrc: frameSrc,
-      pageTitle: frameTitle || selectedRoute?.label,
-    },
-    attachments: [],
-    targetHint: {
-      componentName: selectedComponent?.component || selectedRoute?.componentName,
-      route: selectedRoute?.route || "/",
-    },
-    constraints: {
-      preserveOutsideSelection: false,
-      preserveDataContract: true,
-      rerunFromScratch: false,
-    },
-    reactSourceTarget: {
-      previewDir: statusData?.result?.previewDir,
-      frontendDir: statusData?.result?.frontendDir,
-      previewUrl,
-      apiBaseUrl,
-      uiSourceMapPath: statusData?.result?.uiSourceMapPath,
-      routeEntries: statusData?.result?.routeEntries || [],
-    },
-  });
+  const buildPayload = (): ReactVisualEditPayload => {
+    const mapEntry = selectedComponent?.vpSourceNode
+      ? sourceMap.find((e) => e.sourceNodeId === selectedComponent.vpSourceNode)
+      : undefined;
+
+    return {
+      prompt: prompt.trim() || undefined,
+      language: /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(prompt)
+        ? "vi"
+        : "en",
+      pageContext: {
+        reactUrl: selectedPageUrl,
+        reactRoute: selectedRoute?.route || "/",
+        iframeSrc: frameSrc,
+        pageTitle: frameTitle || selectedRoute?.label,
+      },
+      attachments: [],
+      targetHint: {
+        route: selectedRoute?.route || "/",
+        // Layer 2: section identity — prefer data-vp-* from DOM, fall back to route-level component
+        sourceNodeId: selectedComponent?.vpSourceNode,
+        sectionKey: selectedComponent?.vpSectionKey,
+        componentName: selectedComponent?.vpComponent || selectedComponent?.component || selectedRoute?.componentName,
+        sectionComponentName: selectedComponent?.vpSectionComponent,
+        templateName: selectedComponent?.vpTemplate,
+        sourceFile: selectedComponent?.vpSourceFile,
+        // Layer 3: code location — from ui-source-map.json lookup
+        outputFilePath: mapEntry?.outputFilePath,
+        startLine: mapEntry?.startLine,
+        endLine: mapEntry?.endLine,
+        // Child node targeting
+        targetNodeRole: selectedComponent?.targetNodeRole,
+        targetElementTag: selectedComponent?.targetElementTag,
+        targetTextPreview: selectedComponent?.targetTextPreview,
+        targetStartLine: selectedComponent?.targetStartLine,
+      },
+      constraints: {
+        preserveOutsideSelection: false,
+        preserveDataContract: true,
+        rerunFromScratch: false,
+      },
+      reactSourceTarget: {
+        previewDir: statusData?.result?.previewDir,
+        frontendDir: statusData?.result?.frontendDir,
+        previewUrl,
+        apiBaseUrl,
+        uiSourceMapPath: statusData?.result?.uiSourceMapPath,
+        routeEntries: statusData?.result?.routeEntries || [],
+      },
+    };
+  };
 
   const handleSubmitRequest = async () => {
     if (!jobId || !siteId) return;
