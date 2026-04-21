@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import type { ComponentInfo, InspectorMessage } from "../types/inspector";
 
 interface UseInspectorReturn {
-  iframeRef: React.RefObject<HTMLIFrameElement>;
+  iframeRef: React.RefObject<HTMLIFrameElement | null>;
   isActive: boolean;
   selectedComponent: ComponentInfo | null;
   toggle: () => void;
