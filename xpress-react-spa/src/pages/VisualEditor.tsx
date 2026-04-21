@@ -94,12 +94,13 @@ const routeLabel = (value: string) =>
     .replace(/\b\w/g, (char) => char.toUpperCase()) || "Home";
 
 const toPageUrl = (previewUrl: string, route: string) => {
+  // Strip leading slashes so the route is relative — prevents new URL() from
+  // overriding the preview/{jobId}/ base path when the route starts with "/".
+  const base = previewUrl.endsWith("/") ? previewUrl : `${previewUrl}/`;
+  const cleanRoute = route.replace(/^\/+/, "");
   try {
-    return new URL(route, previewUrl.endsWith("/") ? previewUrl : `${previewUrl}/`).toString();
+    return new URL(cleanRoute, base).toString();
   } catch {
-    // base is a relative path — manually join so route-specific URLs still differ
-    const base = previewUrl.endsWith("/") ? previewUrl : `${previewUrl}/`;
-    const cleanRoute = route.replace(/^\/+/, "");
     return `${base}${cleanRoute}`;
   }
 };
