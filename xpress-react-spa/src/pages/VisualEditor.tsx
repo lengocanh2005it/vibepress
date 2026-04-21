@@ -83,16 +83,13 @@ const toPageUrl = (previewUrl: string, route: string) => {
   try {
     return new URL(route, previewUrl.endsWith("/") ? previewUrl : `${previewUrl}/`).toString();
   } catch {
-    return previewUrl;
+    // base is a relative path — manually join so route-specific URLs still differ
+    const base = previewUrl.endsWith("/") ? previewUrl : `${previewUrl}/`;
+    const cleanRoute = route.replace(/^\/+/, "");
+    return `${base}${cleanRoute}`;
   }
 };
 
-const buildProxyUrl = (pageUrl?: string | null, siteId?: string | null) => {
-  if (!pageUrl) return "";
-  const params = new URLSearchParams({ url: pageUrl });
-  if (siteId) params.set("siteId", siteId);
-  return `/api/wp/proxy?${params.toString()}`;
-};
 
 const buildRouteItems = (
   previewUrl?: string,
@@ -230,7 +227,7 @@ const VisualEditor: React.FC = () => {
 
   const selectedRoute = routes.find((r) => r.id === effectiveRouteId) || routes[0] || null;
   const selectedPageUrl = selectedRoute?.pageUrl || resolvedPreviewUrl;
-  const frameSrc = selectedPageUrl || buildProxyUrl(selectedPageUrl, siteId);
+  const frameSrc = selectedPageUrl;
   const frameLoading = loadedSrc !== frameSrc;
 
   const refreshFrameMeta = () => {
