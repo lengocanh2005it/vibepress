@@ -1501,7 +1501,7 @@ ${postCard}
     }
     if (s.showCategory)
       parts.push(
-        `{post.categories[0] && (post.categorySlugs[0] ? <Link to={\`/category/\${post.categorySlugs[0]}\`} className="${metaLinkClass}">{post.categories[0]}</Link> : <a href="#" className="${metaLinkClass}">{post.categories[0]}</a>)}`,
+        `{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={\`/category/\${post.categorySlugs[0]}\`} className="${metaLinkClass}">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}`,
       );
     const flex = inline
       ? 'flex items-center gap-2 whitespace-nowrap shrink-0'

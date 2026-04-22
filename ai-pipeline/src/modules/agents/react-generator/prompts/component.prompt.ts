@@ -417,6 +417,9 @@ function buildScopedApiContractNote(input: {
     '- CRITICAL: in post cards, archive rows, search results, recent-post lists, bylines, and any non-heading meta UI, do NOT render bare `<span>{post.author}</span>`, `<span>{post.categories[0]}</span>`, or `post.categories?.map((cat, i) => <span>{cat}</span>)` when the matching `post.authorSlug` or `post.categorySlugs[i]` exists. Those labels must be `<Link>` archive links. Only keep plain text when the label itself is the real heading/title content.',
   );
   lines.push(
+    "- Prefer the explicit ternary form for post meta so the fallback stays syntactically valid: `{post.author && (post.authorSlug ? <Link to={'/author/' + post.authorSlug} className='hover:underline underline-offset-4'>by {post.author}</Link> : <span>by {post.author}</span>)}` and `{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={'/category/' + post.categorySlugs[0]} className='hover:underline underline-offset-4'>{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}`. Do not wrap JSX branches in extra braces.",
+  );
+  lines.push(
     '- Post titles, recent-post titles, search results, and page-list/sidebar titles must link to their canonical detail routes (`/post/${post.slug}` or `/page/${page.slug}`) when those routes are part of the approved app contract.',
   );
   lines.push(
@@ -1512,6 +1515,12 @@ export function buildVisualPlanContextNote(
       );
       lines.push(
         'Do NOT rename, hash, omit, or move these attributes to a child element. They are required for exact capture-to-source resolution after React generation.',
+      );
+      lines.push(
+        'Content preservation rule: inside each approved section, preserve every source-backed heading, subheading, subtitle, card heading, card body, bullet/list item, CTA label, and image src from the approved visual plan unless that exact field is a documented dynamic binding.',
+      );
+      lines.push(
+        'Do NOT summarize, merge, paraphrase, or collapse multiple source-backed text nodes into one shorter sentence. If the plan lists three card headings or four bullet items, render all of them explicitly.',
       );
       lines.push(...trackedSections);
     }

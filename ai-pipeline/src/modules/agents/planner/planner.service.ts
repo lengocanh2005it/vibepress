@@ -62,6 +62,9 @@ export interface ComponentPlan {
   customClassNames?: string[];
   sourceBackedAuxiliaryLabels?: string[];
   draftSections?: SectionPlan[];
+  planningSourceLabel?: string;
+  planningSourceReason?: string;
+  planningSourceFile?: string;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
 }
@@ -72,6 +75,10 @@ interface PlanningSourceContext {
   source: string;
   sourceAnalysis: string;
   sourceBackedAuxiliaryLabels: string[];
+  sourceLabel?: string;
+  sourceTemplateName?: string;
+  sourceFile?: string;
+  sourceReason?: string;
 }
 
 @Injectable()
@@ -393,6 +400,7 @@ export class PlannerService {
           this.generateVisualPlanForComponent(
             componentPlan,
             sourceMap.get(componentPlan.templateName) ?? '',
+            sourceMap,
             content,
             tokens,
             globalPalette,
@@ -426,6 +434,7 @@ export class PlannerService {
   private async generateVisualPlanForComponent(
     componentPlan: PlanResult[number],
     templateSource: string,
+    sourceMap: Map<string, string>,
     content: DbContentResult,
     tokens: ThemeTokens | undefined,
     globalPalette: ColorPalette,
@@ -439,9 +448,8 @@ export class PlannerService {
     let visualPlan: ComponentVisualPlan | undefined;
     let detectedCustomClassNames: string[] = [];
     let sourceBackedAuxiliaryLabels: string[] = [];
-    let draftSections:
-      | ReturnType<typeof mapWpNodesToDraftSections>
-      | undefined;
+    let draftSections: ReturnType<typeof mapWpNodesToDraftSections> | undefined;
+    let planningSource: PlanningSourceContext | undefined;
     const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
       componentPlan,
       content,
@@ -454,36 +462,45 @@ export class PlannerService {
       this.logger.log(
         `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓`,
       );
-      return { ...componentPlan, visualPlan: deterministicPlan };
+      return {
+        ...componentPlan,
+        planningSourceLabel: `deterministic:${componentPlan.templateName}`,
+        planningSourceReason: 'deterministic visual plan path',
+        planningSourceFile: inferFseSourceFile(
+          componentPlan.templateName,
+          componentPlan.type,
+        ),
+        visualPlan: deterministicPlan,
+      };
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
       this.logger.log(
         `[Phase C: AI Visual Sections] "${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
       );
-      return { ...componentPlan, visualPlan: undefined };
+      return {
+        ...componentPlan,
+        planningSourceLabel: `repo:${componentPlan.templateName}`,
+        planningSourceReason: 'visual plan skipped for standard partial',
+        planningSourceFile: inferFseSourceFile(
+          componentPlan.templateName,
+          componentPlan.type,
+        ),
+        visualPlan: undefined,
+      };
     }
     try {
       const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
-      // For FSE themes with a static front page, the actual home content lives
-      // in the database as a page, not in the theme's home.html template.
-      // Prefer that page's block content so the AI sees the real sections.
-      const effectiveTemplateSource =
-        componentPlan.route === '/' &&
-        content.readingSettings?.showOnFront === 'page' &&
-        content.readingSettings.pageOnFrontId
-          ? (content.pages.find(
-              (p) => p.id === content.readingSettings.pageOnFrontId,
-            )?.content ?? templateSource)
-          : templateSource;
       const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
         request: editRequest,
         componentName: componentPlan.componentName,
         route: componentPlan.route,
         maxAttachments: 3,
       });
-      const planningSource = this.buildPlanningSourceContext(
+      planningSource = this.buildPlanningSourceContext(
         componentPlan,
-        effectiveTemplateSource,
+        templateSource,
+        sourceMap,
+        content,
         fullPlan.some(
           (item) =>
             item.type === 'partial' &&
@@ -495,16 +512,19 @@ export class PlannerService {
       // skeleton so AI only needs to fill in content, not infer layout order.
       draftSections = (() => {
         try {
-          const rawMarkup = effectiveTemplateSource;
+          const rawMarkup = planningSource.source;
           if (!rawMarkup) return undefined;
           const nodes = this.styleResolver.resolve(
             wpBlocksToJsonWithSourceRefs({
               markup: rawMarkup,
-              templateName: componentPlan.templateName,
-              sourceFile: inferFseSourceFile(
-                componentPlan.templateName,
-                componentPlan.type,
-              ),
+              templateName:
+                planningSource.sourceTemplateName ?? componentPlan.templateName,
+              sourceFile:
+                planningSource.sourceFile ??
+                inferFseSourceFile(
+                  componentPlan.templateName,
+                  componentPlan.type,
+                ),
             }),
             tokens,
           );
@@ -692,6 +712,15 @@ export class PlannerService {
         : {}),
       ...(sourceBackedAuxiliaryLabels.length > 0
         ? { sourceBackedAuxiliaryLabels }
+        : {}),
+      ...(planningSource?.sourceLabel
+        ? { planningSourceLabel: planningSource.sourceLabel }
+        : {}),
+      ...(planningSource?.sourceReason
+        ? { planningSourceReason: planningSource.sourceReason }
+        : {}),
+      ...(planningSource?.sourceFile
+        ? { planningSourceFile: planningSource.sourceFile }
         : {}),
       visualPlan,
     };
@@ -1595,7 +1624,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     content?: DbContentResult,
   ): string[] {
     const allTemplates =
-      theme.type === 'classic' ? theme.templates : [...theme.templates, ...theme.parts];
+      theme.type === 'classic'
+        ? theme.templates
+        : [...theme.templates, ...theme.parts];
     return this.ensureStandardTemplates(allTemplates, theme.type, content).map(
       (template) => template.name,
     );
@@ -1742,10 +1773,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private buildPlanningSourceContext(
     componentPlan: PlanResult[number],
     templateSource: string,
+    sourceMap: Map<string, string>,
+    content: DbContentResult,
     hasSharedLayoutPartials: boolean,
   ): PlanningSourceContext {
+    const preferredSource = this.selectPreferredPlanningSource(
+      componentPlan,
+      templateSource,
+      sourceMap,
+      content,
+    );
     const hints: string[] = [];
-    let scopedSource = templateSource;
+    let scopedSource = preferredSource.source;
 
     if (componentPlan.type === 'page') {
       scopedSource = this.stripClassicSharedIncludes(scopedSource, hints);
@@ -1772,12 +1811,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     const trimmed = scopedSource.trim();
-    const fallbackSource = trimmed.length > 0 ? trimmed : templateSource;
-    const mode = this.looksLikeBlockMarkup(templateSource)
+    const fallbackSource =
+      trimmed.length > 0 ? trimmed : preferredSource.source;
+    const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
       : 'body-only markup';
     const summaryLines = ['## Extracted source scope'];
     summaryLines.push(`Mode: ${mode}`);
+    summaryLines.push(`Selected source: ${preferredSource.label}`);
+    summaryLines.push(`Selection reason: ${preferredSource.reason}`);
     summaryLines.push(
       `Shared Header/Footer partials in overall plan: ${hasSharedLayoutPartials ? 'yes' : 'no'}`,
     );
@@ -1809,14 +1851,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           .join(', ')}`,
       );
     }
-    const interactiveWidgets = this.detectInteractiveWidgetsFromSource(
-      fallbackSource,
-    );
+    const interactiveWidgets =
+      this.detectInteractiveWidgetsFromSource(fallbackSource);
     if (interactiveWidgets.length > 0) {
       summaryLines.push(
         `Interactive/widget hints detected from source: ${interactiveWidgets
           .map((item) => `\`${item}\``)
-          .join(', ')}. Preserve them as interactive UI where the source shows real behavior; do not flatten them into static sections by default.`,
+          .join(
+            ', ',
+          )}. Preserve them as interactive UI where the source shows real behavior; do not flatten them into static sections by default.`,
       );
     }
 
@@ -1824,7 +1867,213 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       source: fallbackSource,
       sourceAnalysis: summaryLines.join('\n'),
       sourceBackedAuxiliaryLabels,
+      sourceLabel: preferredSource.label,
+      sourceTemplateName: preferredSource.templateName,
+      sourceFile: preferredSource.sourceFile,
+      sourceReason: preferredSource.reason,
     };
+  }
+
+  private selectPreferredPlanningSource(
+    componentPlan: PlanResult[number],
+    templateSource: string,
+    sourceMap: Map<string, string>,
+    content: DbContentResult,
+  ): {
+    source: string;
+    label: string;
+    reason: string;
+    templateName?: string;
+    sourceFile?: string;
+  } {
+    const fallback = {
+      source: templateSource,
+      label: `repo:${componentPlan.templateName}`,
+      reason: 'default component template source',
+      templateName: componentPlan.templateName,
+      sourceFile: inferFseSourceFile(
+        componentPlan.templateName,
+        componentPlan.type,
+      ),
+    };
+
+    if (componentPlan.route !== '/') {
+      return fallback;
+    }
+
+    const candidates: Array<{
+      source: string;
+      label: string;
+      templateName?: string;
+      sourceFile?: string;
+      priority: number;
+    }> = [];
+    const seen = new Set<string>();
+    const pushCandidate = (candidate: {
+      source?: string;
+      label: string;
+      templateName?: string;
+      sourceFile?: string;
+      priority: number;
+    }) => {
+      const normalized = String(candidate.source ?? '').trim();
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      candidates.push({
+        source: normalized,
+        label: candidate.label,
+        templateName: candidate.templateName,
+        sourceFile: candidate.sourceFile,
+        priority: candidate.priority,
+      });
+    };
+
+    for (const templateName of ['front-page', 'home', 'index']) {
+      pushCandidate({
+        source: sourceMap.get(templateName),
+        label: `repo:${templateName}`,
+        templateName,
+        sourceFile: inferFseSourceFile(templateName, componentPlan.type),
+        priority:
+          templateName === 'front-page'
+            ? 30
+            : templateName === 'home'
+              ? 20
+              : 10,
+      });
+    }
+
+    pushCandidate({
+      source: templateSource,
+      label: `repo:${componentPlan.templateName}`,
+      templateName: componentPlan.templateName,
+      sourceFile: inferFseSourceFile(
+        componentPlan.templateName,
+        componentPlan.type,
+      ),
+      priority: 15,
+    });
+
+    const frontPage = content.readingSettings?.pageOnFrontId
+      ? content.pages.find(
+          (page) => page.id === content.readingSettings.pageOnFrontId,
+        )
+      : undefined;
+    pushCandidate({
+      source: frontPage?.content,
+      label: frontPage
+        ? `db:page-on-front:${frontPage.slug || frontPage.id}`
+        : 'db:page-on-front',
+      templateName: componentPlan.templateName,
+      sourceFile: frontPage
+        ? `db:pages/${frontPage.slug || frontPage.id}`
+        : 'db:pages/front-page',
+      priority: content.readingSettings?.showOnFront === 'page' ? 60 : 25,
+    });
+
+    const postsPage = content.readingSettings?.pageForPostsId
+      ? content.pages.find(
+          (page) => page.id === content.readingSettings.pageForPostsId,
+        )
+      : undefined;
+    pushCandidate({
+      source: postsPage?.content,
+      label: postsPage
+        ? `db:page-for-posts:${postsPage.slug || postsPage.id}`
+        : 'db:page-for-posts',
+      templateName: componentPlan.templateName,
+      sourceFile: postsPage
+        ? `db:pages/${postsPage.slug || postsPage.id}`
+        : 'db:pages/posts-page',
+      priority: 45,
+    });
+
+    for (const dbTemplate of content.dbTemplates.filter((entry) =>
+      ['front-page', 'home', 'index'].includes(entry.slug),
+    )) {
+      pushCandidate({
+        source: dbTemplate.content,
+        label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
+        templateName: dbTemplate.slug,
+        sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
+        priority:
+          dbTemplate.slug === 'front-page'
+            ? 55
+            : dbTemplate.slug === 'home'
+              ? 50
+              : 40,
+      });
+    }
+
+    if (candidates.length === 0) {
+      return fallback;
+    }
+
+    const winner = candidates
+      .map((candidate) => ({
+        ...candidate,
+        richness: this.scorePlanningSourceRichness(candidate.source),
+      }))
+      .sort((a, b) => {
+        if (b.richness !== a.richness) return b.richness - a.richness;
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        return b.source.length - a.source.length;
+      })[0];
+
+    if (!winner) {
+      return fallback;
+    }
+
+    return {
+      source: winner.source,
+      label: winner.label,
+      reason: `richest home source selected (score=${winner.richness}, priority=${winner.priority})`,
+      templateName: winner.templateName ?? componentPlan.templateName,
+      sourceFile:
+        winner.sourceFile ??
+        inferFseSourceFile(componentPlan.templateName, componentPlan.type),
+    };
+  }
+
+  private scorePlanningSourceRichness(source: string): number {
+    const trimmed = source.trim();
+    if (!trimmed) return 0;
+
+    let score = Math.min(80, Math.floor(trimmed.length / 120));
+    score += this.detectInteractiveWidgetsFromSource(trimmed).length * 25;
+    score += extractStaticImageSources(trimmed).length * 8;
+    score += (trimmed.match(/<!--\s*wp:/g) ?? []).length * 3;
+    score += (trimmed.match(/<img\b/gi) ?? []).length * 4;
+    score +=
+      (
+        trimmed.match(
+          /\b(core\/|wp:)(cover|columns|group|gallery|image|media-text|query|buttons?|heading|paragraph)\b/gi,
+        ) ?? []
+      ).length * 2;
+
+    try {
+      const nodes = wpBlocksToJson(trimmed);
+      const draftSections = mapWpNodesToDraftSections(nodes);
+      const distinctBlocks = new Set(
+        nodes.flatMap((node) => this.flattenBlockNames(node)),
+      );
+      score += draftSections.length * 40;
+      score += distinctBlocks.size * 4;
+      score += nodes.length * 2;
+    } catch {
+      // Best-effort scoring only.
+    }
+
+    return score;
+  }
+
+  private flattenBlockNames(node: WpNode): string[] {
+    return [
+      node.block,
+      ...(node.children ?? []).flatMap((child) =>
+        this.flattenBlockNames(child),
+      ),
+    ];
   }
 
   private collectDraftCustomClassNames(
@@ -2049,7 +2298,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   private isRetryableVisualPlanError(error: unknown): boolean {
-    const message = String((error as any)?.message ?? error ?? '').toLowerCase();
+    const message = String(
+      (error as any)?.message ?? error ?? '',
+    ).toLowerCase();
     return (
       message.includes('502') ||
       message.includes('503') ||

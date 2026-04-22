@@ -489,6 +489,8 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 
 Post list layout: mirror template structure — row layout → `flex items-baseline gap-4` with `flex-1` on title, `whitespace-nowrap shrink-0` on date/meta; card layout → `grid grid-cols-1 gap-6`.
 
+Use the explicit ternary form above for author/category meta. Do not wrap JSX branches in extra braces like `{cond && ({...})}` because that often leads to invalid TSX such as `"," expected`.
+
 ⛔ NEVER invent text not in template or API — leave empty rather than guess.
 
 {{templateSource}}

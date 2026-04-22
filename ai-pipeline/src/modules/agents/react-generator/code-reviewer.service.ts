@@ -1530,11 +1530,16 @@ export class CodeReviewerService {
         const isPageContract = lastError?.includes(
           'Page detail contract violated',
         );
+        const isVisualPlanFidelity = lastError?.includes(
+          'Visual plan fidelity violated',
+        );
 
-        if (isNoJsx || isPageContract) {
+        if (isNoJsx || isPageContract || isVisualPlanFidelity) {
           const reason = isNoJsx
             ? 'No JSX return found'
-            : 'Page detail contract violated';
+            : isPageContract
+              ? 'Page detail contract violated'
+              : 'Visual plan fidelity violated';
           this.logger.warn(
             `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
           );
@@ -1547,7 +1552,12 @@ export class CodeReviewerService {
             const fixedResult = await this.selfFixDetailed(
               modelName,
               code,
-              `${reason}: ${lastError}`,
+              this.buildAutoFixErrorContext(
+                reason,
+                lastError,
+                componentPlan,
+                componentName,
+              ),
               logPath,
               `${componentName}:${logLabel}:autofix`,
             );
@@ -2052,6 +2062,16 @@ export class CodeReviewerService {
       }
     }
 
+    const visualPlanChecklist = this.buildVisualPlanRetryChecklist(
+      input.componentPlan,
+      input.lastError,
+      input.componentName,
+    );
+    if (visualPlanChecklist) {
+      lines.push('');
+      lines.push(visualPlanChecklist);
+    }
+
     lines.push('');
     lines.push(
       'Return the complete corrected component file, but only change code necessary to fix the failure above.',
@@ -2186,6 +2206,22 @@ export class CodeReviewerService {
     }
 
     if (
+      /visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid|lost hero heading|lost hero subheading|lost post-list title/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Restore every missing visual-plan section from the approved plan. If section 2 is missing, add it back as a separate top-level JSX wrapper instead of expanding section 1.',
+      );
+      instructions.push(
+        'For each restored section, preserve the exact sectionKey/sourceNodeId pair from the approved visual plan on the outer wrapper attributes.',
+      );
+      instructions.push(
+        'If the approved plan includes a hero heading/subheading or post-list title, render that approved content exactly or keep the approved dynamic binding intact; do not drop it.',
+      );
+    }
+
+    if (
       /duplicated route prefix|extra `\/page` segment|\/page\/page\//.test(
         compact,
       )
@@ -2222,6 +2258,9 @@ export class CodeReviewerService {
       instructions.push(
         'Use `post.authorSlug` with `/author/${post.authorSlug}` and `post.categorySlugs[0]` with `/category/${post.categorySlugs[0]}`. Keep plain-text author only when it is the actual heading/title content, such as an `h1` on author/archive/detail views.',
       );
+      instructions.push(
+        "Use a single ternary JSX expression for the fallback, for example `{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={'/category/' + post.categorySlugs[0]} className='hover:underline underline-offset-4'>{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}`. Do not introduce extra brace layers around JSX branches.",
+      );
     }
 
     if (/author/.test(compact) && /route|link/.test(compact)) {
@@ -2249,6 +2288,106 @@ export class CodeReviewerService {
     }
 
     return [...new Set(instructions)];
+  }
+
+  private buildVisualPlanRetryChecklist(
+    componentPlan: ComponentPromptContext | undefined,
+    error: string | undefined,
+    componentName: string,
+  ): string {
+    if (
+      !componentPlan?.visualPlan?.sections?.length ||
+      !/visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid|lost hero heading|lost hero subheading|lost post-list title|lost card-grid subtitle|lost card heading|lost media-text heading|lost media-text list item/i.test(
+        error ?? '',
+      )
+    ) {
+      return '';
+    }
+
+    const lines = [
+      '### Visual plan sections to preserve exactly',
+      ...componentPlan.visualPlan.sections.map((section, index) => {
+        const parts = [
+          `- section ${index + 1}: type=${section.type}`,
+          section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+          section.sourceRef?.sourceNodeId
+            ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+            : null,
+        ];
+
+        if (section.type === 'hero') {
+          parts.push(
+            section.heading ? `heading=${JSON.stringify(section.heading)}` : null,
+          );
+          parts.push(
+            section.subheading
+              ? `subheading=${JSON.stringify(section.subheading)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'post-list') {
+          parts.push(section.title ? `title=${JSON.stringify(section.title)}` : null);
+        }
+
+        if (section.type === 'card-grid') {
+          parts.push(section.title ? `title=${JSON.stringify(section.title)}` : null);
+          parts.push(
+            section.subtitle ? `subtitle=${JSON.stringify(section.subtitle)}` : null,
+          );
+          const cardHints = section.cards
+            ?.slice(0, 4)
+            .map((card, cardIndex) => {
+              const hints = [
+                card.heading ? `card${cardIndex + 1}.heading=${JSON.stringify(card.heading)}` : null,
+                card.body ? `card${cardIndex + 1}.body=${JSON.stringify(card.body)}` : null,
+              ].filter(Boolean);
+              return hints.join(' | ');
+            })
+            .filter(Boolean);
+          if (cardHints?.length) {
+            parts.push(...cardHints);
+          }
+        }
+
+        if (section.type === 'media-text') {
+          parts.push(
+            section.heading ? `heading=${JSON.stringify(section.heading)}` : null,
+          );
+          parts.push(
+            section.body ? `body=${JSON.stringify(section.body)}` : null,
+          );
+          if (section.listItems?.length) {
+            parts.push(
+              `listItems=${JSON.stringify(section.listItems.slice(0, 6))}`,
+            );
+          }
+        }
+
+        return parts.filter(Boolean).join(' | ');
+      }),
+      `Use data-vp-component="${componentName}" on every tracked wrapper in this file.`,
+    ];
+
+    return lines.join('\n');
+  }
+
+  private buildAutoFixErrorContext(
+    reason: string,
+    lastError: string | undefined,
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): string {
+    const parts = [`${reason}: ${lastError ?? 'Unknown validation error.'}`];
+    const checklist = this.buildVisualPlanRetryChecklist(
+      componentPlan,
+      lastError,
+      componentName,
+    );
+    if (checklist) {
+      parts.push(checklist);
+    }
+    return parts.join('\n\n');
   }
 
   // ── Code post-processors ──────────────────────────────────────────────────

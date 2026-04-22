@@ -199,7 +199,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 
   // Modal: popup trigger — not a page section, skip
   if (block === 'uagb/modal') {
-    return [];
+    return toMappedSections(mapUagbModal(node), node);
   }
 
   // Tabs: render tab content as a card-grid (one card per tab)
@@ -372,6 +372,14 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   const children = node.children ?? [];
   if (children.length === 0) return [];
 
+  const segmentedInteractiveSections = buildSegmentedInteractiveSections(
+    node,
+    children,
+  );
+  if (segmentedInteractiveSections) {
+    return segmentedInteractiveSections;
+  }
+
   const groupedCardGrid = buildGroupedCardGrid(children);
   if (groupedCardGrid) {
     return toMappedSections(groupedCardGrid, node);
@@ -502,17 +510,15 @@ function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
   // Otherwise: card-grid
   const cards = cols
     .map((col) => {
-      const h = findFirstByBlock(flattenChildren(col), [
+      const flat = flattenChildren(col);
+      const h = findFirstByBlock(flat, [
         'core/heading',
         'heading',
       ]);
-      const p = findFirstByBlock(flattenChildren(col), [
-        'core/paragraph',
-        'paragraph',
-      ]);
+      const body = extractRichTextFromNodes(flat);
       return {
         heading: h?.text ?? '',
-        body: p?.text ?? '',
+        body,
       };
     })
     .filter((c) => c.heading || c.body);
@@ -588,9 +594,7 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     const h = flat.find(
       (c) => c.block === 'core/heading' || c.block === 'heading',
     );
-    const p = flat.find(
-      (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
-    );
+    const subheading = extractRichTextFromNodes(flat);
     const img = flat.find(
       (c) =>
         (c.block === 'core/image' || c.block === 'image') && c.src,
@@ -604,7 +608,7 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     );
     return {
       ...(h?.text ? { heading: h.text } : {}),
-      ...(p?.text ? { subheading: p.text } : {}),
+      ...(subheading ? { subheading } : {}),
       ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
       ...(btn?.text ? { cta: { text: btn.text, link: btn.href ?? '#' } } : {}),
     };
@@ -614,12 +618,12 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
   if (slides.length === 0) {
     const flat = flattenChildren(node);
     const h = flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
-    const p = flat.find((c) => c.block === 'core/paragraph' || c.block === 'paragraph');
+    const subheading = extractRichTextFromNodes(flat);
     const img = flat.find((c) => (c.block === 'core/image' || c.block === 'image') && c.src);
     if (!h && !img) return null;
     slides.push({
       ...(h?.text ? { heading: h.text } : {}),
-      ...(p?.text ? { subheading: p.text } : {}),
+      ...(subheading ? { subheading } : {}),
       ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
     });
   }
@@ -632,11 +636,11 @@ function mapUagbInfoBox(node: WpNode): CardGridSection | null {
   const h = flat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
   );
-  const p = flat.find(
-    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
-  );
   const heading = h?.text ?? (node.params?.iconBoxTitle as string | undefined) ?? '';
-  const body = p?.text ?? (node.params?.iconBoxDesc as string | undefined) ?? '';
+  const body =
+    extractRichTextFromNodes(flat) ??
+    (node.params?.iconBoxDesc as string | undefined) ??
+    '';
   if (!heading && !body) return null;
   return { type: 'card-grid', columns: 3, cards: [{ heading, body }] };
 }
@@ -651,11 +655,8 @@ function mapUagbTabs(node: WpNode): CardGridSection | null {
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
-      const p = flat.find(
-        (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
-      );
       const tabTitle = (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
-      const body = p?.text ?? '';
+      const body = extractRichTextFromNodes(flat);
       return { heading: tabTitle, body };
     })
     .filter((c) => c.heading || c.body);
@@ -666,6 +667,66 @@ function mapUagbTabs(node: WpNode): CardGridSection | null {
     columns: Math.min(Math.max(cards.length, 2), 4) as 2 | 3 | 4,
     cards,
   };
+}
+
+function mapUagbModal(node: WpNode): HeroSection | null {
+  const flat = flattenChildren(node);
+  const headingNode = flat.find(
+    (c) => c.block === 'core/heading' || c.block === 'heading',
+  );
+  const imageNode = flat.find(
+    (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
+  );
+  const buttonNode = flat.find(
+    (c) =>
+      c.block === 'core/button' ||
+      c.block === 'button' ||
+      c.block === 'core/buttons' ||
+      c.block === 'buttons',
+  );
+  const heading =
+    headingNode?.text ??
+    (node.params?.modalTitle as string | undefined) ??
+    (node.params?.title as string | undefined) ??
+    '';
+  const subheading =
+    extractRichTextFromNodes(flat) ??
+    (node.params?.modalText as string | undefined) ??
+    (node.params?.content as string | undefined) ??
+    '';
+
+  if (!heading && !subheading && !buttonNode?.text && !imageNode?.src) {
+    return null;
+  }
+
+  const section: HeroSection = {
+    type: 'hero',
+    layout: imageNode?.src ? 'split' : 'centered',
+    heading,
+  };
+  if (subheading) section.subheading = subheading;
+  if (headingNode?.typography || headingNode?.fontFamily) {
+    section.headingStyle = toTypographyStyle(headingNode);
+  }
+  if (buttonNode?.text) {
+    section.cta = { text: buttonNode.text, link: buttonNode.href ?? '#' };
+  } else if (typeof node.params?.btnText === 'string') {
+    section.cta = {
+      text: String(node.params.btnText),
+      link:
+        (node.params?.btnLink as string | undefined) ??
+        (node.params?.link as string | undefined) ??
+        '#',
+    };
+  }
+  if (imageNode?.src) {
+    section.image = {
+      src: imageNode.src,
+      alt: imageNode.alt ?? '',
+      position: 'right',
+    };
+  }
+  return section;
 }
 
 function toMappedSections(
@@ -845,7 +906,8 @@ function buildHeroFromChildren(
     heading: h?.text ?? '',
   };
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  if (p?.text) s.subheading = p.text;
+  const richSubheading = extractRichTextFromNodes(flat);
+  if (richSubheading) s.subheading = richSubheading;
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   if (img?.src)
@@ -890,10 +952,10 @@ function buildMediaTextFromColumns(
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
-      const p = flat.find(
-        (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
-      );
-      return { heading: h?.text ?? '', body: p?.text ?? '' };
+      return {
+        heading: h?.text ?? '',
+        body: extractRichTextFromNodes(flat),
+      };
     });
     return { type: 'card-grid', columns: 2, cards };
   }
@@ -925,11 +987,63 @@ function buildMediaTextFromColumns(
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   if (h?.text) s.heading = h.text;
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  if (p?.text) s.body = p.text;
+  const richBody = extractRichTextFromNodes(textFlat);
+  if (richBody) s.body = richBody;
   if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
   if (listItems.length > 0) s.listItems = listItems;
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   return s;
+}
+
+function buildSegmentedInteractiveSections(
+  groupNode: WpNode,
+  children: WpNode[],
+): SectionPlan[] | null {
+  const hasInteractiveChild = children.some((child) =>
+    ['uagb/slider', 'uagb/modal', 'uagb/tabs'].includes(child.block),
+  );
+  if (!hasInteractiveChild) return null;
+
+  const sections: SectionPlan[] = [];
+  let prefixEnd = 0;
+  while (prefixEnd < children.length) {
+    const block = children[prefixEnd]?.block;
+    if (
+      block &&
+      ![
+        'core/heading',
+        'heading',
+        'core/paragraph',
+        'paragraph',
+        'core/button',
+        'button',
+        'core/buttons',
+        'buttons',
+        'core/image',
+        'image',
+        'core/spacer',
+        'spacer',
+      ].includes(block)
+    ) {
+      break;
+    }
+    prefixEnd++;
+  }
+
+  const prefixChildren = children.slice(0, prefixEnd).filter(
+    (child) => !isSpacerBlock(child.block),
+  );
+  if (prefixChildren.some((child) => child.block === 'core/heading' || child.block === 'heading')) {
+    sections.push(applyNodePresentation(buildHeroFromChildren(groupNode, prefixChildren), groupNode));
+  }
+
+  const remainder = children.slice(prefixEnd);
+  for (const child of remainder) {
+    if (isSpacerBlock(child.block)) continue;
+    sections.push(...mapNode(child, children));
+  }
+
+  return sections.length > 0 ? sections : null;
 }
 
 // ── low-level helpers ───────────────────────────────────────────────────────
@@ -1019,6 +1133,20 @@ function extractNodeText(node: WpNode): string {
   if (node.text?.trim()) return node.text.trim();
   if (node.html?.trim()) return stripInlineHtml(node.html);
   return '';
+}
+
+function extractRichTextFromNodes(nodes: WpNode[]): string {
+  const texts = nodes
+    .filter(
+      (node) =>
+        node.block === 'core/paragraph' ||
+        node.block === 'paragraph' ||
+        node.block === 'core/list-item' ||
+        node.block === 'list-item',
+    )
+    .map((node) => extractNodeText(node))
+    .filter(Boolean);
+  return texts.join('\n');
 }
 
 function stripInlineHtml(html: string): string {

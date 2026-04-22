@@ -125,6 +125,7 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
 | \`sidebar\` | sidebar column for page/post layouts with menus, page links, or recent posts |
+| \`carousel\` | slider/carousel with ordered slides from the source |
 
 ## Section schemas (key fields only)
 
@@ -144,6 +145,7 @@ comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
+carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay? }
 \`\`\`
 
 ## Rules
@@ -177,6 +179,8 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 - For page/listing/body components, do NOT add trailing utility/footer/sidebar-like sections or headings such as ${formatInventedAuxiliarySectionLabels()} unless that EXACT label is already source-backed in the scoped template source or deterministic draft sections supplied in the user prompt.
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
+- If the source shows a real slider/carousel widget (for example Spectra/UAGB slider), preserve it as a \`carousel\` section instead of collapsing it into a \`card-grid\`.
+- If the source shows a modal/popup block, preserve its real heading/body/CTA content as a source-faithful content section, usually \`hero\` when it is primarily modal copy plus CTA. Do NOT fake it as a generic \`card-grid\`.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const draftHint = buildDraftSectionsHint(draftSections);

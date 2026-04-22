@@ -1087,11 +1087,19 @@ export class ValidatorService {
     section: PostListSection,
     label: string,
   ): string[] {
+    if (this.isDynamicPlanBinding(section.title)) {
+      return [];
+    }
     return this.requireLiteralIfPresent(
       code,
       section.title,
       `${label} lost post-list title`,
     );
+  }
+
+  private isDynamicPlanBinding(value?: string): boolean {
+    const normalized = value?.trim();
+    return Boolean(normalized && /^\{[a-zA-Z0-9_.]+\}$/.test(normalized));
   }
 
   private requireLiteralIfPresent(
@@ -1101,7 +1109,13 @@ export class ValidatorService {
   ): string[] {
     const normalized = value?.trim();
     if (!normalized) return [];
-    return code.includes(normalized) ? [] : [error];
+    if (this.isDynamicPlanBinding(normalized)) return [];
+    if (code.includes(normalized)) return [];
+    const preview =
+      normalized.length > 120
+        ? `${normalized.slice(0, 117).trimEnd()}...`
+        : normalized;
+    return [`${error}: ${JSON.stringify(preview)}`];
   }
 
   private findMissingRequiredCustomClasses(
