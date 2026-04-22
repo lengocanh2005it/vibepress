@@ -27,6 +27,7 @@ import type {
   ThemeInteractionTarget,
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
+import type { ComponentVisualPlan } from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
@@ -71,6 +72,7 @@ export interface GeneratedComponent {
   generationMode?: 'deterministic' | 'ai';
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  visualPlan?: ComponentVisualPlan;
 }
 
 export interface ReactGenerateResult {
@@ -640,6 +642,10 @@ export class ReactGeneratorService {
       fixMode === 'syntax-only'
         ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
+    const visualPlanRepairNote = this.buildVisualPlanRepairNote(componentPlan);
+    const repairFeedback = visualPlanRepairNote
+      ? `${effectiveFeedback}\n\n${visualPlanRepairNote}`
+      : effectiveFeedback;
 
     this.logger.log(
       fixMode === 'syntax-only'
@@ -649,16 +655,16 @@ export class ReactGeneratorService {
     await this.logToFile(
       logPath,
       fixMode === 'syntax-only'
-        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${effectiveFeedback}`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${effectiveFeedback}`,
+        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${repairFeedback}`
+        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${repairFeedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
       fixAgentModel,
       component.code,
       visionContextNote
-        ? `${effectiveFeedback}\n\n${visionContextNote}`
-        : effectiveFeedback,
+        ? `${repairFeedback}\n\n${visionContextNote}`
+        : repairFeedback,
       logPath,
       component.name,
       visionImageUrls,
@@ -749,6 +755,7 @@ ${renders}
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
+      visualPlan: componentPlan?.visualPlan ?? component.visualPlan,
       ...overrides,
     };
   }
@@ -764,6 +771,56 @@ ${renders}
     };
     for (const node of nodes) visit(node);
     return [...result];
+  }
+
+  private buildVisualPlanRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string | undefined {
+    const sections = componentPlan?.visualPlan?.sections ?? [];
+    if (sections.length === 0) return undefined;
+
+    const lines = sections.map((section, index) => {
+      const parts = [
+        `${index + 1}. ${section.type}`,
+        section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+        section.sourceRef?.sourceNodeId
+          ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+          : null,
+      ];
+
+      if ('heading' in section && section.heading) {
+        parts.push(`heading="${section.heading}"`);
+      }
+      if ('subheading' in section && section.subheading) {
+        parts.push(`subheading="${section.subheading}"`);
+      }
+      if ('cta' in section && section.cta?.text) {
+        parts.push(`cta="${section.cta.text}"`);
+      }
+      if ('image' in section && section.image?.src) {
+        parts.push(`image="${section.image.src}"`);
+      }
+      if ('imageSrc' in section && section.imageSrc) {
+        parts.push(`image="${section.imageSrc}"`);
+      }
+      if ('cards' in section && Array.isArray(section.cards) && section.cards.length > 0) {
+        parts.push(
+          `cards=${section.cards
+            .map((card) => card.heading || card.body)
+            .filter(Boolean)
+            .slice(0, 6)
+            .join(' | ')}`,
+        );
+      }
+
+      return parts.filter(Boolean).join(' | ');
+    });
+
+    return [
+      'Visual plan sections that must remain present in the repaired code:',
+      ...lines,
+      'Do not drop sections, CTA labels, images, or card bodies from this contract.',
+    ].join('\n');
   }
 
   private resolveRequiredCustomClassTargets(

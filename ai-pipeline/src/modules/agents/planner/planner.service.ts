@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { writeFile } from 'fs/promises';
 import { basename } from 'path';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
@@ -31,6 +32,8 @@ import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
   parseVisualPlanDetailed,
+  sanitizeSectionsForContract,
+  type VisualPlanContract,
 } from '../react-generator/prompts/visual-plan.prompt.js';
 import {
   extractAuxiliaryLabelsFromSections,
@@ -58,6 +61,7 @@ export interface ComponentPlan {
   description: string;
   customClassNames?: string[];
   sourceBackedAuxiliaryLabels?: string[];
+  draftSections?: SectionPlan[];
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
 }
@@ -268,7 +272,6 @@ export class PlannerService {
       `[Phase B: Component Graph Builder] Done — ${enriched.filter((c) => c.route).length} routable, ` +
         `${enriched.filter((c) => c.dataNeeds?.includes('menus')).length} with menus`,
     );
-
     // ── Phase C (C3): AI Visual Sections ────────────────────────────────
     // AI generates a visual section plan (navbar/hero/footer/etc.) per component.
     // palette, typography, layout are injected deterministically from theme tokens.
@@ -436,6 +439,9 @@ export class PlannerService {
     let visualPlan: ComponentVisualPlan | undefined;
     let detectedCustomClassNames: string[] = [];
     let sourceBackedAuxiliaryLabels: string[] = [];
+    let draftSections:
+      | ReturnType<typeof mapWpNodesToDraftSections>
+      | undefined;
     const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
       componentPlan,
       content,
@@ -458,6 +464,17 @@ export class PlannerService {
     }
     try {
       const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+      // For FSE themes with a static front page, the actual home content lives
+      // in the database as a page, not in the theme's home.html template.
+      // Prefer that page's block content so the AI sees the real sections.
+      const effectiveTemplateSource =
+        componentPlan.route === '/' &&
+        content.readingSettings?.showOnFront === 'page' &&
+        content.readingSettings.pageOnFrontId
+          ? (content.pages.find(
+              (p) => p.id === content.readingSettings.pageOnFrontId,
+            )?.content ?? templateSource)
+          : templateSource;
       const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
         request: editRequest,
         componentName: componentPlan.componentName,
@@ -466,7 +483,7 @@ export class PlannerService {
       });
       const planningSource = this.buildPlanningSourceContext(
         componentPlan,
-        templateSource,
+        effectiveTemplateSource,
         fullPlan.some(
           (item) =>
             item.type === 'partial' &&
@@ -476,9 +493,9 @@ export class PlannerService {
       // Deterministically parse the WordPress block tree to get an ordered
       // draft of sections. This is injected into the prompt as a hard-ordered
       // skeleton so AI only needs to fill in content, not infer layout order.
-      const draftSections = (() => {
+      draftSections = (() => {
         try {
-          const rawMarkup = templateSource;
+          const rawMarkup = effectiveTemplateSource;
           if (!rawMarkup) return undefined;
           const nodes = this.styleResolver.resolve(
             wpBlocksToJsonWithSourceRefs({
@@ -540,6 +557,7 @@ export class PlannerService {
         await this.tokenTracker.init(tokenLogPath);
       }
 
+      const maxTransportRetries = 3;
       for (let attempt = 1; attempt <= 2; attempt++) {
         const prompt =
           attempt === 1
@@ -549,17 +567,55 @@ export class PlannerService {
                 lastReason,
                 lastRaw,
               );
+        let raw = '';
+        let inTok = 0;
+        let outTok = 0;
+        let completionReceived = false;
+        let lastTransportError = '';
 
-        const {
-          text: raw,
-          inputTokens: inTok,
-          outputTokens: outTok,
-        } = await this.requestVisualPlanCompletion({
-          model: modelName,
-          systemPrompt,
-          userPrompt: prompt,
-          maxTokens: 4096,
-        });
+        for (
+          let transportAttempt = 1;
+          transportAttempt <= maxTransportRetries;
+          transportAttempt++
+        ) {
+          try {
+            if (transportAttempt > 1) {
+              this.logger.log(
+                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
+              );
+            }
+            const completion = await this.requestVisualPlanCompletion({
+              model: modelName,
+              systemPrompt,
+              userPrompt: prompt,
+              maxTokens: 4096,
+            });
+            raw = completion.text;
+            inTok = completion.inputTokens;
+            outTok = completion.outputTokens;
+            completionReceived = true;
+            break;
+          } catch (err: any) {
+            lastTransportError = err?.message ?? String(err);
+            if (
+              !this.isRetryableVisualPlanError(err) ||
+              transportAttempt >= maxTransportRetries
+            ) {
+              throw err;
+            }
+            this.logger.warn(
+              `[Phase C: AI Visual Sections] "${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
+            );
+            await this.delay(1200 * transportAttempt);
+          }
+        }
+
+        if (!completionReceived) {
+          throw new Error(
+            lastTransportError ||
+              'visual plan request failed before a response was received',
+          );
+        }
         if (tokenLogPath) {
           await this.tokenTracker.track(
             modelName,
@@ -594,6 +650,7 @@ export class PlannerService {
             sections: this.mergeDraftSectionPresentation(
               parsed.sections,
               draftSections,
+              visualContract,
             ),
           };
           this.logger.log(
@@ -629,6 +686,7 @@ export class PlannerService {
 
     return {
       ...componentPlan,
+      ...(draftSections?.length ? { draftSections } : {}),
       ...(detectedCustomClassNames.length > 0
         ? { customClassNames: detectedCustomClassNames }
         : {}),
@@ -827,6 +885,30 @@ export class PlannerService {
     const n = parseFloat(radius);
     if (!Number.isNaN(n) && n >= 9999) return 'rounded-full';
     return `rounded-[${normalized}]`;
+  }
+
+  async writeArtifact(
+    logPath: string | undefined,
+    fileName: string,
+    payload: unknown,
+  ): Promise<void> {
+    if (!logPath) return;
+    try {
+      const targetPath = this.buildPlannerArtifactPath(logPath, fileName);
+      await writeFile(targetPath, JSON.stringify(payload, null, 2), 'utf-8');
+    } catch (error: any) {
+      this.logger.warn(
+        `[Planner Artifact] Failed to write ${fileName}: ${error?.message ?? error}`,
+      );
+    }
+  }
+
+  private buildPlannerArtifactPath(logPath: string, fileName: string): string {
+    const normalized = logPath.replace(/\\/g, '/');
+    const baseDir = normalized.endsWith('.json')
+      ? normalized.slice(0, normalized.lastIndexOf('/'))
+      : normalized;
+    return `${baseDir}/${fileName}`.replace(/\//g, '\\');
   }
 
   // ── Layout hints: map extracted theme tokens to generator-friendly classes ─
@@ -1300,10 +1382,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
   private mergeDraftSectionPresentation(
     sections: SectionPlan[],
     draftSections?: SectionPlan[],
+    contract?: VisualPlanContract,
   ): SectionPlan[] {
     if (!draftSections?.length) return sections;
+    const effectiveDraft = contract
+      ? sanitizeSectionsForContract(draftSections, contract).sections
+      : draftSections;
     return sections.map((section, index) =>
-      this.mergeDraftSection(section, draftSections[index]),
+      this.mergeDraftSection(section, effectiveDraft[index]),
     );
   }
 
@@ -1311,7 +1397,17 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     section: SectionPlan,
     draft?: SectionPlan,
   ): SectionPlan {
-    if (!draft || draft.type !== section.type) return section;
+    if (!draft) return section;
+    // Always carry identity fields (sectionKey, sourceRef) regardless of type
+    // substitution — the AI may legitimately replace a layout hero with a
+    // search, post-list, or comments section for the given component context.
+    if (draft.type !== section.type) {
+      return {
+        ...section,
+        ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
+        ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
+      };
+    }
 
     const mergedBase = {
       ...section,
@@ -1950,6 +2046,23 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return ordered.filter((need) => mapped.has(need));
+  }
+
+  private isRetryableVisualPlanError(error: unknown): boolean {
+    const message = String((error as any)?.message ?? error ?? '').toLowerCase();
+    return (
+      message.includes('502') ||
+      message.includes('503') ||
+      message.includes('504') ||
+      message.includes('429') ||
+      message.includes('timeout') ||
+      message.includes('timed out') ||
+      message.includes('temporarily unavailable')
+    );
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private normalizeTemplateNameToExpected(

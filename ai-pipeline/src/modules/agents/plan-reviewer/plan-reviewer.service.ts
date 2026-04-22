@@ -93,6 +93,7 @@ export class PlanReviewerService {
     reviewed = this.fixDuplicateRoutes(reviewed, warnings);
     this.checkVisualPlanCoverage(reviewed, warnings);
     this.validateHard(reviewed, expectedTemplateNames, errors);
+    this.validateDraftSectionFidelity(reviewed, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
     const partials = reviewed.filter((c) => c.type === 'partial').length;
@@ -431,6 +432,15 @@ export class PlanReviewerService {
     if (section.type === 'page-content') {
       return allowedPageDetail;
     }
+    // For detail pages, hero/cover sections from the draft are layout
+    // placeholders that the AI replaces with post-content or page-content.
+    // Enforcing them as required sections causes false type-mismatch failures.
+    if (
+      (section.type === 'hero' || section.type === 'cover') &&
+      (allowedPostDetail || allowedPageDetail)
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -630,6 +640,108 @@ export class PlanReviewerService {
         `Plan has no page components (${plan.length} partial(s) only) — at least one page is required`,
       );
     }
+  }
+
+  private validateDraftSectionFidelity(
+    plan: PlanResult,
+    errors: string[],
+  ): void {
+    for (const item of plan) {
+      const expectedDraftSections = this.getContractExpectedDraftSections(item);
+      if (expectedDraftSections.length === 0) continue;
+
+      if (!item.visualPlan) {
+        // Missing visual plan is non-fatal: the generator falls back to the D3
+        // AI path using draftSections as context.
+        this.logger.warn(
+          `Component "${item.componentName}" has no visualPlan despite ${expectedDraftSections.length} draft section(s) — generator will use D3 fallback`,
+        );
+        continue;
+      }
+
+      const actualSections = item.visualPlan.sections;
+
+      for (let index = 0; index < expectedDraftSections.length; index++) {
+        const expectedSection = expectedDraftSections[index];
+        const actualSection = actualSections[index];
+        const expectedLabel = this.describeSectionIdentity(expectedSection);
+
+        if (!actualSection) {
+          errors.push(
+            `Component "${item.componentName}" is missing draft-backed section ${index + 1} (${expectedLabel})`,
+          );
+          continue;
+        }
+
+        if (actualSection.type !== expectedSection.type) {
+          // Type substitution is allowed: the AI may generate semantically
+          // appropriate types (search, comments, post-list) in place of draft
+          // layout placeholders (hero, post-list). Warn but don't block.
+          this.logger.warn(
+            `Component "${item.componentName}" section ${index + 1} type substitution: draft "${expectedSection.type}" → actual "${actualSection.type}"`,
+          );
+        }
+
+        if (
+          expectedSection.sourceRef?.sourceNodeId &&
+          actualSection.sourceRef?.sourceNodeId !==
+            expectedSection.sourceRef.sourceNodeId
+        ) {
+          errors.push(
+            `Component "${item.componentName}" section ${index + 1} lost sourceNodeId "${expectedSection.sourceRef.sourceNodeId}"`,
+          );
+        }
+
+        if (
+          expectedSection.sectionKey &&
+          actualSection.sectionKey !== expectedSection.sectionKey
+        ) {
+          errors.push(
+            `Component "${item.componentName}" section ${index + 1} changed sectionKey "${expectedSection.sectionKey}" → "${actualSection.sectionKey ?? 'undefined'}"`,
+          );
+        }
+      }
+    }
+  }
+
+  private getContractExpectedDraftSections(
+    item: PlanResult[number],
+  ): SectionPlan[] {
+    if (!item.draftSections?.length) return [];
+    const allowedPostDetail =
+      item.isDetail === true && item.dataNeeds.includes('post-detail');
+    const allowedPageDetail =
+      item.isDetail === true && item.dataNeeds.includes('page-detail');
+    const stripLayoutSections = item.type === 'page';
+    const filteredSections = item.draftSections.filter((section) =>
+      this.isSectionAllowed(
+        section,
+        allowedPostDetail,
+        allowedPageDetail,
+        stripLayoutSections,
+      ),
+    );
+    const sanitizedSections = sanitizeSectionsForContract(filteredSections, {
+      componentType: item.type,
+      route: item.route,
+      isDetail: item.isDetail,
+      dataNeeds: this.toVisualDataNeeds(item.dataNeeds),
+      stripLayoutChrome: item.type === 'page',
+      sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
+    });
+    return sanitizedSections.sections;
+  }
+
+  private describeSectionIdentity(section: SectionPlan): string {
+    return [
+      section.type,
+      section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+      section.sourceRef?.sourceNodeId
+        ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
   }
 
   private resolveDuplicateHomePages(

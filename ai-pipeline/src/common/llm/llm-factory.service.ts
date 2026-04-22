@@ -1,6 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
+import { AxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
 import OpenAI from 'openai';
 import { OPENAI_CLIENT } from '../providers/openai/openai.provider.js';
@@ -21,12 +22,25 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
 
 @Injectable()
 export class LlmFactoryService {
+  private readonly logger = new Logger(LlmFactoryService.name);
+  private readonly maxRetryAttempts: number;
+  private readonly retryBaseDelayMs: number;
+
   constructor(
     @Inject(OPENAI_CLIENT) private readonly openai: OpenAI,
     @Inject(CUSTOM_CONFIG) private readonly customConfig: CustomConfig,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.maxRetryAttempts = Math.max(
+      1,
+      this.configService.get<number>('llm.retry.maxAttempts', 3),
+    );
+    this.retryBaseDelayMs = Math.max(
+      100,
+      this.configService.get<number>('llm.retry.baseDelayMs', 1000),
+    );
+  }
 
   getProvider(): LlmProvider {
     return this.configService.get<LlmProvider>('aiProvider', 'openai');
@@ -101,6 +115,118 @@ export class LlmFactoryService {
     return text || undefined;
   }
 
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private getRetryDelayMs(attempt: number): number {
+    const exponentialDelay = this.retryBaseDelayMs * 2 ** (attempt - 1);
+    const jitter = Math.floor(Math.random() * 250);
+    return exponentialDelay + jitter;
+  }
+
+  private getErrorStatus(error: unknown): number | undefined {
+    if (error instanceof AxiosError) {
+      return error.response?.status;
+    }
+
+    if (error && typeof error === 'object') {
+      const status = (error as { status?: unknown }).status;
+      if (typeof status === 'number') {
+        return status;
+      }
+
+      const nestedStatus = (error as { response?: { status?: unknown } }).response
+        ?.status;
+      if (typeof nestedStatus === 'number') {
+        return nestedStatus;
+      }
+    }
+
+    return undefined;
+  }
+
+  private getErrorCode(error: unknown): string | undefined {
+    if (error && typeof error === 'object') {
+      const code = (error as { code?: unknown }).code;
+      return typeof code === 'string' ? code : undefined;
+    }
+    return undefined;
+  }
+
+  private isRetryableLlmError(error: unknown): boolean {
+    const status = this.getErrorStatus(error);
+    if (status !== undefined && [408, 409, 429, 500, 502, 503, 504].includes(status)) {
+      return true;
+    }
+
+    const code = this.getErrorCode(error);
+    if (
+      code &&
+      [
+        'ECONNABORTED',
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'ETIMEDOUT',
+        'EAI_AGAIN',
+        'ENOTFOUND',
+      ].includes(code)
+    ) {
+      return true;
+    }
+
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    return (
+      message.includes('timeout') ||
+      message.includes('temporarily unavailable') ||
+      message.includes('rate limit') ||
+      message.includes('too many requests') ||
+      message.includes('connection reset') ||
+      message.includes('bad gateway') ||
+      message.includes('gateway timeout') ||
+      message.includes('service unavailable')
+    );
+  }
+
+  async runWithRetry<T>(
+    label: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= this.maxRetryAttempts; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        const retryable = this.isRetryableLlmError(error);
+        const hasNextAttempt = attempt < this.maxRetryAttempts;
+
+        if (!retryable || !hasNextAttempt) {
+          throw error;
+        }
+
+        const delayMs = this.getRetryDelayMs(attempt);
+        const status = this.getErrorStatus(error);
+        const code = this.getErrorCode(error);
+        const details = [
+          status ? `status=${status}` : null,
+          code ? `code=${code}` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+
+        this.logger.warn(
+          `[LLM Retry] ${label} failed on attempt ${attempt}/${this.maxRetryAttempts}${details ? ` (${details})` : ''}. Retrying in ${delayMs}ms.`,
+        );
+        await this.sleep(delayMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
   async chat(params: LlmChatParams): Promise<LlmChatResult> {
     let provider = this.getProvider();
     let model = params.model;
@@ -141,17 +267,19 @@ export class LlmFactoryService {
       temperature = 0,
     } = params;
 
-    const response = await this.openai.chat.completions.create({
-      model,
-      max_completion_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(systemPrompt
-          ? [{ role: 'system' as const, content: systemPrompt }]
-          : []),
-        { role: 'user' as const, content: userPrompt },
-      ],
-    });
+    const response = await this.runWithRetry(`openai:${model}`, () =>
+      this.openai.chat.completions.create({
+        model,
+        max_completion_tokens: maxTokens,
+        temperature,
+        messages: [
+          ...(systemPrompt
+            ? [{ role: 'system' as const, content: systemPrompt }]
+            : []),
+          { role: 'user' as const, content: userPrompt },
+        ],
+      }),
+    );
 
     const text = response.choices[0]?.message?.content;
     const finishReason = response.choices[0]?.finish_reason;
@@ -193,23 +321,25 @@ export class LlmFactoryService {
       headers[authHeader] = `${authValuePrefix}${trimmedApiKey}`;
     }
 
-    const response = await firstValueFrom(
-      this.httpService.post(
-        this.normalizeChatCompletionUrl(baseURL, chatCompletionsPath),
-        {
-          model,
-          max_tokens: maxTokens,
-          temperature,
-          messages: [
-            ...(systemPrompt
-              ? [{ role: 'system', content: systemPrompt }]
-              : []),
-            { role: 'user', content: userPrompt },
-          ],
-        },
-        {
-          headers,
-        },
+    const response = await this.runWithRetry(`custom:${model}`, () =>
+      firstValueFrom(
+        this.httpService.post(
+          this.normalizeChatCompletionUrl(baseURL, chatCompletionsPath),
+          {
+            model,
+            max_tokens: maxTokens,
+            temperature,
+            messages: [
+              ...(systemPrompt
+                ? [{ role: 'system', content: systemPrompt }]
+                : []),
+              { role: 'user', content: userPrompt },
+            ],
+          },
+          {
+            headers,
+          },
+        ),
       ),
     );
 

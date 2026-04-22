@@ -1043,6 +1043,7 @@ export class CodeReviewerService {
       dataNeeds: componentPlan?.dataNeeds,
       type: componentPlan?.type,
       isSubComponent,
+      visualPlan: componentPlan?.visualPlan,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
       requiredCustomClassNames:
         requiredCustomClassNames ?? componentPlan?.requiredCustomClassNames,
@@ -1722,33 +1723,38 @@ export class CodeReviewerService {
       this.canUseOpenAiVisionModel(model)
     ) {
       try {
-        const response = await this.openai.chat.completions.create({
-          model: this.resolveOpenAiModelName(model),
-          temperature: 0,
-          max_completion_tokens: this.llmFactory.getMaxTokens(),
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
-            },
-            {
-              role: 'user',
-              content: [
+        const openAiModel = this.resolveOpenAiModelName(model);
+        const response = await this.llmFactory.runWithRetry(
+          `openai-vision-fix:${openAiModel}`,
+          () =>
+            this.openai.chat.completions.create({
+              model: openAiModel,
+              temperature: 0,
+              max_completion_tokens: this.llmFactory.getMaxTokens(),
+              messages: [
                 {
-                  type: 'text',
-                  text:
-                    `This component has a validation or targeted edit request:\n${error}\n\n` +
-                    `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                  role: 'system',
+                  content:
+                    'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
                 },
-                ...normalizedVisionUrls.map((url) => ({
-                  type: 'image_url' as const,
-                  image_url: { url, detail: 'high' as const },
-                })),
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'text',
+                      text:
+                        `This component has a validation or targeted edit request:\n${error}\n\n` +
+                        `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                    },
+                    ...normalizedVisionUrls.map((url) => ({
+                      type: 'image_url' as const,
+                      image_url: { url, detail: 'high' as const },
+                    })),
+                  ],
+                },
               ],
-            },
-          ],
-        });
+            }),
+        );
         const text = response.choices[0]?.message?.content;
         if (text) {
           const usage = response.usage;

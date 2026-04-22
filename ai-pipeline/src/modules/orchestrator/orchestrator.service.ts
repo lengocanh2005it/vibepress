@@ -53,6 +53,7 @@ import {
   readUiSourceMapEntries,
   resolveCaptureTargetsFromUiSourceMap,
 } from '../edit-request/ui-source-map.util.js';
+import { getComponentStrategy } from '../agents/component-strategy.registry.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
@@ -256,6 +257,70 @@ export interface PipelineStatus {
   steps: PipelineStep[];
   result?: any;
   error?: string;
+}
+
+function collectPlanReviewBlockingIssues(
+  review: {
+    errors: string[];
+    warnings: string[];
+    plan?: Array<{ componentName: string; visualPlan?: unknown }>;
+  },
+  strictMode: boolean,
+  phase: 'architecture' | 'visual',
+): string[] {
+  const actionableWarnings: string[] = [];
+
+  for (const warning of review.warnings) {
+    // Phase-D review intentionally runs before visual plans are attached.
+    if (
+      phase === 'architecture' &&
+      warning.includes('without visual plan (generator will use fallback AI)')
+    ) {
+      continue;
+    }
+
+    if (
+      phase === 'visual' &&
+      warning.includes('without visual plan (generator will use fallback AI)')
+    ) {
+      const missingVisualPlanComponents =
+        review.plan
+          ?.filter(
+            (component) =>
+              !component.visualPlan &&
+              !getComponentStrategy(component.componentName).skipAiVisualPlan,
+          )
+          .map((component) => component.componentName) ?? [];
+
+      if (missingVisualPlanComponents.length > 0) {
+        actionableWarnings.push(
+          `${missingVisualPlanComponents.length} component(s) still require visual plan: ${missingVisualPlanComponents.join(', ')}`,
+        );
+      }
+      continue;
+    }
+
+    // These are deterministic normalizations performed by the reviewer itself,
+    // not something the LLM can meaningfully "fix" on the next retry.
+    if (
+      warning.includes('Multiple home-like templates detected') ||
+      warning.includes('→ normalized to ') ||
+      warning.includes('removed page-level chrome dataNeeds') ||
+      warning.includes('visualPlan sections were synchronized to match route/detail contract') ||
+      warning.includes('visualPlan contract sanitization:') ||
+      warning.includes('visualPlan dataNeeds [') ||
+      warning.includes('Duplicate route "') ||
+      warning.includes('Template "') && warning.includes('dataNeeds [')
+    ) {
+      continue;
+    }
+
+    actionableWarnings.push(warning);
+  }
+
+  return strictMode
+    ? [...review.errors, ...actionableWarnings]
+    : [...review.errors];
 }
 
 interface JobRuntimeControl {
@@ -1172,6 +1237,8 @@ export class OrchestratorService {
       // All 4 phases + plan review + retry loop are ONE atomic step.
       // Per diagram: C4 (Plan Review) and C5 (Plan Valid?) live INSIDE the Planner subgraph.
       const MAX_PLAN_RETRIES = 3;
+      const strictPlanReview =
+        this.configService.get<boolean>('planner.strictReview') ?? true;
       const expectedTemplateNames = this.planner.getExpectedTemplateNames(
         normalizedTheme,
         content,
@@ -1214,26 +1281,64 @@ export class OrchestratorService {
             expectedTemplateNames,
             repoResult.themeManifest,
           );
+          let planAttempt = 1;
+          let planBlockingIssues = collectPlanReviewBlockingIssues(
+            review,
+            strictPlanReview,
+            'architecture',
+          );
+          await this.planner.writeArtifact(
+            logPath,
+            `plan.attempt-${planAttempt}.json`,
+            {
+              stage: 'planner-attempt-reviewed',
+              generatedAt: new Date().toISOString(),
+              attempt: planAttempt,
+              isValid: planBlockingIssues.length === 0,
+              errors: review.errors,
+              warnings: review.warnings,
+              blockingIssues: planBlockingIssues,
+              strictReview: strictPlanReview,
+              plan: review.plan,
+            },
+          );
 
           // C5 → C6 retry loop: if plan invalid, loop back to C1
           for (
             let attempt = 2;
-            attempt <= MAX_PLAN_RETRIES && !review.isValid;
+            attempt <= MAX_PLAN_RETRIES && planBlockingIssues.length > 0;
             attempt++
           ) {
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.attempt-${planAttempt}.invalid.json`,
+              {
+                stage: 'planner-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: planAttempt,
+                errors: review.errors,
+                warnings: review.warnings,
+                blockingIssues: planBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: review.plan,
+              },
+            );
             summaryDraft.retries.plannerReview += 1;
             this.logger.warn(
-              `[${jobId}] [Stage 3: Phase D] Plan invalid (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${review.errors.join('; ')} — retrying Phases A→C`,
+              `[${jobId}] [Stage 3: Phase D] Plan blocked (attempt ${attempt - 1}/${MAX_PLAN_RETRIES}): ${planBlockingIssues.join('; ')} — retrying Phases A→C`,
             );
             await this.logToFile(
               logPath,
-              `[Stage 3: C6 Retry] attempt ${attempt}: ${review.errors.join('; ')}`,
+              `[Stage 3: C6 Retry] attempt ${attempt}: ${planBlockingIssues.join('; ')}`,
             );
             this.emitStepProgress(
               state,
               '5_planner',
               0.35,
               `Planner retry ${attempt}/${MAX_PLAN_RETRIES}: rebuilding routes, data needs, and visual sections after review feedback.`,
+            );
+            this.logger.log(
+              `[${jobId}] [Stage 3: Phase D] Starting planner attempt ${attempt}/${MAX_PLAN_RETRIES}`,
             );
 
             // C6 → C1: reset and re-run Phases A, B, C
@@ -1247,13 +1352,34 @@ export class OrchestratorService {
                 logPath,
                 repoManifest: repoResult.themeManifest,
                 editRequest: planningEditRequest,
-                planReviewErrors: review.errors,
+                planReviewErrors: planBlockingIssues,
               },
             );
             review = this.planReviewer.review(
               plan,
               expectedTemplateNames,
               repoResult.themeManifest,
+            );
+            planAttempt = attempt;
+            planBlockingIssues = collectPlanReviewBlockingIssues(
+              review,
+              strictPlanReview,
+              'architecture',
+            );
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.attempt-${planAttempt}.json`,
+              {
+                stage: 'planner-attempt-reviewed',
+                generatedAt: new Date().toISOString(),
+                attempt: planAttempt,
+                isValid: planBlockingIssues.length === 0,
+                errors: review.errors,
+                warnings: review.warnings,
+                blockingIssues: planBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: review.plan,
+              },
             );
             this.emitStepProgress(
               state,
@@ -1263,9 +1389,23 @@ export class OrchestratorService {
             );
           }
 
-          if (!review.isValid) {
+          if (planBlockingIssues.length > 0) {
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.attempt-${planAttempt}.invalid.json`,
+              {
+                stage: 'planner-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: planAttempt,
+                errors: review.errors,
+                warnings: review.warnings,
+                blockingIssues: planBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: review.plan,
+              },
+            );
             throw new Error(
-              `[Stage 3] Plan still invalid after ${MAX_PLAN_RETRIES} attempts: ${review.errors.join('; ')}`,
+              `[Stage 3] Plan still blocked after ${MAX_PLAN_RETRIES} attempts: ${planBlockingIssues.join('; ')}`,
             );
           }
 
@@ -1289,24 +1429,62 @@ export class OrchestratorService {
             expectedTemplateNames,
             repoResult.themeManifest,
           );
+          let visualAttempt = 1;
+          let visualBlockingIssues = collectPlanReviewBlockingIssues(
+            visualReview,
+            strictPlanReview,
+            'visual',
+          );
+          await this.planner.writeArtifact(
+            logPath,
+            `plan.visual-attempt-${visualAttempt}.json`,
+            {
+              stage: 'visual-plan-attempt-reviewed',
+              generatedAt: new Date().toISOString(),
+              attempt: visualAttempt,
+              isValid: visualBlockingIssues.length === 0,
+              errors: visualReview.errors,
+              warnings: visualReview.warnings,
+              blockingIssues: visualBlockingIssues,
+              strictReview: strictPlanReview,
+              plan: visualReview.plan,
+            },
+          );
           for (
             let vAttempt = 2;
-            vAttempt <= MAX_VISUAL_RETRIES && !visualReview.isValid;
+            vAttempt <= MAX_VISUAL_RETRIES && visualBlockingIssues.length > 0;
             vAttempt++
           ) {
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}.invalid.json`,
+              {
+                stage: 'visual-plan-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
             summaryDraft.retries.visualPlanReview += 1;
             this.logger.warn(
-              `[${jobId}] [Stage 3: Visual Plan] Review failed (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualReview.errors.join('; ')} — retrying attachVisualPlans`,
+              `[${jobId}] [Stage 3: Visual Plan] Review blocked (attempt ${vAttempt - 1}/${MAX_VISUAL_RETRIES}): ${visualBlockingIssues.join('; ')} — retrying attachVisualPlans`,
             );
             await this.logToFile(
               logPath,
-              `[Stage 3: Visual Plan Retry] attempt ${vAttempt}: ${visualReview.errors.join('; ')}`,
+              `[Stage 3: Visual Plan Retry] attempt ${vAttempt}: ${visualBlockingIssues.join('; ')}`,
             );
             this.emitStepProgress(
               state,
               '5_planner',
               0.82,
               `Visual plan retry ${vAttempt}/${MAX_VISUAL_RETRIES}: regenerating visual sections after consistency check failed.`,
+            );
+            this.logger.log(
+              `[${jobId}] [Stage 3: Visual Plan] Starting visual-plan attempt ${vAttempt}/${MAX_VISUAL_RETRIES}`,
             );
             planWithVisuals = await this.planner.attachVisualPlans(
               normalizedTheme,
@@ -1321,13 +1499,54 @@ export class OrchestratorService {
               expectedTemplateNames,
               repoResult.themeManifest,
             );
+            visualAttempt = vAttempt;
+            visualBlockingIssues = collectPlanReviewBlockingIssues(
+              visualReview,
+              strictPlanReview,
+              'visual',
+            );
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}.json`,
+              {
+                stage: 'visual-plan-attempt-reviewed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                isValid: visualBlockingIssues.length === 0,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
           }
-          if (!visualReview.isValid) {
+          if (visualBlockingIssues.length > 0) {
+            await this.planner.writeArtifact(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}.invalid.json`,
+              {
+                stage: 'visual-plan-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
             throw new Error(
-              `[Stage 3] Visual-plan synchronization failed after ${MAX_VISUAL_RETRIES} attempts: ${visualReview.errors.join('; ')}`,
+              `[Stage 3] Visual-plan synchronization failed after ${MAX_VISUAL_RETRIES} attempts: ${visualBlockingIssues.join('; ')}`,
             );
           }
           review = visualReview;
+          await this.planner.writeArtifact(logPath, 'plan.final.json', {
+            stage: 'planner-final',
+            generatedAt: new Date().toISOString(),
+            plan: review.plan,
+            warnings: review.warnings,
+          });
 
           this.emitStepProgress(
             state,

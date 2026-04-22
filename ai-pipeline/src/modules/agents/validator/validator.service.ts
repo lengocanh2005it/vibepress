@@ -4,6 +4,17 @@ import { spawn } from 'child_process';
 import ts from 'typescript';
 import puppeteer, { type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
+import type {
+  CardGridSection,
+  ComponentVisualPlan,
+  CoverSection,
+  HeroSection,
+  MediaTextSection,
+  NewsletterSection,
+  PostListSection,
+  SectionPlan,
+  TestimonialSection,
+} from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
@@ -38,6 +49,7 @@ export interface CodeValidationContext {
   requireCommentForm?: boolean;
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  visualPlan?: ComponentVisualPlan;
 }
 
 export interface ComponentValidationFailure {
@@ -97,6 +109,7 @@ export class ValidatorService {
         isSubComponent: comp.isSubComponent,
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
+        visualPlan: comp.visualPlan,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -258,6 +271,18 @@ export class ValidatorService {
         isValid: false,
         error:
           'Missing `export default` — component is truncated or incomplete.',
+      };
+    }
+
+    const visualPlanIssue = this.checkVisualPlanFidelity(
+      code,
+      context.visualPlan,
+      context.componentName,
+    );
+    if (visualPlanIssue) {
+      return {
+        isValid: false,
+        error: visualPlanIssue,
       };
     }
 
@@ -817,6 +842,266 @@ export class ValidatorService {
       isValid: true,
       ...(code !== rawCode ? { fixedCode: code } : {}),
     };
+  }
+
+  private checkVisualPlanFidelity(
+    code: string,
+    visualPlan?: ComponentVisualPlan,
+    componentName?: string,
+  ): string | null {
+    if (!visualPlan?.sections?.length) return null;
+
+    const issues: string[] = [];
+    const sectionKeyMatches = [
+      ...code.matchAll(/data-vp-section-key=["']([^"']+)["']/g),
+    ].map((match) => match[1]);
+    const renderedSectionKeys = new Set(sectionKeyMatches);
+
+    for (const [index, section] of visualPlan.sections.entries()) {
+      const label = `"${componentName ?? visualPlan.componentName}" section ${index + 1}`;
+      if (section.sectionKey && !renderedSectionKeys.has(section.sectionKey)) {
+        issues.push(
+          `${label} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
+        );
+      }
+
+      if (section.sourceRef?.sourceNodeId && !code.includes(section.sourceRef.sourceNodeId)) {
+        issues.push(
+          `${label} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
+        );
+      }
+
+      issues.push(...this.checkSectionPayloadFidelity(code, section, label));
+    }
+
+    if (issues.length === 0) return null;
+    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+  }
+
+  private checkSectionPayloadFidelity(
+    code: string,
+    section: SectionPlan,
+    label: string,
+  ): string[] {
+    switch (section.type) {
+      case 'hero':
+        return this.checkHeroPayload(code, section, label);
+      case 'cover':
+        return this.checkCoverPayload(code, section, label);
+      case 'media-text':
+        return this.checkMediaTextPayload(code, section, label);
+      case 'card-grid':
+        return this.checkCardGridPayload(code, section, label);
+      case 'testimonial':
+        return this.checkTestimonialPayload(code, section, label);
+      case 'newsletter':
+        return this.checkNewsletterPayload(code, section, label);
+      case 'post-list':
+        return this.checkPostListPayload(code, section, label);
+      default:
+        return [];
+    }
+  }
+
+  private checkHeroPayload(
+    code: string,
+    section: HeroSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(...this.requireLiteralIfPresent(code, section.heading, `${label} lost hero heading`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost hero subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.cta?.text,
+        `${label} lost hero CTA text`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.image?.src,
+        `${label} lost hero image src`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkCoverPayload(
+    code: string,
+    section: CoverSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost cover image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(code, section.heading, `${label} lost cover heading`),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost cover subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.cta?.text,
+        `${label} lost cover CTA text`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkMediaTextPayload(
+    code: string,
+    section: MediaTextSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost media-text image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost media-text heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(code, section.body, `${label} lost media-text body`),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.cta?.text,
+        `${label} lost media-text CTA text`,
+      ),
+    );
+    for (const item of section.listItems ?? []) {
+      issues.push(...this.requireLiteralIfPresent(code, item, `${label} lost media-text list item`));
+    }
+    return issues;
+  }
+
+  private checkCardGridPayload(
+    code: string,
+    section: CardGridSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(code, section.title, `${label} lost card-grid title`),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subtitle,
+        `${label} lost card-grid subtitle`,
+      ),
+    );
+
+    for (const card of section.cards ?? []) {
+      issues.push(...this.requireLiteralIfPresent(code, card.heading, `${label} lost card heading`));
+      issues.push(...this.requireLiteralIfPresent(code, card.body, `${label} lost card body`));
+    }
+    return issues;
+  }
+
+  private checkTestimonialPayload(
+    code: string,
+    section: TestimonialSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(...this.requireLiteralIfPresent(code, section.quote, `${label} lost testimonial quote`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorName,
+        `${label} lost testimonial author`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorTitle,
+        `${label} lost testimonial author title`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorAvatar,
+        `${label} lost testimonial avatar`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkNewsletterPayload(
+    code: string,
+    section: NewsletterSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(...this.requireLiteralIfPresent(code, section.heading, `${label} lost newsletter heading`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost newsletter subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.buttonText,
+        `${label} lost newsletter button text`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkPostListPayload(
+    code: string,
+    section: PostListSection,
+    label: string,
+  ): string[] {
+    return this.requireLiteralIfPresent(
+      code,
+      section.title,
+      `${label} lost post-list title`,
+    );
+  }
+
+  private requireLiteralIfPresent(
+    code: string,
+    value: string | undefined,
+    error: string,
+  ): string[] {
+    const normalized = value?.trim();
+    if (!normalized) return [];
+    return code.includes(normalized) ? [] : [error];
   }
 
   private findMissingRequiredCustomClasses(

@@ -20,6 +20,7 @@ import type {
   CommentsSection,
   SearchSection,
   SidebarSection,
+  CarouselSection,
   DataNeed,
 } from './visual-plan.schema.js';
 import {
@@ -163,6 +164,9 @@ export class CodeGeneratorService {
     }
     if (needsMenus) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
+    }
+    if (needsMenus && renderState.componentKind === 'header') {
+      lines.push(`  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`);
     }
     if (renderState.componentKind === 'footer') {
       lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
@@ -336,7 +340,9 @@ export class CodeGeneratorService {
 
     lines.push('');
     lines.push('  return (');
-    lines.push(`    <${rootTag} className="w-full">`);
+    const rootClass =
+      renderState.componentKind === 'header' ? 'w-full relative' : 'w-full';
+    lines.push(`    <${rootTag} className="${rootClass}">`);
     if (fragment) lines.push(fragment);
     lines.push(`    </${rootTag}>`);
     lines.push('  );');
@@ -496,6 +502,8 @@ export class CodeGeneratorService {
       lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     if (dataNeeds.includes('menus'))
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
+    if (plan.sections.some((s) => s.type === 'navbar'))
+      lines.push(`  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`);
     if (dataNeeds.includes('postDetail')) {
       lines.push(`  const [item, setItem] = useState<Post | null>(null);`);
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
@@ -834,6 +842,10 @@ export class CodeGeneratorService {
     }
 
     lines.push(
+      `  const resolveAsset = (src: string) => src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+    );
+    lines.push('');
+    lines.push(
       `  if (loading) return <div className="min-h-screen flex items-center justify-center"><span>Loading...</span></div>;`,
     );
     lines.push(
@@ -962,6 +974,9 @@ export default ${componentName};`;
         break;
       case 'sidebar':
         markup = this.renderSidebar(section, ctx, py);
+        break;
+      case 'carousel':
+        markup = this.renderCarousel(section, ctx, bg, tc, py);
         break;
     }
 
@@ -1261,29 +1276,49 @@ export default ${componentName};`;
         : `\n            <Link to="${s.cta.link}" className="${this.textLinkClass(tc, p.accent)}">${s.cta.text}</Link>`
       : '';
 
+    const navItems = `menus.find(m => m.slug === '${s.menuSlug}')?.items.filter(i => i.parentId === 0)`;
+    const renderNavItem = (extraClass = '') =>
+      `(isInternalPath(item.url) ? (
+                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}">
+                      {item.title}
+                    </Link>
+                  ) : (
+                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}">
+                      {item.title}
+                    </a>
+                  ))`;
+
     return `      {/* Navbar */}
       <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           <div className="flex items-center justify-between py-4"${this.buildSectionGapStyleAttr(s)}>
             <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
             <nav className="hidden md:flex items-center gap-6">
-              {menus.find(m => m.slug === '${s.menuSlug}')?.items
-                .filter(i => i.parentId === 0)
-                .map(item => (
-                  isInternalPath(item.url) ? (
-                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}">
-                      {item.title}
-                    </Link>
-                  ) : (
-                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}">
-                      {item.title}
-                    </a>
-                  )
+              {${navItems}?.map(item => (
+                  ${renderNavItem()}
                 ))}
             </nav>
             <div className="flex items-center gap-4">${cta}
+              <button
+                className="md:hidden flex flex-col gap-[5px] p-2 text-[${tc}]"
+                aria-label="Toggle menu"
+                onClick={() => setMobileMenuOpen(prev => !prev)}
+              >
+                {mobileMenuOpen ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                )}
+              </button>
             </div>
           </div>
+          {mobileMenuOpen && (
+            <nav className="md:hidden flex flex-col gap-1 pb-4 border-t border-black/10">
+              {${navItems}?.map(item => (
+                  ${renderNavItem(' block py-2 px-2')}
+                ))}
+            </nav>
+          )}
         </div>
       </header>`;
   }
@@ -1309,8 +1344,8 @@ export default ${componentName};`;
       : '';
     const image = s.image
       ? s.image.position === 'below'
-        ? `\n          <img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />`
-        : `\n          <div className="flex-1"><img src="${s.image.src}" alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`
+        ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />`
+        : `\n          <div className="flex-1"><img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`
       : '';
 
     const isCenter = s.layout === 'centered';
@@ -1355,12 +1390,18 @@ export default ${componentName};`;
       this.pickBlockStyle(ctx, 'paragraph')?.typography,
       s.subheadingStyle,
     );
-    const styleAttr = this.buildSectionStyleAttr(s, {
-      backgroundImage: `url("${s.imageSrc}")`,
-      backgroundSize: 'cover',
-      backgroundPosition: 'center',
-      minHeight: s.minHeight,
-    });
+    const bgSrcExpr = s.imageSrc.startsWith('/assets/')
+      ? `\`url("\${resolveAsset("${s.imageSrc}")}")\``
+      : `"url(\\"${s.imageSrc}\\")"`;
+    const extraStyles = [
+      `backgroundImage: ${bgSrcExpr}`,
+      `backgroundSize: 'cover'`,
+      `backgroundPosition: 'center'`,
+      ...(s.minHeight ? [`minHeight: '${s.minHeight}'`] : []),
+      ...(s.paddingStyle ? [`padding: '${s.paddingStyle}'`] : []),
+      ...(s.marginStyle ? [`margin: '${s.marginStyle}'`] : []),
+    ].join(', ');
+    const styleAttr = ` style={{ ${extraStyles} }}`;
     const align =
       s.contentAlign === 'center'
         ? 'items-center text-center'
@@ -1536,7 +1577,7 @@ ${cards}
         : 'flex flex-col md:flex-row gap-8 items-center';
     const imgFirst = s.imagePosition === 'left';
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
-    const imgEl = `<div className="${itemWrapper}"><img src="${s.imageSrc}" alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
+    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
@@ -1573,7 +1614,7 @@ ${cards}
           <div className="flex flex-col items-center text-center gap-8"${this.buildSectionGapStyleAttr(s)}>
             <p className="${t.h3} font-normal leading-snug">"{s.quote}"</p>
             <div className="flex flex-col items-center gap-1">
-              ${s.authorAvatar ? `<img src="${s.authorAvatar}" alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
+              ${s.authorAvatar ? `<img src={resolveAsset("${s.authorAvatar}")} alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
               <span className="font-medium">${s.authorName}</span>
               ${s.authorTitle ? `<span className="text-sm opacity-70">${s.authorTitle}</span>` : ''}
             </div>
@@ -2345,6 +2386,44 @@ ${indent}</div>`;
       depth + 1,
       isVertical,
     );
+    const isMobileNav = !isVertical && state.componentKind === 'header';
+    if (isMobileNav) {
+      const tc = ctx.p.text;
+      return `${indent}<>
+${indent}  <nav className="hidden md:flex"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}    {${menuVar} ? (
+${indent}      <ul className="${listClass}">
+${indent}        {renderMenuItems(${menuVar}.items, 0, false)}
+${indent}      </ul>
+${indent}    ) : (
+${fallbackMarkup}
+${indent}    )}
+${indent}  </nav>
+${indent}  <button
+${indent}    className="md:hidden flex items-center p-2 text-[${tc}]"
+${indent}    aria-label="Toggle menu"
+${indent}    onClick={() => setMobileMenuOpen(prev => !prev)}
+${indent}  >
+${indent}    {mobileMenuOpen ? (
+${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+${indent}    ) : (
+${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+${indent}    )}
+${indent}  </button>
+${indent}  {mobileMenuOpen && (
+${indent}    <nav className="md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50">
+${indent}      <div className="${ctx.l.containerClass} py-3">
+${indent}        {${menuVar} ? (
+${indent}          <ul className="flex flex-col gap-1">
+${indent}            {renderMenuItems(${menuVar}.items, 0, true)}
+${indent}          </ul>
+${indent}        ) : (
+${fallbackMarkup}
+${indent}        )}
+${indent}      </div>
+${indent}    </nav>
+${indent}  )}
+${indent}</>`;}
     return `${indent}<nav${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
 ${indent}    <ul className="${listClass}">
@@ -2527,6 +2606,52 @@ ${indent}</ul>`;
     const normalized = value.trim();
     if (!normalized) return undefined;
     return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+  }
+
+  private renderCarousel(
+    s: CarouselSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+  ): string {
+    const { t } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const resolveAsset = (src: string) =>
+      src.startsWith('/assets/')
+        ? `\${import.meta.env.BASE_URL}assets/\${${JSON.stringify(src.slice('/assets/'.length))}}`
+        : src;
+
+    const slides = s.slides
+      .map((slide, i) => {
+        const imgSrc = slide.imageSrc ? resolveAsset(slide.imageSrc) : '';
+        const imgPart = slide.imageSrc
+          ? `\n            <img src="${imgSrc}" alt={${JSON.stringify(slide.imageAlt ?? '')}} className="w-full h-64 object-cover rounded-xl" />`
+          : '';
+        const headingPart = slide.heading
+          ? `\n            <h3 className="${t.h2} font-bold" style={{ color: '${tc}' }}>${slide.heading}</h3>`
+          : '';
+        const subPart = slide.subheading
+          ? `\n            <p className="text-base" style={{ color: '${tc}' }}>${slide.subheading}</p>`
+          : '';
+        const ctaPart = slide.cta
+          ? `\n            <a href={${JSON.stringify(slide.cta.link)}} className="inline-block px-6 py-3 rounded-full font-semibold" style={{ background: '${tc}', color: '${bg}' }}>${slide.cta.text}</a>`
+          : '';
+        return `          <div key={${i}} className="flex-none w-full snap-center">
+            <div className="flex flex-col gap-4">${imgPart}${headingPart}${subPart}${ctaPart}
+            </div>
+          </div>`;
+      })
+      .join('\n');
+
+    return `
+    <section className="w-full ${py} overflow-hidden" style={{ background: '${bg}' }}${sectionStyle}>
+      <div className="max-w-[1280px] mx-auto px-4 sm:px-6">
+        <div className="flex overflow-x-auto snap-x snap-mandatory gap-4 pb-2 scrollbar-hide">
+${slides}
+        </div>
+      </div>
+    </section>`;
   }
 }
 

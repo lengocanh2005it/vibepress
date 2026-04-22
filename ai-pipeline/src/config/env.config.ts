@@ -139,6 +139,10 @@ export default () => {
   },
   llm: {
     profile: llmProfile,
+    retry: {
+      maxAttempts: parseInt(process.env.LLM_RETRY_MAX_ATTEMPTS ?? '3', 10),
+      baseDelayMs: parseInt(process.env.LLM_RETRY_BASE_DELAY_MS ?? '1000', 10),
+    },
   },
   reactGenerator: {
     delayBetweenComponents: parseInt(

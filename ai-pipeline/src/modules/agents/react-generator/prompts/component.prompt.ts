@@ -835,7 +835,7 @@ function buildClassicThemeNote(
     : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
   const footerHint = isPageComponent
     ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` for footer links`;
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + ALWAYS fetch \`GET /api/footer-links\` for footer columns; if you also fetch \`GET /api/menus\`, use only non-primary footer/social groups from menus and fall back to \`/api/footer-links\``;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).

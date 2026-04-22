@@ -192,6 +192,18 @@ export interface SidebarSection extends BaseSection {
   maxItems?: number;
 }
 
+export interface CarouselSection extends BaseSection {
+  type: 'carousel';
+  slides: {
+    heading?: string;
+    subheading?: string;
+    imageSrc?: string;
+    imageAlt?: string;
+    cta?: { text: string; link: string };
+  }[];
+  autoplay?: boolean;
+}
+
 export type SectionPlan =
   | NavbarSection
   | HeroSection
@@ -207,7 +219,8 @@ export type SectionPlan =
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
-  | SidebarSection;
+  | SidebarSection
+  | CarouselSection;
 
 /**
  * Typography tokens derived from theme.json / style.css.

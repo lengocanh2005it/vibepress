@@ -1,13 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import {
+  AiProcessError,
+  runAiProcess,
+  type AiEditRequestPayload,
+} from "../services/AiService";
 import type { PipelineProgressEvent } from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
+
+interface SplitViewLocationState {
+  jobId?: string;
+  siteId?: string;
+  editRequest?: AiEditRequestPayload;
+}
 
 const SplitView: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const jobId = location.state?.jobId || "";
-  const siteId: string = location.state?.siteId || "";
+  const locationState = (location.state ?? {}) as SplitViewLocationState;
+  const jobId = locationState.jobId || "";
+  const siteId = locationState.siteId || "";
+  const previousEditRequest = locationState.editRequest;
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
@@ -15,6 +28,10 @@ const SplitView: React.FC = () => {
     useState<PipelineProgressEvent | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
+  const [retryState, setRetryState] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -175,6 +192,15 @@ const SplitView: React.FC = () => {
         .find((event) => Boolean(event.data?.metrics)) ?? null,
     [sse.allEvents],
   );
+  const latestFailedEvent = useMemo(
+    () =>
+      [...sse.allEvents]
+        .reverse()
+        .find(
+          (event) => event.status === "error" || event.status === "stopped",
+        ) ?? null,
+    [sse.allEvents],
+  );
   const latestEvent = sse.currentEvent;
   const previewData = latestPreviewEvent?.data;
   const previewUrl = previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
@@ -258,6 +284,7 @@ const SplitView: React.FC = () => {
   useEffect(() => {
     startedAtRef.current = Date.now();
     setElapsedSeconds(0);
+    setRetryState({ loading: false, error: null });
   }, [jobId]);
 
   const isPipelineCompleted =
@@ -337,6 +364,11 @@ const SplitView: React.FC = () => {
     };
   }, [completionEvent, sse.connectionState]);
   const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
+  const canRetryLastRequest = Boolean(siteId && previousEditRequest);
+  const shouldShowRetryButton =
+    canRetryLastRequest &&
+    !deleteState.done &&
+    (sse.connectionState === "error" || latestFailedEvent?.status === "error");
 
   const openStopConfirm = () => {
     if (deleteState.loading || deleteState.done) return;
@@ -389,6 +421,33 @@ const SplitView: React.FC = () => {
 
   const handleRefreshPreview = () => {
     setPreviewRefreshNonce((value) => value + 1);
+  };
+
+  const handleRetryPipeline = async () => {
+    if (!siteId || !previousEditRequest || retryState.loading) return;
+
+    setRetryState({ loading: true, error: null });
+
+    try {
+      sse.disconnect();
+      const data = await runAiProcess(siteId, previousEditRequest);
+      navigate("/app/editor/split-view", {
+        replace: true,
+        state: {
+          jobId: data.jobId,
+          siteId,
+          editRequest: previousEditRequest,
+        },
+      });
+    } catch (error) {
+      const message =
+        error instanceof AiProcessError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Failed to retry the pipeline.";
+      setRetryState({ loading: false, error: message });
+    }
   };
 
   const handleOpenVisualEdit = () => {
@@ -481,6 +540,18 @@ const SplitView: React.FC = () => {
                 {deleteState.loading ? "Stopping..." : "Stop"}
               </button>
             )}
+            {shouldShowRetryButton && (
+              <button
+                onClick={handleRetryPipeline}
+                disabled={retryState.loading}
+                className="text-xs font-mono px-2 py-1 rounded bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>
+                  replay
+                </span>
+                {retryState.loading ? "Retrying..." : "Retry"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -519,6 +590,38 @@ const SplitView: React.FC = () => {
           {sse.error && (
             <div className="p-3 bg-red-500/20 border border-red-500/50 rounded text-red-400 text-xs">
               Workflow error: {sse.error.message}
+            </div>
+          )}
+          {shouldShowRetryButton && (
+            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-100">
+              <p className="font-semibold text-amber-200">
+                The pipeline stopped with an error.
+              </p>
+              <p className="mt-1 text-amber-100/90">
+                Retry will resend the previous request from this screen.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={handleRetryPipeline}
+                  disabled={retryState.loading}
+                  className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-semibold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span className="material-symbols-outlined text-[18px]">
+                    replay
+                  </span>
+                  {retryState.loading ? "Retrying request..." : "Retry Last Request"}
+                </button>
+                {latestFailedEvent?.label && (
+                  <span className="text-[11px] text-amber-100/80">
+                    Failed at: {latestFailedEvent.label}
+                  </span>
+                )}
+              </div>
+              {retryState.error && (
+                <p className="mt-3 text-[11px] text-red-200">
+                  Retry failed: {retryState.error}
+                </p>
+              )}
             </div>
           )}
 
@@ -703,6 +806,18 @@ const SplitView: React.FC = () => {
           <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
             {previewUrl ? (
               <>
+                {shouldShowRetryButton && (
+                  <button
+                    onClick={handleRetryPipeline}
+                    disabled={retryState.loading}
+                    className={`${actionButtonClass} border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 focus-visible:ring-amber-300 disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    <span className="material-symbols-outlined text-[18px]">
+                      replay
+                    </span>
+                    {retryState.loading ? "Retrying..." : "Retry Last Request"}
+                  </button>
+                )}
                 {completionEvent && (
                   <button
                     onClick={handleOpenVisualEdit}

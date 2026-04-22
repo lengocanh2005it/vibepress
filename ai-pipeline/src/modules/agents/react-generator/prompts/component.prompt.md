@@ -159,7 +159,7 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 ⛔ `blogDescription` → ONLY if template has `block: "site-tagline"`, else omit entirely
 ⛔ Images: render `<img>` only when `src` is non-empty in template JSON or `featuredImage` from API — no placeholders, no invented paths
 ⛔ Invented content: testimonial quotes, names, job titles must come exactly from template `text` fields
-⛔ Footer nav: fetch BOTH `/api/menus` AND `/api/footer-links` in Promise.all — use non-primary menus from `/api/menus` first; if none, fall back to `/api/footer-links` columns — NEVER hardcode links
+⛔ Footer nav: ALWAYS fetch `/api/footer-links` for footer columns. You may also fetch `/api/menus`, but only to read non-primary footer/social groups. If those menu groups are absent, fall back to `/api/footer-links` columns — NEVER hardcode links
 
 **Footer multi-menu rendering — MANDATORY pattern:**
 
@@ -168,12 +168,13 @@ Each column from `/api/footer-links` has shape: `{ heading: string; links: { lab
 
 - `location` = WP theme location slug (e.g. `"primary"` = main nav, `"footer-about"`, `"social"`, etc.)
 - The **Header/Navigation** component owns the `location === "primary"` menu
-- The **Footer** component must fetch BOTH `/api/menus` AND `/api/footer-links` in a single `Promise.all`
+- The **Footer** component must always fetch `/api/footer-links`
+- The **Footer** component may also fetch `/api/menus` in the same `Promise.all`, but only to read non-primary footer/social groups
 - Render priority: non-primary menus from `/api/menus` first; if none, use `/api/footer-links` columns; if neither, render nothing
 - `item.url` from `/api/menus` is already canonical. Use `<Link to={item.url}>` directly — never prefix it.
 
 ```tsx
-// ✅ Correct — fetch both, use footer-links as fallback
+// ✅ Correct — footer-links is mandatory, menus are optional enrichment
 interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }
 interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }
 interface FooterColumn { heading: string; links: { label: string; url: string }[]; }
@@ -534,7 +535,8 @@ Rules:
 - `header` should become `<header>` with its child blocks and compound layout.
 - `footer` should become `<footer>` with link columns, menus, site info, and credit elements.
 - Respect block order and spacing (e.g., if header has nav + banner, keep order).
-- Fetch menus from `/api/menus` and render ALL navigation items — never hardcode links.
+- Header/Nav should fetch menus from `/api/menus` and render navigation items — never hardcode links.
+- Footer should always fetch `/api/footer-links`; `/api/menus` is optional and only for non-primary footer/social groups.
 - Do not produce a generic placeholder when the template explicitly defines these blocks.
 
 **For PAGE components** (any other component): ⛔ Do NOT render a `<header>` or `<footer>` — they are provided by the shared Layout wrapper.

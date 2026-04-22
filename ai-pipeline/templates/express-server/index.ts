@@ -3,13 +3,16 @@ import cors from 'cors';
 import { createConnection } from 'mysql2/promise';
 import dotenv from 'dotenv';
 import { createHash } from 'crypto';
-import { basename, extname, resolve } from 'path';
+import { basename, extname, resolve, join } from 'path';
 
 dotenv.config({ path: resolve(process.cwd(), '.env'), override: true });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve static assets copied from wp-content/uploads during preview build
+app.use('/assets', express.static(join(resolve(process.cwd(), '..', 'frontend', 'public', 'assets'))));
 
 app.get('/api', (_req, res) => {
   res.json({

@@ -28,6 +28,7 @@ import type {
   BreadcrumbSection,
   SidebarSection,
   TestimonialSection,
+  CarouselSection,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -182,6 +183,46 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 
   if (block === 'core/heading' || block === 'heading') {
     return toMappedSections(mapStandaloneHeading(node), node);
+  }
+
+  // ── UAGB / Spectra blocks ───────────────────────────────────────────────
+
+  // Slider: map to CarouselSection with one slide per uagb/slider-child
+  if (block === 'uagb/slider') {
+    return toMappedSections(mapUagbSlider(node), node);
+  }
+
+  // Info-box: a single card — collect as card-grid at parent level or standalone
+  if (block === 'uagb/info-box') {
+    return toMappedSections(mapUagbInfoBox(node), node);
+  }
+
+  // Modal: popup trigger — not a page section, skip
+  if (block === 'uagb/modal') {
+    return [];
+  }
+
+  // Tabs: render tab content as a card-grid (one card per tab)
+  if (block === 'uagb/tabs') {
+    return toMappedSections(mapUagbTabs(node), node);
+  }
+
+  // Container / section / advanced-heading / icon-list: treat as group wrapper
+  if (
+    block === 'uagb/container' ||
+    block === 'uagb/section' ||
+    block === 'uagb/advanced-heading' ||
+    block === 'uagb/icon-list'
+  ) {
+    if (node.children?.length) return mapGroup(node, siblings);
+    return [];
+  }
+
+  // Unknown block (e.g. elementor-*, other plugin blocks, etc.)
+  // If it has nested children, treat it like a group wrapper and recurse so
+  // sections are not silently dropped.
+  if (node.children?.length) {
+    return mapGroup(node, siblings);
   }
 
   return [];
@@ -533,6 +574,97 @@ function mapQuote(node: WpNode): TestimonialSection | null {
     type: 'testimonial',
     quote,
     authorName,
+  };
+}
+
+// ── UAGB / Spectra mappers ──────────────────────────────────────────────────
+
+function mapUagbSlider(node: WpNode): CarouselSection | null {
+  const slideChildren = (node.children ?? []).filter(
+    (c) => c.block === 'uagb/slider-child',
+  );
+  const slides = slideChildren.map((child) => {
+    const flat = flattenChildren(child);
+    const h = flat.find(
+      (c) => c.block === 'core/heading' || c.block === 'heading',
+    );
+    const p = flat.find(
+      (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+    );
+    const img = flat.find(
+      (c) =>
+        (c.block === 'core/image' || c.block === 'image') && c.src,
+    );
+    const btn = flat.find(
+      (c) =>
+        c.block === 'core/button' ||
+        c.block === 'button' ||
+        c.block === 'core/buttons' ||
+        c.block === 'buttons',
+    );
+    return {
+      ...(h?.text ? { heading: h.text } : {}),
+      ...(p?.text ? { subheading: p.text } : {}),
+      ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
+      ...(btn?.text ? { cta: { text: btn.text, link: btn.href ?? '#' } } : {}),
+    };
+  });
+
+  // Fallback: if no labeled slider-children, treat all children as a single slide
+  if (slides.length === 0) {
+    const flat = flattenChildren(node);
+    const h = flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
+    const p = flat.find((c) => c.block === 'core/paragraph' || c.block === 'paragraph');
+    const img = flat.find((c) => (c.block === 'core/image' || c.block === 'image') && c.src);
+    if (!h && !img) return null;
+    slides.push({
+      ...(h?.text ? { heading: h.text } : {}),
+      ...(p?.text ? { subheading: p.text } : {}),
+      ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
+    });
+  }
+
+  return { type: 'carousel', slides };
+}
+
+function mapUagbInfoBox(node: WpNode): CardGridSection | null {
+  const flat = flattenChildren(node);
+  const h = flat.find(
+    (c) => c.block === 'core/heading' || c.block === 'heading',
+  );
+  const p = flat.find(
+    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+  );
+  const heading = h?.text ?? (node.params?.iconBoxTitle as string | undefined) ?? '';
+  const body = p?.text ?? (node.params?.iconBoxDesc as string | undefined) ?? '';
+  if (!heading && !body) return null;
+  return { type: 'card-grid', columns: 3, cards: [{ heading, body }] };
+}
+
+function mapUagbTabs(node: WpNode): CardGridSection | null {
+  const tabChildren = (node.children ?? []).filter(
+    (c) => c.block === 'uagb/tabs-child',
+  );
+  const cards = tabChildren
+    .map((tab) => {
+      const flat = flattenChildren(tab);
+      const h = flat.find(
+        (c) => c.block === 'core/heading' || c.block === 'heading',
+      );
+      const p = flat.find(
+        (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+      );
+      const tabTitle = (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
+      const body = p?.text ?? '';
+      return { heading: tabTitle, body };
+    })
+    .filter((c) => c.heading || c.body);
+
+  if (cards.length === 0) return null;
+  return {
+    type: 'card-grid',
+    columns: Math.min(Math.max(cards.length, 2), 4) as 2 | 3 | 4,
+    cards,
   };
 }
 

@@ -2,7 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
-import { AiProcessError, runAiProcess } from "../services/AiService";
+import {
+  AiProcessError,
+  runAiProcess,
+  type AiEditRequestPayload,
+} from "../services/AiService";
 import {
   captureRegion,
   deleteCapturesBySite,
@@ -1246,7 +1250,7 @@ const Editor: React.FC = () => {
 
     setIsSendingAiRequest(true);
 
-    const requestBody = buildAiRequestPayload(
+    const requestBody: AiEditRequestPayload = buildAiRequestPayload(
       trimmedPrompt,
       requestLanguage,
       chatCaptures,
@@ -1261,7 +1265,7 @@ const Editor: React.FC = () => {
       console.log("AI process started with job ID:", data.jobId);
       await deleteCapturesBySite(siteId);
       navigate("/app/editor/split-view", {
-        state: { jobId: data.jobId, siteId },
+        state: { jobId: data.jobId, siteId, editRequest: requestBody },
       });
     } catch (error) {
       if (error instanceof AiProcessError) {
