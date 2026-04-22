@@ -65,6 +65,39 @@ function shortenPath(filePath: string): string {
   return idx !== -1 ? filePath.slice(idx + 1) : filePath;
 }
 
+// Walk up DOM để tìm nearest ancestor có data-vp-source-node và đọc toàn bộ data-vp-*
+function getVpSection(el: Element) {
+  let node: Element | null = el;
+  while (node) {
+    if (node.hasAttribute("data-vp-source-node")) {
+      return {
+        vpSourceNode: node.getAttribute("data-vp-source-node") ?? undefined,
+        vpTemplate: node.getAttribute("data-vp-template") ?? undefined,
+        vpSourceFile: node.getAttribute("data-vp-source-file") ?? undefined,
+        vpSectionKey: node.getAttribute("data-vp-section-key") ?? undefined,
+        vpComponent: node.getAttribute("data-vp-component") ?? undefined,
+        vpSectionComponent: node.getAttribute("data-vp-section-component") ?? undefined,
+      };
+    }
+    node = node.parentElement;
+  }
+  return {};
+}
+
+// Suy ra semantic role từ HTML tag
+function inferNodeRole(tag: string): string {
+  const t = tag.toLowerCase();
+  if (/^h[1-6]$/.test(t)) return "heading";
+  if (["p", "span", "em", "strong", "blockquote", "label"].includes(t)) return "text";
+  if (["img", "video", "picture", "figure", "canvas", "svg"].includes(t)) return "media";
+  if (t === "button") return "button";
+  if (t === "a") return "link";
+  if (["input", "textarea", "select"].includes(t)) return "input";
+  if (["ul", "ol", "li"].includes(t)) return "list";
+  if (["nav", "header", "footer", "main", "section", "article", "aside"].includes(t)) return "section";
+  return "container";
+}
+
 // ─── Overlay UI ─────────────────────────────────────────────────────────────
 
 let overlayEl: HTMLDivElement | null = null;
@@ -170,6 +203,7 @@ function onClick(e: MouseEvent) {
   const fiber = getFiber(el);
   const src = getDebugSource(fiber);
   const rect = el.getBoundingClientRect();
+  const textContent = (el.textContent ?? "").trim().slice(0, 100);
 
   window.parent.postMessage(
     {
@@ -177,7 +211,7 @@ function onClick(e: MouseEvent) {
       payload: {
         component: getComponentName(fiber),
         tag: el.tagName,
-        text: (el.textContent ?? "").trim().slice(0, 100),
+        text: textContent,
         classes: Array.from(el.classList),
         rect: { w: Math.round(rect.width), h: Math.round(rect.height) },
         source: src
@@ -187,6 +221,13 @@ function onClick(e: MouseEvent) {
               column: src.columnNumber,
             }
           : undefined,
+        // Layer 2: section identity từ data-vp-* trên nearest ancestor
+        ...getVpSection(el),
+        // Layer 3: child node targeting
+        targetNodeRole: inferNodeRole(el.tagName),
+        targetElementTag: el.tagName.toLowerCase(),
+        targetTextPreview: textContent,
+        targetStartLine: src?.lineNumber,
       },
     },
     "*",

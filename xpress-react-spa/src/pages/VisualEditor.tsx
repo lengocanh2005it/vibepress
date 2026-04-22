@@ -210,6 +210,10 @@ const VisualEditor: React.FC = () => {
     comment: string;
     route: string;
     savedAt: string;
+    // Resolved từ ui-source-map bằng sourceNodeId
+    outputFilePath?: string;
+    startLine?: number;
+    endLine?: number;
   }>>([]);
 
   const previewUrl = statusData?.result?.previewUrl || state.previewUrl || "";
@@ -332,12 +336,18 @@ const VisualEditor: React.FC = () => {
 
   const handleSaveAnnotation = () => {
     if (!selectedComponent) return;
+    const mapEntry = selectedComponent.vpSourceNode
+      ? sourceMap.find((e) => e.sourceNodeId === selectedComponent.vpSourceNode)
+      : undefined;
     const item = {
       id: `annotation-${Date.now()}`,
       component: selectedComponent,
       comment: annotationComment.trim(),
       route: selectedRoute?.route || "/",
       savedAt: new Date().toISOString(),
+      outputFilePath: mapEntry?.outputFilePath,
+      startLine: mapEntry?.startLine,
+      endLine: mapEntry?.endLine,
     };
     setSavedAnnotations((prev) => [...prev, item]);
     console.log("[VisualEditor] Saved annotation:", item);
