@@ -118,7 +118,8 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
   const remoteDir = `${VPS_FRONTEND_DIR}/${siteDir}`;
   const frontendDir = path.join(workDir, 'frontend');
   const distDir = path.join(frontendDir, 'dist');
-  const domain = VPS_DOMAIN ? `${siteDir}.${VPS_DOMAIN}` : null;
+  const cleanDomain = VPS_DOMAIN?.replace(/^https?:\/\//i, '').replace(/\/+$/, '') || null;
+  const domain = cleanDomain ? `${siteDir}.${cleanDomain}` : null;
 
   console.log(`[VPS-Frontend] Building site=${siteDir}...`);
   await execAsync('npm install', {
