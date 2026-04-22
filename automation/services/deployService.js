@@ -1,7 +1,11 @@
 const path = require('path');
+const os = require('os');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 const fse = require('fs-extra');
 const axios = require('axios');
 const { simpleGit } = require('simple-git');
+const { NodeSSH } = require('node-ssh');
 const {
   GITHUB_TOKEN,
   GITHUB_OWNER,
@@ -15,12 +19,165 @@ const {
   PUBLIC_DB_PORT,
   RENDER_DB_USER,
   RENDER_DB_PASSWORD,
+  VPS_HOST,
+  VPS_USER,
+  VPS_SSH_KEY_PATH,
+  VPS_SSH_PASSWORD,
+  VPS_FRONTEND_DIR,
+  VPS_BACKEND_DIR,
+  VPS_DOMAIN,
+  VPS_BACKEND_BASE_PORT,
 } = require('../config/constants');
+
+const execAsync = promisify(exec);
 
 const AI_PIPELINE_GENERATED_DIR = path.resolve(
   __dirname,
   '../../ai-pipeline/temp/generated',
 );
+
+// ── VPS helpers ───────────────────────────────────────────────────────────────
+
+// Gán port cố định cho mỗi site dựa trên tên — deterministic, không cần state
+function sitePort(siteDir) {
+  let hash = 0;
+  for (let i = 0; i < siteDir.length; i++) {
+    hash = ((hash << 5) - hash + siteDir.charCodeAt(i)) | 0;
+  }
+  return VPS_BACKEND_BASE_PORT + (Math.abs(hash) % 1000);
+}
+
+async function connectSsh() {
+  const ssh = new NodeSSH();
+  const opts = { host: VPS_HOST, username: VPS_USER };
+  if (VPS_SSH_KEY_PATH) {
+    opts.privateKeyPath = VPS_SSH_KEY_PATH;
+  } else if (VPS_SSH_PASSWORD) {
+    opts.password = VPS_SSH_PASSWORD;
+  } else {
+    throw new Error('VPS: cần cấu hình VPS_SSH_KEY_PATH hoặc VPS_SSH_PASSWORD');
+  }
+  await ssh.connect(opts);
+  return ssh;
+}
+
+async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
+  const port = sitePort(siteDir);
+  const remoteDir = `${VPS_BACKEND_DIR}/${siteDir}`;
+  const localServerDir = path.join(workDir, 'server');
+
+  console.log(`[VPS-Backend] site=${siteDir} port=${port} remote=${remoteDir}`);
+  const ssh = await connectSsh();
+  try {
+    await ssh.execCommand(`mkdir -p ${remoteDir}`);
+
+    // Upload server/ — bỏ qua node_modules
+    await ssh.putDirectory(localServerDir, remoteDir, {
+      recursive: true,
+      concurrency: 5,
+      validate: (itemPath) =>
+        !itemPath.includes('node_modules') && !itemPath.includes('.git'),
+    });
+    console.log(`[VPS-Backend] Files uploaded`);
+
+    // Ghi .env qua SFTP để tránh shell-escaping
+    const envContent = [
+      `PORT=${port}`,
+      `DB_HOST=${dbCreds.host ?? 'localhost'}`,
+      `DB_PORT=${dbCreds.port ?? 3306}`,
+      `DB_USER=${dbCreds.user ?? 'root'}`,
+      `DB_PASSWORD=${dbCreds.password ?? ''}`,
+      `DB_NAME=${dbCreds.dbName ?? 'wordpress'}`,
+      `NODE_ENV=production`,
+    ].join('\n');
+    const tmpEnv = path.join(os.tmpdir(), `vps-env-${siteDir}-${Date.now()}`);
+    await fse.writeFile(tmpEnv, envContent);
+    await ssh.putFile(tmpEnv, `${remoteDir}/.env`);
+    await fse.remove(tmpEnv);
+    console.log(`[VPS-Backend] .env written`);
+
+    // npm install
+    const install = await ssh.execCommand(`cd ${remoteDir} && npm install --production`);
+    if (install.stderr) console.warn(`[VPS-Backend] npm install: ${install.stderr.slice(0, 200)}`);
+
+    // PM2 start/restart
+    await ssh.execCommand(`pm2 delete "${siteDir}" 2>/dev/null || true`);
+    const pm2 = await ssh.execCommand(
+      `cd ${remoteDir} && PORT=${port} pm2 start npm --name "${siteDir}" -- start && pm2 save`,
+    );
+    if (pm2.code !== 0) throw new Error(`PM2 failed: ${pm2.stderr}`);
+    console.log(`[VPS-Backend] PM2 started — port ${port}`);
+  } finally {
+    ssh.dispose();
+  }
+
+  return { backendPort: port };
+}
+
+async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
+  const remoteDir = `${VPS_FRONTEND_DIR}/${siteDir}`;
+  const frontendDir = path.join(workDir, 'frontend');
+  const distDir = path.join(frontendDir, 'dist');
+  const domain = VPS_DOMAIN ? `${siteDir}.${VPS_DOMAIN}` : null;
+
+  console.log(`[VPS-Frontend] Building site=${siteDir}...`);
+  await execAsync('npm install', {
+    cwd: frontendDir,
+    env: { ...process.env, VITE_BASE: '/', VITE_API_BASE: '/api' },
+  });
+  await execAsync('npm run build', {
+    cwd: frontendDir,
+    env: { ...process.env, VITE_BASE: '/', VITE_API_BASE: '/api' },
+  });
+  console.log(`[VPS-Frontend] Build done`);
+
+  const ssh = await connectSsh();
+  try {
+    await ssh.execCommand(`mkdir -p ${remoteDir}`);
+
+    // Upload dist/
+    await ssh.putDirectory(distDir, remoteDir, { recursive: true, concurrency: 5 });
+    console.log(`[VPS-Frontend] dist/ uploaded`);
+
+    // Viết Nginx config qua SFTP rồi sudo mv vào sites-enabled
+    const serverName = domain ?? '_';
+    const nginxConf = [
+      'server {',
+      '    listen 80;',
+      `    server_name ${serverName};`,
+      `    root ${remoteDir};`,
+      '    index index.html;',
+      '    location / {',
+      '        try_files $uri $uri/ /index.html;',
+      '    }',
+      '    location /api/ {',
+      `        proxy_pass http://127.0.0.1:${backendPort}/;`,
+      '        proxy_http_version 1.1;',
+      '        proxy_set_header Host $host;',
+      '        proxy_set_header X-Real-IP $remote_addr;',
+      '    }',
+      '}',
+    ].join('\n');
+
+    const tmpNginx = path.join(os.tmpdir(), `nginx-${siteDir}-${Date.now()}.conf`);
+    await fse.writeFile(tmpNginx, nginxConf);
+    await ssh.putFile(tmpNginx, `/tmp/${siteDir}.conf`);
+    await fse.remove(tmpNginx);
+
+    const nginx = await ssh.execCommand(
+      `sudo mv /tmp/${siteDir}.conf /etc/nginx/sites-enabled/${siteDir}.conf` +
+      ` && sudo nginx -t && sudo nginx -s reload`,
+    );
+    if (nginx.code !== 0) throw new Error(`Nginx config failed: ${nginx.stderr}`);
+    console.log(`[VPS-Frontend] Nginx reloaded`);
+  } finally {
+    ssh.dispose();
+  }
+
+  const frontendUrl = domain ? `http://${domain}` : `http://${VPS_HOST}`;
+  console.log(`[VPS-Frontend] Live: ${frontendUrl}`);
+  return { frontendUrl };
+}
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
@@ -349,12 +506,9 @@ async function pushToGit({ jobId, repoName, branch = 'main' }) {
 // ── Main flow ─────────────────────────────────────────────────────────────────
 
 async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} }) {
-  console.log(`\n[Deploy] ── Start jobId=${jobId} ──────────────────────`);
+  console.log(`\n[Deploy] ── Start jobId=${jobId} provider=${VPS_HOST ? 'vps' : 'vercel+render'} ──`);
 
   if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is not configured');
-  if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
-  if (!RENDER_API_KEY) throw new Error('RENDER_API_KEY is not configured');
-  if (!RENDER_OWNER_ID) throw new Error('RENDER_OWNER_ID is not configured');
 
   const githubHeaders = { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' };
   const githubOwner = await getGithubOwner(githubHeaders);
@@ -368,90 +522,114 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   const finalRepoName = repoName || `react-migration-${jobId.slice(0, 8)}`;
   console.log(`[Deploy] Repo name: ${finalRepoName}`);
 
-  // 1. Tạo GitHub repo
-  console.log(`\n[Deploy] Step 1/6 — Create GitHub repo`);
+  // ── Step 1: Tạo GitHub repo ─────────────────────────────────────────────────
+  console.log(`\n[Deploy] Step 1 — Create GitHub repo`);
   const repo = await createGithubRepo(finalRepoName);
 
-  // 2. Copy generated code → workDir
-  console.log(`\n[Deploy] Step 2/6 — Copy generated files`);
+  // ── Step 2: Copy generated code → workDir ──────────────────────────────────
+  console.log(`\n[Deploy] Step 2 — Copy generated files`);
   const workDir = path.join(TEMP_ROOT, `deploy_${jobId}`);
   await fse.remove(workDir);
   await fse.copy(generatedDir, workDir);
   console.log(`[Deploy] Copied to: ${workDir}`);
 
-  // 3. Push lần 1 lên GitHub
-  console.log(`\n[Deploy] Step 3/6 — Push to GitHub`);
-  await initAndPush({
+  // ── Step 3: Push lên GitHub ─────────────────────────────────────────────────
+  console.log(`\n[Deploy] Step 3 — Push to GitHub`);
+  const commitSha = await initAndPush({
     workDir,
     repoCloneUrl: repo.cloneUrl,
     branch,
     message: `feat: initial React migration [jobId=${jobId}]`,
   });
 
-  // 4. Deploy server lên Render
-  console.log(`\n[Deploy] Step 4/6 — Deploy server to Render`);
-
-  // Nếu host là Docker internal hostname → resolve sang PUBLIC_DB_HOST
+  // ── Resolve DB credentials cho external host ────────────────────────────────
   const DOCKER_INTERNAL_HOSTS = ['localhost', '127.0.0.1', 'db', 'mysql'];
   const isLocalHost = !dbCreds.host || DOCKER_INTERNAL_HOSTS.includes(dbCreds.host.split(':')[0]);
   let finalDbCreds = dbCreds;
-  if (isLocalHost) {
+  if (isLocalHost && !VPS_HOST) {
+    // Chỉ cần PUBLIC_DB_HOST khi deploy lên Render (cloud); VPS thường trong cùng mạng
     if (!PUBLIC_DB_HOST) throw new Error('DB host is internal but PUBLIC_DB_HOST is not configured');
-    console.log(`[Deploy] DB host "${dbCreds.host}" is internal — using PUBLIC_DB_HOST: ${PUBLIC_DB_HOST}:${PUBLIC_DB_PORT ?? dbCreds.port}`);
+    console.log(`[Deploy] DB host is internal — using PUBLIC_DB_HOST: ${PUBLIC_DB_HOST}`);
     finalDbCreds = { ...dbCreds, host: PUBLIC_DB_HOST, ...(PUBLIC_DB_PORT && { port: PUBLIC_DB_PORT }) };
   }
 
-  const { renderUrl, serviceId } = await createRenderService({
-    repoName: finalRepoName,
-    repoHtmlUrl: repo.htmlUrl,
-    branch,
-    dbCreds: finalDbCreds,
-  });
+  let result;
 
-  // 5. Update vercel.json với Render URL
-  console.log(`\n[Deploy] Step 5/6 — Update vercel.json with Render URL`);
-  const vercelJsonPath = path.join(workDir, 'frontend', 'vercel.json');
-  if (await fse.pathExists(vercelJsonPath)) {
-    let content = await fse.readFile(vercelJsonPath, 'utf8');
-    content = content.replace(/__RENDER_API_URL__/g, renderUrl);
-    await fse.writeFile(vercelJsonPath, content);
-    console.log(`[Deploy] vercel.json updated — API URL: ${renderUrl}`);
+  if (VPS_HOST) {
+    // ── VPS flow ────────────────────────────────────────────────────────────────
+    console.log(`\n[Deploy] Step 4 — Deploy backend to VPS`);
+    const { backendPort } = await deployBackendToVps({ workDir, siteDir: finalRepoName, dbCreds: finalDbCreds });
+
+    console.log(`\n[Deploy] Step 5 — Deploy frontend to VPS`);
+    const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: finalRepoName, backendPort });
+
+    result = {
+      jobId,
+      repoName: finalRepoName,
+      githubUrl: repo.htmlUrl,
+      frontendUrl,
+      backendPort,
+      commitSha,
+    };
+
+    console.log(`\n[Deploy] ── Done (VPS) ─────────────────────────────────`);
+    console.log(`  GitHub   : ${repo.htmlUrl}`);
+    console.log(`  Frontend : ${frontendUrl}`);
+    console.log(`  Backend  : port ${backendPort}`);
   } else {
-    console.warn(`[Deploy] vercel.json not found at ${vercelJsonPath}, skipping`);
+    // ── Vercel + Render flow ────────────────────────────────────────────────────
+    if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
+    if (!RENDER_API_KEY) throw new Error('RENDER_API_KEY is not configured');
+    if (!RENDER_OWNER_ID) throw new Error('RENDER_OWNER_ID is not configured');
+
+    console.log(`\n[Deploy] Step 4 — Deploy server to Render`);
+    const { renderUrl } = await createRenderService({
+      repoName: finalRepoName,
+      repoHtmlUrl: repo.htmlUrl,
+      branch,
+      dbCreds: finalDbCreds,
+    });
+
+    console.log(`\n[Deploy] Step 5 — Update vercel.json with Render URL`);
+    const vercelJsonPath = path.join(workDir, 'frontend', 'vercel.json');
+    if (await fse.pathExists(vercelJsonPath)) {
+      let content = await fse.readFile(vercelJsonPath, 'utf8');
+      content = content.replace(/__RENDER_API_URL__/g, renderUrl);
+      await fse.writeFile(vercelJsonPath, content);
+      console.log(`[Deploy] vercel.json updated — API URL: ${renderUrl}`);
+    } else {
+      console.warn(`[Deploy] vercel.json not found at ${vercelJsonPath}, skipping`);
+    }
+
+    console.log(`\n[Deploy] Step 6 — Push updated vercel.json`);
+    const updatedSha = await commitAndPush({
+      workDir,
+      branch,
+      message: `chore: set Render API URL in vercel.json [jobId=${jobId}]`,
+    });
+
+    console.log(`\n[Deploy] Step 7 — Create Vercel project`);
+    const { projectId, vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
+    await setVercelEnvVars({ projectId });
+    await triggerVercelDeployment({ repoName: finalRepoName, branch, githubOwner });
+
+    result = {
+      jobId,
+      repoName: finalRepoName,
+      githubUrl: repo.htmlUrl,
+      renderUrl,
+      vercelUrl,
+      commitSha: updatedSha,
+    };
+
+    console.log(`\n[Deploy] ── Done (Vercel+Render) ──────────────────────`);
+    console.log(`  GitHub : ${repo.htmlUrl}`);
+    console.log(`  Render : ${renderUrl}`);
+    console.log(`  Vercel : ${vercelUrl}`);
   }
 
-  // 6. Push lần 2 với vercel.json đã update
-  console.log(`\n[Deploy] Step 6/6 — Push updated vercel.json`);
-  const commitSha = await commitAndPush({
-    workDir,
-    branch,
-    message: `chore: set Render API URL in vercel.json [jobId=${jobId}]`,
-  });
-
-  // 7. Tạo Vercel project + set env vars + trigger deploy
-  console.log(`\n[Deploy] Step 7/6 — Create Vercel project`);
-  const { projectId, vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
-
-  console.log(`\n[Deploy] Step 7b — Set Vercel env vars`);
-  await setVercelEnvVars({ projectId });
-
-  console.log(`\n[Deploy] Step 7c — Trigger Vercel deployment`);
-  await triggerVercelDeployment({ repoName: finalRepoName, branch, githubOwner });
-
   await fse.remove(workDir);
-  console.log(`\n[Deploy] ── Done ───────────────────────────────────────`);
-  console.log(`  GitHub : ${repo.htmlUrl}`);
-  console.log(`  Render : ${renderUrl}`);
-  console.log(`  Vercel : ${vercelUrl}`);
-
-  return {
-    jobId,
-    repoName: finalRepoName,
-    githubUrl: repo.htmlUrl,
-    renderUrl,
-    vercelUrl,
-    commitSha,
-  };
+  return result;
 }
 
 module.exports = { deployFullStack, pushToGit };
