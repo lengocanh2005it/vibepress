@@ -48,6 +48,7 @@ services:
       - ./automation/temp_dumps:/app/temp_dumps
       - ./automation/temp_workspaces:/app/temp_workspaces
       - ai_generated:/ai-pipeline/temp/generated
+      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
 
   ai_pipeline:
     build:
