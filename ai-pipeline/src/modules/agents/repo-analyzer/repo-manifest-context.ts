@@ -170,6 +170,46 @@ export function buildRepoManifestContextNote(
   if (structuralSignals.length > 0) {
     lines.push(`Structural signals: ${structuralSignals.join(', ')}`);
   }
+  const uagbBlockTypes = manifest.structureHints.blockTypes.filter((block) =>
+    block.startsWith('uagb/'),
+  );
+  if (includeStructureHints && uagbBlockTypes.length > 0) {
+    const limit = mode === 'compact' ? 5 : 10;
+    lines.push(
+      `Detected UAGB/Spectra block types in repo source: ${uagbBlockTypes
+        .slice(0, limit)
+        .join(', ')}${uagbBlockTypes.length > limit ? ` (+${uagbBlockTypes.length - limit} more)` : ''}`,
+    );
+  }
+  if (manifest.uagbSummary?.detected) {
+    lines.push(
+      `Merged UAGB detection: plugins=${manifest.uagbSummary.mergedPluginSlugs.join(', ') || 'none'}; blocks=${manifest.uagbSummary.mergedBlockTypes.join(', ') || 'none'}`,
+    );
+    const homeUsage =
+      manifest.uagbSummary.db.pages.find((entry) => entry.isHome) ??
+      manifest.uagbSummary.db.templates.find((entry) => entry.isHome);
+    if (homeUsage) {
+      lines.push(
+        `UAGB home from DB ${homeUsage.entityType}: ${homeUsage.slug}=[${homeUsage.blockTypes.join(', ')}]`,
+      );
+    }
+    if (manifest.uagbSummary.db.pages.length > 0) {
+      lines.push(
+        `UAGB pages from DB: ${manifest.uagbSummary.db.pages
+          .slice(0, mode === 'compact' ? 4 : 8)
+          .map((page) => `${page.slug}=[${page.blockTypes.join(', ')}]`)
+          .join(', ')}${manifest.uagbSummary.db.pages.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.pages.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+      );
+    }
+    if (manifest.uagbSummary.db.templates.length > 0) {
+      lines.push(
+        `UAGB templates from DB: ${manifest.uagbSummary.db.templates
+          .slice(0, mode === 'compact' ? 4 : 8)
+          .map((template) => `${template.slug}=[${template.blockTypes.join(', ')}]`)
+          .join(', ')}${manifest.uagbSummary.db.templates.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.templates.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+      );
+    }
+  }
 
   if (mode !== 'compact' && manifest.themes.length > 0) {
     lines.push(`Available themes in repo (${manifest.themes.length} total):`);
@@ -208,6 +248,16 @@ export function buildRepoManifestContextNote(
         ? `${parentTheme.slug}${parentTheme.relativeDir ? ` → ${parentTheme.relativeDir}` : ''}`
         : `${parentTheme.slug} (missing from repo)`;
       lines.push(`Parent theme: ${parentLabel}`);
+    }
+    const interactiveActivePlugins = activePlugins.filter((plugin) =>
+      ['ultimate-addons-for-gutenberg', 'spectra'].includes(plugin.slug),
+    );
+    if (interactiveActivePlugins.length > 0) {
+      lines.push(
+        `Resolved active interactive plugins: ${interactiveActivePlugins
+          .map((plugin) => plugin.slug)
+          .join(', ')}`,
+      );
     }
     for (const note of manifest.resolvedSource.notes) {
       lines.push(note);

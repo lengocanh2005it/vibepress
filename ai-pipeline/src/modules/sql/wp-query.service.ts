@@ -635,7 +635,9 @@ export class WpQueryService {
          WHERE option_name IN ('active_plugins')
             OR option_name LIKE 'elementor_%'
             OR option_name LIKE 'acf_%'
-            OR option_name LIKE 'wpseo_%'`,
+            OR option_name LIKE 'wpseo_%'
+            OR option_name LIKE 'uagb_%'
+            OR option_name LIKE 'spectra_%'`,
       );
 
       const optionMap = new Map<string, string>();
@@ -647,7 +649,7 @@ export class WpQueryService {
         optionMap.get('active_plugins') ?? '',
       );
       const plugins = activePluginFiles.map<WpPluginInfo>((pluginFile) => ({
-        slug: pluginFile.split('/')[0] || pluginFile,
+        slug: this.normalizePluginSlug(pluginFile.split('/')[0] || pluginFile),
         pluginFile,
         active: true,
         source: 'active_plugins',
@@ -1190,6 +1192,14 @@ export class WpQueryService {
       result.push(match[1]);
     }
     return result;
+  }
+
+  private normalizePluginSlug(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'spectra') {
+      return 'ultimate-addons-for-gutenberg';
+    }
+    return normalized;
   }
 
   private collectUsage(

@@ -179,7 +179,14 @@ export class ReactGeneratorService {
       );
     }
 
-    const total = templates.length;
+    const plannedTemplateNames = plan
+      ? new Set(plan.map((item) => item.templateName))
+      : null;
+    const scopedTemplates = plannedTemplateNames
+      ? templates.filter((template) => plannedTemplateNames.has(template.name))
+      : templates;
+
+    const total = scopedTemplates.length;
     const components: GeneratedComponent[] = [];
     const hasSharedHeader = !!plan?.some(
       (item) => item.type === 'partial' && /^header/i.test(item.componentName),
@@ -197,7 +204,7 @@ export class ReactGeneratorService {
 
     for (
       let batchStart = 0;
-      batchStart < templates.length;
+      batchStart < scopedTemplates.length;
       batchStart += concurrency
     ) {
       if (batchStart > 0) {
@@ -205,7 +212,7 @@ export class ReactGeneratorService {
         await new Promise((res) => setTimeout(res, delay));
       }
 
-      const batch = templates.slice(batchStart, batchStart + concurrency);
+      const batch = scopedTemplates.slice(batchStart, batchStart + concurrency);
       const batchResults = await Promise.all(
         batch.map(async (tpl, batchIdx) => {
           const i = batchStart + batchIdx;

@@ -36,6 +36,7 @@ import type {
   RepoAnalyzeResult,
   RepoResolvedSourceSummary,
   RepoThemeManifest,
+  RepoUagbDetectionSummary,
 } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import { RepoAnalyzerService } from '../agents/repo-analyzer/repo-analyzer.service.js';
 import { SourceResolverService } from '../agents/source-resolver/source-resolver.service.js';
@@ -1136,6 +1137,12 @@ export class OrchestratorService {
         content,
       });
       repoResult.themeManifest.resolvedSource = resolvedSource;
+      repoResult.themeManifest.uagbSummary = this.buildMergedUagbSummary({
+        manifest: repoResult.themeManifest,
+        content,
+        resolvedSource,
+      });
+      await this.recordUagbRuntimeAnalysis(logPath, repoResult.themeManifest);
       summaryDraft.repoAnalysisSummary = await this.recordRepoAnalysis(
         jobLogDir,
         logPath,
@@ -1165,12 +1172,10 @@ export class OrchestratorService {
       // All 4 phases + plan review + retry loop are ONE atomic step.
       // Per diagram: C4 (Plan Review) and C5 (Plan Valid?) live INSIDE the Planner subgraph.
       const MAX_PLAN_RETRIES = 3;
-      const expectedTemplateNames =
-        normalizedTheme.type === 'classic'
-          ? normalizedTheme.templates.map((t) => t.name)
-          : [...normalizedTheme.templates, ...normalizedTheme.parts].map(
-              (t) => t.name,
-            );
+      const expectedTemplateNames = this.planner.getExpectedTemplateNames(
+        normalizedTheme,
+        content,
+      );
       const reviewResult = await this.runStep(
         state,
         '5_planner',
@@ -2374,18 +2379,331 @@ export class OrchestratorService {
       manifest.assetManifest.fonts.length +
       manifest.assetManifest.svg.length +
       manifest.assetManifest.video.length;
+    const uagbSummaryLines = this.buildUagbSummaryLines(manifest);
 
     return [
       `kind=${manifest.themeTypeHints.detectedThemeKind}, themeFiles=${repoResult.totalFiles}, themeInventoryFiles=${repoResult.themeInventoryFiles}, themes=${repoResult.themeCount}, pluginFiles=${repoResult.pluginFiles}, plugins=${repoResult.pluginCount}, templates=${manifest.filesByRole.templates.length}, parts=${manifest.filesByRole.templateParts.length}, patterns=${manifest.filesByRole.patterns.length}, phpTemplates=${manifest.filesByRole.phpTemplates.length}, css=${manifest.filesByRole.styles.length}, assets=${assetCount}`,
       `theme.json: palette=${manifest.themeJsonSummary.paletteCount}, fontFamilies=${manifest.themeJsonSummary.fontFamilyCount}, fontSizes=${manifest.themeJsonSummary.fontSizeCount}, spacing=${manifest.themeJsonSummary.spacingSizeCount}, customTemplates=${manifest.themeJsonSummary.customTemplateCount}`,
       `runtime: menus=${manifest.runtimeHints.registeredMenus.length}, sidebars=${manifest.runtimeHints.registeredSidebars.length}, supports=${manifest.runtimeHints.themeSupports.join(', ') || 'none'}`,
       `structure: partRefs=${manifest.structureHints.templatePartRefs.length}, patternRefs=${manifest.structureHints.patternRefs.length}, notableBlocks=${notableBlocks.join(', ') || 'none'}, priorityDirs=${manifest.sourceOfTruth.priorityDirectories.join(', ') || 'root-only'}, themeDirs=${manifest.sourceOfTruth.themeDirectories.join(', ') || 'none'}, pluginDirs=${manifest.sourceOfTruth.pluginDirectories.join(', ') || 'none'}`,
+      ...uagbSummaryLines,
       ...(manifest.resolvedSource
         ? [
             `resolved: activeTheme=${manifest.resolvedSource.activeTheme.slug}${manifest.resolvedSource.parentTheme ? `, parentTheme=${manifest.resolvedSource.parentTheme.slug}` : ''}, activePlugins=${manifest.resolvedSource.activePlugins.length}, runtimeOnlyPlugins=${manifest.resolvedSource.runtimeOnlyPlugins.length}, repoOnlyPlugins=${manifest.resolvedSource.repoOnlyPlugins.length}`,
           ]
         : []),
     ];
+  }
+
+  private buildUagbSummaryLines(manifest: RepoThemeManifest): string[] {
+    const summary = manifest.uagbSummary;
+    if (!summary?.detected) {
+      return [];
+    }
+
+    const usages = summary.source.files;
+    const lines = [
+      `uagb: files=${usages.length}, blocks=${summary.mergedBlockTypes.join(', ') || 'none'}, plugins=${summary.mergedPluginSlugs.join(', ') || 'none'}`,
+    ];
+
+    const homeBases = new Set(['frontend-page', 'home', 'index']);
+    const homeUsages = usages.filter((usage) =>
+      homeBases.has(this.toTemplateBaseName(usage.file)),
+    );
+    if (homeUsages.length > 0) {
+      lines.push(`uagb-home: ${this.formatUagbUsageEntries(homeUsages, 4)}`);
+    }
+
+    const dbHomeUsage =
+      summary.db.pages.find((entry) => entry.isHome) ??
+      summary.db.templates.find((entry) => entry.isHome);
+    if (dbHomeUsage) {
+      lines.push(
+        `uagb-db-home: ${dbHomeUsage.entityType}:${dbHomeUsage.slug}=[${dbHomeUsage.blockTypes.join(', ')}]`,
+      );
+    }
+
+    const otherPageUsages = usages.filter(
+      (usage) =>
+        !homeBases.has(this.toTemplateBaseName(usage.file)) &&
+        !/^(parts|template-parts|patterns)\//i.test(usage.file),
+    );
+    if (otherPageUsages.length > 0) {
+      lines.push(
+        `uagb-other: ${this.formatUagbUsageEntries(otherPageUsages, 6)}`,
+      );
+    }
+    const otherDbTemplates = summary.db.templates.filter((entry) => !entry.isHome);
+    if (otherDbTemplates.length > 0) {
+      lines.push(
+        `uagb-db-templates: ${otherDbTemplates
+          .slice(0, 6)
+          .map(
+            (entry) => `${entry.slug}=[${entry.blockTypes.join(', ') || 'none'}]`,
+          )
+          .join('; ')}${otherDbTemplates.length > 6 ? ` (+${otherDbTemplates.length - 6} more)` : ''}`,
+      );
+    }
+
+    return lines;
+  }
+
+  private buildMergedUagbSummary(input: {
+    manifest: RepoThemeManifest;
+    content: {
+      pages: Array<{ id: number; title: string; slug: string; content: string }>;
+      dbTemplates: Array<{
+        id: number;
+        slug: string;
+        title: string;
+        content: string;
+        postType: 'wp_template' | 'wp_template_part';
+      }>;
+      readingSettings: {
+        showOnFront: 'posts' | 'page';
+        pageOnFrontId: number | null;
+      };
+      detectedPlugins: Array<{ slug: string }>;
+      discovery: {
+        topBlockTypes: string[];
+      };
+    };
+    resolvedSource: RepoResolvedSourceSummary;
+  }): RepoUagbDetectionSummary {
+    const { manifest, content, resolvedSource } = input;
+    const sourceFiles = manifest.structureHints.uagbUsages ?? [];
+    const sourceBlockTypes = [
+      ...new Set(sourceFiles.flatMap((usage) => usage.blockTypes)),
+    ].sort();
+
+    const dbPages = content.pages
+      .map((page) => ({
+        id: page.id,
+        slug: page.slug || String(page.id),
+        title: page.title,
+        blockTypes: this.extractUagbBlockTypes(page.content),
+        source: 'db' as const,
+        entityType: 'page' as const,
+        isHome:
+          content.readingSettings.showOnFront === 'page' &&
+          content.readingSettings.pageOnFrontId === page.id,
+      }))
+      .filter((page) => page.blockTypes.length > 0);
+
+    const dbTemplates = content.dbTemplates
+      .filter((row) => row.postType === 'wp_template')
+      .map((row) => ({
+        id: row.id,
+        slug: row.slug || String(row.id),
+        title: row.title,
+        blockTypes: this.extractUagbBlockTypes(row.content),
+        source: 'db' as const,
+        entityType: 'template' as const,
+        isHome: false,
+      }))
+      .filter((row) => row.blockTypes.length > 0);
+    const homeTemplate = this.resolveDbHomeTemplateUsage(dbTemplates);
+    if (homeTemplate) {
+      homeTemplate.isHome = true;
+    }
+
+    const dbParts = content.dbTemplates
+      .filter((row) => row.postType === 'wp_template_part')
+      .map((row) => ({
+        id: row.id,
+        slug: row.slug || String(row.id),
+        title: row.title,
+        blockTypes: this.extractUagbBlockTypes(row.content),
+        source: 'db' as const,
+        entityType: 'part' as const,
+        isHome: false,
+      }))
+      .filter((row) => row.blockTypes.length > 0);
+
+    const dbBlockTypes = [
+      ...new Set([
+        ...content.discovery.topBlockTypes.filter((block) =>
+          block.startsWith('uagb/'),
+        ),
+        ...dbPages.flatMap((page) => page.blockTypes),
+        ...dbTemplates.flatMap((template) => template.blockTypes),
+        ...dbParts.flatMap((part) => part.blockTypes),
+      ]),
+    ].sort();
+
+    const dbDetectedPluginSlugs = [
+      ...new Set(
+        content.detectedPlugins
+          .map((plugin) => this.normalizeUagbPluginSlug(plugin.slug))
+          .filter((slug) => slug === 'ultimate-addons-for-gutenberg'),
+      ),
+    ].sort();
+
+    const effectiveActivePluginSlugs = [
+      ...new Set(
+        resolvedSource.activePlugins
+          .map((plugin) => this.normalizeUagbPluginSlug(plugin.slug))
+          .filter((slug) => slug === 'ultimate-addons-for-gutenberg'),
+      ),
+    ].sort();
+
+    const mergedBlockTypes = [
+      ...new Set([...sourceBlockTypes, ...dbBlockTypes]),
+    ].sort();
+    const mergedPluginSlugs = [
+      ...new Set([...dbDetectedPluginSlugs, ...effectiveActivePluginSlugs]),
+    ].sort();
+
+    return {
+      detected:
+        sourceFiles.length > 0 ||
+        dbPages.length > 0 ||
+        dbTemplates.length > 0 ||
+        dbParts.length > 0 ||
+        dbBlockTypes.length > 0 ||
+        mergedPluginSlugs.length > 0,
+      mergedBlockTypes,
+      mergedPluginSlugs,
+      source: {
+        files: sourceFiles,
+        blockTypes: sourceBlockTypes,
+      },
+      db: {
+        detectedPluginSlugs: dbDetectedPluginSlugs,
+        blockTypes: dbBlockTypes,
+        pages: dbPages,
+        templates: dbTemplates,
+        parts: dbParts,
+      },
+      effective: {
+        activePluginSlugs: effectiveActivePluginSlugs,
+      },
+    };
+  }
+
+  private async recordUagbRuntimeAnalysis(
+    logPath: string,
+    manifest: RepoThemeManifest,
+  ): Promise<void> {
+    const summary = manifest.uagbSummary;
+    if (!summary?.detected) return;
+
+    const lines: string[] = [
+      `[UAGB] merged: plugins=${summary.mergedPluginSlugs.join(', ') || 'none'}, blocks=${summary.mergedBlockTypes.join(', ') || 'none'}`,
+      `[UAGB] source: files=${summary.source.files.length}, blocks=${summary.source.blockTypes.join(', ') || 'none'}`,
+      `[UAGB] db: detectedPlugins=${summary.db.detectedPluginSlugs.join(', ') || 'none'}, blocks=${summary.db.blockTypes.join(', ') || 'none'}, pages=${summary.db.pages.length}, templates=${summary.db.templates.length}, parts=${summary.db.parts.length}`,
+      `[UAGB] effective: activePlugins=${summary.effective.activePluginSlugs.join(', ') || 'none'}`,
+    ];
+
+    const homeUsage =
+      summary.db.pages.find((page) => page.isHome) ??
+      summary.db.templates.find((template) => template.isHome);
+    if (homeUsage) {
+      lines.push(
+        `[UAGB] db-home: ${homeUsage.entityType}:${homeUsage.slug || homeUsage.title || homeUsage.id}=[${homeUsage.blockTypes.join(', ')}]`,
+      );
+    }
+    const otherPages = summary.db.pages.filter((page) => !page.isHome);
+    if (otherPages.length > 0) {
+      lines.push(
+        `[UAGB] db-pages: ${otherPages
+          .slice(0, 8)
+          .map(
+            (page) =>
+              `${page.slug || page.title || page.id}=[${page.blockTypes.join(', ')}]`,
+          )
+          .join('; ')}${otherPages.length > 8 ? ` (+${otherPages.length - 8} more)` : ''}`,
+      );
+    }
+    const otherTemplates = summary.db.templates.filter((template) => !template.isHome);
+    if (otherTemplates.length > 0) {
+      lines.push(
+        `[UAGB] db-templates: ${otherTemplates
+          .slice(0, 8)
+          .map(
+            (template) =>
+              `${template.slug || template.title || template.id}=[${template.blockTypes.join(', ')}]`,
+          )
+          .join('; ')}${otherTemplates.length > 8 ? ` (+${otherTemplates.length - 8} more)` : ''}`,
+      );
+    }
+    if (summary.db.parts.length > 0) {
+      lines.push(
+        `[UAGB] db-parts: ${summary.db.parts
+          .slice(0, 8)
+          .map(
+            (part) =>
+              `${part.slug || part.title || part.id}=[${part.blockTypes.join(', ')}]`,
+          )
+          .join('; ')}${summary.db.parts.length > 8 ? ` (+${summary.db.parts.length - 8} more)` : ''}`,
+      );
+    }
+
+    for (const line of lines) {
+      this.logger.log(line);
+      await this.logToFile(logPath, line);
+    }
+  }
+
+  private extractUagbBlockTypes(content: string): string[] {
+    const blockTypes = new Set<string>();
+    for (const match of String(content ?? '').matchAll(
+      /<!--\s*wp:(uagb\/[a-z0-9/-]+)/gi,
+    )) {
+      const blockType = String(match[1] ?? '')
+        .trim()
+        .toLowerCase();
+      if (blockType) blockTypes.add(blockType);
+    }
+    return [...blockTypes].sort();
+  }
+
+  private formatUagbUsageEntries(
+    usages: Array<{ file: string; blockTypes: string[] }>,
+    limit: number,
+  ): string {
+    const preview = usages
+      .slice(0, limit)
+      .map(
+        (usage) =>
+          `${usage.file}=[${usage.blockTypes.join(', ') || 'none'}]`,
+      )
+      .join('; ');
+    const overflow = usages.length - limit;
+    return overflow > 0 ? `${preview} (+${overflow} more)` : preview;
+  }
+
+  private toTemplateBaseName(file: string): string {
+    const normalized = file.replace(/\\/g, '/');
+    const lastSegment = normalized.split('/').pop() ?? normalized;
+    return lastSegment.replace(/\.(php|html)$/i, '').toLowerCase();
+  }
+
+  private resolveDbHomeTemplateUsage(
+    templates: Array<{ slug: string; isHome?: boolean }>,
+  ): { slug: string; isHome?: boolean } | null {
+    const byBase = new Map<string, { slug: string; isHome?: boolean }>();
+    for (const template of templates) {
+      const base = this.toTemplateBaseName(template.slug);
+      if (!byBase.has(base)) {
+        byBase.set(base, template);
+      }
+    }
+    for (const base of ['frontend-page', 'home', 'index']) {
+      const match = byBase.get(base);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  private normalizeUagbPluginSlug(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'spectra') {
+      return 'ultimate-addons-for-gutenberg';
+    }
+    return normalized;
   }
 
   private recordStepDuration(

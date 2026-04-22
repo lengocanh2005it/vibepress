@@ -86,6 +86,24 @@ const KNOWN_PLUGINS: Record<string, KnownPluginDef> = {
       'Beaver Builder stores layouts in DB — page templates are empty wrappers.',
     ],
   },
+  'ultimate-addons-for-gutenberg': {
+    type: 'page-builder',
+    hasTemplates: false,
+    keyRoutes: [],
+    notes: [
+      'Spectra / Ultimate Addons for Gutenberg stores interactive blocks as uagb/* block markup in WordPress content and templates.',
+      'Pay attention to Spectra widgets like modal, slider, carousel, tabs, and accordion when reconstructing the frontend.',
+    ],
+  },
+  spectra: {
+    type: 'page-builder',
+    hasTemplates: false,
+    keyRoutes: [],
+    notes: [
+      'Spectra blocks are typically serialized as uagb/* Gutenberg blocks instead of traditional PHP template layouts.',
+      'Look for interactive UI patterns such as modal, slider, carousel, tabs, and accordion in source block markup.',
+    ],
+  },
   // SEO — no frontend templates
   'wordpress-seo': {
     type: 'seo',
@@ -303,6 +321,7 @@ export interface RepoThemeManifest {
   themes: RepoThemeInventoryManifest[];
   plugins: RepoPluginManifest[];
   resolvedSource?: RepoResolvedSourceSummary;
+  uagbSummary?: RepoUagbDetectionSummary;
   sourceOfTruth: RepoSourceOfTruth;
 }
 
@@ -370,6 +389,36 @@ export interface RepoResolvedSourceSummary {
   repoOnlyPlugins: RepoResolvedPluginSource[];
   runtimeOnlyPlugins: RepoResolvedPluginSource[];
   notes: string[];
+}
+
+export interface RepoUagbDbUsage {
+  id?: number;
+  slug: string;
+  title?: string;
+  blockTypes: string[];
+  source: 'db';
+  entityType: 'page' | 'template' | 'part';
+  isHome?: boolean;
+}
+
+export interface RepoUagbDetectionSummary {
+  detected: boolean;
+  mergedBlockTypes: string[];
+  mergedPluginSlugs: string[];
+  source: {
+    files: RepoFileBlockUsage[];
+    blockTypes: string[];
+  };
+  db: {
+    detectedPluginSlugs: string[];
+    blockTypes: string[];
+    pages: RepoUagbDbUsage[];
+    templates: RepoUagbDbUsage[];
+    parts: RepoUagbDbUsage[];
+  };
+  effective: {
+    activePluginSlugs: string[];
+  };
 }
 
 export interface RepoThemeTypeHints {
@@ -452,10 +501,16 @@ export interface RepoPatternMeta {
   file: string;
 }
 
+export interface RepoFileBlockUsage {
+  file: string;
+  blockTypes: string[];
+}
+
 export interface RepoStructureHints {
   templatePartRefs: string[];
   patternRefs: string[];
   blockTypes: string[];
+  uagbUsages: RepoFileBlockUsage[];
   referencedAssetPaths: string[];
   containsNavigation: boolean;
   containsSearch: boolean;
@@ -888,9 +943,11 @@ export class RepoAnalyzerService {
     const blockTypes = new Set<string>();
     const referencedAssetPaths = new Set<string>();
     const patternMeta: RepoPatternMeta[] = [];
+    const uagbUsages: RepoFileBlockUsage[] = [];
 
     for (const { file, content } of contents) {
       if (!content) continue;
+      const fileBlockTypes = new Set<string>();
 
       for (const match of content.matchAll(
         /<!--\s+wp:template-part\s+(\{[\s\S]*?\})\s*\/?-->/g,
@@ -915,7 +972,9 @@ export class RepoAnalyzerService {
       for (const match of content.matchAll(
         /<!--\s+wp:([a-z0-9-]+(?:\/[a-z0-9-]+)?)/gi,
       )) {
-        blockTypes.add(match[1].toLowerCase());
+        const blockType = match[1].toLowerCase();
+        blockTypes.add(blockType);
+        fileBlockTypes.add(blockType);
       }
 
       for (const match of content.matchAll(
@@ -936,6 +995,16 @@ export class RepoAnalyzerService {
         const meta = this.parsePatternPhpHeader(file, content);
         if (meta) patternMeta.push(meta);
       }
+
+      const normalizedFileBlockTypes = Array.from(fileBlockTypes)
+        .filter((blockType) => blockType.startsWith('uagb/'))
+        .sort();
+      if (normalizedFileBlockTypes.length > 0) {
+        uagbUsages.push({
+          file,
+          blockTypes: normalizedFileBlockTypes,
+        });
+      }
     }
 
     const normalizedBlockTypes = Array.from(blockTypes).sort();
@@ -944,6 +1013,7 @@ export class RepoAnalyzerService {
       templatePartRefs: Array.from(templatePartRefs).sort(),
       patternRefs: Array.from(patternRefs).sort(),
       blockTypes: normalizedBlockTypes,
+      uagbUsages: uagbUsages.sort((a, b) => a.file.localeCompare(b.file)),
       referencedAssetPaths: Array.from(referencedAssetPaths).sort(),
       containsNavigation: normalizedBlockTypes.some((block) =>
         block.includes('navigation'),

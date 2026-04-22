@@ -115,13 +115,7 @@ export class PlannerService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    // Ensure standard routes are generated even when not present in theme templates
-    const templates = this.ensureStandardTemplates(
-      allTemplates,
-      theme.type,
-      content,
-    );
-    const templateNames = templates.map((t) => t.name);
+    const templateNames = this.getExpectedTemplateNames(theme, content);
 
     // ── Phase A: architecture plan ─────────────────────────────────────────
     this.logger.log(
@@ -946,7 +940,7 @@ export class PlannerService {
         .replace(/\.(php|html)$/i, '')
         .toLowerCase();
       const isPageTemplate =
-        templateBase.startsWith('page') || templateBase === 'front-page';
+        templateBase.startsWith('page') || templateBase === 'frontend-page';
       const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
 
       // FSE block theme
@@ -1020,9 +1014,9 @@ For each template, decide:
 5. Write a one-line description of what the component renders.
 
 ── ROUTING RULES ──────────────────────────────────────────────────────────────
-- front-page → route "/"
-- home → route "/" ONLY when no front-page template exists; otherwise route "/blog"
- - index → route "/" ONLY when neither front-page nor home exists; otherwise route "/index"
+- frontend-page → route "/"
+- home → route "/" ONLY when no frontend-page template exists; otherwise route "/blog"
+- index → route "/" ONLY when neither frontend-page nor home exists; otherwise route "/index"
 - archive → route "/archive"  (WordPress archive fallback: handles category/tag/author/date archives — App.tsx will register alias routes /category/:slug, /author/:slug, /tag/:slug pointing to this component)
 - search → route "/search"
 - 404 → route "*"
@@ -1030,8 +1024,7 @@ For each template, decide:
 - page (the default page template) → route "/page/:slug"   (isDetail: true)
 - Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
   e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
-       template "page-wide"           → "/page-wide/:slug"
-       template "page-no-title"       → "/page-no-title/:slug"
+       template "page-custom"         → "/page-custom/:slug"
   The route segment MUST match the template name exactly — do NOT invent a different name.
 - header / footer / sidebar / nav / navigation / searchform / comments / comment /
   post-meta / widget / breadcrumb / pagination / loop / content-none / no-results /
@@ -1079,15 +1072,27 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
   private buildUserPrompt(
     theme: PhpParseResult | BlockParseResult,
     content: DbContentResult,
-    _templateNames: string[],
+    templateNames: string[],
     repoManifest?: RepoThemeManifest,
     editRequestContext?: string,
   ): string {
     const lines: string[] = [];
-    const templates =
+    const allTemplates =
       theme.type === 'classic'
         ? theme.templates
         : [...theme.templates, ...theme.parts];
+    const templateMap = new Map(
+      allTemplates.map((template) => [template.name, template] as const),
+    );
+    const templates = templateNames
+      .map((name) => templateMap.get(name))
+      .filter(
+        (
+          template,
+        ): template is
+          | { name: string; html: string }
+          | { name: string; markup: string } => !!template,
+      );
 
     lines.push(`## Theme`);
     lines.push(
@@ -1451,8 +1456,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     themeType: 'classic' | 'fse',
     content?: DbContentResult,
   ): Array<{ name: string; html?: string; markup?: string }> {
+    const filteredTemplates = this.filterUnusedCustomPageTemplates(
+      templates,
+      content,
+    );
     const existingTemplateNames = new Set(
-      templates.map((t) => t.name.toLowerCase()),
+      filteredTemplates.map((t) => t.name.toLowerCase()),
     );
 
     // Ensure standard routes are generated even when not present in theme templates.
@@ -1467,7 +1476,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       existingTemplateNames.has('category');
 
     if (!hasArchiveVariant) {
-      templates.push(
+      filteredTemplates.push(
         createFallbackTemplate(
           'archive',
           '<div><!-- Archive fallback: lists posts filtered by category, author, or tag --></div>',
@@ -1475,14 +1484,76 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       );
     }
     if (!existingTemplateNames.has('page')) {
-      templates.push(
+      filteredTemplates.push(
         createFallbackTemplate(
           'page',
           '<div><!-- Page template fallback --></div>',
         ),
       );
     }
-    return templates;
+    return filteredTemplates;
+  }
+
+  getExpectedTemplateNames(
+    theme: PhpParseResult | BlockParseResult,
+    content?: DbContentResult,
+  ): string[] {
+    const allTemplates =
+      theme.type === 'classic' ? theme.templates : [...theme.templates, ...theme.parts];
+    return this.ensureStandardTemplates(allTemplates, theme.type, content).map(
+      (template) => template.name,
+    );
+  }
+
+  private filterUnusedCustomPageTemplates(
+    templates: Array<{ name: string; html?: string; markup?: string }>,
+    content?: DbContentResult,
+  ): Array<{ name: string; html?: string; markup?: string }> {
+    if (!content?.pages?.length) return templates;
+
+    const usedPageTemplates = new Set(
+      content.pages
+        .map((page) => this.normalizeWordPressTemplateName(page.template))
+        .filter(Boolean),
+    );
+    if (usedPageTemplates.size === 0) return templates;
+
+    const droppedTemplates: string[] = [];
+    const nextTemplates = templates.filter((template) => {
+      const normalized = this.normalizeWordPressTemplateName(template.name);
+      if (!this.isOptionalCustomPageTemplate(normalized)) {
+        return true;
+      }
+      const keep = usedPageTemplates.has(normalized);
+      if (!keep) droppedTemplates.push(template.name);
+      return keep;
+    });
+
+    if (droppedTemplates.length > 0) {
+      this.logger.log(
+        `[Phase A] Skipping unused custom page template(s): ${droppedTemplates.join(', ')}`,
+      );
+    }
+
+    return nextTemplates;
+  }
+
+  private normalizeWordPressTemplateName(value?: string | null): string {
+    const trimmed = String(value ?? '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '');
+    if (!trimmed) return '';
+
+    const unscoped = trimmed.includes('//')
+      ? (trimmed.split('//').pop() ?? trimmed)
+      : trimmed;
+    const base = unscoped.split('/').pop() ?? unscoped;
+    return base.replace(/\.(php|html)$/i, '').toLowerCase();
+  }
+
+  private isOptionalCustomPageTemplate(templateName: string): boolean {
+    return /^page-[a-z0-9-]+$/.test(templateName);
   }
 
   private buildFallbackPlan(templateNames: string[]): PlanResult {
@@ -1642,6 +1713,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           .join(', ')}`,
       );
     }
+    const interactiveWidgets = this.detectInteractiveWidgetsFromSource(
+      fallbackSource,
+    );
+    if (interactiveWidgets.length > 0) {
+      summaryLines.push(
+        `Interactive/widget hints detected from source: ${interactiveWidgets
+          .map((item) => `\`${item}\``)
+          .join(', ')}. Preserve them as interactive UI where the source shows real behavior; do not flatten them into static sections by default.`,
+      );
+    }
 
     return {
       source: fallbackSource,
@@ -1668,6 +1749,40 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     } catch {
       return [];
     }
+  }
+
+  private detectInteractiveWidgetsFromSource(source: string): string[] {
+    const normalized = source.toLowerCase();
+    const hints = new Set<string>();
+
+    if (
+      normalized.includes('"block":"uagb/') ||
+      normalized.includes('wp:uagb/') ||
+      normalized.includes('uagb-') ||
+      normalized.includes('spectra')
+    ) {
+      hints.add('spectra/uagb');
+    }
+    if (/\b(modal|popup|dialog)\b/.test(normalized)) {
+      hints.add('modal');
+    }
+    if (/\b(slider|swiper)\b/.test(normalized)) {
+      hints.add('slider');
+    }
+    if (/\bcarousel\b/.test(normalized)) {
+      hints.add('carousel');
+    }
+    if (/\baccordion\b/.test(normalized)) {
+      hints.add('accordion');
+    }
+    if (/\btabs?\b/.test(normalized)) {
+      hints.add('tabs');
+    }
+    if (/\blightbox\b/.test(normalized)) {
+      hints.add('lightbox');
+    }
+
+    return [...hints];
   }
 
   private collectCustomClassNamesFromValue(value: unknown): string[] {

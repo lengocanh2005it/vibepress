@@ -125,6 +125,12 @@ export class PluginDiscoveryService {
       this.collectCf7Evidence(runtimeFeatures, restNamespaces),
     );
 
+    addDetected(
+      'ultimate-addons-for-gutenberg',
+      this.detectSpectraCapabilities(runtimeFeatures),
+      this.collectSpectraEvidence(runtimeFeatures),
+    );
+
     // Detect any remaining active plugins not caught by the known detectors above
     const detectedSlugs = new Set(detected.map((d) => d.slug));
     const knownPluginSlugs = new Set([
@@ -133,6 +139,8 @@ export class PluginDiscoveryService {
       'advanced-custom-fields-pro',
       'wordpress-seo',
       'contact-form-7',
+      'ultimate-addons-for-gutenberg',
+      'spectra',
     ]);
     for (const plugin of runtimeFeatures.plugins) {
       if (detectedSlugs.has(plugin.slug) || knownPluginSlugs.has(plugin.slug))
@@ -404,6 +412,67 @@ export class PluginDiscoveryService {
       restNamespaces.some((namespace) => /contact-forms|cf7/i.test(namespace))
     ) {
       capabilities.push('rest-api');
+    }
+    return capabilities;
+  }
+
+  private collectSpectraEvidence(
+    runtimeFeatures: WpRuntimeFeatures,
+  ): PluginEvidence[] {
+    const evidence: PluginEvidence[] = [];
+    this.pushIf(
+      evidence,
+      runtimeFeatures.plugins.some((plugin) =>
+        ['ultimate-addons-for-gutenberg', 'spectra'].includes(plugin.slug),
+      ),
+      {
+        source: 'active_plugins',
+        match:
+          runtimeFeatures.plugins.find((plugin) =>
+            ['ultimate-addons-for-gutenberg', 'spectra'].includes(plugin.slug),
+          )?.pluginFile ??
+          'ultimate-addons-for-gutenberg/ultimate-addons-for-gutenberg.php',
+        confidence: 'high',
+      },
+    );
+    this.pushIf(
+      evidence,
+      runtimeFeatures.blockTypes.some((item) => item.blockType.startsWith('uagb/')),
+      {
+        source: 'block_types',
+        match:
+          runtimeFeatures.blockTypes.find((item) =>
+            item.blockType.startsWith('uagb/'),
+          )?.blockType ?? 'uagb/*',
+        confidence: 'high',
+      },
+    );
+    this.pushIf(
+      evidence,
+      runtimeFeatures.optionKeys.some((key) => /^uagb_/i.test(key)),
+      {
+        source: 'option_keys',
+        match:
+          runtimeFeatures.optionKeys.find((key) => /^uagb_/i.test(key)) ??
+          'uagb_*',
+        confidence: 'medium',
+      },
+    );
+    return evidence;
+  }
+
+  private detectSpectraCapabilities(
+    runtimeFeatures: WpRuntimeFeatures,
+  ): string[] {
+    const capabilities = ['blocks', 'interactive-widgets'];
+    const blockTypes = runtimeFeatures.blockTypes.map((item) =>
+      item.blockType.toLowerCase(),
+    );
+    if (blockTypes.some((block) => /\bmodal\b|\bpopup\b/.test(block))) {
+      capabilities.push('modal');
+    }
+    if (blockTypes.some((block) => /\bslider\b|\bcarousel\b/.test(block))) {
+      capabilities.push('slider');
     }
     return capabilities;
   }

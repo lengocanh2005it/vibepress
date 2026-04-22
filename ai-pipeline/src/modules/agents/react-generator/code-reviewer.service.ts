@@ -27,6 +27,7 @@ import {
   buildFragmentPrompt,
   FRAGMENT_SYSTEM_PROMPT,
 } from './prompts/fragment.prompt.js';
+import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
@@ -2478,7 +2479,9 @@ export class CodeReviewerService {
       /^(Page|Single|PageNoTitle|PageWide|PageWithSidebar|SingleWithSidebar)$/.test(
         componentName,
       );
-    if (!isDetailComponent) return code;
+    const isListLikePageComponent =
+      /^(Archive|Index|Search|NotFound|Page404)$/.test(componentName);
+    if (!isDetailComponent && !isListLikePageComponent) return code;
 
     // Dynamic-data reference pattern — any section containing these is kept.
     const dynamicRef =
@@ -2520,11 +2523,15 @@ export class CodeReviewerService {
       }
 
       const sectionContent = code.slice(sectionStart, j);
+      const isHeadingOnlyInventedAuxiliary =
+        isListLikePageComponent &&
+        this.isHeadingOnlyInventedAuxiliarySection(sectionContent);
 
       // Keep the section if it has dynamic refs or dangerouslySetInnerHTML
       if (
         dynamicRef.test(sectionContent) ||
-        /dangerouslySetInnerHTML/.test(sectionContent)
+        /dangerouslySetInnerHTML/.test(sectionContent) ||
+        (!isDetailComponent && !isHeadingOnlyInventedAuxiliary)
       ) {
         result += sectionContent;
       }
@@ -2533,6 +2540,28 @@ export class CodeReviewerService {
       i = j;
     }
     return result;
+  }
+
+  private isHeadingOnlyInventedAuxiliarySection(sectionContent: string): boolean {
+    const visibleTexts = [...sectionContent.matchAll(/<(h[1-6]|p|span|strong|em|li)\b[^>]*>([\s\S]*?)<\/\1>/gi)]
+      .map((match) => this.normalizeAuxiliaryHeadingText(match[2] ?? ''))
+      .filter(Boolean);
+    if (visibleTexts.length !== 1) return false;
+    return new Set<string>(INVENTED_AUXILIARY_SECTION_LABELS).has(
+      visibleTexts[0]!,
+    );
+  }
+
+  private normalizeAuxiliaryHeadingText(value: string): string {
+    return value
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
   }
 
   // ── Logger ────────────────────────────────────────────────────────────────
