@@ -510,8 +510,13 @@ ${routesBlock}
     const apiBaseUrl = `http://localhost:${apiPort}/api`;
     await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
-    const publicBase = this.configService.get<string>('automation.previewPublicBaseUrl', '');
-    const publicPreviewUrl = publicBase ? `${publicBase}/preview/${jobId}/` : null;
+    const publicBase = this.configService.get<string>(
+      'automation.previewPublicBaseUrl',
+      '',
+    );
+    const publicPreviewUrl = publicBase
+      ? `${publicBase}/preview/${jobId}/`
+      : null;
     return {
       jobId,
       previewDir: rootDir,
@@ -1833,7 +1838,9 @@ ${fontEntries}
         process.kill(-proc.pid!, 'SIGTERM');
       } catch {}
     }, ttlMs).unref();
-    this.logger.log(`Dev server started (pid=${proc.pid}) in ${dir}, TTL=${ttlMs / 60000}m`);
+    this.logger.log(
+      `Dev server started (pid=${proc.pid}) in ${dir}, TTL=${ttlMs / 60000}m`,
+    );
     return proc;
   }
 

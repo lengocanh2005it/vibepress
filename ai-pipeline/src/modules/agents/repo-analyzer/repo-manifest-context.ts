@@ -178,7 +178,9 @@ export function buildRepoManifestContextNote(
     lines.push(
       `Detected UAGB/Spectra block types in repo source: ${uagbBlockTypes
         .slice(0, limit)
-        .join(', ')}${uagbBlockTypes.length > limit ? ` (+${uagbBlockTypes.length - limit} more)` : ''}`,
+        .join(
+          ', ',
+        )}${uagbBlockTypes.length > limit ? ` (+${uagbBlockTypes.length - limit} more)` : ''}`,
     );
   }
   if (manifest.uagbSummary?.detected) {
@@ -198,15 +200,22 @@ export function buildRepoManifestContextNote(
         `UAGB pages from DB: ${manifest.uagbSummary.db.pages
           .slice(0, mode === 'compact' ? 4 : 8)
           .map((page) => `${page.slug}=[${page.blockTypes.join(', ')}]`)
-          .join(', ')}${manifest.uagbSummary.db.pages.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.pages.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+          .join(
+            ', ',
+          )}${manifest.uagbSummary.db.pages.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.pages.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
       );
     }
     if (manifest.uagbSummary.db.templates.length > 0) {
       lines.push(
         `UAGB templates from DB: ${manifest.uagbSummary.db.templates
           .slice(0, mode === 'compact' ? 4 : 8)
-          .map((template) => `${template.slug}=[${template.blockTypes.join(', ')}]`)
-          .join(', ')}${manifest.uagbSummary.db.templates.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.templates.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+          .map(
+            (template) =>
+              `${template.slug}=[${template.blockTypes.join(', ')}]`,
+          )
+          .join(
+            ', ',
+          )}${manifest.uagbSummary.db.templates.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.templates.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
       );
     }
   }

@@ -887,7 +887,11 @@ export class WpQueryService {
       return siteLogoOptionUrl;
     }
 
-    const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix, siteUrl);
+    const customLogoUrl = await this.resolveCustomLogoUrl(
+      conn,
+      prefix,
+      siteUrl,
+    );
     if (customLogoUrl) return customLogoUrl;
 
     const fallbackLogoUrl = await this.resolveLogoUrlFromTemplateMarkup(

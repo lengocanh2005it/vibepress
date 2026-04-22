@@ -437,7 +437,9 @@ export class PluginDiscoveryService {
     );
     this.pushIf(
       evidence,
-      runtimeFeatures.blockTypes.some((item) => item.blockType.startsWith('uagb/')),
+      runtimeFeatures.blockTypes.some((item) =>
+        item.blockType.startsWith('uagb/'),
+      ),
       {
         source: 'block_types',
         match:

@@ -12,7 +12,10 @@ import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.servic
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
-import type { ComponentVisualPlan } from '../visual-plan.schema.js';
+import type {
+  ComponentVisualPlan,
+  SectionPlan,
+} from '../visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   formatInventedAuxiliarySectionLabels,
@@ -1794,6 +1797,69 @@ Render ONLY the JSX for the blocks in the template source below.`;
     .replace('{{siteName}}', input.siteInfo.siteName)
     .replace('{{siteUrl}}', input.siteInfo.siteUrl)
     .replace('{{templateSource}}', input.nodesJson);
+}
+
+export function buildInlineSectionPrompt(input: {
+  componentName: string;
+  section: SectionPlan;
+  sectionIndex: number;
+  totalSections: number;
+  availableVariables: string;
+  content?: DbContentResult;
+  tokens?: ThemeTokens;
+  repoManifest?: RepoThemeManifest;
+  componentPlan?: ComponentPromptContext;
+  editRequestContextNote?: string;
+  retryError?: string;
+}): string {
+  const normalizedDataNeeds = normalizeDataNeeds(
+    input.componentPlan?.dataNeeds,
+  );
+  const planContext = [
+    `## Section-only generation mode
+Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSections} of \`${input.componentName}\`.
+- Output exactly one top-level section wrapper.
+- Do NOT output imports, exports, hooks, component declarations, helper functions, or markdown fences.
+- The page shell already declares runtime variables. Use only these existing variables when needed: ${input.availableVariables}.
+- Preserve every source-backed text node from the approved section plan. Do NOT summarize, merge, or omit headings, subheadings, subtitles, card headings, card bodies, list items, CTA labels, or image sources unless the field is a documented dynamic binding like \`{query.title}\`.
+- Keep the exact source tracking attributes on the top-level wrapper: \`data-vp-source-node\`, \`data-vp-template\`, \`data-vp-source-file\`, \`data-vp-section-key\`, \`data-vp-component\`, \`data-vp-section-component\`.`,
+    buildScopedApiContractNote({
+      dataNeeds: normalizedDataNeeds,
+      route: input.componentPlan?.route,
+      componentName: input.componentName,
+    }),
+    buildVisualPlanContextNote(
+      input.componentPlan?.visualPlan
+        ? {
+            ...input.componentPlan.visualPlan,
+            sections: [input.section],
+          }
+        : undefined,
+      input.componentName,
+    ),
+    input.content
+      ? buildDataGroundingNote(input.content, {
+          dataNeeds: normalizedDataNeeds,
+        })
+      : '',
+    buildThemeTokensNote(input.tokens),
+    shouldIncludeRepoManifestContext(input.componentName, input.componentPlan)
+      ? buildRepoManifestContextNote(input.repoManifest, {
+          mode: 'compact',
+          includeLayoutHints: true,
+          includeStyleHints: false,
+          includeStructureHints: true,
+        })
+      : '',
+    input.editRequestContextNote,
+    buildRetryNote(input.retryError),
+    '## Approved section JSON',
+    '```json',
+    JSON.stringify(input.section, null, 2),
+    '```',
+  ].filter(Boolean);
+
+  return planContext.join('\n\n');
 }
 
 function buildSourceTrackingNoteForNodes(

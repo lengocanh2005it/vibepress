@@ -20,6 +20,7 @@ import { FrameGeneratorService } from './frame-generator.service.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 import {
   buildComponentPrompt,
+  buildInlineSectionPrompt,
   buildSectionPrompt,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
@@ -205,6 +206,65 @@ export class CodeReviewerService {
         logPath,
         `[reviewer] "${componentName}": preferDirectAi enabled; bypassing visual-plan-first path to preserve WordPress block fidelity`,
       );
+    }
+
+    if (
+      !forceDirectAi &&
+      this.shouldUseSectionLevelAssembly(componentPlan, componentName)
+    ) {
+      this.logger.log(
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections)`,
+      );
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections)`,
+      );
+      try {
+        const assembled = await this.generateComponentWithSectionAssembly({
+          componentName,
+          modelName,
+          content,
+          tokens,
+          repoManifest,
+          componentPlan: promptContext,
+          editRequestContextNote,
+          logPath,
+          systemPrompt: componentSystemPrompt,
+        });
+        if (assembled.isValid) {
+          return {
+            component: {
+              name: componentName,
+              filePath: '',
+              code: assembled.code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+            },
+            fromVisualPlan: true,
+            generationMode: 'ai',
+            attempts: assembled.attemptsUsed,
+            rawResponse: assembled.lastRawOutput || '',
+          };
+        }
+        lastError = assembled.lastError;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level assembly failed: ${assembled.lastError} — falling back to full-file generation`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level assembly failed: ${assembled.lastError} — falling back to full-file generation`,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error ?? 'unknown');
+        lastError = message;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level assembly failed: ${message} — full-file fallback`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level assembly failed: ${message} — full-file fallback`,
+        );
+      }
     }
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
@@ -1140,6 +1200,18 @@ export class CodeReviewerService {
     // Keep it only for narrowly-scoped utility/meta components unless
     // explicitly allowlisted in the strategy registry.
     return false;
+  }
+
+  private shouldUseSectionLevelAssembly(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): boolean {
+    return (
+      componentName === 'Home' &&
+      componentPlan?.type === 'page' &&
+      Boolean(componentPlan.visualPlan) &&
+      (componentPlan.visualPlan?.sections?.length ?? 0) >= 5
+    );
   }
 
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
@@ -2290,6 +2362,444 @@ export class CodeReviewerService {
     return [...new Set(instructions)];
   }
 
+  private async generateComponentWithSectionAssembly(input: {
+    componentName: string;
+    modelName: string;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
+    componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
+    logPath?: string;
+    systemPrompt: string;
+  }): Promise<{
+    code: string;
+    isValid: boolean;
+    attemptsUsed: number;
+    lastError?: string;
+    lastRawOutput?: string;
+    cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[];
+  }> {
+    const {
+      componentName,
+      modelName,
+      content,
+      tokens,
+      repoManifest,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+      systemPrompt,
+    } = input;
+
+    if (!componentPlan?.visualPlan) {
+      return {
+        code: '',
+        isValid: false,
+        attemptsUsed: 0,
+        lastError: 'Missing visual plan for section-level assembly',
+        cotAttempts: [],
+      };
+    }
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    const frame = this.codeGenerator.generateSectionAssemblyFrame(
+      componentPlan.visualPlan,
+    );
+    const availableVariables = this.frameGenerator.describeVariables({
+      type: componentPlan.type ?? 'page',
+      dataNeeds: componentPlan.dataNeeds ?? [],
+      isDetail: componentPlan.isDetail ?? false,
+    });
+    const validationContext = this.buildValidationContext(
+      componentPlan,
+      componentName,
+      false,
+      undefined,
+      this.resolveRequiredCustomClassTargets(
+        componentPlan.requiredCustomClassNames,
+        tokens,
+      ),
+    );
+    const assembledSections: string[] = [];
+    let attemptsUsed = 0;
+    let lastError: string | undefined;
+    let lastRawOutput = '';
+    const cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[] =
+      [];
+
+    for (let index = 0; index < sections.length; index++) {
+      const section = sections[index];
+      const sectionResult = await this.generateInlineSectionForAssembly({
+        componentName,
+        section,
+        sectionIndex: index,
+        totalSections: sections.length,
+        availableVariables,
+        modelName,
+        systemPrompt,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan,
+        editRequestContextNote,
+        logPath,
+      });
+      attemptsUsed += sectionResult.attemptsUsed;
+      lastRawOutput = sectionResult.lastRawOutput || lastRawOutput;
+      cotAttempts.push(...sectionResult.cotAttempts);
+
+      if (!sectionResult.isValid) {
+        lastError = sectionResult.lastError;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level: section ${index + 1}/${sections.length} (${section.type}) exhausted attempts — full-file fallback`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level: section ${index + 1}/${sections.length} (${section.type}) exhausted attempts — full-file fallback`,
+        );
+        return {
+          code: '',
+          isValid: false,
+          attemptsUsed,
+          lastError: sectionResult.lastError,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+
+      assembledSections.push(sectionResult.code);
+    }
+
+    let code = this.codeGenerator.assembleSectionedComponent(
+      frame,
+      assembledSections,
+    );
+    code = this.stripSpuriousHardcodedSections(
+      this.postProcessCode(code),
+      componentName,
+    );
+    const check = this.validator.checkCodeStructure(code, validationContext);
+    if (check.fixedCode) code = check.fixedCode;
+
+    if (check.isValid) {
+      this.logger.log(
+        `[reviewer] "${componentName}" ✓ section-level one-file assembly succeeded (${sections.length} sections, ${attemptsUsed} AI attempt(s))`,
+      );
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}" ✓ section-level one-file assembly succeeded (${sections.length} sections, ${attemptsUsed} AI attempt(s))`,
+      );
+      return {
+        code,
+        isValid: true,
+        attemptsUsed,
+        lastRawOutput,
+        cotAttempts,
+      };
+    }
+
+    const targetedRetryIndexes = this.extractSectionIndexesFromVisualPlanError(
+      check.error,
+      sections.length,
+    );
+    if (targetedRetryIndexes.length > 0) {
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level final validation failed in section(s) ${targetedRetryIndexes
+          .map((value) => value + 1)
+          .join(', ')} — targeted section retry`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level final validation failed in section(s) ${targetedRetryIndexes
+          .map((value) => value + 1)
+          .join(', ')} — targeted section retry`,
+      );
+
+      for (const index of targetedRetryIndexes) {
+        const section = sections[index];
+        const narrowedError = this.extractSectionSpecificError(
+          check.error,
+          index + 1,
+        );
+        const retryResult = await this.generateInlineSectionForAssembly({
+          componentName,
+          section,
+          sectionIndex: index,
+          totalSections: sections.length,
+          availableVariables,
+          modelName,
+          systemPrompt,
+          content,
+          tokens,
+          repoManifest,
+          componentPlan,
+          editRequestContextNote,
+          logPath,
+          initialRetryError: narrowedError,
+          maxAttempts: 2,
+          phaseLabel: 'targeted-retry',
+        });
+        attemptsUsed += retryResult.attemptsUsed;
+        lastRawOutput = retryResult.lastRawOutput || lastRawOutput;
+        cotAttempts.push(...retryResult.cotAttempts);
+        if (retryResult.isValid) {
+          assembledSections[index] = retryResult.code;
+        }
+      }
+
+      code = this.codeGenerator.assembleSectionedComponent(
+        frame,
+        assembledSections,
+      );
+      code = this.stripSpuriousHardcodedSections(
+        this.postProcessCode(code),
+        componentName,
+      );
+      const retriedCheck = this.validator.checkCodeStructure(
+        code,
+        validationContext,
+      );
+      if (retriedCheck.fixedCode) code = retriedCheck.fixedCode;
+
+      if (retriedCheck.isValid) {
+        this.logger.log(
+          `[reviewer] "${componentName}" ✓ section-level targeted retry resolved final validation`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer] "${componentName}" ✓ section-level targeted retry resolved final validation`,
+        );
+        return {
+          code,
+          isValid: true,
+          attemptsUsed,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+
+      lastError = retriedCheck.error;
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level targeted retry still invalid: ${retriedCheck.error}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level targeted retry still invalid: ${retriedCheck.error}`,
+      );
+    }
+
+    this.logger.warn(
+      `[reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${check.error}`,
+    );
+    await this.log(
+      logPath,
+      `WARN [reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${check.error}`,
+    );
+
+    return {
+      code,
+      isValid: false,
+      attemptsUsed,
+      lastError: lastError ?? check.error,
+      lastRawOutput,
+      cotAttempts,
+    };
+  }
+
+  private async generateInlineSectionForAssembly(input: {
+    componentName: string;
+    section: ComponentVisualPlan['sections'][number];
+    sectionIndex: number;
+    totalSections: number;
+    availableVariables: string;
+    modelName: string;
+    systemPrompt: string;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
+    componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
+    logPath?: string;
+    initialRetryError?: string;
+    maxAttempts?: number;
+    phaseLabel?: string;
+  }): Promise<{
+    code: string;
+    isValid: boolean;
+    attemptsUsed: number;
+    lastError?: string;
+    lastRawOutput?: string;
+    cotAttempts: AttemptLog[];
+  }> {
+    const {
+      componentName,
+      section,
+      sectionIndex,
+      totalSections,
+      availableVariables,
+      modelName,
+      systemPrompt,
+      content,
+      tokens,
+      repoManifest,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+      initialRetryError,
+      maxAttempts = 2,
+      phaseLabel = 'initial',
+    } = input;
+
+    let sectionCode = '';
+    let sectionError = initialRetryError;
+    let lastRawOutput = '';
+    const cotAttempts: AttemptLog[] = [];
+
+    this.logger.log(
+      `[reviewer] "${componentName}" section-level (${phaseLabel}): generating section ${sectionIndex + 1}/${totalSections} (${section.type})`,
+    );
+    await this.log(
+      logPath,
+      `[reviewer] "${componentName}" section-level (${phaseLabel}): generating section ${sectionIndex + 1}/${totalSections} (${section.type})`,
+    );
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const userPrompt = buildInlineSectionPrompt({
+        componentName,
+        section,
+        sectionIndex,
+        totalSections,
+        availableVariables,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan,
+        editRequestContextNote,
+        retryError: sectionError,
+      });
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedTokens,
+      } = await this.generateWithRetry(
+        modelName,
+        systemPrompt,
+        userPrompt,
+        4,
+        logPath,
+        `${componentName}:section-${sectionIndex + 1}:${phaseLabel}`,
+        editRequestContextNote ? 'edit-request' : 'base',
+      );
+      lastRawOutput = raw;
+      sectionCode = this.postProcessCode(raw).trim();
+      const basicError = this.validateInlineSectionOutput(sectionCode);
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        promptSent: {
+          system: systemPrompt,
+          user: userPrompt,
+        },
+        response: raw,
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
+        },
+        timestamp: new Date().toISOString(),
+        success: !basicError,
+        error: basicError,
+        validationFeedback: basicError
+          ? undefined
+          : `section ${sectionIndex + 1} inline assembly candidate accepted`,
+      });
+      if (!basicError) {
+        this.logger.log(
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted on attempt ${attempt}/${maxAttempts}`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted on attempt ${attempt}/${maxAttempts}`,
+        );
+        return {
+          code: sectionCode,
+          isValid: true,
+          attemptsUsed: attempt,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+      sectionError = basicError;
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) attempt ${attempt}/${maxAttempts} failed: ${basicError}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) section ${sectionIndex + 1}/${totalSections} attempt ${attempt}/${maxAttempts} failed: ${basicError}${this.formatRawOutput(raw)}`,
+      );
+    }
+
+    return {
+      code: sectionCode,
+      isValid: false,
+      attemptsUsed: maxAttempts,
+      lastError: sectionError,
+      lastRawOutput,
+      cotAttempts,
+    };
+  }
+
+  private extractSectionIndexesFromVisualPlanError(
+    error: string | undefined,
+    totalSections: number,
+  ): number[] {
+    if (!error || !/Visual plan fidelity violated/i.test(error)) return [];
+    const matches = [...error.matchAll(/section\s+(\d+)/gi)];
+    const indexes = matches
+      .map((match) => Number(match[1]) - 1)
+      .filter(
+        (value) =>
+          Number.isInteger(value) && value >= 0 && value < totalSections,
+      );
+    return [...new Set(indexes)];
+  }
+
+  private extractSectionSpecificError(
+    error: string | undefined,
+    sectionNumber: number,
+  ): string | undefined {
+    if (!error) return undefined;
+    const lines = error
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const filtered = lines.filter((line) =>
+      new RegExp(`section\\s+${sectionNumber}\\b`, 'i').test(line),
+    );
+    if (filtered.length === 0) return error;
+    return ['Visual plan fidelity violated:', ...filtered].join('\n');
+  }
+
+  private validateInlineSectionOutput(code: string): string | undefined {
+    const trimmed = code.trim();
+    if (!trimmed) return 'Empty section JSX output';
+    if (/^\s*import\s/m.test(trimmed)) {
+      return 'Inline section output must not contain imports';
+    }
+    if (/export\s+default/.test(trimmed)) {
+      return 'Inline section output must not contain export default';
+    }
+    if (/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed)) {
+      return 'Inline section output must not declare hooks or component functions';
+    }
+    if (!/^<[\s\S]+>$/.test(trimmed)) {
+      return 'Inline section output must be a single top-level JSX wrapper';
+    }
+    return undefined;
+  }
+
   private buildVisualPlanRetryChecklist(
     componentPlan: ComponentPromptContext | undefined,
     error: string | undefined,
@@ -2317,7 +2827,9 @@ export class CodeReviewerService {
 
         if (section.type === 'hero') {
           parts.push(
-            section.heading ? `heading=${JSON.stringify(section.heading)}` : null,
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
           );
           parts.push(
             section.subheading
@@ -2327,20 +2839,30 @@ export class CodeReviewerService {
         }
 
         if (section.type === 'post-list') {
-          parts.push(section.title ? `title=${JSON.stringify(section.title)}` : null);
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
         }
 
         if (section.type === 'card-grid') {
-          parts.push(section.title ? `title=${JSON.stringify(section.title)}` : null);
           parts.push(
-            section.subtitle ? `subtitle=${JSON.stringify(section.subtitle)}` : null,
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          parts.push(
+            section.subtitle
+              ? `subtitle=${JSON.stringify(section.subtitle)}`
+              : null,
           );
           const cardHints = section.cards
             ?.slice(0, 4)
             .map((card, cardIndex) => {
               const hints = [
-                card.heading ? `card${cardIndex + 1}.heading=${JSON.stringify(card.heading)}` : null,
-                card.body ? `card${cardIndex + 1}.body=${JSON.stringify(card.body)}` : null,
+                card.heading
+                  ? `card${cardIndex + 1}.heading=${JSON.stringify(card.heading)}`
+                  : null,
+                card.body
+                  ? `card${cardIndex + 1}.body=${JSON.stringify(card.body)}`
+                  : null,
               ].filter(Boolean);
               return hints.join(' | ');
             })
@@ -2352,7 +2874,9 @@ export class CodeReviewerService {
 
         if (section.type === 'media-text') {
           parts.push(
-            section.heading ? `heading=${JSON.stringify(section.heading)}` : null,
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
           );
           parts.push(
             section.body ? `body=${JSON.stringify(section.body)}` : null,
@@ -2687,8 +3211,14 @@ export class CodeReviewerService {
     return result;
   }
 
-  private isHeadingOnlyInventedAuxiliarySection(sectionContent: string): boolean {
-    const visibleTexts = [...sectionContent.matchAll(/<(h[1-6]|p|span|strong|em|li)\b[^>]*>([\s\S]*?)<\/\1>/gi)]
+  private isHeadingOnlyInventedAuxiliarySection(
+    sectionContent: string,
+  ): boolean {
+    const visibleTexts = [
+      ...sectionContent.matchAll(
+        /<(h[1-6]|p|span|strong|em|li)\b[^>]*>([\s\S]*?)<\/\1>/gi,
+      ),
+    ]
       .map((match) => this.normalizeAuxiliaryHeadingText(match[2] ?? ''))
       .filter(Boolean);
     if (visibleTexts.length !== 1) return false;

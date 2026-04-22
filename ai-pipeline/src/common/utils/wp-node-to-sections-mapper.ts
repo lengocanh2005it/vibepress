@@ -511,10 +511,7 @@ function mapColumns(node: WpNode): CardGridSection | MediaTextSection | null {
   const cards = cols
     .map((col) => {
       const flat = flattenChildren(col);
-      const h = findFirstByBlock(flat, [
-        'core/heading',
-        'heading',
-      ]);
+      const h = findFirstByBlock(flat, ['core/heading', 'heading']);
       const body = extractRichTextFromNodes(flat);
       return {
         heading: h?.text ?? '',
@@ -596,8 +593,7 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     );
     const subheading = extractRichTextFromNodes(flat);
     const img = flat.find(
-      (c) =>
-        (c.block === 'core/image' || c.block === 'image') && c.src,
+      (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
     );
     const btn = flat.find(
       (c) =>
@@ -617,9 +613,13 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
   // Fallback: if no labeled slider-children, treat all children as a single slide
   if (slides.length === 0) {
     const flat = flattenChildren(node);
-    const h = flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
+    const h = flat.find(
+      (c) => c.block === 'core/heading' || c.block === 'heading',
+    );
     const subheading = extractRichTextFromNodes(flat);
-    const img = flat.find((c) => (c.block === 'core/image' || c.block === 'image') && c.src);
+    const img = flat.find(
+      (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
+    );
     if (!h && !img) return null;
     slides.push({
       ...(h?.text ? { heading: h.text } : {}),
@@ -636,7 +636,8 @@ function mapUagbInfoBox(node: WpNode): CardGridSection | null {
   const h = flat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
   );
-  const heading = h?.text ?? (node.params?.iconBoxTitle as string | undefined) ?? '';
+  const heading =
+    h?.text ?? (node.params?.iconBoxTitle as string | undefined) ?? '';
   const body =
     extractRichTextFromNodes(flat) ??
     (node.params?.iconBoxDesc as string | undefined) ??
@@ -655,7 +656,8 @@ function mapUagbTabs(node: WpNode): CardGridSection | null {
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
-      const tabTitle = (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
+      const tabTitle =
+        (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
       const body = extractRichTextFromNodes(flat);
       return { heading: tabTitle, body };
     })
@@ -1030,11 +1032,20 @@ function buildSegmentedInteractiveSections(
     prefixEnd++;
   }
 
-  const prefixChildren = children.slice(0, prefixEnd).filter(
-    (child) => !isSpacerBlock(child.block),
-  );
-  if (prefixChildren.some((child) => child.block === 'core/heading' || child.block === 'heading')) {
-    sections.push(applyNodePresentation(buildHeroFromChildren(groupNode, prefixChildren), groupNode));
+  const prefixChildren = children
+    .slice(0, prefixEnd)
+    .filter((child) => !isSpacerBlock(child.block));
+  if (
+    prefixChildren.some(
+      (child) => child.block === 'core/heading' || child.block === 'heading',
+    )
+  ) {
+    sections.push(
+      applyNodePresentation(
+        buildHeroFromChildren(groupNode, prefixChildren),
+        groupNode,
+      ),
+    );
   }
 
   const remainder = children.slice(prefixEnd);

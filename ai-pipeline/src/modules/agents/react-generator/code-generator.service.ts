@@ -98,6 +98,41 @@ export class CodeGeneratorService {
       .join('\n\n');
   }
 
+  generateSectionAssemblyFrame(plan: ComponentVisualPlan): string {
+    const effectiveDataNeeds = this.deriveDataNeeds(plan);
+    const effectivePlan = { ...plan, dataNeeds: effectiveDataNeeds };
+
+    const needsRouter = this.needsRouter(effectivePlan);
+    const needsParams = this.needsParams(effectivePlan);
+
+    const ctx: RenderCtx = {
+      p: effectivePlan.palette,
+      t: effectivePlan.typography,
+      l: effectivePlan.layout,
+      b: effectivePlan.blockStyles,
+    };
+
+    const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
+    const interfaces = SHARED_INTERFACES;
+    const stateAndFetch = this.buildStateAndFetch(effectivePlan);
+    const body = this.buildSectionAssemblyBody(effectivePlan, ctx);
+
+    return [imports, interfaces, stateAndFetch, body]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  assembleSectionedComponent(frame: string, sectionJsx: string[]): string {
+    let assembled = frame;
+    for (let index = 0; index < sectionJsx.length; index++) {
+      assembled = assembled.replace(
+        this.buildSectionAssemblyPlaceholder(index),
+        sectionJsx[index]?.trim() || '',
+      );
+    }
+    return assembled;
+  }
+
   generateBlockFaithfulPartial(input: BlockFaithfulPartialInput): string {
     const {
       componentName,
@@ -166,16 +201,24 @@ export class CodeGeneratorService {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
     if (needsMenus && renderState.componentKind === 'header') {
-      lines.push(`  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`);
+      lines.push(
+        `  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`,
+      );
     }
     if (renderState.componentKind === 'footer') {
-      lines.push(`  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`);
+      lines.push(
+        `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
+      );
     }
     if (needsSiteInfo || needsMenus) {
       lines.push('');
       lines.push('  useEffect(() => {');
       lines.push('    (async () => {');
-      if (needsSiteInfo && needsMenus && renderState.componentKind === 'footer') {
+      if (
+        needsSiteInfo &&
+        needsMenus &&
+        renderState.componentKind === 'footer'
+      ) {
         lines.push(
           '      const [siteInfoRes, menusRes, footerLinksRes] = await Promise.all([',
         );
@@ -183,7 +226,9 @@ export class CodeGeneratorService {
         lines.push("        fetch('/api/menus'),");
         lines.push("        fetch('/api/footer-links'),");
         lines.push('      ]);');
-        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
         lines.push('      setSiteInfo(await siteInfoRes.json());');
         lines.push('      setMenus(await menusRes.json());');
         lines.push(
@@ -200,11 +245,15 @@ export class CodeGeneratorService {
         lines.push("      const siteInfoRes = await fetch('/api/site-info');");
         lines.push('      setSiteInfo(await siteInfoRes.json());');
       } else if (renderState.componentKind === 'footer') {
-        lines.push('      const [menusRes, footerLinksRes] = await Promise.all([');
+        lines.push(
+          '      const [menusRes, footerLinksRes] = await Promise.all([',
+        );
         lines.push("        fetch('/api/menus'),");
         lines.push("        fetch('/api/footer-links'),");
         lines.push('      ]);');
-        lines.push('      const footerLinksData = await footerLinksRes.json();');
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
         lines.push('      setMenus(await menusRes.json());');
         lines.push(
           '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
@@ -503,7 +552,9 @@ export class CodeGeneratorService {
     if (dataNeeds.includes('menus'))
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     if (plan.sections.some((s) => s.type === 'navbar'))
-      lines.push(`  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`);
+      lines.push(
+        `  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`,
+      );
     if (dataNeeds.includes('postDetail')) {
       lines.push(`  const [item, setItem] = useState<Post | null>(null);`);
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
@@ -873,6 +924,32 @@ ${sectionJsx}
 };
 
 export default ${componentName};`;
+  }
+
+  private buildSectionAssemblyBody(
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+  ): string {
+    const { componentName, palette, sections } = plan;
+    const rootStyle = this.buildStyleAttr({
+      fontFamily: ctx.t.bodyFamily,
+    });
+    const placeholders = sections
+      .map((_, index) => `      ${this.buildSectionAssemblyPlaceholder(index)}`)
+      .join('\n\n');
+
+    return `  return (
+    <div className="bg-[${palette.background}] text-[${palette.text}] flex flex-col ${ctx.l.blockGap}"${rootStyle}>
+${placeholders}
+    </div>
+  );
+};
+
+export default ${componentName};`;
+  }
+
+  private buildSectionAssemblyPlaceholder(index: number): string {
+    return `__VP_SECTION_${index + 1}__`;
   }
 
   private contentContainerClass(ctx: RenderCtx): string {
@@ -1581,7 +1658,7 @@ ${cards}
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => /<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`)).join('')}</ul>` : ''}
             ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
           </div>`;
 
@@ -2423,7 +2500,8 @@ ${indent}        )}
 ${indent}      </div>
 ${indent}    </nav>
 ${indent}  )}
-${indent}</>`;}
+${indent}</>`;
+    }
     return `${indent}<nav${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
 ${indent}    <ul className="${listClass}">

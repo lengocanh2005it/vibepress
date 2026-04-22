@@ -5,8 +5,6 @@ import { join } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import type { TokenScope } from '../../../common/utils/token-tracker.js';
-import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
-import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { DbContentResult } from '../db-content/db-content.service.js';
 import { PhpParseResult } from '../php-parser/php-parser.service.js';
@@ -91,7 +89,6 @@ export class ReactGeneratorService {
     private readonly styleResolver: StyleResolverService,
     private readonly codeGenerator: CodeGeneratorService,
     private readonly codeReviewer: CodeReviewerService,
-    private readonly capturePlanning: CapturePlanningService,
     private readonly aiLogger: AiLoggerService,
   ) {}
 
@@ -130,15 +127,7 @@ export class ReactGeneratorService {
     const reviewCodeModel = modelConfig?.reviewCode ?? codeGeneratorModel;
     const fixAgentModel = modelConfig?.fixAgent ?? reviewCodeModel;
 
-    const systemPrompt = buildPlanPrompt(
-      theme,
-      content,
-      repoManifest,
-      buildEditRequestContextNote(editRequest, {
-        audience: 'system',
-        maxAttachments: 2,
-      }),
-    );
+    const systemPrompt = buildPlanPrompt(theme, content, repoManifest);
     const tokens = 'tokens' in theme ? theme.tokens : undefined;
 
     const pagesCount = theme.templates.length;
@@ -418,13 +407,6 @@ export class ReactGeneratorService {
       themeType === 'fse' &&
       componentPlan?.type === 'partial' &&
       !getComponentStrategy(componentName).deterministicFirst;
-    const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
-      request: editRequest,
-      componentName,
-      route: componentPlan?.route,
-      maxAttachments: 3,
-    });
-
     if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
         componentName,
@@ -437,11 +419,6 @@ export class ReactGeneratorService {
         tokens,
         repoManifest,
         componentPlan,
-        editRequestContextNote: buildEditRequestContextNote(scopedEditRequest, {
-          audience: 'codegen',
-          componentName,
-          route: componentPlan?.route,
-        }),
         logPath,
         jobId,
       });
@@ -519,14 +496,6 @@ export class ReactGeneratorService {
             tokens,
             repoManifest,
             componentPlan,
-            editRequestContextNote: buildEditRequestContextNote(
-              scopedEditRequest,
-              {
-                audience: 'section',
-                componentName,
-                route: componentPlan?.route,
-              },
-            ),
             logPath,
             jobId,
           });
@@ -803,7 +772,11 @@ ${renders}
       if ('imageSrc' in section && section.imageSrc) {
         parts.push(`image="${section.imageSrc}"`);
       }
-      if ('cards' in section && Array.isArray(section.cards) && section.cards.length > 0) {
+      if (
+        'cards' in section &&
+        Array.isArray(section.cards) &&
+        section.cards.length > 0
+      ) {
         parts.push(
           `cards=${section.cards
             .map((card) => card.heading || card.body)

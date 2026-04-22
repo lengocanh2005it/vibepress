@@ -865,7 +865,10 @@ export class ValidatorService {
         );
       }
 
-      if (section.sourceRef?.sourceNodeId && !code.includes(section.sourceRef.sourceNodeId)) {
+      if (
+        section.sourceRef?.sourceNodeId &&
+        !code.includes(section.sourceRef.sourceNodeId)
+      ) {
         issues.push(
           `${label} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
         );
@@ -909,7 +912,13 @@ export class ValidatorService {
     label: string,
   ): string[] {
     const issues: string[] = [];
-    issues.push(...this.requireLiteralIfPresent(code, section.heading, `${label} lost hero heading`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost hero heading`,
+      ),
+    );
     issues.push(
       ...this.requireLiteralIfPresent(
         code,
@@ -948,7 +957,11 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(code, section.heading, `${label} lost cover heading`),
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost cover heading`,
+      ),
     );
     issues.push(
       ...this.requireLiteralIfPresent(
@@ -988,7 +1001,11 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(code, section.body, `${label} lost media-text body`),
+      ...this.requireLiteralIfPresent(
+        code,
+        section.body,
+        `${label} lost media-text body`,
+      ),
     );
     issues.push(
       ...this.requireLiteralIfPresent(
@@ -998,7 +1015,13 @@ export class ValidatorService {
       ),
     );
     for (const item of section.listItems ?? []) {
-      issues.push(...this.requireLiteralIfPresent(code, item, `${label} lost media-text list item`));
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item,
+          `${label} lost media-text list item`,
+        ),
+      );
     }
     return issues;
   }
@@ -1010,7 +1033,11 @@ export class ValidatorService {
   ): string[] {
     const issues: string[] = [];
     issues.push(
-      ...this.requireLiteralIfPresent(code, section.title, `${label} lost card-grid title`),
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost card-grid title`,
+      ),
     );
     issues.push(
       ...this.requireLiteralIfPresent(
@@ -1021,8 +1048,20 @@ export class ValidatorService {
     );
 
     for (const card of section.cards ?? []) {
-      issues.push(...this.requireLiteralIfPresent(code, card.heading, `${label} lost card heading`));
-      issues.push(...this.requireLiteralIfPresent(code, card.body, `${label} lost card body`));
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          card.heading,
+          `${label} lost card heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          card.body,
+          `${label} lost card body`,
+        ),
+      );
     }
     return issues;
   }
@@ -1033,7 +1072,13 @@ export class ValidatorService {
     label: string,
   ): string[] {
     const issues: string[] = [];
-    issues.push(...this.requireLiteralIfPresent(code, section.quote, `${label} lost testimonial quote`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.quote,
+        `${label} lost testimonial quote`,
+      ),
+    );
     issues.push(
       ...this.requireLiteralIfPresent(
         code,
@@ -1064,7 +1109,13 @@ export class ValidatorService {
     label: string,
   ): string[] {
     const issues: string[] = [];
-    issues.push(...this.requireLiteralIfPresent(code, section.heading, `${label} lost newsletter heading`));
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost newsletter heading`,
+      ),
+    );
     issues.push(
       ...this.requireLiteralIfPresent(
         code,
@@ -2411,7 +2462,9 @@ export {};
     return (
       /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url) ||
       // External resources (fonts, analytics, CDN) may be blocked by ORB or network restrictions
-      /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(url)
+      /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(
+        url,
+      )
     );
   }
 

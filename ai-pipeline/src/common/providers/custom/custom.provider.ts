@@ -24,13 +24,7 @@ export const CustomProvider: Provider = {
       'custom.chatCompletionsPath',
       '/gateway/chat/completions',
     ),
-    authHeader: configService.get<string>(
-      'custom.authHeader',
-      'Authorization',
-    ),
-    authValuePrefix: configService.get<string>(
-      'custom.authValuePrefix',
-      '',
-    ),
+    authHeader: configService.get<string>('custom.authHeader', 'Authorization'),
+    authValuePrefix: configService.get<string>('custom.authValuePrefix', ''),
   }),
 };

@@ -1,10 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  AiProcessError,
-  runAiProcess,
-  type AiEditRequestPayload,
-} from "../services/AiService";
+import type { AiEditRequestPayload } from "../services/AiService";
 import type { PipelineProgressEvent } from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
 
@@ -14,13 +10,32 @@ interface SplitViewLocationState {
   editRequest?: AiEditRequestPayload;
 }
 
+const SPLIT_VIEW_SESSION_KEY = "vp.splitView.lastRun";
+
+const readPersistedSplitViewState = (): SplitViewLocationState => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const rawValue = window.sessionStorage.getItem(SPLIT_VIEW_SESSION_KEY);
+    if (!rawValue) return {};
+    const parsedValue = JSON.parse(rawValue) as SplitViewLocationState;
+    return parsedValue ?? {};
+  } catch {
+    return {};
+  }
+};
+
 const SplitView: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const locationState = (location.state ?? {}) as SplitViewLocationState;
-  const jobId = locationState.jobId || "";
-  const siteId = locationState.siteId || "";
-  const previousEditRequest = locationState.editRequest;
+  const persistedState = useMemo(() => readPersistedSplitViewState(), []);
+  const jobId = locationState.jobId || persistedState.jobId || "";
+  const siteId = locationState.siteId || persistedState.siteId || "";
+  const previousEditRequest =
+    locationState.editRequest || persistedState.editRequest;
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
@@ -28,10 +43,6 @@ const SplitView: React.FC = () => {
     useState<PipelineProgressEvent | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
-  const [retryState, setRetryState] = useState<{
-    loading: boolean;
-    error: string | null;
-  }>({ loading: false, error: null });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -192,20 +203,9 @@ const SplitView: React.FC = () => {
         .find((event) => Boolean(event.data?.metrics)) ?? null,
     [sse.allEvents],
   );
-  const latestFailedEvent = useMemo(
-    () =>
-      [...sse.allEvents]
-        .reverse()
-        .find(
-          (event) => event.status === "error" || event.status === "stopped",
-        ) ?? null,
-    [sse.allEvents],
-  );
   const latestEvent = sse.currentEvent;
   const previewData = latestPreviewEvent?.data;
   const previewUrl = previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
-  const apiBaseUrl =
-    previewData?.apiBaseUrl ?? completionEvent?.data?.apiBaseUrl;
   const previewStage =
     previewData?.previewStage ?? completionEvent?.data?.previewStage;
   const hasEditRequest = Boolean(
@@ -284,7 +284,6 @@ const SplitView: React.FC = () => {
   useEffect(() => {
     startedAtRef.current = Date.now();
     setElapsedSeconds(0);
-    setRetryState({ loading: false, error: null });
   }, [jobId]);
 
   const isPipelineCompleted =
@@ -328,6 +327,19 @@ const SplitView: React.FC = () => {
   const completionDurationLabel = isPipelineCompleted ? elapsedLabel : null;
 
   useEffect(() => {
+    if (!jobId || !siteId || !previousEditRequest) return;
+
+    window.sessionStorage.setItem(
+      SPLIT_VIEW_SESSION_KEY,
+      JSON.stringify({
+        jobId,
+        siteId,
+        editRequest: previousEditRequest,
+      } satisfies SplitViewLocationState),
+    );
+  }, [jobId, previousEditRequest, siteId]);
+
+  useEffect(() => {
     const shouldWarnBeforeRefresh = () =>
       !isPipelineCompleted;
 
@@ -364,11 +376,6 @@ const SplitView: React.FC = () => {
     };
   }, [completionEvent, sse.connectionState]);
   const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
-  const canRetryLastRequest = Boolean(siteId && previousEditRequest);
-  const shouldShowRetryButton =
-    canRetryLastRequest &&
-    !deleteState.done &&
-    (sse.connectionState === "error" || latestFailedEvent?.status === "error");
 
   const openStopConfirm = () => {
     if (deleteState.loading || deleteState.done) return;
@@ -419,49 +426,6 @@ const SplitView: React.FC = () => {
     }
   };
 
-  const handleRefreshPreview = () => {
-    setPreviewRefreshNonce((value) => value + 1);
-  };
-
-  const handleRetryPipeline = async () => {
-    if (!siteId || !previousEditRequest || retryState.loading) return;
-
-    setRetryState({ loading: true, error: null });
-
-    try {
-      sse.disconnect();
-      const data = await runAiProcess(siteId, previousEditRequest);
-      navigate("/app/editor/split-view", {
-        replace: true,
-        state: {
-          jobId: data.jobId,
-          siteId,
-          editRequest: previousEditRequest,
-        },
-      });
-    } catch (error) {
-      const message =
-        error instanceof AiProcessError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "Failed to retry the pipeline.";
-      setRetryState({ loading: false, error: message });
-    }
-  };
-
-  const handleOpenVisualEdit = () => {
-    if (!completionEvent || !previewUrl) return;
-    navigate("/app/editor/visual", {
-      state: {
-        jobId,
-        siteId,
-        previewUrl,
-        apiBaseUrl,
-      },
-    });
-  };
-
   const actionButtonClass =
     "inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2";
 
@@ -498,7 +462,7 @@ const SplitView: React.FC = () => {
 
   return (
     <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-background text-on-surface font-body">
-      <section className="w-1/2 bg-inverse-surface text-inverse-on-surface flex flex-col border-r border-outline">
+      <section className="w-[42%] bg-inverse-surface text-inverse-on-surface flex flex-col border-r border-outline">
         <div className="px-6 py-4 flex items-center justify-between bg-black/10">
           <div className="flex items-center gap-3">
             <div
@@ -514,12 +478,14 @@ const SplitView: React.FC = () => {
             </div>
           </div>
           <div className="flex gap-2 items-center">
-            <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
-              Job: {jobId.slice(0, 8)}...
-            </span>
-              <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
-                Elapsed: {elapsedLabel}
+              <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
+                Job: {jobId.slice(0, 8)}...
               </span>
+              {!completionDurationLabel && (
+                <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
+                  Elapsed: {elapsedLabel}
+                </span>
+              )}
               {completionDurationLabel && (
                 <span className="text-xs font-mono px-2 py-1 rounded bg-emerald-500/15 text-emerald-700">
                   Completed in: {completionDurationLabel}
@@ -538,18 +504,6 @@ const SplitView: React.FC = () => {
               >
                 <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>stop_circle</span>
                 {deleteState.loading ? "Stopping..." : "Stop"}
-              </button>
-            )}
-            {shouldShowRetryButton && (
-              <button
-                onClick={handleRetryPipeline}
-                disabled={retryState.loading}
-                className="text-xs font-mono px-2 py-1 rounded bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-              >
-                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>
-                  replay
-                </span>
-                {retryState.loading ? "Retrying..." : "Retry"}
               </button>
             )}
           </div>
@@ -590,38 +544,6 @@ const SplitView: React.FC = () => {
           {sse.error && (
             <div className="p-3 bg-red-500/20 border border-red-500/50 rounded text-red-400 text-xs">
               Workflow error: {sse.error.message}
-            </div>
-          )}
-          {shouldShowRetryButton && (
-            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-100">
-              <p className="font-semibold text-amber-200">
-                The pipeline stopped with an error.
-              </p>
-              <p className="mt-1 text-amber-100/90">
-                Retry will resend the previous request from this screen.
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  onClick={handleRetryPipeline}
-                  disabled={retryState.loading}
-                  className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 font-semibold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    replay
-                  </span>
-                  {retryState.loading ? "Retrying request..." : "Retry Last Request"}
-                </button>
-                {latestFailedEvent?.label && (
-                  <span className="text-[11px] text-amber-100/80">
-                    Failed at: {latestFailedEvent.label}
-                  </span>
-                )}
-              </div>
-              {retryState.error && (
-                <p className="mt-3 text-[11px] text-red-200">
-                  Retry failed: {retryState.error}
-                </p>
-              )}
             </div>
           )}
 
@@ -710,12 +632,6 @@ const SplitView: React.FC = () => {
                 >
                   Open Preview
                 </button>
-                <button
-                  onClick={handleRefreshPreview}
-                  className={`${actionButtonClass} border-slate-300 bg-white text-slate-900 hover:bg-slate-100 focus-visible:ring-slate-400`}
-                >
-                  Refresh Preview
-                </button>
                 {metricsData && (
                   <button
                     onClick={() => setShowMetrics(true)}
@@ -777,7 +693,7 @@ const SplitView: React.FC = () => {
         </div>
       </section>
 
-      <section className="w-1/2 bg-surface-container-low flex flex-col">
+      <section className="w-[58%] bg-surface-container-low flex flex-col">
         <div className="px-6 py-4 border-b border-outline-variant bg-white/60 backdrop-blur-sm">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 flex items-center gap-3">
@@ -803,59 +719,9 @@ const SplitView: React.FC = () => {
               </span>
             </div>
           </div>
-          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-            {previewUrl ? (
-              <>
-                {shouldShowRetryButton && (
-                  <button
-                    onClick={handleRetryPipeline}
-                    disabled={retryState.loading}
-                    className={`${actionButtonClass} border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 focus-visible:ring-amber-300 disabled:cursor-not-allowed disabled:opacity-50`}
-                  >
-                    <span className="material-symbols-outlined text-[18px]">
-                      replay
-                    </span>
-                    {retryState.loading ? "Retrying..." : "Retry Last Request"}
-                  </button>
-                )}
-                {completionEvent && (
-                  <button
-                    onClick={handleOpenVisualEdit}
-                    className={`${actionButtonClass} border-amber-900 bg-amber-700 text-white hover:bg-amber-800 focus-visible:ring-amber-500 shadow-md shadow-amber-900/20`}
-                  >
-                    <span className="material-symbols-outlined text-[18px]">
-                      auto_fix_high
-                    </span>
-                    Open Visual Edit
-                  </button>
-                )}
-                <button
-                  onClick={() => window.open(previewUrl, "_blank")}
-                  className={`${actionButtonClass} border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 focus-visible:ring-emerald-300`}
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    language
-                  </span>
-                  Open Preview
-                </button>
-                <button
-                  onClick={handleRefreshPreview}
-                  title="Refresh preview"
-                  aria-label="Refresh preview"
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-900 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2"
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    refresh
-                  </span>
-                </button>
-              </>
-            ) : (
-              <span className="text-xs text-on-surface-variant">Waiting...</span>
-            )}
-          </div>
         </div>
 
-        <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center">
+        <div className="flex-1 p-4 md:p-5 overflow-y-auto flex items-center justify-center">
           {deleteState.done ? (
             <div className="text-center space-y-4">
               <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">

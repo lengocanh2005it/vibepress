@@ -136,8 +136,8 @@ export class LlmFactoryService {
         return status;
       }
 
-      const nestedStatus = (error as { response?: { status?: unknown } }).response
-        ?.status;
+      const nestedStatus = (error as { response?: { status?: unknown } })
+        .response?.status;
       if (typeof nestedStatus === 'number') {
         return nestedStatus;
       }
@@ -156,7 +156,10 @@ export class LlmFactoryService {
 
   private isRetryableLlmError(error: unknown): boolean {
     const status = this.getErrorStatus(error);
-    if (status !== undefined && [408, 409, 429, 500, 502, 503, 504].includes(status)) {
+    if (
+      status !== undefined &&
+      [408, 409, 429, 500, 502, 503, 504].includes(status)
+    ) {
       return true;
     }
 
@@ -176,7 +179,9 @@ export class LlmFactoryService {
     }
 
     const message =
-      error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      error instanceof Error
+        ? error.message.toLowerCase()
+        : String(error).toLowerCase();
     return (
       message.includes('timeout') ||
       message.includes('temporarily unavailable') ||

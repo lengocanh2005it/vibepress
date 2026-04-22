@@ -756,8 +756,9 @@ export class PlanReviewerService {
         item,
         base: getHomeTemplateBase(item.templateName),
       }))
-      .filter((item): item is { item: PlanResult[number]; base: string } =>
-        !!item.base,
+      .filter(
+        (item): item is { item: PlanResult[number]; base: string } =>
+          !!item.base,
       )
       .sort(
         (a, b) =>
@@ -783,8 +784,12 @@ export class PlanReviewerService {
     return [...plan].sort((a, b) => {
       const aBase = getHomeTemplateBase(a.templateName);
       const bBase = getHomeTemplateBase(b.templateName);
-      const aRank = aBase ? rank.get(aBase as (typeof HOME_TEMPLATE_PRIORITY)[number]) : undefined;
-      const bRank = bBase ? rank.get(bBase as (typeof HOME_TEMPLATE_PRIORITY)[number]) : undefined;
+      const aRank = aBase
+        ? rank.get(aBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
+        : undefined;
+      const bRank = bBase
+        ? rank.get(bBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
+        : undefined;
       if (aRank == null && bRank == null) return 0;
       if (aRank == null) return 1;
       if (bRank == null) return -1;

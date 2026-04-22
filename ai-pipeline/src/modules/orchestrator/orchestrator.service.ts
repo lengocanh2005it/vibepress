@@ -306,11 +306,13 @@ function collectPlanReviewBlockingIssues(
       warning.includes('Multiple home-like templates detected') ||
       warning.includes('→ normalized to ') ||
       warning.includes('removed page-level chrome dataNeeds') ||
-      warning.includes('visualPlan sections were synchronized to match route/detail contract') ||
+      warning.includes(
+        'visualPlan sections were synchronized to match route/detail contract',
+      ) ||
       warning.includes('visualPlan contract sanitization:') ||
       warning.includes('visualPlan dataNeeds [') ||
       warning.includes('Duplicate route "') ||
-      warning.includes('Template "') && warning.includes('dataNeeds [')
+      (warning.includes('Template "') && warning.includes('dataNeeds ['))
     ) {
       continue;
     }
@@ -1047,9 +1049,6 @@ export class OrchestratorService {
       );
 
       const { dbConnectionString, themeGithubUrl } = dto;
-      const planningEditRequest = this.editRequestPhase.buildPlanningRequest(
-        dto.editRequest,
-      );
 
       const hasEditRequest = Boolean(dto.editRequest);
       const dbCreds = this.toWpDbCredentials(dbConnectionString);
@@ -1265,7 +1264,6 @@ export class OrchestratorService {
               includeVisualPlans: false,
               logPath,
               repoManifest: repoResult.themeManifest,
-              editRequest: planningEditRequest,
             },
           );
           this.emitStepProgress(
@@ -1351,7 +1349,6 @@ export class OrchestratorService {
                 includeVisualPlans: false,
                 logPath,
                 repoManifest: repoResult.themeManifest,
-                editRequest: planningEditRequest,
                 planReviewErrors: planBlockingIssues,
               },
             );
@@ -1422,7 +1419,6 @@ export class OrchestratorService {
             review.plan,
             resolvedModels.planning,
             repoResult.themeManifest,
-            planningEditRequest,
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
@@ -1492,7 +1488,6 @@ export class OrchestratorService {
               review.plan,
               resolvedModels.planning,
               repoResult.themeManifest,
-              planningEditRequest,
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,
@@ -2197,18 +2192,18 @@ export class OrchestratorService {
           'Calling backend automation for final site compare metrics.',
         );
 
-          try {
-            const response = await lastValueFrom(
-              this.httpService.post(
-                `${this.configService.get<string>('automation.url', '')}/site/compare`,
-                {
-                  siteId,
-                  wpSiteId: siteId,
-                  wpBaseUrl,
-                  reactFeUrl: preview.previewUrl,
-                  reactBeUrl,
-                },
-              ),
+        try {
+          const response = await lastValueFrom(
+            this.httpService.post(
+              `${this.configService.get<string>('automation.url', '')}/site/compare`,
+              {
+                siteId,
+                wpSiteId: siteId,
+                wpBaseUrl,
+                reactFeUrl: preview.previewUrl,
+                reactBeUrl,
+              },
+            ),
           );
           metrics = response.data?.result ?? response.data;
         } catch (err: any) {
@@ -2652,15 +2647,20 @@ export class OrchestratorService {
         `uagb-other: ${this.formatUagbUsageEntries(otherPageUsages, 6)}`,
       );
     }
-    const otherDbTemplates = summary.db.templates.filter((entry) => !entry.isHome);
+    const otherDbTemplates = summary.db.templates.filter(
+      (entry) => !entry.isHome,
+    );
     if (otherDbTemplates.length > 0) {
       lines.push(
         `uagb-db-templates: ${otherDbTemplates
           .slice(0, 6)
           .map(
-            (entry) => `${entry.slug}=[${entry.blockTypes.join(', ') || 'none'}]`,
+            (entry) =>
+              `${entry.slug}=[${entry.blockTypes.join(', ') || 'none'}]`,
           )
-          .join('; ')}${otherDbTemplates.length > 6 ? ` (+${otherDbTemplates.length - 6} more)` : ''}`,
+          .join(
+            '; ',
+          )}${otherDbTemplates.length > 6 ? ` (+${otherDbTemplates.length - 6} more)` : ''}`,
       );
     }
 
@@ -2670,7 +2670,12 @@ export class OrchestratorService {
   private buildMergedUagbSummary(input: {
     manifest: RepoThemeManifest;
     content: {
-      pages: Array<{ id: number; title: string; slug: string; content: string }>;
+      pages: Array<{
+        id: number;
+        title: string;
+        slug: string;
+        content: string;
+      }>;
       dbTemplates: Array<{
         id: number;
         slug: string;
@@ -2831,10 +2836,14 @@ export class OrchestratorService {
             (page) =>
               `${page.slug || page.title || page.id}=[${page.blockTypes.join(', ')}]`,
           )
-          .join('; ')}${otherPages.length > 8 ? ` (+${otherPages.length - 8} more)` : ''}`,
+          .join(
+            '; ',
+          )}${otherPages.length > 8 ? ` (+${otherPages.length - 8} more)` : ''}`,
       );
     }
-    const otherTemplates = summary.db.templates.filter((template) => !template.isHome);
+    const otherTemplates = summary.db.templates.filter(
+      (template) => !template.isHome,
+    );
     if (otherTemplates.length > 0) {
       lines.push(
         `[UAGB] db-templates: ${otherTemplates
@@ -2843,7 +2852,9 @@ export class OrchestratorService {
             (template) =>
               `${template.slug || template.title || template.id}=[${template.blockTypes.join(', ')}]`,
           )
-          .join('; ')}${otherTemplates.length > 8 ? ` (+${otherTemplates.length - 8} more)` : ''}`,
+          .join(
+            '; ',
+          )}${otherTemplates.length > 8 ? ` (+${otherTemplates.length - 8} more)` : ''}`,
       );
     }
     if (summary.db.parts.length > 0) {
@@ -2854,7 +2865,9 @@ export class OrchestratorService {
             (part) =>
               `${part.slug || part.title || part.id}=[${part.blockTypes.join(', ')}]`,
           )
-          .join('; ')}${summary.db.parts.length > 8 ? ` (+${summary.db.parts.length - 8} more)` : ''}`,
+          .join(
+            '; ',
+          )}${summary.db.parts.length > 8 ? ` (+${summary.db.parts.length - 8} more)` : ''}`,
       );
     }
 
@@ -2884,8 +2897,7 @@ export class OrchestratorService {
     const preview = usages
       .slice(0, limit)
       .map(
-        (usage) =>
-          `${usage.file}=[${usage.blockTypes.join(', ') || 'none'}]`,
+        (usage) => `${usage.file}=[${usage.blockTypes.join(', ') || 'none'}]`,
       )
       .join('; ');
     const overflow = usages.length - limit;
