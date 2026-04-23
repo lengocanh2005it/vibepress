@@ -77,6 +77,11 @@ services:
     depends_on:
       - app
       - ai_pipeline
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/www/sites:/var/www/sites:ro
+      - /var/nginx-sites:/etc/nginx/conf.d/sites
 
 volumes:
   mysql_data:

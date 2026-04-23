@@ -140,7 +140,7 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
     await ssh.putDirectory(distDir, remoteDir, { recursive: true, concurrency: 5 });
     console.log(`[VPS-Frontend] dist/ uploaded`);
 
-    // Viết Nginx config qua SFTP rồi sudo mv vào sites-enabled
+    // Viết Nginx config qua SFTP rồi mv vào /var/nginx-sites/ (mounted vào container)
     const serverName = domain ?? '_';
     const nginxConf = [
       'server {',
@@ -152,7 +152,7 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
       '        try_files $uri $uri/ /index.html;',
       '    }',
       '    location /api/ {',
-      `        proxy_pass http://127.0.0.1:${backendPort}/;`,
+      `        proxy_pass http://host.docker.internal:${backendPort}/;`,
       '        proxy_http_version 1.1;',
       '        proxy_set_header Host $host;',
       '        proxy_set_header X-Real-IP $remote_addr;',
@@ -166,9 +166,10 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
     await fse.remove(tmpNginx);
 
     const nginx = await ssh.execCommand(
-      `sudo find /etc/nginx/sites-enabled -name 'react-migration-*.conf' -delete` +
-      ` && sudo mv /tmp/${siteDir}.conf /etc/nginx/sites-enabled/${siteDir}.conf` +
-      ` && sudo nginx -t && (sudo nginx -s reload 2>/dev/null || sudo service nginx start)`,
+      `sudo mkdir -p /var/nginx-sites` +
+      ` && sudo find /var/nginx-sites -name 'react-migration-*.conf' -delete` +
+      ` && sudo mv /tmp/${siteDir}.conf /var/nginx-sites/${siteDir}.conf` +
+      ` && docker exec vibepress_frontend nginx -s reload`,
     );
     if (nginx.code !== 0) throw new Error(`Nginx config failed: ${nginx.stderr}`);
     console.log(`[VPS-Frontend] Nginx reloaded`);
@@ -535,15 +536,6 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   await fse.copy(generatedDir, workDir);
   console.log(`[Deploy] Copied to: ${workDir}`);
 
-  // ── Step 3: Push lên GitHub ─────────────────────────────────────────────────
-  console.log(`\n[Deploy] Step 3 — Push to GitHub`);
-  const commitSha = await initAndPush({
-    workDir,
-    repoCloneUrl: repo.cloneUrl,
-    branch,
-    message: `feat: initial React migration [jobId=${jobId}]`,
-  });
-
   // ── Resolve DB credentials cho external host ────────────────────────────────
   const DOCKER_INTERNAL_HOSTS = ['localhost', '127.0.0.1', 'db', 'mysql'];
   const isLocalHost = !dbCreds.host || DOCKER_INTERNAL_HOSTS.includes(dbCreds.host.split(':')[0]);
@@ -556,81 +548,92 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   }
 
   let result;
-
-  if (VPS_HOST) {
-    // ── VPS flow ────────────────────────────────────────────────────────────────
-    console.log(`\n[Deploy] Step 4 — Deploy backend to VPS`);
-    const { backendPort } = await deployBackendToVps({ workDir, siteDir: finalRepoName, dbCreds: finalDbCreds });
-
-    console.log(`\n[Deploy] Step 5 — Deploy frontend to VPS`);
-    const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: finalRepoName, backendPort });
-
-    result = {
-      jobId,
-      repoName: finalRepoName,
-      githubUrl: repo.htmlUrl,
-      frontendUrl,
-      backendPort,
-      commitSha,
-    };
-
-    console.log(`\n[Deploy] ── Done (VPS) ─────────────────────────────────`);
-    console.log(`  GitHub   : ${repo.htmlUrl}`);
-    console.log(`  Frontend : ${frontendUrl}`);
-    console.log(`  Backend  : port ${backendPort}`);
-  } else {
-    // ── Vercel + Render flow ────────────────────────────────────────────────────
-    if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
-    if (!RENDER_API_KEY) throw new Error('RENDER_API_KEY is not configured');
-    if (!RENDER_OWNER_ID) throw new Error('RENDER_OWNER_ID is not configured');
-
-    console.log(`\n[Deploy] Step 4 — Deploy server to Render`);
-    const { renderUrl } = await createRenderService({
-      repoName: finalRepoName,
-      repoHtmlUrl: repo.htmlUrl,
-      branch,
-      dbCreds: finalDbCreds,
-    });
-
-    console.log(`\n[Deploy] Step 5 — Update vercel.json with Render URL`);
-    const vercelJsonPath = path.join(workDir, 'frontend', 'vercel.json');
-    if (await fse.pathExists(vercelJsonPath)) {
-      let content = await fse.readFile(vercelJsonPath, 'utf8');
-      content = content.replace(/__RENDER_API_URL__/g, renderUrl);
-      await fse.writeFile(vercelJsonPath, content);
-      console.log(`[Deploy] vercel.json updated — API URL: ${renderUrl}`);
-    } else {
-      console.warn(`[Deploy] vercel.json not found at ${vercelJsonPath}, skipping`);
-    }
-
-    console.log(`\n[Deploy] Step 6 — Push updated vercel.json`);
-    const updatedSha = await commitAndPush({
+  try {
+    // ── Step 3: Push lên GitHub ───────────────────────────────────────────────
+    console.log(`\n[Deploy] Step 3 — Push to GitHub`);
+    const commitSha = await initAndPush({
       workDir,
+      repoCloneUrl: repo.cloneUrl,
       branch,
-      message: `chore: set Render API URL in vercel.json [jobId=${jobId}]`,
+      message: `feat: initial React migration [jobId=${jobId}]`,
     });
 
-    console.log(`\n[Deploy] Step 7 — Create Vercel project`);
-    const { projectId, vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
-    await setVercelEnvVars({ projectId });
-    await triggerVercelDeployment({ repoName: finalRepoName, branch, githubOwner });
+    if (VPS_HOST) {
+      // ── VPS flow ──────────────────────────────────────────────────────────────
+      console.log(`\n[Deploy] Step 4 — Deploy backend to VPS`);
+      const { backendPort } = await deployBackendToVps({ workDir, siteDir: finalRepoName, dbCreds: finalDbCreds });
 
-    result = {
-      jobId,
-      repoName: finalRepoName,
-      githubUrl: repo.htmlUrl,
-      renderUrl,
-      vercelUrl,
-      commitSha: updatedSha,
-    };
+      console.log(`\n[Deploy] Step 5 — Deploy frontend to VPS`);
+      const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: finalRepoName, backendPort });
 
-    console.log(`\n[Deploy] ── Done (Vercel+Render) ──────────────────────`);
-    console.log(`  GitHub : ${repo.htmlUrl}`);
-    console.log(`  Render : ${renderUrl}`);
-    console.log(`  Vercel : ${vercelUrl}`);
+      result = {
+        jobId,
+        repoName: finalRepoName,
+        githubUrl: repo.htmlUrl,
+        frontendUrl,
+        backendPort,
+        commitSha,
+      };
+
+      console.log(`\n[Deploy] ── Done (VPS) ─────────────────────────────────`);
+      console.log(`  GitHub   : ${repo.htmlUrl}`);
+      console.log(`  Frontend : ${frontendUrl}`);
+      console.log(`  Backend  : port ${backendPort}`);
+    } else {
+      // ── Vercel + Render flow ──────────────────────────────────────────────────
+      if (!VERCEL_TOKEN) throw new Error('VERCEL_TOKEN is not configured');
+      if (!RENDER_API_KEY) throw new Error('RENDER_API_KEY is not configured');
+      if (!RENDER_OWNER_ID) throw new Error('RENDER_OWNER_ID is not configured');
+
+      console.log(`\n[Deploy] Step 4 — Deploy server to Render`);
+      const { renderUrl } = await createRenderService({
+        repoName: finalRepoName,
+        repoHtmlUrl: repo.htmlUrl,
+        branch,
+        dbCreds: finalDbCreds,
+      });
+
+      console.log(`\n[Deploy] Step 5 — Update vercel.json with Render URL`);
+      const vercelJsonPath = path.join(workDir, 'frontend', 'vercel.json');
+      if (await fse.pathExists(vercelJsonPath)) {
+        let content = await fse.readFile(vercelJsonPath, 'utf8');
+        content = content.replace(/__RENDER_API_URL__/g, renderUrl);
+        await fse.writeFile(vercelJsonPath, content);
+        console.log(`[Deploy] vercel.json updated — API URL: ${renderUrl}`);
+      } else {
+        console.warn(`[Deploy] vercel.json not found at ${vercelJsonPath}, skipping`);
+      }
+
+      console.log(`\n[Deploy] Step 6 — Push updated vercel.json`);
+      const updatedSha = await commitAndPush({
+        workDir,
+        branch,
+        message: `chore: set Render API URL in vercel.json [jobId=${jobId}]`,
+      });
+
+      console.log(`\n[Deploy] Step 7 — Create Vercel project`);
+      const { projectId, vercelUrl } = await createVercelProject({ repoName: finalRepoName, branch, githubOwner });
+      await setVercelEnvVars({ projectId });
+      await triggerVercelDeployment({ repoName: finalRepoName, branch, githubOwner });
+
+      result = {
+        jobId,
+        repoName: finalRepoName,
+        githubUrl: repo.htmlUrl,
+        renderUrl,
+        vercelUrl,
+        commitSha: updatedSha,
+      };
+
+      console.log(`\n[Deploy] ── Done (Vercel+Render) ──────────────────────`);
+      console.log(`  GitHub : ${repo.htmlUrl}`);
+      console.log(`  Render : ${renderUrl}`);
+      console.log(`  Vercel : ${vercelUrl}`);
+    }
+  } finally {
+    await fse.remove(workDir).catch(() => {});
   }
 
-  await fse.remove(workDir);
   return result;
 }
 
