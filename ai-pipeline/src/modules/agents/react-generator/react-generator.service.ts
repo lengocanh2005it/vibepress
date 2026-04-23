@@ -565,7 +565,7 @@ export class ReactGeneratorService {
     }
 
     // When navbar/footer are removed, also strip their exclusive data needs
-    // (siteInfo, menus) from the plan — otherwise CodeGeneratorService will
+    // (siteInfo, menus, footerLinks) from the plan — otherwise CodeGeneratorService will
     // still emit fetches for them and the validator will reject the component.
     const chromeRemoved =
       removedTypes.has('navbar') || removedTypes.has('footer');
@@ -576,7 +576,7 @@ export class ReactGeneratorService {
     const dataNeeds =
       chromeRemoved && !stillNeedsChrome
         ? componentPlan.visualPlan.dataNeeds.filter(
-            (n) => n !== 'siteInfo' && n !== 'menus',
+            (n) => n !== 'siteInfo' && n !== 'menus' && n !== 'footerLinks',
           )
         : componentPlan.visualPlan.dataNeeds;
 
@@ -873,13 +873,17 @@ ${renders}
         needs.add('siteInfo');
       }
       if (block === 'navigation') {
-        needs.add('menus');
+        if (!/^footer/i.test(componentName)) needs.add('menus');
       }
       for (const child of node.children ?? []) visit(child);
     };
     for (const node of nodes) visit(node);
     if (/^(header|footer)/i.test(componentName)) {
       needs.add('siteInfo');
+    }
+    if (/^footer/i.test(componentName)) {
+      needs.add('footerLinks');
+      needs.delete('menus');
     }
     return Array.from(needs);
   }

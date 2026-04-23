@@ -76,6 +76,7 @@ const PAGE_TEMPLATES = new Set([
 
 const DATA_NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
+  'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
 };
@@ -171,6 +172,8 @@ function buildAllowedEndpointsNote(input: {
   );
 
   if (input.dataNeeds.includes('siteInfo')) allowed.add('GET /api/site-info');
+  if (input.dataNeeds.includes('footerLinks'))
+    allowed.add('GET /api/footer-links');
   if (input.dataNeeds.includes('menus')) allowed.add('GET /api/menus');
   if (input.dataNeeds.includes('posts')) allowed.add('GET /api/posts');
   if (input.dataNeeds.includes('pages')) allowed.add('GET /api/pages');
@@ -258,7 +261,7 @@ function buildForbiddenBehaviorNote(input: {
       '- Do NOT render shared site chrome (`<header>`, navigation bar, `<footer>`, site logo/title, footer columns) inside this page component.',
     );
     lines.push(
-      '- Do NOT fetch `/api/site-info` or `/api/menus` just to rebuild shared layout chrome inside a page component.',
+      '- Do NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` just to rebuild shared layout chrome inside a page component.',
     );
     lines.push(
       `- Do NOT append trailing utility/footer/sidebar-like sections with exact headings such as ${formatInventedAuxiliarySectionLabels()} unless that exact label is already source-backed or explicitly approved in the visual plan.`,
@@ -375,6 +378,12 @@ function buildScopedApiContractNote(input: {
   if (needs.includes('siteInfo')) {
     endpoints.add('GET /api/site-info -> SiteInfo');
     entityLines.push(`- SiteInfo: ${formatContractFields(SITE_INFO_FIELDS)}`);
+  }
+  if (needs.includes('footerLinks')) {
+    endpoints.add('GET /api/footer-links -> FooterColumn[]');
+    entityLines.push(
+      '- FooterColumn: `heading: string`, `links: Array<{ label: string; url: string }>`',
+    );
   }
   if (hasAnyDataNeed(needs, 'posts', 'postDetail', 'authorDetail')) {
     endpoints.add('GET /api/posts -> Post[]');
@@ -879,8 +888,8 @@ function buildClassicThemeNote(
     ? `- \`{/* WP: <Header /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site header. Do NOT fetch site-info or menus for it.`
     : `- \`{/* WP: <Header /> */}\` → render the visible brand as ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + fetch \`GET /api/menus\` and render ALL returned nav items`;
   const footerHint = isPageComponent
-    ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info or menus for it.`
-    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + ALWAYS fetch \`GET /api/footer-links\` for footer columns; if you also fetch \`GET /api/menus\`, use only non-primary footer/social groups from menus and fall back to \`/api/footer-links\``;
+    ? `- \`{/* WP: <Footer /> */}\` → ⛔ SKIP entirely — this is a PAGE component; the shared Layout wrapper renders the site footer. Do NOT fetch site-info, menus, or footer-links for it.`
+    : `- \`{/* WP: <Footer /> */}\` → if you render a visible site brand, keep logo + title inside ONE home link (\`<Link to="/" className="flex items-center ...">{siteInfo.logoUrl && <img ... />}<span>{siteInfo.siteName}</span></Link>\`) + ALWAYS fetch \`GET /api/footer-links\` for footer columns. Do NOT fetch \`GET /api/menus\` for footer link groups.`;
 
   return `## CLASSIC PHP THEME — MANDATORY RULES
 This template source is from a **classic PHP theme** (identified by \`{/* WP: ... */}\` hint comments, NOT a JSON block tree).
@@ -920,6 +929,7 @@ export function buildDataGroundingNote(
     'authorDetail',
   );
   const wantsPages = hasAnyDataNeed(dataNeeds, 'pages', 'pageDetail');
+  const wantsFooterLinks = dataNeeds.includes('footerLinks');
   const wantsMenus = dataNeeds.includes('menus');
   const wantsComments = dataNeeds.includes('comments');
   const wantsTaxonomies = hasAnyDataNeed(
@@ -986,6 +996,14 @@ export function buildDataGroundingNote(
       parts.push(`- ... and ${pages.length - MAX_SAMPLE_ITEMS} more`);
     }
     if (pages.length === 0) parts.push('- (empty)');
+    parts.push('');
+  }
+
+  if (wantsFooterLinks) {
+    parts.push('### Footer links (GET /api/footer-links)');
+    parts.push(
+      '- Use footer columns from this endpoint for footer link groups. Do not rebuild footer columns from `/api/menus`.',
+    );
     parts.push('');
   }
 

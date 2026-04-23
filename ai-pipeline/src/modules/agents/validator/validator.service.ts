@@ -419,6 +419,7 @@ export class ValidatorService {
       'post-detail': 'postDetail',
       'page-detail': 'pageDetail',
       'site-info': 'siteInfo',
+      'footer-links': 'footerLinks',
     };
     const violations: string[] = [];
     const dataNeeds = new Set(
@@ -562,7 +563,7 @@ export class ValidatorService {
       }
       if (this.fetchesSharedChromeData(code)) {
         violations.push(
-          'Layout data contract violated: page components must NOT fetch `/api/site-info` or `/api/menus` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
+          'Layout data contract violated: page components must NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
         );
       }
       if (this.usesSharedChromeData(code)) {
@@ -608,12 +609,13 @@ export class ValidatorService {
           code,
         );
       if (
+        isHeaderLikePartial &&
         dataNeeds.has('menus') &&
         !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) &&
         !/\bmenu\.items\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
+          'Shared chrome contract violated: Header/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
         );
       }
       if (usesSiteTitle && !hasHomeLinkForBrand) {
@@ -646,17 +648,15 @@ export class ValidatorService {
         !/fetch\(\s*['"`]\/api\/footer-links\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and use those columns as the fallback when `/api/menus` has no footer/social groups.',
+          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and render its footer columns from that API, not from `/api/menus`.',
         );
       }
       if (
         isFooterPartial &&
-        dataNeeds.has('menus') &&
-        !/location\s*!==\s*['"]primary['"]/.test(code) &&
-        !/slug\s*!==\s*['"]primary['"]/.test(code)
+        dataNeeds.has('menus')
       ) {
         violations.push(
-          'Shared chrome contract violated: Footer must exclude the primary navigation menu (`location !== "primary"` and slug fallback) and render only footer/social menu groups.',
+          'Shared chrome contract violated: Footer must not declare `menus`. Use `footerLinks` for footer columns instead.',
         );
       }
     }
@@ -718,7 +718,7 @@ export class ValidatorService {
     // This avoids false positives when static text content in section headings or
     // body copy happens to contain the word (e.g. "Browse all pages and posts.").
     // "all pages." → `pages.` is followed by a space, not \w → no match.
-    const dataVars = ['menus', 'posts', 'pages', 'siteInfo'];
+    const dataVars = ['menus', 'posts', 'pages', 'siteInfo', 'footerColumns'];
     const missingState: string[] = [];
     for (const varName of dataVars) {
       const jsUsage = new RegExp(
@@ -2096,7 +2096,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         code,
       ) ||
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
-      /\{\s*menus\b/.test(code)
+      /\{\s*menus\b/.test(code) ||
+      /\bfooterColumns(?:\??\.)?(?:map|filter|some)\s*\(/.test(code) ||
+      /\{\s*footerColumns\b/.test(code)
     );
   }
 

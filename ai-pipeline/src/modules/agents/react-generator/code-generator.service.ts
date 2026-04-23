@@ -149,6 +149,9 @@ export class CodeGeneratorService {
     const effectiveDataNeeds = Array.from(new Set(dataNeeds));
     const needsSiteInfo = effectiveDataNeeds.includes('siteInfo');
     const needsMenus = effectiveDataNeeds.includes('menus');
+    const needsFooterLinks =
+      effectiveDataNeeds.includes('footerLinks') ||
+      /^footer/i.test(componentName);
     const ctx: RenderCtx = {
       p: palette ?? {
         background: '#ffffff',
@@ -208,16 +211,30 @@ export class CodeGeneratorService {
         `  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`,
       );
     }
-    if (renderState.componentKind === 'footer') {
+    if (needsFooterLinks) {
       lines.push(
         `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
     }
-    if (needsSiteInfo || needsMenus) {
+    if (needsSiteInfo || needsMenus || needsFooterLinks) {
       lines.push('');
       lines.push('  useEffect(() => {');
       lines.push('    (async () => {');
-      if (
+      if (needsSiteInfo && needsFooterLinks && !needsMenus) {
+        lines.push(
+          '      const [siteInfoRes, footerLinksRes] = await Promise.all([',
+        );
+        lines.push("        fetch('/api/site-info'),");
+        lines.push("        fetch('/api/footer-links'),");
+        lines.push('      ]);');
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
+        lines.push('      setSiteInfo(await siteInfoRes.json());');
+        lines.push(
+          '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
+        );
+      } else if (
         needsSiteInfo &&
         needsMenus &&
         renderState.componentKind === 'footer'
@@ -247,6 +264,14 @@ export class CodeGeneratorService {
       } else if (needsSiteInfo) {
         lines.push("      const siteInfoRes = await fetch('/api/site-info');");
         lines.push('      setSiteInfo(await siteInfoRes.json());');
+      } else if (needsFooterLinks && !needsMenus) {
+        lines.push("      const footerLinksRes = await fetch('/api/footer-links');");
+        lines.push(
+          '      const footerLinksData = await footerLinksRes.json();',
+        );
+        lines.push(
+          '      setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);',
+        );
       } else if (renderState.componentKind === 'footer') {
         lines.push(
           '      const [menusRes, footerLinksRes] = await Promise.all([',
@@ -421,7 +446,7 @@ export class CodeGeneratorService {
           break;
         case 'footer':
           needs.add('siteInfo');
-          needs.add('menus');
+          needs.add('footerLinks');
           break;
         case 'post-list':
         case 'search':
@@ -539,6 +564,10 @@ export class CodeGeneratorService {
     if (dataNeeds.includes('siteInfo'))
       lines.push(
         `  const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);`,
+      );
+    if (dataNeeds.includes('footerLinks'))
+      lines.push(
+        `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
     if (dataNeeds.includes('posts')) {
       lines.push(
@@ -704,6 +733,12 @@ export class CodeGeneratorService {
     if (dataNeeds.includes('menus')) {
       fetches.push(`fetch('/api/menus')`);
       setters.push(`setMenus(await res${fetches.length - 1}.json());`);
+    }
+    if (dataNeeds.includes('footerLinks')) {
+      fetches.push(`fetch('/api/footer-links')`);
+      setters.push(
+        `const footerLinksData = await res${fetches.length - 1}.json(); setFooterColumns(Array.isArray(footerLinksData) ? footerLinksData : []);`,
+      );
     }
     if (dataNeeds.includes('postDetail')) {
       lines.push(
@@ -1771,12 +1806,25 @@ ${cards}
       color: tc,
     });
 
+    const align =
+      s.contentAlign === 'right'
+        ? 'items-end text-right'
+        : s.contentAlign === 'left'
+          ? 'items-start text-left'
+          : 'items-center text-center';
+    const containerAlign =
+      s.contentAlign === 'right'
+        ? 'ml-auto'
+        : s.contentAlign === 'left'
+          ? ''
+          : 'mx-auto';
+
     return `      {/* Testimonial */}
       <section className="w-full ${py}"${styleAttr}>
-        <div className="max-w-[720px] mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col items-center text-center gap-8"${this.buildSectionGapStyleAttr(s)}>
+        <div className="max-w-[720px] ${containerAlign} px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col ${align} gap-8"${this.buildSectionGapStyleAttr(s)}>
             <p className="${t.h3} font-normal leading-snug">"{s.quote}"</p>
-            <div className="flex flex-col items-center gap-1">
+            <div className="flex flex-col ${align.replace('text-right', '').replace('text-left', '').replace('text-center', '').trim()} gap-1">
               ${s.authorAvatar ? `<img src={resolveAsset("${s.authorAvatar}")} alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
               <span className="font-medium">${s.authorName}</span>
               ${s.authorTitle ? `<span className="text-sm opacity-70">${s.authorTitle}</span>` : ''}
@@ -1834,28 +1882,9 @@ ${cards}
       ctx,
     );
 
-    const menuCols = s.menuColumns
-      .map(
-        (col) => `            <div className="flex flex-col gap-3">
-              <h3 className="font-semibold text-[${tc}]">${col.title}</h3>
-              <nav className="flex flex-col gap-2">
-                {menus.find(m => m.slug === '${col.menuSlug}')?.items
-                  .filter(i => i.parentId === 0)
-                  .map(item => (
-                    isInternalPath(item.url) ? (
-                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
-                        {item.title}
-                      </Link>
-                    ) : (
-                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
-                        {item.title}
-                      </a>
-                    )
-                  ))}
-              </nav>
-            </div>`,
-      )
-      .join('\n');
+    const fallbackColumns = JSON.stringify(
+      s.menuColumns.map((col) => ({ heading: col.title, links: [] })),
+    );
 
     return `      {/* Footer */}
       <footer className="bg-[${bg}] border-t border-black/10 w-full"${sectionStyle}>
@@ -1865,7 +1894,24 @@ ${cards}
               <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
               <p className="text-sm text-[${p.textMuted}]">${s.brandDescription ? s.brandDescription : '{siteInfo?.blogDescription}'}</p>
             </div>
-${menuCols}
+            {(footerColumns.length > 0 ? footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0) : ${fallbackColumns}).map((column, columnIndex) => (
+              <div key={column.heading ?? columnIndex} className="flex flex-col gap-3">
+                <h3 className="font-semibold text-[${tc}]">{column.heading}</h3>
+                <nav className="flex flex-col gap-2">
+                  {(column.links ?? []).map((link, linkIndex) => (
+                    isInternalPath(link.url) ? (
+                      <Link key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} to={toAppPath(link.url)} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
+                        {link.label}
+                      </Link>
+                    ) : (
+                      <a key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} href={link.url} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
+                        {link.label}
+                      </a>
+                    )
+                  ))}
+                </nav>
+              </div>
+            ))}
           </div>
           ${s.copyright ? `<p className="text-sm text-[${p.textMuted}] mt-8 pt-8 border-t border-black/10">${s.copyright}</p>` : ''}
         </div>
@@ -3009,6 +3055,18 @@ ${items}
   ): string {
     const { t } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const align =
+      s.contentAlign === 'right'
+        ? 'items-end text-right'
+        : s.contentAlign === 'left'
+          ? 'items-start text-left'
+          : 'items-center text-center';
+    const ctaAlign =
+      s.contentAlign === 'right'
+        ? 'self-end'
+        : s.contentAlign === 'left'
+          ? 'self-start'
+          : 'self-center';
     const resolveAsset = (src: string) =>
       src.startsWith('/assets/')
         ? `\${import.meta.env.BASE_URL}assets/\${${JSON.stringify(src.slice('/assets/'.length))}}`
@@ -3027,10 +3085,10 @@ ${items}
           ? `\n            <p className="text-base" style={{ color: '${tc}' }}>${slide.subheading}</p>`
           : '';
         const ctaPart = slide.cta
-          ? `\n            <a href={${JSON.stringify(slide.cta.link)}} className="inline-block px-6 py-3 rounded-full font-semibold" style={{ background: '${tc}', color: '${bg}' }}>${slide.cta.text}</a>`
+          ? `\n            <a href={${JSON.stringify(slide.cta.link)}} className="inline-block px-6 py-3 rounded-full font-semibold ${ctaAlign}" style={{ background: '${tc}', color: '${bg}' }}>${slide.cta.text}</a>`
           : '';
         return `          <div key={${i}} className="flex-none w-full snap-center">
-            <div className="flex flex-col gap-4">${imgPart}${headingPart}${subPart}${ctaPart}
+            <div className="flex flex-col gap-4 ${align}">${imgPart}${headingPart}${subPart}${ctaPart}
             </div>
           </div>`;
       })

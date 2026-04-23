@@ -78,7 +78,7 @@ This is a migration plan, NOT a redesign brief.
 \`\`\`typescript
 interface ComponentVisualPlan {
   componentName: string;
-  dataNeeds: Array<'siteInfo' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
+  dataNeeds: Array<'siteInfo' | 'footerLinks' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
   palette: {
     background: string;  // hex
     surface: string;     // card backgrounds hex
@@ -142,7 +142,7 @@ cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingSty
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage }
 card-grid:    { title?, subtitle?, columns: 2|3|4, columnWidths?, cards: [{heading,body}] }
 media-text:   { imageSrc, imageAlt, imagePosition: left|right, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta? }
-testimonial:  { quote, authorName, authorTitle?, authorAvatar? }
+testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign? }
 newsletter:   { heading, subheading?, buttonText, layout: centered|card }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
@@ -154,7 +154,7 @@ sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems?
 modal:        { triggerText?, heading?, body?, imageSrc?, imageAlt?, cta?, layout?: centered|split }
 tabs:         { title?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple? }
-carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay? }
+carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay?, contentAlign? }
 \`\`\`
 
 ## Rules
@@ -458,6 +458,7 @@ const VALID_SECTION_TYPES = new Set<string>([
 
 const VALID_DATA_NEEDS = new Set<string>([
   'siteInfo',
+  'footerLinks',
   'posts',
   'pages',
   'menus',
@@ -674,6 +675,9 @@ function validateSectionDetailed(
       if (typeof raw.authorName !== 'string') raw.authorName = '';
       if (!isAllowedStaticImage(raw.authorAvatar, options?.allowedImageSrcs)) {
         delete raw.authorAvatar;
+      }
+      if (!['center', 'left', 'right'].includes(raw.contentAlign)) {
+        delete raw.contentAlign;
       }
       break;
 
@@ -895,6 +899,9 @@ function validateSectionDetailed(
         };
       }
       if (typeof raw.autoplay !== 'boolean') raw.autoplay = false;
+      if (!['center', 'left', 'right'].includes(raw.contentAlign)) {
+        delete raw.contentAlign;
+      }
       break;
 
     // search, breadcrumb — no required fields

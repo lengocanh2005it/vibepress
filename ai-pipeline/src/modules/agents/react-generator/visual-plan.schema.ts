@@ -8,6 +8,7 @@ import type { SourceRef } from '../../../common/utils/source-node-id.util.js';
 
 export type DataNeed =
   | 'siteInfo'
+  | 'footerLinks'
   | 'posts'
   | 'pages'
   | 'menus'
@@ -136,6 +137,7 @@ export interface TestimonialSection extends BaseSection {
   authorName: string;
   authorTitle?: string;
   authorAvatar?: string;
+  contentAlign?: 'center' | 'left' | 'right';
 }
 
 export interface NewsletterSection extends BaseSection {
@@ -236,6 +238,7 @@ export interface CarouselSection extends BaseSection {
     cta?: { text: string; link: string };
   }[];
   autoplay?: boolean;
+  contentAlign?: 'center' | 'left' | 'right';
 }
 
 export type SectionPlan =

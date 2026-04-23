@@ -297,6 +297,8 @@ ${component.code}
         switch (value) {
           case 'siteInfo':
             return 'site-info';
+          case 'footerLinks':
+            return 'footer-links';
           case 'postDetail':
             return 'post-detail';
           case 'pageDetail':
@@ -308,6 +310,7 @@ ${component.code}
     );
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
+    if (normalized.has('footer-links')) lines.push('- /api/footer-links');
     if (normalized.has('menus')) lines.push('- /api/menus');
     if (normalized.has('posts') || normalized.has('authorDetail'))
       lines.push('- /api/posts');

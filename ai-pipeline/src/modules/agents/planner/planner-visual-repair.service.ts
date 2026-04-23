@@ -364,7 +364,7 @@ export class PlannerVisualRepairService {
     lastRaw = secondPass.raw;
     if (secondPass.visualPlan) {
       this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" strict repair succeeded with ${secondPass.visualPlan.sections.length} sections`,
+        `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" strict repair succeeded with ${secondPass.visualPlan.sections.length} sections ${this.formatSectionList(secondPass.visualPlan.sections)}`,
       );
       return {
         visualPlan: secondPass.visualPlan,
@@ -766,6 +766,25 @@ export class PlannerVisualRepairService {
       const imageCount = extractStaticImageSources(candidate.source).length;
       return `${candidate.label} | score=${candidate.richness} | widgets=${widgets.join(', ') || 'none'} | images=${imageCount} | headings=${headings.slice(0, 3).join(' | ') || 'none'}`;
     });
+  }
+
+  private formatSectionList(
+    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey'>>,
+  ): string {
+    if (!Array.isArray(sections) || sections.length === 0) return '[]';
+
+    const seen = new Map<string, number>();
+    const labels = sections.map((section, index) => {
+      const base =
+        section.sectionKey?.trim() ||
+        section.type?.trim() ||
+        `section-${index + 1}`;
+      const count = (seen.get(base) ?? 0) + 1;
+      seen.set(base, count);
+      return count > 1 ? `${base}#${count}` : base;
+    });
+
+    return `[${labels.join(', ')}]`;
   }
 
   private buildRetryDraftEvidence(

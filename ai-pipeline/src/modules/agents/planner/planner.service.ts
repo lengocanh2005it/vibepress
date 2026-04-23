@@ -476,7 +476,7 @@ export class PlannerService {
     );
     if (deterministicPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓`,
+        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓ ${this.formatSectionList(deterministicPlan.sections)}`,
       );
       return {
         ...componentPlan,
@@ -547,7 +547,9 @@ export class PlannerService {
         this.collectDraftCustomClassNames(draftSections);
       sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
         planningSource.sourceBackedAuxiliaryLabels,
-        extractAuxiliaryLabelsFromSections(draftSections),
+        ...(componentPlan.type === 'partial'
+          ? [extractAuxiliaryLabelsFromSections(draftSections)]
+          : []),
       );
       sourceWidgetHints = this.detectInteractiveWidgetsFromSource(
         planningSource.source,
@@ -768,7 +770,7 @@ export class PlannerService {
             ),
           };
           this.logger.log(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt})`,
+            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
           );
           break;
         }
@@ -1216,6 +1218,12 @@ export class PlannerService {
       const needs = new Set(item.dataNeeds);
       const ownsSharedChromeData =
         item.type === 'partial' || !hasSharedChromePartials;
+      const componentKey = `${item.componentName} ${item.templateName}`.toLowerCase();
+      const isFooterPartial =
+        item.type === 'partial' && /(^|[\s/_-])footer(?:$|[\s/_-])/.test(componentKey);
+      const isHeaderLikePartial =
+        item.type === 'partial' &&
+        /(^|[\s/_-])(header|nav|navigation)(?:$|[\s/_-])/.test(componentKey);
 
       // Determine whether this template renders a page (page-detail) or a post (post-detail)
       // based on the template name, which is authoritative at this stage.
@@ -1232,7 +1240,10 @@ export class PlannerService {
         source.includes('block:"navigation"') ||
         source.includes('"navigation"')
       )
-        if (ownsSharedChromeData) needs.add('menus');
+        if (ownsSharedChromeData) {
+          if (isFooterPartial) needs.add('footer-links');
+          else needs.add('menus');
+        }
       if (source.includes('wp:query') || source.includes('"query"'))
         needs.add('posts');
       if (
@@ -1253,7 +1264,10 @@ export class PlannerService {
         source.includes('{/* WP: <Navigation />') ||
         source.includes('{/* WP: <Footer />')
       )
-        if (ownsSharedChromeData) needs.add('menus');
+        if (ownsSharedChromeData) {
+          if (isFooterPartial) needs.add('footer-links');
+          else needs.add('menus');
+        }
       if (source.includes('{/* WP: loop start */}')) needs.add('posts');
       if (
         source.includes('{/* WP: post.content') ||
@@ -1274,11 +1288,21 @@ export class PlannerService {
       )
         needs.add('comments');
 
+      if (isFooterPartial && ownsSharedChromeData) {
+        needs.add('footer-links');
+        needs.add('site-info');
+        needs.delete('menus');
+      }
+      if (isHeaderLikePartial && ownsSharedChromeData) {
+        needs.delete('footer-links');
+      }
+
       // When the plan already has dedicated Header/Footer/Nav partials, page
       // components must not keep site chrome data needs for duplicated layout.
       if (item.type === 'page' && hasSharedChromePartials) {
         needs.delete('menus');
         needs.delete('site-info');
+        needs.delete('footer-links');
       }
 
       return { ...item, dataNeeds: Array.from(needs) };
@@ -1474,16 +1498,16 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "pages" | "menus" | "site-info" | "post-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
 - "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
 - Page templates MUST use "page-detail" — NEVER "post-detail"
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
-- Dedicated Header / Footer / Navigation partials may include "menus"
-- Dedicated Header / Footer partials that render site title or tagline may include "site-info"
-- Ordinary page components MUST NOT request "menus" or "site-info" just because the original WordPress template referenced shared header/footer chrome.
+- Dedicated Header / Navigation partials may include "menus"
+- Dedicated Footer partials should use "footer-links" for footer columns and may include "site-info" for brand/title/tagline
+- Ordinary page components MUST NOT request "menus", "site-info", or "footer-links" just because the original WordPress template referenced shared header/footer chrome.
 - Global chrome belongs to shared layout partials. Page components MUST NOT own header/footer/navigation data.
 - If a page template has a content sidebar, keep it content-only (recent posts / page links). Do NOT model shared nav menus or site branding inside a page sidebar.
 
@@ -2024,7 +2048,7 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - Pages must have a non-null route starting with "/"
 - Partials must have route: null, isDetail: false
 - isDetail must be true when route contains :slug
-- Valid dataNeeds values: posts, pages, menus, site-info, post-detail, page-detail, comments, categoryDetail
+- Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
 - description must stay specific and source-backed; mention major layout/widgets when visible
 
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
@@ -2158,7 +2182,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
       }
 
-      return mergedDraft.length > 0 ? mergedDraft : undefined;
+      if (mergedDraft.length === 0) return undefined;
+
+      return sanitizeSectionsForContract(mergedDraft, {
+        componentType: componentPlan.type,
+        route: componentPlan.route,
+        isDetail: componentPlan.isDetail,
+        dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+        stripLayoutChrome: componentPlan.type === 'page',
+        sourceBackedAuxiliaryLabels:
+          planningSource?.sourceBackedAuxiliaryLabels ?? [],
+      }).sections;
     } catch {
       return undefined;
     }
@@ -2191,21 +2225,94 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
   }
 
+  private scopePlanningSourceMarkup(
+    componentPlan: PlanResult[number],
+    source: string,
+    templateName: string,
+    sourceFile: string,
+    hints?: string[],
+  ): string {
+    let scopedSource = source;
+
+    if (componentPlan.type === 'page') {
+      scopedSource = this.stripClassicSharedIncludes(scopedSource, hints ?? []);
+      scopedSource = this.stripFseSharedTemplateParts(scopedSource, hints ?? []);
+    }
+
+    if (!this.looksLikeBlockMarkup(scopedSource)) {
+      return scopedSource;
+    }
+
+    const bodyNodes = wpBlocksToJsonWithSourceRefs({
+      markup: scopedSource,
+      templateName,
+      sourceFile,
+    });
+    if (bodyNodes.length === 0) {
+      return scopedSource;
+    }
+
+    if (componentPlan.type === 'page') {
+      const filteredNodes = bodyNodes.filter(
+        (node) => !this.isSharedLayoutBlockNode(node),
+      );
+      if (filteredNodes.length !== bodyNodes.length) {
+        hints?.push('removed top-level shared layout blocks from block tree');
+      }
+      if (filteredNodes.length > 0) {
+        return wpJsonToString(filteredNodes);
+      }
+    }
+
+    return wpJsonToString(bodyNodes);
+  }
+
   private mergeDraftSectionsAcrossSources(
     existing: SectionPlan[],
     incoming: SectionPlan[],
   ): SectionPlan[] {
     if (existing.length === 0) return [...incoming];
-    const seen = new Set(
-      existing.map((section) => this.buildDraftSectionKey(section)),
-    );
     const merged = [...existing];
+    const incomingKeys = incoming.map((section) =>
+      this.buildDraftSectionKey(section),
+    );
+    const rebuildSeen = () =>
+      new Set(merged.map((section) => this.buildDraftSectionKey(section)));
+    let seen = rebuildSeen();
 
-    for (const section of incoming) {
-      const key = this.buildDraftSectionKey(section);
+    for (let index = 0; index < incoming.length; index++) {
+      const section = incoming[index];
+      const key = incomingKeys[index];
       if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(section);
+
+      let insertIndex = merged.length;
+
+      for (let next = index + 1; next < incoming.length; next++) {
+        const nextKey = incomingKeys[next];
+        const nextIndex = merged.findIndex(
+          (candidate) => this.buildDraftSectionKey(candidate) === nextKey,
+        );
+        if (nextIndex !== -1) {
+          insertIndex = nextIndex;
+          break;
+        }
+      }
+
+      if (insertIndex === merged.length) {
+        for (let prev = index - 1; prev >= 0; prev--) {
+          const prevKey = incomingKeys[prev];
+          const prevIndex = merged.findIndex(
+            (candidate) => this.buildDraftSectionKey(candidate) === prevKey,
+          );
+          if (prevIndex !== -1) {
+            insertIndex = prevIndex + 1;
+            break;
+          }
+        }
+      }
+
+      merged.splice(insertIndex, 0, section);
+      seen = rebuildSeen();
     }
 
     return merged;
@@ -2224,7 +2331,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         return [
           section.type,
           normalize(section.heading),
-          normalize(section.subheading),
+          // Strip decorators like "—\nby\n" that differ between DB and repo sources
+          // for the same logical section (e.g. blog listing headings).
+          normalize(section.subheading)
+            .replace(/^[-–—\s]+by\s*/i, '')
+            .replace(/\bno posts were found\b/gi, '')
+            .trim(),
           normalize(section.layout),
         ].join('|');
       case 'cover':
@@ -2318,21 +2430,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       default:
         return [section.type, normalize(section.sectionKey)].join('|');
     }
-  }
-
-  private shouldRunVisualPlanInvestigateAndReplan(
-    reason: string,
-    dropped: string,
-  ): boolean {
-    const combined = `${reason} ${dropped}`.toLowerCase();
-    return (
-      /source contains .* but output has no .* section/.test(combined) ||
-      /imagesrc is required/.test(combined) ||
-      /accordion\.items/.test(combined) ||
-      /tabs\.tabs/.test(combined) ||
-      /modal must include/.test(combined) ||
-      /carousel\.slides/.test(combined)
-    );
   }
 
   private pickInvestigativePlanningSource(input: {
@@ -2470,7 +2567,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       this.collectDraftCustomClassNames(draftSections);
     const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
       planningSource.sourceBackedAuxiliaryLabels,
-      extractAuxiliaryLabelsFromSections(draftSections),
+      ...(componentPlan.type === 'partial'
+        ? [extractAuxiliaryLabelsFromSections(draftSections)]
+        : []),
     );
     const sourceWidgetHints = this.detectInteractiveWidgetsFromSource(
       planningSource.source,
@@ -2984,40 +3083,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     candidates: PlanningSourceCandidate[] = [],
   ): PlanningSourceContext {
     const hints: string[] = [];
-    let scopedSource = preferredSource.source;
     const sourceTemplateName =
       preferredSource.templateName ?? componentPlan.templateName;
     const sourceFile =
       preferredSource.sourceFile ??
       inferFseSourceFile(componentPlan.templateName, componentPlan.type);
-
-    if (componentPlan.type === 'page') {
-      scopedSource = this.stripClassicSharedIncludes(scopedSource, hints);
-      scopedSource = this.stripFseSharedTemplateParts(scopedSource, hints);
-    }
-
-    if (this.looksLikeBlockMarkup(scopedSource)) {
-      const bodyNodes = wpBlocksToJsonWithSourceRefs({
-        markup: scopedSource,
-        templateName: sourceTemplateName,
-        sourceFile,
-      });
-      if (componentPlan.type === 'page' && bodyNodes.length > 0) {
-        const filteredNodes = bodyNodes.filter(
-          (node) => !this.isSharedLayoutBlockNode(node),
-        );
-        if (filteredNodes.length !== bodyNodes.length) {
-          hints.push('removed top-level shared layout blocks from block tree');
-        }
-        if (filteredNodes.length > 0) {
-          scopedSource = wpJsonToString(filteredNodes);
-        } else if (bodyNodes.length > 0) {
-          scopedSource = wpJsonToString(bodyNodes);
-        }
-      } else if (bodyNodes.length > 0) {
-        scopedSource = wpJsonToString(bodyNodes);
-      }
-    }
+    const scopedSource = this.scopePlanningSourceMarkup(
+      componentPlan,
+      preferredSource.source,
+      sourceTemplateName,
+      sourceFile,
+      hints,
+    );
 
     const trimmed = scopedSource.trim();
     const fallbackSource =
@@ -3039,13 +3116,26 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         ),
       )
       .slice(0, 2)
-      .map((candidate) => ({
-        source: candidate.source,
-        label: candidate.label,
-        reason: candidate.reason,
-        templateName: candidate.templateName,
-        sourceFile: candidate.sourceFile,
-      }));
+      .map((candidate) => {
+        const candidateTemplateName =
+          candidate.templateName ?? componentPlan.templateName;
+        const candidateSourceFile =
+          candidate.sourceFile ??
+          inferFseSourceFile(componentPlan.templateName, componentPlan.type);
+        return {
+          source: this.scopePlanningSourceMarkup(
+            componentPlan,
+            candidate.source,
+            candidateTemplateName,
+            candidateSourceFile,
+          ),
+          label: candidate.label,
+          reason: candidate.reason,
+          templateName: candidateTemplateName,
+          sourceFile: candidateSourceFile,
+        };
+      })
+      .filter((candidate) => candidate.source.trim().length > 0);
     const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
       : 'body-only markup';
@@ -3085,11 +3175,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       extractSourceBackedAuxiliaryLabels({
         source: fallbackSource,
       }),
-      ...supplementalSources.map((source) =>
-        extractSourceBackedAuxiliaryLabels({
-          source: source.source,
-        }),
-      ),
+      ...(componentPlan.type === 'partial'
+        ? supplementalSources.map((source) =>
+            extractSourceBackedAuxiliaryLabels({
+              source: source.source,
+            }),
+          )
+        : []),
     );
     if (customClassNames.length > 0) {
       summaryLines.push(
@@ -4001,6 +4093,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       'pages',
       'menus',
       'siteInfo',
+      'footerLinks',
     ];
     const mapped = new Set<DataNeed>();
 
@@ -4008,6 +4101,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -4027,6 +4123,25 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return ordered.filter((need) => mapped.has(need));
+  }
+
+  private formatSectionList(
+    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey'>>,
+  ): string {
+    if (!Array.isArray(sections) || sections.length === 0) return '[]';
+
+    const seen = new Map<string, number>();
+    const labels = sections.map((section, index) => {
+      const base =
+        section.sectionKey?.trim() ||
+        section.type?.trim() ||
+        `section-${index + 1}`;
+      const count = (seen.get(base) ?? 0) + 1;
+      seen.set(base, count);
+      return count > 1 ? `${base}#${count}` : base;
+    });
+
+    return `[${labels.join(', ')}]`;
   }
 
   private isRetryableVisualPlanError(error: unknown): boolean {

@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { AiEditRequestPayload } from "../services/AiService";
-import type { PipelineProgressEvent } from "../hooks/useSse";
+import type {
+  PipelineMetricsPayload,
+  PipelineProgressEvent,
+} from "../hooks/useSse";
 import { useSse } from "../hooks/useSse";
 
 interface SplitViewLocationState {
@@ -11,6 +14,698 @@ interface SplitViewLocationState {
 }
 
 const SPLIT_VIEW_SESSION_KEY = "vp.splitView.lastRun";
+
+type CompareMetricsView = {
+  kind: "compare";
+  summary: NonNullable<PipelineMetricsPayload["summary"]>;
+  pages: NonNullable<PipelineMetricsPayload["pages"]>;
+};
+
+type AuditMetricItem = {
+  key: string;
+  label: string;
+  value: string;
+};
+
+type AuditScoreItem = {
+  key: string;
+  label: string;
+  value: number;
+};
+
+type AuditMetricsView = {
+  kind: "audit";
+  requestedUrl: string | null;
+  finalUrl: string | null;
+  fetchTime: string | null;
+  formFactor: string | null;
+  throttlingMethod: string | null;
+  runs: number | null;
+  scores: AuditScoreItem[];
+  metrics: AuditMetricItem[];
+  runScores: AuditScoreItem[][];
+};
+
+type RawMetricsView = {
+  kind: "raw";
+  pretty: string;
+};
+
+type MetricsViewModel = CompareMetricsView | AuditMetricsView | RawMetricsView;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toText = (value: unknown): string | null => {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+};
+
+const toTitleLabel = (key: string) => {
+  const normalizedKey = key.trim();
+  if (!normalizedKey) return "Unknown";
+
+  const overrides: Record<string, string> = {
+    seo: "SEO",
+    url: "URL",
+    firstContentfulPaint: "First Contentful Paint",
+    largestContentfulPaint: "Largest Contentful Paint",
+    totalBlockingTime: "Total Blocking Time",
+    cumulativeLayoutShift: "Cumulative Layout Shift",
+    speedIndex: "Speed Index",
+    bestPractices: "Best Practices",
+  };
+
+  if (overrides[normalizedKey]) {
+    return overrides[normalizedKey];
+  }
+
+  return normalizedKey
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const normalizeMetricsPayload = (
+  payload: PipelineMetricsPayload | null | undefined,
+): MetricsViewModel | null => {
+  if (!payload || !isRecord(payload)) return null;
+
+  if (payload.summary && Array.isArray(payload.pages)) {
+    return {
+      kind: "compare",
+      summary: payload.summary,
+      pages: payload.pages,
+    };
+  }
+
+  const hasAuditShape =
+    isRecord(payload.scores) ||
+    isRecord(payload.metrics) ||
+    Array.isArray(payload.runScores) ||
+    typeof payload.runs === "number" ||
+    typeof payload.requestedUrl === "string" ||
+    typeof payload.finalUrl === "string";
+
+  if (hasAuditShape) {
+    const scoreEntries = isRecord(payload.scores)
+      ? Object.entries(payload.scores)
+          .map(([key, value]) => {
+            const score = toFiniteNumber(value);
+            return score === null
+              ? null
+              : {
+                  key,
+                  label: toTitleLabel(key),
+                  value: score,
+                };
+          })
+          .filter((entry): entry is AuditScoreItem => entry !== null)
+      : [];
+
+    const metricEntries = isRecord(payload.metrics)
+      ? Object.entries(payload.metrics)
+          .map(([key, value]) => {
+            const textValue = toText(value);
+            return textValue === null
+              ? null
+              : {
+                  key,
+                  label: toTitleLabel(key),
+                  value: textValue,
+                };
+          })
+          .filter((entry): entry is AuditMetricItem => entry !== null)
+      : [];
+
+    const runScores = Array.isArray(payload.runScores)
+      ? payload.runScores.map((runScore) => {
+          if (!isRecord(runScore)) return [];
+          return Object.entries(runScore)
+            .map(([key, value]) => {
+              const score = toFiniteNumber(value);
+              return score === null
+                ? null
+                : {
+                    key,
+                    label: toTitleLabel(key),
+                    value: score,
+                  };
+            })
+            .filter((entry): entry is AuditScoreItem => entry !== null);
+        })
+      : [];
+
+    return {
+      kind: "audit",
+      requestedUrl: toText(payload.requestedUrl),
+      finalUrl: toText(payload.finalUrl),
+      fetchTime: toText(payload.fetchTime),
+      formFactor: toText(payload.formFactor),
+      throttlingMethod: toText(payload.throttlingMethod),
+      runs: toFiniteNumber(payload.runs),
+      scores: scoreEntries,
+      metrics: metricEntries,
+      runScores,
+    };
+  }
+
+  return {
+    kind: "raw",
+    pretty: JSON.stringify(payload, null, 2),
+  };
+};
+
+const CompareMetricsModal = ({
+  view,
+  onClose,
+}: {
+  view: CompareMetricsView;
+  onClose: () => void;
+}) => {
+  const { summary, pages } = view;
+  const hasContentSummary = summary.content !== null;
+  const visualSummary = summary.visual ?? {
+    totalCompared: 0,
+    passed: 0,
+    failed: 0,
+    passRate: 0,
+    avgAccuracy: 0,
+  };
+  const contentSummary = summary.content ?? {
+    total: 0,
+    passed: 0,
+    failed: 0,
+    missing: 0,
+    passRate: 0,
+    avgOverall: 0,
+  };
+  const visualAccuracy = visualSummary.avgAccuracy;
+  const scoreColor =
+    visualAccuracy >= 95
+      ? "text-primary"
+      : visualAccuracy >= 80
+        ? "text-[#705c30]"
+        : "text-error";
+  const scoreBg =
+    visualAccuracy >= 95
+      ? "bg-primary/10 border-primary/30"
+      : visualAccuracy >= 80
+        ? "bg-[#705c30]/10 border-[#705c30]/30"
+        : "bg-error/10 border-error/30";
+  const scoreBarColor =
+    visualAccuracy >= 95
+      ? "bg-primary"
+      : visualAccuracy >= 80
+        ? "bg-[#705c30]"
+        : "bg-error";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="relative max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-outline-variant/30 bg-surface px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-primary/10 p-2">
+              <span
+                className="material-symbols-outlined text-xl text-primary"
+                style={{ fontVariationSettings: "'FILL' 1" }}
+              >
+                analytics
+              </span>
+            </div>
+            <div>
+              <h2 className="font-headline text-base font-bold leading-tight text-on-surface">
+                Migration Report
+              </h2>
+              <p className="text-xs text-on-surface-variant">
+                Visual &amp; content comparison across {pages.length} pages
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+          >
+            <span className="material-symbols-outlined text-xl">close</span>
+          </button>
+        </div>
+
+        <div className="space-y-5 p-6">
+          <div className="grid grid-cols-2 gap-3">
+            <div className={`rounded-2xl border p-4 ${scoreBg}`}>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Visual
+              </p>
+              <div className="mb-2 flex items-end gap-2">
+                <p className={`font-headline text-3xl font-bold ${scoreColor}`}>
+                  {visualSummary.avgAccuracy.toFixed(1)}
+                  <span className="text-base">%</span>
+                </p>
+                <p className="mb-1 text-xs text-on-surface-variant">
+                  avg accuracy
+                </p>
+              </div>
+              <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-surface-container-high">
+                <div
+                  className={`h-full rounded-full ${scoreBarColor}`}
+                  style={{ width: `${visualSummary.avgAccuracy}%` }}
+                />
+              </div>
+              <div className="flex gap-3 text-xs">
+                <span className="text-green-500">
+                  {visualSummary.passed} passed
+                </span>
+                <span className="text-error">{visualSummary.failed} failed</span>
+                <span className="text-on-surface-variant">
+                  {visualSummary.totalCompared} total
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-4">
+              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Content
+              </p>
+              {hasContentSummary ? (
+                <>
+                  <div className="mb-2 flex items-end gap-2">
+                    <p className="font-headline text-3xl font-bold text-on-surface">
+                      {contentSummary.passRate.toFixed(1)}
+                      <span className="text-base">%</span>
+                    </p>
+                    <p className="mb-1 text-xs text-on-surface-variant">
+                      pass rate
+                    </p>
+                  </div>
+                  <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-surface-container-high">
+                    <div
+                      className="h-full rounded-full bg-primary"
+                      style={{ width: `${contentSummary.passRate}%` }}
+                    />
+                  </div>
+                  <div className="flex gap-3 text-xs">
+                    <span className="text-green-500">
+                      {contentSummary.passed} passed
+                    </span>
+                    <span className="text-yellow-500">
+                      {contentSummary.missing} missing
+                    </span>
+                    <span className="text-on-surface-variant">
+                      {contentSummary.total} total
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-xl border border-dashed border-outline-variant/50 bg-surface px-4 py-5">
+                  <p className="text-sm font-semibold text-on-surface">
+                    Khong co du lieu
+                  </p>
+                  <p className="mt-1 text-xs text-on-surface-variant">
+                    Automation hien khong tra ve tong hop content cho lan so
+                    sanh nay.
+                  </p>
+                </div>
+              )}
+              {summary.errors.content && (
+                <p className="mt-3 text-[11px] text-amber-700">
+                  Content metrics unavailable: {summary.errors.content}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-3 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+              Pages
+            </p>
+            <div className="overflow-hidden rounded-xl border border-outline-variant/30">
+              <div className="grid grid-cols-12 gap-2 border-b border-outline-variant/30 bg-surface-container px-4 py-2 text-xs font-medium text-on-surface-variant">
+                <span className="col-span-4">Page</span>
+                <span className="col-span-2">Type</span>
+                <span className="col-span-3">Visual accuracy</span>
+                <span className="col-span-3">Content</span>
+              </div>
+              {pages.map((page, i) => {
+                const acc = page.visual?.accuracy ?? null;
+                const accColor =
+                  acc === null
+                    ? ""
+                    : acc >= 95
+                      ? "text-primary"
+                      : acc >= 80
+                        ? "text-[#705c30]"
+                        : "text-error";
+                const accBar =
+                  acc === null
+                    ? ""
+                    : acc >= 95
+                      ? "bg-primary"
+                      : acc >= 80
+                        ? "bg-[#705c30]"
+                        : "bg-error";
+
+                return (
+                  <div
+                    key={page.slug + i}
+                    className={`grid grid-cols-12 gap-2 px-4 py-3 text-xs hover:bg-surface-container/50 ${i < pages.length - 1 ? "border-b border-outline-variant/20" : ""}`}
+                  >
+                    <div className="col-span-4 min-w-0 flex-col justify-center">
+                      <p className="truncate font-medium text-on-surface">
+                        {page.slug}
+                      </p>
+                      {page.url && (
+                        <p className="truncate text-on-surface-variant/50">
+                          {page.url.replace(/^https?:\/\/[^/]+/, "")}
+                        </p>
+                      )}
+                    </div>
+                    <div className="col-span-2 flex items-center">
+                      <span className="rounded-full bg-surface-container-high px-2 py-0.5 text-[10px] text-on-surface-variant">
+                        {page.type}
+                      </span>
+                    </div>
+                    <div className="col-span-3 flex flex-col justify-center gap-1">
+                      {acc !== null ? (
+                        <div className="flex items-center gap-1.5">
+                          <div className="h-1 flex-1 overflow-hidden rounded-full bg-surface-container-high">
+                            <div
+                              className={`h-full rounded-full ${accBar}`}
+                              style={{ width: `${acc}%` }}
+                            />
+                          </div>
+                          <span
+                            className={`shrink-0 font-mono text-[11px] ${accColor}`}
+                          >
+                            {acc.toFixed(1)}%
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-on-surface-variant/40">—</span>
+                      )}
+                    </div>
+                    <div className="col-span-3 flex items-center">
+                      {page.content ? (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            page.content.status === "PASS"
+                              ? "bg-green-500/10 text-green-600"
+                              : page.content.status === "MISSING"
+                                ? "bg-yellow-500/10 text-yellow-600"
+                                : "bg-error/10 text-error"
+                          }`}
+                        >
+                          {page.content.status}
+                          {page.content.status === "PASS" &&
+                          page.content.scores.overall > 0
+                            ? ` · ${page.content.scores.overall}%`
+                            : ""}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-on-surface-variant/40">
+                          —
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AuditMetricsModal = ({
+  view,
+  onClose,
+}: {
+  view: AuditMetricsView;
+  onClose: () => void;
+}) => {
+  const scoreColor = (value: number) =>
+    value >= 90
+      ? "text-primary"
+      : value >= 70
+        ? "text-[#705c30]"
+        : "text-error";
+  const scoreBar = (value: number) =>
+    value >= 90
+      ? "bg-primary"
+      : value >= 70
+        ? "bg-[#705c30]"
+        : "bg-error";
+  const fetchTimeLabel =
+    view.fetchTime && !Number.isNaN(new Date(view.fetchTime).getTime())
+      ? new Date(view.fetchTime).toLocaleString()
+      : view.fetchTime;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="relative max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-outline-variant/30 bg-surface px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-primary/10 p-2">
+              <span
+                className="material-symbols-outlined text-xl text-primary"
+                style={{ fontVariationSettings: "'FILL' 1" }}
+              >
+                analytics
+              </span>
+            </div>
+            <div>
+              <h2 className="font-headline text-base font-bold leading-tight text-on-surface">
+                Automation Metrics
+              </h2>
+              <p className="text-xs text-on-surface-variant">
+                {view.finalUrl || view.requestedUrl || "Audit results"}
+                {view.runs ? ` · ${view.runs} run(s)` : ""}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+          >
+            <span className="material-symbols-outlined text-xl">close</span>
+          </button>
+        </div>
+
+        <div className="space-y-5 p-6">
+          <div className="flex flex-wrap gap-2">
+            {view.formFactor && (
+              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-on-surface-variant">
+                {view.formFactor}
+              </span>
+            )}
+            {view.throttlingMethod && (
+              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-on-surface-variant">
+                {view.throttlingMethod}
+              </span>
+            )}
+            {fetchTimeLabel && (
+              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1 text-[11px] font-semibold text-on-surface-variant">
+                {fetchTimeLabel}
+              </span>
+            )}
+          </div>
+
+          {view.scores.length > 0 && (
+            <div>
+              <p className="mb-3 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Category Scores
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                {view.scores.map((score) => (
+                  <div
+                    key={score.key}
+                    className="rounded-2xl border border-outline-variant/30 bg-surface-container-low p-4"
+                  >
+                    <div className="mb-2 flex items-end justify-between gap-3">
+                      <p className="text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                        {score.label}
+                      </p>
+                      <p
+                        className={`font-headline text-3xl font-bold ${scoreColor(score.value)}`}
+                      >
+                        {score.value}
+                      </p>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-surface-container-high">
+                      <div
+                        className={`h-full rounded-full ${scoreBar(score.value)}`}
+                        style={{
+                          width: `${Math.max(0, Math.min(score.value, 100))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {view.metrics.length > 0 && (
+            <div>
+              <p className="mb-3 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Lab Metrics
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                {view.metrics.map((metric) => (
+                  <div
+                    key={metric.key}
+                    className="rounded-2xl border border-outline-variant/30 bg-white p-4"
+                  >
+                    <p className="text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                      {metric.label}
+                    </p>
+                    <p className="mt-2 text-lg font-semibold text-on-surface">
+                      {metric.value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(view.requestedUrl || view.finalUrl) && (
+            <div className="rounded-2xl border border-outline-variant/30 bg-white p-4 text-sm text-on-surface">
+              <p className="text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Audit Target
+              </p>
+              {view.requestedUrl && (
+                <p className="mt-3 break-all">
+                  Requested URL:{" "}
+                  <span className="text-on-surface-variant">
+                    {view.requestedUrl}
+                  </span>
+                </p>
+              )}
+              {view.finalUrl && (
+                <p className="mt-1 break-all">
+                  Final URL:{" "}
+                  <span className="text-on-surface-variant">{view.finalUrl}</span>
+                </p>
+              )}
+            </div>
+          )}
+
+          {view.runScores.some((run) => run.length > 0) && (
+            <div>
+              <p className="mb-3 text-xs font-medium uppercase tracking-wider text-on-surface-variant">
+                Per-run Scores
+              </p>
+              <div className="overflow-hidden rounded-xl border border-outline-variant/30">
+                <div className="grid grid-cols-[120px_repeat(4,minmax(0,1fr))] gap-2 border-b border-outline-variant/30 bg-surface-container px-4 py-2 text-xs font-medium text-on-surface-variant">
+                  <span>Run</span>
+                  <span>Performance</span>
+                  <span>Accessibility</span>
+                  <span>Best Practices</span>
+                  <span>SEO</span>
+                </div>
+                {view.runScores.map((run, index) => {
+                  const runMap = new Map(
+                    run.map((entry) => [entry.key, entry.value]),
+                  );
+
+                  return (
+                    <div
+                      key={`run-${index + 1}`}
+                      className={`grid grid-cols-[120px_repeat(4,minmax(0,1fr))] gap-2 px-4 py-3 text-xs ${index < view.runScores.length - 1 ? "border-b border-outline-variant/20" : ""}`}
+                    >
+                      <span className="font-medium text-on-surface">
+                        Run {index + 1}
+                      </span>
+                      <span>{runMap.get("performance") ?? "—"}</span>
+                      <span>{runMap.get("accessibility") ?? "—"}</span>
+                      <span>{runMap.get("bestPractices") ?? "—"}</span>
+                      <span>{runMap.get("seo") ?? "—"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const RawMetricsModal = ({
+  view,
+  onClose,
+}: {
+  view: RawMetricsView;
+  onClose: () => void;
+}) => (
+  <div
+    className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+    onClick={onClose}
+  >
+    <div
+      className="relative max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-outline-variant/30 bg-surface px-6 py-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-lg bg-primary/10 p-2">
+            <span
+              className="material-symbols-outlined text-xl text-primary"
+              style={{ fontVariationSettings: "'FILL' 1" }}
+            >
+              data_object
+            </span>
+          </div>
+          <div>
+            <h2 className="font-headline text-base font-bold leading-tight text-on-surface">
+              Raw Metrics Payload
+            </h2>
+            <p className="text-xs text-on-surface-variant">
+              Unknown metrics schema. Showing raw payload for inspection.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+        >
+          <span className="material-symbols-outlined text-xl">close</span>
+        </button>
+      </div>
+
+      <div className="p-6">
+        <pre className="overflow-x-auto rounded-2xl bg-slate-950 p-4 text-xs leading-6 text-slate-100">
+          {view.pretty}
+        </pre>
+      </div>
+    </div>
+  </div>
+);
 
 const readPersistedSplitViewState = (): SplitViewLocationState => {
   if (typeof window === "undefined") {
@@ -205,13 +900,18 @@ const SplitView: React.FC = () => {
   );
   const latestEvent = sse.currentEvent;
   const previewData = latestPreviewEvent?.data;
-  const previewUrl = previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
+  const previewUrl =
+    previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
   const previewStage =
     previewData?.previewStage ?? completionEvent?.data?.previewStage;
   const hasEditRequest = Boolean(
     previewData?.hasEditRequest ?? completionEvent?.data?.hasEditRequest,
   );
   const metricsData = latestMetricsEvent?.data?.metrics;
+  const metricsView = useMemo(
+    () => normalizeMetricsPayload(metricsData),
+    [metricsData],
+  );
 
   const previewFrameSrc = useMemo(() => {
     if (!previewUrl) return "";
@@ -340,8 +1040,7 @@ const SplitView: React.FC = () => {
   }, [jobId, previousEditRequest, siteId]);
 
   useEffect(() => {
-    const shouldWarnBeforeRefresh = () =>
-      !isPipelineCompleted;
+    const shouldWarnBeforeRefresh = () => !isPipelineCompleted;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!shouldWarnBeforeRefresh()) return;
@@ -352,8 +1051,7 @@ const SplitView: React.FC = () => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const isRefreshShortcut =
         event.key === "F5" ||
-        ((event.ctrlKey || event.metaKey) &&
-          event.key.toLowerCase() === "r");
+        ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r");
 
       if (!isRefreshShortcut || !shouldWarnBeforeRefresh()) return;
 
@@ -375,7 +1073,10 @@ const SplitView: React.FC = () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [completionEvent, sse.connectionState]);
-  const [deleteState, setDeleteState] = useState<{ loading: boolean; done: boolean }>({ loading: false, done: false });
+  const [deleteState, setDeleteState] = useState<{
+    loading: boolean;
+    done: boolean;
+  }>({ loading: false, done: false });
 
   const openStopConfirm = () => {
     if (deleteState.loading || deleteState.done) return;
@@ -419,7 +1120,11 @@ const SplitView: React.FC = () => {
       const data = await res.json();
       if (!res.ok || !data.success)
         throw new Error(data.error || "Push failed");
-      setPushGitState({ loading: false, githubUrl: data.githubUrl, error: null });
+      setPushGitState({
+        loading: false,
+        githubUrl: data.githubUrl,
+        error: null,
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setPushGitState({ loading: false, githubUrl: null, error: message });
@@ -463,49 +1168,58 @@ const SplitView: React.FC = () => {
   return (
     <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-background text-on-surface font-body">
       <section className="w-[42%] bg-inverse-surface text-inverse-on-surface flex flex-col border-r border-outline">
-        <div className="px-6 py-4 flex items-center justify-between bg-black/10">
-          <div className="flex items-center gap-3">
-            <div
-              className={`w-2 h-2 rounded-full ${connectionBadge.dotClassName}`}
-            />
-            <div>
-              <h2 className="font-headline text-lg tracking-tight">
-                AI Workflow Console
-              </h2>
-              <p className="text-[11px] text-black/45">
-                Live progress from the migration agents
-              </p>
+        <div className="px-6 py-4 bg-black/10">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <div
+                className={`w-2 h-2 rounded-full ${connectionBadge.dotClassName}`}
+              />
+              <div className="min-w-0">
+                <h2 className="font-headline text-lg tracking-tight">
+                  AI Workflow Console
+                </h2>
+                <p className="max-w-[15rem] text-[11px] leading-5 text-black/45">
+                  Live progress from the migration agents
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="flex gap-2 items-center">
-              <span className="text-xs font-mono opacity-50 px-2 py-1 bg-white/5 rounded">
-                Job: {jobId.slice(0, 8)}...
-              </span>
-              {!completionDurationLabel && (
-                <span className="text-xs font-mono opacity-60 px-2 py-1 bg-white/5 rounded">
-                  Elapsed: {elapsedLabel}
+            <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5">
+                <span className="text-[11px] font-mono text-black/55">
+                  Job: {jobId.slice(0, 8)}...
                 </span>
-              )}
-              {completionDurationLabel && (
-                <span className="text-xs font-mono px-2 py-1 rounded bg-emerald-500/15 text-emerald-700">
-                  Completed in: {completionDurationLabel}
-                </span>
-              )}
+                {!completionDurationLabel && (
+                  <span className="text-[11px] font-mono text-black/55">
+                    Elapsed: {elapsedLabel}
+                  </span>
+                )}
+                {completionDurationLabel && (
+                  <span className="text-[11px] font-mono text-emerald-700">
+                    Completed in: {completionDurationLabel}
+                  </span>
+                )}
+              </div>
               <span
-                className={`text-xs font-mono px-2 py-1 rounded ${connectionBadge.className}`}
+                className={`text-xs font-mono px-2.5 py-1.5 rounded ${connectionBadge.className}`}
               >
-              {connectionBadge.label}
-            </span>
-            {sse.isConnected && !deleteState.done && (
-              <button
-                onClick={openStopConfirm}
-                disabled={deleteState.loading}
-                className="text-xs font-mono px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-              >
-                <span className="material-symbols-outlined text-xs" style={{ fontSize: 13 }}>stop_circle</span>
-                {deleteState.loading ? "Stopping..." : "Stop"}
-              </button>
-            )}
+                {connectionBadge.label}
+              </span>
+              {sse.isConnected && !deleteState.done && (
+                <button
+                  onClick={openStopConfirm}
+                  disabled={deleteState.loading}
+                  className="text-xs font-mono px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                >
+                  <span
+                    className="material-symbols-outlined text-xs"
+                    style={{ fontSize: 13 }}
+                  >
+                    stop_circle
+                  </span>
+                  {deleteState.loading ? "Stopping..." : "Stop"}
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -517,7 +1231,9 @@ const SplitView: React.FC = () => {
               </p>
               <p className="mt-2 text-sm text-green-700">{latestEvent.label}</p>
               {latestEvent.message && (
-                <p className="mt-1 text-xs text-black/55">{latestEvent.message}</p>
+                <p className="mt-1 text-xs text-black/55">
+                  {latestEvent.message}
+                </p>
               )}
             </div>
           ) : sse.isConnected && !sse.isLoading ? (
@@ -529,7 +1245,8 @@ const SplitView: React.FC = () => {
                 Waiting for the first agent action...
               </p>
               <p className="mt-1 text-xs text-black/55">
-                The workflow stream is connected. The first step update will appear here as soon as the backend emits it.
+                The workflow stream is connected. The first step update will
+                appear here as soon as the backend emits it.
               </p>
             </div>
           ) : null}
@@ -605,15 +1322,19 @@ const SplitView: React.FC = () => {
                 >
                   {previewStatus.badge}
                 </span>
-                {metricsData && (
+                {metricsView && (
                   <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
                     Metrics Ready
                   </span>
                 )}
               </div>
               <div className="mt-3">
-                <p className="text-sm font-semibold text-slate-900">{previewStatus.title}</p>
-                <p className="mt-1 text-xs text-slate-600">{previewStatus.description}</p>
+                <p className="text-sm font-semibold text-slate-900">
+                  {previewStatus.title}
+                </p>
+                <p className="mt-1 text-xs text-slate-600">
+                  {previewStatus.description}
+                </p>
                 {completionDurationLabel && (
                   <p className="mt-2 text-xs font-medium text-emerald-800">
                     Total completion time: {completionDurationLabel}
@@ -622,7 +1343,8 @@ const SplitView: React.FC = () => {
               </div>
               <div className="mt-4 space-y-2 rounded-xl border border-[#d8cec0] bg-[#d7d1ca] p-3 text-[11px] text-slate-700">
                 <p className="break-all">
-                  Preview URL: <span className="text-slate-900">{previewUrl}</span>
+                  Preview URL:{" "}
+                  <span className="text-slate-900">{previewUrl}</span>
                 </p>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
@@ -632,7 +1354,7 @@ const SplitView: React.FC = () => {
                 >
                   Open Preview
                 </button>
-                {metricsData && (
+                {metricsView && (
                   <button
                     onClick={() => setShowMetrics(true)}
                     className={`${actionButtonClass} border-orange-700 bg-orange-600 text-white hover:bg-orange-700 focus-visible:ring-orange-500`}
@@ -643,7 +1365,9 @@ const SplitView: React.FC = () => {
                 {completionEvent &&
                   (pushGitState.githubUrl ? (
                     <button
-                      onClick={() => window.open(pushGitState.githubUrl!, "_blank")}
+                      onClick={() =>
+                        window.open(pushGitState.githubUrl!, "_blank")
+                      }
                       className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500`}
                     >
                       View on GitHub
@@ -659,7 +1383,9 @@ const SplitView: React.FC = () => {
                   ))}
               </div>
               {pushGitState.error && (
-                <p className="mt-3 text-xs text-red-700">{pushGitState.error}</p>
+                <p className="mt-3 text-xs text-red-700">
+                  {pushGitState.error}
+                </p>
               )}
             </div>
           )}
@@ -686,9 +1412,7 @@ const SplitView: React.FC = () => {
             </span>
           </div>
           <div className="text-xs text-primary font-bold">
-            {completionEvent
-              ? "WORKFLOW COMPLETE"
-              : "AGENTS WORKING"}
+            {completionEvent ? "WORKFLOW COMPLETE" : "AGENTS WORKING"}
           </div>
         </div>
       </section>
@@ -725,10 +1449,19 @@ const SplitView: React.FC = () => {
           {deleteState.done ? (
             <div className="text-center space-y-4">
               <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">
-                <span className="material-symbols-outlined text-red-400 text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>stop_circle</span>
+                <span
+                  className="material-symbols-outlined text-red-400 text-3xl"
+                  style={{ fontVariationSettings: "'FILL' 1" }}
+                >
+                  stop_circle
+                </span>
               </div>
-              <p className="text-on-surface font-medium">Pipeline đã tạm dừng</p>
-              <p className="text-xs text-on-surface-variant">Tất cả tiến trình đã được dừng lại và artifacts đã được xóa.</p>
+              <p className="text-on-surface font-medium">
+                Pipeline đã tạm dừng
+              </p>
+              <p className="text-xs text-on-surface-variant">
+                Tất cả tiến trình đã được dừng lại và artifacts đã được xóa.
+              </p>
               <button
                 onClick={() => navigate("/app/projects")}
                 className="px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 text-sm font-medium"
@@ -745,7 +1478,7 @@ const SplitView: React.FC = () => {
                   >
                     {previewStatus.badge}
                   </span>
-                  {metricsData && (
+                  {metricsView && (
                     <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
                       Metrics Ready
                     </span>
@@ -767,7 +1500,9 @@ const SplitView: React.FC = () => {
           ) : (
             <div className="text-center space-y-4">
               <div className="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin mx-auto" />
-              <p className="text-on-surface-variant">AI agents are preparing the preview...</p>
+              <p className="text-on-surface-variant">
+                AI agents are preparing the preview...
+              </p>
               <p className="text-xs text-on-surface-variant/50">
                 {sse.progress > 0
                   ? `${sse.progress}% workflow complete`
@@ -801,7 +1536,8 @@ const SplitView: React.FC = () => {
                   Dừng pipeline hiện tại?
                 </h2>
                 <p className="mt-1 text-sm text-on-surface-variant">
-                  Tất cả tiến trình đang chạy sẽ bị dừng và preview/artifacts hiện tại sẽ bị xóa.
+                  Tất cả tiến trình đang chạy sẽ bị dừng và preview/artifacts
+                  hiện tại sẽ bị xóa.
                 </p>
               </div>
             </div>
@@ -910,7 +1646,8 @@ const SplitView: React.FC = () => {
                         Latest Log
                       </p>
                       <p className="mt-2 text-sm leading-6 text-slate-700">
-                        {selectedStepEvent.message || "No additional log message."}
+                        {selectedStepEvent.message ||
+                          "No additional log message."}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-[#e4dac9] bg-white p-4">
@@ -960,7 +1697,8 @@ const SplitView: React.FC = () => {
                         </div>
                         <div className="mt-4 rounded-2xl bg-[#f8f3eb] px-4 py-4">
                           <p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
-                            {details.prompt || "No main prompt was submitted. This run is driven by capture notes only."}
+                            {details.prompt ||
+                              "No main prompt was submitted. This run is driven by capture notes only."}
                           </p>
                         </div>
                         {details.targetPageTitle && (
@@ -988,8 +1726,12 @@ const SplitView: React.FC = () => {
                         {details.captures.length > 0 ? (
                           <div className="mt-5 grid gap-4 md:grid-cols-2">
                             {details.captures.map((capture) => {
-                              const imageSrc = resolveCaptureImageUrl(capture.imageUrl);
-                              const capturedAtLabel = formatCapturedAt(capture.capturedAt);
+                              const imageSrc = resolveCaptureImageUrl(
+                                capture.imageUrl,
+                              );
+                              const capturedAtLabel = formatCapturedAt(
+                                capture.capturedAt,
+                              );
 
                               return (
                                 <div
@@ -1000,19 +1742,25 @@ const SplitView: React.FC = () => {
                                     {imageSrc ? (
                                       <img
                                         src={imageSrc}
-                                        alt={capture.note || `capture-${capture.id}`}
+                                        alt={
+                                          capture.note ||
+                                          `capture-${capture.id}`
+                                        }
                                         className="h-full w-full object-contain"
                                       />
                                     ) : (
                                       <div className="px-6 text-center text-sm text-slate-500">
-                                        This capture does not expose an image URL.
+                                        This capture does not expose an image
+                                        URL.
                                       </div>
                                     )}
                                   </div>
                                   <div className="space-y-3 px-4 py-4">
                                     <div className="flex flex-wrap items-center gap-2">
                                       <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm">
-                                        {capture.pageRoute || capture.sourcePageUrl || "Unknown route"}
+                                        {capture.pageRoute ||
+                                          capture.sourcePageUrl ||
+                                          "Unknown route"}
                                       </span>
                                       {capture.tagName && (
                                         <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm">
@@ -1022,7 +1770,8 @@ const SplitView: React.FC = () => {
                                     </div>
                                     <div>
                                       <p className="text-sm font-semibold leading-6 text-slate-900">
-                                        {capture.note || "No capture note provided."}
+                                        {capture.note ||
+                                          "No capture note provided."}
                                       </p>
                                       {capture.pageTitle && (
                                         <p className="mt-1 text-xs text-slate-500">
@@ -1035,10 +1784,15 @@ const SplitView: React.FC = () => {
                                       capturedAtLabel) && (
                                       <div className="rounded-2xl bg-white px-3 py-3 text-xs leading-6 text-slate-600">
                                         {capture.nearestHeading && (
-                                          <p>Nearest heading: {capture.nearestHeading}</p>
+                                          <p>
+                                            Nearest heading:{" "}
+                                            {capture.nearestHeading}
+                                          </p>
                                         )}
                                         {capture.selector && (
-                                          <p className="break-all">Target: {capture.selector}</p>
+                                          <p className="break-all">
+                                            Target: {capture.selector}
+                                          </p>
                                         )}
                                         {capturedAtLabel && (
                                           <p>Captured at: {capturedAtLabel}</p>
@@ -1052,7 +1806,8 @@ const SplitView: React.FC = () => {
                           </div>
                         ) : (
                           <div className="mt-5 rounded-2xl border border-dashed border-[#d8cbb7] bg-[#faf5ec] px-4 py-6 text-sm text-slate-600">
-                            No capture attachments were submitted for this request.
+                            No capture attachments were submitted for this
+                            request.
                           </div>
                         )}
                       </div>
@@ -1064,289 +1819,24 @@ const SplitView: React.FC = () => {
           );
         })()}
 
-      {showMetrics &&
-        metricsData &&
-        (() => {
-          const { summary, pages } = metricsData;
-          const hasContentSummary = summary.content !== null;
-          const visualSummary = summary.visual ?? {
-            totalCompared: 0,
-            passed: 0,
-            failed: 0,
-            passRate: 0,
-            avgAccuracy: 0,
-          };
-          const contentSummary = summary.content ?? {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            missing: 0,
-            passRate: 0,
-            avgOverall: 0,
-          };
-          const visualAccuracy = visualSummary.avgAccuracy;
-          const scoreColor =
-            visualAccuracy >= 95
-              ? "text-primary"
-              : visualAccuracy >= 80
-                ? "text-[#705c30]"
-                : "text-error";
-          const scoreBg =
-            visualAccuracy >= 95
-              ? "bg-primary/10 border-primary/30"
-              : visualAccuracy >= 80
-                ? "bg-[#705c30]/10 border-[#705c30]/30"
-                : "bg-error/10 border-error/30";
-          const scoreBarColor =
-            visualAccuracy >= 95
-              ? "bg-primary"
-              : visualAccuracy >= 80
-                ? "bg-[#705c30]"
-                : "bg-error";
-
-          return (
-            <div
-              className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-              onClick={() => setShowMetrics(false)}
-            >
-              <div
-                className="relative bg-surface w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl border border-outline-variant/40 shadow-2xl"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* Header */}
-                <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-surface border-b border-outline-variant/30">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-primary/10 rounded-lg">
-                      <span
-                        className="material-symbols-outlined text-primary text-xl"
-                        style={{ fontVariationSettings: "'FILL' 1" }}
-                      >
-                        analytics
-                      </span>
-                    </div>
-                    <div>
-                      <h2 className="font-headline text-base font-bold text-on-surface leading-tight">
-                        Migration Report
-                      </h2>
-                      <p className="text-xs text-on-surface-variant">
-                        Visual &amp; content comparison across {pages.length}{" "}
-                        pages
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setShowMetrics(false)}
-                    className="p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors"
-                  >
-                    <span className="material-symbols-outlined text-xl">
-                      close
-                    </span>
-                  </button>
-                </div>
-
-                <div className="p-6 space-y-5">
-                  {/* Summary cards */}
-                  <div className="grid grid-cols-2 gap-3">
-                    {/* Visual */}
-                    <div
-                      className={`p-4 rounded-2xl border ${scoreBg}`}
-                    >
-                      <p className="text-xs font-medium text-on-surface-variant mb-2 uppercase tracking-wider">
-                        Visual
-                      </p>
-                      <div className="flex items-end gap-2 mb-2">
-                        <p
-                          className={`text-3xl font-headline font-bold ${scoreColor}`}
-                        >
-                          {visualSummary.avgAccuracy.toFixed(1)}
-                          <span className="text-base">%</span>
-                        </p>
-                        <p className="text-xs text-on-surface-variant mb-1">
-                          avg accuracy
-                        </p>
-                      </div>
-                      <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
-                        <div
-                          className={`h-full rounded-full ${scoreBarColor}`}
-                          style={{
-                            width: `${visualSummary.avgAccuracy}%`,
-                          }}
-                        />
-                      </div>
-                      <div className="flex gap-3 text-xs">
-                        <span className="text-green-500">
-                          {visualSummary.passed} passed
-                        </span>
-                        <span className="text-error">
-                          {visualSummary.failed} failed
-                        </span>
-                        <span className="text-on-surface-variant">
-                          {visualSummary.totalCompared} total
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Content */}
-                    <div className="p-4 rounded-2xl border border-outline-variant/30 bg-surface-container-low">
-                      <p className="text-xs font-medium text-on-surface-variant mb-2 uppercase tracking-wider">
-                        Content
-                      </p>
-                      {hasContentSummary ? (
-                        <>
-                          <div className="flex items-end gap-2 mb-2">
-                            <p className="text-3xl font-headline font-bold text-on-surface">
-                              {contentSummary.passRate.toFixed(1)}
-                              <span className="text-base">%</span>
-                            </p>
-                            <p className="text-xs text-on-surface-variant mb-1">
-                              pass rate
-                            </p>
-                          </div>
-                          <div className="h-1.5 bg-surface-container-high rounded-full overflow-hidden mb-2">
-                            <div
-                              className="h-full rounded-full bg-primary"
-                              style={{ width: `${contentSummary.passRate}%` }}
-                            />
-                          </div>
-                          <div className="flex gap-3 text-xs">
-                            <span className="text-green-500">
-                              {contentSummary.passed} passed
-                            </span>
-                            <span className="text-yellow-500">
-                              {contentSummary.missing} missing
-                            </span>
-                            <span className="text-on-surface-variant">
-                              {contentSummary.total} total
-                            </span>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="rounded-xl border border-dashed border-outline-variant/50 bg-surface px-4 py-5">
-                          <p className="text-sm font-semibold text-on-surface">
-                            Khong co du lieu
-                          </p>
-                          <p className="mt-1 text-xs text-on-surface-variant">
-                            Automation hien khong tra ve tong hop content cho lan so sanh nay.
-                          </p>
-                        </div>
-                      )}
-                      {summary.errors.content && (
-                        <p className="mt-3 text-[11px] text-amber-700">
-                          Content metrics unavailable: {summary.errors.content}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Pages table */}
-                  <div>
-                    <p className="text-xs font-medium text-on-surface-variant mb-3 uppercase tracking-wider">
-                      Pages
-                    </p>
-                    <div className="rounded-xl border border-outline-variant/30 overflow-hidden">
-                      <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-surface-container text-xs font-medium text-on-surface-variant border-b border-outline-variant/30">
-                        <span className="col-span-4">Page</span>
-                        <span className="col-span-2">Type</span>
-                        <span className="col-span-3">Visual accuracy</span>
-                        <span className="col-span-3">Content</span>
-                      </div>
-                      {pages.map((page, i) => {
-                        const acc = page.visual?.accuracy ?? null;
-                        const accColor =
-                          acc === null
-                            ? ""
-                            : acc >= 95
-                              ? "text-primary"
-                              : acc >= 80
-                                ? "text-[#705c30]"
-                                : "text-error";
-                        const accBar =
-                          acc === null
-                            ? ""
-                            : acc >= 95
-                              ? "bg-primary"
-                              : acc >= 80
-                                ? "bg-[#705c30]"
-                                : "bg-error";
-                        return (
-                          <div
-                            key={page.slug + i}
-                            className={`grid grid-cols-12 gap-2 px-4 py-3 text-xs ${i < pages.length - 1 ? "border-b border-outline-variant/20" : ""} hover:bg-surface-container/50`}
-                          >
-                            <div className="col-span-4 flex flex-col justify-center min-w-0">
-                              <p className="font-medium text-on-surface truncate">
-                                {page.slug}
-                              </p>
-                              {page.url && (
-                                <p className="text-on-surface-variant/50 truncate">
-                                  {page.url.replace(
-                                    /^https?:\/\/[^/]+/,
-                                    "",
-                                  )}
-                                </p>
-                              )}
-                            </div>
-                            <div className="col-span-2 flex items-center">
-                              <span className="px-2 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant text-[10px]">
-                                {page.type}
-                              </span>
-                            </div>
-                            <div className="col-span-3 flex flex-col justify-center gap-1">
-                              {acc !== null ? (
-                                <>
-                                  <div className="flex items-center gap-1.5">
-                                    <div className="flex-1 h-1 bg-surface-container-high rounded-full overflow-hidden">
-                                      <div
-                                        className={`h-full rounded-full ${accBar}`}
-                                        style={{ width: `${acc}%` }}
-                                      />
-                                    </div>
-                                    <span
-                                      className={`font-mono text-[11px] shrink-0 ${accColor}`}
-                                    >
-                                      {acc.toFixed(1)}%
-                                    </span>
-                                  </div>
-                                </>
-                              ) : (
-                                <span className="text-on-surface-variant/40">
-                                  —
-                                </span>
-                              )}
-                            </div>
-                            <div className="col-span-3 flex items-center">
-                              {page.content ? (
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                                    page.content.status === "PASS"
-                                      ? "bg-green-500/10 text-green-600"
-                                      : page.content.status === "MISSING"
-                                        ? "bg-yellow-500/10 text-yellow-600"
-                                        : "bg-error/10 text-error"
-                                  }`}
-                                >
-                                  {page.content.status}
-                                  {page.content.status === "PASS" &&
-                                  page.content.scores.overall > 0
-                                    ? ` · ${page.content.scores.overall}%`
-                                    : ""}
-                                </span>
-                              ) : (
-                                <span className="text-on-surface-variant/40 text-[10px]">
-                                  —
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+      {showMetrics && metricsView?.kind === "compare" && (
+        <CompareMetricsModal
+          view={metricsView}
+          onClose={() => setShowMetrics(false)}
+        />
+      )}
+      {showMetrics && metricsView?.kind === "audit" && (
+        <AuditMetricsModal
+          view={metricsView}
+          onClose={() => setShowMetrics(false)}
+        />
+      )}
+      {showMetrics && metricsView?.kind === "raw" && (
+        <RawMetricsModal
+          view={metricsView}
+          onClose={() => setShowMetrics(false)}
+        />
+      )}
     </div>
   );
 };

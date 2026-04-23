@@ -12,6 +12,7 @@ import {
 // ── Data-need aliases (plan uses both forms) ──────────────────────────────────
 const NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
+  'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
 };
@@ -61,6 +62,7 @@ export class FrameGeneratorService {
     const hasPages = needs.has('pages');
     const hasMenus = needs.has('menus');
     const hasSiteInfo = needs.has('siteInfo');
+    const hasFooterLinks = needs.has('footerLinks');
     const hasComments = needs.has('comments') && isDetail;
     const isFooter = componentName.toLowerCase().includes('footer');
     // Archive component: handles /archive, /category/:slug, /author/:slug, /tag/:slug
@@ -171,7 +173,7 @@ export class FrameGeneratorService {
     if (hasMenus && !isFooter) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
-    if (isFooter) {
+    if (isFooter || hasFooterLinks) {
       lines.push(
         `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
@@ -193,6 +195,7 @@ export class FrameGeneratorService {
       hasPages,
       hasMenus,
       hasSiteInfo,
+      hasFooterLinks,
       hasComments,
       isDetail,
       isFooter,
@@ -329,6 +332,8 @@ export class FrameGeneratorService {
     if (hasPageDetail) vars.push('`page: Page | null`');
     else if (needs.has('pages')) vars.push('`pages: Page[]`');
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
+    if (needs.has('footerLinks'))
+      vars.push('`footerColumns: FooterColumn[]`');
     if (needs.has('siteInfo')) vars.push('`siteInfo: SiteInfo | null`');
     if (needs.has('comments') && isDetail) vars.push('`comments: Comment[]`');
     if (isDetail && fixedSlug)
@@ -355,6 +360,7 @@ export class FrameGeneratorService {
     hasPages: boolean;
     hasMenus: boolean;
     hasSiteInfo: boolean;
+    hasFooterLinks: boolean;
     hasComments: boolean;
     isDetail: boolean;
     isFooter: boolean;
@@ -390,7 +396,7 @@ export class FrameGeneratorService {
     if (flags.hasMenus && !flags.isFooter) {
       fetches.push({ setter: 'setMenus', url: `'/api/menus'` });
     }
-    if (flags.isFooter) {
+    if (flags.isFooter || flags.hasFooterLinks) {
       fetches.push({ setter: 'setFooterColumns', url: `'/api/footer-links'` });
     }
 

@@ -300,13 +300,13 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   const src = node.src ?? '';
   const dimRatio = (node.params?.dimRatio as number | undefined) ?? 50;
   const minHeight = normalizeCssLength(node.minHeight) ?? '400px';
-  const contentAlign = (
-    node.params?.contentPosition as string | undefined
-  )?.includes('left')
-    ? 'left'
-    : (node.params?.contentPosition as string | undefined)?.includes('right')
-      ? 'right'
-      : 'center';
+  const contentAlign =
+    inferSectionAlignment(node, node.children ?? []) ??
+    ((node.params?.contentPosition as string | undefined)?.includes('left')
+      ? 'left'
+      : (node.params?.contentPosition as string | undefined)?.includes('right')
+        ? 'right'
+        : 'center');
 
   if (src) {
     const s: CoverSection = {
@@ -388,9 +388,36 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return segmentedInteractiveSections;
   }
 
-  const groupedCardGrid = buildGroupedCardGrid(children);
-  if (groupedCardGrid) {
-    return toMappedSections(groupedCardGrid, node);
+  // Testimonial group: metadata.name contains "testimonial" or content starts with a curly quote
+  const metadataName = (
+    (node.params?.metadata as Record<string, string> | undefined)?.name ?? ''
+  ).toLowerCase();
+  if (metadataName.includes('testimonial')) {
+    const testimonial = buildTestimonialFromGroup(node, children);
+    if (testimonial) return toMappedSections(testimonial, node);
+  }
+
+  // If any UAGB interactive block (slider/modal/tabs) is nested anywhere in the
+  // subtree, skip static heuristics so recursion maps each child to the correct
+  // interactive section type.
+  const hasInteractive = hasDeepInteractiveBlock(children);
+
+  // If the group contains post-content blocks anywhere (single/page templates),
+  // skip card-grid and hero heuristics — recurse so post-content maps correctly.
+  const hasPostContent = children.some((c) =>
+    POST_CONTENT_BLOCKS.includes(c.block),
+  ) || children.some((c) => c.children?.some((cc) => POST_CONTENT_BLOCKS.includes(cc.block)));
+
+  if (!hasInteractive && !hasPostContent) {
+    const groupedCardGrid = buildGroupedCardGrid(children);
+    // Reject degenerate card-grids (e.g. footer nav groups mapped to 1 card with no body)
+    const isDegenerate =
+      groupedCardGrid &&
+      groupedCardGrid.cards.length <= 1 &&
+      groupedCardGrid.cards.every((c) => !c.body);
+    if (groupedCardGrid && !isDegenerate) {
+      return toMappedSections(groupedCardGrid, node);
+    }
   }
 
   // Query-led archive/index groups often include a heading or intro copy above
@@ -414,13 +441,19 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return [applyNodePresentation(section, node)];
   }
 
+  // Composite groups that mix intro copy with one or more direct rows/columns
+  // should recurse into their children instead of collapsing into a single hero.
+  if (!hasInteractive && !hasPostContent && isCompositeGroup(children)) {
+    return mapNodes(children, children);
+  }
+
   // Group acting as a hero: has heading + paragraph (+ optional button)
-  if (isHeroGroup(children)) {
+  if (!hasInteractive && !hasPostContent && isHeroGroup(children)) {
     return toMappedSections(buildHeroFromChildren(node, children), node);
   }
 
   // Group acting as a 2-column media-text layout
-  if (isMediaTextGroup(children)) {
+  if (!hasInteractive && !hasPostContent && isMediaTextGroup(children)) {
     return toMappedSections(buildMediaTextFromColumns(children), node);
   }
 
@@ -580,7 +613,7 @@ function mapStandaloneHeading(node: WpNode): HeroSection | null {
   if (!node.text?.trim()) return null;
   const hero: HeroSection = {
     type: 'hero',
-    layout: node.textAlign === 'center' ? 'centered' : 'left',
+    layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
     heading: node.text ?? '',
   };
   if (node.typography || node.fontFamily) {
@@ -596,11 +629,14 @@ function mapQuote(node: WpNode): TestimonialSection | null {
   const authorMatch = node.html?.match(/<cite[^>]*>([\s\S]*?)<\/cite>/i);
   const authorName = authorMatch ? stripInlineHtml(authorMatch[1]) : '';
 
-  return {
+  const section: TestimonialSection = {
     type: 'testimonial',
     quote,
     authorName,
   };
+  const contentAlign = inferSectionAlignment(node, node.children ?? []);
+  if (contentAlign) section.contentAlign = contentAlign;
+  return section;
 }
 
 // ── UAGB / Spectra mappers ──────────────────────────────────────────────────
@@ -651,7 +687,13 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     });
   }
 
-  return { type: 'carousel', slides };
+  const section: CarouselSection = { type: 'carousel', slides };
+  const contentAlign = inferSectionAlignment(
+    node,
+    slideChildren.length > 0 ? slideChildren : (node.children ?? []),
+  );
+  if (contentAlign) section.contentAlign = contentAlign;
+  return section;
 }
 
 function mapUagbInfoBox(node: WpNode): CardGridSection | null {
@@ -869,7 +911,10 @@ function applyNodePresentation<T extends SectionPlan>(
     next.marginStyle = boxSpacingToCss(node.margin);
   }
   if (node.gap && !next.gapStyle) {
-    next.gapStyle = node.gap;
+    next.gapStyle =
+      typeof node.gap === 'string'
+        ? node.gap
+        : normalizeGapStyleValue(node.gap) ?? next.gapStyle;
   }
   const customClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
@@ -879,6 +924,23 @@ function applyNodePresentation<T extends SectionPlan>(
     next.customClassNames = customClassNames;
   }
   return next;
+}
+
+function normalizeGapStyleValue(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized || undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const spacing = value as Record<string, unknown>;
+  const row = normalizeCssLength(
+    typeof spacing.top === 'string' ? spacing.top : undefined,
+  );
+  const column = normalizeCssLength(
+    typeof spacing.left === 'string' ? spacing.left : undefined,
+  );
+  if (row && column) return `${row} ${column}`;
+  return row ?? column ?? undefined;
 }
 
 function buildSectionKey(
@@ -894,16 +956,60 @@ function buildSectionKey(
 // ── helpers: recognise group intent ────────────────────────────────────────
 
 function isHeroGroup(children: WpNode[]): boolean {
-  const flat = flattenChildren({ children } as WpNode);
-  const hasH1OrH2 = flat.some(
+  const meaningfulChildren = children.filter(
+    (child) => !isSpacerBlock(child.block),
+  );
+  const hasH1OrH2 = meaningfulChildren.some(
     (c) =>
       (c.block === 'core/heading' || c.block === 'heading') &&
       (c.level === 1 || c.level === 2),
   );
-  const hasPara = flat.some(
+  const hasPara = meaningfulChildren.some(
     (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
-  return hasH1OrH2 && hasPara;
+  const hasDirectColumns = meaningfulChildren.some(
+    (c) => c.block === 'core/columns' || c.block === 'columns',
+  );
+  return hasH1OrH2 && hasPara && !hasDirectColumns;
+}
+
+function isCompositeGroup(children: WpNode[]): boolean {
+  const meaningfulChildren = children.filter(
+    (child) => !isSpacerBlock(child.block),
+  );
+  const directColumnsCount = meaningfulChildren.filter(
+    (child) => child.block === 'core/columns' || child.block === 'columns',
+  ).length;
+  return directColumnsCount >= 1 && meaningfulChildren.length > 1;
+}
+
+function buildTestimonialFromGroup(
+  groupNode: WpNode,
+  children: WpNode[],
+): TestimonialSection | null {
+  const allText = flattenChildren({ children } as WpNode)
+    .filter((n) => n.block === 'core/paragraph' || n.block === 'paragraph')
+    .map((n) => n.text ?? '')
+    .filter(Boolean);
+
+  if (allText.length === 0) return null;
+
+  // First paragraph is the quote; look for curly-quote wrapper or just take it
+  const quote = allText[0].replace(/^["“«]+|["”»]+$/g, '').trim();
+  if (!quote) return null;
+
+  const authorName = allText[1] ?? '';
+  const authorTitle = allText[2] ?? undefined;
+
+  const section: TestimonialSection = {
+    type: 'testimonial',
+    quote,
+    authorName,
+    authorTitle,
+  };
+  const contentAlign = inferSectionAlignment(groupNode, children);
+  if (contentAlign) section.contentAlign = contentAlign;
+  return section;
 }
 
 function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
@@ -1010,7 +1116,7 @@ function buildHeroFromChildren(
   );
   const img = flat.find((c) => c.block === 'core/image' || c.block === 'image');
 
-  const align = groupNode.textAlign ?? groupNode.params?.textAlign ?? 'left';
+  const align = inferSectionAlignment(groupNode, children);
   const layout: HeroSection['layout'] =
     align === 'center' ? 'centered' : img ? 'split' : 'left';
 
@@ -1030,6 +1136,63 @@ function buildHeroFromChildren(
     s.paddingStyle = boxSpacingToCss(groupNode.padding);
   }
   return s;
+}
+
+type HorizontalAlign = 'left' | 'center' | 'right';
+
+function inferSectionAlignment(
+  node: WpNode,
+  children: WpNode[],
+): HorizontalAlign | undefined {
+  const direct = inferNodeAlignment(node);
+  if (direct) return direct;
+
+  const counts: Record<HorizontalAlign, number> = {
+    left: 0,
+    center: 0,
+    right: 0,
+  };
+  for (const candidate of flattenChildren({ children } as WpNode)) {
+    const align = inferNodeAlignment(candidate);
+    if (align) counts[align] += 1;
+  }
+
+  const nonZero = (Object.entries(counts) as Array<[HorizontalAlign, number]>)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  if (nonZero.length === 0) return undefined;
+  if (nonZero.length === 1) return nonZero[0][0];
+
+  const [best, second] = nonZero;
+  if (best[1] > second[1]) return best[0];
+  if (counts.center > 0 && counts.center >= counts.left && counts.center >= counts.right) {
+    return 'center';
+  }
+  return undefined;
+}
+
+function inferNodeAlignment(node: WpNode): HorizontalAlign | undefined {
+  return (
+    normalizeHorizontalAlign(node.textAlign) ??
+    normalizeHorizontalAlign(node.justifyContent) ??
+    normalizeHorizontalAlign(node.align) ??
+    normalizeHorizontalAlign(node.params?.textAlign) ??
+    normalizeHorizontalAlign(node.params?.contentPosition) ??
+    normalizeHorizontalAlign(node.params?.layout?.justifyContent) ??
+    normalizeHorizontalAlign(node.params?.align) ??
+    normalizeHorizontalAlign(node.params?.layout?.horizontalAlignment)
+  );
+}
+
+function normalizeHorizontalAlign(value: unknown): HorizontalAlign | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (/(^|[\s:-])center(ed)?($|[\s:-])/.test(normalized)) return 'center';
+  if (/(^|[\s:-])right($|[\s:-])/.test(normalized)) return 'right';
+  if (/(^|[\s:-])left($|[\s:-])/.test(normalized)) return 'left';
+  return undefined;
 }
 
 function isMediaTextGroup(children: WpNode[]): boolean {
@@ -1107,6 +1270,26 @@ function buildMediaTextFromColumns(
   if (listItems.length > 0) s.listItems = listItems;
   if (btn?.text) s.cta = { text: btn.text, link: btn.href ?? '#' };
   return s;
+}
+
+const INTERACTIVE_UAGB_BLOCKS = ['uagb/slider', 'uagb/modal', 'uagb/tabs'];
+
+const POST_CONTENT_BLOCKS = [
+  'core/post-content',
+  'post-content',
+  'core/post-title',
+  'post-title',
+  'core/post-featured-image',
+  'post-featured-image',
+];
+
+function hasDeepInteractiveBlock(nodes: WpNode[]): boolean {
+  for (const node of nodes) {
+    if (INTERACTIVE_UAGB_BLOCKS.includes(node.block)) return true;
+    if (node.children?.length && hasDeepInteractiveBlock(node.children))
+      return true;
+  }
+  return false;
 }
 
 function buildSegmentedInteractiveSections(

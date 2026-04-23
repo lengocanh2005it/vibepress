@@ -1308,6 +1308,7 @@ export class CodeReviewerService {
       'pages',
       'menus',
       'siteInfo',
+      'footerLinks',
     ];
     const mapped = new Set<DataNeed>();
 
@@ -1315,6 +1316,9 @@ export class CodeReviewerService {
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -2362,6 +2366,11 @@ export class CodeReviewerService {
     if (/shared chrome contract|menus/.test(compact)) {
       instructions.push(
         'Do not hardcode nav/footer links. If this component declares menus, render them from `/api/menus` only.',
+      );
+    }
+    if (/footerlinks|footer-links|\/api\/footer-links/.test(compact)) {
+      instructions.push(
+        'If this is a Footer component, fetch `/api/footer-links` and render those columns directly; do not fall back to `/api/menus`.',
       );
     }
 

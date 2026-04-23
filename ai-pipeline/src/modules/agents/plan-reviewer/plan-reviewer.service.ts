@@ -21,6 +21,7 @@ type PlanDataNeed =
   | 'pages'
   | 'menus'
   | 'site-info'
+  | 'footer-links'
   | 'post-detail'
   | 'page-detail'
   | 'comments'
@@ -39,6 +40,7 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'pages',
   'menus',
   'site-info',
+  'footer-links',
   'post-detail',
   'page-detail',
   'comments',
@@ -287,6 +289,15 @@ export class PlanReviewerService {
       );
       const needs = new Set<PlanDataNeed>(normalized);
       const before = [...needs];
+      const templateBase = toTemplateBase(item.templateName);
+      const isFooterPartial =
+        policy.type === 'partial' &&
+        (/^footer(?:[-_].+)?$/.test(templateBase) ||
+          /^footer(?:[-_].+)?$/i.test(item.componentName));
+      const isHeaderLikePartial =
+        policy.type === 'partial' &&
+        (/^(header|nav|navigation)(?:[-_].+)?$/.test(templateBase) ||
+          /^(Header|Nav|Navigation)(?:[-_].+)?$/.test(item.componentName));
 
       if (policy.type === 'partial') {
         needs.delete('post-detail');
@@ -295,6 +306,15 @@ export class PlanReviewerService {
 
       for (const need of policy.requiredDataNeeds) {
         needs.add(need);
+      }
+
+      if (isFooterPartial) {
+        needs.add('site-info');
+        needs.add('footer-links');
+        needs.delete('menus');
+      }
+      if (isHeaderLikePartial) {
+        needs.delete('footer-links');
       }
 
       if (
@@ -317,6 +337,8 @@ export class PlanReviewerService {
         const removedChromeNeeds: PlanDataNeed[] = [];
         if (needs.delete('menus')) removedChromeNeeds.push('menus');
         if (needs.delete('site-info')) removedChromeNeeds.push('site-info');
+        if (needs.delete('footer-links'))
+          removedChromeNeeds.push('footer-links');
         if (removedChromeNeeds.length > 0) {
           warnings.push(
             `Template "${item.templateName}" removed page-level chrome dataNeeds (${removedChromeNeeds.join(', ')}) because shared layout partials own global chrome`,
@@ -450,6 +472,9 @@ export class PlanReviewerService {
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -669,6 +694,17 @@ export class PlanReviewerService {
 
       const actualSections = item.visualPlan.sections;
 
+      // Reject AI-added orphan sections (no sourceRef) that exceed the draft count.
+      // These are hallucinated sections with no WP source backing.
+      const orphans = actualSections.filter(
+        (s, i) => i >= expectedDraftSections.length && !s.sourceRef?.sourceNodeId,
+      );
+      for (const orphan of orphans) {
+        errors.push(
+          `Component "${item.componentName}" has AI-added orphan section [${orphan.type}] key="${orphan.sectionKey ?? 'undefined'}" with no sourceRef — remove it`,
+        );
+      }
+
       for (let index = 0; index < expectedDraftSections.length; index++) {
         const expectedSection = expectedDraftSections[index];
         const actualSection = actualSections[index];
@@ -682,12 +718,41 @@ export class PlanReviewerService {
         }
 
         if (actualSection.type !== expectedSection.type) {
-          // Type substitution is allowed: the AI may generate semantically
-          // appropriate types (search, comments, post-list) in place of draft
-          // layout placeholders (hero, post-list). Warn but don't block.
-          this.logger.warn(
-            `Component "${item.componentName}" section ${index + 1} type substitution: draft "${expectedSection.type}" → actual "${actualSection.type}"`,
+          // Interactive section types (modal, carousel, tabs, accordion) should
+          // only be assigned when the source block is a native interactive block.
+          // Substituting a plain core/group to modal/carousel is AI hallucination
+          // — reject and restore the draft type + content to prevent fabricated UIs.
+          const interactiveTypes = [
+            'modal',
+            'carousel',
+            'tabs',
+            'accordion',
+          ] as const;
+          const nativeInteractiveBlocks = [
+            'uagb/modal',
+            'uagb/popup',
+            'uagb/slider',
+            'uagb/tabs',
+            'uagb/faq',
+            'uagb/content-toggle',
+          ];
+          const actualIsInteractive = (
+            interactiveTypes as readonly string[]
+          ).includes(actualSection.type);
+          const sourceIsNativeInteractive = nativeInteractiveBlocks.includes(
+            expectedSection.sourceRef?.blockName ?? '',
           );
+          if (actualIsInteractive && !sourceIsNativeInteractive) {
+            errors.push(
+              `Component "${item.componentName}" section ${index + 1} illegal type substitution: draft "${expectedSection.type}" (blockName="${expectedSection.sourceRef?.blockName ?? 'unknown'}") → actual "${actualSection.type}" — source block is not a native interactive widget; rejecting to prevent hallucinated UI`,
+            );
+          } else {
+            // Semantic substitutions (search, comments, post-list, hero) are
+            // allowed. Warn but don't block.
+            this.logger.warn(
+              `Component "${item.componentName}" section ${index + 1} type substitution: draft "${expectedSection.type}" → actual "${actualSection.type}"`,
+            );
+          }
         }
 
         if (
@@ -1106,6 +1171,7 @@ export class PlanReviewerService {
       'pages',
       'menus',
       'site-info',
+      'footer-links',
     ];
     return order.filter((need) => dataNeeds.includes(need));
   }
@@ -1119,6 +1185,7 @@ export class PlanReviewerService {
       'pages',
       'menus',
       'siteInfo',
+      'footerLinks',
     ];
     return order.filter((need) => dataNeeds.includes(need));
   }

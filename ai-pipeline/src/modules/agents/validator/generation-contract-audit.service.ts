@@ -162,6 +162,17 @@ export class GenerationContractAuditService {
       });
     }
     if (
+      dataNeeds.has('footerLinks') &&
+      !hasFetch((fetch) => fetch.path === '/api/footer-links')
+    ) {
+      warnings.push({
+        scope: 'frontend-contract',
+        componentName: component.name,
+        message:
+          'Plan declares `footerLinks` but generated code does not fetch `/api/footer-links`.',
+      });
+    }
+    if (
       dataNeeds.has('postDetail') &&
       !hasFetch((fetch) => /^\/api\/posts\/:param$/.test(fetch.normalizedPath))
     ) {
@@ -219,6 +230,17 @@ export class GenerationContractAuditService {
           componentName: component.name,
           message:
             'Generated code fetches `/api/site-info` but the plan does not declare `siteInfo`.',
+        });
+      }
+      if (
+        fetch.path === '/api/footer-links' &&
+        !dataNeeds.has('footerLinks')
+      ) {
+        warnings.push({
+          scope: 'frontend-contract',
+          componentName: component.name,
+          message:
+            'Generated code fetches `/api/footer-links` but the plan does not declare `footerLinks`.',
         });
       }
     }
@@ -403,6 +425,8 @@ export class GenerationContractAuditService {
         return 'pageDetail';
       case 'site-info':
         return 'siteInfo';
+      case 'footer-links':
+        return 'footerLinks';
       default:
         return value;
     }
