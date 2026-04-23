@@ -1352,7 +1352,11 @@ export class ValidatorService {
 
   private isDynamicPlanBinding(value?: string): boolean {
     const normalized = value?.trim();
-    return Boolean(normalized && /^\{[a-zA-Z0-9_.]+\}$/.test(normalized));
+    return Boolean(
+      normalized &&
+        (/^\{[a-zA-Z0-9_.]+\}$/.test(normalized) ||
+          /\{[a-zA-Z0-9_.]+\}/.test(normalized)),
+    );
   }
 
   private requireLiteralIfPresent(

@@ -393,6 +393,27 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(groupedCardGrid, node);
   }
 
+  // Query-led archive/index groups often include a heading or intro copy above
+  // the loop. Preserve the query as the primary section and lift the heading
+  // into the post-list title instead of misclassifying the whole group as hero.
+  const queryChild = children.find(
+    (c) => c.block === 'core/query' || c.block === 'query',
+  );
+  if (queryChild) {
+    const headingChild = findFirstByBlock(children, [
+      'core/query-title',
+      'query-title',
+      'core/heading',
+      'heading',
+    ]);
+    let section = applyNodePresentation(mapQuery(queryChild), queryChild);
+    if (headingChild) {
+      const title = extractNodeText(headingChild);
+      if (title) section = { ...section, title };
+    }
+    return [applyNodePresentation(section, node)];
+  }
+
   // Group acting as a hero: has heading + paragraph (+ optional button)
   if (isHeroGroup(children)) {
     return toMappedSections(buildHeroFromChildren(node, children), node);
@@ -402,12 +423,6 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   if (isMediaTextGroup(children)) {
     return toMappedSections(buildMediaTextFromColumns(children), node);
   }
-
-  // Group with a query inside → defer to query mapper
-  const queryChild = children.find(
-    (c) => c.block === 'core/query' || c.block === 'query',
-  );
-  if (queryChild) return toMappedSections(mapQuery(queryChild), node);
 
   // Group with a search block
   const searchChild = children.find(

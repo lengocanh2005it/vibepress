@@ -1159,7 +1159,7 @@ export default ${componentName};`;
     if (!trackingAttrs) return withCustomClasses;
 
     return withCustomClasses.replace(
-      /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-source-node=)/,
+      /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-section-key=)/,
       `$1${trackingAttrs}`,
     );
   }
@@ -1198,20 +1198,18 @@ export default ${componentName};`;
     section: SectionPlan,
     componentName: string,
   ): string {
-    if (!section.sourceRef?.sourceNodeId) return '';
+    const sectionKey = section.sectionKey ?? section.type;
+    if (!sectionKey && !section.sourceRef?.sourceNodeId) return '';
 
     const attrs = [
-      ['data-vp-source-node', section.sourceRef.sourceNodeId],
-      ['data-vp-template', section.sourceRef.templateName],
-      ['data-vp-source-file', section.sourceRef.sourceFile],
-      ['data-vp-section-key', section.sectionKey ?? section.type],
+      ['data-vp-source-node', section.sourceRef?.sourceNodeId],
+      ['data-vp-template', section.sourceRef?.templateName],
+      ['data-vp-source-file', section.sourceRef?.sourceFile],
+      ['data-vp-section-key', sectionKey],
       ['data-vp-component', componentName],
       [
         'data-vp-section-component',
-        this.buildTrackedSectionComponentName(
-          componentName,
-          section.sectionKey ?? section.type,
-        ),
+        this.buildTrackedSectionComponentName(componentName, sectionKey),
       ],
     ].filter(([, value]) => !!value);
 

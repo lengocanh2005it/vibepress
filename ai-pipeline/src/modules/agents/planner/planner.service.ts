@@ -8,6 +8,7 @@ import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
   wpBlocksToJson,
   wpBlocksToJsonWithSourceRefs,
+  ensureWpNodesHaveSourceRefs,
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
@@ -2176,7 +2177,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       trimmed.includes('"block"')
     ) {
       const parsed = JSON.parse(trimmed) as WpNode[] | WpNode;
-      return Array.isArray(parsed) ? parsed : [parsed];
+      return ensureWpNodesHaveSourceRefs({
+        nodes: Array.isArray(parsed) ? parsed : [parsed],
+        templateName: input.templateName,
+        sourceFile: input.sourceFile,
+      });
     }
 
     return wpBlocksToJsonWithSourceRefs({
@@ -2980,6 +2985,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   ): PlanningSourceContext {
     const hints: string[] = [];
     let scopedSource = preferredSource.source;
+    const sourceTemplateName =
+      preferredSource.templateName ?? componentPlan.templateName;
+    const sourceFile =
+      preferredSource.sourceFile ??
+      inferFseSourceFile(componentPlan.templateName, componentPlan.type);
 
     if (componentPlan.type === 'page') {
       scopedSource = this.stripClassicSharedIncludes(scopedSource, hints);
@@ -2987,7 +2997,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     if (this.looksLikeBlockMarkup(scopedSource)) {
-      const bodyNodes = wpBlocksToJson(scopedSource);
+      const bodyNodes = wpBlocksToJsonWithSourceRefs({
+        markup: scopedSource,
+        templateName: sourceTemplateName,
+        sourceFile,
+      });
       if (componentPlan.type === 'page' && bodyNodes.length > 0) {
         const filteredNodes = bodyNodes.filter(
           (node) => !this.isSharedLayoutBlockNode(node),
@@ -3016,6 +3030,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .filter(
         (candidate) =>
           this.extractPlanningSourceOrigin(candidate.label) !== preferredOrigin,
+      )
+      .filter((candidate) =>
+        this.isCompatibleSupplementalPlanningSource(
+          componentPlan,
+          preferredSource,
+          candidate,
+        ),
       )
       .slice(0, 2)
       .map((candidate) => ({
@@ -3131,8 +3152,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceBackedAuxiliaryLabels,
       supplementalSources,
       sourceLabel: preferredSource.label,
-      sourceTemplateName: preferredSource.templateName,
-      sourceFile: preferredSource.sourceFile,
+      sourceTemplateName,
+      sourceFile,
       sourceReason: preferredSource.reason,
     };
   }
@@ -3767,6 +3788,34 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private extractPlanningSourceOrigin(label: string): string {
     const [origin] = label.split(':', 1);
     return origin?.trim().toLowerCase() || 'unknown';
+  }
+
+  private isCompatibleSupplementalPlanningSource(
+    componentPlan: PlanResult[number],
+    preferredSource: PlanningSourceCandidate,
+    candidate: PlanningSourceCandidate,
+  ): boolean {
+    const normalize = (value: string | undefined): string =>
+      String(value ?? '')
+        .trim()
+        .toLowerCase();
+
+    const preferredTemplate = normalize(preferredSource.templateName);
+    const candidateTemplate = normalize(candidate.templateName);
+    if (!preferredTemplate || !candidateTemplate) return false;
+    if (preferredTemplate === candidateTemplate) return true;
+
+    if (componentPlan.route === '/') {
+      const homeLikeTemplates = new Set(['front-page', 'home']);
+      if (
+        homeLikeTemplates.has(preferredTemplate) &&
+        homeLikeTemplates.has(candidateTemplate)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private isSharedLayoutBlockNode(node: WpNode): boolean {

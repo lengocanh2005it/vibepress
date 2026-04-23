@@ -226,6 +226,180 @@ function compareDomStructure(freqA, freqB) {
   };
 }
 
+function normalizePathname(input) {
+  try {
+    const parsed = new URL(String(input || ""));
+    return parsed.pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    const value = String(input || "").trim();
+    return value.replace(/\/+$/, "") || "/";
+  }
+}
+
+function extractSlugFromUrl(input) {
+  const pathname = normalizePathname(input);
+  if (pathname === "/") return null;
+  const segments = pathname.split("/").filter(Boolean);
+  return segments.length > 0 ? segments[segments.length - 1] : null;
+}
+
+function buildRouteKey({ reactUrl, wpUrl, type, slug }) {
+  const route = normalizePathname(reactUrl || wpUrl);
+  if (route === "/" || type === "homepage") {
+    return "homepage:/";
+  }
+  if (slug) {
+    return `${type || "page"}:${slug}`;
+  }
+  return `${type || "page"}:${route}`;
+}
+
+function inferComponentHint(routePath, type) {
+  if (routePath === "/" || type === "homepage") return "Home";
+  if (/^\/page\/[^/]+$/i.test(routePath)) return "Page";
+  if (/^\/post\/[^/]+$/i.test(routePath)) return "Single";
+  if (/^\/category\/[^/]+$/i.test(routePath)) return "Category";
+  if (/^\/tag\/[^/]+$/i.test(routePath)) return "Tag";
+  if (/^\/author\/[^/]+$/i.test(routePath)) return "Author";
+  if (/^\/search$/i.test(routePath)) return "Search";
+  if (/^\/archive/i.test(routePath)) return "Archive";
+  return type === "page" ? "Page" : type === "post" ? "Single" : null;
+}
+
+function cropImage(image, x, y, width, height) {
+  const cropped = new PNG({ width, height });
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const src = ((image.width * (y + row)) + (x + col)) << 2;
+      const dst = ((width * row) + col) << 2;
+      cropped.data[dst] = image.data[src];
+      cropped.data[dst + 1] = image.data[src + 1];
+      cropped.data[dst + 2] = image.data[src + 2];
+      cropped.data[dst + 3] = image.data[src + 3];
+    }
+  }
+  return cropped;
+}
+
+function detectDiffRegions(diffImage, width, height) {
+  const rowThreshold = Math.max(8, Math.floor(width * 0.01));
+  const minRegionHeight = 24;
+  const candidateBands = [];
+  let startY = null;
+
+  const rowDiffCounts = new Array(height).fill(0);
+  for (let y = 0; y < height; y++) {
+    let count = 0;
+    for (let x = 0; x < width; x++) {
+      const idx = ((width * y) + x) << 2;
+      if (
+        diffImage.data[idx] !== 0 ||
+        diffImage.data[idx + 1] !== 0 ||
+        diffImage.data[idx + 2] !== 0 ||
+        diffImage.data[idx + 3] !== 0
+      ) {
+        count++;
+      }
+    }
+    rowDiffCounts[y] = count;
+    if (count >= rowThreshold) {
+      if (startY === null) startY = y;
+      continue;
+    }
+    if (startY !== null && y - startY >= minRegionHeight) {
+      candidateBands.push({ startY, endY: y - 1 });
+    }
+    startY = null;
+  }
+  if (startY !== null && height - startY >= minRegionHeight) {
+    candidateBands.push({ startY, endY: height - 1 });
+  }
+
+  const regions = candidateBands
+    .map((band, index) => {
+      let minX = width;
+      let maxX = -1;
+      let diffPixels = 0;
+      for (let y = band.startY; y <= band.endY; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = ((width * y) + x) << 2;
+          if (
+            diffImage.data[idx] === 0 &&
+            diffImage.data[idx + 1] === 0 &&
+            diffImage.data[idx + 2] === 0 &&
+            diffImage.data[idx + 3] === 0
+          ) {
+            continue;
+          }
+          diffPixels++;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+        }
+      }
+      if (diffPixels === 0 || maxX < minX) return null;
+      const regionWidth = maxX - minX + 1;
+      const regionHeight = band.endY - band.startY + 1;
+      const area = regionWidth * regionHeight;
+      const density = area > 0 ? diffPixels / area : 0;
+      const severity =
+        diffPixels >= 60000 || regionHeight >= 480
+          ? "high"
+          : diffPixels >= 15000 || regionHeight >= 220
+            ? "medium"
+            : "low";
+      return {
+        id: `region-${index + 1}`,
+        kind: regionWidth >= width * 0.8 ? "horizontal-band" : "localized-diff",
+        severity,
+        bbox: {
+          x: minX,
+          y: band.startY,
+          width: regionWidth,
+          height: regionHeight,
+        },
+        diffPixels,
+        diffDensity: Number((density * 100).toFixed(2)),
+        rowSpan: {
+          start: band.startY,
+          end: band.endY,
+        },
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.diffPixels - a.diffPixels)
+    .slice(0, 4);
+
+  return regions;
+}
+
+function writeRegionArtifacts({
+  runId,
+  baseImageA,
+  baseImageB,
+  diffImage,
+  regions,
+}) {
+  return regions.map((region, index) => {
+    const { x, y, width, height } = region.bbox;
+    const cropAPath = path.join(ARTIFACTS_DIR, `${runId}-${region.id}-${index + 1}-a.png`);
+    const cropBPath = path.join(ARTIFACTS_DIR, `${runId}-${region.id}-${index + 1}-b.png`);
+    const cropDiffPath = path.join(ARTIFACTS_DIR, `${runId}-${region.id}-${index + 1}-diff.png`);
+
+    fs.writeFileSync(cropAPath, PNG.sync.write(cropImage(baseImageA, x, y, width, height)));
+    fs.writeFileSync(cropBPath, PNG.sync.write(cropImage(baseImageB, x, y, width, height)));
+    fs.writeFileSync(cropDiffPath, PNG.sync.write(cropImage(diffImage, x, y, width, height)));
+
+    return {
+      ...region,
+      cropArtifacts: {
+        imageA: `http://localhost:${PORT}/artifacts/${path.basename(cropAPath)}`,
+        imageB: `http://localhost:${PORT}/artifacts/${path.basename(cropBPath)}`,
+        diff: `http://localhost:${PORT}/artifacts/${path.basename(cropDiffPath)}`,
+      },
+    };
+  });
+}
+
 function cropToSize(image, width, height) {
   const cropped = new PNG({ width, height });
   for (let y = 0; y < height; y++) {
@@ -537,13 +711,25 @@ async function compareWebVisuals({
   const differentPixels = overlapDiffPixels + extraPixels;
   const totalPixels = maxWidth * maxHeight;
   const diffPct = totalPixels > 0 ? (differentPixels / totalPixels) * 100 : 0;
+  const overlapDiffPct =
+    width * height > 0 ? (overlapDiffPixels / (width * height)) * 100 : 0;
+  const extraDiffPct = totalPixels > 0 ? (extraPixels / totalPixels) * 100 : 0;
 
   const domComparison = compareDomStructure(domFreqA, domFreqB);
+  const diffRegions = writeRegionArtifacts({
+    runId,
+    baseImageA: normA,
+    baseImageB: normB,
+    diffImage,
+    regions: detectDiffRegions(diffImage, width, height),
+  });
 
   return {
     urlA,
     urlB,
     diffPercentage: Number(diffPct.toFixed(4)),
+    overlapDiffPercentage: Number(overlapDiffPct.toFixed(4)),
+    extraDiffPercentage: Number(extraDiffPct.toFixed(4)),
     differentPixels,
     overlapDiffPixels,
     extraPixels,
@@ -555,6 +741,7 @@ async function compareWebVisuals({
       imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
       diff: `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
     },
+    regions: diffRegions,
     domComparison,
   };
 }
@@ -640,9 +827,36 @@ async function compareMultiplePages({
 
       const accuracy = 100 - result.diffPercentage;
       const status = accuracy >= 90 ? "✅ PASS" : "⚠️  FAIL";
+      const reactPath = normalizePathname(reactUrl);
+      const wpPath = normalizePathname(wpUrl);
+      const slug = urlItem?.slug || extractSlugFromUrl(wpUrl) || extractSlugFromUrl(reactUrl);
+      const routeKey = buildRouteKey({
+        reactUrl,
+        wpUrl,
+        type: urlItem.type,
+        slug,
+      });
+      const componentHint = inferComponentHint(reactPath, urlItem.type);
+      const repairPriority =
+        result.diffPercentage >= 20 || (result.regions?.[0]?.severity === "high")
+          ? "high"
+          : result.diffPercentage >= 8
+            ? "medium"
+            : "low";
       console.log(`   ${status} — accuracy: ${accuracy.toFixed(2)}%\n`);
 
-      results.push({ type: urlItem.type, accuracy, status, ...result });
+      results.push({
+        type: urlItem.type,
+        slug,
+        routeKey,
+        wpPath,
+        reactPath,
+        componentHint,
+        repairPriority,
+        accuracy,
+        status,
+        ...result,
+      });
     } catch (err) {
       console.warn(`   ❌ ERROR: ${err.message}\n`);
       results.push({ type: urlItem.type, wpUrl, reactUrl, error: err.message });

@@ -64,6 +64,17 @@ export function wpBlocksToJsonWithSourceRefs(input: {
   });
 }
 
+export function ensureWpNodesHaveSourceRefs(input: {
+  nodes: WpNode[];
+  templateName: string;
+  sourceFile: string;
+}): WpNode[] {
+  return annotateSourceRefs(input.nodes, {
+    templateName: input.templateName,
+    sourceFile: input.sourceFile,
+  });
+}
+
 /**
  * Serialize the JSON tree to a compact string for the AI prompt.
  * Strips `params` (already processed into top-level fields) to reduce token count.

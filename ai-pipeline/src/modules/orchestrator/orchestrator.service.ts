@@ -9,16 +9,23 @@ import { lastValueFrom, ReplaySubject } from 'rxjs';
 import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
+import { LlmFactoryService } from '../../common/llm/llm-factory.service.js';
 import {
   TokenTracker,
   type TokenUsagePhaseSummary,
 } from '../../common/utils/token-tracker.js';
 import { ApiBuilderService } from '../agents/api-builder/api-builder.service.js';
 import { GeneratedApiReviewService } from '../agents/api-builder/generated-api-review.service.js';
-import type { BlockParseResult } from '../agents/block-parser/block-parser.service.js';
+import type {
+  BlockParseResult,
+  ThemeTokens,
+} from '../agents/block-parser/block-parser.service.js';
 import { BlockParserService } from '../agents/block-parser/block-parser.service.js';
 import { CleanupService } from '../agents/cleanup/cleanup.service.js';
-import { DbContentService } from '../agents/db-content/db-content.service.js';
+import {
+  DbContentService,
+  type DbContentResult,
+} from '../agents/db-content/db-content.service.js';
 import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
 import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
@@ -364,6 +371,114 @@ interface PipelineUiAssessment {
   basis: string[];
 }
 
+interface AutomationCompareRegion {
+  id?: string;
+  kind?: string;
+  severity?: 'low' | 'medium' | 'high' | string;
+  diffPixels?: number | null;
+  diffDensity?: number | null;
+  bbox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  cropArtifacts?: {
+    imageA?: string;
+    imageB?: string;
+    diff?: string;
+  };
+}
+
+interface AutomationComparePageVisual {
+  status?: string | null;
+  accuracy?: number | null;
+  diffPct?: number | null;
+  overlapDiffPct?: number | null;
+  extraDiffPct?: number | null;
+  overlapDiffPixels?: number | null;
+  extraPixels?: number | null;
+  artifacts?: {
+    imageA?: string;
+    imageB?: string;
+    diff?: string;
+  } | null;
+  regions?: AutomationCompareRegion[];
+  domComparison?: {
+    similarityScore?: number | null;
+  } | null;
+  wpPath?: string | null;
+  reactPath?: string | null;
+  error?: string | null;
+}
+
+interface AutomationComparePageContent {
+  status?: string | null;
+  scores?: {
+    title?: number | null;
+    content?: number | null;
+    overall?: number | null;
+  } | null;
+  issues?: string[];
+  wp?: {
+    title?: string;
+    contentPreview?: string;
+  } | null;
+  react?: {
+    title?: string;
+    contentPreview?: string;
+  } | null;
+}
+
+interface AutomationComparePageResult {
+  routeKey?: string | null;
+  route?: string | null;
+  url?: string | null;
+  slug?: string | null;
+  type?: string | null;
+  componentHint?: string | null;
+  repairPriority?: string | null;
+  visual?: AutomationComparePageVisual | null;
+  content?: AutomationComparePageContent | null;
+}
+
+interface VisualMismatchDiagnosis {
+  componentName: string;
+  routeKey?: string | null;
+  route?: string | null;
+  shouldRepair: boolean;
+  confidence: number;
+  rootCause: {
+    primary:
+      | 'plan-omission'
+      | 'missing-section'
+      | 'missing-image'
+      | 'content-drift'
+      | 'layout-drift'
+      | 'route-mapping-error'
+      | 'data-binding-error'
+      | 'shared-layout-mismatch'
+      | 'unknown';
+    secondary: string[];
+    reasoning: string;
+  };
+  evidence: {
+    sourceHints: string[];
+    missingLabels: string[];
+    sectionLikelyMissingFromPlan: boolean;
+  };
+  repairPlan: {
+    strategy: string;
+    instructions: string[];
+    targetAreas: Array<{
+      type: string;
+      sectionHint?: string;
+      headingHint?: string;
+    }>;
+    guardrails: string[];
+  };
+}
+
 interface PipelineRunSummaryFile {
   jobId: string;
   status: 'success' | 'failed' | 'stopped' | 'deleted';
@@ -441,6 +556,7 @@ export class OrchestratorService {
     private readonly captureReview: CaptureReviewService,
     private readonly editRequestPhase: EditRequestPhaseService,
     private readonly aiLogger: AiLoggerService,
+    private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
@@ -2184,6 +2300,10 @@ export class OrchestratorService {
       await this.runStep(state, '9_visual_compare', logPath, async () => {
         const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
+        const previewTokens =
+          'tokens' in normalizedTheme
+            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ?? undefined)
+            : undefined;
 
         this.emitStepProgress(
           state,
@@ -2193,24 +2313,63 @@ export class OrchestratorService {
         );
 
         try {
-          const response = await lastValueFrom(
-            this.httpService.post(
-              `${this.configService.get<string>('automation.url', '')}/site/compare`,
-              {
-                siteId,
-                wpSiteId: siteId,
-                wpBaseUrl,
-                reactFeUrl: preview.previewUrl,
-                reactBeUrl,
-              },
-            ),
-          );
-          metrics = response.data?.result ?? response.data;
+          metrics = await this.compareSiteWithAutomation({
+            siteId,
+            wpBaseUrl,
+            reactFeUrl: preview.previewUrl,
+            reactBeUrl,
+          });
+          if (metrics) {
+            await this.logAutomationCompareMetrics(
+              logPath,
+              'initial',
+              metrics,
+            );
+          }
         } catch (err: any) {
           this.logger.error(
             `[site-compare] failed — ${err?.message ?? err}`,
             err?.response?.data ?? err?.stack,
           );
+        }
+
+        if (metrics) {
+          const visualRepairResult = await this.applyVisualMetricsRepairPass({
+            state,
+            stepName: '9_visual_compare',
+            metrics,
+            preview,
+            components: buildComponents,
+            plan: reviewResult.plan,
+            content,
+            tokens: previewTokens,
+            fixAgentModel: resolvedModels.fixAgent,
+            logPath,
+          });
+          buildComponents = visualRepairResult.components;
+
+          if (visualRepairResult.applied) {
+            try {
+              metrics = await this.compareSiteWithAutomation({
+                siteId,
+                wpBaseUrl,
+                reactFeUrl: preview.previewUrl,
+                reactBeUrl,
+              });
+              if (metrics) {
+                await this.logAutomationCompareMetrics(
+                  logPath,
+                  'after-repair',
+                  metrics,
+                );
+              }
+            } catch (err: any) {
+              this.logger.error(
+                `[site-compare] re-run after visual repair failed — ${err?.message ?? err}`,
+                err?.response?.data ?? err?.stack,
+              );
+            }
+          }
         }
 
         this.emitStepProgress(
@@ -3219,6 +3378,1269 @@ export class OrchestratorService {
       hasEditRequest,
       metrics,
     };
+  }
+
+  private async compareSiteWithAutomation(input: {
+    siteId: string;
+    wpBaseUrl: string;
+    reactFeUrl: string;
+    reactBeUrl: string;
+  }): Promise<ProgressEventData['metrics'] | undefined> {
+    const { siteId, wpBaseUrl, reactFeUrl, reactBeUrl } = input;
+    const response = await lastValueFrom(
+      this.httpService.post(
+        `${this.configService.get<string>('automation.url', '')}/site/compare`,
+        {
+          siteId,
+          wpSiteId: siteId,
+          wpBaseUrl,
+          reactFeUrl,
+          reactBeUrl,
+        },
+      ),
+    );
+    return (response.data?.result ?? response.data) as ProgressEventData['metrics'];
+  }
+
+  private collectAutomationComparePages(
+    metrics: unknown,
+  ): AutomationComparePageResult[] {
+    if (!metrics || typeof metrics !== 'object') return [];
+    const pages = (metrics as { pages?: unknown }).pages;
+    return Array.isArray(pages) ? (pages as AutomationComparePageResult[]) : [];
+  }
+
+  private selectVisualRepairTargets(input: {
+    metrics: unknown;
+    preview: PreviewBuilderResult;
+    components: ReactGenerateResult['components'];
+  }): Array<{
+    componentName: string;
+    page: AutomationComparePageResult;
+    score: number;
+  }> {
+    const { metrics, preview, components } = input;
+    const pages = this.collectAutomationComparePages(metrics);
+    const componentNames = new Set(components.map((component) => component.name));
+    const bestByComponent = new Map<
+      string,
+      { componentName: string; page: AutomationComparePageResult; score: number }
+    >();
+
+    for (const page of pages) {
+      const visualStatus = page.visual?.status;
+      const contentStatus = page.content?.status;
+      const diffPct = this.coerceFiniteNumber(page.visual?.diffPct) ?? 0;
+      const accuracy = this.coerceFiniteNumber(page.visual?.accuracy);
+      const isActionable =
+        visualStatus === '⚠️  FAIL' ||
+        contentStatus === 'FAIL' ||
+        contentStatus === 'MISSING' ||
+        diffPct >= 8;
+      if (!isActionable) continue;
+
+      const componentName = this.resolveVisualRepairComponentName({
+        page,
+        preview,
+        componentNames,
+      });
+      if (!componentName) continue;
+
+      const priorityBoost =
+        page.repairPriority === 'high'
+          ? 80
+          : page.repairPriority === 'medium'
+            ? 40
+            : 10;
+      const contentPenalty =
+        contentStatus === 'MISSING' ? 45 : contentStatus === 'FAIL' ? 25 : 0;
+      const regionPenalty = (page.visual?.regions ?? []).reduce(
+        (sum, region) =>
+          sum +
+          (region.severity === 'high'
+            ? 20
+            : region.severity === 'medium'
+              ? 10
+              : 3),
+        0,
+      );
+      const score =
+        priorityBoost +
+        (accuracy === null ? diffPct : Math.max(0, 100 - accuracy)) +
+        contentPenalty +
+        regionPenalty;
+
+      const existing = bestByComponent.get(componentName);
+      if (!existing || score > existing.score) {
+        bestByComponent.set(componentName, { componentName, page, score });
+      }
+    }
+
+    return [...bestByComponent.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+  }
+
+  private async logAutomationCompareMetrics(
+    logPath: string,
+    stage: 'initial' | 'after-repair',
+    metrics: unknown,
+  ): Promise<void> {
+    const pages = this.collectAutomationComparePages(metrics);
+    const overall =
+      metrics && typeof metrics === 'object'
+        ? ((metrics as { overall?: Record<string, unknown> }).overall ?? {})
+        : {};
+    const failingRoutes = Array.isArray(
+      (overall as { failingRoutes?: unknown }).failingRoutes,
+    )
+      ? ((overall as { failingRoutes?: string[] }).failingRoutes ?? [])
+      : [];
+    const repairNeeded = this.coerceFiniteNumber(
+      (overall as { repairNeeded?: unknown }).repairNeeded,
+    );
+    const lines: string[] = [
+      `[Automation Compare] stage=${stage} pages=${pages.length} failingRoutes=${failingRoutes.length} repairNeeded=${repairNeeded ?? 'unknown'}`,
+    ];
+
+    if (failingRoutes.length > 0) {
+      lines.push(
+        `[Automation Compare] failing routes: ${failingRoutes.join(', ')}`,
+      );
+    }
+
+    for (const page of pages.slice(0, 12)) {
+      lines.push(
+        `[Automation Compare] ${this.formatAutomationComparePageSummary(page)}`,
+      );
+    }
+
+    if (pages.length > 12) {
+      lines.push(
+        `[Automation Compare] ... ${pages.length - 12} additional route(s) omitted from log summary`,
+      );
+    }
+
+    await this.logToFile(logPath, lines.join('\n'));
+  }
+
+  private formatAutomationComparePageSummary(
+    page: AutomationComparePageResult,
+  ): string {
+    const parts = [
+      `route=${page.route ?? page.visual?.reactPath ?? 'unknown'}`,
+      `routeKey=${page.routeKey ?? 'unknown'}`,
+      `componentHint=${page.componentHint ?? 'unknown'}`,
+      `visualStatus=${page.visual?.status ?? 'unknown'}`,
+      `contentStatus=${page.content?.status ?? 'unknown'}`,
+    ];
+    if (page.visual?.accuracy !== null && page.visual?.accuracy !== undefined) {
+      parts.push(`accuracy=${page.visual.accuracy}%`);
+    }
+    if (page.visual?.diffPct !== null && page.visual?.diffPct !== undefined) {
+      parts.push(`diffPct=${page.visual.diffPct}%`);
+    }
+    if (
+      page.visual?.overlapDiffPct !== null &&
+      page.visual?.overlapDiffPct !== undefined
+    ) {
+      parts.push(`overlapDiffPct=${page.visual.overlapDiffPct}%`);
+    }
+    if (
+      page.visual?.extraDiffPct !== null &&
+      page.visual?.extraDiffPct !== undefined
+    ) {
+      parts.push(`extraDiffPct=${page.visual.extraDiffPct}%`);
+    }
+    if ((page.visual?.regions?.length ?? 0) > 0) {
+      parts.push(`regions=${page.visual?.regions?.length ?? 0}`);
+    }
+    return parts.join(' | ');
+  }
+
+  private summarizeLogLines(
+    lines: string[],
+    limit: number,
+    label: string,
+  ): string {
+    if (lines.length === 0) return `${label}: none`;
+    if (lines.length <= limit) {
+      return `${label}: ${lines.join(' || ')}`;
+    }
+    return `${label}: ${lines
+      .slice(0, limit)
+      .join(' || ')} || ... (+${lines.length - limit} more)`;
+  }
+
+  private summarizeMultilineForLog(
+    value: string,
+    maxLines = 12,
+    maxChars = 2400,
+  ): string {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    const normalized = trimmed
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .slice(0, maxLines)
+      .join('\n');
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, maxChars).trimEnd()}\n...`;
+  }
+
+  private resolveVisualRepairComponentName(input: {
+    page: AutomationComparePageResult;
+    preview: PreviewBuilderResult;
+    componentNames: Set<string>;
+  }): string | null {
+    const { page, preview, componentNames } = input;
+    const route =
+      this.normalizeComparableRoute(page.route) ??
+      this.normalizeComparableRoute(page.visual?.reactPath) ??
+      null;
+    if (route) {
+      const exactMatch = preview.routeEntries.find(
+        (entry) => this.normalizeComparableRoute(entry.route) === route,
+      );
+      if (exactMatch) return exactMatch.componentName;
+
+      const patternMatch = preview.routeEntries.find((entry) =>
+        this.previewRouteMatches(entry.route, route),
+      );
+      if (patternMatch) return patternMatch.componentName;
+    }
+
+    const hinted = page.componentHint?.trim();
+    if (hinted && componentNames.has(hinted)) return hinted;
+    return null;
+  }
+
+  private normalizeComparableRoute(route?: string | null): string | null {
+    if (!route) return null;
+    const value = route.trim();
+    if (!value) return null;
+    return value.replace(/\/+$/, '') || '/';
+  }
+
+  private previewRouteMatches(pattern: string, actual: string): boolean {
+    const normalizedPattern = this.normalizeComparableRoute(pattern);
+    const normalizedActual = this.normalizeComparableRoute(actual);
+    if (!normalizedPattern || !normalizedActual) return false;
+    if (normalizedPattern === normalizedActual) return true;
+
+    const regexSource = normalizedPattern
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, '[^/]+')
+      .replace(/\\\*/g, '.*');
+    return new RegExp(`^${regexSource}$`).test(normalizedActual);
+  }
+
+  private async applyVisualMetricsRepairPass(input: {
+    state: PipelineStatus;
+    stepName: string;
+    metrics: unknown;
+    preview: PreviewBuilderResult;
+    components: ReactGenerateResult['components'];
+    plan: PlanResult;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    fixAgentModel?: string;
+    logPath: string;
+  }): Promise<{
+    components: ReactGenerateResult['components'];
+    applied: boolean;
+    repairedCount: number;
+  }> {
+    const {
+      state,
+      stepName,
+      metrics,
+      preview,
+      components,
+      plan,
+      content,
+      tokens,
+      fixAgentModel,
+      logPath,
+    } = input;
+    const repairTargets = this.selectVisualRepairTargets({
+      metrics,
+      preview,
+      components,
+    });
+    if (repairTargets.length === 0) {
+      await this.logToFile(
+        logPath,
+        '[Visual Metrics Repair] No actionable compare mismatches were selected for AI diagnosis/fix.',
+      );
+      return { components, applied: false, repairedCount: 0 };
+    }
+
+    const snapshot = components.map((component) => ({ ...component }));
+    let repairedCount = 0;
+
+    this.logger.warn(
+      `[Visual Metrics Repair] ${repairTargets.length} route/component mismatch(es) selected for targeted repair.`,
+    );
+    await this.logToFile(
+      logPath,
+      `[Visual Metrics Repair] Selected targets: ${repairTargets
+        .map((target) => `${target.componentName}:${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}`)
+        .join(', ')}`,
+    );
+    await this.logToFile(
+      logPath,
+      repairTargets
+        .map(
+          (target) =>
+            `[Visual Metrics Repair] target=${target.componentName} score=${target.score.toFixed(1)} ${this.formatAutomationComparePageSummary(target.page)}`,
+        )
+        .join('\n'),
+    );
+
+    this.emitStepProgress(
+      state,
+      stepName,
+      0.45,
+      `Automation compare found ${repairTargets.length} high-signal mismatch(es). Applying targeted visual repair with the fix agent.`,
+    );
+
+    for (const target of repairTargets) {
+      const componentIndex = components.findIndex(
+        (component) => component.name === target.componentName,
+      );
+      if (componentIndex === -1) continue;
+
+      const diagnosis = await this.diagnoseVisualMismatch({
+        componentName: target.componentName,
+        page: target.page,
+        plan,
+        content,
+        modelName: fixAgentModel,
+        logPath,
+      });
+      if (!diagnosis.shouldRepair || diagnosis.confidence < 0.55) {
+        this.logger.warn(
+          `[Visual Metrics Repair] Diagnosis confidence too low for "${target.componentName}". Skipping targeted fix. rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Visual Metrics Repair] Skipped "${target.componentName}" because diagnosis confidence was too low (${diagnosis.confidence.toFixed(2)}). rootCause=${diagnosis.rootCause.primary}`,
+        );
+        continue;
+      }
+
+      const visionImageUrls = await this.buildComparePageVisionInputs(target.page);
+      const visionContextNote = this.buildComparePageVisionContext(target.page);
+      const feedback = this.buildVisualRepairFeedback({
+        componentName: target.componentName,
+        page: target.page,
+        diagnosis,
+        plan,
+        content,
+      });
+
+      this.logger.warn(
+        `[Visual Metrics Repair] Fixing component "${target.componentName}" from route "${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}" after diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}`,
+      );
+      await this.logToFile(
+        logPath,
+        [
+          `[Visual Metrics Repair] Fixing "${target.componentName}" with diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}.`,
+          `[Visual Metrics Repair] visionArtifacts=${visionImageUrls.length} visionContext=${JSON.stringify(visionContextNote || '')}`,
+          `[Visual Metrics Repair] fix feedback:\n${this.summarizeMultilineForLog(
+            feedback,
+          )}`,
+        ].join('\n'),
+      );
+
+      const fixed = await this.reactGenerator.fixComponent({
+        component: components[componentIndex],
+        plan,
+        feedback,
+        modelConfig: { fixAgent: fixAgentModel },
+        logPath,
+        visionImageUrls,
+        visionContextNote,
+      });
+      const revalidated = this.validator.collectValidationIssues([fixed]);
+      if (revalidated.failures.length > 0) {
+        const error = revalidated.failures[0]?.error ?? 'Unknown validation error';
+        this.logger.warn(
+          `[Visual Metrics Repair] Re-validation failed for "${target.componentName}". Keeping the previous version. Error: ${error}`,
+        );
+        await this.logToFile(
+          logPath,
+          `[Visual Metrics Repair] Re-validation failed for "${target.componentName}": ${error}`,
+        );
+        continue;
+      }
+
+      components[componentIndex] = revalidated.components[0];
+      repairedCount += 1;
+      await this.logToFile(
+        logPath,
+        `[Visual Metrics Repair] Accepted updated component "${target.componentName}" after validator re-check.`,
+      );
+    }
+
+    if (repairedCount === 0) {
+      return { components: snapshot, applied: false, repairedCount: 0 };
+    }
+
+    try {
+      await this.previewBuilder.syncGeneratedComponents(
+        preview.previewDir,
+        components,
+        tokens,
+      );
+      await this.validator.assertPreviewBuild(preview.frontendDir);
+      await this.validator.assertPreviewRuntime(
+        preview.previewUrl,
+        preview.routeEntries.map((entry) => entry.route),
+      );
+    } catch (error: any) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[Visual Metrics Repair] Preview sync/build/runtime failed after targeted repair. Reverting to the last valid snapshot. ${message}`,
+      );
+      await this.logToFile(
+        logPath,
+        `[Visual Metrics Repair] Sync/build/runtime failed after targeted repair. Reverting.\n${message}`,
+      );
+      await this.previewBuilder.syncGeneratedComponents(
+        preview.previewDir,
+        snapshot,
+        tokens,
+      );
+      return { components: snapshot, applied: false, repairedCount: 0 };
+    }
+
+    this.emitStepProgress(
+      state,
+      stepName,
+      0.7,
+      `Targeted visual repair updated ${repairedCount} component(s). Re-running compare metrics now.`,
+    );
+
+    return { components, applied: true, repairedCount };
+  }
+
+  private async diagnoseVisualMismatch(input: {
+    componentName: string;
+    page: AutomationComparePageResult;
+    plan: PlanResult;
+    content: DbContentResult;
+    modelName?: string;
+    logPath: string;
+  }): Promise<VisualMismatchDiagnosis> {
+    const { componentName, page, plan, content, modelName, logPath } = input;
+    const componentPlan = plan.find((entry) => entry.componentName === componentName);
+    const sourceEvidence = this.buildSourceEvidenceForComparePage(page, content);
+    const planEvidence = this.buildPlanEvidenceForComponent(componentPlan);
+    const heuristic = this.buildHeuristicVisualDiagnosis({
+      componentName,
+      page,
+      sourceEvidence,
+      planEvidence,
+    });
+    const prompt = this.buildVisualDiagnosisPrompt({
+      componentName,
+      page,
+      sourceEvidence,
+      planEvidence,
+      heuristic,
+    });
+    const resolvedModel = modelName ?? this.llmFactory.getModel();
+
+    await this.logToFile(
+      logPath,
+      [
+        `[Visual Diagnose] component=${componentName} route=${page.route ?? page.visual?.reactPath ?? 'unknown'} model=${resolvedModel}`,
+        `[Visual Diagnose] incoming metrics: ${this.formatAutomationComparePageSummary(
+          page,
+        )}`,
+        this.summarizeLogLines(sourceEvidence, 6, '[Visual Diagnose] source evidence'),
+        this.summarizeLogLines(planEvidence, 4, '[Visual Diagnose] plan evidence'),
+        `[Visual Diagnose] heuristic rootCause=${heuristic.rootCause.primary} confidence=${heuristic.confidence.toFixed(2)} strategy=${heuristic.repairPlan.strategy}`,
+      ].join('\n'),
+    );
+
+    try {
+      const response = await this.llmFactory.chat({
+        model: resolvedModel,
+        systemPrompt:
+          'You diagnose WordPress-to-React visual mismatches. Return ONLY valid JSON. Do not include markdown fences or commentary.',
+        userPrompt: prompt,
+        maxTokens: 1200,
+        temperature: 0,
+      });
+      const parsed = this.parseVisualDiagnosisResponse(
+        response.text,
+        componentName,
+        page,
+      );
+      if (parsed) {
+        await this.logToFile(
+          logPath,
+          [
+            `[Visual Diagnose] ${componentName} route=${page.route ?? page.visual?.reactPath ?? 'unknown'} rootCause=${parsed.rootCause.primary} confidence=${parsed.confidence.toFixed(2)}`,
+            `[Visual Diagnose] AI diagnosis strategy=${parsed.repairPlan.strategy} shouldRepair=${parsed.shouldRepair}`,
+            this.summarizeLogLines(
+              parsed.repairPlan.instructions,
+              5,
+              '[Visual Diagnose] AI instructions',
+            ),
+            this.summarizeLogLines(
+              parsed.repairPlan.guardrails,
+              5,
+              '[Visual Diagnose] AI guardrails',
+            ),
+          ].join('\n'),
+        );
+        return this.mergeDiagnosisWithHeuristic(parsed, heuristic);
+      }
+    } catch (error) {
+      await this.logToFile(
+        logPath,
+        `[Visual Diagnose] LLM diagnosis failed for "${componentName}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    await this.logToFile(
+      logPath,
+      `[Visual Diagnose] Falling back to heuristic diagnosis for "${componentName}" rootCause=${heuristic.rootCause.primary} confidence=${heuristic.confidence.toFixed(2)}`,
+    );
+    return heuristic;
+  }
+
+  private buildVisualDiagnosisPrompt(input: {
+    componentName: string;
+    page: AutomationComparePageResult;
+    sourceEvidence: string[];
+    planEvidence: string[];
+    heuristic: VisualMismatchDiagnosis;
+  }): string {
+    const { componentName, page, sourceEvidence, planEvidence, heuristic } = input;
+    const lines: string[] = [
+      `Component: ${componentName}`,
+      `Route key: ${page.routeKey ?? 'unknown'}`,
+      `Route: ${page.route ?? page.visual?.reactPath ?? 'unknown'}`,
+      `Suggested component hint from automation: ${page.componentHint ?? 'unknown'}`,
+      '',
+      'Automation metrics:',
+      `- visual status: ${page.visual?.status ?? 'unknown'}`,
+      `- content status: ${page.content?.status ?? 'unknown'}`,
+      `- visual accuracy: ${page.visual?.accuracy ?? 'unknown'}`,
+      `- diffPct: ${page.visual?.diffPct ?? 'unknown'}`,
+      `- overlapDiffPct: ${page.visual?.overlapDiffPct ?? 'unknown'}`,
+      `- extraDiffPct: ${page.visual?.extraDiffPct ?? 'unknown'}`,
+      `- domSimilarity: ${page.visual?.domComparison?.similarityScore ?? 'unknown'}`,
+      `- region count: ${(page.visual?.regions ?? []).length}`,
+    ];
+
+    if ((page.visual?.regions?.length ?? 0) > 0) {
+      lines.push('Top diff regions:');
+      for (const region of page.visual?.regions ?? []) {
+        const bbox = region.bbox;
+        lines.push(
+          `- ${region.id ?? 'region'} | severity=${region.severity ?? 'unknown'} | kind=${region.kind ?? 'diff'} | diffPixels=${region.diffPixels ?? 'unknown'} | bbox=${bbox ? `(${bbox.x},${bbox.y},${bbox.width},${bbox.height})` : 'unknown'}`,
+        );
+      }
+    }
+
+    if ((page.content?.issues?.length ?? 0) > 0) {
+      lines.push('Content issues:');
+      for (const issue of page.content?.issues ?? []) {
+        lines.push(`- ${issue}`);
+      }
+    }
+
+    if (sourceEvidence.length > 0) {
+      lines.push('WordPress / DB source evidence:');
+      for (const evidence of sourceEvidence) {
+        lines.push(`- ${evidence}`);
+      }
+    }
+
+    if (planEvidence.length > 0) {
+      lines.push('Current plan evidence:');
+      for (const evidence of planEvidence) {
+        lines.push(`- ${evidence}`);
+      }
+    }
+
+    lines.push(
+      `Heuristic baseline diagnosis: rootCause=${heuristic.rootCause.primary}, confidence=${heuristic.confidence.toFixed(2)}, missingLabels=${heuristic.evidence.missingLabels.join(' | ') || 'none'}`,
+    );
+    lines.push('');
+    lines.push('Decide the most likely root cause and return JSON with this exact shape:');
+    lines.push(
+      '{"componentName":"string","routeKey":"string|null","route":"string|null","shouldRepair":true,"confidence":0.0,"rootCause":{"primary":"plan-omission|missing-section|missing-image|content-drift|layout-drift|route-mapping-error|data-binding-error|shared-layout-mismatch|unknown","secondary":["string"],"reasoning":"string"},"evidence":{"sourceHints":["string"],"missingLabels":["string"],"sectionLikelyMissingFromPlan":true},"repairPlan":{"strategy":"string","instructions":["string"],"targetAreas":[{"type":"section","sectionHint":"string","headingHint":"string"}],"guardrails":["string"]}}',
+    );
+    lines.push(
+      'Rules: prefer "plan-omission" when WordPress/DB source clearly shows a prominent section or heading that is absent from the current plan evidence. Keep confidence between 0 and 1. Return only JSON.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private parseVisualDiagnosisResponse(
+    raw: string,
+    componentName: string,
+    page: AutomationComparePageResult,
+  ): VisualMismatchDiagnosis | null {
+    const candidate = this.extractJsonObject(raw);
+    if (!candidate) return null;
+
+    try {
+      const parsed = JSON.parse(candidate) as Partial<VisualMismatchDiagnosis>;
+      const confidence = Math.max(
+        0,
+        Math.min(1, this.coerceFiniteNumber(parsed.confidence) ?? 0),
+      );
+      const rootPrimary = parsed.rootCause?.primary ?? 'unknown';
+      const allowedRootCauses = new Set([
+        'plan-omission',
+        'missing-section',
+        'missing-image',
+        'content-drift',
+        'layout-drift',
+        'route-mapping-error',
+        'data-binding-error',
+        'shared-layout-mismatch',
+        'unknown',
+      ]);
+      return {
+        componentName:
+          typeof parsed.componentName === 'string' &&
+          parsed.componentName.trim().length > 0
+            ? parsed.componentName.trim()
+            : componentName,
+        routeKey:
+          typeof parsed.routeKey === 'string' ? parsed.routeKey : page.routeKey ?? null,
+        route:
+          typeof parsed.route === 'string'
+            ? parsed.route
+            : page.route ?? page.visual?.reactPath ?? null,
+        shouldRepair:
+          typeof parsed.shouldRepair === 'boolean' ? parsed.shouldRepair : true,
+        confidence,
+        rootCause: {
+          primary: allowedRootCauses.has(rootPrimary)
+            ? (rootPrimary as VisualMismatchDiagnosis['rootCause']['primary'])
+            : 'unknown',
+          secondary: Array.isArray(parsed.rootCause?.secondary)
+            ? parsed.rootCause.secondary
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+                .slice(0, 5)
+            : [],
+          reasoning:
+            typeof parsed.rootCause?.reasoning === 'string'
+              ? parsed.rootCause.reasoning.trim()
+              : '',
+        },
+        evidence: {
+          sourceHints: Array.isArray(parsed.evidence?.sourceHints)
+            ? parsed.evidence.sourceHints
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+                .slice(0, 8)
+            : [],
+          missingLabels: Array.isArray(parsed.evidence?.missingLabels)
+            ? parsed.evidence.missingLabels
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+                .slice(0, 6)
+            : [],
+          sectionLikelyMissingFromPlan:
+            parsed.evidence?.sectionLikelyMissingFromPlan === true,
+        },
+        repairPlan: {
+          strategy:
+            typeof parsed.repairPlan?.strategy === 'string'
+              ? parsed.repairPlan.strategy.trim()
+              : 'targeted-visual-repair',
+          instructions: Array.isArray(parsed.repairPlan?.instructions)
+            ? parsed.repairPlan.instructions
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+                .slice(0, 8)
+            : [],
+          targetAreas: Array.isArray(parsed.repairPlan?.targetAreas)
+            ? parsed.repairPlan.targetAreas
+                .map((target) => ({
+                  type: String(target?.type ?? 'section').trim() || 'section',
+                  sectionHint:
+                    typeof target?.sectionHint === 'string'
+                      ? target.sectionHint.trim()
+                      : undefined,
+                  headingHint:
+                    typeof target?.headingHint === 'string'
+                      ? target.headingHint.trim()
+                      : undefined,
+                }))
+                .slice(0, 5)
+            : [],
+          guardrails: Array.isArray(parsed.repairPlan?.guardrails)
+            ? parsed.repairPlan.guardrails
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+                .slice(0, 8)
+            : [],
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private extractJsonObject(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    return trimmed.slice(start, end + 1);
+  }
+
+  private mergeDiagnosisWithHeuristic(
+    diagnosis: VisualMismatchDiagnosis,
+    heuristic: VisualMismatchDiagnosis,
+  ): VisualMismatchDiagnosis {
+    return {
+      ...diagnosis,
+      shouldRepair: diagnosis.shouldRepair ?? heuristic.shouldRepair,
+      confidence:
+        diagnosis.confidence > 0 ? diagnosis.confidence : heuristic.confidence,
+      rootCause: {
+        primary: diagnosis.rootCause.primary ?? heuristic.rootCause.primary,
+        secondary:
+          diagnosis.rootCause.secondary.length > 0
+            ? diagnosis.rootCause.secondary
+            : heuristic.rootCause.secondary,
+        reasoning:
+          diagnosis.rootCause.reasoning || heuristic.rootCause.reasoning,
+      },
+      evidence: {
+        sourceHints:
+          diagnosis.evidence.sourceHints.length > 0
+            ? diagnosis.evidence.sourceHints
+            : heuristic.evidence.sourceHints,
+        missingLabels:
+          diagnosis.evidence.missingLabels.length > 0
+            ? diagnosis.evidence.missingLabels
+            : heuristic.evidence.missingLabels,
+        sectionLikelyMissingFromPlan:
+          diagnosis.evidence.sectionLikelyMissingFromPlan ||
+          heuristic.evidence.sectionLikelyMissingFromPlan,
+      },
+      repairPlan: {
+        strategy:
+          diagnosis.repairPlan.strategy || heuristic.repairPlan.strategy,
+        instructions:
+          diagnosis.repairPlan.instructions.length > 0
+            ? diagnosis.repairPlan.instructions
+            : heuristic.repairPlan.instructions,
+        targetAreas:
+          diagnosis.repairPlan.targetAreas.length > 0
+            ? diagnosis.repairPlan.targetAreas
+            : heuristic.repairPlan.targetAreas,
+        guardrails:
+          diagnosis.repairPlan.guardrails.length > 0
+            ? diagnosis.repairPlan.guardrails
+            : heuristic.repairPlan.guardrails,
+      },
+    };
+  }
+
+  private buildHeuristicVisualDiagnosis(input: {
+    componentName: string;
+    page: AutomationComparePageResult;
+    sourceEvidence: string[];
+    planEvidence: string[];
+  }): VisualMismatchDiagnosis {
+    const { componentName, page, sourceEvidence, planEvidence } = input;
+    const missingLabels = sourceEvidence
+      .filter((entry) => entry.startsWith('Heading/text hint: "'))
+      .map((entry) => entry.replace(/^Heading\/text hint: "/, '').replace(/"$/, ''))
+      .filter((entry) => !planEvidence.some((planLine) => planLine.includes(entry)))
+      .slice(0, 4);
+    const overlapDiffPct = this.coerceFiniteNumber(page.visual?.overlapDiffPct) ?? 0;
+    const extraDiffPct = this.coerceFiniteNumber(page.visual?.extraDiffPct) ?? 0;
+    const diffPct = this.coerceFiniteNumber(page.visual?.diffPct) ?? 0;
+    const domSimilarity =
+      this.coerceFiniteNumber(page.visual?.domComparison?.similarityScore) ?? 100;
+    const hasHighRegion = (page.visual?.regions ?? []).some(
+      (region) => region.severity === 'high',
+    );
+    const contentStatus = page.content?.status ?? 'PASS';
+    const sectionLikelyMissingFromPlan =
+      missingLabels.length > 0 && contentStatus !== 'PASS';
+
+    let primary: VisualMismatchDiagnosis['rootCause']['primary'] = 'layout-drift';
+    let confidence = 0.68;
+    let strategy = 'targeted-visual-repair';
+    const secondary: string[] = [];
+
+    if (sectionLikelyMissingFromPlan) {
+      primary = 'plan-omission';
+      confidence = 0.9;
+      strategy = 'restore-missing-section-from-source';
+      secondary.push('missing-section', 'content-drift');
+    } else if (contentStatus === 'MISSING') {
+      primary = 'data-binding-error';
+      confidence = 0.88;
+      strategy = 'restore-missing-content-binding';
+      secondary.push('content-drift');
+    } else if (extraDiffPct >= 8 && overlapDiffPct < extraDiffPct + 4) {
+      primary = 'missing-section';
+      confidence = 0.8;
+      strategy = 'restore-vertical-missing-block';
+      secondary.push('layout-drift');
+    } else if (domSimilarity < 75) {
+      primary = 'layout-drift';
+      confidence = 0.76;
+      strategy = 'repair-structure-to-match-source';
+      secondary.push('content-drift');
+    } else if (hasHighRegion && contentStatus === 'FAIL') {
+      primary = 'content-drift';
+      confidence = 0.74;
+      strategy = 'restore-source-backed-content';
+      secondary.push('layout-drift');
+    } else if (diffPct < 8) {
+      primary = 'unknown';
+      confidence = 0.45;
+      strategy = 'review-before-repair';
+    }
+
+    return {
+      componentName,
+      routeKey: page.routeKey ?? null,
+      route: page.route ?? page.visual?.reactPath ?? null,
+      shouldRepair: confidence >= 0.5,
+      confidence,
+      rootCause: {
+        primary,
+        secondary,
+        reasoning:
+          primary === 'plan-omission'
+            ? 'WordPress/DB source hints show headings or sections that are not represented in the current plan evidence while compare metrics also report strong content/visual drift.'
+            : primary === 'data-binding-error'
+              ? 'Content compare reports missing data while the route/component still exists, which suggests the React output is not binding or rendering source data correctly.'
+              : primary === 'missing-section'
+                ? 'Visual diff indicates a large missing vertical band or extra-height mismatch, suggesting an omitted section rather than only cosmetic drift.'
+                : primary === 'layout-drift'
+                  ? 'The overall DOM structure and visual diff suggest the component layout diverged from WordPress even if content is partially present.'
+                  : 'Signal quality is weak, so the root cause is uncertain.',
+      },
+      evidence: {
+        sourceHints: sourceEvidence.slice(0, 8),
+        missingLabels,
+        sectionLikelyMissingFromPlan,
+      },
+      repairPlan: {
+        strategy,
+        instructions:
+          primary === 'plan-omission'
+            ? [
+                'Restore the source-backed missing section even if it is absent from the current plan.',
+                'Preserve neighboring sections and current correct layout.',
+              ]
+            : primary === 'data-binding-error'
+              ? [
+                  'Repair the component so it renders the expected source-backed content again.',
+                  'Do not remove existing sections to hide the mismatch.',
+                ]
+              : [
+                  'Repair the mismatched layout in the highest-diff region first.',
+                  'Preserve already-correct sections and avoid unnecessary rewrites.',
+                ],
+        targetAreas: missingLabels.slice(0, 3).map((label) => ({
+          type: 'section',
+          headingHint: label,
+        })),
+        guardrails: [
+          'Do not simplify the component to reduce diff.',
+          'Preserve validated sections, CTAs, and images unless source evidence says they are wrong.',
+        ],
+      },
+    };
+  }
+
+  private buildPlanEvidenceForComponent(
+    componentPlan: PlanResult[number] | undefined,
+  ): string[] {
+    if (!componentPlan) return [];
+    const lines: string[] = [];
+    if (componentPlan.planningSourceSummary) {
+      lines.push(`Planning source summary: ${componentPlan.planningSourceSummary}`);
+    }
+    if (componentPlan.planningSourceLabel) {
+      lines.push(`Planning source label: ${componentPlan.planningSourceLabel}`);
+    }
+    if (componentPlan.visualPlan?.sections?.length) {
+      lines.push(
+        `Visual plan sections: ${componentPlan.visualPlan.sections
+          .map((section) => this.summarizePlanSection(section))
+          .filter(Boolean)
+          .join(' || ')}`,
+      );
+    }
+    if (componentPlan.draftSections?.length) {
+      lines.push(
+        `Draft sections: ${componentPlan.draftSections
+          .map((section) => this.summarizePlanSection(section))
+          .filter(Boolean)
+          .join(' || ')}`,
+      );
+    }
+    return lines;
+  }
+
+  private buildVisualRepairFeedback(input: {
+    componentName: string;
+    page: AutomationComparePageResult;
+    diagnosis: VisualMismatchDiagnosis;
+    plan: PlanResult;
+    content: DbContentResult;
+  }): string {
+    const { componentName, page, diagnosis, plan, content } = input;
+    const componentPlan = plan.find((entry) => entry.componentName === componentName);
+    const lines: string[] = [
+      `Automation visual-compare reported a fidelity mismatch for component "${componentName}".`,
+      `Repair the component so the rendered React preview matches the WordPress source more closely for route "${page.route ?? page.visual?.reactPath ?? 'unknown'}".`,
+      `Diagnosis: rootCause=${diagnosis.rootCause.primary} | confidence=${diagnosis.confidence.toFixed(2)} | strategy=${diagnosis.repairPlan.strategy}`,
+      diagnosis.rootCause.reasoning
+        ? `Diagnosis reasoning: ${diagnosis.rootCause.reasoning}`
+        : '',
+    ];
+
+    if (page.visual) {
+      const metricParts = [
+        page.visual.accuracy !== null && page.visual.accuracy !== undefined
+          ? `visualAccuracy=${page.visual.accuracy}%`
+          : null,
+        page.visual.diffPct !== null && page.visual.diffPct !== undefined
+          ? `diffPct=${page.visual.diffPct}%`
+          : null,
+        page.visual.overlapDiffPct !== null &&
+        page.visual.overlapDiffPct !== undefined
+          ? `overlapDiffPct=${page.visual.overlapDiffPct}%`
+          : null,
+        page.visual.extraDiffPct !== null && page.visual.extraDiffPct !== undefined
+          ? `extraDiffPct=${page.visual.extraDiffPct}%`
+          : null,
+        page.visual.domComparison?.similarityScore !== null &&
+        page.visual.domComparison?.similarityScore !== undefined
+          ? `domSimilarity=${page.visual.domComparison.similarityScore}%`
+          : null,
+      ].filter(Boolean);
+      if (metricParts.length > 0) {
+        lines.push(`Automation metrics: ${metricParts.join(' | ')}`);
+      }
+      if ((page.visual.regions?.length ?? 0) > 0) {
+        lines.push('Top mismatch regions from automation diff:');
+        for (const region of page.visual?.regions ?? []) {
+          const bbox = region.bbox;
+          lines.push(
+            `- ${region.id ?? 'region'} | severity=${region.severity ?? 'unknown'} | kind=${region.kind ?? 'diff'} | diffPixels=${region.diffPixels ?? 'unknown'} | bbox=${bbox ? `(${bbox.x},${bbox.y},${bbox.width},${bbox.height})` : 'unknown'}`,
+          );
+        }
+      }
+    }
+
+    if (page.content?.status && page.content.status !== 'PASS') {
+      lines.push(
+        `Content compare status: ${page.content.status}.${
+          page.content.scores?.overall !== undefined &&
+          page.content.scores?.overall !== null
+            ? ` overall=${page.content.scores.overall}%`
+            : ''
+        }`,
+      );
+      for (const issue of page.content.issues ?? []) {
+        lines.push(`- content issue: ${issue}`);
+      }
+    }
+
+    const sourceEvidence = this.buildSourceEvidenceForComparePage(page, content);
+    if (sourceEvidence.length > 0) {
+      lines.push('Source-backed evidence from WordPress/DB:');
+      lines.push(...sourceEvidence.map((line) => `- ${line}`));
+    }
+
+    const planEvidence = this.buildPlanEvidenceForComponent(componentPlan);
+    if (planEvidence.length > 0) {
+      lines.push('Current planner evidence:');
+      lines.push(...planEvidence.map((line) => `- ${line}`));
+    }
+
+    if (diagnosis.evidence.missingLabels.length > 0) {
+      lines.push(
+        `Diagnosis missing labels: ${diagnosis.evidence.missingLabels
+          .map((label) => `"${label}"`)
+          .join(', ')}`,
+      );
+    }
+    if (diagnosis.repairPlan.instructions.length > 0) {
+      lines.push('Diagnosis repair instructions:');
+      lines.push(
+        ...diagnosis.repairPlan.instructions.map((instruction) => `- ${instruction}`),
+      );
+    }
+    if (diagnosis.repairPlan.targetAreas.length > 0) {
+      lines.push('Diagnosis target areas:');
+      lines.push(
+        ...diagnosis.repairPlan.targetAreas.map(
+          (target) =>
+            `- type=${target.type} sectionHint=${target.sectionHint ?? 'unknown'} headingHint=${target.headingHint ?? 'unknown'}`,
+        ),
+      );
+    }
+    if (diagnosis.repairPlan.guardrails.length > 0) {
+      lines.push('Diagnosis guardrails:');
+      lines.push(
+        ...diagnosis.repairPlan.guardrails.map((guardrail) => `- ${guardrail}`),
+      );
+    }
+
+    lines.push(
+      'Source-backed repair override: if the WordPress/DB evidence clearly shows a prominent section, heading, CTA, or image block that is missing from the current React component, you MUST restore it even if the current plan under-specifies it.',
+    );
+    lines.push(
+      'Preserve all already-correct sections. Do not simplify the page. Prefer a faithful structural repair over cosmetic tweaks.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private buildSourceEvidenceForComparePage(
+    page: AutomationComparePageResult,
+    content: DbContentResult,
+  ): string[] {
+    const route =
+      this.normalizeComparableRoute(page.route) ??
+      this.normalizeComparableRoute(page.visual?.reactPath) ??
+      null;
+    const evidence: string[] = [];
+    const headingCandidates = new Set<string>();
+
+    const addHeadingCandidates = (raw: string | undefined) => {
+      for (const heading of this.extractHeadingCandidates(raw)) {
+        headingCandidates.add(heading);
+        if (headingCandidates.size >= 6) break;
+      }
+    };
+
+    if (route === '/') {
+      const homeTemplates = content.dbTemplates.filter((template) =>
+        /^(home|front-page)$/i.test(template.slug) ||
+        /^(home|front page)$/i.test(template.title),
+      );
+      for (const template of homeTemplates) {
+        addHeadingCandidates(template.content);
+      }
+      const frontPage = content.pages.find(
+        (pageItem) =>
+          content.readingSettings.pageOnFrontId !== null &&
+          Number(pageItem.id) === Number(content.readingSettings.pageOnFrontId),
+      );
+      if (frontPage) {
+        addHeadingCandidates(frontPage.content);
+      }
+    } else if (route) {
+      const pageSlugMatch = route.match(/^\/page\/([^/]+)$/i);
+      const postSlugMatch = route.match(/^\/post\/([^/]+)$/i);
+      if (pageSlugMatch) {
+        const pageItem = content.pages.find(
+          (entry) => entry.slug === pageSlugMatch[1],
+        );
+        if (pageItem) {
+          evidence.push(`WP page title: "${pageItem.title}"`);
+          addHeadingCandidates(pageItem.content);
+        }
+      }
+      if (postSlugMatch) {
+        const postItem = content.posts.find(
+          (entry) => entry.slug === postSlugMatch[1],
+        );
+        if (postItem) {
+          evidence.push(`WP post title: "${postItem.title}"`);
+          addHeadingCandidates(postItem.content);
+        }
+      }
+    }
+
+    if (page.content?.wp?.title) {
+      evidence.push(`Content compare WP title: "${page.content.wp.title}"`);
+    }
+    if (page.content?.wp?.contentPreview) {
+      addHeadingCandidates(page.content.wp.contentPreview);
+    }
+
+    for (const heading of [...headingCandidates].slice(0, 6)) {
+      evidence.push(`Heading/text hint: "${heading}"`);
+    }
+    return evidence;
+  }
+
+  private extractHeadingCandidates(raw: string | undefined): string[] {
+    if (!raw) return [];
+    const results: string[] = [];
+    const seen = new Set<string>();
+    const htmlHeadingPattern = /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = htmlHeadingPattern.exec(raw)) !== null) {
+      const text = this.normalizeEvidenceText(match[1]);
+      if (text && !seen.has(text)) {
+        seen.add(text);
+        results.push(text);
+      }
+      if (results.length >= 6) return results;
+    }
+
+    const plainTextLines = raw
+      .replace(/<[^>]+>/g, '\n')
+      .split(/\r?\n+/)
+      .map((line) => this.normalizeEvidenceText(line))
+      .filter(
+        (line) =>
+          line.length >= 8 &&
+          line.length <= 120 &&
+          !seen.has(line),
+      );
+    for (const line of plainTextLines) {
+      seen.add(line);
+      results.push(line);
+      if (results.length >= 6) break;
+    }
+    return results;
+  }
+
+  private normalizeEvidenceText(value: string): string {
+    return value
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private summarizePlanSection(section: Record<string, any> | undefined): string {
+    if (!section || typeof section !== 'object') return '';
+    const parts = [typeof section.type === 'string' ? section.type : 'section'];
+    if (typeof section.heading === 'string' && section.heading.trim()) {
+      parts.push(`heading="${section.heading.trim()}"`);
+    }
+    if (typeof section.subheading === 'string' && section.subheading.trim()) {
+      parts.push(`subheading="${section.subheading.trim()}"`);
+    }
+    if (
+      section.cta &&
+      typeof section.cta === 'object' &&
+      typeof section.cta.text === 'string' &&
+      section.cta.text.trim()
+    ) {
+      parts.push(`cta="${section.cta.text.trim()}"`);
+    }
+    if (
+      Array.isArray(section.cards) &&
+      section.cards.length > 0 &&
+      typeof section.cards[0] === 'object'
+    ) {
+      const cardLabel =
+        section.cards
+          .map((card: Record<string, any>) =>
+            typeof card.heading === 'string'
+              ? card.heading.trim()
+              : typeof card.body === 'string'
+                ? card.body.trim()
+                : '',
+          )
+          .filter(Boolean)
+          .slice(0, 3)
+          .join(' | ') || '';
+      if (cardLabel) parts.push(`cards=${cardLabel}`);
+    }
+    return parts.join(' | ');
+  }
+
+  private buildComparePageVisionContext(
+    page: AutomationComparePageResult,
+  ): string {
+    const lines = ['Automation screenshot evidence:'];
+    const topRegion = page.visual?.regions?.[0];
+    if (topRegion?.cropArtifacts) {
+      lines.push(
+        `- Region crop images highlight the most severe mismatch area (${topRegion.kind ?? 'diff'} / ${topRegion.severity ?? 'unknown'}).`,
+      );
+    } else {
+      lines.push('- Full-page screenshots show WordPress vs React plus a diff overlay.');
+    }
+    return lines.join('\n');
+  }
+
+  private async buildComparePageVisionInputs(
+    page: AutomationComparePageResult,
+  ): Promise<string[]> {
+    const urls = this.collectCompareArtifactUrls(page).slice(0, 3);
+    const resolved: string[] = [];
+    for (const url of urls) {
+      const dataUrl = await this.fetchImageAsDataUrl(url);
+      if (dataUrl) resolved.push(dataUrl);
+    }
+    return resolved;
+  }
+
+  private collectCompareArtifactUrls(page: AutomationComparePageResult): string[] {
+    const urls: string[] = [];
+    const topRegion = page.visual?.regions?.[0];
+    if (topRegion?.cropArtifacts) {
+      urls.push(
+        topRegion.cropArtifacts.imageA ?? '',
+        topRegion.cropArtifacts.imageB ?? '',
+        topRegion.cropArtifacts.diff ?? '',
+      );
+    }
+    if (urls.filter(Boolean).length === 0) {
+      urls.push(
+        page.visual?.artifacts?.imageA ?? '',
+        page.visual?.artifacts?.imageB ?? '',
+        page.visual?.artifacts?.diff ?? '',
+      );
+    }
+    return [...new Set(urls.map((value) => value.trim()).filter(Boolean))];
+  }
+
+  private async fetchImageAsDataUrl(url: string): Promise<string | null> {
+    try {
+      const response = await lastValueFrom(
+        this.httpService.get<ArrayBuffer>(url, {
+          responseType: 'arraybuffer',
+        }),
+      );
+      const buffer = Buffer.from(response.data as ArrayBuffer);
+      const contentTypeHeader = response.headers['content-type'];
+      const contentType = Array.isArray(contentTypeHeader)
+        ? contentTypeHeader[0]
+        : contentTypeHeader || this.guessImageMimeType(url);
+      return `data:${contentType};base64,${buffer.toString('base64')}`;
+    } catch (error) {
+      this.logger.warn(
+        `[Visual Metrics Repair] Failed to fetch automation artifact "${url}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private guessImageMimeType(url: string): string {
+    const normalized = url.toLowerCase();
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+      return 'image/jpeg';
+    }
+    if (normalized.endsWith('.webp')) return 'image/webp';
+    return 'image/png';
   }
 
   private buildEditRequestProgressData(input: {
