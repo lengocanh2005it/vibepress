@@ -166,7 +166,8 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
     await fse.remove(tmpNginx);
 
     const nginx = await ssh.execCommand(
-      `sudo mv /tmp/${siteDir}.conf /etc/nginx/sites-enabled/${siteDir}.conf` +
+      `sudo find /etc/nginx/sites-enabled -name 'react-migration-*.conf' -delete` +
+      ` && sudo mv /tmp/${siteDir}.conf /etc/nginx/sites-enabled/${siteDir}.conf` +
       ` && sudo nginx -t && (sudo nginx -s reload 2>/dev/null || sudo service nginx start)`,
     );
     if (nginx.code !== 0) throw new Error(`Nginx config failed: ${nginx.stderr}`);
