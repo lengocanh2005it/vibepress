@@ -192,6 +192,40 @@ export interface SidebarSection extends BaseSection {
   maxItems?: number;
 }
 
+export interface ModalSection extends BaseSection {
+  type: 'modal';
+  triggerText?: string;
+  heading?: string;
+  body?: string;
+  imageSrc?: string;
+  imageAlt?: string;
+  cta?: { text: string; link: string };
+  layout?: 'centered' | 'split';
+}
+
+export interface TabsSection extends BaseSection {
+  type: 'tabs';
+  title?: string;
+  tabs: {
+    label: string;
+    heading?: string;
+    body?: string;
+    imageSrc?: string;
+    imageAlt?: string;
+    cta?: { text: string; link: string };
+  }[];
+}
+
+export interface AccordionSection extends BaseSection {
+  type: 'accordion';
+  title?: string;
+  items: {
+    heading: string;
+    body: string;
+  }[];
+  allowMultiple?: boolean;
+}
+
 export interface CarouselSection extends BaseSection {
   type: 'carousel';
   slides: {
@@ -220,6 +254,9 @@ export type SectionPlan =
   | BreadcrumbSection
   | CommentsSection
   | SidebarSection
+  | ModalSection
+  | TabsSection
+  | AccordionSection
   | CarouselSection;
 
 /**
@@ -258,6 +295,13 @@ export interface LayoutTokens {
 export interface ComponentVisualPlan {
   componentName: string;
   dataNeeds: DataNeed[];
+  /** When this component is bound to one exact WordPress page, fetch by this slug instead of URL params. */
+  pageBinding?: {
+    id?: number | string;
+    slug: string;
+    title?: string;
+    route?: string;
+  };
   /** Colors — derived from theme.tokens by planner, forced on all components */
   palette: ColorPalette;
   /** Typography — derived from theme.tokens by planner, forced on all components */

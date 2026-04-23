@@ -296,14 +296,15 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 | `borderRadius`                    | `rounded-[value]` — resolve CSS vars; if unresolvable, omit           |
 | `columnWidth` e.g. `"33.33%"`     | `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}`                |
 | `overlayColor` on cover           | `style={{backgroundColor:'#hex'}}` on overlay div                     |
-| `fontFamily` slug                 | `style={{fontFamily:'actual-family-string'}}`                         |
+| `fontFamily` slug                 | `style={{fontFamily:'actual-family-string'}}` only when that node/block explicitly overrides inherited theme font |
 | `typography` field                | `tracking-[v]` `uppercase` `leading-[v]` `text-[v]` `font-[v]`        |
 | `bgColor` / `textColor`           | `bg-[#hex]` / `text-[#hex]` — NEVER ignore on buttons                 |
 
 ### Theme tokens
 
 - Root wrapper: use theme tokens to reproduce the WordPress layout with Tailwind classes.
-- Body/heading fonts should come from the provided theme tokens and inline `fontFamily` only when needed.
+- Body/heading fonts should come from the provided theme tokens and inherited global CSS first. Do NOT add inline `fontFamily` on the page root or every section by default.
+- Inline `fontFamily` is only for blocks/nodes that explicitly override the inherited theme font.
 - Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
 - **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
 - Headings: exact token size/weight per level (`text-[3rem] font-[700]`)

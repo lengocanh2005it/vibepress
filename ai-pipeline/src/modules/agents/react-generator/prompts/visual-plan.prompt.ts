@@ -29,6 +29,7 @@ export function buildVisualPlanPrompt(input: {
   dataNeeds?: DataNeed[];
   sourceAnalysis?: string;
   sourceBackedAuxiliaryLabels?: string[];
+  sourceWidgetHints?: string[];
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
   draftSections?: SectionPlan[];
@@ -46,6 +47,7 @@ export function buildVisualPlanPrompt(input: {
     dataNeeds,
     sourceAnalysis,
     sourceBackedAuxiliaryLabels,
+    sourceWidgetHints,
     draftSections,
     editRequestContextNote,
   } = input;
@@ -61,6 +63,7 @@ export function buildVisualPlanPrompt(input: {
     route,
     isDetail,
     dataNeeds,
+    sourceWidgetHints,
   });
 
   const systemPrompt = `You are a WordPress-to-React UI planner.
@@ -125,6 +128,9 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
 | \`sidebar\` | sidebar column for page/post layouts with menus, page links, or recent posts |
+| \`modal\` | source-backed modal/popup/dialog with trigger text and modal content |
+| \`tabs\` | interactive tab set with source-backed labels and tab panels |
+| \`accordion\` | FAQ/accordion/content-toggle with source-backed panel headings and bodies |
 | \`carousel\` | slider/carousel with ordered slides from the source |
 
 ## Section schemas (key fields only)
@@ -145,6 +151,9 @@ comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
+modal:        { triggerText?, heading?, body?, imageSrc?, imageAlt?, cta?, layout?: centered|split }
+tabs:         { title?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
+accordion:    { title?, items: [{ heading, body }], allowMultiple? }
 carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay? }
 \`\`\`
 
@@ -180,7 +189,14 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
 - If the source shows a real slider/carousel widget (for example Spectra/UAGB slider), preserve it as a \`carousel\` section instead of collapsing it into a \`card-grid\`.
-- If the source shows a modal/popup block, preserve its real heading/body/CTA content as a source-faithful content section, usually \`hero\` when it is primarily modal copy plus CTA. Do NOT fake it as a generic \`card-grid\`.
+- If source widget hints say \`slider\` or \`carousel\`, the output MUST include at least one \`carousel\` section. Do not replace it with \`hero\`, \`card-grid\`, or \`media-text\`.
+- If the source shows a real modal/popup/dialog block, preserve it as a \`modal\` section. Do NOT flatten it into \`hero\`, \`card-grid\`, or generic text.
+- If source widget hints say \`modal\`, the output MUST include at least one \`modal\` section. Preserve trigger text plus modal heading/body/CTA content when present in source.
+- If the source shows a real tabs widget, preserve it as a \`tabs\` section. Do NOT flatten it into a \`card-grid\` or generic copy block.
+- If source widget hints say \`tabs\`, the output MUST include at least one \`tabs\` section. Preserve every source-backed tab label and tab panel body.
+- If the source shows a real accordion/FAQ/content-toggle widget, preserve it as an \`accordion\` section. Do NOT flatten it into a \`card-grid\`, \`hero\`, or generic text block.
+- If source widget hints say \`accordion\`, the output MUST include at least one \`accordion\` section. Preserve every source-backed accordion panel heading and body.
+- If source widget hints detect an interactive widget that is NOT represented in the deterministic draft sections, you must still add the missing source-backed section instead of silently omitting it.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const draftHint = buildDraftSectionsHint(draftSections);
@@ -271,6 +287,7 @@ function buildContractHint(input: {
   route?: string | null;
   isDetail?: boolean;
   dataNeeds?: DataNeed[];
+  sourceWidgetHints?: string[];
 }): string {
   const lines = ['## Approved component contract'];
   lines.push(`Component: ${input.componentName}`);
@@ -280,6 +297,36 @@ function buildContractHint(input: {
   lines.push(
     `Allowed dataNeeds: ${input.dataNeeds?.join(', ') || '(none declared)'}`,
   );
+  if (input.sourceWidgetHints?.length) {
+    lines.push(
+      `Required source widget preservation hints: ${input.sourceWidgetHints
+        .map((hint) => `\`${hint}\``)
+        .join(', ')}`,
+    );
+    if (
+      input.sourceWidgetHints.includes('slider') ||
+      input.sourceWidgetHints.includes('carousel')
+    ) {
+      lines.push(
+        'Hard rule: include at least one `carousel` section because the source contains a real slider/carousel widget.',
+      );
+    }
+    if (input.sourceWidgetHints.includes('tabs')) {
+      lines.push(
+        'Hard rule: include at least one `tabs` section because the source contains a real tabs widget.',
+      );
+    }
+    if (input.sourceWidgetHints.includes('modal')) {
+      lines.push(
+        'Hard rule: include at least one `modal` section because the source contains a real modal/popup widget.',
+      );
+    }
+    if (input.sourceWidgetHints.includes('accordion')) {
+      lines.push(
+        'Hard rule: include at least one `accordion` section because the source contains a real accordion/FAQ widget.',
+      );
+    }
+  }
   if (input.componentType === 'page') {
     lines.push(
       'Hard rule: do not plan navbar/footer shared chrome inside this page.',
@@ -352,12 +399,17 @@ export function extractStaticImageSources(templateSource: string): string[] {
     visit(parsed);
   } catch {
     for (const match of templateSource.matchAll(
-      /(?:src|imageSrc)="([^"]+)"/g,
+      /(?:src|imageSrc)=["']([^"']+)["']/g,
     )) {
       if (match[1]) result.add(match[1].trim());
     }
     for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
       if (match[1]) result.add(match[1].trim());
+    }
+    for (const match of templateSource.matchAll(
+      /https?:\/\/[^\s"'()<>]+\.(?:png|jpe?g|gif|webp|svg|avif)(?:\?[^\s"'()<>]*)?/gi,
+    )) {
+      if (match[0]) result.add(match[0].trim());
     }
   }
 
@@ -398,6 +450,10 @@ const VALID_SECTION_TYPES = new Set<string>([
   'search',
   'breadcrumb',
   'sidebar',
+  'modal',
+  'tabs',
+  'accordion',
+  'carousel',
 ]);
 
 const VALID_DATA_NEEDS = new Set<string>([
@@ -417,6 +473,7 @@ export interface VisualPlanContract {
   dataNeeds?: DataNeed[];
   stripLayoutChrome?: boolean;
   sourceBackedAuxiliaryLabels?: string[];
+  requiredSourceWidgets?: string[];
 }
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -467,7 +524,7 @@ function sanitizePalette(raw: any): ColorPalette {
  */
 function validateSectionDetailed(
   raw: any,
-  options?: { allowedImageSrcs?: string[] },
+  options?: { allowedImageSrcs?: string[]; draftSections?: SectionPlan[] },
 ): {
   section: SectionPlan | null;
   reason?: string;
@@ -512,6 +569,9 @@ function validateSectionDetailed(
     if (value) raw[key] = value;
     else delete raw[key];
   }
+  const normalizedTopLevelCta = normalizeCtaConfig(raw.cta);
+  if (normalizedTopLevelCta) raw.cta = normalizedTopLevelCta;
+  else delete raw.cta;
   if (Array.isArray(raw.columnWidths)) {
     raw.columnWidths = raw.columnWidths.filter(
       (value: unknown): value is string =>
@@ -665,6 +725,178 @@ function validateSectionDetailed(
         raw.maxItems = 6;
       break;
 
+    case 'modal':
+      if (typeof raw.triggerText !== 'string') delete raw.triggerText;
+      if (typeof raw.heading !== 'string') delete raw.heading;
+      if (typeof raw.body !== 'string') delete raw.body;
+      if (!['centered', 'split'].includes(raw.layout)) raw.layout = 'centered';
+      if (
+        typeof raw.imageSrc === 'string' &&
+        raw.imageSrc.trim() &&
+        !isAllowedStaticImage(raw.imageSrc, options?.allowedImageSrcs)
+      ) {
+        delete raw.imageSrc;
+        delete raw.imageAlt;
+      }
+      if (typeof raw.imageAlt !== 'string') delete raw.imageAlt;
+      if (
+        raw.cta &&
+        typeof raw.cta === 'object' &&
+        typeof raw.cta.text === 'string' &&
+        raw.cta.text.trim() &&
+        typeof raw.cta.link === 'string' &&
+        raw.cta.link.trim()
+      ) {
+        raw.cta = {
+          text: raw.cta.text.trim(),
+          link: raw.cta.link.trim(),
+        };
+      } else {
+        delete raw.cta;
+      }
+      if (
+        !raw.triggerText &&
+        !raw.heading &&
+        !raw.body &&
+        !raw.imageSrc &&
+        !raw.cta
+      ) {
+        return {
+          section: null,
+          reason:
+            'modal must include triggerText, heading, body, imageSrc, or cta',
+        };
+      }
+      break;
+
+    case 'tabs':
+      if (typeof raw.title !== 'string') delete raw.title;
+      if (!Array.isArray(raw.tabs) || raw.tabs.length === 0) {
+        return {
+          section: null,
+          reason: 'tabs.tabs must be a non-empty array',
+        };
+      }
+      raw.tabs = (raw.tabs as any[])
+        .map((tab) => {
+          if (!tab || typeof tab !== 'object') return null;
+          const next: Record<string, unknown> = {};
+          const label =
+            typeof tab.label === 'string' && tab.label.trim()
+              ? tab.label.trim()
+              : typeof tab.heading === 'string' && tab.heading.trim()
+                ? tab.heading.trim()
+                : '';
+          if (!label) return null;
+          next.label = label;
+          if (typeof tab.heading === 'string' && tab.heading.trim()) {
+            next.heading = tab.heading.trim();
+          }
+          if (typeof tab.body === 'string' && tab.body.trim()) {
+            next.body = tab.body.trim();
+          }
+          if (isAllowedStaticImage(tab.imageSrc, options?.allowedImageSrcs)) {
+            next.imageSrc = tab.imageSrc.trim();
+            if (typeof tab.imageAlt === 'string') {
+              next.imageAlt = tab.imageAlt;
+            }
+          }
+          if (normalizeCtaConfig(tab.cta)) {
+            next.cta = normalizeCtaConfig(tab.cta);
+          }
+          if (!next.heading && !next.body && !next.imageSrc && !next.cta) {
+            return null;
+          }
+          return next;
+        })
+        .filter(Boolean);
+      if (raw.tabs.length === 0) {
+        return {
+          section: null,
+          reason: 'tabs.tabs has no valid tab objects',
+        };
+      }
+      break;
+
+    case 'accordion':
+      if (typeof raw.title !== 'string') delete raw.title;
+      if (!Array.isArray(raw.items) || raw.items.length === 0) {
+        return {
+          section: null,
+          reason: 'accordion.items must be a non-empty array',
+        };
+      }
+      raw.items = (raw.items as any[])
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const heading =
+            typeof item.heading === 'string' && item.heading.trim()
+              ? item.heading.trim()
+              : typeof item.label === 'string' && item.label.trim()
+                ? item.label.trim()
+                : typeof item.title === 'string' && item.title.trim()
+                  ? item.title.trim()
+                  : '';
+          const body =
+            typeof item.body === 'string' && item.body.trim()
+              ? item.body.trim()
+              : typeof item.content === 'string' && item.content.trim()
+                ? item.content.trim()
+                : typeof item.text === 'string' && item.text.trim()
+                  ? item.text.trim()
+                  : '';
+          if (!heading || !body) return null;
+          return { heading, body };
+        })
+        .filter(Boolean);
+      if (raw.items.length === 0) {
+        return {
+          section: null,
+          reason: 'accordion.items has no valid {heading, body} items',
+        };
+      }
+      if (typeof raw.allowMultiple !== 'boolean') raw.allowMultiple = false;
+      break;
+
+    case 'carousel':
+      if (!Array.isArray(raw.slides) || raw.slides.length === 0) {
+        return {
+          section: null,
+          reason: 'carousel.slides must be a non-empty array',
+        };
+      }
+      raw.slides = (raw.slides as any[])
+        .map((slide) => {
+          if (!slide || typeof slide !== 'object') return null;
+          const next: Record<string, unknown> = {};
+          if (typeof slide.heading === 'string' && slide.heading.trim()) {
+            next.heading = slide.heading;
+          }
+          if (typeof slide.subheading === 'string' && slide.subheading.trim()) {
+            next.subheading = slide.subheading;
+          }
+          if (isAllowedStaticImage(slide.imageSrc, options?.allowedImageSrcs)) {
+            next.imageSrc = slide.imageSrc.trim();
+            if (typeof slide.imageAlt === 'string') {
+              next.imageAlt = slide.imageAlt;
+            }
+          }
+          if (normalizeCtaConfig(slide.cta)) {
+            next.cta = normalizeCtaConfig(slide.cta);
+          }
+          if (Object.keys(next).length === 0) return null;
+          return next;
+        })
+        .filter(Boolean);
+      if (raw.slides.length === 0) {
+        return {
+          section: null,
+          reason: 'carousel.slides has no valid slide objects',
+        };
+      }
+      if (typeof raw.autoplay !== 'boolean') raw.autoplay = false;
+      break;
+
     // search, breadcrumb — no required fields
   }
 
@@ -678,6 +910,35 @@ function isAllowedStaticImage(
   if (typeof src !== 'string' || !src.trim()) return false;
   if (!allowedImageSrcs || allowedImageSrcs.length === 0) return false;
   return allowedImageSrcs.includes(src.trim());
+}
+
+function normalizeCtaConfig(
+  value: unknown,
+): { text: string; link: string; style?: 'button' | 'link' } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const text =
+    typeof raw.text === 'string' && raw.text.trim()
+      ? raw.text.trim()
+      : typeof raw.label === 'string' && raw.label.trim()
+        ? raw.label.trim()
+        : undefined;
+  const link =
+    typeof raw.link === 'string' && raw.link.trim()
+      ? raw.link.trim()
+      : typeof raw.href === 'string' && raw.href.trim()
+        ? raw.href.trim()
+        : typeof raw.url === 'string' && raw.url.trim()
+          ? raw.url.trim()
+          : undefined;
+  if (!text || !link) return undefined;
+  const style =
+    raw.style === 'button' || raw.style === 'link' ? raw.style : undefined;
+  return {
+    text,
+    link,
+    ...(style ? { style } : {}),
+  };
 }
 
 function validateSection(raw: any): SectionPlan | null {
@@ -784,6 +1045,89 @@ export function sanitizeSectionsForContract(
   return { sections: prunedAuxiliarySections.sections, adjustments };
 }
 
+function findMissingRequiredSourceWidgets(
+  sections: SectionPlan[],
+  contract?: VisualPlanContract,
+): string[] {
+  const hints = new Set(contract?.requiredSourceWidgets ?? []);
+  const missing: string[] = [];
+
+  if (
+    (hints.has('slider') || hints.has('carousel')) &&
+    !sections.some((section) => section.type === 'carousel')
+  ) {
+    missing.push(
+      'source contains slider/carousel widget but output has no carousel section',
+    );
+  }
+  if (
+    hints.has('modal') &&
+    !sections.some((section) => section.type === 'modal')
+  ) {
+    missing.push(
+      'source contains modal/popup widget but output has no modal section',
+    );
+  }
+  if (
+    hints.has('tabs') &&
+    !sections.some((section) => section.type === 'tabs')
+  ) {
+    missing.push('source contains tabs widget but output has no tabs section');
+  }
+  if (
+    hints.has('accordion') &&
+    !sections.some((section) => section.type === 'accordion')
+  ) {
+    missing.push(
+      'source contains accordion/FAQ widget but output has no accordion section',
+    );
+  }
+
+  return missing;
+}
+
+function recoverRequiredSourceWidgetsFromDraft(
+  sections: SectionPlan[],
+  draftSections?: SectionPlan[],
+  allowedImageSrcs?: string[],
+  contract?: VisualPlanContract,
+): { sections: SectionPlan[]; adjustments: string[] } {
+  if (!draftSections?.length || !contract?.requiredSourceWidgets?.length) {
+    return { sections, adjustments: [] };
+  }
+
+  const adjustments: string[] = [];
+  const next = [...sections];
+  const requiredTypes = new Set<SectionPlan['type']>();
+  const hints = new Set(contract.requiredSourceWidgets);
+
+  if (hints.has('slider') || hints.has('carousel'))
+    requiredTypes.add('carousel');
+  if (hints.has('modal')) requiredTypes.add('modal');
+  if (hints.has('tabs')) requiredTypes.add('tabs');
+  if (hints.has('accordion')) requiredTypes.add('accordion');
+
+  for (let draftIndex = 0; draftIndex < draftSections.length; draftIndex++) {
+    const draftSection = draftSections[draftIndex];
+    if (!requiredTypes.has(draftSection.type)) continue;
+    if (next.some((section) => section.type === draftSection.type)) continue;
+
+    const recovered = validateSectionDetailed(
+      JSON.parse(JSON.stringify(draftSection)),
+      { draftSections, allowedImageSrcs },
+    ).section;
+    if (!recovered) continue;
+
+    const insertionIndex = Math.min(draftIndex, next.length);
+    next.splice(insertionIndex, 0, recovered);
+    adjustments.push(
+      `recovered missing required ${draftSection.type} section from draft fallback`,
+    );
+  }
+
+  return { sections: next, adjustments };
+}
+
 /**
  * Parse and validate the AI response into a ComponentVisualPlan.
  *
@@ -794,7 +1138,11 @@ export function sanitizeSectionsForContract(
 export function parseVisualPlanDetailed(
   raw: string,
   componentName: string,
-  options?: { allowedImageSrcs?: string[]; contract?: VisualPlanContract },
+  options?: {
+    allowedImageSrcs?: string[];
+    contract?: VisualPlanContract;
+    draftSections?: SectionPlan[];
+  },
 ): VisualPlanParseResult {
   const cleaned = raw
     .replace(/^```[\w]*\n?/gm, '')
@@ -856,22 +1204,61 @@ export function parseVisualPlanDetailed(
 
   const sections: SectionPlan[] = [];
   const droppedSections: string[] = [];
-  for (const rawSection of parsed.sections) {
+  for (let index = 0; index < parsed.sections.length; index++) {
+    const rawSection = parsed.sections[index];
     const { section, reason } = validateSectionDetailed(rawSection, options);
     if (section) {
       sections.push(section);
     } else {
-      droppedSections.push(
-        `type=${typeof rawSection?.type === 'string' ? rawSection.type : 'unknown'}: ${reason ?? 'invalid section'}`,
-      );
+      const rawType =
+        typeof rawSection?.type === 'string' ? rawSection.type : 'unknown';
+      const draftSection = options?.draftSections?.[index];
+      const recovered =
+        draftSection && (rawType === 'unknown' || draftSection.type === rawType)
+          ? validateSectionDetailed(
+              JSON.parse(JSON.stringify(draftSection)),
+              options,
+            ).section
+          : null;
+      if (recovered) {
+        sections.push(recovered);
+        droppedSections.push(
+          `type=${rawType}: ${reason ?? 'invalid section'}; recovered from draft fallback`,
+        );
+      } else {
+        droppedSections.push(`type=${rawType}: ${reason ?? 'invalid section'}`);
+      }
     }
   }
 
-  const sanitizedSections = sanitizeSectionsForContract(
+  const recoveredSections = recoverRequiredSourceWidgetsFromDraft(
     sections,
+    options?.draftSections,
+    options?.allowedImageSrcs,
     options?.contract,
   );
+  const sanitizedSections = sanitizeSectionsForContract(
+    recoveredSections.sections,
+    options?.contract,
+  );
+  droppedSections.push(...recoveredSections.adjustments);
   droppedSections.push(...sanitizedSections.adjustments);
+  const missingRequiredWidgets = findMissingRequiredSourceWidgets(
+    sanitizedSections.sections,
+    options?.contract,
+  );
+  if (missingRequiredWidgets.length > 0) {
+    droppedSections.push(...missingRequiredWidgets);
+    return {
+      plan: null,
+      diagnostic: {
+        reason: missingRequiredWidgets.join('; '),
+        rawOutput: raw,
+        cleanedOutput: cleaned,
+        droppedSections,
+      },
+    };
+  }
 
   if (sanitizedSections.sections.length === 0) {
     return {

@@ -27,7 +27,10 @@ import type {
   SearchSection,
   BreadcrumbSection,
   SidebarSection,
+  ModalSection,
   TestimonialSection,
+  TabsSection,
+  AccordionSection,
   CarouselSection,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
@@ -197,14 +200,19 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(mapUagbInfoBox(node), node);
   }
 
-  // Modal: popup trigger — not a page section, skip
-  if (block === 'uagb/modal') {
+  // Modal / popup / dialog: preserve trigger + modal content
+  if (/\b(modal|popup|dialog)\b/.test(block)) {
     return toMappedSections(mapUagbModal(node), node);
   }
 
-  // Tabs: render tab content as a card-grid (one card per tab)
+  // Tabs: preserve interactive tab groups as tabs
   if (block === 'uagb/tabs') {
     return toMappedSections(mapUagbTabs(node), node);
+  }
+
+  // Accordion / FAQ / content-toggle: preserve panel headings + bodies
+  if (/\b(accordion|faq|content-toggle|toggle)\b/.test(block)) {
+    return toMappedSections(mapAccordionLike(node), node);
   }
 
   // Container / section / advanced-heading / icon-list: treat as group wrapper
@@ -646,32 +654,114 @@ function mapUagbInfoBox(node: WpNode): CardGridSection | null {
   return { type: 'card-grid', columns: 3, cards: [{ heading, body }] };
 }
 
-function mapUagbTabs(node: WpNode): CardGridSection | null {
+function mapUagbTabs(node: WpNode): TabsSection | null {
   const tabChildren = (node.children ?? []).filter(
     (c) => c.block === 'uagb/tabs-child',
   );
-  const cards = tabChildren
+  const tabs = tabChildren
     .map((tab) => {
       const flat = flattenChildren(tab);
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
+      const imageNode = flat.find(
+        (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
+      );
+      const buttonNode = flat.find(
+        (c) =>
+          c.block === 'core/button' ||
+          c.block === 'button' ||
+          c.block === 'core/buttons' ||
+          c.block === 'buttons',
+      );
       const tabTitle =
         (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
       const body = extractRichTextFromNodes(flat);
-      return { heading: tabTitle, body };
+      const heading =
+        h?.text && h.text.trim() && h.text.trim() !== tabTitle.trim()
+          ? h.text
+          : undefined;
+      return {
+        label: tabTitle,
+        ...(heading ? { heading } : {}),
+        ...(body ? { body } : {}),
+        ...(imageNode?.src
+          ? { imageSrc: imageNode.src, imageAlt: imageNode.alt ?? '' }
+          : {}),
+        ...(buttonNode?.text
+          ? {
+              cta: {
+                text: buttonNode.text,
+                link: buttonNode.href ?? '#',
+              },
+            }
+          : {}),
+      };
     })
-    .filter((c) => c.heading || c.body);
+    .filter((tab) => tab.label || tab.heading || tab.body || tab.imageSrc);
 
-  if (cards.length === 0) return null;
+  if (tabs.length === 0) return null;
   return {
-    type: 'card-grid',
-    columns: Math.min(Math.max(cards.length, 2), 4) as 2 | 3 | 4,
-    cards,
+    type: 'tabs',
+    tabs,
   };
 }
 
-function mapUagbModal(node: WpNode): HeroSection | null {
+function mapAccordionLike(node: WpNode): AccordionSection | null {
+  const panelChildren = (node.children ?? []).filter((child) =>
+    /\b(accordion|faq|content-toggle|toggle)\b/.test(child.block),
+  );
+  const sourcePanels =
+    panelChildren.length > 0 ? panelChildren : (node.children ?? []);
+
+  const items = sourcePanels
+    .map((panel) => {
+      const flat = flattenChildren(panel);
+      const headingNode = flat.find(
+        (c) => c.block === 'core/heading' || c.block === 'heading',
+      );
+      const heading =
+        headingNode?.text ??
+        (panel.params?.title as string | undefined) ??
+        (panel.params?.heading as string | undefined) ??
+        (panel.params?.label as string | undefined) ??
+        (panel.params?.question as string | undefined) ??
+        '';
+      const body =
+        extractRichTextFromNodes(flat) ??
+        (panel.params?.content as string | undefined) ??
+        (panel.params?.body as string | undefined) ??
+        (panel.params?.answer as string | undefined) ??
+        '';
+      if (!heading && !body) return null;
+      return {
+        heading,
+        body,
+      };
+    })
+    .filter((item): item is { heading: string; body: string } => !!item);
+
+  if (items.length === 0) return null;
+
+  const title =
+    (node.params?.title as string | undefined) ??
+    (node.params?.heading as string | undefined);
+  const allowMultiple =
+    typeof node.params?.allowMultipleOpen === 'boolean'
+      ? Boolean(node.params.allowMultipleOpen)
+      : typeof node.params?.multiOpen === 'boolean'
+        ? Boolean(node.params.multiOpen)
+        : undefined;
+
+  return {
+    type: 'accordion',
+    ...(title ? { title } : {}),
+    items,
+    ...(allowMultiple !== undefined ? { allowMultiple } : {}),
+  };
+}
+
+function mapUagbModal(node: WpNode): ModalSection | null {
   const flat = flattenChildren(node);
   const headingNode = flat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
@@ -691,41 +781,48 @@ function mapUagbModal(node: WpNode): HeroSection | null {
     (node.params?.modalTitle as string | undefined) ??
     (node.params?.title as string | undefined) ??
     '';
-  const subheading =
+  const body =
     extractRichTextFromNodes(flat) ??
     (node.params?.modalText as string | undefined) ??
     (node.params?.content as string | undefined) ??
     '';
+  const triggerText =
+    (node.params?.btnText as string | undefined) ??
+    (node.params?.triggerText as string | undefined) ??
+    (node.params?.buttonText as string | undefined) ??
+    '';
 
-  if (!heading && !subheading && !buttonNode?.text && !imageNode?.src) {
+  if (
+    !heading &&
+    !body &&
+    !triggerText &&
+    !buttonNode?.text &&
+    !imageNode?.src
+  ) {
     return null;
   }
 
-  const section: HeroSection = {
-    type: 'hero',
+  const section: ModalSection = {
+    type: 'modal',
+    ...(triggerText ? { triggerText } : {}),
+    ...(heading ? { heading } : {}),
     layout: imageNode?.src ? 'split' : 'centered',
-    heading,
   };
-  if (subheading) section.subheading = subheading;
-  if (headingNode?.typography || headingNode?.fontFamily) {
-    section.headingStyle = toTypographyStyle(headingNode);
-  }
+  if (body) section.body = body;
   if (buttonNode?.text) {
     section.cta = { text: buttonNode.text, link: buttonNode.href ?? '#' };
-  } else if (typeof node.params?.btnText === 'string') {
-    section.cta = {
-      text: String(node.params.btnText),
-      link:
-        (node.params?.btnLink as string | undefined) ??
-        (node.params?.link as string | undefined) ??
-        '#',
-    };
   }
   if (imageNode?.src) {
-    section.image = {
-      src: imageNode.src,
-      alt: imageNode.alt ?? '',
-      position: 'right',
+    section.imageSrc = imageNode.src;
+    section.imageAlt = imageNode.alt ?? '';
+  }
+  if (!section.cta && typeof node.params?.modalCtaText === 'string') {
+    section.cta = {
+      text: String(node.params.modalCtaText),
+      link:
+        (node.params?.modalCtaLink as string | undefined) ??
+        (node.params?.link as string | undefined) ??
+        '#',
     };
   }
   return section;

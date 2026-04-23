@@ -269,9 +269,17 @@ export class CodeReviewerService {
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
+      const bypassPrecomputedVisualPlan =
+        !isRetry &&
+        this.shouldBypassPrecomputedVisualPlan(componentPlan, componentName);
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
-      if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
+      if (
+        !forceDirectAi &&
+        !isRetry &&
+        componentPlan?.visualPlan &&
+        !bypassPrecomputedVisualPlan
+      ) {
         if (this.shouldUseDeterministicFirst(componentPlan, componentName)) {
           const deterministic = await this.tryDeterministicPlan(
             componentName,
@@ -385,6 +393,7 @@ export class CodeReviewerService {
               filePath: '',
               code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: true,
             generationMode: 'ai',
@@ -438,6 +447,7 @@ export class CodeReviewerService {
               filePath: '',
               code: deterministic.code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: true,
             generationMode: 'deterministic',
@@ -467,9 +477,11 @@ export class CodeReviewerService {
           logPath,
           isRetry
             ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
-            : precomputedPlanAllFailed
-              ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
-              : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
+            : bypassPrecomputedVisualPlan
+              ? `[reviewer] "${componentName}" skipping reviewed pre-computed visual plan for fixed page-detail route — generating fresh AI visual plan`
+              : precomputedPlanAllFailed
+                ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
+                : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
         const visualDataNeeds = componentPlan
           ? this.toVisualDataNeeds(componentPlan.dataNeeds)
@@ -516,7 +528,21 @@ export class CodeReviewerService {
             allowedImageSrcs: extractStaticImageSources(templateSource),
             contract: visualContract,
           });
-          const visualPlan = parsedPlan.plan;
+          const visualPlan = parsedPlan.plan
+            ? {
+                ...parsedPlan.plan,
+                ...(componentPlan?.fixedSlug
+                  ? {
+                      pageBinding: {
+                        id: componentPlan.fixedPageId,
+                        slug: componentPlan.fixedSlug,
+                        title: componentPlan.fixedTitle,
+                        route: componentPlan.route ?? undefined,
+                      },
+                    }
+                  : {}),
+              }
+            : undefined;
 
           if (visualPlan) {
             promptContext = this.buildPromptContext(componentPlan, visualPlan);
@@ -583,6 +609,7 @@ export class CodeReviewerService {
                   code,
                   requiredCustomClassNames:
                     promptContext?.requiredCustomClassNames,
+                  visualPlan: promptContext?.visualPlan,
                 },
                 fromVisualPlan: true,
                 generationMode: 'ai',
@@ -614,6 +641,7 @@ export class CodeReviewerService {
                   code: deterministic.code,
                   requiredCustomClassNames:
                     promptContext?.requiredCustomClassNames,
+                  visualPlan: promptContext?.visualPlan,
                 },
                 fromVisualPlan: true,
                 generationMode: 'deterministic',
@@ -692,6 +720,7 @@ export class CodeReviewerService {
             filePath: '',
             code,
             requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+            visualPlan: promptContext?.visualPlan,
           },
           fromVisualPlan: false,
           generationMode: 'ai',
@@ -767,6 +796,7 @@ export class CodeReviewerService {
               filePath: '',
               code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: false,
             generationMode: 'ai',
@@ -1079,6 +1109,9 @@ export class CodeReviewerService {
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
       type: componentPlan?.type,
+      fixedSlug: componentPlan?.fixedSlug,
+      fixedTitle: componentPlan?.fixedTitle,
+      fixedPageId: componentPlan?.fixedPageId,
       dataNeeds,
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
@@ -1100,6 +1133,7 @@ export class CodeReviewerService {
       componentName,
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
+      fixedSlug: componentPlan?.fixedSlug,
       dataNeeds: componentPlan?.dataNeeds,
       type: componentPlan?.type,
       isSubComponent,
@@ -1186,6 +1220,36 @@ export class CodeReviewerService {
     return getComponentStrategy(componentName).deterministicFirst;
   }
 
+  private shouldBypassPrecomputedVisualPlan(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): boolean {
+    if (!componentPlan?.visualPlan) return false;
+    if (!componentPlan.fixedSlug) return false;
+    if (componentPlan.type !== 'page' || componentPlan.isDetail !== true) {
+      return false;
+    }
+    const normalizedNeeds = new Set(
+      this.toVisualDataNeeds(componentPlan.dataNeeds),
+    );
+    if (!normalizedNeeds.has('pageDetail')) return false;
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    if (sections.length === 0) return false;
+    if (sections.some((section) => section.type === 'page-content')) {
+      return false;
+    }
+
+    // Concrete bound pages vary arbitrarily by DB content. If the reviewed
+    // pre-computed visual plan turned them into a fully static multi-section
+    // composition, prefer a fresh visual-plan pass that can fall back to the
+    // exact page-content contract instead of forcing mismatched static copy.
+    this.logger.log(
+      `[reviewer] "${componentName}": bypassing reviewed pre-computed visual plan for fixed page-detail route without page-content section`,
+    );
+    return true;
+  }
+
   private shouldUseFramePath(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
@@ -1206,12 +1270,33 @@ export class CodeReviewerService {
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
   ): boolean {
-    return (
-      componentName === 'Home' &&
-      componentPlan?.type === 'page' &&
-      Boolean(componentPlan.visualPlan) &&
-      (componentPlan.visualPlan?.sections?.length ?? 0) >= 5
-    );
+    if (
+      componentPlan?.type !== 'page' ||
+      !componentPlan.visualPlan ||
+      getComponentStrategy(componentName).deterministicFirst
+    ) {
+      return false;
+    }
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    if (sections.length >= 5) return true;
+
+    const richSectionCount = sections.filter((section) =>
+      new Set([
+        'hero',
+        'cover',
+        'media-text',
+        'card-grid',
+        'testimonial',
+        'accordion',
+        'tabs',
+        'carousel',
+        'modal',
+        'newsletter',
+      ]).has(section.type),
+    ).length;
+
+    return sections.length >= 3 && richSectionCount >= 2;
   }
 
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
@@ -1295,12 +1380,14 @@ export class CodeReviewerService {
       dataNeeds: componentPlan.dataNeeds ?? [],
       isDetail: componentPlan.isDetail ?? false,
       route: componentPlan.route,
+      fixedSlug: componentPlan.fixedSlug,
     });
 
     const availableVariables = this.frameGenerator.describeVariables({
       type: componentPlan.type ?? 'page',
       dataNeeds: componentPlan.dataNeeds ?? [],
       isDetail: componentPlan.isDetail ?? false,
+      fixedSlug: componentPlan.fixedSlug,
     });
 
     const validationContext = this.buildValidationContext(
@@ -2223,10 +2310,37 @@ export class CodeReviewerService {
     validationContext: CodeValidationContext,
   ): string[] {
     const compact = (error ?? '').toLowerCase();
+    const fixedSlug = validationContext.fixedSlug?.trim();
+    const normalizedDataNeeds = new Set(
+      (validationContext.dataNeeds ?? []).map((need) =>
+        need === 'page-detail'
+          ? 'pageDetail'
+          : need === 'post-detail'
+            ? 'postDetail'
+            : need,
+      ),
+    );
     const instructions = [
       'Do not redesign or rewrite unrelated sections.',
       'Keep the existing approved route/data contract intact.',
     ];
+
+    if (fixedSlug) {
+      instructions.push(
+        `This component is bound to the fixed slug \`${fixedSlug}\`; do not convert it back to a dynamic slug route.`,
+      );
+      instructions.push('Do not import or call `useParams()` in this file.');
+      if (normalizedDataNeeds.has('pageDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/pages/${fixedSlug}\`, not \`/api/pages/\${slug}\` and not \`/api/pages\` + lookup.`,
+        );
+      }
+      if (normalizedDataNeeds.has('postDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/posts/${fixedSlug}\`, not \`/api/posts/\${slug}\` and not \`/api/posts\` + lookup.`,
+        );
+      }
+    }
 
     if (
       /expected corresponding|jsx|parse|closing tag|unterminated/.test(compact)
@@ -2410,6 +2524,7 @@ export class CodeReviewerService {
       type: componentPlan.type ?? 'page',
       dataNeeds: componentPlan.dataNeeds ?? [],
       isDetail: componentPlan.isDetail ?? false,
+      fixedSlug: componentPlan.fixedSlug,
     });
     const validationContext = this.buildValidationContext(
       componentPlan,
@@ -2518,10 +2633,11 @@ export class CodeReviewerService {
 
       for (const index of targetedRetryIndexes) {
         const section = sections[index];
-        const narrowedError = this.extractSectionSpecificError(
-          check.error,
-          index + 1,
-        );
+        const narrowedError = this.buildTargetedSectionRetryError({
+          error: check.error,
+          section,
+          sectionNumber: index + 1,
+        });
         const retryResult = await this.generateInlineSectionForAssembly({
           componentName,
           section,
@@ -2695,6 +2811,15 @@ export class CodeReviewerService {
       lastRawOutput = raw;
       sectionCode = this.postProcessCode(raw).trim();
       const basicError = this.validateInlineSectionOutput(sectionCode);
+      const fidelityError = basicError
+        ? undefined
+        : this.validator.checkInlineSectionFidelity(
+            sectionCode,
+            section,
+            componentName,
+            sectionIndex + 1,
+          );
+      const attemptError = basicError ?? fidelityError ?? undefined;
       cotAttempts.push({
         attemptNumber: cotAttempts.length + 1,
         promptSent: {
@@ -2709,13 +2834,13 @@ export class CodeReviewerService {
           ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
         },
         timestamp: new Date().toISOString(),
-        success: !basicError,
-        error: basicError,
-        validationFeedback: basicError
+        success: !attemptError,
+        error: attemptError,
+        validationFeedback: attemptError
           ? undefined
           : `section ${sectionIndex + 1} inline assembly candidate accepted`,
       });
-      if (!basicError) {
+      if (!attemptError) {
         this.logger.log(
           `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted on attempt ${attempt}/${maxAttempts}`,
         );
@@ -2731,13 +2856,13 @@ export class CodeReviewerService {
           cotAttempts,
         };
       }
-      sectionError = basicError;
+      sectionError = attemptError;
       this.logger.warn(
-        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) attempt ${attempt}/${maxAttempts} failed: ${basicError}`,
+        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) attempt ${attempt}/${maxAttempts} failed: ${attemptError}`,
       );
       await this.log(
         logPath,
-        `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) section ${sectionIndex + 1}/${totalSections} attempt ${attempt}/${maxAttempts} failed: ${basicError}${this.formatRawOutput(raw)}`,
+        `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) section ${sectionIndex + 1}/${totalSections} attempt ${attempt}/${maxAttempts} failed: ${attemptError}${this.formatRawOutput(raw)}`,
       );
     }
 
@@ -2782,6 +2907,204 @@ export class CodeReviewerService {
     return ['Visual plan fidelity violated:', ...filtered].join('\n');
   }
 
+  private buildTargetedSectionRetryError(input: {
+    error: string | undefined;
+    section: ComponentVisualPlan['sections'][number];
+    sectionNumber: number;
+  }): string | undefined {
+    const baseError = this.extractSectionSpecificError(
+      input.error,
+      input.sectionNumber,
+    );
+    const requiredContent = this.buildSectionRequiredContentChecklist(
+      input.section,
+    );
+    const lines = [
+      baseError?.trim(),
+      '## TARGETED SECTION RETRY',
+      `You are regenerating only section ${input.sectionNumber} (${input.section.type}).`,
+      'Preserve every approved content field for this section exactly; do not summarize, collapse, or omit any repeated item.',
+      requiredContent,
+    ].filter(Boolean);
+    return lines.join('\n\n');
+  }
+
+  private buildSectionRequiredContentChecklist(
+    section: ComponentVisualPlan['sections'][number],
+  ): string {
+    const lines: string[] = ['## REQUIRED CONTENT CHECKLIST'];
+
+    switch (section.type) {
+      case 'card-grid':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        if (section.subtitle) {
+          lines.push(
+            `- Keep subtitle exactly: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
+        lines.push(
+          `- Render exactly ${section.cards.length} card(s). Do not merge or drop cards.`,
+        );
+        section.cards.forEach((card, cardIndex) => {
+          lines.push(
+            `- Card ${cardIndex + 1} heading: ${JSON.stringify(card.heading)}`,
+          );
+          lines.push(
+            `- Card ${cardIndex + 1} body: ${JSON.stringify(card.body)}`,
+          );
+        });
+        break;
+      case 'accordion':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        lines.push(
+          `- Render exactly ${section.items.length} accordion item(s).`,
+        );
+        section.items.forEach((item, itemIndex) => {
+          lines.push(
+            `- Item ${itemIndex + 1} heading: ${JSON.stringify(item.heading)}`,
+          );
+          lines.push(
+            `- Item ${itemIndex + 1} body: ${JSON.stringify(item.body)}`,
+          );
+        });
+        break;
+      case 'tabs':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        lines.push(`- Render exactly ${section.tabs.length} tab(s).`);
+        section.tabs.forEach((tab, tabIndex) => {
+          lines.push(
+            `- Tab ${tabIndex + 1} label: ${JSON.stringify(tab.label)}`,
+          );
+          if (tab.heading) {
+            lines.push(
+              `- Tab ${tabIndex + 1} heading: ${JSON.stringify(tab.heading)}`,
+            );
+          }
+          if (tab.body) {
+            lines.push(
+              `- Tab ${tabIndex + 1} body: ${JSON.stringify(tab.body)}`,
+            );
+          }
+          if (tab.imageSrc) {
+            lines.push(
+              `- Tab ${tabIndex + 1} image src: ${JSON.stringify(tab.imageSrc)}`,
+            );
+          }
+          if (tab.cta?.text) {
+            lines.push(
+              `- Tab ${tabIndex + 1} CTA text: ${JSON.stringify(tab.cta.text)}`,
+            );
+          }
+        });
+        break;
+      case 'carousel':
+        lines.push(`- Render exactly ${section.slides.length} slide(s).`);
+        section.slides.forEach((slide, slideIndex) => {
+          if (slide.heading) {
+            lines.push(
+              `- Slide ${slideIndex + 1} heading: ${JSON.stringify(slide.heading)}`,
+            );
+          }
+          if (slide.subheading) {
+            lines.push(
+              `- Slide ${slideIndex + 1} subheading: ${JSON.stringify(slide.subheading)}`,
+            );
+          }
+        });
+        break;
+      case 'media-text':
+        if (section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if (section.body) {
+          lines.push(`- Keep body exactly: ${JSON.stringify(section.body)}`);
+        }
+        if (section.listItems?.length) {
+          lines.push(
+            `- Keep ${section.listItems.length} list item(s): ${section.listItems
+              .map((item) => JSON.stringify(item))
+              .join(', ')}`,
+          );
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        break;
+      case 'hero':
+      case 'cover':
+        if ('heading' in section && section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if ('subheading' in section && section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        if ('cta' in section && section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        break;
+      case 'testimonial':
+        lines.push(`- Keep quote exactly: ${JSON.stringify(section.quote)}`);
+        lines.push(
+          `- Keep author name exactly: ${JSON.stringify(section.authorName)}`,
+        );
+        if (section.authorTitle) {
+          lines.push(
+            `- Keep author title exactly: ${JSON.stringify(section.authorTitle)}`,
+          );
+        }
+        break;
+      case 'newsletter':
+        lines.push(
+          `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+        );
+        if (section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        lines.push(
+          `- Keep button text exactly: ${JSON.stringify(section.buttonText)}`,
+        );
+        break;
+      case 'post-list':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        break;
+      default:
+        lines.push(
+          '- Preserve every approved heading, body, CTA, image, and repeated child item from the approved section JSON.',
+        );
+        break;
+    }
+
+    lines.push(
+      '- If any checklist item is missing in your JSX, the retry will fail again.',
+    );
+    return lines.join('\n');
+  }
+
   private validateInlineSectionOutput(code: string): string | undefined {
     const trimmed = code.trim();
     if (!trimmed) return 'Empty section JSX output';
@@ -2807,7 +3130,7 @@ export class CodeReviewerService {
   ): string {
     if (
       !componentPlan?.visualPlan?.sections?.length ||
-      !/visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid|lost hero heading|lost hero subheading|lost post-list title|lost card-grid subtitle|lost card heading|lost media-text heading|lost media-text list item/i.test(
+      !/visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid/i.test(
         error ?? '',
       )
     ) {
@@ -2874,6 +3197,11 @@ export class CodeReviewerService {
 
         if (section.type === 'media-text') {
           parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
             section.heading
               ? `heading=${JSON.stringify(section.heading)}`
               : null,
@@ -2884,6 +3212,72 @@ export class CodeReviewerService {
           if (section.listItems?.length) {
             parts.push(
               `listItems=${JSON.stringify(section.listItems.slice(0, 6))}`,
+            );
+          }
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'modal') {
+          parts.push(
+            section.triggerText
+              ? `triggerText=${JSON.stringify(section.triggerText)}`
+              : null,
+          );
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.body ? `body=${JSON.stringify(section.body)}` : null,
+          );
+          parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'tabs') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          if (section.tabs?.length) {
+            parts.push(
+              `tabs=${JSON.stringify(
+                section.tabs.slice(0, 6).map((tab) => ({
+                  label: tab.label,
+                  heading: tab.heading,
+                  body: tab.body,
+                  imageSrc: tab.imageSrc,
+                  ctaText: tab.cta?.text,
+                })),
+              )}`,
+            );
+          }
+        }
+
+        if (section.type === 'accordion') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          if (section.items?.length) {
+            parts.push(
+              `items=${JSON.stringify(
+                section.items.slice(0, 6).map((item) => ({
+                  heading: item.heading,
+                  body: item.body,
+                })),
+              )}`,
             );
           }
         }
@@ -2903,6 +3297,24 @@ export class CodeReviewerService {
     componentName: string,
   ): string {
     const parts = [`${reason}: ${lastError ?? 'Unknown validation error.'}`];
+    const fixedSlug = componentPlan?.fixedSlug?.trim();
+    if (fixedSlug) {
+      const boundEndpoint = componentPlan?.dataNeeds?.includes('postDetail')
+        ? `/api/posts/${fixedSlug}`
+        : componentPlan?.dataNeeds?.includes('pageDetail')
+          ? `/api/pages/${fixedSlug}`
+          : undefined;
+      const bindingLines = [
+        `Fixed slug binding: \`${fixedSlug}\`.`,
+        'Do not import or call `useParams()`.',
+      ];
+      if (boundEndpoint) {
+        bindingLines.push(
+          `Fetch the main record only from \`${boundEndpoint}\`. Do not fall back to a dynamic \`/api/.../\${slug}\` endpoint or a list endpoint plus lookup.`,
+        );
+      }
+      parts.push(bindingLines.join('\n'));
+    }
     const checklist = this.buildVisualPlanRetryChecklist(
       componentPlan,
       lastError,
@@ -3195,11 +3607,16 @@ export class CodeReviewerService {
       const isHeadingOnlyInventedAuxiliary =
         isListLikePageComponent &&
         this.isHeadingOnlyInventedAuxiliarySection(sectionContent);
+      const isTrackedApprovedSection =
+        /\bdata-vp-source-node=/.test(sectionContent) ||
+        /\bdata-vp-section-key=/.test(sectionContent) ||
+        /\bdata-vp-section-component=/.test(sectionContent);
 
       // Keep the section if it has dynamic refs or dangerouslySetInnerHTML
       if (
         dynamicRef.test(sectionContent) ||
         /dangerouslySetInnerHTML/.test(sectionContent) ||
+        isTrackedApprovedSection ||
         (!isDetailComponent && !isHeadingOnlyInventedAuxiliary)
       ) {
         result += sectionContent;

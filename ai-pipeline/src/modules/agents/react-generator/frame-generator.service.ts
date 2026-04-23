@@ -24,6 +24,7 @@ export interface FrameOptions {
   dataNeeds: string[];
   isDetail: boolean;
   route?: string | null;
+  fixedSlug?: string;
 }
 
 /**
@@ -48,8 +49,11 @@ export class FrameGeneratorService {
    * FRAME_PLACEHOLDER where the AI JSX block should be inserted.
    */
   generateFrame(options: FrameOptions): string {
-    const { componentName, type, dataNeeds, isDetail, route } = options;
+    const { componentName, type, dataNeeds, isDetail, route, fixedSlug } =
+      options;
     const needs = this.normalizeNeeds(dataNeeds);
+    const usesRouteParams =
+      isDetail && /:[A-Za-z_]/.test(route ?? '') && !fixedSlug;
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
     const hasPageDetail = needs.has('pageDetail') && isDetail;
@@ -70,7 +74,7 @@ export class FrameGeneratorService {
 
     // ── 1. Imports ────────────────────────────────────────────────────────────
     const routerImports = ['Link'];
-    if (isDetail) routerImports.push('useParams');
+    if (usesRouteParams) routerImports.push('useParams');
     if (isArchive) {
       if (!routerImports.includes('useParams')) routerImports.push('useParams');
       routerImports.push('useLocation');
@@ -125,8 +129,10 @@ export class FrameGeneratorService {
       );
       lines.push(`    : location.pathname.startsWith('/author/') ? 'author'`);
       lines.push(`    : location.pathname.startsWith('/tag/') ? 'tag' : null;`);
-    } else if (isDetail) {
+    } else if (usesRouteParams) {
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+    } else if (isDetail && fixedSlug) {
+      lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
     }
     if (hasPosts || isArchive) {
       lines.push(
@@ -197,7 +203,7 @@ export class FrameGeneratorService {
       lines.push('');
       const depArray = isArchive
         ? '[slug, archiveType, currentPage]'
-        : isDetail
+        : isDetail && usesRouteParams
           ? '[slug]'
           : hasPosts
             ? '[currentPage]'
@@ -304,8 +310,9 @@ export class FrameGeneratorService {
     type: 'page' | 'partial';
     dataNeeds: string[];
     isDetail: boolean;
+    fixedSlug?: string;
   }): string {
-    const { type, dataNeeds, isDetail } = options;
+    const { type, dataNeeds, isDetail, fixedSlug } = options;
     const needs = this.normalizeNeeds(dataNeeds);
     const vars: string[] = [];
 
@@ -324,7 +331,9 @@ export class FrameGeneratorService {
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
     if (needs.has('siteInfo')) vars.push('`siteInfo: SiteInfo | null`');
     if (needs.has('comments') && isDetail) vars.push('`comments: Comment[]`');
-    if (isDetail) vars.push('`slug: string` (URL param)');
+    if (isDetail && fixedSlug)
+      vars.push(`\`slug: "${fixedSlug}"\` (fixed plan binding)`);
+    else if (isDetail) vars.push('`slug: string` (URL param)');
 
     return vars.length > 0 ? vars.join(', ') : '(no data variables)';
   }

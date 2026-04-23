@@ -536,6 +536,7 @@ export class PlanReviewerService {
 
     const expected = new Set(expectedTemplateNames);
     const templateCounts = new Map<string, number>();
+    const templateItems = new Map<string, ComponentPlan[]>();
     const componentCounts = new Map<string, number>();
     const pageRoutes = new Map<string, string[]>();
 
@@ -545,6 +546,9 @@ export class PlanReviewerService {
         item.templateName,
         (templateCounts.get(item.templateName) ?? 0) + 1,
       );
+      const existingTemplateItems = templateItems.get(item.templateName) ?? [];
+      existingTemplateItems.push(item);
+      templateItems.set(item.templateName, existingTemplateItems);
       componentCounts.set(
         item.componentName,
         (componentCounts.get(item.componentName) ?? 0) + 1,
@@ -611,7 +615,11 @@ export class PlanReviewerService {
     }
 
     for (const [templateName, count] of templateCounts) {
-      if (count > 1) {
+      const items = templateItems.get(templateName) ?? [];
+      if (
+        count > 1 &&
+        !this.allowsConcreteTemplateMultiplicity(templateName, items)
+      ) {
         errors.push(
           `Template "${templateName}" appears ${count} times in plan (must be exactly once)`,
         );
@@ -878,6 +886,9 @@ export class PlanReviewerService {
   private inferRoutePolicy(item: ComponentPlan): RoutePolicy {
     const templateBase = toTemplateBase(item.templateName);
     const routeSlug = this.toKebabCase(templateBase);
+    const normalizedNeeds = new Set(
+      (item.dataNeeds ?? []).map((need) => need.trim()),
+    );
 
     if (isPartialComponentName(templateBase)) {
       return {
@@ -897,6 +908,27 @@ export class PlanReviewerService {
         isDetail: false,
         requiredDataNeeds: [],
       };
+    }
+
+    if (item.fixedSlug) {
+      if (normalizedNeeds.has('page-detail')) {
+        return {
+          type: 'page',
+          route: item.route ?? `/page/${item.fixedSlug}`,
+          routeMode: 'hard',
+          isDetail: true,
+          requiredDataNeeds: ['page-detail'],
+        };
+      }
+      if (normalizedNeeds.has('post-detail')) {
+        return {
+          type: 'page',
+          route: item.route ?? `/post/${item.fixedSlug}`,
+          routeMode: 'hard',
+          isDetail: true,
+          requiredDataNeeds: ['post-detail'],
+        };
+      }
     }
 
     if (/^404$/.test(templateBase)) {
@@ -999,6 +1031,43 @@ export class PlanReviewerService {
       isDetail: false,
       requiredDataNeeds: [],
     };
+  }
+
+  private allowsConcreteTemplateMultiplicity(
+    templateName: string,
+    items: ComponentPlan[],
+  ): boolean {
+    if (items.length <= 1) return false;
+
+    const templateBase = toTemplateBase(templateName);
+    if (
+      !/^page(?:-.+)?$/.test(templateBase) &&
+      templateBase !== 'frontend-page'
+    ) {
+      return false;
+    }
+
+    if (
+      !items.every(
+        (item) =>
+          item.type === 'page' &&
+          item.isDetail === true &&
+          !!item.fixedSlug &&
+          item.dataNeeds.includes('page-detail'),
+      )
+    ) {
+      return false;
+    }
+
+    const bindingKeys = new Set(
+      items.map((item) =>
+        String(item.fixedPageId ?? '').trim()
+          ? `id:${String(item.fixedPageId).trim()}`
+          : `slug:${String(item.fixedSlug).trim()}`,
+      ),
+    );
+
+    return bindingKeys.size === items.length;
   }
 
   private isValidComponentName(name: string): boolean {

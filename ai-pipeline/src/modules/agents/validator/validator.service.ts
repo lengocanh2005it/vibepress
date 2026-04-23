@@ -10,9 +10,12 @@ import type {
   CoverSection,
   HeroSection,
   MediaTextSection,
+  ModalSection,
   NewsletterSection,
   PostListSection,
   SectionPlan,
+  TabsSection,
+  AccordionSection,
   TestimonialSection,
 } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
@@ -42,6 +45,7 @@ export interface CodeValidationContext {
   componentName?: string;
   route?: string | null;
   isDetail?: boolean;
+  fixedSlug?: string;
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   isSubComponent?: boolean;
@@ -104,6 +108,7 @@ export class ValidatorService {
         componentName: comp.name,
         route: comp.route,
         isDetail: comp.isDetail,
+        fixedSlug: comp.fixedSlug,
         dataNeeds: comp.dataNeeds,
         type: comp.type,
         isSubComponent: comp.isSubComponent,
@@ -423,6 +428,8 @@ export class ValidatorService {
     const expectsPageDetail = dataNeeds.has('pageDetail');
     const expectsAnyDetail =
       context.isDetail === true || expectsPostDetail || expectsPageDetail;
+    const fixedSlug = context.fixedSlug?.trim();
+    const hasFixedSlug = Boolean(fixedSlug);
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
     const allowsArchiveAliasParams =
       /^Archive$/i.test(context.componentName ?? '') &&
@@ -740,9 +747,14 @@ export class ValidatorService {
       context.isSubComponent === true ||
       isPartialComponent;
     if (!skipRouteDataContractChecks) {
-      if (expectsAnyDetail && !/\buseParams\s*</.test(code)) {
+      if (expectsAnyDetail && !hasFixedSlug && !/\buseParams\s*</.test(code)) {
         violations.push(
           'Detail component is missing `useParams<{ slug: string }>()` for slug-based routing.',
+        );
+      }
+      if (hasFixedSlug && /\buseParams\s*</.test(code)) {
+        violations.push(
+          `Component is bound to the fixed slug \`${fixedSlug}\` and must not import or call \`useParams()\`. Use \`const slug = "${fixedSlug}"\` or fetch the exact endpoint directly.`,
         );
       }
       if (!effectiveRouteHasParams && /\buseParams\s*</.test(code)) {
@@ -750,30 +762,54 @@ export class ValidatorService {
           'Component uses `useParams()` even though its planned route has no URL params.',
         );
       }
-      if (expectsPostDetail && !this.matchesDetailFetch(code, 'posts')) {
+      if (
+        expectsPostDetail &&
+        !(hasFixedSlug
+          ? this.matchesExactDetailFetch(code, 'posts', fixedSlug!)
+          : this.matchesDetailFetch(code, 'posts'))
+      ) {
         violations.push(
-          'Post detail component must fetch the record via `/api/posts/${slug}` (or equivalent string concatenation with `slug`).',
+          hasFixedSlug
+            ? `Post detail component must fetch the exact bound record via \`/api/posts/${fixedSlug}\`.`
+            : 'Post detail component must fetch the record via `/api/posts/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
-      if (expectsPageDetail && !this.matchesDetailFetch(code, 'pages')) {
+      if (
+        expectsPageDetail &&
+        !(hasFixedSlug
+          ? this.matchesExactDetailFetch(code, 'pages', fixedSlug!)
+          : this.matchesDetailFetch(code, 'pages'))
+      ) {
         violations.push(
-          'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
+          hasFixedSlug
+            ? `Page detail component must fetch the exact bound record via \`/api/pages/${fixedSlug}\`.`
+            : 'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
       if (
         !dataNeeds.has('postDetail') &&
-        this.matchesDetailFetch(code, 'posts')
+        this.matchesAnyDetailFetch(code, 'posts')
       ) {
         violations.push(
-          'Component fetches `/api/posts/${slug}` even though its plan does not require post detail data.',
+          'Component fetches a post detail endpoint even though its plan does not require post detail data.',
         );
       }
       if (
         !dataNeeds.has('pageDetail') &&
-        this.matchesDetailFetch(code, 'pages')
+        this.matchesAnyDetailFetch(code, 'pages')
       ) {
         violations.push(
-          'Component fetches `/api/pages/${slug}` even though its plan does not require page detail data.',
+          'Component fetches a page detail endpoint even though its plan does not require page detail data.',
+        );
+      }
+      if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'posts')) {
+        violations.push(
+          `Fixed-slug component must not fetch dynamic post detail via \`/api/posts/\${slug}\`. Fetch only \`/api/posts/${fixedSlug}\`.`,
+        );
+      }
+      if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'pages')) {
+        violations.push(
+          `Fixed-slug component must not fetch dynamic page detail via \`/api/pages/\${slug}\`. Fetch only \`/api/pages/${fixedSlug}\`.`,
         );
       }
     }
@@ -844,6 +880,37 @@ export class ValidatorService {
     };
   }
 
+  checkInlineSectionFidelity(
+    code: string,
+    section: SectionPlan,
+    componentName?: string,
+    sectionNumber?: number,
+  ): string | null {
+    const sectionLabel = `"${componentName ?? 'Component'}" section ${sectionNumber ?? 1}`;
+    const issues: string[] = [];
+
+    if (section.sectionKey && !code.includes(section.sectionKey)) {
+      issues.push(
+        `${sectionLabel} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
+      );
+    }
+
+    if (
+      section.sourceRef?.sourceNodeId &&
+      !code.includes(section.sourceRef.sourceNodeId)
+    ) {
+      issues.push(
+        `${sectionLabel} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
+      );
+    }
+
+    issues.push(
+      ...this.checkSectionPayloadFidelity(code, section, sectionLabel),
+    );
+    if (issues.length === 0) return null;
+    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+  }
+
   private checkVisualPlanFidelity(
     code: string,
     visualPlan?: ComponentVisualPlan,
@@ -895,6 +962,12 @@ export class ValidatorService {
         return this.checkMediaTextPayload(code, section, label);
       case 'card-grid':
         return this.checkCardGridPayload(code, section, label);
+      case 'modal':
+        return this.checkModalPayload(code, section, label);
+      case 'tabs':
+        return this.checkTabsPayload(code, section, label);
+      case 'accordion':
+        return this.checkAccordionPayload(code, section, label);
       case 'testimonial':
         return this.checkTestimonialPayload(code, section, label);
       case 'newsletter':
@@ -1066,6 +1139,135 @@ export class ValidatorService {
     return issues;
   }
 
+  private checkModalPayload(
+    code: string,
+    section: ModalSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.triggerText,
+        `${label} lost modal trigger text`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost modal heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.body,
+        `${label} lost modal body`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost modal image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.cta?.text,
+        `${label} lost modal CTA text`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkTabsPayload(
+    code: string,
+    section: TabsSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost tabs title`,
+      ),
+    );
+    for (const tab of section.tabs ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.label,
+          `${label} lost tab label`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.heading,
+          `${label} lost tab heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.body,
+          `${label} lost tab body`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.imageSrc,
+          `${label} lost tab image src`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.cta?.text,
+          `${label} lost tab CTA text`,
+        ),
+      );
+    }
+    return issues;
+  }
+
+  private checkAccordionPayload(
+    code: string,
+    section: AccordionSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost accordion title`,
+      ),
+    );
+    for (const item of section.items ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item.heading,
+          `${label} lost accordion heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item.body,
+          `${label} lost accordion body`,
+        ),
+      );
+    }
+    return issues;
+  }
+
   private checkTestimonialPayload(
     code: string,
     section: TestimonialSection,
@@ -1162,11 +1364,89 @@ export class ValidatorService {
     if (!normalized) return [];
     if (this.isDynamicPlanBinding(normalized)) return [];
     if (code.includes(normalized)) return [];
+    if (this.codeSemanticallyContainsLiteral(code, normalized)) return [];
     const preview =
       normalized.length > 120
         ? `${normalized.slice(0, 117).trimEnd()}...`
         : normalized;
     return [`${error}: ${JSON.stringify(preview)}`];
+  }
+
+  private codeSemanticallyContainsLiteral(
+    code: string,
+    literal: string,
+  ): boolean {
+    const normalizedLiteral = this.normalizeLiteralSearchText(literal);
+    if (!normalizedLiteral) return true;
+
+    const normalizedCode = this.normalizeLiteralSearchText(code);
+    if (normalizedCode.includes(normalizedLiteral)) return true;
+    if (this.codeContainsEquivalentAssetLiteral(code, literal)) return true;
+
+    const paragraphParts = normalizedLiteral
+      .split(/\n\s*\n/)
+      .map((part) => this.normalizeLiteralSearchText(part))
+      .filter(Boolean);
+    if (paragraphParts.length > 1) {
+      return paragraphParts.every((part) => normalizedCode.includes(part));
+    }
+
+    return false;
+  }
+
+  private codeContainsEquivalentAssetLiteral(
+    code: string,
+    literal: string,
+  ): boolean {
+    if (!/\/wp-content\/uploads\//i.test(literal)) return false;
+
+    const fileName = this.extractLiteralFileName(literal);
+    if (!fileName) return false;
+
+    const escapedFileName = this.escapeRegExp(fileName);
+    const localAssetPatterns = [
+      new RegExp(`/assets/images/[^"'\\s)\\]}]*${escapedFileName}`, 'i'),
+      new RegExp(`/assets/[^"'\\s)\\]}]*${escapedFileName}`, 'i'),
+    ];
+
+    return localAssetPatterns.some((pattern) => pattern.test(code));
+  }
+
+  private extractLiteralFileName(literal: string): string | null {
+    const trimmed = literal.trim();
+    if (!trimmed) return null;
+
+    try {
+      const pathname = new URL(trimmed).pathname;
+      const fileName = pathname.split('/').pop()?.trim();
+      return fileName || null;
+    } catch {
+      const normalized = trimmed.split(/[?#]/)[0] ?? trimmed;
+      const fileName = normalized.split('/').pop()?.trim();
+      return fileName || null;
+    }
+  }
+
+  private normalizeLiteralSearchText(input: string): string {
+    return input
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\\n/g, ' ')
+      .replace(/\\r/g, ' ')
+      .replace(/\\t/g, ' ')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\`/g, '`')
+      .replace(/\\\\/g, '\\')
+      .replace(/\{['"`]\s*['"`]\}/g, ' ')
+      .replace(/\{`\s*`\}/g, ' ')
+      .replace(/&nbsp;|&#160;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;|&#34;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private findMissingRequiredCustomClasses(
@@ -1747,6 +2027,26 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     code: string,
     resource: 'posts' | 'pages' | 'products',
   ): boolean {
+    return this.matchesDynamicDetailFetch(code, resource);
+  }
+
+  private matchesAnyDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+  ): boolean {
+    const escapedResource = this.escapeRegExp(resource);
+    const exactPattern = new RegExp(
+      `fetch\\(\\s*['"\`]/api/${escapedResource}/[^'"\`\\s)]+['"\`]`,
+    );
+    return (
+      this.matchesDynamicDetailFetch(code, resource) || exactPattern.test(code)
+    );
+  }
+
+  private matchesDynamicDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+  ): boolean {
     const patterns = [
       // Template literal: `/api/posts/${slug}` or `/api/posts/${encodeURIComponent(slug)}`
       new RegExp(
@@ -1757,6 +2057,24 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       // Unusual single/double-quoted string with ${…}: '/api/posts/${slug}'
       new RegExp(
         String.raw`fetch\(\s*['"]/api/${resource}/\$\{[^}]*(?:slug|productId)[^}]*\}['"]`,
+      ),
+    ];
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
+  private matchesExactDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+    slug: string,
+  ): boolean {
+    const escapedResource = this.escapeRegExp(resource);
+    const escapedSlug = this.escapeRegExp(slug);
+    const patterns = [
+      new RegExp(
+        `fetch\\(\\s*['"\`]/api/${escapedResource}/${escapedSlug}['"\`]`,
+      ),
+      new RegExp(
+        String.raw`fetch\(\s*\`/api/${escapedResource}/${escapedSlug}\``,
       ),
     ];
     return patterns.some((pattern) => pattern.test(code));

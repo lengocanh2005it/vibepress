@@ -93,6 +93,9 @@ export interface ComponentPromptContext {
   route?: string | null;
   isDetail?: boolean;
   type?: 'page' | 'partial';
+  fixedSlug?: string;
+  fixedTitle?: string;
+  fixedPageId?: number | string;
   requiredCustomClassNames?: string[];
   sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
@@ -157,6 +160,7 @@ function buildAllowedEndpointsNote(input: {
   route?: string | null;
   visualPlan?: ComponentVisualPlan;
   componentName?: string;
+  fixedSlug?: string;
 }): string {
   const lines = ['## Allowed runtime data for this component'];
   const allowed = new Set<string>();
@@ -172,12 +176,23 @@ function buildAllowedEndpointsNote(input: {
   if (input.dataNeeds.includes('pages')) allowed.add('GET /api/pages');
   if (input.dataNeeds.includes('postDetail') && routeHasParams)
     allowed.add('GET /api/posts/${slug}');
+  if (input.dataNeeds.includes('postDetail') && input.fixedSlug)
+    allowed.add(`GET /api/posts/${input.fixedSlug}`);
   if (input.dataNeeds.includes('pageDetail') && routeHasParams)
     allowed.add('GET /api/pages/${slug}');
+  if (input.dataNeeds.includes('pageDetail') && input.fixedSlug)
+    allowed.add(`GET /api/pages/${input.fixedSlug}`);
   if (input.dataNeeds.includes('comments') && routeHasParams) {
     allowed.add('GET /api/comments?slug=${slug}');
     allowed.add(
       'GET /api/comments/submissions?slug=${slug}&clientToken=${token}',
+    );
+    allowed.add('POST /api/comments');
+  }
+  if (input.dataNeeds.includes('comments') && input.fixedSlug) {
+    allowed.add(`GET /api/comments?slug=${input.fixedSlug}`);
+    allowed.add(
+      `GET /api/comments/submissions?slug=${input.fixedSlug}&clientToken=\${token}`,
     );
     allowed.add('POST /api/comments');
   }
@@ -231,6 +246,7 @@ function buildForbiddenBehaviorNote(input: {
   type?: 'page' | 'partial';
   dataNeeds: string[];
   route?: string | null;
+  fixedSlug?: string;
 }): string {
   const lines = ['## Forbidden behavior'];
   const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
@@ -251,8 +267,18 @@ function buildForbiddenBehaviorNote(input: {
   if (!input.dataNeeds.includes('postDetail')) {
     lines.push('- Do NOT fetch `/api/posts/${slug}` in this component.');
   }
+  if (!input.dataNeeds.includes('postDetail') || !input.fixedSlug) {
+    lines.push(
+      '- Do NOT fetch hardcoded post-detail slugs unless this component is explicitly bound to one exact post.',
+    );
+  }
   if (!input.dataNeeds.includes('pageDetail')) {
     lines.push('- Do NOT fetch `/api/pages/${slug}` in this component.');
+  }
+  if (!input.dataNeeds.includes('pageDetail') || !input.fixedSlug) {
+    lines.push(
+      '- Do NOT fetch hardcoded page-detail slugs unless this component is explicitly bound to one exact page.',
+    );
   }
   if (!input.dataNeeds.includes('posts')) {
     lines.push(
@@ -332,6 +358,7 @@ function buildScopedApiContractNote(input: {
   dataNeeds: string[];
   route?: string | null;
   componentName?: string;
+  fixedSlug?: string;
 }): string {
   const lines = [
     `## Canonical API contract — relevant subset from \`${API_CONTRACT_SOURCE_PATH}\``,
@@ -356,6 +383,9 @@ function buildScopedApiContractNote(input: {
   if (needs.includes('postDetail') && routeHasParams) {
     endpoints.add('GET /api/posts/${slug} -> Post');
   }
+  if (needs.includes('postDetail') && input.fixedSlug) {
+    endpoints.add(`GET /api/posts/${input.fixedSlug} -> Post`);
+  }
   if (hasAnyDataNeed(needs, 'pages', 'pageDetail')) {
     endpoints.add('GET /api/pages -> Page[]');
     entityLines.push(`- Page: ${formatContractFields(PAGE_FRONTEND_FIELDS)}`);
@@ -363,15 +393,24 @@ function buildScopedApiContractNote(input: {
   if (needs.includes('pageDetail') && routeHasParams) {
     endpoints.add('GET /api/pages/${slug} -> Page');
   }
+  if (needs.includes('pageDetail') && input.fixedSlug) {
+    endpoints.add(`GET /api/pages/${input.fixedSlug} -> Page`);
+  }
   if (needs.includes('menus')) {
     endpoints.add('GET /api/menus -> Menu[]');
     entityLines.push(`- Menu: ${formatContractFields(MENU_FIELDS)}`);
     entityLines.push(`- MenuItem: ${formatContractFields(MENU_ITEM_FIELDS)}`);
   }
   if (needs.includes('comments')) {
-    endpoints.add('GET /api/comments?slug=${slug} -> Comment[]');
     endpoints.add(
-      'GET /api/comments/submissions?slug=${slug}&clientToken=${token} -> CommentSubmission[]',
+      input.fixedSlug
+        ? `GET /api/comments?slug=${input.fixedSlug} -> Comment[]`
+        : 'GET /api/comments?slug=${slug} -> Comment[]',
+    );
+    endpoints.add(
+      input.fixedSlug
+        ? `GET /api/comments/submissions?slug=${input.fixedSlug}&clientToken=\${token} -> CommentSubmission[]`
+        : 'GET /api/comments/submissions?slug=${slug}&clientToken=${token} -> CommentSubmission[]',
     );
     endpoints.add('POST /api/comments');
     entityLines.push(`- Comment: ${formatContractFields(COMMENT_FIELDS)}`);
@@ -508,7 +547,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     if (d.fontSize) lines.push(`- Default font size: \`text-[${d.fontSize}]\``);
     if (d.fontFamily)
       lines.push(
-        `- Default font family: use \`style={{fontFamily:"${d.fontFamily}"}}\` on root wrapper`,
+        `- Default font family: do NOT hardcode this inline on every wrapper. Let global theme CSS / \`.wp-site-blocks\` inherit it, and only add \`style={{fontFamily:"${d.fontFamily}"}}\` when a specific block explicitly overrides the default.`,
       );
     if (d.lineHeight)
       lines.push(
@@ -567,7 +606,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.fonts.length > 0) {
     lines.push(
-      '**Font families** — use `style={{fontFamily:"..."}}` (Tailwind arbitrary font-family is unreliable):',
+      '**Font families** — Tailwind arbitrary font-family is unreliable, but do NOT spray inline fonts everywhere. Use `style={{fontFamily:"..."}}` only for blocks/nodes that explicitly carry a different font from the inherited theme default:',
     );
     for (const f of tokens.fonts) {
       lines.push(`- slug \`${f.slug}\` → \`${f.family}\` (${f.name})`);
@@ -1022,6 +1061,9 @@ export function buildPlanContextNote(
     dataNeeds?: string[];
     route?: string | null;
     type?: 'page' | 'partial';
+    fixedSlug?: string;
+    fixedTitle?: string;
+    fixedPageId?: number | string;
     requiredCustomClassNames?: string[];
     sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
@@ -1041,6 +1083,9 @@ export function buildPlanContextNote(
         : 'Route contract: this route has no URL params, so do NOT import or call `useParams`.',
     );
   }
+  if (plan.fixedSlug) {
+    lines.push(`Fixed page slug binding: \`${plan.fixedSlug}\``);
+  }
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
   lines.push('');
@@ -1050,6 +1095,7 @@ export function buildPlanContextNote(
       route: plan.route,
       visualPlan: plan.visualPlan,
       componentName,
+      fixedSlug: plan.fixedSlug,
     }),
   );
   lines.push('');
@@ -1058,21 +1104,26 @@ export function buildPlanContextNote(
       type: plan.type,
       dataNeeds: normalizedDataNeeds,
       route: plan.route,
+      fixedSlug: plan.fixedSlug,
     }),
   );
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
   if (normalizedDataNeeds.includes('postDetail')) {
     lines.push(
-      routeHasParams
-        ? 'Detail data contract: fetch the specific post with `/api/posts/${slug}` and render that record, not the full posts list.'
-        : 'Data contract: this component does not own a slug route. Do NOT fabricate post detail by fetching `/api/posts` and picking an item by index, title, or guesswork.',
+      plan.fixedSlug
+        ? `Detail data contract: fetch the specific post with \`/api/posts/${plan.fixedSlug}\` and render that exact record.`
+        : routeHasParams
+          ? 'Detail data contract: fetch the specific post with `/api/posts/${slug}` and render that record, not the full posts list.'
+          : 'Data contract: this component does not own a slug route. Do NOT fabricate post detail by fetching `/api/posts` and picking an item by index, title, or guesswork.',
     );
   }
   if (normalizedDataNeeds.includes('pageDetail')) {
     lines.push(
-      routeHasParams
-        ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
-        : 'Data contract: this component does not own a slug route. Do NOT fabricate page detail by fetching `/api/pages` and picking an item by index, title, or guesswork.',
+      plan.fixedSlug
+        ? `Detail data contract: fetch the specific page with \`/api/pages/${plan.fixedSlug}\` and render that exact record.`
+        : routeHasParams
+          ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
+          : 'Data contract: this component does not own a slug route. Do NOT fabricate page detail by fetching `/api/pages` and picking an item by index, title, or guesswork.',
     );
     lines.push(
       '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
@@ -1298,6 +1349,16 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'imageAlt', section.image?.alt);
         pushPlanTextPart(parts, 'imagePosition', section.image?.position);
         break;
+      case 'modal':
+        parts.push(`layout=${section.layout ?? 'centered'}`);
+        pushPlanTextPart(parts, 'triggerText', section.triggerText);
+        pushPlanTextPart(parts, 'heading', section.heading);
+        pushPlanTextPart(parts, 'body', section.body, 220);
+        pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
+        pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
       case 'sidebar':
         pushPlanTextPart(parts, 'title', section.title);
         parts.push(`showPages=${section.showPages}`);
@@ -1361,6 +1422,41 @@ function buildCompactSectionSummary(
         });
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        break;
+      case 'tabs':
+        pushPlanTextPart(parts, 'title', section.title);
+        parts.push(`tabCount=${section.tabs.length}`);
+        section.tabs.forEach((tab, tabIndex) => {
+          pushPlanTextPart(parts, `tab${tabIndex + 1}Label`, tab.label, 120);
+          pushPlanTextPart(
+            parts,
+            `tab${tabIndex + 1}Heading`,
+            tab.heading,
+            140,
+          );
+          pushPlanTextPart(parts, `tab${tabIndex + 1}Body`, tab.body, 180);
+          pushPlanTextPart(parts, `tab${tabIndex + 1}ImageSrc`, tab.imageSrc);
+          pushPlanTextPart(
+            parts,
+            `tab${tabIndex + 1}CtaText`,
+            tab.cta?.text,
+            120,
+          );
+        });
+        break;
+      case 'accordion':
+        pushPlanTextPart(parts, 'title', section.title);
+        parts.push(`itemCount=${section.items.length}`);
+        parts.push(`allowMultiple=${section.allowMultiple ?? false}`);
+        section.items.forEach((item, itemIndex) => {
+          pushPlanTextPart(
+            parts,
+            `item${itemIndex + 1}Heading`,
+            item.heading,
+            140,
+          );
+          pushPlanTextPart(parts, `item${itemIndex + 1}Body`, item.body, 180);
+        });
         break;
       case 'testimonial':
         pushPlanTextPart(parts, 'quote', section.quote, 240);
@@ -1639,7 +1735,27 @@ export function buildComponentPrompt(
 
   const slugFetchingNote =
     isSingle || isPage
-      ? `## IMPORTANT — This is a detail/single view component
+      ? componentPlan?.fixedSlug
+        ? `## IMPORTANT — This component is bound to one exact detail record
+- Do NOT import or call \`useParams\`
+- Use the fixed slug from the approved plan: \`${componentPlan.fixedSlug}\`
+- Fetch the specific ${isSingle ? 'post' : 'page'} with:
+  - ${isSingle ? `\`GET /api/posts/${componentPlan.fixedSlug}\`` : `\`GET /api/pages/${componentPlan.fixedSlug}\``}
+- If the response is null/404, show a "Not found" message
+- Do NOT fetch the full list and pick index 0
+${
+  isNoTitle
+    ? '- This is a NoTitle variant: do NOT render the record title in any heading element.'
+    : `- Render \`${isSingle ? 'post' : 'page'}.title\` as the primary heading above the content.`
+}
+${
+  isPage
+    ? `- Page Detail Contract: NO \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, \`comments\`.
+- \`interface Page\` (MANDATORY for pages) must match the canonical Page contract from the API note.
+- Use \`item: Page | null\` state, not \`Post\`.`
+    : ''
+}`
+        : `## IMPORTANT — This is a detail/single view component
 - Import \`useParams\` from \`react-router-dom\`
 - Read the slug from URL: \`const { slug } = useParams<{ slug: string }>()\`
 - Fetch the specific ${isSingle ? 'post' : 'page'} by slug:
@@ -1666,6 +1782,7 @@ ${
         dataNeeds: normalizedDataNeeds,
         route: componentPlan?.route,
         componentName,
+        fixedSlug: componentPlan?.fixedSlug,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
@@ -1769,7 +1886,13 @@ Render ONLY the JSX for the blocks in the template source below.`;
 
   const slugFetchingNote =
     isSingle || isPage
-      ? `## Detail route context for this section
+      ? input.componentPlan?.fixedSlug
+        ? `## Detail route context for this section
+- The parent component is bound to the exact slug \`${input.componentPlan.fixedSlug}\`.
+- Do NOT use \`useParams\` inside this section.
+- If this section truly renders detail data, fetch ${isSingle ? `\`GET /api/posts/${input.componentPlan.fixedSlug}\`` : `\`GET /api/pages/${input.componentPlan.fixedSlug}\``}.
+- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
+        : `## Detail route context for this section
 - The parent component route is slug-based.
 - Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
 - If you need detail data in this section, fetch ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'} by slug. Never fetch the full list and pick index 0.
@@ -1783,6 +1906,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
         dataNeeds: normalizedDataNeeds,
         route: input.componentPlan?.route,
         componentName: input.parentName,
+        fixedSlug: input.componentPlan?.fixedSlug,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
@@ -1827,6 +1951,7 @@ Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSectio
       dataNeeds: normalizedDataNeeds,
       route: input.componentPlan?.route,
       componentName: input.componentName,
+      fixedSlug: input.componentPlan?.fixedSlug,
     }),
     buildVisualPlanContextNote(
       input.componentPlan?.visualPlan
@@ -1853,6 +1978,7 @@ Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSectio
       : '',
     input.editRequestContextNote,
     buildRetryNote(input.retryError),
+    buildInlineSectionLiteralChecklist(input.section),
     '## Approved section JSON',
     '```json',
     JSON.stringify(input.section, null, 2),
@@ -1860,6 +1986,115 @@ Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSectio
   ].filter(Boolean);
 
   return planContext.join('\n\n');
+}
+
+function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
+  const lines: string[] = [
+    '## Literal preservation checklist',
+    'Render these approved literals exactly as written. Do not paraphrase, truncate, summarize, or replace them with shorter summaries.',
+  ];
+
+  switch (section.type) {
+    case 'media-text':
+      if (section.imageSrc) {
+        lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
+      }
+      if (section.heading) {
+        lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if (section.body) {
+        lines.push(`- body: ${JSON.stringify(section.body)}`);
+      }
+      if (section.listItems?.length) {
+        lines.push(
+          `- listItems: ${JSON.stringify(section.listItems.slice(0, 8))}`,
+        );
+      }
+      if (section.cta?.text) {
+        lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      break;
+    case 'card-grid':
+      if (section.title) {
+        lines.push(`- title: ${JSON.stringify(section.title)}`);
+      }
+      if (section.subtitle) {
+        lines.push(`- subtitle: ${JSON.stringify(section.subtitle)}`);
+      }
+      lines.push(`- render exactly ${section.cards.length} card(s)`);
+      section.cards.slice(0, 12).forEach((card, index) => {
+        if (card.heading) {
+          lines.push(
+            `- card ${index + 1} heading: ${JSON.stringify(card.heading)}`,
+          );
+        }
+        if (card.body) {
+          lines.push(`- card ${index + 1} body: ${JSON.stringify(card.body)}`);
+        }
+      });
+      break;
+    case 'tabs':
+      if (section.title) {
+        lines.push(`- title: ${JSON.stringify(section.title)}`);
+      }
+      lines.push(`- render exactly ${section.tabs.length} tab(s)`);
+      section.tabs.slice(0, 12).forEach((tab, index) => {
+        lines.push(`- tab ${index + 1} label: ${JSON.stringify(tab.label)}`);
+        if (tab.heading) {
+          lines.push(
+            `- tab ${index + 1} heading: ${JSON.stringify(tab.heading)}`,
+          );
+        }
+        if (tab.body) {
+          lines.push(`- tab ${index + 1} body: ${JSON.stringify(tab.body)}`);
+        }
+        if (tab.imageSrc) {
+          lines.push(
+            `- tab ${index + 1} imageSrc: ${JSON.stringify(tab.imageSrc)}`,
+          );
+        }
+        if (tab.cta?.text) {
+          lines.push(
+            `- tab ${index + 1} ctaText: ${JSON.stringify(tab.cta.text)}`,
+          );
+        }
+      });
+      break;
+    case 'accordion':
+      if (section.title) {
+        lines.push(`- title: ${JSON.stringify(section.title)}`);
+      }
+      lines.push(`- render exactly ${section.items.length} accordion item(s)`);
+      section.items.slice(0, 12).forEach((item, index) => {
+        lines.push(
+          `- item ${index + 1} heading: ${JSON.stringify(item.heading)}`,
+        );
+        lines.push(`- item ${index + 1} body: ${JSON.stringify(item.body)}`);
+      });
+      break;
+    case 'hero':
+    case 'cover':
+      if ('heading' in section && section.heading) {
+        lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if ('subheading' in section && section.subheading) {
+        lines.push(`- subheading: ${JSON.stringify(section.subheading)}`);
+      }
+      if ('cta' in section && section.cta?.text) {
+        lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      break;
+    default:
+      lines.push(
+        '- Preserve every heading, body, subtitle, CTA label, repeated item, and image src from the approved section JSON.',
+      );
+      break;
+  }
+
+  lines.push(
+    '- For long paragraph bodies, keep the full literal text in JSX instead of rewriting it into a shorter paraphrase.',
+  );
+  return lines.join('\n');
 }
 
 function buildSourceTrackingNoteForNodes(

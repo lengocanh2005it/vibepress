@@ -334,9 +334,11 @@ export class PreviewBuilderService {
     };
 
     const planRouteMap = new Map<string, string>();
+    const planByComponentName = new Map<string, PlanResult[number]>();
     if (plan) {
       for (const p of plan) {
         if (p.route) planRouteMap.set(p.componentName, p.route);
+        planByComponentName.set(p.componentName, p);
       }
     }
 
@@ -362,8 +364,13 @@ export class PreviewBuilderService {
     const routeEntries: PreviewRouteEntry[] = [];
 
     for (const c of primaryPageComponents) {
+      const componentPlan = planByComponentName.get(c.name);
+      const canonicalFixedPagePath =
+        this.buildFixedPageCanonicalRoute(componentPlan);
       const path =
+        canonicalFixedPagePath ??
         planRouteMap.get(c.name) ??
+        c.route ??
         FALLBACK_ROUTE_MAP[c.name] ??
         `/${c.name.toLowerCase()}`;
       if (usedPaths.has(path)) {
@@ -418,6 +425,7 @@ export class PreviewBuilderService {
     if (notFoundComponent) {
       const notFoundPath =
         planRouteMap.get(notFoundComponent.name) ??
+        notFoundComponent.route ??
         FALLBACK_ROUTE_MAP[notFoundComponent.name] ??
         '*';
       if (!usedPaths.has(notFoundPath)) {
@@ -627,13 +635,7 @@ ${fontEntries}
     );
 
     // 2. Inject Google Fonts vào index.html
-    const googleFonts = tokens.fonts
-      .map((f) => f.name)
-      .filter(
-        (name) => !name.startsWith('System') && !name.startsWith('-apple'),
-      )
-      .map((name) => name.replace(/\s+/g, '+'))
-      .filter((v, i, a) => a.indexOf(v) === i);
+    const googleFonts = this.buildGoogleFontQueryNames(tokens.fonts);
 
     if (googleFonts.length > 0) {
       const fontQuery = googleFonts
@@ -643,10 +645,12 @@ ${fontEntries}
 
       const indexPath = join(frontendDir, 'index.html');
       const indexHtml = await readFile(indexPath, 'utf-8');
-      await writeFile(
-        indexPath,
-        indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
-      );
+      if (!indexHtml.includes('fonts.googleapis.com')) {
+        await writeFile(
+          indexPath,
+          indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
+        );
+      }
     }
 
     // 3. Inject theme design tokens into index.css so all components inherit
@@ -661,14 +665,17 @@ ${fontEntries}
     if (d?.fontSize) bodyProps.push(`font-size: ${d.fontSize}`);
     if (d?.lineHeight) bodyProps.push(`line-height: ${d.lineHeight}`);
     if (bodyProps.length > 0)
-      cssLines.push(`body { ${bodyProps.join('; ')}; }`);
+      cssLines.push(`body, .wp-site-blocks { ${bodyProps.join('; ')}; }`);
+    cssLines.push(`button, input, textarea, select { font: inherit; }`);
 
     const headingProps: string[] = [];
     if (d?.headingFontFamily)
       headingProps.push(`font-family: ${d.headingFontFamily}`);
     if (d?.headingColor) headingProps.push(`color: ${d.headingColor}`);
     if (headingProps.length > 0)
-      cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
+      cssLines.push(
+        `h1, h2, h3, h4, h5, h6, .wp-site-blocks :is(h1, h2, h3, h4, h5, h6) { ${headingProps.join('; ')}; }`,
+      );
 
     if (d?.headings) {
       for (const [level, style] of Object.entries(d.headings)) {
@@ -680,7 +687,8 @@ ${fontEntries}
       }
     }
 
-    if (d?.linkColor) cssLines.push(`a { color: ${d.linkColor}; }`);
+    if (d?.linkColor)
+      cssLines.push(`a, .wp-site-blocks a { color: ${d.linkColor}; }`);
 
     if (cssLines.length > 0) {
       const cssPath = join(frontendDir, 'src', 'index.css');
@@ -699,6 +707,51 @@ ${fontEntries}
 
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
+  }
+
+  private buildGoogleFontQueryNames(fonts: ThemeTokens['fonts']): string[] {
+    return fonts
+      .map((font) => this.extractGoogleFontName(font))
+      .filter((name): name is string => Boolean(name))
+      .map((name) => name.replace(/\s+/g, '+'))
+      .filter((value, index, array) => array.indexOf(value) === index);
+  }
+
+  private extractGoogleFontName(
+    font: ThemeTokens['fonts'][number],
+  ): string | undefined {
+    const fallbackName = font.family.split(',')[0] ?? '';
+    const name = (font.name || fallbackName).trim().replace(/^['"]|['"]$/g, '');
+    if (!name) return undefined;
+
+    const normalized = name.toLowerCase();
+    const genericFamilies = new Set([
+      'serif',
+      'sans-serif',
+      'monospace',
+      'cursive',
+      'fantasy',
+      'system-ui',
+      'emoji',
+      'math',
+      'fangsong',
+      'inherit',
+      'initial',
+      'unset',
+    ]);
+
+    if (
+      normalized.startsWith('system') ||
+      normalized.startsWith('-apple') ||
+      normalized.includes('var(') ||
+      normalized.includes(',') ||
+      genericFamilies.has(normalized) ||
+      /[^a-z0-9 .&+-]/i.test(name)
+    ) {
+      return undefined;
+    }
+
+    return name;
   }
 
   private async applyWordPressCustomCss(
@@ -2056,5 +2109,16 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
+  }
+
+  private buildFixedPageCanonicalRoute(
+    componentPlan?: PlanResult[number],
+  ): string | null {
+    if (!componentPlan) return null;
+    if (componentPlan.type !== 'page') return null;
+    if (!componentPlan.isDetail) return null;
+    if (!componentPlan.fixedSlug?.trim()) return null;
+    if (!componentPlan.dataNeeds.includes('page-detail')) return null;
+    return `/page/${componentPlan.fixedSlug.trim()}`;
   }
 }

@@ -211,6 +211,7 @@ export class GeneratedCodeReviewService {
     const route = contract?.route ?? component.route ?? null;
     const type = contract?.type ?? component.type ?? 'page';
     const isDetail = contract?.isDetail ?? component.isDetail ?? false;
+    const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const description = contract?.description ?? '(none)';
     const visualSectionTypes =
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
@@ -250,6 +251,7 @@ Rules:
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
+- If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
@@ -260,6 +262,7 @@ Approved contract:
 - type: ${type}
 - route: ${route ?? 'null'}
 - isDetail: ${String(isDetail)}
+- fixedSlug: ${fixedSlug ?? 'null'}
 - dataNeeds: ${dataNeeds.length > 0 ? dataNeeds.join(', ') : '(none)'}
 - description: ${description}
 - approved visual sections: ${visualSections}
@@ -268,7 +271,13 @@ ${this.buildVisualSectionDetailLines(contract)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
-${this.buildApiContractLines(dataNeeds, isDetail, visualSectionTypes, isArchive)}
+${this.buildApiContractLines(
+  dataNeeds,
+  isDetail,
+  visualSectionTypes,
+  isArchive,
+  fixedSlug,
+)}
 
 Generated TSX:
 \`\`\`tsx
@@ -281,6 +290,7 @@ ${component.code}
     isDetail: boolean,
     visualSectionTypes: string[],
     isArchive = false,
+    fixedSlug?: string | null,
   ): string {
     const normalized = new Set(
       dataNeeds.map((value) => {
@@ -302,10 +312,20 @@ ${component.code}
     if (normalized.has('posts') || normalized.has('authorDetail'))
       lines.push('- /api/posts');
     if (normalized.has('pages')) lines.push('- /api/pages');
-    if (normalized.has('post-detail'))
-      lines.push('- /api/posts/${slug} only for post-detail routes');
-    if (normalized.has('page-detail'))
-      lines.push('- /api/pages/${slug} only for page-detail routes');
+    if (normalized.has('post-detail')) {
+      lines.push(
+        fixedSlug
+          ? `- /api/posts/${fixedSlug} only for this fixed-bound post-detail route`
+          : '- /api/posts/${slug} only for post-detail routes',
+      );
+    }
+    if (normalized.has('page-detail')) {
+      lines.push(
+        fixedSlug
+          ? `- /api/pages/${fixedSlug} only for this fixed-bound page-detail route`
+          : '- /api/pages/${slug} only for page-detail routes',
+      );
+    }
     if (normalized.has('categoryDetail') || isArchive) {
       lines.push('- /api/taxonomies/category — list all category terms');
       lines.push(
@@ -388,6 +408,15 @@ ${component.code}
         if (section.type === 'media-text') {
           return `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
+        if (section.type === 'modal') {
+          return `- modal trigger="${section.triggerText ?? ''}" heading="${section.heading ?? ''}"`;
+        }
+        if (section.type === 'tabs') {
+          return `- tabs title="${section.title ?? ''}" items=${section.tabs.length}`;
+        }
+        if (section.type === 'accordion') {
+          return `- accordion title="${section.title ?? ''}" items=${section.items.length}`;
+        }
         if (section.type === 'post-list') {
           return `- post-list layout=${section.layout}`;
         }
@@ -422,6 +451,10 @@ ${component.code}
     const sections = contract?.visualPlan?.sections ?? [];
     const normalizedCode = this.normalizeForTextMatch(component.code);
     const isPageComponent = (contract?.type ?? component.type) === 'page';
+    const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
+    const normalizedDataNeeds = new Set(
+      contract?.dataNeeds ?? component.dataNeeds ?? [],
+    );
 
     if (
       normalizedCode.includes('/page/page/') ||
@@ -478,6 +511,39 @@ ${component.code}
         issues.push({
           severity: 'high',
           message: `Component contains invented trailing auxiliary section heading(s) not justified by the approved contract/source: ${inventedAuxiliaryHeadings.join(' | ')}. Auxiliary/footer/sidebar-like page sections are invalid unless source-backed.`,
+        });
+      }
+    }
+
+    if (fixedSlug) {
+      if (/\buseParams\s*(?:<[^>]+>)?\s*\(/.test(component.code)) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still calls useParams(). Fixed-bound detail components must not read slug from the route.`,
+        });
+      }
+
+      if (
+        normalizedDataNeeds.has('pageDetail') &&
+        /\/api\/pages\/\$\{slug\}|\/api\/pages\/['"`]\s*\+\s*slug/.test(
+          component.code,
+        )
+      ) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still fetches dynamic page detail via \`/api/pages/\${slug}\` instead of \`/api/pages/${fixedSlug}\`.`,
+        });
+      }
+
+      if (
+        normalizedDataNeeds.has('postDetail') &&
+        /\/api\/posts\/\$\{slug\}|\/api\/posts\/['"`]\s*\+\s*slug/.test(
+          component.code,
+        )
+      ) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still fetches dynamic post detail via \`/api/posts/\${slug}\` instead of \`/api/posts/${fixedSlug}\`.`,
         });
       }
     }

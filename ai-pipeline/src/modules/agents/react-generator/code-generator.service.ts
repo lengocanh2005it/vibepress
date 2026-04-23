@@ -20,6 +20,9 @@ import type {
   CommentsSection,
   SearchSection,
   SidebarSection,
+  ModalSection,
+  TabsSection,
+  AccordionSection,
   CarouselSection,
   DataNeed,
 } from './visual-plan.schema.js';
@@ -390,7 +393,9 @@ export class CodeGeneratorService {
     lines.push('');
     lines.push('  return (');
     const rootClass =
-      renderState.componentKind === 'header' ? 'w-full relative' : 'w-full';
+      renderState.componentKind === 'header'
+        ? 'wp-site-blocks w-full relative'
+        : 'wp-site-blocks w-full';
     lines.push(`    <${rootTag} className="${rootClass}">`);
     if (fragment) lines.push(fragment);
     lines.push(`    </${rootTag}>`);
@@ -495,6 +500,7 @@ export class CodeGeneratorService {
   }
 
   private needsParams(plan: ComponentVisualPlan): boolean {
+    if (plan.pageBinding?.slug) return false;
     return (
       plan.dataNeeds.includes('postDetail') ||
       plan.dataNeeds.includes('pageDetail')
@@ -509,6 +515,16 @@ export class CodeGeneratorService {
 
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
+    const fixedSlug = plan.pageBinding?.slug;
+    const hasModalSections = plan.sections.some(
+      (section) => section.type === 'modal',
+    );
+    const hasTabsSections = plan.sections.some(
+      (section) => section.type === 'tabs',
+    );
+    const hasAccordionSections = plan.sections.some(
+      (section) => section.type === 'accordion',
+    );
     const commentsSection =
       plan.sections.find(
         (section): section is CommentsSection => section.type === 'comments',
@@ -555,12 +571,35 @@ export class CodeGeneratorService {
       lines.push(
         `  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);`,
       );
+    if (hasModalSections) {
+      lines.push(
+        `  const [openModals, setOpenModals] = useState<Record<string, boolean>>({});`,
+      );
+    }
+    if (hasTabsSections) {
+      lines.push(
+        `  const [activeTabs, setActiveTabs] = useState<Record<string, number>>({});`,
+      );
+    }
+    if (hasAccordionSections) {
+      lines.push(
+        `  const [openAccordions, setOpenAccordions] = useState<Record<string, number[]>>({});`,
+      );
+    }
     if (dataNeeds.includes('postDetail')) {
       lines.push(`  const [item, setItem] = useState<Post | null>(null);`);
-      lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+      if (fixedSlug) {
+        lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
+      } else {
+        lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+      }
     } else if (dataNeeds.includes('pageDetail')) {
       lines.push(`  const [item, setItem] = useState<Page | null>(null);`);
-      lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+      if (fixedSlug) {
+        lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
+      } else {
+        lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+      }
     }
     if (needsComments) {
       lines.push(`  const [comments, setComments] = useState<Comment[]>([]);`);
@@ -910,14 +949,11 @@ export class CodeGeneratorService {
   // ── Component body ────────────────────────────────────────────────────────
 
   private buildBody(plan: ComponentVisualPlan, ctx: RenderCtx): string {
-    const { componentName, palette, sections } = plan;
+    const { componentName, palette } = plan;
     const sectionJsx = this.buildSections(plan, ctx);
-    const rootStyle = this.buildStyleAttr({
-      fontFamily: ctx.t.bodyFamily,
-    });
 
     return `  return (
-    <div className="bg-[${palette.background}] text-[${palette.text}] flex flex-col ${ctx.l.blockGap}"${rootStyle}>
+    <div className="wp-site-blocks bg-[${palette.background}] text-[${palette.text}] flex flex-col ${ctx.l.blockGap}">
 ${sectionJsx}
     </div>
   );
@@ -931,15 +967,12 @@ export default ${componentName};`;
     ctx: RenderCtx,
   ): string {
     const { componentName, palette, sections } = plan;
-    const rootStyle = this.buildStyleAttr({
-      fontFamily: ctx.t.bodyFamily,
-    });
     const placeholders = sections
       .map((_, index) => `      ${this.buildSectionAssemblyPlaceholder(index)}`)
       .join('\n\n');
 
     return `  return (
-    <div className="bg-[${palette.background}] text-[${palette.text}] flex flex-col ${ctx.l.blockGap}"${rootStyle}>
+    <div className="wp-site-blocks bg-[${palette.background}] text-[${palette.text}] flex flex-col ${ctx.l.blockGap}">
 ${placeholders}
     </div>
   );
@@ -968,7 +1001,8 @@ export default ${componentName};`;
       (s) => s.type === 'page-content' || s.type === 'post-content',
     );
 
-    for (const section of plan.sections) {
+    for (let index = 0; index < plan.sections.length; index++) {
+      const section = plan.sections[index];
       if (sidebarSection && section === sidebarSection && mainContentSection) {
         continue;
       }
@@ -988,7 +1022,7 @@ export default ${componentName};`;
         );
         continue;
       }
-      parts.push(this.renderSection(section, ctx, plan.componentName));
+      parts.push(this.renderSection(section, ctx, plan.componentName, index));
     }
 
     return parts.join('\n\n');
@@ -1000,6 +1034,7 @@ export default ${componentName};`;
     section: SectionPlan,
     ctx: RenderCtx,
     componentName: string,
+    sectionIndex: number,
   ): string {
     const bg = section.background ?? ctx.p.background;
     const tc = section.textColor ?? ctx.p.text;
@@ -1051,6 +1086,15 @@ export default ${componentName};`;
         break;
       case 'sidebar':
         markup = this.renderSidebar(section, ctx, py);
+        break;
+      case 'modal':
+        markup = this.renderModal(section, ctx, bg, tc, py, sectionIndex);
+        break;
+      case 'tabs':
+        markup = this.renderTabs(section, ctx, bg, tc, py, sectionIndex);
+        break;
+      case 'accordion':
+        markup = this.renderAccordion(section, ctx, bg, tc, py, sectionIndex);
         break;
       case 'carousel':
         markup = this.renderCarousel(section, ctx, bg, tc, py);
@@ -1214,6 +1258,7 @@ export default ${componentName};`;
       style,
       { padding: ctx.l.buttonPadding },
       true,
+      ctx,
     );
   }
 
@@ -1264,6 +1309,7 @@ export default ${componentName};`;
     style?: BlockStyleToken,
     base: Record<string, string | number | undefined> = {},
     preferStyle = false,
+    ctx?: RenderCtx,
   ): string {
     const styleMap: Record<string, string | number | undefined> = {
       ...base,
@@ -1280,8 +1326,13 @@ export default ${componentName};`;
     }
     if (style?.typography?.fontSize)
       styleMap.fontSize = style.typography.fontSize;
-    if (style?.typography?.fontFamily)
-      styleMap.fontFamily = style.typography.fontFamily;
+    if (style?.typography?.fontFamily) {
+      const fontFamily = this.normalizeRedundantFontFamily(
+        style.typography.fontFamily,
+        ctx,
+      );
+      if (fontFamily) styleMap.fontFamily = fontFamily;
+    }
     if (style?.typography?.fontWeight)
       styleMap.fontWeight = style.typography.fontWeight;
     if (style?.typography?.letterSpacing)
@@ -1301,19 +1352,48 @@ export default ${componentName};`;
   }
 
   private buildTypographyStyleAttr(
+    ctx: RenderCtx,
     ...styles: Array<BlockStyleToken['typography'] | undefined>
   ): string {
     const styleMap: Record<string, string | number | undefined> = {};
     for (const style of styles) {
       if (!style) continue;
       if (style.fontSize) styleMap.fontSize = style.fontSize;
-      if (style.fontFamily) styleMap.fontFamily = style.fontFamily;
+      if (style.fontFamily) {
+        const fontFamily = this.normalizeRedundantFontFamily(
+          style.fontFamily,
+          ctx,
+        );
+        if (fontFamily) styleMap.fontFamily = fontFamily;
+      }
       if (style.fontWeight) styleMap.fontWeight = style.fontWeight;
       if (style.letterSpacing) styleMap.letterSpacing = style.letterSpacing;
       if (style.lineHeight) styleMap.lineHeight = style.lineHeight;
       if (style.textTransform) styleMap.textTransform = style.textTransform;
     }
     return this.buildStyleAttr(styleMap);
+  }
+
+  private normalizeRedundantFontFamily(
+    value: string | undefined,
+    ctx?: RenderCtx,
+  ): string | undefined {
+    const trimmed = value?.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'inherit') return undefined;
+    if (!ctx) return trimmed;
+    const normalized = this.normalizeFontFamilyKey(trimmed);
+    const defaultFonts = [ctx.t.bodyFamily, ctx.t.headingFamily]
+      .map((font) => this.normalizeFontFamilyKey(font))
+      .filter(Boolean);
+    return defaultFonts.includes(normalized) ? undefined : trimmed;
+  }
+
+  private normalizeFontFamilyKey(value: string | undefined): string {
+    return (value ?? '')
+      .replace(/["']/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
   }
 
   private responsiveGridColumnsClass(
@@ -1345,6 +1425,7 @@ export default ${componentName};`;
       navStyle,
       { ...this.extractSectionStyleBase(s) },
       true,
+      ctx,
     );
     const buttonStyle = this.buttonStyleAttr(ctx);
     const cta = s.cta
@@ -1404,10 +1485,12 @@ export default ${componentName};`;
     const { p, t, l } = ctx;
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const headingStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'heading')?.typography,
       s.headingStyle,
     );
     const subheadingStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'paragraph')?.typography,
       s.subheadingStyle,
     );
@@ -1421,8 +1504,8 @@ export default ${componentName};`;
       : '';
     const image = s.image
       ? s.image.position === 'below'
-        ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />`
-        : `\n          <div className="flex-1"><img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`
+        ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
+        : `\n          <div className="flex-1"><img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`
       : '';
 
     const isCenter = s.layout === 'centered';
@@ -1460,10 +1543,12 @@ export default ${componentName};`;
     const tc = s.textColor ?? '#ffffff';
     const imageRadius = this.imageRadiusClass(ctx);
     const headingStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'heading')?.typography,
       s.headingStyle,
     );
     const subheadingStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'paragraph')?.typography,
       s.subheadingStyle,
     );
@@ -1518,8 +1603,8 @@ export default ${componentName};`;
       : 'flex flex-col divide-y divide-black/10';
 
     const postCard = isGrid
-      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding })}>
-              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} />}` : ''}
+      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding }, false, ctx)}>
+              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}` : ''}
               <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}">{post.title}</Link>
               ${s.showExcerpt ? `<p className="text-sm text-[${p.textMuted}]">{post.excerpt}</p>` : ''}
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
@@ -1601,6 +1686,7 @@ ${postCard}
       cardStylePreset,
       { padding: l.cardPadding },
       true,
+      ctx,
     );
     const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
     const cards = s.cards
@@ -1641,10 +1727,12 @@ ${cards}
       'rounded-[24px]';
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const headingStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'heading')?.typography,
       s.headingStyle,
     );
     const bodyStyle = this.buildTypographyStyleAttr(
+      ctx,
       this.pickBlockStyle(ctx, 'paragraph')?.typography,
       s.bodyStyle,
     );
@@ -1654,7 +1742,7 @@ ${cards}
         : 'flex flex-col md:flex-row gap-8 items-center';
     const imgFirst = s.imagePosition === 'left';
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
-    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle)} /></div>`;
+    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
             ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
@@ -1715,6 +1803,7 @@ ${cards}
       cardStylePreset,
       { padding: l.cardPadding, gap: s.gapStyle },
       true,
+      ctx,
     );
     const inner =
       s.layout === 'card'
@@ -1744,6 +1833,7 @@ ${cards}
       footerStyle,
       { ...this.extractSectionStyleBase(s) },
       true,
+      ctx,
     );
 
     const menuCols = s.menuColumns
@@ -2079,6 +2169,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       cardStylePreset,
       { padding: l.cardPadding, gap: s.gapStyle },
       true,
+      ctx,
     );
     const titleBlock = s.title
       ? `            <h3 className="${t.h3} font-normal text-[${p.text}]">${s.title}</h3>\n`
@@ -2684,6 +2775,231 @@ ${indent}</ul>`;
     const normalized = value.trim();
     if (!normalized) return undefined;
     return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+  }
+
+  private buildInteractiveSectionStateKey(
+    section: SectionPlan,
+    sectionIndex: number,
+  ): string {
+    return (
+      section.sectionKey ??
+      section.sourceRef?.sourceNodeId ??
+      `${section.type}-${sectionIndex + 1}`
+    );
+  }
+
+  private renderModal(
+    s: ModalSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+    sectionIndex: number,
+  ): string {
+    const { t } = ctx;
+    const stateKey = JSON.stringify(
+      this.buildInteractiveSectionStateKey(s, sectionIndex),
+    );
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const gapStyle = this.buildSectionGapStyleAttr(s);
+    const triggerText = s.triggerText || s.heading || 'Open';
+    const headingPart = s.heading
+      ? `\n                  <h3 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h3>`
+      : '';
+    const bodyPart = s.body
+      ? `\n                  <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      : '';
+    const ctaPart = s.cta
+      ? `\n                  <a href={${JSON.stringify(s.cta.link)}} className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                    {${JSON.stringify(s.cta.text)}}\n                  </a>`
+      : '';
+    const imagePart = s.imageSrc
+      ? `\n                <div>\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="h-auto w-full rounded-2xl object-cover" />\n                </div>`
+      : '';
+    const contentGridClass =
+      s.layout === 'split' && s.imageSrc
+        ? 'grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)] lg:items-center'
+        : 'flex flex-col gap-6';
+
+    return `
+    <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
+      <div className="${ctx.l.containerClass} px-4 sm:px-6">
+        <div className="flex flex-col items-start gap-4"${gapStyle}>
+          <button
+            type="button"
+            onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: true }))}
+            className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90"
+            style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}
+          >
+            {${JSON.stringify(triggerText)}}
+          </button>
+          {openModals[${stateKey}] ? (
+            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 px-4 py-8">
+              <div className="relative max-h-[90vh] w-full max-w-[960px] overflow-y-auto rounded-[28px] bg-white p-6 shadow-2xl sm:p-8">
+                <button
+                  type="button"
+                  onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }))}
+                  className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 text-xl leading-none transition-opacity hover:opacity-75"
+                  aria-label="Close modal"
+                >
+                  ×
+                </button>
+                <div className="${contentGridClass}">
+                  <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
+                  </div>${imagePart}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </section>`;
+  }
+
+  private renderTabs(
+    s: TabsSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+    sectionIndex: number,
+  ): string {
+    const { t } = ctx;
+    const stateKey = JSON.stringify(
+      this.buildInteractiveSectionStateKey(s, sectionIndex),
+    );
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const gapStyle = this.buildSectionGapStyleAttr(s);
+    const titlePart = s.title
+      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
+      : '';
+    const tabButtons = s.tabs
+      .map(
+        (tab, index) => `            <button
+              key=${index}
+              type="button"
+              onClick={() => setActiveTabs((prev) => ({ ...prev, [${stateKey}]: ${index} }))}
+              className={(activeTabs[${stateKey}] ?? 0) === ${index}
+                ? 'border-b-2 px-0 py-3 text-left font-semibold'
+                : 'border-b-2 border-transparent px-0 py-3 text-left opacity-70 transition-opacity hover:opacity-100'}
+              style={{ color: '${tc}', borderColor: (activeTabs[${stateKey}] ?? 0) === ${index} ? '${ctx.p.accent}' : 'transparent' }}
+            >
+              {${JSON.stringify(tab.label)}}
+            </button>`,
+      )
+      .join('\n');
+    const panels = s.tabs
+      .map((tab, index) => {
+        const headingPart = tab.heading
+          ? `\n                <h3 className="${t.h3} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(tab.heading)}}</h3>`
+          : '';
+        const bodyPart = tab.body
+          ? `\n                <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          : '';
+        const imagePart = tab.imageSrc
+          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="h-auto w-full rounded-xl object-cover" />`
+          : '';
+        const ctaPart = tab.cta
+          ? `\n                <a href={${JSON.stringify(tab.cta.link)}} className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                  {${JSON.stringify(tab.cta.text)}}\n                </a>`
+          : '';
+        const panelGridClass =
+          tab.imageSrc && (tab.heading || tab.body || tab.cta)
+            ? 'grid gap-8 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] lg:items-center'
+            : 'flex flex-col gap-5';
+        return `            <div
+              key=${index}
+              className={(activeTabs[${stateKey}] ?? 0) === ${index} ? 'block' : 'hidden'}
+            >
+              <div className="${panelGridClass} rounded-[24px] border border-black/10 bg-white/60 p-6 sm:p-8">
+                <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
+                </div>${imagePart ? `\n                <div>${imagePart}\n                </div>` : ''}
+              </div>
+            </div>`;
+      })
+      .join('\n');
+
+    return `
+    <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
+      <div className="${ctx.l.containerClass} px-4 sm:px-6">
+        <div className="flex flex-col gap-6"${gapStyle}>${titlePart}
+          <div className="flex flex-wrap items-end gap-6 border-b border-black/10">
+${tabButtons}
+          </div>
+          <div className="flex flex-col gap-4">
+${panels}
+          </div>
+        </div>
+      </div>
+    </section>`;
+  }
+
+  private renderAccordion(
+    s: AccordionSection,
+    ctx: RenderCtx,
+    bg: string,
+    tc: string,
+    py: string,
+    sectionIndex: number,
+  ): string {
+    const { t } = ctx;
+    const stateKey = JSON.stringify(
+      this.buildInteractiveSectionStateKey(s, sectionIndex),
+    );
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const gapStyle = this.buildSectionGapStyleAttr(s);
+    const titlePart = s.title
+      ? `\n          <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.title)}}</h2>`
+      : '';
+    const items = s.items
+      .map(
+        (
+          item,
+          index,
+        ) => `          <div key=${index} className="overflow-hidden rounded-[20px] border border-black/10 bg-white/60">
+            <button
+              type="button"
+              onClick={() =>
+                setOpenAccordions((prev) => {
+                  const current = prev[${stateKey}] ?? [0];
+                  const isOpen = current.includes(${index});
+                  if (${s.allowMultiple ? 'true' : 'false'}) {
+                    return {
+                      ...prev,
+                      [${stateKey}]: isOpen
+                        ? current.filter((value) => value !== ${index})
+                        : [...current, ${index}],
+                    };
+                  }
+                  return {
+                    ...prev,
+                    [${stateKey}]: isOpen ? [] : [${index}],
+                  };
+                })
+              }
+              className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+              style={{ color: '${tc}' }}
+            >
+              <span className="${t.h3} font-semibold">{${JSON.stringify(item.heading)}}</span>
+              <span className="text-2xl leading-none">
+                {(openAccordions[${stateKey}] ?? [0]).includes(${index}) ? '−' : '+'}
+              </span>
+            </button>
+            {(openAccordions[${stateKey}] ?? [0]).includes(${index}) ? (
+              <div className="border-t border-black/10 px-5 py-5">
+                <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
+              </div>
+            ) : null}
+          </div>`,
+      )
+      .join('\n');
+
+    return `
+    <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
+      <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6">
+        <div className="flex flex-col gap-4"${gapStyle}>${titlePart}
+${items}
+        </div>
+      </div>
+    </section>`;
   }
 
   private renderCarousel(

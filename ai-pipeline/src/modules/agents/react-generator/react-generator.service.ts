@@ -57,6 +57,7 @@ export interface GeneratedComponent {
   code: string;
   route?: string | null;
   isDetail?: boolean;
+  fixedSlug?: string;
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   // When true, preview-builder must NOT create a route for this component.
@@ -170,14 +171,36 @@ export class ReactGeneratorService {
       );
     }
 
-    const plannedTemplateNames = plan
-      ? new Set(plan.map((item) => item.templateName))
-      : null;
-    const scopedTemplates = plannedTemplateNames
-      ? templates.filter((template) => plannedTemplateNames.has(template.name))
-      : templates;
+    const templateByName = new Map(
+      templates.map((template) => [template.name, template] as const),
+    );
+    const generationTargets = plan
+      ? plan
+          .map((componentPlan) => {
+            const template = templateByName.get(componentPlan.templateName);
+            if (!template) return null;
+            return {
+              template,
+              componentPlan,
+              componentName: componentPlan.componentName,
+            };
+          })
+          .filter(
+            (
+              target,
+            ): target is {
+              template: { name: string; html?: string; markup?: string };
+              componentPlan: PlanResult[number];
+              componentName: string;
+            } => !!target,
+          )
+      : templates.map((template) => ({
+          template,
+          componentPlan: undefined,
+          componentName: this.toComponentName(template.name),
+        }));
 
-    const total = scopedTemplates.length;
+    const total = generationTargets.length;
     const components: GeneratedComponent[] = [];
     const hasSharedHeader = !!plan?.some(
       (item) => item.type === 'partial' && /^header/i.test(item.componentName),
@@ -195,7 +218,7 @@ export class ReactGeneratorService {
 
     for (
       let batchStart = 0;
-      batchStart < scopedTemplates.length;
+      batchStart < generationTargets.length;
       batchStart += concurrency
     ) {
       if (batchStart > 0) {
@@ -203,19 +226,20 @@ export class ReactGeneratorService {
         await new Promise((res) => setTimeout(res, delay));
       }
 
-      const batch = scopedTemplates.slice(batchStart, batchStart + concurrency);
+      const batch = generationTargets.slice(
+        batchStart,
+        batchStart + concurrency,
+      );
       const batchResults = await Promise.all(
-        batch.map(async (tpl, batchIdx) => {
+        batch.map(async (target, batchIdx) => {
           const i = batchStart + batchIdx;
-          const componentName = this.toComponentName(tpl.name);
-          const rawSource = (tpl.markup ?? tpl.html ?? '') as string;
+          const componentName = target.componentName;
+          const rawSource = (target.template.markup ??
+            target.template.html ??
+            '') as string;
           const counter = `[${i + 1}/${total}]`;
-          const rawComponentPlan = plan?.find(
-            (p) =>
-              p.templateName === tpl.name || p.componentName === componentName,
-          );
           const componentPlan = this.stripSharedLayoutSectionsFromPlan(
-            rawComponentPlan,
+            target.componentPlan,
             hasSharedHeader,
             hasSharedFooter,
           );
@@ -720,11 +744,12 @@ ${renders}
       ...component,
       route: componentPlan?.route ?? component.route,
       isDetail: componentPlan?.isDetail ?? component.isDetail,
+      fixedSlug: componentPlan?.fixedSlug ?? component.fixedSlug,
       dataNeeds: componentPlan?.dataNeeds
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
-      visualPlan: componentPlan?.visualPlan ?? component.visualPlan,
+      visualPlan: component.visualPlan ?? componentPlan?.visualPlan,
       ...overrides,
     };
   }
