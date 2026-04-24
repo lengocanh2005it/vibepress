@@ -103,7 +103,7 @@ async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
     // PM2 start/restart
     await ssh.execCommand(`pm2 delete "${siteDir}" 2>/dev/null || true`);
     const pm2 = await ssh.execCommand(
-      `cd ${remoteDir} && PORT=${port} pm2 start npm --name "${siteDir}" -- start && pm2 save`,
+      `cd ${remoteDir} && API_PORT=${port} pm2 start npm --name "${siteDir}" -- start && pm2 save`,
     );
     if (pm2.code !== 0) throw new Error(`PM2 failed: ${pm2.stderr}`);
     console.log(`[VPS-Backend] PM2 started — port ${port}`);
