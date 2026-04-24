@@ -33,6 +33,9 @@ export interface WpNode {
   textAlign?: string; // from params.textAlign
   justifyContent?: string; // normalized horizontal layout intent from params.layout.justifyContent / rendered classes
   align?: string; // "full" | "wide" | "center" — section width hint
+  menuOrientation?: 'horizontal' | 'vertical'; // navigation layout orientation
+  overlayMenu?: 'always' | 'mobile' | 'never'; // core/navigation responsive overlay intent
+  isResponsive?: boolean; // core/navigation responsive toggle enabled
   fontFamily?: string; // slug from params.fontFamily
   // Inline typography from params.style.typography
   typography?: {
@@ -84,7 +87,7 @@ export function wpJsonToString(nodes: WpNode[]): string {
   return JSON.stringify(stripParams(nodes));
 }
 
-const USEFUL_PARAM_KEYS = new Set([
+const BASE_USEFUL_PARAM_KEYS = new Set([
   'align', // "full" | "wide" | "center" — section width
   'className', // preserve Gutenberg/custom classes for precise interaction bridge
   'layout', // { type: "flex", justifyContent, orientation, ... }
@@ -93,16 +96,21 @@ const USEFUL_PARAM_KEYS = new Set([
   'dimRatio', // cover block overlay opacity
   'contentPosition', // cover block content position
   'isStackedOnMobile', // columns stacking behaviour
+  'overlayMenu', // navigation overlay mode
+  'isResponsive', // navigation responsive collapse behaviour
+  'openSubmenusOnClick', // navigation interaction hint
   'verticalAlignment', // column vertical align
   'gradient', // gradient background slug
   'metadata', // block metadata — carries { name: "Testimonial" } labels used for section detection
 ]);
 
 function pruneParams(
+  blockName: string,
   params: Record<string, any>,
 ): Record<string, any> | undefined {
+  const allowedKeys = getUsefulParamKeysForBlock(blockName);
   const pruned = Object.fromEntries(
-    Object.entries(params).filter(([k]) => USEFUL_PARAM_KEYS.has(k)),
+    Object.entries(params).filter(([k]) => allowedKeys.has(k)),
   );
   return Object.keys(pruned).length > 0 ? pruned : undefined;
 }
@@ -110,9 +118,61 @@ function pruneParams(
 function stripParams(nodes: WpNode[]): WpNode[] {
   return nodes.map(({ params, children, ...rest }) => ({
     ...rest,
-    ...(params ? { params: pruneParams(params) } : {}),
+    ...(params ? { params: pruneParams(rest.block, params) } : {}),
     ...(children ? { children: stripParams(children) } : {}),
   }));
+}
+
+function getUsefulParamKeysForBlock(blockName: string): Set<string> {
+  const keys = new Set(BASE_USEFUL_PARAM_KEYS);
+  if (
+    [
+      'uagb/slider',
+      'uagb/modal',
+      'uagb/tabs',
+      'uagb/faq',
+      'uagb/tabs-child',
+      'uagb/faq-child',
+    ].includes(blockName)
+  ) {
+    for (const key of [
+      'autoplay',
+      'autoplaySpeed',
+      'infiniteLoop',
+      'transitionEffect',
+      'transitionSpeed',
+      'displayDots',
+      'displayArrows',
+      'pauseOn',
+      'verticalMode',
+      'btnText',
+      'triggerText',
+      'buttonText',
+      'modalTitle',
+      'modalText',
+      'modalWidth',
+      'modalWidthType',
+      'modalHeight',
+      'modalHeightType',
+      'overlayColor',
+      'overlayclick',
+      'escpress',
+      'closeIconPosition',
+      'tabActive',
+      'tabActiveFrontend',
+      'tabsStyleD',
+      'tabAlign',
+      'tabTitle',
+      'inactiveOtherItems',
+      'expandFirstItem',
+      'enableToggle',
+      'allowMultipleOpen',
+      'multiOpen',
+    ]) {
+      keys.add(key);
+    }
+  }
+  return keys;
 }
 
 // ----------------------d--------------------------------------------------
@@ -182,6 +242,32 @@ function normalizeHorizontalAlign(
   if (/(^|[\s:-])center(ed)?($|[\s:-])/.test(normalized)) return 'center';
   if (/(^|[\s:-])right($|[\s:-])/.test(normalized)) return 'right';
   if (/(^|[\s:-])left($|[\s:-])/.test(normalized)) return 'left';
+  return undefined;
+}
+
+function normalizeOrientation(
+  value: unknown,
+): 'horizontal' | 'vertical' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'horizontal' || normalized === 'vertical') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function normalizeOverlayMenu(
+  value: unknown,
+): 'always' | 'mobile' | 'never' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'always' ||
+    normalized === 'mobile' ||
+    normalized === 'never'
+  ) {
+    return normalized;
+  }
   return undefined;
 }
 
@@ -255,7 +341,9 @@ function extractJustifyContentFromStyle(
   value: unknown,
 ): 'left' | 'center' | 'right' | undefined {
   if (typeof value !== 'string') return undefined;
-  const match = value.match(/justify-content\s*:\s*(left|center|right|flex-start|flex-end)/i);
+  const match = value.match(
+    /justify-content\s*:\s*(left|center|right|flex-start|flex-end)/i,
+  );
   if (!match?.[1]) return undefined;
   if (/flex-start/i.test(match[1])) return 'left';
   if (/flex-end/i.test(match[1])) return 'right';
@@ -445,6 +533,9 @@ function parseBlocks(markup: string): WpNode[] {
           compact({
             block: blockName,
             params,
+            ...(blockName === 'site-logo' && params?.width
+              ? { width: Number(params.width) }
+              : {}),
           }),
         );
       }
@@ -484,6 +575,13 @@ function parseBlocks(markup: string): WpNode[] {
       node.justifyContent ??
       extractJustifyContentFromMarkup(innerMarkup);
     if (justifyContent) node.justifyContent = justifyContent;
+    const menuOrientation = normalizeOrientation(params?.layout?.orientation);
+    if (menuOrientation) node.menuOrientation = menuOrientation;
+    const overlayMenu = normalizeOverlayMenu(params?.overlayMenu);
+    if (overlayMenu) node.overlayMenu = overlayMenu;
+    if (typeof params?.isResponsive === 'boolean') {
+      node.isResponsive = params.isResponsive as boolean;
+    }
     // Lift color hints from params to top-level fields for AI visibility
     if (params?.backgroundColor)
       node.bgColor = params.backgroundColor as string;
@@ -496,7 +594,9 @@ function parseBlocks(markup: string): WpNode[] {
     const borderRadius = params?.style?.border?.radius;
     if (borderRadius) node.borderRadius = borderRadius as string;
     // Lift gap from params.style.spacing.blockGap or params.gap
-    const gap = normalizeGapValue(params?.style?.spacing?.blockGap ?? params?.gap);
+    const gap = normalizeGapValue(
+      params?.style?.spacing?.blockGap ?? params?.gap,
+    );
     if (gap) node.gap = gap;
     // Lift padding from params.style.spacing.padding
     const pad = params?.style?.spacing?.padding;
@@ -648,9 +748,10 @@ function buildNode(
     const stripped = innerMarkup
       .replace(/\s+class="[^"]*"/g, '')
       .replace(/\s+style="[^"]*"/g, '');
-    const titleMatch = stripped.match(
-      /<h[1-6][^>]*class="[^"]*uagb-ifb-title[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/i,
-    ) ?? stripped.match(/<h([1-6])[^>]*>([\s\S]*?)<\/h[1-6]>/i);
+    const titleMatch =
+      stripped.match(
+        /<h[1-6][^>]*class="[^"]*uagb-ifb-title[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/i,
+      ) ?? stripped.match(/<h([1-6])[^>]*>([\s\S]*?)<\/h[1-6]>/i);
     const titleText = titleMatch
       ? stripTags(titleMatch[titleMatch.length - 1])
       : undefined;
@@ -658,9 +759,10 @@ function buildNode(
       /<p[^>]*class="[^"]*uagb-ifb-desc[^"]*"[^>]*>([\s\S]*?)<\/p>/i,
     );
     const descText = descMatch ? stripTags(descMatch[1]) : undefined;
-    const ctaMatch = innerMarkup.match(
-      /<a[^>]*href="([^"]*)"[^>]*>[\s\S]*?<span[^>]*class="[^"]*uagb-inline-editing[^"]*"[^>]*>([\s\S]*?)<\/span>/i,
-    ) ?? innerMarkup.match(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+    const ctaMatch =
+      innerMarkup.match(
+        /<a[^>]*href="([^"]*)"[^>]*>[\s\S]*?<span[^>]*class="[^"]*uagb-inline-editing[^"]*"[^>]*>([\s\S]*?)<\/span>/i,
+      ) ?? innerMarkup.match(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
     const ctaHref = ctaMatch?.[1];
     const ctaText = ctaMatch ? stripTags(ctaMatch[2]) : undefined;
     if (titleText)
@@ -692,6 +794,9 @@ function buildNode(
   if (blockName === 'image') {
     if (!leaf.width && params?.width) leaf.width = params.width as number;
     if (!leaf.height && params?.height) leaf.height = params.height as number;
+  }
+  if (blockName === 'site-logo' && !leaf.width && params?.width) {
+    leaf.width = Number(params.width);
   }
 
   return compact({

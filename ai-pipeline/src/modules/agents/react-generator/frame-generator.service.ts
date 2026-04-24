@@ -200,6 +200,7 @@ export class FrameGeneratorService {
       isDetail,
       isFooter,
       isArchive,
+      fixedSlug,
     });
 
     if (fetches.length > 0) {
@@ -332,8 +333,7 @@ export class FrameGeneratorService {
     if (hasPageDetail) vars.push('`page: Page | null`');
     else if (needs.has('pages')) vars.push('`pages: Page[]`');
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
-    if (needs.has('footerLinks'))
-      vars.push('`footerColumns: FooterColumn[]`');
+    if (needs.has('footerLinks')) vars.push('`footerColumns: FooterColumn[]`');
     if (needs.has('siteInfo')) vars.push('`siteInfo: SiteInfo | null`');
     if (needs.has('comments') && isDetail) vars.push('`comments: Comment[]`');
     if (isDetail && fixedSlug)
@@ -365,6 +365,7 @@ export class FrameGeneratorService {
     isDetail: boolean;
     isFooter: boolean;
     isArchive: boolean;
+    fixedSlug?: string;
   }): Array<{ setter: string; url: string }> {
     const fetches: Array<{ setter: string; url: string }> = [];
 
@@ -379,7 +380,12 @@ export class FrameGeneratorService {
           ` : \`/api/posts?page=\${currentPage}&perPage=\${perPage}\``,
       });
     } else if (flags.hasPostDetail) {
-      fetches.push({ setter: 'setPost', url: '`/api/posts/${slug}`' });
+      fetches.push({
+        setter: 'setPost',
+        url: flags.fixedSlug
+          ? JSON.stringify(`/api/posts/${flags.fixedSlug}`)
+          : '`/api/posts/${slug}`',
+      });
     } else if (flags.hasPosts) {
       fetches.push({
         setter: 'setPosts',
@@ -388,7 +394,12 @@ export class FrameGeneratorService {
     }
 
     if (flags.hasPageDetail) {
-      fetches.push({ setter: 'setPage', url: '`/api/pages/${slug}`' });
+      fetches.push({
+        setter: 'setPage',
+        url: flags.fixedSlug
+          ? JSON.stringify(`/api/pages/${flags.fixedSlug}`)
+          : '`/api/pages/${slug}`',
+      });
     } else if (flags.hasPages) {
       fetches.push({ setter: 'setPages', url: `'/api/pages'` });
     }

@@ -322,6 +322,7 @@ export interface RepoThemeManifest {
   plugins: RepoPluginManifest[];
   resolvedSource?: RepoResolvedSourceSummary;
   uagbSummary?: RepoUagbDetectionSummary;
+  interactiveContracts?: RepoInteractiveContractsSummary;
   sourceOfTruth: RepoSourceOfTruth;
 }
 
@@ -419,6 +420,38 @@ export interface RepoUagbDetectionSummary {
   effective: {
     activePluginSlugs: string[];
   };
+}
+
+export interface RepoInteractiveWidgetContract {
+  blockType: string;
+  runtime: 'swiper' | 'tabs-dom' | 'modal-dom' | 'accordion-dom';
+  attrKeys: string[];
+  scriptFiles: string[];
+  styleFiles: string[];
+  appearance?: RepoInteractiveAppearanceSignature;
+  notes: string[];
+}
+
+export interface RepoInteractiveAppearanceSignature {
+  wrapperClasses: string[];
+  itemClasses: string[];
+  activeClasses: string[];
+  variantClasses: string[];
+  behaviorClasses: string[];
+  alignmentClasses: string[];
+  styleCues: string[];
+}
+
+export interface RepoSpectraInteractiveContracts {
+  detected: boolean;
+  pluginSlug: string;
+  widgets: Partial<
+    Record<'slider' | 'tabs' | 'modal' | 'accordion', RepoInteractiveWidgetContract>
+  >;
+}
+
+export interface RepoInteractiveContractsSummary {
+  spectra?: RepoSpectraInteractiveContracts;
 }
 
 export interface RepoThemeTypeHints {
@@ -593,6 +626,9 @@ export class RepoAnalyzerService {
     const assetManifest = this.categorizeAssets(fileTree);
     const themes = await this.discoverThemeInventories(themeDir);
     const plugins = await this.discoverPluginManifests(themeDir);
+    const interactiveContracts = await this.extractInteractiveContracts(
+      plugins,
+    );
     const styleSources = await this.extractStyleSources(
       themeDir,
       filesByRole,
@@ -618,6 +654,7 @@ export class RepoAnalyzerService {
       assetManifest,
       themes,
       plugins,
+      ...(interactiveContracts ? { interactiveContracts } : {}),
       sourceOfTruth,
     };
   }
@@ -1312,6 +1349,325 @@ export class RepoAnalyzerService {
     return manifests.sort((a, b) => a.slug.localeCompare(b.slug));
   }
 
+  private async extractInteractiveContracts(
+    plugins: RepoPluginManifest[],
+  ): Promise<RepoInteractiveContractsSummary | undefined> {
+    const spectraPlugin = plugins.find(
+      (plugin) =>
+        this.normalizePluginSlug(plugin.slug) ===
+        'ultimate-addons-for-gutenberg',
+    );
+    if (!spectraPlugin) return undefined;
+
+    const spectraContracts = await this.extractSpectraContracts(spectraPlugin);
+    if (!spectraContracts) return undefined;
+
+    return {
+      spectra: spectraContracts,
+    };
+  }
+
+  private async extractSpectraContracts(
+    plugin: RepoPluginManifest,
+  ): Promise<RepoSpectraInteractiveContracts | undefined> {
+    const widgetConfigs = [
+      {
+        key: 'slider' as const,
+        blockType: 'uagb/slider',
+        runtime: 'swiper' as const,
+        attrPath: 'includes/blocks/slider/attributes.php',
+        scriptPaths: ['includes/blocks/slider/frontend.js.php'],
+        stylePaths: [
+          'includes/blocks/slider/frontend.css.php',
+          'assets/css/blocks/slider.css',
+        ],
+        preferredAttrKeys: [
+          'autoplay',
+          'autoplaySpeed',
+          'infiniteLoop',
+          'transitionEffect',
+          'transitionSpeed',
+          'displayDots',
+          'displayArrows',
+          'pauseOn',
+          'verticalMode',
+        ],
+        notes: [
+          'Spectra slider uses Swiper-style runtime options and dynamic per-block CSS.',
+        ],
+        appearance: {
+          wrapperClasses: ['uagb-slider-container', 'uagb-swiper', 'swiper-wrapper'],
+          itemClasses: [
+            'swiper-button-prev',
+            'swiper-button-next',
+            'swiper-pagination',
+            'swiper-pagination-bullet',
+          ],
+          activeClasses: ['swiper-button-disabled'],
+          variantPattern: /swiper-[a-z-]+|uagb-slider-container|uagb-swiper/g,
+          behaviorPattern: /swiper-pagination-bullets|swiper-notification/g,
+          alignmentClasses: [],
+          styleCueDetectors: [
+            {
+              pattern: /overflow:hidden/,
+              cue: 'masked slider viewport with slides clipped inside one frame',
+            },
+            {
+              pattern: /swiper-button-prev|swiper-button-next/,
+              cue: 'inner arrow controls are part of the default slider chrome',
+            },
+            {
+              pattern: /swiper-pagination-bullet/,
+              cue: 'dot pagination bullets appear inside the slider frame',
+            },
+            {
+              pattern: /background:#efefef|background-color'\s*=>\s*\$attr\['arrowBgColor'\]/,
+              cue: 'arrow buttons use a filled surface instead of plain text links',
+            },
+          ],
+        },
+      },
+      {
+        key: 'tabs' as const,
+        blockType: 'uagb/tabs',
+        runtime: 'tabs-dom' as const,
+        attrPath: 'includes/blocks/tabs/attributes.php',
+        scriptPaths: [
+          'includes/blocks/tabs/frontend.js.php',
+          'assets/js/tabs.js',
+        ],
+        stylePaths: [
+          'includes/blocks/tabs/frontend.css.php',
+          'assets/css/blocks/tabs.css',
+        ],
+        preferredAttrKeys: [
+          'tabActive',
+          'tabActiveFrontend',
+          'tabsStyleD',
+          'tabAlign',
+          'iconPosition',
+          'tabTitlePaddingUnit',
+          'tabBodyPaddingUnit',
+        ],
+        notes: [
+          'Spectra tabs has explicit active-tab state, style variants, and keyboard navigation.',
+        ],
+        appearance: {
+          wrapperClasses: [
+            'uagb-tabs__wrap',
+            'uagb-tabs__panel',
+            'uagb-tabs__body-wrap',
+          ],
+          itemClasses: [
+            'uagb-tab',
+            'uagb-tabs-list',
+            'uagb-tabs__body-container',
+          ],
+          activeClasses: ['uagb-tabs__active', 'uagb-tabs-body__active'],
+          variantPattern:
+            /uagb-tabs__(?:hstyle|vstyle|stack)\d+-(?:desktop|tablet|mobile)/g,
+          behaviorPattern:
+            /uagb-tabs__icon-position-(?:left|right|top|bottom)|uagb-inner-tab-\d+/g,
+          alignmentClasses: [
+            'uagb-tabs__align-left',
+            'uagb-tabs__align-center',
+            'uagb-tabs__align-right',
+          ],
+          styleCueDetectors: [
+            {
+              pattern: /uagb-tabs__active|uagb-tabs-body__active/,
+              cue: 'active tab state is mirrored in both the tab button and matching body panel',
+            },
+            {
+              pattern: /uagb-tabs__hstyle4|uagb-tabs__vstyle9|border-radius'\s*=>\s*'30px'/,
+              cue: 'rounded pill-style tabs are part of the Spectra variant family',
+            },
+            {
+              pattern: /uagb-tabs__hstyle5|uagb-tabs__vstyle10/,
+              cue: 'some variants distribute tabs across the row instead of using a simple underline list',
+            },
+            {
+              pattern: /uagb-tabs__vstyle6|uagb-tabs__vstyle7|uagb-tabs__vstyle8|uagb-tabs__vstyle9|uagb-tabs__vstyle10/,
+              cue: 'vertical variants use a left-side tab rail with body content on the right',
+            },
+            {
+              pattern: /ArrowRight|ArrowLeft|aria-selected/,
+              cue: 'keyboard arrow navigation and ARIA-selected state are part of the default tabs behavior',
+            },
+          ],
+        },
+      },
+      {
+        key: 'modal' as const,
+        blockType: 'uagb/modal',
+        runtime: 'modal-dom' as const,
+        attrPath: 'includes/blocks/modal/attributes.php',
+        scriptPaths: [
+          'includes/blocks/modal/frontend.js.php',
+          'assets/js/modal.js',
+        ],
+        stylePaths: [
+          'includes/blocks/modal/frontend.css.php',
+          'assets/css/blocks/modal.css',
+        ],
+        preferredAttrKeys: [
+          'btnText',
+          'modalWidth',
+          'modalWidthType',
+          'modalHeight',
+          'modalHeightType',
+          'overlayColor',
+          'closeIconPosition',
+          'iconSize',
+        ],
+        notes: [
+          'Spectra modal supports overlay behavior, ESC close, scroll locking, and dynamic sizing.',
+        ],
+        appearance: {
+          wrapperClasses: [
+            'uagb-modal-popup',
+            'uagb-modal-popup-wrap',
+            'uagb-modal-popup-content',
+          ],
+          itemClasses: [
+            'uagb-modal-trigger',
+            'uagb-modal-popup-close',
+            'uagb-spectra-button-wrapper',
+          ],
+          activeClasses: ['active'],
+          variantPattern: /uagb-effect-[a-z0-9-]+/g,
+          behaviorPattern:
+            /hide-scroll|overlayclick|escpress|uagb-modal-button-link/g,
+          alignmentClasses: [],
+          styleCueDetectors: [
+            {
+              pattern: /position:fixed|display:flex;visibility:visible/,
+              cue: 'modal opens as a fixed centered overlay over the whole viewport',
+            },
+            {
+              pattern: /hide-scroll/,
+              cue: 'opening the modal locks body scrolling until every modal is closed',
+            },
+            {
+              pattern: /uagb-modal-popup-close|closeIconPosition/,
+              cue: 'the dialog includes an explicit close button with configurable position',
+            },
+            {
+              pattern: /overlayColor|background'\s*=>\s*\$attr\['overlayColor'\]/,
+              cue: 'overlay color is controlled by block settings and should not default to a generic backdrop',
+            },
+          ],
+        },
+      },
+      {
+        key: 'accordion' as const,
+        blockType: 'uagb/faq',
+        runtime: 'accordion-dom' as const,
+        attrPath: 'includes/blocks/faq/attributes.php',
+        scriptPaths: ['includes/blocks/faq/frontend.js.php', 'assets/js/faq.js'],
+        stylePaths: [
+          'includes/blocks/faq/frontend.css.php',
+          'assets/css/blocks/faq.css',
+        ],
+        preferredAttrKeys: [
+          'layout',
+          'inactiveOtherItems',
+          'expandFirstItem',
+          'enableToggle',
+          'enableSchemaSupport',
+        ],
+        notes: [
+          'Spectra FAQ/accordion exposes multi-open, default-open, and toggle behavior through block attrs.',
+        ],
+        appearance: {
+          wrapperClasses: [
+            'wp-block-uagb-faq',
+            'uagb-faq__wrap',
+            'uagb-faq-child__outer-wrap',
+          ],
+          itemClasses: [
+            'uagb-faq-item',
+            'uagb-faq-questions-button',
+            'uagb-faq-content',
+            'uagb-faq-icon-wrap',
+          ],
+          activeClasses: ['uagb-faq-item-active'],
+          variantPattern:
+            /uagb-faq-layout-[a-z-]+|uagb-faq-icon-row(?:-reverse)?/g,
+          behaviorPattern:
+            /uagb-faq-expand-first-true|uagb-faq-inactive-other-false|data-faqtoggle/g,
+          alignmentClasses: [],
+          styleCueDetectors: [
+            {
+              pattern: /slideUp|slideDown/,
+              cue: 'accordion answers animate open and closed with height transitions',
+            },
+            {
+              pattern: /uagb-faq-item-active/,
+              cue: 'active accordion items get their own visual state instead of a plain text toggle',
+            },
+            {
+              pattern: /uagb-faq-questions-button|uagb-faq-icon-wrap/,
+              cue: 'question row and icon chrome are part of the default Spectra FAQ surface',
+            },
+          ],
+        },
+      },
+    ];
+
+    const widgets: RepoSpectraInteractiveContracts['widgets'] = {};
+
+    for (const config of widgetConfigs) {
+      const sourcePaths = [...config.scriptPaths, ...config.stylePaths];
+      const [attrRaw, ...assetSources] = await Promise.all([
+        this.readOptionalPluginText(plugin.absoluteDir, config.attrPath),
+        ...sourcePaths.map((relativePath) =>
+          this.readOptionalPluginText(plugin.absoluteDir, relativePath),
+        ),
+      ]);
+      const scriptRaw = assetSources.slice(0, config.scriptPaths.length);
+      const styleRaw = assetSources.slice(config.scriptPaths.length);
+
+      if (
+        !attrRaw &&
+        scriptRaw.every((source) => !source) &&
+        styleRaw.every((source) => !source)
+      ) {
+        continue;
+      }
+
+      const attrKeys = this.extractPhpArrayKeys(attrRaw);
+      widgets[config.key] = {
+        blockType: config.blockType,
+        runtime: config.runtime,
+        attrKeys: config.preferredAttrKeys.filter((key) =>
+          attrKeys.includes(key),
+        ),
+        scriptFiles: config.scriptPaths.filter((_, index) => !!scriptRaw[index]),
+        styleFiles: config.stylePaths.filter((_, index) => !!styleRaw[index]),
+        appearance: this.extractInteractiveAppearanceSignature({
+          combinedSources: [attrRaw, ...scriptRaw, ...styleRaw],
+          wrapperClasses: config.appearance.wrapperClasses,
+          itemClasses: config.appearance.itemClasses,
+          activeClasses: config.appearance.activeClasses,
+          variantPattern: config.appearance.variantPattern,
+          behaviorPattern: config.appearance.behaviorPattern,
+          alignmentClasses: config.appearance.alignmentClasses,
+          styleCueDetectors: config.appearance.styleCueDetectors,
+        }),
+        notes: config.notes,
+      };
+    }
+
+    if (Object.keys(widgets).length === 0) return undefined;
+
+    return {
+      detected: true,
+      pluginSlug: plugin.slug,
+      widgets,
+    };
+  }
+
   private buildLightweightPluginManifest(
     pluginRoot: string,
     slug: string,
@@ -1398,6 +1754,73 @@ export class RepoAnalyzerService {
       layoutFiles,
       runtimeFiles,
       assetFiles,
+    };
+  }
+
+  private normalizePluginSlug(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'spectra'
+      ? 'ultimate-addons-for-gutenberg'
+      : normalized;
+  }
+
+  private extractInteractiveAppearanceSignature(input: {
+    combinedSources: Array<string | null>;
+    wrapperClasses: string[];
+    itemClasses: string[];
+    activeClasses: string[];
+    variantPattern: RegExp;
+    behaviorPattern: RegExp;
+    alignmentClasses: string[];
+    styleCueDetectors: Array<{
+      pattern: RegExp;
+      cue: string;
+    }>;
+  }): RepoInteractiveAppearanceSignature | undefined {
+    const raw = input.combinedSources.filter(Boolean).join('\n');
+    if (!raw.trim()) return undefined;
+
+    const collectExact = (tokens: string[]) =>
+      tokens.filter((token) => raw.includes(token));
+    const collectPattern = (pattern: RegExp) =>
+      Array.from(
+        new Set(
+          Array.from(raw.matchAll(pattern))
+            .map((match) => match[0]?.trim())
+            .filter((value): value is string => !!value),
+        ),
+      ).sort();
+
+    const wrapperClasses = collectExact(input.wrapperClasses);
+    const itemClasses = collectExact(input.itemClasses);
+    const activeClasses = collectExact(input.activeClasses);
+    const variantClasses = collectPattern(input.variantPattern);
+    const behaviorClasses = collectPattern(input.behaviorPattern);
+    const alignmentClasses = collectExact(input.alignmentClasses);
+    const styleCues = input.styleCueDetectors
+      .filter((detector) => detector.pattern.test(raw))
+      .map((detector) => detector.cue);
+
+    if (
+      wrapperClasses.length === 0 &&
+      itemClasses.length === 0 &&
+      activeClasses.length === 0 &&
+      variantClasses.length === 0 &&
+      behaviorClasses.length === 0 &&
+      alignmentClasses.length === 0 &&
+      styleCues.length === 0
+    ) {
+      return undefined;
+    }
+
+    return {
+      wrapperClasses,
+      itemClasses,
+      activeClasses,
+      variantClasses,
+      behaviorClasses,
+      alignmentClasses,
+      styleCues,
     };
   }
 
@@ -1498,6 +1921,28 @@ export class RepoAnalyzerService {
     } catch {
       return null;
     }
+  }
+
+  private async readOptionalPluginText(
+    pluginDir: string,
+    relativePath: string,
+  ): Promise<string | null> {
+    try {
+      return await readFile(join(pluginDir, relativePath), 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  private extractPhpArrayKeys(raw: string | null): string[] {
+    if (!raw) return [];
+    return Array.from(
+      new Set(
+        Array.from(raw.matchAll(/'([A-Za-z0-9_]+)'\s*=>/g))
+          .map((match) => match[1]?.trim())
+          .filter((value): value is string => !!value),
+      ),
+    ).sort();
   }
 
   private async walk(dir: string, base = dir): Promise<string[]> {

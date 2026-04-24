@@ -1144,7 +1144,9 @@ export function buildPlanContextNote(
           : 'Data contract: this component does not own a slug route. Do NOT fabricate page detail by fetching `/api/pages` and picking an item by index, title, or guesswork.',
     );
     lines.push(
-      '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
+      plan.fixedSlug
+        ? `⛔ API endpoint contract: \`/api/pages/${plan.fixedSlug}\` is mandatory for the main record. Do NOT replace it with \`/api/pages/\${slug}\` and do NOT replace it with \`/api/pages\` + index lookup.`
+        : '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
     );
     lines.push(
       '⛔ Page Detail Contract: a page has NO `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`. Use page fields from the approved contract only.',
@@ -1363,9 +1365,22 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'subheading', section.subheading);
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        section.ctas?.slice(1).forEach((cta, ctaIndex) => {
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
+        });
         pushPlanTextPart(parts, 'imageSrc', section.image?.src);
         pushPlanTextPart(parts, 'imageAlt', section.image?.alt);
         pushPlanTextPart(parts, 'imagePosition', section.image?.position);
+        break;
+      case 'cta-strip':
+        pushPlanTextPart(parts, 'align', section.align);
+        pushPlanTextPart(parts, 'ctaText', section.cta?.text);
+        pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        section.ctas?.slice(1).forEach((cta, ctaIndex) => {
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
+        });
         break;
       case 'modal':
         parts.push(`layout=${section.layout ?? 'centered'}`);
@@ -1412,6 +1427,10 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        section.ctas?.slice(1).forEach((cta, ctaIndex) => {
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
+        });
         break;
       case 'card-grid':
         pushPlanTextPart(parts, 'title', section.title);
@@ -1440,6 +1459,10 @@ function buildCompactSectionSummary(
         });
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        section.ctas?.slice(1).forEach((cta, ctaIndex) => {
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
+          pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
+        });
         break;
       case 'tabs':
         pushPlanTextPart(parts, 'title', section.title);
@@ -1965,6 +1988,14 @@ Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSectio
 - The page shell already declares runtime variables. Use only these existing variables when needed: ${input.availableVariables}.
 - Preserve every source-backed text node from the approved section plan. Do NOT summarize, merge, or omit headings, subheadings, subtitles, card headings, card bodies, list items, CTA labels, or image sources unless the field is a documented dynamic binding like \`{query.title}\`.
 - Keep the exact source tracking attributes on the top-level wrapper: \`data-vp-source-node\`, \`data-vp-template\`, \`data-vp-source-file\`, \`data-vp-section-key\`, \`data-vp-component\`, \`data-vp-section-component\`.`,
+    `## Canonical post-meta rule
+When this section renders post-list/archive/search/recent-post meta:
+- NEVER output bare plain-text author/category meta when the slug field already exists.
+- Use the canonical ternary pattern exactly:
+  \`{post.author && (post.authorSlug ? <Link to={'/author/' + post.authorSlug} className="hover:underline underline-offset-4">by {post.author}</Link> : <span>by {post.author}</span>)}\`
+  \`{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={'/category/' + post.categorySlugs[0]} className="hover:underline underline-offset-4">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}\`
+- Apply the same pattern for \`item.author\` / \`item.categorySlugs\` inside list loops.
+- Do NOT invent \`href="#"\`, guessed slugs, or extra nested brace layers around JSX branches.`,
     buildScopedApiContractNote({
       dataNeeds: normalizedDataNeeds,
       route: input.componentPlan?.route,
@@ -2030,6 +2061,15 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       }
       if (section.cta?.text) {
         lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      if (section.ctas?.length) {
+        section.ctas.slice(1).forEach((cta, ctaIndex) => {
+          if (cta.text) {
+            lines.push(
+              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
+            );
+          }
+        });
       }
       break;
     case 'card-grid':
@@ -2100,6 +2140,32 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       }
       if ('cta' in section && section.cta?.text) {
         lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      if ('ctas' in section && Array.isArray(section.ctas)) {
+        section.ctas.slice(1).forEach((cta, ctaIndex) => {
+          if (cta.text) {
+            lines.push(
+              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
+            );
+          }
+        });
+      }
+      break;
+    case 'cta-strip':
+      if (section.align) {
+        lines.push(`- align: ${JSON.stringify(section.align)}`);
+      }
+      if (section.cta?.text) {
+        lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      if (section.ctas?.length) {
+        section.ctas.slice(1).forEach((cta, ctaIndex) => {
+          if (cta.text) {
+            lines.push(
+              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
+            );
+          }
+        });
       }
       break;
     default:

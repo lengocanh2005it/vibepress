@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { writeFile } from 'fs/promises';
-import { basename } from 'path';
+import { mkdir, writeFile } from 'fs/promises';
+import { basename, dirname } from 'path';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
@@ -922,6 +922,32 @@ export class PlannerService {
       const hasSidebarTemplate =
         /sidebar/.test(normalizedTemplate) ||
         /withsidebar|sidebar/i.test(componentPlan.componentName);
+      const richBoundPageSections = this.buildRichBoundPageDetailSections(
+        componentPlan,
+        content,
+        tokens,
+      );
+      if (richBoundPageSections?.length) {
+        return {
+          ...base,
+          layout: hasSidebarTemplate
+            ? { ...layout, contentLayout: 'sidebar-right' as const }
+            : layout,
+          sections: hasSidebarTemplate
+            ? [
+                ...richBoundPageSections,
+                {
+                  type: 'sidebar' as const,
+                  title: 'Explore',
+                  showSiteInfo: false,
+                  showPages: true,
+                  showPosts: content.posts.length > 0,
+                  maxItems: 8,
+                },
+              ]
+            : richBoundPageSections,
+        };
+      }
       return {
         ...base,
         layout: hasSidebarTemplate
@@ -969,6 +995,9 @@ export class PlannerService {
               type: 'navbar',
               sticky: true,
               menuSlug: content.menus[0]?.slug ?? 'primary',
+              orientation: 'horizontal',
+              overlayMenu: 'mobile',
+              isResponsive: true,
             },
           ],
         };
@@ -984,6 +1013,9 @@ export class PlannerService {
                 title: menu.name,
                 menuSlug: menu.slug,
               })),
+              showSiteLogo: true,
+              showSiteTitle: true,
+              showTagline: true,
             },
           ],
         };
@@ -1098,6 +1130,7 @@ export class PlannerService {
     if (!logPath) return;
     try {
       const targetPath = this.buildPlannerArtifactPath(logPath, fileName);
+      await mkdir(dirname(targetPath), { recursive: true });
       await writeFile(targetPath, JSON.stringify(payload, null, 2), 'utf-8');
     } catch (error: any) {
       this.logger.warn(
@@ -1112,6 +1145,110 @@ export class PlannerService {
       ? normalized.slice(0, normalized.lastIndexOf('/'))
       : normalized;
     return `${baseDir}/${fileName}`.replace(/\//g, '\\');
+  }
+
+  async writeSplitComponentPlanArtifacts(
+    logPath: string | undefined,
+    artifactPrefix: string,
+    payload: {
+      stage?: string;
+      generatedAt?: string;
+      attempt?: number;
+      isValid?: boolean;
+      errors?: string[];
+      plan?: PlanResult;
+      warnings?: string[];
+      blockingIssues?: string[];
+      strictReview?: boolean;
+    },
+  ): Promise<void> {
+    const plan = Array.isArray(payload.plan) ? payload.plan : [];
+    if (!logPath || plan.length === 0) return;
+
+    const generatedAt = payload.generatedAt ?? new Date().toISOString();
+    const groups: Array<{
+      type: ComponentPlan['type'];
+      bucketName: 'pages' | 'partials';
+    }> = [
+      { type: 'page', bucketName: 'pages' },
+      { type: 'partial', bucketName: 'partials' },
+    ];
+
+    for (const group of groups) {
+      const componentPlans = plan.filter((item) => item.type === group.type);
+      if (componentPlans.length === 0) continue;
+
+      const manifest = componentPlans.map((componentPlan) => {
+        const fileName = this.buildSplitPlanComponentFileName(componentPlan);
+        return {
+          componentName: componentPlan.componentName,
+          templateName: componentPlan.templateName,
+          route: componentPlan.route,
+          fixedSlug: componentPlan.fixedSlug,
+          file: `${artifactPrefix}.${group.bucketName}/${fileName}`,
+        };
+      });
+
+      await this.writeArtifact(
+        logPath,
+        `${artifactPrefix}.${group.bucketName}/manifest.json`,
+        {
+          stage: payload.stage ?? 'planner-final',
+          generatedAt,
+          attempt: payload.attempt,
+          isValid: payload.isValid,
+          count: manifest.length,
+          componentType: group.type,
+          [group.bucketName]: manifest,
+          warnings: payload.warnings,
+          errors: payload.errors,
+          blockingIssues: payload.blockingIssues,
+          strictReview: payload.strictReview,
+        },
+      );
+
+      for (let index = 0; index < componentPlans.length; index++) {
+        const componentPlan = componentPlans[index];
+        const entry = manifest[index];
+        await this.writeArtifact(logPath, entry.file, {
+          stage: payload.stage ?? 'planner-final',
+          generatedAt,
+          attempt: payload.attempt,
+          isValid: payload.isValid,
+          warnings: payload.warnings,
+          errors: payload.errors,
+          blockingIssues: payload.blockingIssues,
+          strictReview: payload.strictReview,
+          componentName: componentPlan.componentName,
+          templateName: componentPlan.templateName,
+          route: componentPlan.route,
+          fixedSlug: componentPlan.fixedSlug,
+          type: componentPlan.type,
+          componentPlan,
+        });
+      }
+    }
+  }
+
+  private buildSplitPlanComponentFileName(
+    componentPlan: Pick<
+      ComponentPlan,
+      'componentName' | 'route' | 'fixedSlug' | 'templateName'
+    >,
+  ): string {
+    const preferredName =
+      componentPlan.fixedSlug?.trim() ||
+      componentPlan.route?.trim().replace(/^\/+|\/+$/g, '').replace(/\//g, '__') ||
+      componentPlan.componentName ||
+      componentPlan.templateName;
+    const safeName = preferredName
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 120);
+    const componentSuffix = componentPlan.componentName
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return `${safeName || 'page'}--${componentSuffix || 'component'}.json`;
   }
 
   // ── Layout hints: map extracted theme tokens to generator-friendly classes ─
@@ -1130,10 +1267,14 @@ export class PlannerService {
     const cardRadius =
       tokens?.blockStyles?.group?.border?.radius ??
       tokens?.blockStyles?.column?.border?.radius ??
+      tokens?.blockStyles?.quote?.border?.radius ??
+      tokens?.blockStyles?.pullquote?.border?.radius ??
       tokens?.blockStyles?.cover?.border?.radius;
     const cardPadding =
       tokens?.blockStyles?.group?.spacing?.padding ??
-      tokens?.blockStyles?.column?.spacing?.padding;
+      tokens?.blockStyles?.column?.spacing?.padding ??
+      tokens?.blockStyles?.quote?.spacing?.padding ??
+      tokens?.blockStyles?.pullquote?.spacing?.padding;
     const isSidebarLayout = /WithSidebar$/i.test(componentName);
 
     // WordPress contentSize is usually the prose/article width, not the outer
@@ -1218,9 +1359,11 @@ export class PlannerService {
       const needs = new Set(item.dataNeeds);
       const ownsSharedChromeData =
         item.type === 'partial' || !hasSharedChromePartials;
-      const componentKey = `${item.componentName} ${item.templateName}`.toLowerCase();
+      const componentKey =
+        `${item.componentName} ${item.templateName}`.toLowerCase();
       const isFooterPartial =
-        item.type === 'partial' && /(^|[\s/_-])footer(?:$|[\s/_-])/.test(componentKey);
+        item.type === 'partial' &&
+        /(^|[\s/_-])footer(?:$|[\s/_-])/.test(componentKey);
       const isHeaderLikePartial =
         item.type === 'partial' &&
         /(^|[\s/_-])(header|nav|navigation)(?:$|[\s/_-])/.test(componentKey);
@@ -1929,6 +2072,64 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     };
 
     switch (section.type) {
+      case 'navbar': {
+        const navbarDraft = draft as typeof section;
+        return {
+          ...mergedBase,
+          menuSlug: navbarDraft.menuSlug ?? section.menuSlug,
+          sticky:
+            typeof navbarDraft.sticky === 'boolean'
+              ? navbarDraft.sticky
+              : section.sticky,
+          ...(navbarDraft.orientation
+            ? { orientation: navbarDraft.orientation }
+            : {}),
+          ...(navbarDraft.overlayMenu
+            ? { overlayMenu: navbarDraft.overlayMenu }
+            : {}),
+          ...(typeof navbarDraft.isResponsive === 'boolean'
+            ? { isResponsive: navbarDraft.isResponsive }
+            : {}),
+          ...(typeof navbarDraft.showSiteLogo === 'boolean'
+            ? { showSiteLogo: navbarDraft.showSiteLogo }
+            : {}),
+          ...(typeof navbarDraft.showSiteTitle === 'boolean'
+            ? { showSiteTitle: navbarDraft.showSiteTitle }
+            : {}),
+          ...(navbarDraft.logoWidth
+            ? { logoWidth: navbarDraft.logoWidth }
+            : {}),
+        } as SectionPlan;
+      }
+      case 'footer': {
+        const footerDraft = draft as any;
+        const footerSection = section as any;
+        return {
+          ...mergedBase,
+          menuColumns:
+            (footerDraft.menuColumns?.length ?? 0) > 0
+              ? footerDraft.menuColumns
+              : footerSection.menuColumns,
+          ...(footerDraft.columnWidths
+            ? { columnWidths: footerDraft.columnWidths }
+            : {}),
+          ...(typeof footerDraft.showSiteLogo === 'boolean'
+            ? { showSiteLogo: footerDraft.showSiteLogo }
+            : {}),
+          ...(typeof footerDraft.showSiteTitle === 'boolean'
+            ? { showSiteTitle: footerDraft.showSiteTitle }
+            : {}),
+          ...(typeof footerDraft.showTagline === 'boolean'
+            ? { showTagline: footerDraft.showTagline }
+            : {}),
+          ...(footerDraft.logoWidth
+            ? { logoWidth: footerDraft.logoWidth }
+            : {}),
+          ...(footerDraft.brandDescription
+            ? { brandDescription: footerDraft.brandDescription }
+            : {}),
+        } as SectionPlan;
+      }
       case 'hero': {
         const heroDraft = draft as typeof section;
         return {
@@ -2198,6 +2399,94 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
+  private buildRichBoundPageDetailSections(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+    tokens: ThemeTokens | undefined,
+  ): SectionPlan[] | undefined {
+    const boundPage = content.pages.find(
+      (page) =>
+        String(page.id) === String(componentPlan.fixedPageId ?? '') ||
+        page.slug === componentPlan.fixedSlug,
+    );
+    const source = String(boundPage?.content ?? '').trim();
+    if (!source) return undefined;
+
+    try {
+      const nodes = this.styleResolver.resolve(
+        this.parsePlanningSourceNodes({
+          source,
+          templateName: componentPlan.templateName,
+          sourceFile: boundPage
+            ? `db:pages/${boundPage.slug || boundPage.id}`
+            : `db:pages/${componentPlan.fixedSlug}`,
+        }),
+        tokens,
+      );
+      if (nodes.length === 0) return undefined;
+
+      const draftSections = sanitizeSectionsForContract(
+        mapWpNodesToDraftSections(nodes),
+        {
+          componentType: componentPlan.type,
+          route: componentPlan.route,
+          isDetail: componentPlan.isDetail,
+          dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+          stripLayoutChrome: componentPlan.type === 'page',
+          sourceBackedAuxiliaryLabels: [],
+        },
+      ).sections;
+      if (!this.shouldPromoteBoundPageDetailToRichSections(draftSections)) {
+        return undefined;
+      }
+      return draftSections;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private shouldPromoteBoundPageDetailToRichSections(
+    sections: SectionPlan[] | undefined,
+  ): boolean {
+    if (!sections?.length) return false;
+    const meaningful = sections.filter(
+      (section) =>
+        section.type !== 'page-content' &&
+        section.type !== 'post-content' &&
+        section.type !== 'sidebar' &&
+        section.type !== 'navbar' &&
+        section.type !== 'footer',
+    );
+    const interactiveTypes = new Set<SectionPlan['type']>([
+      'carousel',
+      'modal',
+      'tabs',
+      'accordion',
+    ]);
+    if (meaningful.some((section) => interactiveTypes.has(section.type))) {
+      return true;
+    }
+    if (meaningful.length < 3) return false;
+
+    const richTypes = new Set<SectionPlan['type']>([
+      'hero',
+      'cover',
+      'media-text',
+      'card-grid',
+      'carousel',
+      'testimonial',
+      'modal',
+      'tabs',
+      'accordion',
+    ]);
+    const richSectionCount = meaningful.filter((section) =>
+      richTypes.has(section.type),
+    ).length;
+    const distinctTypes = new Set(meaningful.map((section) => section.type)).size;
+
+    return richSectionCount >= 2 || distinctTypes >= 3 || meaningful.length >= 4;
+  }
+
   private parsePlanningSourceNodes(input: {
     source: string;
     templateName: string;
@@ -2236,7 +2525,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
     if (componentPlan.type === 'page') {
       scopedSource = this.stripClassicSharedIncludes(scopedSource, hints ?? []);
-      scopedSource = this.stripFseSharedTemplateParts(scopedSource, hints ?? []);
+      scopedSource = this.stripFseSharedTemplateParts(
+        scopedSource,
+        hints ?? [],
+      );
     }
 
     if (!this.looksLikeBlockMarkup(scopedSource)) {
@@ -2719,6 +3011,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const visualPlan = {
         ...parsedResult.plan,
         dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+        ...(componentPlan.fixedSlug
+          ? {
+              pageBinding: {
+                id: componentPlan.fixedPageId,
+                slug: componentPlan.fixedSlug,
+                title: componentPlan.fixedTitle,
+                route: componentPlan.route ?? undefined,
+              },
+            }
+          : {}),
         palette: globalPalette,
         typography: globalTypography,
         layout,

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
+import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type { CardGridSection } from './visual-plan.schema.js';
@@ -405,6 +406,15 @@ ${component.code}
         if (section.type === 'hero') {
           return `- hero heading="${section.heading}"`;
         }
+        if (section.type === 'cta-strip') {
+          const ctaCount =
+            Array.isArray(section.ctas) && section.ctas.length > 0
+              ? section.ctas.length
+              : section.cta
+                ? 1
+                : 0;
+          return `- cta-strip align="${section.align ?? ''}" buttons=${ctaCount}`;
+        }
         if (section.type === 'cover') {
           return `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
@@ -647,44 +657,7 @@ ${component.code}
     code: string,
     max = 3,
   ): string[] {
-    const snippets: string[] = [];
-    const patterns = [
-      {
-        pattern:
-          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-        allowHeadingContext: true,
-      },
-      {
-        pattern:
-          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-        allowHeadingContext: false,
-      },
-      {
-        pattern:
-          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
-        allowHeadingContext: false,
-      },
-    ];
-
-    for (const { pattern, allowHeadingContext } of patterns) {
-      for (const match of code.matchAll(pattern)) {
-        const raw = match[0]?.replace(/\s+/g, ' ').trim();
-        if (!raw) continue;
-        const offset = match.index ?? 0;
-        if (
-          allowHeadingContext &&
-          this.isWithinHeadingTitleContext(code, offset)
-        ) {
-          continue;
-        }
-        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
-        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
-        if (snippets.length >= max) return snippets;
-      }
-      if (snippets.length >= max) break;
-    }
-
-    return snippets;
+    return findSharedPlainTextPostMetaArchiveSnippets(code, max);
   }
 
   private isWithinSlugTernaryFallback(code: string, offset: number): boolean {

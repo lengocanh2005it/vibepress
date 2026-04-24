@@ -141,6 +141,8 @@ function getSectionHeadingCandidates(section: SectionPlan): string[] {
   switch (section.type) {
     case 'hero':
       return [section.heading, section.subheading].filter(isNonEmptyString);
+    case 'cta-strip':
+      return [];
     case 'cover':
       return [section.heading, section.subheading].filter(isNonEmptyString);
     case 'post-list':

@@ -52,6 +52,12 @@ export interface BlockStyleToken {
 
 export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
 
+export interface SectionCta {
+  text: string;
+  link: string;
+  customClassNames?: string[];
+}
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
@@ -70,7 +76,13 @@ export interface NavbarSection extends BaseSection {
   type: 'navbar';
   sticky: boolean;
   menuSlug: string; // e.g. "primary"
-  cta?: { text: string; link: string; style: 'button' | 'link' };
+  orientation?: 'horizontal' | 'vertical';
+  overlayMenu?: 'always' | 'mobile' | 'never';
+  isResponsive?: boolean;
+  showSiteLogo?: boolean;
+  showSiteTitle?: boolean;
+  logoWidth?: string;
+  cta?: SectionCta & { style: 'button' | 'link' };
 }
 
 export interface HeroSection extends BaseSection {
@@ -80,8 +92,16 @@ export interface HeroSection extends BaseSection {
   subheading?: string;
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
   image?: { src: string; alt: string; position: 'right' | 'below' };
+}
+
+export interface CtaStripSection extends BaseSection {
+  type: 'cta-strip';
+  align?: 'left' | 'center' | 'right';
+  cta?: SectionCta;
+  ctas?: SectionCta[];
 }
 
 export interface CoverSection extends BaseSection {
@@ -93,7 +113,8 @@ export interface CoverSection extends BaseSection {
   subheading?: string;
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
   contentAlign: 'center' | 'left' | 'right';
 }
 
@@ -128,7 +149,8 @@ export interface MediaTextSection extends BaseSection {
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
 }
 
 export interface TestimonialSection extends BaseSection {
@@ -152,6 +174,11 @@ export interface FooterSection extends BaseSection {
   type: 'footer';
   brandDescription?: string; // uses siteInfo.blogDescription if omitted
   menuColumns: { title: string; menuSlug: string }[];
+  columnWidths?: string[];
+  showSiteLogo?: boolean;
+  showSiteTitle?: boolean;
+  showTagline?: boolean;
+  logoWidth?: string;
   copyright?: string;
 }
 
@@ -201,20 +228,30 @@ export interface ModalSection extends BaseSection {
   body?: string;
   imageSrc?: string;
   imageAlt?: string;
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
   layout?: 'centered' | 'split';
+  closeOnOverlay?: boolean;
+  closeOnEsc?: boolean;
+  overlayColor?: string;
+  width?: string;
+  height?: string;
+  closeIconPosition?: string;
 }
 
 export interface TabsSection extends BaseSection {
   type: 'tabs';
   title?: string;
+  activeTab?: number;
+  variant?: string;
+  tabAlign?: 'left' | 'center' | 'right';
   tabs: {
     label: string;
     heading?: string;
     body?: string;
     imageSrc?: string;
     imageAlt?: string;
-    cta?: { text: string; link: string };
+    cta?: SectionCta;
   }[];
 }
 
@@ -226,6 +263,9 @@ export interface AccordionSection extends BaseSection {
     body: string;
   }[];
   allowMultiple?: boolean;
+  enableToggle?: boolean;
+  defaultOpenItems?: number[];
+  variant?: string;
 }
 
 export interface CarouselSection extends BaseSection {
@@ -235,15 +275,24 @@ export interface CarouselSection extends BaseSection {
     subheading?: string;
     imageSrc?: string;
     imageAlt?: string;
-    cta?: { text: string; link: string };
+    cta?: SectionCta;
   }[];
   autoplay?: boolean;
+  autoplaySpeed?: number;
+  loop?: boolean;
+  effect?: 'slide' | 'fade' | 'flip' | 'coverflow';
+  showDots?: boolean;
+  showArrows?: boolean;
+  vertical?: boolean;
+  transitionSpeed?: number;
+  pauseOn?: 'hover' | 'click';
   contentAlign?: 'center' | 'left' | 'right';
 }
 
 export type SectionPlan =
   | NavbarSection
   | HeroSection
+  | CtaStripSection
   | CoverSection
   | PostListSection
   | CardGridSection

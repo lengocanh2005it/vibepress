@@ -25,7 +25,10 @@ import type {
   ThemeInteractionTarget,
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
-import type { ComponentVisualPlan } from './visual-plan.schema.js';
+import type {
+  ComponentVisualPlan,
+  SectionPlan,
+} from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
@@ -663,9 +666,24 @@ export class ReactGeneratorService {
       visionImageUrls,
       tokenScope,
     );
+    const restoredTracking = this.restoreTrackedSectionMarkers(
+      fixedCode,
+      component.name,
+      componentPlan,
+    );
+    if (restoredTracking.restoredSectionKeys.length > 0) {
+      const restoredList = restoredTracking.restoredSectionKeys.join(', ');
+      this.logger.log(
+        `[fixer] Restored tracked section markers for "${component.name}": ${restoredList}`,
+      );
+      await this.logToFile(
+        logPath,
+        `[fixer] Restored tracked section markers for "${component.name}": ${restoredList}`,
+      );
+    }
 
     return this.attachPlanContext(
-      { ...component, code: fixedCode },
+      { ...component, code: restoredTracking.code },
       componentPlan,
     );
   }
@@ -788,8 +806,24 @@ ${renders}
       if ('subheading' in section && section.subheading) {
         parts.push(`subheading="${section.subheading}"`);
       }
-      if ('cta' in section && section.cta?.text) {
-        parts.push(`cta="${section.cta.text}"`);
+      if ('align' in section && section.align) {
+        parts.push(`align="${section.align}"`);
+      }
+      const ctas =
+        'ctas' in section && Array.isArray(section.ctas) && section.ctas.length > 0
+          ? section.ctas
+          : 'cta' in section && section.cta
+            ? [section.cta]
+            : [];
+      if (ctas.length > 0) {
+        parts.push(
+          ...ctas
+            .map((cta) => cta?.text?.trim())
+            .filter((value): value is string => !!value)
+            .map((value, ctaIndex) =>
+              ctaIndex === 0 ? `cta="${value}"` : `cta${ctaIndex + 1}="${value}"`,
+            ),
+        );
       }
       if ('image' in section && section.image?.src) {
         parts.push(`image="${section.image.src}"`);
@@ -819,6 +853,236 @@ ${renders}
       ...lines,
       'Do not drop sections, CTA labels, images, or card bodies from this contract.',
     ].join('\n');
+  }
+
+  private restoreTrackedSectionMarkers(
+    code: string,
+    componentName: string,
+    componentPlan?: PlanResult[number],
+  ): { code: string; restoredSectionKeys: string[] } {
+    const trackedSections = (componentPlan?.visualPlan?.sections ?? [])
+      .map((section, index) => ({
+        section,
+        sectionKey:
+          section.sectionKey ?? `${section.type}${index === 0 ? '' : `-${index}`}`,
+      }))
+      .filter(
+        ({ section, sectionKey }) =>
+          !!section.sourceRef?.sourceNodeId || !!sectionKey,
+      );
+    if (trackedSections.length === 0) {
+      return { code, restoredSectionKeys: [] };
+    }
+
+    const missingSections = trackedSections.filter(
+      ({ sectionKey }) =>
+        !code.includes(`data-vp-section-key="${sectionKey}"`),
+    );
+    if (missingSections.length === 0) {
+      return { code, restoredSectionKeys: [] };
+    }
+
+    const anchors = this.findTopLevelSectionAnchors(code, trackedSections.length);
+    if (anchors.length === 0) {
+      return { code, restoredSectionKeys: [] };
+    }
+
+    const mutations: Array<{ start: number; end: number; replacement: string }> =
+      [];
+    const restoredSectionKeys: string[] = [];
+
+    trackedSections.forEach(({ section, sectionKey }, index) => {
+      if (code.includes(`data-vp-section-key="${sectionKey}"`)) return;
+      const anchor = anchors[index];
+      if (!anchor) return;
+      if (/\bdata-vp-section-key=/.test(anchor.raw)) return;
+
+      const trackingAttrs = this.buildSectionTrackingAttrs(
+        section,
+        componentName,
+        sectionKey,
+      );
+      if (!trackingAttrs) return;
+
+      mutations.push({
+        start: anchor.start,
+        end: anchor.end,
+        replacement: anchor.raw.replace(
+          /^<([A-Za-z][\w.:-]*)\b/,
+          `$&${trackingAttrs}`,
+        ),
+      });
+      restoredSectionKeys.push(sectionKey);
+    });
+
+    if (mutations.length === 0) {
+      return { code, restoredSectionKeys: [] };
+    }
+
+    let nextCode = code;
+    for (const mutation of mutations.sort((a, b) => b.start - a.start)) {
+      nextCode =
+        nextCode.slice(0, mutation.start) +
+        mutation.replacement +
+        nextCode.slice(mutation.end);
+    }
+
+    return { code: nextCode, restoredSectionKeys };
+  }
+
+  private findTopLevelSectionAnchors(
+    code: string,
+    expectedCount: number,
+  ): Array<{ start: number; end: number; raw: string }> {
+    const returnMatch = /return\s*\(/m.exec(code);
+    if (!returnMatch) return [];
+
+    const openParenIndex = returnMatch.index + returnMatch[0].length - 1;
+    const closeParenIndex = this.findMatchingParen(code, openParenIndex);
+    if (closeParenIndex === -1) return [];
+
+    const bodyStart = openParenIndex + 1;
+    const body = code.slice(bodyStart, closeParenIndex);
+    const tagPattern =
+      /<>|<\/>|<\/([A-Za-z][\w.:-]*)\s*>|<([A-Za-z][\w.:-]*)\b[^>]*\/?>/g;
+    const stack: Array<{ name: string; kind: 'fragment' | 'element' }> = [];
+    const anchors: Array<{ start: number; end: number; raw: string }> = [];
+    let rootKind: 'fragment' | 'element' | null = null;
+
+    for (const match of body.matchAll(tagPattern)) {
+      const raw = match[0];
+      const localStart = match.index ?? -1;
+      if (localStart < 0) continue;
+      const absoluteStart = bodyStart + localStart;
+      const absoluteEnd = absoluteStart + raw.length;
+
+      if (raw === '<>') {
+        if (!rootKind) rootKind = 'fragment';
+        stack.push({ name: '', kind: 'fragment' });
+        continue;
+      }
+
+      if (raw === '</>') {
+        while (stack.length > 0) {
+          const last = stack.pop();
+          if (last?.kind === 'fragment') break;
+        }
+        continue;
+      }
+
+      if (raw.startsWith('</')) {
+        const closingName = match[1] ?? '';
+        while (stack.length > 0) {
+          const last = stack.pop();
+          if (last?.kind === 'element' && last.name === closingName) break;
+        }
+        continue;
+      }
+
+      const tagName = match[2] ?? '';
+      const isSelfClosing = /\/>\s*$/.test(raw);
+      const isSectionCandidate =
+        /^(section|header|footer|main|article|aside|nav|div)$/i.test(tagName);
+      const parentDepth = stack.length;
+
+      if (!rootKind) {
+        rootKind = 'element';
+        if (expectedCount === 1 && isSectionCandidate) {
+          anchors.push({ start: absoluteStart, end: absoluteEnd, raw });
+        }
+      } else if (
+        isSectionCandidate &&
+        ((rootKind === 'fragment' && parentDepth === 1) ||
+          (rootKind === 'element' && parentDepth === 1))
+      ) {
+        anchors.push({ start: absoluteStart, end: absoluteEnd, raw });
+      }
+
+      if (!isSelfClosing) {
+        stack.push({ name: tagName, kind: 'element' });
+      }
+      if (anchors.length >= expectedCount) break;
+    }
+
+    return anchors;
+  }
+
+  private findMatchingParen(source: string, openParenIndex: number): number {
+    let depth = 0;
+    let quote: "'" | '"' | '`' | null = null;
+    let escaped = false;
+
+    for (let index = openParenIndex; index < source.length; index += 1) {
+      const char = source[index];
+      if (quote) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === quote) {
+          quote = null;
+        }
+        continue;
+      }
+
+      if (char === "'" || char === '"' || char === '`') {
+        quote = char;
+        continue;
+      }
+      if (char === '(') {
+        depth += 1;
+        continue;
+      }
+      if (char === ')') {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private buildSectionTrackingAttrs(
+    section: SectionPlan,
+    componentName: string,
+    sectionKeyOverride?: string,
+  ): string {
+    const sectionKey = sectionKeyOverride ?? section.sectionKey ?? section.type;
+    if (!sectionKey && !section.sourceRef?.sourceNodeId) return '';
+
+    const attrs = [
+      ['data-vp-source-node', section.sourceRef?.sourceNodeId],
+      ['data-vp-template', section.sourceRef?.templateName],
+      ['data-vp-source-file', section.sourceRef?.sourceFile],
+      ['data-vp-section-key', sectionKey],
+      ['data-vp-component', componentName],
+      [
+        'data-vp-section-component',
+        this.buildTrackedSectionComponentName(componentName, sectionKey),
+      ],
+    ].filter(([, value]) => !!value);
+
+    return attrs
+      .map(
+        ([name, value]) =>
+          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
+      )
+      .join('');
+  }
+
+  private buildTrackedSectionComponentName(
+    componentName: string,
+    sectionKey: string,
+  ): string {
+    return `${componentName}${sectionKey
+      .split(/[^a-zA-Z0-9]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+      .join('')}Section`;
   }
 
   private resolveRequiredCustomClassTargets(

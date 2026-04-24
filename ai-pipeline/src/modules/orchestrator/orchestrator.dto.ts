@@ -177,6 +177,17 @@ export interface PipelineEditTargetHintDto {
   route?: string | null;
   sectionIndex?: number;
   sectionType?: string;
+  sourceNodeId?: string;
+  sectionKey?: string;
+  sectionComponentName?: string;
+  sourceFile?: string;
+  outputFilePath?: string;
+  startLine?: number;
+  endLine?: number;
+  targetNodeRole?: string;
+  targetElementTag?: string;
+  targetTextPreview?: string;
+  targetStartLine?: number;
 }
 
 export interface PipelineEditConstraintsDto {

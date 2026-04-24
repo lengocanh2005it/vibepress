@@ -8,6 +8,7 @@ import type {
   SectionPlan,
   NavbarSection,
   HeroSection,
+  CtaStripSection,
   CoverSection,
   PostListSection,
   CardGridSection,
@@ -25,6 +26,7 @@ import type {
   AccordionSection,
   CarouselSection,
   DataNeed,
+  SectionCta,
 } from './visual-plan.schema.js';
 import {
   COMMENT_INTERFACE,
@@ -265,7 +267,9 @@ export class CodeGeneratorService {
         lines.push("      const siteInfoRes = await fetch('/api/site-info');");
         lines.push('      setSiteInfo(await siteInfoRes.json());');
       } else if (needsFooterLinks && !needsMenus) {
-        lines.push("      const footerLinksRes = await fetch('/api/footer-links');");
+        lines.push(
+          "      const footerLinksRes = await fetch('/api/footer-links');",
+        );
         lines.push(
           '      const footerLinksData = await footerLinksRes.json();',
         );
@@ -541,9 +545,30 @@ export class CodeGeneratorService {
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
     const fixedSlug = plan.pageBinding?.slug;
+    const modalSections = plan.sections.flatMap((section, index) =>
+      section.type === 'modal'
+        ? [
+            {
+              section,
+              stateKey: this.buildInteractiveSectionStateKey(section, index),
+            },
+          ]
+        : [],
+    );
     const hasModalSections = plan.sections.some(
       (section) => section.type === 'modal',
     );
+    const carouselSections = plan.sections.flatMap((section, index) =>
+      section.type === 'carousel'
+        ? [
+            {
+              section,
+              stateKey: this.buildInteractiveSectionStateKey(section, index),
+            },
+          ]
+        : [],
+    );
+    const hasCarouselSections = carouselSections.length > 0;
     const hasTabsSections = plan.sections.some(
       (section) => section.type === 'tabs',
     );
@@ -603,6 +628,24 @@ export class CodeGeneratorService {
     if (hasModalSections) {
       lines.push(
         `  const [openModals, setOpenModals] = useState<Record<string, boolean>>({});`,
+      );
+      lines.push(
+        `  const modalEscEnabled: Record<string, boolean> = ${JSON.stringify(
+          Object.fromEntries(
+            modalSections.map(({ section, stateKey }) => [
+              stateKey,
+              section.closeOnEsc !== false,
+            ]),
+          ),
+        )};`,
+      );
+    }
+    if (hasCarouselSections) {
+      lines.push(
+        `  const [activeCarousels, setActiveCarousels] = useState<Record<string, number>>({});`,
+      );
+      lines.push(
+        `  const [hoveredCarousels, setHoveredCarousels] = useState<Record<string, boolean>>({});`,
       );
     }
     if (hasTabsSections) {
@@ -706,6 +749,86 @@ export class CodeGeneratorService {
       lines.push('');
     }
 
+    if (hasModalSections) {
+      lines.push(`  useEffect(() => {`);
+      lines.push(
+        `    const openKeys = Object.entries(openModals).filter((entry) => entry[1]).map((entry) => entry[0]);`,
+      );
+      lines.push(`    if (typeof document !== 'undefined') {`);
+      lines.push(
+        `      document.body.style.overflow = openKeys.length > 0 ? 'hidden' : '';`,
+      );
+      lines.push(
+        `      document.body.classList.toggle('hide-scroll', openKeys.length > 0);`,
+      );
+      lines.push(`    }`);
+      lines.push(
+        `    const handleKeyDown = (event: KeyboardEvent) => {`,
+      );
+      lines.push(`      if (event.key !== 'Escape') return;`);
+      lines.push(
+        `      const closableKeys = openKeys.filter((key) => modalEscEnabled[key] !== false);`,
+      );
+      lines.push(`      if (closableKeys.length === 0) return;`);
+      lines.push(`      setOpenModals((prev) => {`);
+      lines.push(`        const next = { ...prev };`);
+      lines.push(
+        `        closableKeys.forEach((key) => { next[key] = false; });`,
+      );
+      lines.push(`        return next;`);
+      lines.push(`      });`);
+      lines.push(`    };`);
+      lines.push(`    if (typeof window !== 'undefined') {`);
+      lines.push(`      window.addEventListener('keydown', handleKeyDown);`);
+      lines.push(`    }`);
+      lines.push(`    return () => {`);
+      lines.push(`      if (typeof document !== 'undefined') {`);
+      lines.push(`        document.body.style.overflow = '';`);
+      lines.push(`        document.body.classList.remove('hide-scroll');`);
+      lines.push(`      }`);
+      lines.push(`      if (typeof window !== 'undefined') {`);
+      lines.push(
+        `        window.removeEventListener('keydown', handleKeyDown);`,
+      );
+      lines.push(`      }`);
+      lines.push(`    };`);
+      lines.push(`  }, [openModals, modalEscEnabled]);`);
+      lines.push('');
+    }
+
+    for (const { section, stateKey } of carouselSections) {
+      if (!section.autoplay || section.slides.length <= 1) continue;
+      const defaultIndex = 0;
+      const speed = Math.max(600, section.autoplaySpeed ?? 3000);
+      const loop = section.loop !== false;
+      const pauseOnInteraction =
+        section.pauseOn === 'hover' || section.pauseOn === 'click';
+      lines.push(`  useEffect(() => {`);
+      if (pauseOnInteraction) {
+        lines.push(
+          `    if (hoveredCarousels[${JSON.stringify(stateKey)}]) return;`,
+        );
+      }
+      lines.push(`    const timer = window.setInterval(() => {`);
+      lines.push(`      setActiveCarousels((prev) => {`);
+      lines.push(
+        `        const current = prev[${JSON.stringify(stateKey)}] ?? ${defaultIndex};`,
+      );
+      lines.push(
+        `        if (current >= ${section.slides.length - 1}) return ${loop ? `{ ...prev, [${JSON.stringify(stateKey)}]: 0 }` : 'prev'};`,
+      );
+      lines.push(
+        `        return { ...prev, [${JSON.stringify(stateKey)}]: current + 1 };`,
+      );
+      lines.push(`      });`);
+      lines.push(`    }, ${speed});`);
+      lines.push(`    return () => window.clearInterval(timer);`);
+      lines.push(
+        `  }, [activeCarousels[${JSON.stringify(stateKey)}], hoveredCarousels[${JSON.stringify(stateKey)}]]);`,
+      );
+      lines.push('');
+    }
+
     // Fetch
     lines.push(`  useEffect(() => {`);
     lines.push(`    const fetchData = async () => {`);
@@ -745,7 +868,9 @@ export class CodeGeneratorService {
         `        if (!slug) throw new Error('Post slug is required');`,
       );
       lines.push(
-        `        const detailRes = await fetch(\`/api/posts/\${slug}\`);`,
+        fixedSlug
+          ? `        const detailRes = await fetch(${JSON.stringify(`/api/posts/${fixedSlug}`)});`
+          : `        const detailRes = await fetch(\`/api/posts/\${slug}\`);`,
       );
       lines.push(
         `        if (!detailRes.ok) throw new Error('Post not found');`,
@@ -758,7 +883,9 @@ export class CodeGeneratorService {
         `        if (!slug) throw new Error('Page slug is required');`,
       );
       lines.push(
-        `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
+        fixedSlug
+          ? `        const detailRes = await fetch(${JSON.stringify(`/api/pages/${fixedSlug}`)});`
+          : `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
       );
       lines.push(
         `        if (!detailRes.ok) throw new Error('Page not found');`,
@@ -1083,6 +1210,9 @@ export default ${componentName};`;
       case 'hero':
         markup = this.renderHero(section, ctx, py);
         break;
+      case 'cta-strip':
+        markup = this.renderCtaStrip(section, ctx, py);
+        break;
       case 'cover':
         markup = this.renderCover(section, ctx);
         break;
@@ -1132,7 +1262,7 @@ export default ${componentName};`;
         markup = this.renderAccordion(section, ctx, bg, tc, py, sectionIndex);
         break;
       case 'carousel':
-        markup = this.renderCarousel(section, ctx, bg, tc, py);
+        markup = this.renderCarousel(section, ctx, bg, tc, py, sectionIndex);
         break;
     }
 
@@ -1314,6 +1444,96 @@ export default ${componentName};`;
       .trim();
   }
 
+  private appendOptionalCustomClasses(
+    baseClassName: string,
+    customClassNames?: string[],
+  ): string {
+    const extra = [...new Set((customClassNames ?? []).map((entry) => entry.trim()))]
+      .filter(Boolean)
+      .join(' ');
+    return extra ? this.appendUniqueClasses(baseClassName, extra) : baseClassName;
+  }
+
+  private buildInteractiveCtaClassName(
+    baseClassName: string,
+    cta?: SectionCta,
+  ): string {
+    return this.appendOptionalCustomClasses(
+      baseClassName,
+      cta?.customClassNames,
+    );
+  }
+
+  private resolveSectionCtas(section: {
+    cta?: SectionCta;
+    ctas?: SectionCta[];
+  }): SectionCta[] {
+    const raw =
+      Array.isArray(section.ctas) && section.ctas.length > 0
+        ? section.ctas
+        : section.cta
+          ? [section.cta]
+          : [];
+    const seen = new Set<string>();
+    return raw.filter((cta) => {
+      if (!cta?.text?.trim()) return false;
+      const key = `${cta.text}\u0000${cta.link}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private renderButtonCtaGroup(
+    ctas: SectionCta[],
+    ctx: RenderCtx,
+    options?: { align?: 'start' | 'center' | 'end' },
+  ): string {
+    if (ctas.length === 0) return '';
+    const { p, t } = ctx;
+    const justifyClass =
+      options?.align === 'center'
+        ? 'justify-center'
+        : options?.align === 'end'
+          ? 'justify-end'
+          : 'justify-start';
+    const buttonStyle = this.buttonStyleAttr(ctx);
+    const links = ctas
+      .map(
+        (cta) =>
+          `<Link to="${cta.link}" className="${this.buildInteractiveCtaClassName(
+            `inline-flex items-center justify-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity`,
+            cta,
+          )}"${buttonStyle}>${cta.text}</Link>`,
+      )
+      .join('');
+    return `\n            <div className="flex flex-wrap items-center ${justifyClass} gap-4">${links}</div>`;
+  }
+
+  private renderInteractiveAnchorCtaGroup(
+    ctas: SectionCta[],
+    ctx: RenderCtx,
+    options?: { align?: 'start' | 'center' | 'end'; baseClassName?: string },
+  ): string {
+    if (ctas.length === 0) return '';
+    const justifyClass =
+      options?.align === 'center'
+        ? 'justify-center'
+        : options?.align === 'end'
+          ? 'justify-end'
+          : 'justify-start';
+    const baseClassName =
+      options?.baseClassName ??
+      `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-opacity hover:opacity-90`;
+    const links = ctas
+      .map(
+        (cta) =>
+          `\n                  <a href={${JSON.stringify(cta.link)}} className="${this.buildInteractiveCtaClassName(baseClassName, cta)}" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                    {${JSON.stringify(cta.text)}}\n                  </a>`,
+      )
+      .join('');
+    return `\n                  <div className="flex flex-wrap items-center ${justifyClass} gap-4">${links}\n                  </div>`;
+  }
+
   private opacityLinkClass(extra = ''): string {
     return [
       extra,
@@ -1407,6 +1627,83 @@ export default ${componentName};`;
     return this.buildStyleAttr(styleMap);
   }
 
+  private mergeBlockStyleTokens(
+    ...styles: Array<BlockStyleToken | undefined>
+  ): BlockStyleToken | undefined {
+    const merged: BlockStyleToken = {};
+
+    for (const style of styles) {
+      if (!style) continue;
+      if (style.color) {
+        merged.color = { ...(merged.color ?? {}), ...style.color };
+      }
+      if (style.typography) {
+        merged.typography = {
+          ...(merged.typography ?? {}),
+          ...style.typography,
+        };
+      }
+      if (style.border) {
+        merged.border = { ...(merged.border ?? {}), ...style.border };
+      }
+      if (style.spacing) {
+        merged.spacing = { ...(merged.spacing ?? {}), ...style.spacing };
+      }
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private buildTextTokenStyleAttr(
+    ctx: RenderCtx,
+    options: {
+      baseColor?: string;
+      typography?: BlockStyleToken['typography'];
+    } = {},
+    ...styles: Array<BlockStyleToken | undefined>
+  ): string {
+    const merged = this.mergeBlockStyleTokens(...styles);
+    const styleMap: Record<string, string | number | undefined> = {};
+
+    if (options.baseColor) styleMap.color = options.baseColor;
+    if (merged?.color?.text) styleMap.color = merged.color.text;
+
+    const typography = [merged?.typography, options.typography].filter(
+      Boolean,
+    ) as Array<NonNullable<BlockStyleToken['typography']>>;
+
+    for (const style of typography) {
+      if (style.fontSize) styleMap.fontSize = style.fontSize;
+      if (style.fontFamily) {
+        const fontFamily = this.normalizeRedundantFontFamily(
+          style.fontFamily,
+          ctx,
+        );
+        if (fontFamily) styleMap.fontFamily = fontFamily;
+      }
+      if (style.fontWeight) styleMap.fontWeight = style.fontWeight;
+      if (style.letterSpacing) styleMap.letterSpacing = style.letterSpacing;
+      if (style.lineHeight) styleMap.lineHeight = style.lineHeight;
+      if (style.textTransform) styleMap.textTransform = style.textTransform;
+    }
+
+    return this.buildStyleAttr(styleMap);
+  }
+
+  private buildMergedBlockStyleAttr(
+    ctx: RenderCtx,
+    base: Record<string, string | number | undefined> = {},
+    preferStyle = false,
+    ...styles: Array<BlockStyleToken | undefined>
+  ): string {
+    return this.buildBlockStyleAttr(
+      this.mergeBlockStyleTokens(...styles),
+      base,
+      preferStyle,
+      ctx,
+    );
+  }
+
   private normalizeRedundantFontFamily(
     value: string | undefined,
     ctx?: RenderCtx,
@@ -1446,6 +1743,30 @@ export default ${componentName};`;
     return `${base} ${breakpoint}:grid-cols-[${tracks}]`;
   }
 
+  private resolveNavigationOverlayMode(input: {
+    overlayMenu?: 'always' | 'mobile' | 'never';
+    orientation?: 'horizontal' | 'vertical';
+    isResponsive?: boolean;
+    componentKind?: 'header' | 'footer' | 'page';
+  }): 'always' | 'mobile' | 'never' {
+    if (input.overlayMenu) return input.overlayMenu;
+    if (input.isResponsive === false) return 'never';
+    if (input.orientation === 'vertical' || input.componentKind === 'footer') {
+      return 'never';
+    }
+    return 'mobile';
+  }
+
+  private isNavigationResponsive(input: {
+    overlayMode: 'always' | 'mobile' | 'never';
+    orientation?: 'horizontal' | 'vertical';
+    isResponsive?: boolean;
+  }): boolean {
+    if (input.orientation === 'vertical') return false;
+    if (input.overlayMode === 'never') return false;
+    return input.isResponsive !== false;
+  }
+
   // ── Section renderers ─────────────────────────────────────────────────────
 
   private renderNavbar(s: NavbarSection, ctx: RenderCtx): string {
@@ -1461,20 +1782,78 @@ export default ${componentName};`;
       ctx,
     );
     const buttonStyle = this.buttonStyleAttr(ctx);
+    const brandStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'site-title', 'heading'),
+    );
+    const navLinkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      navStyle,
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const overlayMode = this.resolveNavigationOverlayMode({
+      overlayMenu: s.overlayMenu,
+      orientation: s.orientation,
+      isResponsive: s.isResponsive,
+      componentKind: 'header',
+    });
+    const isResponsiveNav = this.isNavigationResponsive({
+      overlayMode,
+      orientation: s.orientation,
+      isResponsive: s.isResponsive,
+    });
+    const desktopNavClass =
+      overlayMode === 'always'
+        ? 'hidden'
+        : isResponsiveNav
+          ? 'hidden md:flex items-center gap-6'
+          : `flex items-center gap-6 ${s.orientation === 'vertical' ? 'flex-col items-start' : ''}`.trim();
+    const mobileButtonClass =
+      overlayMode === 'always'
+        ? 'flex flex-col gap-[5px] p-2'
+        : isResponsiveNav
+          ? 'md:hidden flex flex-col gap-[5px] p-2'
+          : '';
+    const mobilePanelClass =
+      overlayMode === 'always'
+        ? 'flex flex-col gap-1 pb-4 border-t border-black/10'
+        : 'md:hidden flex flex-col gap-1 pb-4 border-t border-black/10';
+    const showSiteLogo = s.showSiteLogo !== false;
+    const showSiteTitle = s.showSiteTitle !== false;
+    const logoStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        width: s.logoWidth,
+        maxWidth: '100%',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'site-logo'),
+      this.pickBlockStyle(ctx, 'image'),
+    );
+    const brandMarkup =
+      showSiteLogo || showSiteTitle
+        ? `<Link to="/" className="flex items-center gap-3 text-[${tc}]">
+              ${showSiteLogo ? `{siteInfo?.logoUrl ? <img src={siteInfo.logoUrl} alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto object-contain"${logoStyle} /> : null}` : ''}
+              ${showSiteTitle ? `<span className="font-bold text-[${tc}]"${brandStyle}>{siteInfo?.siteName}</span>` : ''}
+              ${showSiteLogo && !showSiteTitle ? '<span className="sr-only">{siteInfo?.siteName}</span>' : ''}
+            </Link>`
+        : `<Link to="/" className="font-bold text-[${tc}]"${brandStyle}>{siteInfo?.siteName}</Link>`;
     const cta = s.cta
       ? s.cta.style === 'button'
-        ? `\n            <Link to="${s.cta.link}" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity"${buttonStyle}>${s.cta.text}</Link>`
-        : `\n            <Link to="${s.cta.link}" className="${this.textLinkClass(tc, p.accent)}">${s.cta.text}</Link>`
+        ? `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(`bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity`, s.cta.customClassNames)}"${buttonStyle}>${s.cta.text}</Link>`
+        : `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(this.textLinkClass(tc, p.accent), s.cta.customClassNames)}"${navLinkStyle}>${s.cta.text}</Link>`
       : '';
 
     const navItems = `menus.find(m => m.slug === '${s.menuSlug}')?.items.filter(i => i.parentId === 0)`;
     const renderNavItem = (extraClass = '') =>
       `(isInternalPath(item.url) ? (
-                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}">
+                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}"${navLinkStyle}>
                       {item.title}
                     </Link>
                   ) : (
-                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}">
+                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}"${navLinkStyle}>
                       {item.title}
                     </a>
                   ))`;
@@ -1483,15 +1862,15 @@ export default ${componentName};`;
       <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           <div className="flex items-center justify-between py-4"${this.buildSectionGapStyleAttr(s)}>
-            <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
-            <nav className="hidden md:flex items-center gap-6">
+            ${brandMarkup}
+            <nav className="${desktopNavClass}">
               {${navItems}?.map(item => (
                   ${renderNavItem()}
                 ))}
             </nav>
             <div className="flex items-center gap-4">${cta}
-              <button
-                className="md:hidden flex flex-col gap-[5px] p-2 text-[${tc}]"
+              ${mobileButtonClass ? `<button
+                className="${mobileButtonClass} text-[${tc}]"
                 aria-label="Toggle menu"
                 onClick={() => setMobileMenuOpen(prev => !prev)}
               >
@@ -1500,11 +1879,11 @@ export default ${componentName};`;
                 ) : (
                   <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
                 )}
-              </button>
+              </button>` : ''}
             </div>
           </div>
-          {mobileMenuOpen && (
-            <nav className="md:hidden flex flex-col gap-1 pb-4 border-t border-black/10">
+          {${mobileButtonClass ? 'mobileMenuOpen' : 'false'} && (
+            <nav className="${mobilePanelClass}">
               {${navItems}?.map(item => (
                   ${renderNavItem(' block py-2 px-2')}
                 ))}
@@ -1517,24 +1896,23 @@ export default ${componentName};`;
   private renderHero(s: HeroSection, ctx: RenderCtx, py: string): string {
     const { p, t, l } = ctx;
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
-    const headingStyle = this.buildTypographyStyleAttr(
-      ctx,
-      this.pickBlockStyle(ctx, 'heading')?.typography,
-      s.headingStyle,
-    );
-    const subheadingStyle = this.buildTypographyStyleAttr(
-      ctx,
-      this.pickBlockStyle(ctx, 'paragraph')?.typography,
-      s.subheadingStyle,
-    );
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
+    const headingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc, typography: s.headingStyle },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const subheadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted, typography: s.subheadingStyle },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const sectionStyle = this.buildSectionStyleAttr(s);
-    const buttonStyle = this.buttonStyleAttr(ctx);
     const imageRadius = this.imageRadiusClass(ctx);
-    const cta = s.cta
-      ? `\n            <Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${buttonStyle}>${s.cta.text}</Link>`
-      : '';
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align: s.layout === 'centered' ? 'center' : 'start',
+    });
     const image = s.image
       ? s.image.position === 'below'
         ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
@@ -1550,8 +1928,8 @@ export default ${componentName};`;
         <div className="${l.containerClass}">
           <div className="flex flex-col md:flex-row gap-8 items-center"${this.buildSectionGapStyleAttr(s)}>
             <div className="flex-1 flex flex-col gap-4">
-              <h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>
-              ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
+              ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
+              ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
               ${cta}
             </div>${image}
           </div>
@@ -1563,10 +1941,31 @@ export default ${componentName};`;
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${l.containerClass}">
           <div className="flex flex-col ${isCenter ? 'items-center text-center' : 'items-start'} gap-6 max-w-[640px] ${isCenter ? 'mx-auto' : ''}"${this.buildSectionGapStyleAttr(s)}>
-            <h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>
-            ${s.subheading ? `<p className="text-lg text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
+            ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
+            ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
           </div>${image}
+        </div>
+      </section>`;
+  }
+
+  private renderCtaStrip(
+    s: CtaStripSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const bg = s.background ?? ctx.p.background;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align:
+        s.align === 'center' ? 'center' : s.align === 'right' ? 'end' : 'start',
+    });
+    return `      {/* CTA Strip */}
+      <section className="bg-[${bg}] ${py}"${sectionStyle}>
+        <div className="${ctx.l.containerClass}">
+          <div className="flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
+            ${cta}
+          </div>
         </div>
       </section>`;
   }
@@ -1575,15 +1974,15 @@ export default ${componentName};`;
     const { p, t } = ctx;
     const tc = s.textColor ?? '#ffffff';
     const imageRadius = this.imageRadiusClass(ctx);
-    const headingStyle = this.buildTypographyStyleAttr(
+    const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
-      this.pickBlockStyle(ctx, 'heading')?.typography,
-      s.headingStyle,
+      { baseColor: tc, typography: s.headingStyle },
+      this.pickBlockStyle(ctx, 'heading'),
     );
-    const subheadingStyle = this.buildTypographyStyleAttr(
+    const subheadingStyle = this.buildTextTokenStyleAttr(
       ctx,
-      this.pickBlockStyle(ctx, 'paragraph')?.typography,
-      s.subheadingStyle,
+      { baseColor: '#ffffffcc', typography: s.subheadingStyle },
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const bgSrcExpr = s.imageSrc.startsWith('/assets/')
       ? `\`url("\${resolveAsset("${s.imageSrc}")}")\``
@@ -1603,6 +2002,14 @@ export default ${componentName};`;
         : s.contentAlign === 'right'
           ? 'items-end text-right'
           : 'items-start text-left';
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align:
+        s.contentAlign === 'center'
+          ? 'center'
+          : s.contentAlign === 'right'
+            ? 'end'
+            : 'start',
+    });
 
     return `      {/* Cover */}
       <section${styleAttr}
@@ -1610,9 +2017,9 @@ export default ${componentName};`;
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
         <div className="relative z-10 w-full flex flex-col ${align} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.buildSectionGapStyleAttr(s)}>
-          ${s.heading ? `<h1 className="${t.h1} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h1>` : ''}
-          ${s.subheading ? `<p className="text-lg text-white/80"${subheadingStyle}>${s.subheading}</p>` : ''}
-          ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
+          ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
+          ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
+          ${cta}
         </div>
       </section>`;
   }
@@ -1628,6 +2035,16 @@ export default ${componentName};`;
     const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const excerptStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const imageRadius = this.imageRadiusClass(ctx);
     const isGrid = s.layout !== 'list';
     const cols = s.layout === 'grid-3' ? 3 : 2;
@@ -1638,19 +2055,19 @@ export default ${componentName};`;
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding }, false, ctx)}>
               ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}` : ''}
-              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}">{post.title}</Link>
-              ${s.showExcerpt ? `<p className="text-sm text-[${p.textMuted}]">{post.excerpt}</p>` : ''}
+              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
+              ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
             </article>`
       : `            <article key={post.id} className="flex flex-col md:flex-row md:items-baseline gap-2 md:gap-4 py-4">
-              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'flex-1 text-lg')}">{post.title}</Link>
+              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'flex-1 text-lg')}"${titleStyle}>{post.title}</Link>
               ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx, true) : ''}
             </article>`;
 
     return `      {/* Post List */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-8">${s.title}</h2>` : ''}
+          ${s.title ? `<h2 className="${t.h2} font-normal mb-8"${titleStyle}>${s.title}</h2>` : ''}
           <div className="${gridClass}"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
 ${postCard}
@@ -1685,6 +2102,12 @@ ${postCard}
     const { p } = ctx;
     const parts: string[] = [];
     const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     if (s.showDate)
       parts.push(
         `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`,
@@ -1701,7 +2124,7 @@ ${postCard}
     const flex = inline
       ? 'flex items-center gap-2 whitespace-nowrap shrink-0'
       : 'flex flex-wrap gap-2 mt-1';
-    return `<div className="text-sm text-[${p.textMuted}] ${flex}">${parts.join('\n              ')}</div>`;
+    return `<div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}>${parts.join('\n              ')}</div>`;
   }
 
   private renderCardGrid(
@@ -1714,12 +2137,35 @@ ${postCard}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const cardRadius = this.cardRadiusClass(ctx);
-    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
+    const cardStylePreset = this.mergeBlockStyleTokens(
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
     const cardStyle = this.buildBlockStyleAttr(
       cardStylePreset,
       { padding: l.cardPadding },
       true,
       ctx,
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const subtitleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const cardHeadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const cardBodyStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
     const cards = s.cards
@@ -1727,8 +2173,8 @@ ${postCard}
         (
           c,
         ) => `          <div className="flex flex-col gap-3 ${cardRadius}"${cardStyle}>
-            <h3 className="font-semibold text-[${tc}]">${c.heading}</h3>
-            <p className="text-[${p.textMuted}]">${c.body}</p>
+            <h3 className="font-semibold"${cardHeadingStyle}>${c.heading}</h3>
+            <p${cardBodyStyle}>${c.body}</p>
           </div>`,
       )
       .join('\n');
@@ -1736,8 +2182,8 @@ ${postCard}
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-4">${s.title}</h2>` : ''}
-          ${s.subtitle ? `<p className="text-[${p.textMuted}] mb-8">${s.subtitle}</p>` : ''}
+          ${s.title ? `<h2 className="${t.h2} font-normal mb-4"${titleStyle}>${s.title}</h2>` : ''}
+          ${s.subtitle ? `<p className="mb-8"${subtitleStyle}>${s.subtitle}</p>` : ''}
           <div className="grid ${colClass} gap-6"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
@@ -1759,15 +2205,21 @@ ${cards}
       this.cardRadiusClass(ctx) ||
       'rounded-[24px]';
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
-    const headingStyle = this.buildTypographyStyleAttr(
+    const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
-      this.pickBlockStyle(ctx, 'heading')?.typography,
-      s.headingStyle,
+      { baseColor: tc, typography: s.headingStyle },
+      this.pickBlockStyle(ctx, 'heading'),
     );
-    const bodyStyle = this.buildTypographyStyleAttr(
+    const bodyStyle = this.buildTextTokenStyleAttr(
       ctx,
-      this.pickBlockStyle(ctx, 'paragraph')?.typography,
-      s.bodyStyle,
+      { baseColor: tc, typography: s.bodyStyle },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const listItemStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'list'),
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const layoutClass =
       s.columnWidths?.length === 2
@@ -1775,12 +2227,15 @@ ${cards}
         : 'flex flex-col md:flex-row gap-8 items-center';
     const imgFirst = s.imagePosition === 'left';
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align: 'start',
+    });
     const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
-            ${s.heading ? `<h2 className="${t.h3} font-[600] text-[${tc}]"${headingStyle}>${s.heading}</h2>` : ''}
-            ${s.body ? `<p className="text-[${tc}]"${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="text-[${tc}] font-medium" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="text-[${tc}] font-medium">${li}</li>`)).join('')}</ul>` : ''}
-            ${s.cta ? `<Link to="${s.cta.link}" className="inline-block bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>${s.cta.text}</Link>` : ''}
+            ${s.heading ? `<h2 className="${t.h3} font-[600]"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.body ? `<p${bodyStyle}>${s.body}</p>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
+            ${cta}
           </div>`;
 
     return `      {/* Media + Text */}
@@ -1801,6 +2256,24 @@ ${cards}
     const { p, t } = ctx;
     const bg = s.background ?? p.dark ?? '#111111';
     const tc = s.textColor ?? p.darkText ?? '#f9f9f9';
+    const quoteStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'pullquote'),
+      this.pickBlockStyle(ctx, 'quote'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const authorStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const authorTitleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const styleAttr = this.buildSectionStyleAttr(s, {
       backgroundColor: bg,
       color: tc,
@@ -1823,11 +2296,11 @@ ${cards}
       <section className="w-full ${py}"${styleAttr}>
         <div className="max-w-[720px] ${containerAlign} px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col ${align} gap-8"${this.buildSectionGapStyleAttr(s)}>
-            <p className="${t.h3} font-normal leading-snug">"{s.quote}"</p>
+            <p className="${t.h3} font-normal leading-snug"${quoteStyle}>"${s.quote}"</p>
             <div className="flex flex-col ${align.replace('text-right', '').replace('text-left', '').replace('text-center', '').trim()} gap-1">
               ${s.authorAvatar ? `<img src={resolveAsset("${s.authorAvatar}")} alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
-              <span className="font-medium">${s.authorName}</span>
-              ${s.authorTitle ? `<span className="text-sm opacity-70">${s.authorTitle}</span>` : ''}
+              <span className="font-medium"${authorStyle}>${s.authorName}</span>
+              ${s.authorTitle ? `<span className="text-sm opacity-70"${authorTitleStyle}>${s.authorTitle}</span>` : ''}
             </div>
           </div>
         </div>
@@ -1844,12 +2317,22 @@ ${cards}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const cardRadius = this.cardRadiusClass(ctx);
-    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
-    const cardStyle = this.buildBlockStyleAttr(
-      cardStylePreset,
+    const cardStyle = this.buildMergedBlockStyleAttr(
+      ctx,
       { padding: l.cardPadding, gap: s.gapStyle },
       true,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
+    const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const subheadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const inner =
       s.layout === 'card'
@@ -1860,8 +2343,8 @@ ${cards}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           ${inner}
-            <h2 className="${t.h2} font-normal text-[${tc}]">${s.heading}</h2>
-            ${s.subheading ? `<p className="text-[${p.textMuted}]">${s.subheading}</p>` : ''}
+            <h2 className="${t.h2} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h2>
+            ${s.subheading ? `<p className="text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
             <button className="self-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>
               ${s.buttonText}
             </button>
@@ -1881,39 +2364,107 @@ ${cards}
       true,
       ctx,
     );
-
+    const brandStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'site-title', 'heading'),
+    );
+    const descriptionStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'),
+    );
+    const columnHeadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const linkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'navigation'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const logoStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        width: s.logoWidth,
+        maxWidth: '100%',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'site-logo'),
+      this.pickBlockStyle(ctx, 'image'),
+    );
+    const showSiteLogo = s.showSiteLogo !== false;
+    const showSiteTitle = s.showSiteTitle !== false;
+    const showTagline = s.showTagline !== false;
+    const brandDescriptionExpr = s.brandDescription
+      ? JSON.stringify(s.brandDescription)
+      : 'siteInfo?.blogDescription';
+    const footerColumnsExpr =
+      '(footerColumns.length > 0 ? footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0) : fallbackFooterColumns)';
     const fallbackColumns = JSON.stringify(
       s.menuColumns.map((col) => ({ heading: col.title, links: [] })),
     );
+    const outerTracks =
+      s.columnWidths
+        ?.map((value) => value.trim().replace(/\s+/g, ''))
+        .filter(Boolean)
+        .join('_') ?? '';
+    const hasSpacerColumn =
+      (s.columnWidths?.length ?? 0) >= 3 && s.menuColumns.length > 0;
+    const outerGridClass = outerTracks
+      ? `grid-cols-1 md:grid-cols-[${outerTracks}]`
+      : `grid-cols-1 md:grid-cols-${hasSpacerColumn ? 3 : 2}`;
+    const menuGridClass = this.responsiveGridColumnsClass(
+      Math.min(Math.max(s.menuColumns.length, 1), 4),
+      undefined,
+      'lg',
+    );
+    const copyrightMarkup = s.copyright
+      ? `<p className="text-sm text-[${p.textMuted}] mt-8 pt-8 border-t border-black/10"${descriptionStyle}>{${JSON.stringify(s.copyright)}}</p>`
+      : '';
 
     return `      {/* Footer */}
       <footer className="bg-[${bg}] border-t border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass} py-12">
-          <div className="grid grid-cols-1 md:grid-cols-${Math.min(4, s.menuColumns.length + 1)} gap-8"${this.buildSectionGapStyleAttr(s)}>
-            <div className="flex flex-col gap-3">
-              <Link to="/" className="font-bold text-[${tc}]">{siteInfo?.siteName}</Link>
-              <p className="text-sm text-[${p.textMuted}]">${s.brandDescription ? s.brandDescription : '{siteInfo?.blogDescription}'}</p>
+          <div className="grid ${outerGridClass} items-start gap-8"${this.buildSectionGapStyleAttr(s)}>
+            <div className="flex min-w-0 flex-col items-start gap-3">
+              <Link to="/" className="flex flex-col items-start gap-3 text-[${tc}]">
+                ${showSiteLogo ? `{siteInfo?.logoUrl ? <img src={siteInfo.logoUrl} alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto object-contain"${logoStyle} /> : null}` : ''}
+                ${showSiteTitle ? `<span className="font-bold text-[${tc}]"${brandStyle}>{siteInfo?.siteName}</span>` : ''}
+                ${showSiteLogo && !showSiteTitle ? '<span className="sr-only">{siteInfo?.siteName}</span>' : ''}
+              </Link>
+              ${showTagline ? `<p className="text-sm text-[${p.textMuted}]"${descriptionStyle}>{${brandDescriptionExpr}}</p>` : ''}
             </div>
-            {(footerColumns.length > 0 ? footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0) : ${fallbackColumns}).map((column, columnIndex) => (
-              <div key={column.heading ?? columnIndex} className="flex flex-col gap-3">
-                <h3 className="font-semibold text-[${tc}]">{column.heading}</h3>
-                <nav className="flex flex-col gap-2">
-                  {(column.links ?? []).map((link, linkIndex) => (
-                    isInternalPath(link.url) ? (
-                      <Link key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} to={toAppPath(link.url)} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
-                        {link.label}
-                      </Link>
-                    ) : (
-                      <a key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} href={link.url} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}">
-                        {link.label}
-                      </a>
-                    )
-                  ))}
-                </nav>
+            ${hasSpacerColumn ? '<div className="hidden md:block" aria-hidden="true" />' : ''}
+            <div className="min-w-0">
+              <div className="grid ${menuGridClass} items-start gap-8">
+                {(() => {
+                  const fallbackFooterColumns = ${fallbackColumns};
+                  return ${footerColumnsExpr}.map((column, columnIndex) => (
+                    <div key={column.heading ?? columnIndex} className="flex min-w-0 flex-col gap-3">
+                      <h3 className="font-semibold text-[${tc}]"${columnHeadingStyle}>{column.heading}</h3>
+                      <nav className="flex flex-col gap-2">
+                        {(column.links ?? []).map((link, linkIndex) => (
+                          isInternalPath(link.url) ? (
+                            <Link key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} to={toAppPath(link.url)} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}"${linkStyle}>
+                              {link.label}
+                            </Link>
+                          ) : (
+                            <a key={\`\${column.heading ?? columnIndex}-\${link.label}-\${linkIndex}\`} href={link.url} className="${this.textLinkClass(p.textMuted, p.accent, 'text-sm')}"${linkStyle}>
+                              {link.label}
+                            </a>
+                          )
+                        ))}
+                      </nav>
+                    </div>
+                  ));
+                })()}
               </div>
-            ))}
+            </div>
           </div>
-          ${s.copyright ? `<p className="text-sm text-[${p.textMuted}] mt-8 pt-8 border-t border-black/10">${s.copyright}</p>` : ''}
+          ${copyrightMarkup}
         </div>
       </footer>`;
   }
@@ -1943,28 +2494,70 @@ ${this.renderPostContentInner(s, ctx)}
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const headingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const authorStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const bodyStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const inputStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        color: tc,
+        backgroundColor: 'transparent',
+        borderColor: 'rgb(0 0 0 / 0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        padding: '0.625rem 0.875rem',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'search'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const moderationStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      { padding: '1rem' },
+      false,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
     const renderCommentCard = (
       commentVar: string,
     ) => `                      <div className="flex items-start gap-3">
-                        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]">
-                          {${commentVar}.author.charAt(0).toUpperCase()}
-                        </span>
-                        <div className="flex-1">
-                          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="text-sm font-medium text-[${tc}]">{${commentVar}.author}</div>
-                            <time className="text-xs text-[${p.textMuted}]">{${commentVar}.date}</time>
-                          </div>
-                          <p className="mt-2 whitespace-pre-line text-sm text-[${p.textMuted}]">{${commentVar}.content}</p>
-                        </div>
-                      </div>`;
+                         <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]">
+                           {${commentVar}.author.charAt(0).toUpperCase()}
+                         </span>
+                         <div className="flex-1">
+                           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</div>
+                            <time className="text-xs text-[${p.textMuted}]"${metaStyle}>{${commentVar}.date}</time>
+                           </div>
+                          <p className="mt-2 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
+                         </div>
+                       </div>`;
     const formBlock = s.showForm
       ? `
               <div className="flex flex-col gap-4 pt-6 border-t border-black/10">
-                <h3 className="${t.h3} font-normal text-[${tc}]">Leave a Reply</h3>
+                <h3 className="${t.h3} font-normal text-[${tc}]"${headingStyle}>Leave a Reply</h3>
                 <form className="flex flex-col gap-3" onSubmit={handleCommentSubmit}>
-                  ${s.requireName ? `<input type="text" placeholder="Name *" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
-                  ${s.requireEmail ? `<input type="email" placeholder="Email *" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm" />` : ''}
-                  <textarea rows={4} placeholder="Your comment..." value={commentContent} onChange={(event) => setCommentContent(event.target.value)} className="border border-black/20 ${t.buttonRadius} px-3 py-2 bg-transparent text-[${tc}] text-sm resize-none" />
+                  ${s.requireName ? `<input type="text" placeholder="Name *" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />` : ''}
+                  ${s.requireEmail ? `<input type="email" placeholder="Email *" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />` : ''}
+                  <textarea rows={4} placeholder="Your comment..." value={commentContent} onChange={(event) => setCommentContent(event.target.value)} className="${t.buttonRadius} text-sm resize-none"${inputStyle} />
                   {commentError ? <p className="text-sm text-red-600">{commentError}</p> : null}
                   {commentSuccess ? <p className="text-sm text-green-700">{commentSuccess}</p> : null}
                   <button type="submit" disabled={submittingComment} className="self-start bg-[${p.accent}] text-[${p.accentText}] px-5 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity text-sm disabled:cursor-not-allowed disabled:opacity-60"${this.buttonStyleAttr(ctx)}>
@@ -1976,17 +2569,17 @@ ${this.renderPostContentInner(s, ctx)}
     const pendingBlock = s.showForm
       ? `
               {pendingComments.length > 0 ? (
-                <div className="rounded-[24px] border border-black/10 bg-black/5 p-4">
-                  <p className="text-sm font-medium text-[${tc}]">
+                <div className="rounded-[24px] border border-black/10 bg-black/5"${moderationStyle}>
+                  <p className="text-sm font-medium text-[${tc}]"${authorStyle}>
                     {pendingComments.length === 1
                       ? '1 comment is awaiting moderation.'
                       : \`\${pendingComments.length} comments are awaiting moderation.\`}
                   </p>
                   <div className="mt-3 flex flex-col gap-3">
                     {pendingComments.map((pendingComment) => (
-                      <div key={pendingComment.id} className="rounded-[18px] bg-white/70 px-4 py-3">
-                        <div className="text-sm font-medium text-[${tc}]">{pendingComment.author}</div>
-                        <p className="mt-1 whitespace-pre-line text-sm text-[${p.textMuted}]">{pendingComment.content}</p>
+                      <div key={pendingComment.id} className="rounded-[18px] bg-white/70"${this.buildMergedBlockStyleAttr(ctx, { padding: '0.75rem 1rem' }, false, this.pickBlockStyle(ctx, 'group'), this.pickBlockStyle(ctx, 'column'))}>
+                        <div className="text-sm font-medium text-[${tc}]"${authorStyle}>{pendingComment.author}</div>
+                        <p className="mt-1 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{pendingComment.content}</p>
                       </div>
                     ))}
                   </div>
@@ -1998,7 +2591,7 @@ ${this.renderPostContentInner(s, ctx)}
         <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
           {item && (
             <div className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
-              <h2 className="${t.h2} font-normal text-[${tc}]">
+              <h2 className="${t.h2} font-normal text-[${tc}]"${headingStyle}>
                 {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
               </h2>
               {topLevelComments.length > 0 ? (
@@ -2021,7 +2614,7 @@ ${renderCommentCard('reply')}
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-[${p.textMuted}]">No comments yet.</p>
+                <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>No comments yet.</p>
               )}${pendingBlock}${formBlock}
             </div>
           )}
@@ -2050,21 +2643,51 @@ ${this.renderPageContentInner(s, ctx)}
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const resultLinkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const searchControlStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        color: tc,
+        backgroundColor: 'transparent',
+        borderColor: 'rgb(0 0 0 / 0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        padding: '0.625rem 1rem',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'search'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     return `      {/* Search */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6">${s.title}</h2>` : ''}
+          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6"${titleStyle}>${s.title}</h2>` : ''}
           <div className="flex gap-2">
-            <input type="search" placeholder="Search..." className="flex-1 border border-black/20 ${t.buttonRadius} px-4 py-2 bg-transparent text-[${tc}]" />
+            <input type="search" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
             <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
           </div>
           <div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
-              <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}">{post.title}</Link>
+              <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}"${resultLinkStyle}>{post.title}</Link>
             ))}
           </div>
           {totalPages > 1 && (
-            <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]">
+            <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]"${metaStyle}>
               <button
                 type="button"
                 onClick={() => updatePage(currentPage - 1)}
@@ -2172,7 +2795,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
     }
     if (s.showCategories)
       metaParts.push(
-        `{item.categories[0] && (item.categorySlugs[0] ? <Link to={\`/category/\${item.categorySlugs[0]}\`} className="${metaLinkClass}">{item.categories[0]}</Link> : <a href="#" className="${metaLinkClass}">{item.categories[0]}</a>)}`,
+        `{item.categories[0] && (item.categorySlugs[0] ? <Link to={\`/category/\${item.categorySlugs[0]}\`} className="${metaLinkClass}">{item.categories[0]}</Link> : <span>{item.categories[0]}</span>)}`,
       );
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
@@ -2207,25 +2830,47 @@ ${this.renderSidebarCard(s, ctx, 10)}
     maxItemsOverride?: number,
   ): string {
     const { p, t, l } = ctx;
-    const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
     const radius = this.cardRadiusClass(ctx) || 'rounded-2xl';
-    const paddingStyle = this.buildBlockStyleAttr(
-      cardStylePreset,
+    const paddingStyle = this.buildMergedBlockStyleAttr(
+      ctx,
       { padding: l.cardPadding, gap: s.gapStyle },
       true,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
       ctx,
+      { baseColor: p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const brandStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.text },
+      this.pickBlockStyle(ctx, 'site-title', 'heading'),
+    );
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const navLinkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.text },
+      this.pickBlockStyle(ctx, 'navigation'),
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const titleBlock = s.title
-      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]">${s.title}</h3>\n`
+      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>${s.title}</h3>\n`
       : '';
     const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
     const menuSlug = s.menuSlug ? `'${s.menuSlug}'` : 'undefined';
 
     const siteInfoBlock = s.showSiteInfo
       ? `            <div className="flex flex-col gap-2">
-              <div className="font-semibold text-[${p.text}]">{siteInfo?.siteName}</div>
+              <div className="font-semibold text-[${p.text}]"${brandStyle}>{siteInfo?.siteName}</div>
               {siteInfo?.blogDescription && (
-                <p className="text-sm text-[${p.textMuted}]">{siteInfo.blogDescription}</p>
+                <p className="text-sm text-[${p.textMuted}]"${metaStyle}>{siteInfo.blogDescription}</p>
               )}
             </div>
 `
@@ -2233,18 +2878,18 @@ ${this.renderSidebarCard(s, ctx, 10)}
 
     const menuBlock = s.menuSlug
       ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Navigation</div>
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Navigation</div>
               <nav className="flex flex-col gap-2">
                 {(menus.find(m => m.slug === ${menuSlug}) ?? menus[0])?.items
                   ?.filter(item => item.parentId === 0)
                   ?.slice(0, ${maxItems})
                   ?.map(item => (
                     isInternalPath(item.url) ? (
-                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
                         {item.title}
                       </Link>
                     ) : (
-                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
                         {item.title}
                       </a>
                     )
@@ -2256,10 +2901,10 @@ ${this.renderSidebarCard(s, ctx, 10)}
 
     const pagesBlock = s.showPages
       ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Pages</div>
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Pages</div>
               <nav className="flex flex-col gap-2">
                 {pages.slice(0, ${maxItems}).map(page => (
-                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
                     {page.title}
                   </Link>
                 ))}
@@ -2270,10 +2915,10 @@ ${this.renderSidebarCard(s, ctx, 10)}
 
     const postsBlock = s.showPosts
       ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]">Latest Posts</div>
+              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Latest Posts</div>
               <div className="flex flex-col gap-3">
                 {posts.slice(0, ${maxItems}).map(post => (
-                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}">
+                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
                     {post.title}
                   </Link>
                 ))}
@@ -2581,9 +3226,23 @@ ${indent}</div>`;
   ): string {
     const indent = '  '.repeat(depth);
     const menuIndex = state.navIndex++;
+    const orientation =
+      node.menuOrientation ??
+      (node.params?.layout?.orientation as 'horizontal' | 'vertical' | undefined) ??
+      (state.componentKind === 'footer' ? 'vertical' : 'horizontal');
     const isVertical =
-      node.params?.layout?.orientation === 'vertical' ||
-      state.componentKind === 'footer';
+      orientation === 'vertical' || state.componentKind === 'footer';
+    const overlayMode = this.resolveNavigationOverlayMode({
+      overlayMenu: node.overlayMenu,
+      orientation,
+      isResponsive: node.isResponsive,
+      componentKind: state.componentKind,
+    });
+    const isResponsiveNav = this.isNavigationResponsive({
+      overlayMode,
+      orientation,
+      isResponsive: node.isResponsive,
+    });
     const hintTitles = this.extractNavigationHintTitles(node);
     const menuVar = `resolveNavigationMenu(${JSON.stringify(
       hintTitles,
@@ -2598,11 +3257,25 @@ ${indent}</div>`;
       depth + 1,
       isVertical,
     );
-    const isMobileNav = !isVertical && state.componentKind === 'header';
+    const isMobileNav =
+      !isVertical &&
+      state.componentKind === 'header' &&
+      overlayMode !== 'never' &&
+      isResponsiveNav;
     if (isMobileNav) {
       const tc = ctx.p.text;
+      const desktopNavClass =
+        overlayMode === 'always' ? 'hidden' : 'hidden md:flex';
+      const mobileButtonClass =
+        overlayMode === 'always'
+          ? 'flex items-center p-2'
+          : 'md:hidden flex items-center p-2';
+      const mobilePanelClass =
+        overlayMode === 'always'
+          ? 'absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50'
+          : 'md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50';
       return `${indent}<>
-${indent}  <nav className="hidden md:flex"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  <nav className="${desktopNavClass}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}    {${menuVar} ? (
 ${indent}      <ul className="${listClass}">
 ${indent}        {renderMenuItems(${menuVar}.items, 0, false)}
@@ -2612,7 +3285,7 @@ ${fallbackMarkup}
 ${indent}    )}
 ${indent}  </nav>
 ${indent}  <button
-${indent}    className="md:hidden flex items-center p-2 text-[${tc}]"
+${indent}    className="${mobileButtonClass} text-[${tc}]"
 ${indent}    aria-label="Toggle menu"
 ${indent}    onClick={() => setMobileMenuOpen(prev => !prev)}
 ${indent}  >
@@ -2623,7 +3296,7 @@ ${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" vi
 ${indent}    )}
 ${indent}  </button>
 ${indent}  {mobileMenuOpen && (
-${indent}    <nav className="md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50">
+${indent}    <nav className="${mobilePanelClass}">
 ${indent}      <div className="${ctx.l.containerClass} py-3">
 ${indent}        {${menuVar} ? (
 ${indent}          <ul className="flex flex-col gap-1">
@@ -2847,47 +3520,113 @@ ${indent}</ul>`;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const gapStyle = this.buildSectionGapStyleAttr(s);
     const triggerText = s.triggerText || s.heading || 'Open';
+    const modalTextColor = ctx.p.text;
+    const modalMutedTextColor = ctx.p.textMuted || ctx.p.text;
+    const overlayColor = s.overlayColor?.trim() || 'rgba(15, 23, 42, 0.72)';
+    const closeOnOverlay = s.closeOnOverlay !== false;
+    const closeButtonSide = (s.closeIconPosition ?? '')
+      .toLowerCase()
+      .includes('left')
+      ? 'left-4 sm:left-5'
+      : 'right-4 sm:right-5';
+    const modalWidth = this.normalizeCssLength(s.width) ?? '880px';
+    const modalHeight = this.normalizeCssLength(s.height);
+    const modalShellStyle = this.buildStyleAttr({
+      width: '100%',
+      maxWidth: modalWidth,
+      minHeight: modalHeight,
+      maxHeight: modalHeight
+        ? `min(${modalHeight}, calc(100vh - 2rem))`
+        : 'calc(100vh - 2rem)',
+    });
+    const dialogBodyStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      { padding: '1.5rem' },
+      true,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
+    const headingTextStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: modalTextColor },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const bodyTextStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: modalMutedTextColor },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const imageStyle = this.buildBlockStyleAttr(
+      this.pickBlockStyle(ctx, 'image', 'gallery'),
+      {},
+      false,
+      ctx,
+    );
+    const imageRadius = this.imageRadiusClass(ctx) || 'rounded-[24px]';
+    const triggerHeadingPart = s.heading
+      ? `\n          <div className="max-w-2xl">\n            <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
+      : '';
     const headingPart = s.heading
-      ? `\n                  <h3 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h3>`
+      ? `\n                  <h3 className="${t.h2} font-semibold tracking-[-0.02em]"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
       : '';
     const bodyPart = s.body
-      ? `\n                  <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      ? `\n                  <div className="${t.body} leading-7"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
       : '';
-    const ctaPart = s.cta
-      ? `\n                  <a href={${JSON.stringify(s.cta.link)}} className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                    {${JSON.stringify(s.cta.text)}}\n                  </a>`
-      : '';
+    const ctaPart = this.renderInteractiveAnchorCtaGroup(
+      this.resolveSectionCtas(s),
+      ctx,
+    );
     const imagePart = s.imageSrc
-      ? `\n                <div>\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="h-auto w-full rounded-2xl object-cover" />\n                </div>`
+      ? `\n                <div className="relative overflow-hidden ${imageRadius} bg-slate-100">\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="h-full min-h-[240px] w-full object-cover"${imageStyle} />\n                </div>`
       : '';
     const contentGridClass =
       s.layout === 'split' && s.imageSrc
-        ? 'grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)] lg:items-center'
+        ? 'grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.88fr)] lg:items-center'
         : 'flex flex-col gap-6';
 
     return `
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${ctx.l.containerClass} px-4 sm:px-6">
-        <div className="flex flex-col items-start gap-4"${gapStyle}>
+        <div className="uagb-modal-wrapper flex flex-col items-start gap-4"${gapStyle}>${triggerHeadingPart}
           <button
             type="button"
             onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: true }))}
-            className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90"
+            className="uagb-modal-trigger uagb-modal-button-link inline-flex items-center justify-center gap-2 ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-transform transition-opacity hover:-translate-y-0.5 hover:opacity-90"
             style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}
           >
             {${JSON.stringify(triggerText)}}
+            <span aria-hidden="true">+</span>
           </button>
           {openModals[${stateKey}] ? (
-            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 px-4 py-8">
-              <div className="relative max-h-[90vh] w-full max-w-[960px] overflow-y-auto rounded-[28px] bg-white p-6 shadow-2xl sm:p-8">
+            <div
+              className="uagb-modal-popup active uagb-effect-default fixed inset-0 z-[90] flex items-center justify-center px-4 py-4 sm:py-8"
+              style={{ background: '${overlayColor}' }}
+              onClick={() => {
+                if (${closeOnOverlay ? 'true' : 'false'}) {
+                  setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }));
+                }
+              }}
+            >
+              <div
+                className="uagb-modal-popup-wrap relative overflow-y-auto rounded-[30px] bg-white shadow-[0_30px_80px_rgba(15,23,42,0.28)]"
+                onClick={(event) => event.stopPropagation()}
+                role="dialog"
+                aria-modal="true"
+                aria-label={${JSON.stringify(s.heading || triggerText)}}
+                ${modalShellStyle}
+              >
                 <button
                   type="button"
                   onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }))}
-                  className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 text-xl leading-none transition-opacity hover:opacity-75"
+                  className="uagb-modal-popup-close absolute top-4 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white/90 text-slate-700 shadow-sm transition-opacity hover:opacity-75 sm:top-5 ${closeButtonSide}"
                   aria-label="Close modal"
                 >
-                  ×
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>
                 </button>
-                <div className="${contentGridClass}">
+                <div className="uagb-modal-popup-content ${contentGridClass}"${dialogBodyStyle}>
                   <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
                   </div>${imagePart}
                 </div>
@@ -2908,42 +3647,157 @@ ${indent}</ul>`;
     sectionIndex: number,
   ): string {
     const { t } = ctx;
-    const stateKey = JSON.stringify(
-      this.buildInteractiveSectionStateKey(s, sectionIndex),
+    const stateKeyRaw = this.buildInteractiveSectionStateKey(s, sectionIndex);
+    const stateKey = JSON.stringify(stateKeyRaw);
+    const domKey = stateKeyRaw.replace(/[^a-zA-Z0-9_-]+/g, '-');
+    const defaultActiveTab = Math.min(
+      Math.max(s.activeTab ?? 0, 0),
+      Math.max(s.tabs.length - 1, 0),
     );
+    const variant = (s.variant ?? '').toLowerCase();
+    const isVertical =
+      variant.includes('vertical') || /(^|[^a-z])vstyle\d+/i.test(variant);
+    const isStacked = /(^|[^a-z])stack\d+/i.test(variant);
+    const isPillLike =
+      variant.includes('pill') ||
+      variant.includes('boxed') ||
+      variant.includes('style-2') ||
+      variant.includes('style-3') ||
+      /(^|[^a-z])hstyle4|(^|[^a-z])vstyle9|(^|[^a-z])stack4/i.test(variant);
+    const isDistributedTabs =
+      /(^|[^a-z])hstyle5|(^|[^a-z])vstyle10/i.test(variant);
+    const spectraVariantClass = variant
+      ? variant.startsWith('uagb-tabs__')
+        ? variant
+        : `uagb-tabs__${variant}${
+            /-(desktop|tablet|mobile)$/i.test(variant) ? '' : '-desktop'
+          }`
+      : isVertical
+        ? 'uagb-tabs__vstyle6-desktop'
+        : 'uagb-tabs__hstyle4-desktop';
+    const spectraAlignClass =
+      s.tabAlign === 'center'
+        ? 'uagb-tabs__align-center'
+        : s.tabAlign === 'right'
+          ? 'uagb-tabs__align-right'
+          : 'uagb-tabs__align-left';
     const sectionStyle = this.buildSectionStyleAttr(s);
     const gapStyle = this.buildSectionGapStyleAttr(s);
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const panelStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      { padding: '1.5rem' },
+      true,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
+    const panelHeadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const panelBodyStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const imageStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {},
+      false,
+      this.pickBlockStyle(ctx, 'image'),
+      this.pickBlockStyle(ctx, 'gallery'),
+    );
+    const imageRadius = this.imageRadiusClass(ctx) || this.cardRadiusClass(ctx);
+    const tabsLayoutClass = isVertical
+      ? 'grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start'
+      : isStacked
+        ? 'flex flex-col gap-4'
+      : 'flex flex-col gap-6';
+    const tabAlignClass =
+      isDistributedTabs
+        ? 'justify-between'
+        : s.tabAlign === 'center'
+        ? 'justify-center'
+        : s.tabAlign === 'right'
+          ? 'justify-end'
+          : 'justify-start';
+    const tabListClass = isVertical
+      ? 'flex flex-col gap-2'
+      : `flex flex-wrap gap-3 ${tabAlignClass}`;
+    const tabListSurfaceClass = isPillLike
+      ? 'rounded-[24px] border border-black/10 bg-white/70 p-2 shadow-[0_18px_40px_rgba(15,23,42,0.06)]'
+      : 'border-b border-black/10 pb-1';
     const titlePart = s.title
-      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
+      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${t.h2} font-semibold"${titleStyle}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
       : '';
     const tabButtons = s.tabs
       .map(
-        (tab, index) => `            <button
+        (tab, index) => `            <div
               key=${index}
-              type="button"
-              onClick={() => setActiveTabs((prev) => ({ ...prev, [${stateKey}]: ${index} }))}
-              className={(activeTabs[${stateKey}] ?? 0) === ${index}
-                ? 'border-b-2 px-0 py-3 text-left font-semibold'
-                : 'border-b-2 border-transparent px-0 py-3 text-left opacity-70 transition-opacity hover:opacity-100'}
-              style={{ color: '${tc}', borderColor: (activeTabs[${stateKey}] ?? 0) === ${index} ? '${ctx.p.accent}' : 'transparent' }}
+              className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                ? 'uagb-tab uagb-tabs__active'
+                : 'uagb-tab'}
             >
-              {${JSON.stringify(tab.label)}}
-            </button>`,
+              <button
+                type="button"
+                role="tab"
+                id="${domKey}-tab-${index}"
+                aria-selected={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}}
+                aria-controls="${domKey}-panel-${index}"
+                onClick={() => setActiveTabs((prev) => ({ ...prev, [${stateKey}]: ${index} }))}
+                onKeyDown={(event) => {
+                  if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                  event.preventDefault();
+                  const current = activeTabs[${stateKey}] ?? ${defaultActiveTab};
+                  let next = current;
+                  if (event.key === 'Home') next = 0;
+                  else if (event.key === 'End') next = ${Math.max(s.tabs.length - 1, 0)};
+                  else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = current >= ${Math.max(s.tabs.length - 1, 0)} ? 0 : current + 1;
+                  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = current <= 0 ? ${Math.max(s.tabs.length - 1, 0)} : current - 1;
+                  setActiveTabs((prev) => ({ ...prev, [${stateKey}]: next }));
+                }}
+                className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                  ? 'uagb-tabs-list ${isVertical ? 'flex w-full items-center justify-between' : 'inline-flex items-center justify-center'} rounded-[18px] px-4 py-3 text-left font-semibold shadow-sm'
+                  : 'uagb-tabs-list ${isVertical ? 'flex w-full items-center justify-between' : 'inline-flex items-center justify-center'} rounded-[18px] px-4 py-3 text-left font-medium opacity-80 transition-all hover:opacity-100'}
+                style={{
+                  color: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? '${isPillLike ? ctx.p.accentText : tc}'
+                    : '${tc}',
+                  background: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? '${isPillLike ? ctx.p.accent : 'rgba(255,255,255,0.92)'}'
+                    : '${isPillLike ? 'rgba(15,23,42,0.04)' : 'transparent'}',
+                  borderColor: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? '${ctx.p.accent}'
+                    : 'transparent',
+                  borderWidth: '${isPillLike ? '1px' : '0'}',
+                }}
+              >
+                {${JSON.stringify(tab.label)}}
+              </button>
+            </div>`,
       )
       .join('\n');
     const panels = s.tabs
       .map((tab, index) => {
         const headingPart = tab.heading
-          ? `\n                <h3 className="${t.h3} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(tab.heading)}}</h3>`
+          ? `\n                <h3 className="${t.h3} font-semibold"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
           : '';
         const bodyPart = tab.body
-          ? `\n                <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          ? `\n                <div className="${t.body} leading-7"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
           : '';
         const imagePart = tab.imageSrc
-          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="h-auto w-full rounded-xl object-cover" />`
+          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="h-auto w-full ${imageRadius} object-cover"${imageStyle} />`
           : '';
         const ctaPart = tab.cta
-          ? `\n                <a href={${JSON.stringify(tab.cta.link)}} className="inline-flex items-center justify-center rounded-full px-5 py-3 font-medium transition-opacity hover:opacity-90" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                  {${JSON.stringify(tab.cta.text)}}\n                </a>`
+          ? `\n                <a href={${JSON.stringify(tab.cta.link)}} className="${this.buildInteractiveCtaClassName(
+              `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-opacity hover:opacity-90`,
+              tab.cta,
+            )}" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                  {${JSON.stringify(tab.cta.text)}}\n                </a>`
           : '';
         const panelGridClass =
           tab.imageSrc && (tab.heading || tab.body || tab.cta)
@@ -2951,9 +3805,14 @@ ${indent}</ul>`;
             : 'flex flex-col gap-5';
         return `            <div
               key=${index}
-              className={(activeTabs[${stateKey}] ?? 0) === ${index} ? 'block' : 'hidden'}
+              id="${domKey}-panel-${index}"
+              role="tabpanel"
+              aria-labelledby="${domKey}-tab-${index}"
+              className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                ? 'uagb-tabs__body-container uagb-tabs-body__active block'
+                : 'uagb-tabs__body-container hidden'}
             >
-              <div className="${panelGridClass} rounded-[24px] border border-black/10 bg-white/60 p-6 sm:p-8">
+              <div className="${panelGridClass} rounded-[28px] border border-black/10 bg-white/75 shadow-[0_24px_60px_rgba(15,23,42,0.08)]"${panelStyle}>
                 <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
                 </div>${imagePart ? `\n                <div>${imagePart}\n                </div>` : ''}
               </div>
@@ -2965,11 +3824,15 @@ ${indent}</ul>`;
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${ctx.l.containerClass} px-4 sm:px-6">
         <div className="flex flex-col gap-6"${gapStyle}>${titlePart}
-          <div className="flex flex-wrap items-end gap-6 border-b border-black/10">
+          <div className="uagb-tabs__wrap ${spectraVariantClass} ${tabsLayoutClass}">
+            <div className="${tabListSurfaceClass}">
+              <div className="uagb-tabs__panel ${spectraAlignClass} ${tabListClass}" role="tablist" aria-orientation="${isVertical ? 'vertical' : 'horizontal'}">
 ${tabButtons}
-          </div>
-          <div className="flex flex-col gap-4">
+              </div>
+            </div>
+            <div className="uagb-tabs__body-wrap flex flex-col gap-4">
 ${panels}
+            </div>
           </div>
         </div>
       </div>
@@ -2985,53 +3848,121 @@ ${panels}
     sectionIndex: number,
   ): string {
     const { t } = ctx;
-    const stateKey = JSON.stringify(
-      this.buildInteractiveSectionStateKey(s, sectionIndex),
-    );
+    const stateKeyRaw = this.buildInteractiveSectionStateKey(s, sectionIndex);
+    const stateKey = JSON.stringify(stateKeyRaw);
+    const domKey = stateKeyRaw.replace(/[^a-zA-Z0-9_-]+/g, '-');
+    const defaultOpenItems = (s.defaultOpenItems ?? [])
+      .filter((index) => index >= 0 && index < s.items.length)
+      .filter((value, index, items) => items.indexOf(value) === index);
+    const normalizedDefaultOpenItems = s.allowMultiple
+      ? defaultOpenItems
+      : defaultOpenItems.slice(0, 1);
+    const defaultOpenLiteral = JSON.stringify(normalizedDefaultOpenItems);
+    const openStateExpr = `openAccordions[${stateKey}] ?? ${defaultOpenLiteral}`;
+    const variant = (s.variant ?? '').toLowerCase();
+    const accordionLayoutClass = variant.includes('grid')
+      ? 'uagb-faq-layout-grid'
+      : 'uagb-faq-layout-accordion';
+    const isBoxedVariant =
+      variant.includes('boxed') ||
+      variant.includes('card') ||
+      variant.includes('style-2');
     const sectionStyle = this.buildSectionStyleAttr(s);
     const gapStyle = this.buildSectionGapStyleAttr(s);
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const itemHeadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'heading'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const itemBodyStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const titlePart = s.title
-      ? `\n          <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.title)}}</h2>`
+      ? `\n          <h2 className="${t.h2} font-semibold"${titleStyle}>{${JSON.stringify(s.title)}}</h2>`
       : '';
     const items = s.items
       .map(
         (
           item,
           index,
-        ) => `          <div key=${index} className="overflow-hidden rounded-[20px] border border-black/10 bg-white/60">
+        ) => `          <div
+            key=${index}
+            className="uagb-faq-child__outer-wrap"
+          >
+            <div
+              id="${domKey}-item-${index}"
+              className={((${openStateExpr}).includes(${index}))
+                ? 'uagb-faq-item uagb-faq-item-active overflow-hidden rounded-[24px] border p-1 shadow-[0_20px_44px_rgba(15,23,42,0.08)]'
+                : 'uagb-faq-item overflow-hidden rounded-[24px] border p-1'}
+            style={{
+              background: ((${openStateExpr}).includes(${index}))
+                ? '${isBoxedVariant ? 'rgba(255,255,255,0.94)' : 'rgba(255,255,255,0.76)'}'
+                : 'rgba(255,255,255,0.62)',
+              borderColor: ((${openStateExpr}).includes(${index})) ? '${ctx.p.accent}' : 'rgba(15,23,42,0.10)',
+            }}
+          >
             <button
               type="button"
               onClick={() =>
                 setOpenAccordions((prev) => {
-                  const current = prev[${stateKey}] ?? [0];
+                  const current = prev[${stateKey}] ?? ${defaultOpenLiteral};
                   const isOpen = current.includes(${index});
+                  if (isOpen) {
+                    if (${s.enableToggle === false ? 'false' : 'true'}) {
+                      return {
+                        ...prev,
+                        [${stateKey}]: ${s.allowMultiple ? `current.filter((value) => value !== ${index})` : '[]'},
+                      };
+                    }
+                    return prev;
+                  }
                   if (${s.allowMultiple ? 'true' : 'false'}) {
                     return {
                       ...prev,
-                      [${stateKey}]: isOpen
-                        ? current.filter((value) => value !== ${index})
-                        : [...current, ${index}],
+                      [${stateKey}]: [...current, ${index}],
                     };
                   }
                   return {
                     ...prev,
-                    [${stateKey}]: isOpen ? [] : [${index}],
+                    [${stateKey}]: [${index}],
                   };
                 })
               }
-              className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+              aria-expanded={((${openStateExpr}).includes(${index}))}
+              aria-controls="${domKey}-panel-${index}"
+              className="uagb-faq-questions-button uagb-faq-questions flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
               style={{ color: '${tc}' }}
             >
-              <span className="${t.h3} font-semibold">{${JSON.stringify(item.heading)}}</span>
-              <span className="text-2xl leading-none">
-                {(openAccordions[${stateKey}] ?? [0]).includes(${index}) ? '−' : '+'}
+              <span className="${t.h3} font-semibold pr-4"${itemHeadingStyle}>{${JSON.stringify(item.heading)}}</span>
+              <span
+                className="uagb-faq-icon-wrap inline-flex h-10 w-10 items-center justify-center rounded-full transition-transform"
+                style={{
+                  background: ((${openStateExpr}).includes(${index})) ? '${ctx.p.accent}' : 'rgba(15,23,42,0.06)',
+                  color: ((${openStateExpr}).includes(${index})) ? '${ctx.p.accentText}' : '${tc}',
+                  transform: ((${openStateExpr}).includes(${index})) ? 'rotate(180deg)' : 'rotate(0deg)',
+                }}
+              >
+                <span className={((${openStateExpr}).includes(${index})) ? 'uagb-icon-active' : 'uagb-icon'}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </span>
               </span>
             </button>
-            {(openAccordions[${stateKey}] ?? [0]).includes(${index}) ? (
-              <div className="border-t border-black/10 px-5 py-5">
-                <div className="${t.body} leading-7" style={{ color: '${tc}' }} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
+            {((${openStateExpr}).includes(${index})) ? (
+              <div id="${domKey}-panel-${index}" className="uagb-faq-content border-t border-black/10 px-5 pb-5 pt-1">
+                <div className="${t.body} leading-7"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
               </div>
             ) : null}
+            </div>
           </div>`,
       )
       .join('\n');
@@ -3039,7 +3970,7 @@ ${panels}
     return `
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6">
-        <div className="flex flex-col gap-4"${gapStyle}>${titlePart}
+        <div className="wp-block-uagb-faq uagb-faq__wrap ${accordionLayoutClass} flex flex-col gap-4"${gapStyle}>${titlePart}
 ${items}
         </div>
       </div>
@@ -3052,9 +3983,45 @@ ${items}
     bg: string,
     tc: string,
     py: string,
+    sectionIndex: number,
   ): string {
-    const { t } = ctx;
+    const { t, l } = ctx;
+    const stateKeyRaw = this.buildInteractiveSectionStateKey(s, sectionIndex);
+    const stateKey = JSON.stringify(stateKeyRaw);
+    const domKey = stateKeyRaw.replace(/[^a-zA-Z0-9_-]+/g, '-');
+    const activeIndexExpr = `activeCarousels[${stateKey}] ?? 0`;
+    const transitionSpeed = Math.max(250, s.transitionSpeed ?? 550);
+    const effect = s.effect ?? 'slide';
+    const useStackedSlides = effect === 'fade' || s.vertical === true;
+    const pauseOnHover = s.pauseOn === 'hover';
+    const pauseOnClick = s.pauseOn === 'click';
+    const clickPauseStatement = pauseOnClick
+      ? `setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }));`
+      : '';
+    const showArrows = s.showArrows !== false && s.slides.length > 1;
+    const showDots = s.showDots !== false && s.slides.length > 1;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const slideSurfaceStyle = this.buildBlockStyleAttr(
+      this.mergeBlockStyleTokens(
+        this.pickBlockStyle(ctx, 'group'),
+        this.pickBlockStyle(ctx, 'column'),
+      ),
+      { padding: l.cardPadding },
+      true,
+      ctx,
+    );
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
+    const imageRadius = this.imageRadiusClass(ctx) || this.cardRadiusClass(ctx);
+    const headingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: '#ffffff' },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const bodyStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: 'rgba(255,255,255,0.82)' },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const align =
       s.contentAlign === 'right'
         ? 'items-end text-right'
@@ -3067,38 +4034,149 @@ ${items}
         : s.contentAlign === 'left'
           ? 'self-start'
           : 'self-center';
-    const resolveAsset = (src: string) =>
-      src.startsWith('/assets/')
-        ? `\${import.meta.env.BASE_URL}assets/\${${JSON.stringify(src.slice('/assets/'.length))}}`
-        : src;
+    const activeTransform =
+      effect === 'flip'
+        ? 'perspective(1400px) rotateY(0deg) scale(1)'
+        : 'scale(1)';
+    const inactiveTransform =
+      effect === 'flip'
+        ? 'perspective(1400px) rotateY(-14deg) scale(0.97)'
+        : effect === 'coverflow'
+          ? 'scale(1.04)'
+          : 'scale(1.02)';
 
     const slides = s.slides
       .map((slide, i) => {
-        const imgSrc = slide.imageSrc ? resolveAsset(slide.imageSrc) : '';
         const imgPart = slide.imageSrc
-          ? `\n            <img src="${imgSrc}" alt={${JSON.stringify(slide.imageAlt ?? '')}} className="w-full h-64 object-cover rounded-xl" />`
+          ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="absolute inset-0 h-full w-full object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
           : '';
         const headingPart = slide.heading
-          ? `\n            <h3 className="${t.h2} font-bold" style={{ color: '${tc}' }}>${slide.heading}</h3>`
+          ? `\n                  <h3 className="${t.h2} max-w-[18ch] font-bold text-white"${headingStyle}>${slide.heading}</h3>`
           : '';
         const subPart = slide.subheading
-          ? `\n            <p className="text-base" style={{ color: '${tc}' }}>${slide.subheading}</p>`
+          ? `\n                  <p className="${t.body} max-w-[60ch] text-white/82"${bodyStyle}>${slide.subheading}</p>`
           : '';
         const ctaPart = slide.cta
-          ? `\n            <a href={${JSON.stringify(slide.cta.link)}} className="inline-block px-6 py-3 rounded-full font-semibold ${ctaAlign}" style={{ background: '${tc}', color: '${bg}' }}>${slide.cta.text}</a>`
+          ? `\n                  <a href={${JSON.stringify(slide.cta.link)}} className="${this.buildInteractiveCtaClassName(
+              `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-6 py-3 font-semibold ${ctaAlign}`,
+              slide.cta,
+            )}" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>${slide.cta.text}</a>`
           : '';
-        return `          <div key={${i}} className="flex-none w-full snap-center">
-            <div className="flex flex-col gap-4 ${align}">${imgPart}${headingPart}${subPart}${ctaPart}
-            </div>
-          </div>`;
+        const slideSurface = `${imgPart}
+              <div className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/42 to-black/10" />
+              <div className="relative z-10 flex h-full flex-col justify-end p-6 sm:p-10">
+                <div className="flex max-w-[720px] flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${slideSurfaceStyle}>${headingPart}${subPart}${ctaPart}
+                </div>
+              </div>`;
+        if (useStackedSlides) {
+          return `          <article
+            key={${i}}
+            id="${domKey}-slide-${i}"
+            aria-hidden={(${activeIndexExpr}) !== ${i}}
+            className={(${activeIndexExpr}) === ${i}
+              ? 'swiper-slide absolute inset-0 z-10 overflow-hidden ${imageRadius}'
+              : 'swiper-slide absolute inset-0 overflow-hidden ${imageRadius} pointer-events-none'}
+            style={{
+              opacity: (${activeIndexExpr}) === ${i} ? 1 : 0,
+              transform: (${activeIndexExpr}) === ${i} ? '${activeTransform}' : '${inactiveTransform}',
+              transitionDuration: '${transitionSpeed}ms',
+            }}
+          >
+${slideSurface}
+          </article>`;
+        }
+        return `          <article key={${i}} id="${domKey}-slide-${i}" className="swiper-slide relative h-full w-full shrink-0 grow-0 basis-full overflow-hidden ${imageRadius}">
+${slideSurface}
+          </article>`;
       })
       .join('\n');
 
+    const previousHandler = `() => {
+      ${clickPauseStatement}
+      setActiveCarousels((prev) => {
+        const current = prev[${stateKey}] ?? 0;
+        if (current <= 0) {
+          return ${s.loop === false ? 'prev' : `{ ...prev, [${stateKey}]: ${Math.max(s.slides.length - 1, 0)} }`};
+        }
+        return { ...prev, [${stateKey}]: current - 1 };
+      });
+    }`;
+    const nextHandler = `() => {
+      ${clickPauseStatement}
+      setActiveCarousels((prev) => {
+        const current = prev[${stateKey}] ?? 0;
+        if (current >= ${Math.max(s.slides.length - 1, 0)}) {
+          return ${s.loop === false ? 'prev' : `{ ...prev, [${stateKey}]: 0 }`};
+        }
+        return { ...prev, [${stateKey}]: current + 1 };
+      });
+    }`;
+    const dots = showDots
+      ? s.slides
+          .map(
+            (_, i) => `            <button
+              key={${i}}
+              type="button"
+              aria-label="Go to slide ${i + 1}"
+              onClick={() => {
+                ${clickPauseStatement}
+                setActiveCarousels((prev) => ({ ...prev, [${stateKey}]: ${i} }));
+              }}
+              className={(${activeIndexExpr}) === ${i}
+                ? 'swiper-pagination-bullet swiper-pagination-bullet-active h-2.5 w-8 rounded-full'
+                : 'swiper-pagination-bullet h-2.5 w-2.5 rounded-full transition-all'}
+              style={{
+                background: (${activeIndexExpr}) === ${i} ? '${ctx.p.accent}' : 'rgba(255,255,255,0.5)',
+              }}
+            />`,
+          )
+          .join('\n')
+      : '';
+
     return `
-    <section className="w-full ${py} overflow-hidden" style={{ background: '${bg}' }}${sectionStyle}>
-      <div className="max-w-[1280px] mx-auto px-4 sm:px-6">
-        <div className="flex overflow-x-auto snap-x snap-mandatory gap-4 pb-2 scrollbar-hide">
+    <section className="w-full ${py} overflow-hidden bg-[${bg}] text-[${tc}]"${sectionStyle}>
+      <div className="${ctx.l.containerClass} px-4 sm:px-6">
+        <div
+          className="uagb-slider-container uagb-swiper relative"
+          onMouseEnter={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }))` : 'undefined'}}
+          onMouseLeave={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: false }))` : 'undefined'}}
+        >
+          <div className="swiper relative min-h-[420px] overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]">
+            ${useStackedSlides ? slides : `<div
+              className="swiper-wrapper flex h-full transition-transform ease-out"
+              style={{
+                transform: 'translateX(-' + ((${activeIndexExpr}) * 100) + '%)',
+                transitionDuration: '${transitionSpeed}ms',
+              }}
+            >
 ${slides}
+            </div>`}
+          </div>
+          ${showArrows ? `<div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 items-center justify-between px-3 sm:px-5">
+            <button
+              type="button"
+              aria-label="Previous slide"
+              onClick={${previousHandler}}
+              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/35 text-white backdrop-blur-sm transition-opacity hover:opacity-90"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              aria-label="Next slide"
+              onClick={${nextHandler}}
+              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/35 text-white backdrop-blur-sm transition-opacity hover:opacity-90"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+            </button>
+          </div>` : ''}
+          ${showDots ? `<div className="swiper-pagination swiper-pagination-bullets absolute inset-x-0 bottom-5 z-20 flex items-center justify-center gap-2">
+${dots}
+          </div>` : ''}
         </div>
       </div>
     </section>`;

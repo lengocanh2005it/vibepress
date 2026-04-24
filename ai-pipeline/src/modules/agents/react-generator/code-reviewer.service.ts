@@ -8,6 +8,10 @@ import {
   type TokenScope,
 } from '../../../common/utils/token-tracker.js';
 import {
+  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
+  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
+} from '../../../common/utils/post-meta-link.util.js';
+import {
   AiLoggerService,
   type AttemptLog,
 } from '../../ai-logger/ai-logger.service.js';
@@ -42,7 +46,10 @@ import type {
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
+import type {
+  ComponentVisualPlan,
+  DataNeed,
+} from './visual-plan.schema.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -208,16 +215,17 @@ export class CodeReviewerService {
       );
     }
 
-    if (
-      !forceDirectAi &&
-      this.shouldUseSectionLevelAssembly(componentPlan, componentName)
-    ) {
+    const sectionAssemblyDecision = this.getSectionLevelAssemblyDecision(
+      componentPlan,
+      componentName,
+    );
+    if (!forceDirectAi && sectionAssemblyDecision.enabled) {
       this.logger.log(
-        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections)`,
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections; ${sectionAssemblyDecision.reason})`,
       );
       await this.log(
         logPath,
-        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections)`,
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections; ${sectionAssemblyDecision.reason})`,
       );
       try {
         const assembled = await this.generateComponentWithSectionAssembly({
@@ -1266,37 +1274,128 @@ export class CodeReviewerService {
     return false;
   }
 
-  private shouldUseSectionLevelAssembly(
+  private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
-  ): boolean {
+  ): { enabled: boolean; reason: string } {
     if (
       componentPlan?.type !== 'page' ||
       !componentPlan.visualPlan ||
       getComponentStrategy(componentName).deterministicFirst
     ) {
-      return false;
+      return { enabled: false, reason: 'not eligible' };
     }
 
     const sections = componentPlan.visualPlan.sections ?? [];
-    if (sections.length >= 5) return true;
+    if (sections.length < 2) {
+      return { enabled: false, reason: 'too few sections' };
+    }
+
+    const normalizedNeeds = new Set(
+      this.toVisualDataNeeds(componentPlan.dataNeeds),
+    );
+    const interactiveTypes = new Set(['accordion', 'tabs', 'carousel', 'modal']);
+    const richTypes = new Set([
+      'hero',
+      'cta-strip',
+      'cover',
+      'media-text',
+      'card-grid',
+      'testimonial',
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+      'newsletter',
+    ]);
+    const lowComplexityTypes = new Set([
+      'page-content',
+      'post-content',
+      'comments',
+      'search',
+      'breadcrumb',
+      'sidebar',
+      'post-list',
+      'navbar',
+      'footer',
+    ]);
 
     const richSectionCount = sections.filter((section) =>
-      new Set([
-        'hero',
-        'cover',
-        'media-text',
-        'card-grid',
-        'testimonial',
-        'accordion',
-        'tabs',
-        'carousel',
-        'modal',
-        'newsletter',
-      ]).has(section.type),
+      richTypes.has(section.type),
     ).length;
+    const interactiveSectionCount = sections.filter((section) =>
+      interactiveTypes.has(section.type),
+    ).length;
+    const mediaHeavySectionCount = sections.filter((section) =>
+      ['cover', 'media-text', 'carousel', 'testimonial'].includes(section.type),
+    ).length;
+    const sourceBackedSectionCount = sections.filter(
+      (section) => !!section.sourceRef?.sourceNodeId,
+    ).length;
+    const distinctTypes = new Set(sections.map((section) => section.type));
+    const lowComplexityOnly = sections.every((section) =>
+      lowComplexityTypes.has(section.type),
+    );
+    const hasPageContent = sections.some((section) => section.type === 'page-content');
+    const hasOnlyContentWrapper =
+      hasPageContent &&
+      sections.every(
+        (section) =>
+          section.type === 'page-content' ||
+          section.type === 'hero' ||
+          section.type === 'cta-strip' ||
+          section.type === 'breadcrumb' ||
+          section.type === 'sidebar',
+      );
+    const listDrivenOnly =
+      normalizedNeeds.has('posts') &&
+      sections.every((section) =>
+        ['hero', 'cta-strip', 'cover', 'search', 'post-list', 'breadcrumb', 'sidebar'].includes(
+          section.type,
+        ),
+      );
 
-    return sections.length >= 3 && richSectionCount >= 2;
+    if (lowComplexityOnly) {
+      return { enabled: false, reason: 'low-complexity data/content template' };
+    }
+
+    if (hasOnlyContentWrapper) {
+      return { enabled: false, reason: 'page-content wrapper is simpler as full-file' };
+    }
+
+    if (listDrivenOnly) {
+      return { enabled: false, reason: 'list-driven template is simpler as full-file' };
+    }
+
+    let score = 0;
+    if (sections.length >= 5) score += 3;
+    else if (sections.length >= 4) score += 2;
+    else if (sections.length >= 3) score += 1;
+
+    if (richSectionCount >= 3) score += 3;
+    else if (richSectionCount >= 2) score += 2;
+    else if (richSectionCount >= 1) score += 1;
+
+    if (interactiveSectionCount >= 1) score += 2;
+    if (mediaHeavySectionCount >= 2) score += 2;
+    if (distinctTypes.size >= 4) score += 2;
+    else if (distinctTypes.size >= 3) score += 1;
+    if (sourceBackedSectionCount >= 3) score += 1;
+    if (componentPlan.route === '/') score += 1;
+    if (componentPlan.fixedSlug) score += 1;
+    if (normalizedNeeds.has('pageDetail') && !hasPageContent) score += 1;
+
+    const enabled = score >= 5 || (sections.length >= 4 && richSectionCount >= 2);
+    const reason = [
+      `score=${score}`,
+      `rich=${richSectionCount}`,
+      `interactive=${interactiveSectionCount}`,
+      `media=${mediaHeavySectionCount}`,
+      `types=${distinctTypes.size}`,
+      `sourceBacked=${sourceBackedSectionCount}`,
+    ].join(', ');
+
+    return { enabled, reason };
   }
 
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
@@ -3053,6 +3152,14 @@ export class CodeReviewerService {
             `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
           );
         }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
         break;
       case 'hero':
       case 'cover':
@@ -3070,6 +3177,32 @@ export class CodeReviewerService {
           lines.push(
             `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
           );
+        }
+        if ('ctas' in section && Array.isArray(section.ctas)) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
+      case 'cta-strip':
+        if (section.align) {
+          lines.push(`- Keep alignment exactly: ${JSON.stringify(section.align)}`);
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
         }
         break;
       case 'testimonial':
@@ -3170,6 +3303,28 @@ export class CodeReviewerService {
           );
         }
 
+        if (section.type === 'cta-strip') {
+          parts.push(
+            section.align ? `align=${JSON.stringify(section.align)}` : null,
+          );
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
+        }
+
         if (section.type === 'post-list') {
           parts.push(
             section.title ? `title=${JSON.stringify(section.title)}` : null,
@@ -3228,6 +3383,17 @@ export class CodeReviewerService {
               ? `ctaText=${JSON.stringify(section.cta.text)}`
               : null,
           );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
         }
 
         if (section.type === 'modal') {
@@ -3254,6 +3420,17 @@ export class CodeReviewerService {
               ? `ctaText=${JSON.stringify(section.cta.text)}`
               : null,
           );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
         }
 
         if (section.type === 'tabs') {
@@ -3430,97 +3607,11 @@ export class CodeReviewerService {
   }
 
   private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    let next = code;
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
-      (_match, record: string, tag: string, attrs: string) =>
-        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
-    );
-
-    next = next.replace(
-      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-      (match, tag: string, attrs: string, record: string, offset: number) => {
-        if (this.isWithinHeadingTitleContext(next, offset)) return match;
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
-      (_match, record: string, attrs: string) =>
-        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
-    );
-
-    next = next.replace(
-      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-      (match, attrs: string, record: string, offset: number) => {
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
-      (
-        _match,
-        record: string,
-        categoryVar: string,
-        indexVar: string,
-        attrs: string,
-      ) =>
-        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
-    );
-
-    return next;
+    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
   }
 
   private promotePlainTextPostMetaLinks(code: string): string {
-    const isCanonicalMetaLink = (raw: string): boolean =>
-      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
-      /(?:to=|href=)[^>]*\/category\//.test(raw);
-
-    const decorateQuoted = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
-        (
-          match,
-          tag: string,
-          before: string,
-          quote: string,
-          className: string,
-        ) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}${quote}`;
-        },
-      );
-
-    const decorateTemplateLiteral = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
-        (match, tag: string, before: string, className: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className={\`${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}\`}`;
-        },
-      );
-
-    const decorateWithoutClass = (source: string) =>
-      source.replace(
-        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
-        (match, tag: string, attrs: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
-        },
-      );
-
-    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+    return promoteSharedPlainTextPostMetaLinks(code);
   }
 
   private appendUniqueClasses(existing: string, addition: string): string {
@@ -3547,7 +3638,7 @@ export class CodeReviewerService {
     const before = code.slice(Math.max(0, offset - 600), offset);
     return (
       /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
       /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
       /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
         before,

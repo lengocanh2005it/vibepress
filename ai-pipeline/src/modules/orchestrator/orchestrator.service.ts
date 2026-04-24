@@ -6,8 +6,8 @@ import { ConfigService } from '@nestjs/config';
 import { mkdir, readdir, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
-import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
+import { cloneRepoWithRetry } from '../../common/utils/git-clone.util.js';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
 import { LlmFactoryService } from '../../common/llm/llm-factory.service.js';
 import {
@@ -1562,6 +1562,21 @@ export class OrchestratorService {
               plan: visualReview.plan,
             },
           );
+          await this.planner.writeSplitComponentPlanArtifacts(
+            logPath,
+            `plan.visual-attempt-${visualAttempt}`,
+            {
+              stage: 'visual-plan-attempt-reviewed',
+              generatedAt: new Date().toISOString(),
+              attempt: visualAttempt,
+              isValid: visualBlockingIssues.length === 0,
+              errors: visualReview.errors,
+              warnings: visualReview.warnings,
+              blockingIssues: visualBlockingIssues,
+              strictReview: strictPlanReview,
+              plan: visualReview.plan,
+            },
+          );
           for (
             let vAttempt = 2;
             vAttempt <= MAX_VISUAL_RETRIES && visualBlockingIssues.length > 0;
@@ -1570,6 +1585,20 @@ export class OrchestratorService {
             await this.planner.writeArtifact(
               logPath,
               `plan.visual-attempt-${visualAttempt}.invalid.json`,
+              {
+                stage: 'visual-plan-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
+            await this.planner.writeSplitComponentPlanArtifacts(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}.invalid`,
               {
                 stage: 'visual-plan-review-failed',
                 generatedAt: new Date().toISOString(),
@@ -1631,11 +1660,40 @@ export class OrchestratorService {
                 plan: visualReview.plan,
               },
             );
+            await this.planner.writeSplitComponentPlanArtifacts(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}`,
+              {
+                stage: 'visual-plan-attempt-reviewed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                isValid: visualBlockingIssues.length === 0,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
           }
           if (visualBlockingIssues.length > 0) {
             await this.planner.writeArtifact(
               logPath,
               `plan.visual-attempt-${visualAttempt}.invalid.json`,
+              {
+                stage: 'visual-plan-review-failed',
+                generatedAt: new Date().toISOString(),
+                attempt: visualAttempt,
+                errors: visualReview.errors,
+                warnings: visualReview.warnings,
+                blockingIssues: visualBlockingIssues,
+                strictReview: strictPlanReview,
+                plan: visualReview.plan,
+              },
+            );
+            await this.planner.writeSplitComponentPlanArtifacts(
+              logPath,
+              `plan.visual-attempt-${visualAttempt}.invalid`,
               {
                 stage: 'visual-plan-review-failed',
                 generatedAt: new Date().toISOString(),
@@ -1653,6 +1711,12 @@ export class OrchestratorService {
           }
           review = visualReview;
           await this.planner.writeArtifact(logPath, 'plan.final.json', {
+            stage: 'planner-final',
+            generatedAt: new Date().toISOString(),
+            plan: review.plan,
+            warnings: review.warnings,
+          });
+          await this.planner.writeSplitComponentPlanArtifacts(logPath, 'plan', {
             stage: 'planner-final',
             generatedAt: new Date().toISOString(),
             plan: review.plan,
@@ -2111,6 +2175,7 @@ export class OrchestratorService {
                     ? (normalizedTheme as any).tokens
                     : undefined,
                 plan: reviewResult.plan,
+                repoManifest: repoResult.themeManifest,
               });
             } catch (err: any) {
               const errMsg: string = err?.message ?? String(err);
@@ -2302,7 +2367,8 @@ export class OrchestratorService {
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
         const previewTokens =
           'tokens' in normalizedTheme
-            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ?? undefined)
+            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
+              undefined)
             : undefined;
 
         this.emitStepProgress(
@@ -2320,11 +2386,7 @@ export class OrchestratorService {
             reactBeUrl,
           });
           if (metrics) {
-            await this.logAutomationCompareMetrics(
-              logPath,
-              'initial',
-              metrics,
-            );
+            await this.logAutomationCompareMetrics(logPath, 'initial', metrics);
           }
         } catch (err: any) {
           this.logger.error(
@@ -2609,12 +2671,14 @@ export class OrchestratorService {
     const destDir = join('./temp/repos', jobId);
     await mkdir(destDir, { recursive: true });
 
-    const cloneUrl = token
-      ? repoUrl.replace('https://', `https://${token}@`)
-      : repoUrl;
-
     this.logger.log(`Cloning theme repo: ${repoUrl} → ${destDir}`);
-    await simpleGit().clone(cloneUrl, destDir, ['--depth', '1']);
+    await cloneRepoWithRetry({
+      repoUrl,
+      token,
+      destDir,
+      logger: this.logger,
+      label: `theme clone:${jobId}`,
+    });
     return destDir;
   }
 
@@ -3399,7 +3463,8 @@ export class OrchestratorService {
         },
       ),
     );
-    return (response.data?.result ?? response.data) as ProgressEventData['metrics'];
+    return (response.data?.result ??
+      response.data) as ProgressEventData['metrics'];
   }
 
   private collectAutomationComparePages(
@@ -3421,10 +3486,16 @@ export class OrchestratorService {
   }> {
     const { metrics, preview, components } = input;
     const pages = this.collectAutomationComparePages(metrics);
-    const componentNames = new Set(components.map((component) => component.name));
+    const componentNames = new Set(
+      components.map((component) => component.name),
+    );
     const bestByComponent = new Map<
       string,
-      { componentName: string; page: AutomationComparePageResult; score: number }
+      {
+        componentName: string;
+        page: AutomationComparePageResult;
+        score: number;
+      }
     >();
 
     for (const page of pages) {
@@ -3685,7 +3756,10 @@ export class OrchestratorService {
     await this.logToFile(
       logPath,
       `[Visual Metrics Repair] Selected targets: ${repairTargets
-        .map((target) => `${target.componentName}:${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}`)
+        .map(
+          (target) =>
+            `${target.componentName}:${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}`,
+        )
         .join(', ')}`,
     );
     await this.logToFile(
@@ -3730,7 +3804,9 @@ export class OrchestratorService {
         continue;
       }
 
-      const visionImageUrls = await this.buildComparePageVisionInputs(target.page);
+      const visionImageUrls = await this.buildComparePageVisionInputs(
+        target.page,
+      );
       const visionContextNote = this.buildComparePageVisionContext(target.page);
       const feedback = this.buildVisualRepairFeedback({
         componentName: target.componentName,
@@ -3765,7 +3841,8 @@ export class OrchestratorService {
       });
       const revalidated = this.validator.collectValidationIssues([fixed]);
       if (revalidated.failures.length > 0) {
-        const error = revalidated.failures[0]?.error ?? 'Unknown validation error';
+        const error =
+          revalidated.failures[0]?.error ?? 'Unknown validation error';
         this.logger.warn(
           `[Visual Metrics Repair] Re-validation failed for "${target.componentName}". Keeping the previous version. Error: ${error}`,
         );
@@ -3835,8 +3912,13 @@ export class OrchestratorService {
     logPath: string;
   }): Promise<VisualMismatchDiagnosis> {
     const { componentName, page, plan, content, modelName, logPath } = input;
-    const componentPlan = plan.find((entry) => entry.componentName === componentName);
-    const sourceEvidence = this.buildSourceEvidenceForComparePage(page, content);
+    const componentPlan = plan.find(
+      (entry) => entry.componentName === componentName,
+    );
+    const sourceEvidence = this.buildSourceEvidenceForComparePage(
+      page,
+      content,
+    );
     const planEvidence = this.buildPlanEvidenceForComponent(componentPlan);
     const heuristic = this.buildHeuristicVisualDiagnosis({
       componentName,
@@ -3860,8 +3942,16 @@ export class OrchestratorService {
         `[Visual Diagnose] incoming metrics: ${this.formatAutomationComparePageSummary(
           page,
         )}`,
-        this.summarizeLogLines(sourceEvidence, 6, '[Visual Diagnose] source evidence'),
-        this.summarizeLogLines(planEvidence, 4, '[Visual Diagnose] plan evidence'),
+        this.summarizeLogLines(
+          sourceEvidence,
+          6,
+          '[Visual Diagnose] source evidence',
+        ),
+        this.summarizeLogLines(
+          planEvidence,
+          4,
+          '[Visual Diagnose] plan evidence',
+        ),
         `[Visual Diagnose] heuristic rootCause=${heuristic.rootCause.primary} confidence=${heuristic.confidence.toFixed(2)} strategy=${heuristic.repairPlan.strategy}`,
       ].join('\n'),
     );
@@ -3921,7 +4011,8 @@ export class OrchestratorService {
     planEvidence: string[];
     heuristic: VisualMismatchDiagnosis;
   }): string {
-    const { componentName, page, sourceEvidence, planEvidence, heuristic } = input;
+    const { componentName, page, sourceEvidence, planEvidence, heuristic } =
+      input;
     const lines: string[] = [
       `Component: ${componentName}`,
       `Route key: ${page.routeKey ?? 'unknown'}`,
@@ -3974,7 +4065,9 @@ export class OrchestratorService {
       `Heuristic baseline diagnosis: rootCause=${heuristic.rootCause.primary}, confidence=${heuristic.confidence.toFixed(2)}, missingLabels=${heuristic.evidence.missingLabels.join(' | ') || 'none'}`,
     );
     lines.push('');
-    lines.push('Decide the most likely root cause and return JSON with this exact shape:');
+    lines.push(
+      'Decide the most likely root cause and return JSON with this exact shape:',
+    );
     lines.push(
       '{"componentName":"string","routeKey":"string|null","route":"string|null","shouldRepair":true,"confidence":0.0,"rootCause":{"primary":"plan-omission|missing-section|missing-image|content-drift|layout-drift|route-mapping-error|data-binding-error|shared-layout-mismatch|unknown","secondary":["string"],"reasoning":"string"},"evidence":{"sourceHints":["string"],"missingLabels":["string"],"sectionLikelyMissingFromPlan":true},"repairPlan":{"strategy":"string","instructions":["string"],"targetAreas":[{"type":"section","sectionHint":"string","headingHint":"string"}],"guardrails":["string"]}}',
     );
@@ -4018,11 +4111,13 @@ export class OrchestratorService {
             ? parsed.componentName.trim()
             : componentName,
         routeKey:
-          typeof parsed.routeKey === 'string' ? parsed.routeKey : page.routeKey ?? null,
+          typeof parsed.routeKey === 'string'
+            ? parsed.routeKey
+            : (page.routeKey ?? null),
         route:
           typeof parsed.route === 'string'
             ? parsed.route
-            : page.route ?? page.visual?.reactPath ?? null,
+            : (page.route ?? page.visual?.reactPath ?? null),
         shouldRepair:
           typeof parsed.shouldRepair === 'boolean' ? parsed.shouldRepair : true,
         confidence,
@@ -4164,14 +4259,21 @@ export class OrchestratorService {
     const { componentName, page, sourceEvidence, planEvidence } = input;
     const missingLabels = sourceEvidence
       .filter((entry) => entry.startsWith('Heading/text hint: "'))
-      .map((entry) => entry.replace(/^Heading\/text hint: "/, '').replace(/"$/, ''))
-      .filter((entry) => !planEvidence.some((planLine) => planLine.includes(entry)))
+      .map((entry) =>
+        entry.replace(/^Heading\/text hint: "/, '').replace(/"$/, ''),
+      )
+      .filter(
+        (entry) => !planEvidence.some((planLine) => planLine.includes(entry)),
+      )
       .slice(0, 4);
-    const overlapDiffPct = this.coerceFiniteNumber(page.visual?.overlapDiffPct) ?? 0;
-    const extraDiffPct = this.coerceFiniteNumber(page.visual?.extraDiffPct) ?? 0;
+    const overlapDiffPct =
+      this.coerceFiniteNumber(page.visual?.overlapDiffPct) ?? 0;
+    const extraDiffPct =
+      this.coerceFiniteNumber(page.visual?.extraDiffPct) ?? 0;
     const diffPct = this.coerceFiniteNumber(page.visual?.diffPct) ?? 0;
     const domSimilarity =
-      this.coerceFiniteNumber(page.visual?.domComparison?.similarityScore) ?? 100;
+      this.coerceFiniteNumber(page.visual?.domComparison?.similarityScore) ??
+      100;
     const hasHighRegion = (page.visual?.regions ?? []).some(
       (region) => region.severity === 'high',
     );
@@ -4179,7 +4281,8 @@ export class OrchestratorService {
     const sectionLikelyMissingFromPlan =
       missingLabels.length > 0 && contentStatus !== 'PASS';
 
-    let primary: VisualMismatchDiagnosis['rootCause']['primary'] = 'layout-drift';
+    let primary: VisualMismatchDiagnosis['rootCause']['primary'] =
+      'layout-drift';
     let confidence = 0.68;
     let strategy = 'targeted-visual-repair';
     const secondary: string[] = [];
@@ -4275,7 +4378,9 @@ export class OrchestratorService {
     if (!componentPlan) return [];
     const lines: string[] = [];
     if (componentPlan.planningSourceSummary) {
-      lines.push(`Planning source summary: ${componentPlan.planningSourceSummary}`);
+      lines.push(
+        `Planning source summary: ${componentPlan.planningSourceSummary}`,
+      );
     }
     if (componentPlan.planningSourceLabel) {
       lines.push(`Planning source label: ${componentPlan.planningSourceLabel}`);
@@ -4307,7 +4412,9 @@ export class OrchestratorService {
     content: DbContentResult;
   }): string {
     const { componentName, page, diagnosis, plan, content } = input;
-    const componentPlan = plan.find((entry) => entry.componentName === componentName);
+    const componentPlan = plan.find(
+      (entry) => entry.componentName === componentName,
+    );
     const lines: string[] = [
       `Automation visual-compare reported a fidelity mismatch for component "${componentName}".`,
       `Repair the component so the rendered React preview matches the WordPress source more closely for route "${page.route ?? page.visual?.reactPath ?? 'unknown'}".`,
@@ -4329,7 +4436,8 @@ export class OrchestratorService {
         page.visual.overlapDiffPct !== undefined
           ? `overlapDiffPct=${page.visual.overlapDiffPct}%`
           : null,
-        page.visual.extraDiffPct !== null && page.visual.extraDiffPct !== undefined
+        page.visual.extraDiffPct !== null &&
+        page.visual.extraDiffPct !== undefined
           ? `extraDiffPct=${page.visual.extraDiffPct}%`
           : null,
         page.visual.domComparison?.similarityScore !== null &&
@@ -4365,7 +4473,10 @@ export class OrchestratorService {
       }
     }
 
-    const sourceEvidence = this.buildSourceEvidenceForComparePage(page, content);
+    const sourceEvidence = this.buildSourceEvidenceForComparePage(
+      page,
+      content,
+    );
     if (sourceEvidence.length > 0) {
       lines.push('Source-backed evidence from WordPress/DB:');
       lines.push(...sourceEvidence.map((line) => `- ${line}`));
@@ -4387,7 +4498,9 @@ export class OrchestratorService {
     if (diagnosis.repairPlan.instructions.length > 0) {
       lines.push('Diagnosis repair instructions:');
       lines.push(
-        ...diagnosis.repairPlan.instructions.map((instruction) => `- ${instruction}`),
+        ...diagnosis.repairPlan.instructions.map(
+          (instruction) => `- ${instruction}`,
+        ),
       );
     }
     if (diagnosis.repairPlan.targetAreas.length > 0) {
@@ -4435,9 +4548,10 @@ export class OrchestratorService {
     };
 
     if (route === '/') {
-      const homeTemplates = content.dbTemplates.filter((template) =>
-        /^(home|front-page)$/i.test(template.slug) ||
-        /^(home|front page)$/i.test(template.title),
+      const homeTemplates = content.dbTemplates.filter(
+        (template) =>
+          /^(home|front-page)$/i.test(template.slug) ||
+          /^(home|front page)$/i.test(template.title),
       );
       for (const template of homeTemplates) {
         addHeadingCandidates(template.content);
@@ -4506,10 +4620,7 @@ export class OrchestratorService {
       .split(/\r?\n+/)
       .map((line) => this.normalizeEvidenceText(line))
       .filter(
-        (line) =>
-          line.length >= 8 &&
-          line.length <= 120 &&
-          !seen.has(line),
+        (line) => line.length >= 8 && line.length <= 120 && !seen.has(line),
       );
     for (const line of plainTextLines) {
       seen.add(line);
@@ -4527,7 +4638,9 @@ export class OrchestratorService {
       .trim();
   }
 
-  private summarizePlanSection(section: Record<string, any> | undefined): string {
+  private summarizePlanSection(
+    section: Record<string, any> | undefined,
+  ): string {
     if (!section || typeof section !== 'object') return '';
     const parts = [typeof section.type === 'string' ? section.type : 'section'];
     if (typeof section.heading === 'string' && section.heading.trim()) {
@@ -4576,7 +4689,9 @@ export class OrchestratorService {
         `- Region crop images highlight the most severe mismatch area (${topRegion.kind ?? 'diff'} / ${topRegion.severity ?? 'unknown'}).`,
       );
     } else {
-      lines.push('- Full-page screenshots show WordPress vs React plus a diff overlay.');
+      lines.push(
+        '- Full-page screenshots show WordPress vs React plus a diff overlay.',
+      );
     }
     return lines.join('\n');
   }
@@ -4593,7 +4708,9 @@ export class OrchestratorService {
     return resolved;
   }
 
-  private collectCompareArtifactUrls(page: AutomationComparePageResult): string[] {
+  private collectCompareArtifactUrls(
+    page: AutomationComparePageResult,
+  ): string[] {
     const urls: string[] = [];
     const topRegion = page.visual?.regions?.[0];
     if (topRegion?.cropArtifacts) {

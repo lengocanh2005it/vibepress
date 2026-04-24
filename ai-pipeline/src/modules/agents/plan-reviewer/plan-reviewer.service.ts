@@ -697,7 +697,8 @@ export class PlanReviewerService {
       // Reject AI-added orphan sections (no sourceRef) that exceed the draft count.
       // These are hallucinated sections with no WP source backing.
       const orphans = actualSections.filter(
-        (s, i) => i >= expectedDraftSections.length && !s.sourceRef?.sourceNodeId,
+        (s, i) =>
+          i >= expectedDraftSections.length && !s.sourceRef?.sourceNodeId,
       );
       for (const orphan of orphans) {
         errors.push(

@@ -3,8 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import AdmZip from 'adm-zip';
 import { mkdir, rm } from 'fs/promises';
 import { join } from 'path';
-import simpleGit from 'simple-git';
 import { v4 as uuidv4 } from 'uuid';
+import { cloneRepoWithRetry } from '../../common/utils/git-clone.util.js';
 import {
   ThemeDetectResult,
   ThemeDetectorService,
@@ -66,8 +66,12 @@ export class ThemeService {
 
     this.logger.log(`Cloning repo: ${githubUrl} → ${destDir}`);
 
-    const git = simpleGit();
-    await git.clone(githubUrl, destDir, ['--depth', '1']);
+    await cloneRepoWithRetry({
+      repoUrl: githubUrl,
+      destDir,
+      logger: this.logger,
+      label: `theme service clone:${id}`,
+    });
 
     const detection = await this.detector.detect(destDir);
     this.logger.log(`Detected theme type: ${detection.type}`);

@@ -8,6 +8,7 @@ import type {
   CardGridSection,
   ComponentVisualPlan,
   CoverSection,
+  CtaStripSection,
   HeroSection,
   MediaTextSection,
   ModalSection,
@@ -20,6 +21,11 @@ import type {
 } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import {
+  findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets,
+  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
+  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
+} from '../../../common/utils/post-meta-link.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
 const VIRTUAL_MAIN_FILE = `${VIRTUAL_ROOT}/src/main.tsx`;
 const VIRTUAL_APP_FILE = `${VIRTUAL_ROOT}/src/App.tsx`;
@@ -651,10 +657,7 @@ export class ValidatorService {
           'Shared chrome contract violated: Footer must fetch `/api/footer-links` and render its footer columns from that API, not from `/api/menus`.',
         );
       }
-      if (
-        isFooterPartial &&
-        dataNeeds.has('menus')
-      ) {
+      if (isFooterPartial && dataNeeds.has('menus')) {
         violations.push(
           'Shared chrome contract violated: Footer must not declare `menus`. Use `footerLinks` for footer columns instead.',
         );
@@ -956,6 +959,8 @@ export class ValidatorService {
     switch (section.type) {
       case 'hero':
         return this.checkHeroPayload(code, section, label);
+      case 'cta-strip':
+        return this.checkCtaStripPayload(code, section, label);
       case 'cover':
         return this.checkCoverPayload(code, section, label);
       case 'media-text':
@@ -1000,11 +1005,7 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.cta?.text,
-        `${label} lost hero CTA text`,
-      ),
+      ...this.requireSectionCtasIfPresent(code, section, `${label} lost hero CTA text`),
     );
     issues.push(
       ...this.requireLiteralIfPresent(
@@ -1014,6 +1015,18 @@ export class ValidatorService {
       ),
     );
     return issues;
+  }
+
+  private checkCtaStripPayload(
+    code: string,
+    section: CtaStripSection,
+    label: string,
+  ): string[] {
+    return this.requireSectionCtasIfPresent(
+      code,
+      section,
+      `${label} lost cta-strip CTA text`,
+    );
   }
 
   private checkCoverPayload(
@@ -1044,9 +1057,9 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(
+      ...this.requireSectionCtasIfPresent(
         code,
-        section.cta?.text,
+        section,
         `${label} lost cover CTA text`,
       ),
     );
@@ -1081,9 +1094,9 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(
+      ...this.requireSectionCtasIfPresent(
         code,
-        section.cta?.text,
+        section,
         `${label} lost media-text CTA text`,
       ),
     );
@@ -1174,13 +1187,33 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireLiteralIfPresent(
+      ...this.requireSectionCtasIfPresent(
         code,
-        section.cta?.text,
+        section,
         `${label} lost modal CTA text`,
       ),
     );
     return issues;
+  }
+
+  private requireSectionCtasIfPresent(
+    code: string,
+    section: { cta?: { text?: string }; ctas?: Array<{ text?: string }> },
+    reason: string,
+  ): string[] {
+    const raw =
+      Array.isArray(section.ctas) && section.ctas.length > 0
+        ? section.ctas
+        : section.cta
+          ? [section.cta]
+          : [];
+    const seen = new Set<string>();
+    return raw.flatMap((cta) => {
+      const text = typeof cta?.text === 'string' ? cta.text : undefined;
+      if (!text || seen.has(text)) return [];
+      seen.add(text);
+      return this.requireLiteralIfPresent(code, text, reason);
+    });
   }
 
   private checkTabsPayload(
@@ -1354,8 +1387,8 @@ export class ValidatorService {
     const normalized = value?.trim();
     return Boolean(
       normalized &&
-        (/^\{[a-zA-Z0-9_.]+\}$/.test(normalized) ||
-          /\{[a-zA-Z0-9_.]+\}/.test(normalized)),
+      (/^\{[a-zA-Z0-9_.]+\}$/.test(normalized) ||
+        /\{[a-zA-Z0-9_.]+\}/.test(normalized)),
     );
   }
 
@@ -2193,46 +2226,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     code: string,
     max = 3,
   ): string[] {
-    const snippets: string[] = [];
-    const patterns = [
-      {
-        pattern:
-          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-        allowHeadingContext: true,
-      },
-      {
-        pattern:
-          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-        allowHeadingContext: false,
-      },
-      {
-        pattern:
-          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
-        allowHeadingContext: false,
-      },
-    ];
-
-    for (const { pattern, allowHeadingContext } of patterns) {
-      for (const match of code.matchAll(pattern)) {
-        const raw = match[0]?.replace(/\s+/g, ' ').trim();
-        if (!raw) continue;
-        const offset = match.index ?? 0;
-        if (
-          allowHeadingContext &&
-          this.isWithinHeadingTitleContext(code, offset)
-        ) {
-          continue;
-        }
-        // Skip spans that are already inside an authorSlug/categorySlugs ternary
-        // — they are the safe no-slug fallback emitted by promotePlainTextPostMetaLinks.
-        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
-        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
-        if (snippets.length >= max) return snippets;
-      }
-      if (snippets.length >= max) break;
-    }
-
-    return snippets;
+    return findSharedPlainTextPostMetaArchiveSnippets(code, max);
   }
 
   /**
@@ -2246,7 +2240,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     const before = code.slice(Math.max(0, offset - 600), offset);
     return (
       /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
       /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
       /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
         before,
@@ -2255,97 +2249,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private promotePlainTextPostMetaLinks(code: string): string {
-    const isCanonicalMetaLink = (raw: string): boolean =>
-      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
-      /(?:to=|href=)[^>]*\/category\//.test(raw);
-
-    const decorateQuoted = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
-        (
-          match,
-          tag: string,
-          before: string,
-          quote: string,
-          className: string,
-        ) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}${quote}`;
-        },
-      );
-
-    const decorateTemplateLiteral = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
-        (match, tag: string, before: string, className: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className={\`${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}\`}`;
-        },
-      );
-
-    const decorateWithoutClass = (source: string) =>
-      source.replace(
-        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
-        (match, tag: string, attrs: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
-        },
-      );
-
-    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+    return promoteSharedPlainTextPostMetaLinks(code);
   }
 
   private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    let next = code;
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
-      (_match, record: string, tag: string, attrs: string) =>
-        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
-    );
-
-    next = next.replace(
-      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-      (match, tag: string, attrs: string, record: string, offset: number) => {
-        if (this.isWithinHeadingTitleContext(next, offset)) return match;
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
-      (_match, record: string, attrs: string) =>
-        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
-    );
-
-    next = next.replace(
-      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-      (match, attrs: string, record: string, offset: number) => {
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
-      (
-        _match,
-        record: string,
-        categoryVar: string,
-        indexVar: string,
-        attrs: string,
-      ) =>
-        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
-    );
-
-    return next;
+    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
   }
 
   private isWithinHeadingTitleContext(code: string, offset: number): boolean {

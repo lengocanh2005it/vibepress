@@ -1,0 +1,164 @@
+@layer components {
+  body.hide-scroll {
+    overflow: hidden;
+  }
+
+  .uagb-modal-wrapper {
+    width: 100%;
+  }
+
+  .uagb-modal-trigger.uagb-modal-button-link {
+    text-decoration: none;
+    align-items: center;
+    cursor: pointer;
+  }
+
+  .uagb-modal-popup {
+    visibility: hidden;
+    position: fixed;
+    inset: 0;
+  }
+
+  .uagb-modal-popup.active {
+    display: flex;
+    visibility: visible;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .uagb-modal-popup .uagb-modal-popup-wrap {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    max-width: 100%;
+    position: relative;
+    box-sizing: border-box;
+  }
+
+  .uagb-modal-popup .uagb-modal-popup-content {
+    overflow-x: hidden;
+    overflow-y: auto;
+    height: 100%;
+  }
+
+  .uagb-modal-popup.active .uagb-modal-popup-close {
+    display: inline-flex;
+    opacity: 1;
+    cursor: pointer;
+  }
+
+  .uagb-tabs__wrap {
+    display: flex;
+    width: 100%;
+  }
+
+  .uagb-tabs__wrap .uagb-tabs__panel {
+    margin: 0;
+    list-style: none;
+    padding: 0;
+  }
+
+  .uagb-tabs__wrap .uagb-tab {
+    list-style: none;
+  }
+
+  .uagb-tabs__wrap .uagb-tabs-list {
+    width: 100%;
+    text-decoration: none;
+  }
+
+  .uagb-tabs__wrap.uagb-tabs__hstyle4-desktop .uagb-tab,
+  .uagb-tabs__wrap.uagb-tabs__vstyle9-desktop .uagb-tab,
+  .uagb-tabs__wrap.uagb-tabs__stack4-mobile .uagb-tab {
+    border-radius: 999px;
+  }
+
+  .uagb-tabs__wrap.uagb-tabs__hstyle5-desktop .uagb-tabs__panel,
+  .uagb-tabs__wrap.uagb-tabs__vstyle10-desktop .uagb-tabs__panel {
+    justify-content: space-between;
+  }
+
+  .uagb-tabs__wrap.uagb-tabs__vstyle6-desktop,
+  .uagb-tabs__wrap.uagb-tabs__vstyle7-desktop,
+  .uagb-tabs__wrap.uagb-tabs__vstyle8-desktop,
+  .uagb-tabs__wrap.uagb-tabs__vstyle9-desktop,
+  .uagb-tabs__wrap.uagb-tabs__vstyle10-desktop {
+    flex-direction: row;
+  }
+
+  .uagb-tabs__wrap.uagb-tabs__vstyle6-desktop .uagb-tabs__panel,
+  .uagb-tabs__wrap.uagb-tabs__vstyle7-desktop .uagb-tabs__panel,
+  .uagb-tabs__wrap.uagb-tabs__vstyle8-desktop .uagb-tabs__panel,
+  .uagb-tabs__wrap.uagb-tabs__vstyle9-desktop .uagb-tabs__panel,
+  .uagb-tabs__wrap.uagb-tabs__vstyle10-desktop .uagb-tabs__panel {
+    flex-direction: column;
+    min-width: 24%;
+    max-width: 24%;
+  }
+
+  .uagb-tabs__wrap.uagb-tabs__vstyle6-desktop .uagb-tabs__body-wrap,
+  .uagb-tabs__wrap.uagb-tabs__vstyle7-desktop .uagb-tabs__body-wrap,
+  .uagb-tabs__wrap.uagb-tabs__vstyle8-desktop .uagb-tabs__body-wrap,
+  .uagb-tabs__wrap.uagb-tabs__vstyle9-desktop .uagb-tabs__body-wrap,
+  .uagb-tabs__wrap.uagb-tabs__vstyle10-desktop .uagb-tabs__body-wrap {
+    max-width: 75%;
+    flex-grow: 1;
+  }
+
+  .uagb-tabs__wrap .uagb-tabs__body-container {
+    display: none;
+  }
+
+  .uagb-tabs__wrap .uagb-tabs__body-container.uagb-tabs-body__active {
+    display: block;
+  }
+
+  .uagb-slider-container {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .uagb-slider-container .swiper-wrapper {
+    align-items: stretch;
+  }
+
+  .uagb-slider-container .swiper-button-prev,
+  .uagb-slider-container .swiper-button-next {
+    border-style: none;
+    background: rgba(239, 239, 239, 0.9);
+  }
+
+  .uagb-slider-container .swiper-pagination.swiper-pagination-bullets {
+    max-width: 100%;
+  }
+
+  .uagb-slider-container .swiper-pagination-bullet {
+    display: inline-flex;
+  }
+
+  .wp-block-uagb-faq.uagb-faq__wrap {
+    width: 100%;
+  }
+
+  .wp-block-uagb-faq .uagb-faq-child__outer-wrap {
+    width: 100%;
+  }
+
+  .wp-block-uagb-faq .uagb-faq-item {
+    overflow: hidden;
+  }
+
+  .wp-block-uagb-faq .uagb-faq-questions-button {
+    cursor: pointer;
+  }
+
+  .wp-block-uagb-faq .uagb-faq-content {
+    margin-bottom: 0;
+  }
+
+  .wp-block-uagb-faq .uagb-faq-icon-wrap {
+    flex: 0 0 auto;
+  }
+}

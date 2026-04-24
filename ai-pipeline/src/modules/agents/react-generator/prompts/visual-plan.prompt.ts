@@ -115,6 +115,7 @@ Typography and exact column-ratio metadata may also appear when the template exp
 |---|---|
 | \`navbar\` | header/navigation bar |
 | \`hero\` | large heading + optional CTA + optional image; \`centered\` / \`left\` heroes keep image BELOW text, only \`split\` may place image beside text |
+| \`cta-strip\` | standalone button/CTA row without a hero heading |
 | \`cover\` | full-width image with overlay text |
 | \`post-list\` | list or grid of blog posts from API |
 | \`card-grid\` | static grid of feature cards |
@@ -137,11 +138,12 @@ Typography and exact column-ratio metadata may also appear when the template exp
 
 \`\`\`
 navbar:       { sticky, menuSlug, cta? }
-hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, image? } // centered|left => vertical stack (text first, image below)
-cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, contentAlign }
+hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, image? } // centered|left => vertical stack (text first, image below)
+cta-strip:    { align?: left|center|right, cta?, ctas? }
+cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage }
 card-grid:    { title?, subtitle?, columns: 2|3|4, columnWidths?, cards: [{heading,body}] }
-media-text:   { imageSrc, imageAlt, imagePosition: left|right, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta? }
+media-text:   { imageSrc, imageAlt, imagePosition: left|right, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta?, ctas? }
 testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign? }
 newsletter:   { heading, subheading?, buttonText, layout: centered|card }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
@@ -151,10 +153,10 @@ comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
-modal:        { triggerText?, heading?, body?, imageSrc?, imageAlt?, cta?, layout?: centered|split }
-tabs:         { title?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
-accordion:    { title?, items: [{ heading, body }], allowMultiple? }
-carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay?, contentAlign? }
+modal:        { triggerText?, heading?, body?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
+tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
+accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
+carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay?, autoplaySpeed?, loop?, effect?, showDots?, showArrows?, vertical?, transitionSpeed?, pauseOn?, contentAlign? }
 \`\`\`
 
 ## Rules
@@ -169,6 +171,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - \`media-text\` is allowed ONLY when the source wrapper itself is a real image-beside-text block (for example a WordPress media-text block or one columns/group wrapper that clearly contains both sides). It must NOT be used to fuse separate sibling sections.
 - Keep the same major wrappers/regions from the template source. Do NOT upgrade a simple block into a dramatic hero, promo banner, testimonial strip, or newsletter section unless the template clearly contains that section already.
 - Do NOT add decorative sections, marketing content, or stronger CTAs than the original template shows.
+- When one source-backed section contains multiple real buttons, preserve ALL of them in order. Use \`cta\` for the first button and \`ctas\` for the full ordered list.
 - Use ONLY hex colors. Derive them from theme tokens first, then from explicit template colors/classes if present. Do NOT invent a new palette direction.
 - Text content in sections (headings, body text, card copy) must come EXACTLY from the template source — no invented text.
 - If you need to output a dynamic variable (e.g. {item.title} or {post.title}), use EXACTLY ONE pair of curly braces. NEVER use double braces like {{item.title}} or {{post.title}}, as it breaks JSX syntax.
@@ -192,6 +195,9 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - If source widget hints say \`slider\` or \`carousel\`, the output MUST include at least one \`carousel\` section. Do not replace it with \`hero\`, \`card-grid\`, or \`media-text\`.
 - If the source shows a real modal/popup/dialog block, preserve it as a \`modal\` section. Do NOT flatten it into \`hero\`, \`card-grid\`, or generic text.
 - If source widget hints say \`modal\`, the output MUST include at least one \`modal\` section. Preserve trigger text plus modal heading/body/CTA content when present in source.
+- When the source exposes interactive widget settings, preserve them in the JSON plan instead of flattening them away. Examples: slider autoplay/arrows/dots/effect, modal overlay-close/esc-close/overlay-color/width/height, tabs active tab + variant, accordion multi-open/default-open/toggle behavior.
+- If the repo source-of-truth hints include Spectra plugin appearance cues, keep the closest Spectra visual family instead of defaulting to generic cards. Examples: tabs \`hstyle4\` / \`vstyle9\` should stay rounded-pill tabs, \`vstyle6-10\` should stay vertical rail tabs, modal should stay a fixed centered overlay dialog with explicit close button, accordion should stay a question-row + sliding-answer surface, and slider should keep inner arrows/dots inside one masked frame.
+- Preserve source widget variant labels when they are already exposed by the source attrs or repo hints. Do not replace a concrete Spectra-style variant with a vague generic variant name.
 - If the source shows a real tabs widget, preserve it as a \`tabs\` section. Do NOT flatten it into a \`card-grid\` or generic copy block.
 - If source widget hints say \`tabs\`, the output MUST include at least one \`tabs\` section. Preserve every source-backed tab label and tab panel body.
 - If the source shows a real accordion/FAQ/content-toggle widget, preserve it as an \`accordion\` section. Do NOT flatten it into a \`card-grid\`, \`hero\`, or generic text block.
@@ -437,6 +443,7 @@ function buildImageSourcesHint(templateSource: string): string {
 const VALID_SECTION_TYPES = new Set<string>([
   'navbar',
   'hero',
+  'cta-strip',
   'cover',
   'post-list',
   'card-grid',
@@ -570,8 +577,12 @@ function validateSectionDetailed(
     if (value) raw[key] = value;
     else delete raw[key];
   }
+  const normalizedTopLevelCtas = normalizeCtaConfigs(raw.ctas);
+  if (normalizedTopLevelCtas.length > 0) raw.ctas = normalizedTopLevelCtas;
+  else delete raw.ctas;
   const normalizedTopLevelCta = normalizeCtaConfig(raw.cta);
   if (normalizedTopLevelCta) raw.cta = normalizedTopLevelCta;
+  else if (normalizedTopLevelCtas[0]) raw.cta = normalizedTopLevelCtas[0];
   else delete raw.cta;
   if (Array.isArray(raw.columnWidths)) {
     raw.columnWidths = raw.columnWidths.filter(
@@ -603,6 +614,19 @@ function validateSectionDetailed(
         !isAllowedStaticImage(raw.image.src, options?.allowedImageSrcs)
       ) {
         delete raw.image;
+      }
+      break;
+
+    case 'cta-strip':
+      if (!['left', 'center', 'right'].includes(raw.align)) delete raw.align;
+      delete raw.heading;
+      delete raw.subheading;
+      delete raw.image;
+      if (!raw.cta && !raw.ctas?.length) {
+        return {
+          section: null,
+          reason: 'cta-strip must include cta or ctas',
+        };
       }
       break;
 
@@ -734,6 +758,20 @@ function validateSectionDetailed(
       if (typeof raw.heading !== 'string') delete raw.heading;
       if (typeof raw.body !== 'string') delete raw.body;
       if (!['centered', 'split'].includes(raw.layout)) raw.layout = 'centered';
+      if (typeof raw.closeOnOverlay !== 'boolean') delete raw.closeOnOverlay;
+      if (typeof raw.closeOnEsc !== 'boolean') delete raw.closeOnEsc;
+      if (typeof raw.overlayColor !== 'string' || !raw.overlayColor.trim()) {
+        delete raw.overlayColor;
+      }
+      if (typeof raw.width !== 'string' || !raw.width.trim()) delete raw.width;
+      if (typeof raw.height !== 'string' || !raw.height.trim())
+        delete raw.height;
+      if (
+        typeof raw.closeIconPosition !== 'string' ||
+        !raw.closeIconPosition.trim()
+      ) {
+        delete raw.closeIconPosition;
+      }
       if (
         typeof raw.imageSrc === 'string' &&
         raw.imageSrc.trim() &&
@@ -743,18 +781,9 @@ function validateSectionDetailed(
         delete raw.imageAlt;
       }
       if (typeof raw.imageAlt !== 'string') delete raw.imageAlt;
-      if (
-        raw.cta &&
-        typeof raw.cta === 'object' &&
-        typeof raw.cta.text === 'string' &&
-        raw.cta.text.trim() &&
-        typeof raw.cta.link === 'string' &&
-        raw.cta.link.trim()
-      ) {
-        raw.cta = {
-          text: raw.cta.text.trim(),
-          link: raw.cta.link.trim(),
-        };
+      const modalCta = normalizeCtaConfig(raw.cta);
+      if (modalCta) {
+        raw.cta = modalCta;
       } else {
         delete raw.cta;
       }
@@ -775,6 +804,21 @@ function validateSectionDetailed(
 
     case 'tabs':
       if (typeof raw.title !== 'string') delete raw.title;
+      if (
+        typeof raw.activeTab !== 'number' ||
+        !Number.isFinite(raw.activeTab) ||
+        raw.activeTab < 0
+      ) {
+        delete raw.activeTab;
+      } else {
+        raw.activeTab = Math.floor(raw.activeTab);
+      }
+      if (typeof raw.variant !== 'string' || !raw.variant.trim()) {
+        delete raw.variant;
+      }
+      if (!['left', 'center', 'right'].includes(raw.tabAlign)) {
+        delete raw.tabAlign;
+      }
       if (!Array.isArray(raw.tabs) || raw.tabs.length === 0) {
         return {
           section: null,
@@ -820,6 +864,12 @@ function validateSectionDetailed(
           reason: 'tabs.tabs has no valid tab objects',
         };
       }
+      if (typeof raw.activeTab === 'number') {
+        raw.activeTab = Math.min(
+          Math.max(raw.activeTab, 0),
+          raw.tabs.length - 1,
+        );
+      }
       break;
 
     case 'accordion':
@@ -860,6 +910,28 @@ function validateSectionDetailed(
         };
       }
       if (typeof raw.allowMultiple !== 'boolean') raw.allowMultiple = false;
+      if (typeof raw.enableToggle !== 'boolean') delete raw.enableToggle;
+      if (typeof raw.variant !== 'string' || !raw.variant.trim()) {
+        delete raw.variant;
+      }
+      if (Array.isArray(raw.defaultOpenItems)) {
+        raw.defaultOpenItems = Array.from<number>(
+          new Set<number>(
+            raw.defaultOpenItems
+              .map((value: unknown) =>
+                typeof value === 'number' && Number.isFinite(value)
+                  ? Math.floor(value)
+                  : null,
+              )
+              .filter(
+                (value: number | null): value is number =>
+                  value !== null && value >= 0 && value < raw.items.length,
+              ),
+          ),
+        ).sort((a, b) => a - b);
+      } else {
+        delete raw.defaultOpenItems;
+      }
       break;
 
     case 'carousel':
@@ -899,6 +971,32 @@ function validateSectionDetailed(
         };
       }
       if (typeof raw.autoplay !== 'boolean') raw.autoplay = false;
+      if (
+        typeof raw.autoplaySpeed !== 'number' ||
+        !Number.isFinite(raw.autoplaySpeed) ||
+        raw.autoplaySpeed <= 0
+      ) {
+        delete raw.autoplaySpeed;
+      } else {
+        raw.autoplaySpeed = Math.round(raw.autoplaySpeed);
+      }
+      if (typeof raw.loop !== 'boolean') raw.loop = true;
+      if (!['slide', 'fade', 'flip', 'coverflow'].includes(raw.effect)) {
+        raw.effect = 'slide';
+      }
+      if (typeof raw.showDots !== 'boolean') raw.showDots = true;
+      if (typeof raw.showArrows !== 'boolean') raw.showArrows = true;
+      if (typeof raw.vertical !== 'boolean') raw.vertical = false;
+      if (
+        typeof raw.transitionSpeed !== 'number' ||
+        !Number.isFinite(raw.transitionSpeed) ||
+        raw.transitionSpeed <= 0
+      ) {
+        delete raw.transitionSpeed;
+      } else {
+        raw.transitionSpeed = Math.round(raw.transitionSpeed);
+      }
+      if (!['hover', 'click'].includes(raw.pauseOn)) delete raw.pauseOn;
       if (!['center', 'left', 'right'].includes(raw.contentAlign)) {
         delete raw.contentAlign;
       }
@@ -921,7 +1019,14 @@ function isAllowedStaticImage(
 
 function normalizeCtaConfig(
   value: unknown,
-): { text: string; link: string; style?: 'button' | 'link' } | undefined {
+):
+  | {
+      text: string;
+      link: string;
+      style?: 'button' | 'link';
+      customClassNames?: string[];
+    }
+  | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const raw = value as Record<string, unknown>;
   const text =
@@ -941,11 +1046,41 @@ function normalizeCtaConfig(
   if (!text || !link) return undefined;
   const style =
     raw.style === 'button' || raw.style === 'link' ? raw.style : undefined;
+  const customClassNames = Array.isArray(raw.customClassNames)
+    ? [
+        ...new Set(
+          raw.customClassNames
+            .filter(
+              (entry: unknown): entry is string => typeof entry === 'string',
+            )
+            .map((entry: string) => entry.trim())
+            .filter(Boolean),
+        ),
+      ]
+    : [];
   return {
     text,
     link,
     ...(style ? { style } : {}),
+    ...(customClassNames.length > 0 ? { customClassNames } : {}),
   };
+}
+
+function normalizeCtaConfigs(
+  value: unknown,
+): Array<ReturnType<typeof normalizeCtaConfig> extends infer T ? NonNullable<T> : never> {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: Array<NonNullable<ReturnType<typeof normalizeCtaConfig>>> = [];
+  for (const entry of value) {
+    const cta = normalizeCtaConfig(entry);
+    if (!cta) continue;
+    const key = `${cta.text}\u0000${cta.link}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cta);
+  }
+  return result;
 }
 
 function validateSection(raw: any): SectionPlan | null {
