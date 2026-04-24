@@ -11,6 +11,13 @@ export default defineConfig(({ mode }) => {
       target: `http://localhost:${apiPort}`,
       changeOrigin: true,
     },
+    // Proxy /assets/* to the express server so that hardcoded absolute image
+    // paths like `/assets/images/hash-name.png` resolve correctly regardless
+    // of the Vite base URL (which includes /preview/<jobId>/).
+    '/assets': {
+      target: `http://localhost:${apiPort}`,
+      changeOrigin: true,
+    },
   };
 
   // Khi chạy qua proxy chain, API calls đến /{base}api/... thay vì /api/...

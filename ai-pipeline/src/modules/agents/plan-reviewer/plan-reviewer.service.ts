@@ -21,6 +21,7 @@ type PlanDataNeed =
   | 'pages'
   | 'menus'
   | 'site-info'
+  | 'footer-links'
   | 'post-detail'
   | 'page-detail'
   | 'comments'
@@ -39,6 +40,7 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'pages',
   'menus',
   'site-info',
+  'footer-links',
   'post-detail',
   'page-detail',
   'comments',
@@ -48,6 +50,17 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
 const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
+const HOME_TEMPLATE_PRIORITY = ['frontend-page', 'home', 'index'] as const;
+const HOME_TEMPLATE_PRIORITY_SET = new Set<string>(HOME_TEMPLATE_PRIORITY);
+
+function toTemplateBase(templateName: string): string {
+  return templateName.replace(/\.(php|html)$/i, '').toLowerCase();
+}
+
+function getHomeTemplateBase(templateName: string): string | null {
+  const base = toTemplateBase(templateName);
+  return HOME_TEMPLATE_PRIORITY_SET.has(base) ? base : null;
+}
 
 @Injectable()
 export class PlanReviewerService {
@@ -82,6 +95,7 @@ export class PlanReviewerService {
     reviewed = this.fixDuplicateRoutes(reviewed, warnings);
     this.checkVisualPlanCoverage(reviewed, warnings);
     this.validateHard(reviewed, expectedTemplateNames, errors);
+    this.validateDraftSectionFidelity(reviewed, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
     const partials = reviewed.filter((c) => c.type === 'partial').length;
@@ -175,12 +189,10 @@ export class PlanReviewerService {
       let next = item;
 
       // Don't un-demote templates that resolveDuplicateHomePages intentionally
-      // set to partial (front-page/home/index priority resolution).
-      const templateBase = next.templateName
-        .replace(/\.(php|html)$/i, '')
-        .toLowerCase();
+      // set to partial (frontend-page/home/index priority resolution).
+      const templateBase = toTemplateBase(next.templateName);
       const isDemotedHomeTemplate =
-        /^(front-page|home|index)$/.test(templateBase) &&
+        HOME_TEMPLATE_PRIORITY_SET.has(templateBase) &&
         next.type === 'partial' &&
         policy.type === 'page';
 
@@ -277,6 +289,15 @@ export class PlanReviewerService {
       );
       const needs = new Set<PlanDataNeed>(normalized);
       const before = [...needs];
+      const templateBase = toTemplateBase(item.templateName);
+      const isFooterPartial =
+        policy.type === 'partial' &&
+        (/^footer(?:[-_].+)?$/.test(templateBase) ||
+          /^footer(?:[-_].+)?$/i.test(item.componentName));
+      const isHeaderLikePartial =
+        policy.type === 'partial' &&
+        (/^(header|nav|navigation)(?:[-_].+)?$/.test(templateBase) ||
+          /^(Header|Nav|Navigation)(?:[-_].+)?$/.test(item.componentName));
 
       if (policy.type === 'partial') {
         needs.delete('post-detail');
@@ -285,6 +306,15 @@ export class PlanReviewerService {
 
       for (const need of policy.requiredDataNeeds) {
         needs.add(need);
+      }
+
+      if (isFooterPartial) {
+        needs.add('site-info');
+        needs.add('footer-links');
+        needs.delete('menus');
+      }
+      if (isHeaderLikePartial) {
+        needs.delete('footer-links');
       }
 
       if (
@@ -307,6 +337,8 @@ export class PlanReviewerService {
         const removedChromeNeeds: PlanDataNeed[] = [];
         if (needs.delete('menus')) removedChromeNeeds.push('menus');
         if (needs.delete('site-info')) removedChromeNeeds.push('site-info');
+        if (needs.delete('footer-links'))
+          removedChromeNeeds.push('footer-links');
         if (removedChromeNeeds.length > 0) {
           warnings.push(
             `Template "${item.templateName}" removed page-level chrome dataNeeds (${removedChromeNeeds.join(', ')}) because shared layout partials own global chrome`,
@@ -422,6 +454,15 @@ export class PlanReviewerService {
     if (section.type === 'page-content') {
       return allowedPageDetail;
     }
+    // For detail pages, hero/cover sections from the draft are layout
+    // placeholders that the AI replaces with post-content or page-content.
+    // Enforcing them as required sections causes false type-mismatch failures.
+    if (
+      (section.type === 'hero' || section.type === 'cover') &&
+      (allowedPostDetail || allowedPageDetail)
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -431,6 +472,9 @@ export class PlanReviewerService {
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -517,6 +561,7 @@ export class PlanReviewerService {
 
     const expected = new Set(expectedTemplateNames);
     const templateCounts = new Map<string, number>();
+    const templateItems = new Map<string, ComponentPlan[]>();
     const componentCounts = new Map<string, number>();
     const pageRoutes = new Map<string, string[]>();
 
@@ -526,6 +571,9 @@ export class PlanReviewerService {
         item.templateName,
         (templateCounts.get(item.templateName) ?? 0) + 1,
       );
+      const existingTemplateItems = templateItems.get(item.templateName) ?? [];
+      existingTemplateItems.push(item);
+      templateItems.set(item.templateName, existingTemplateItems);
       componentCounts.set(
         item.componentName,
         (componentCounts.get(item.componentName) ?? 0) + 1,
@@ -592,7 +640,11 @@ export class PlanReviewerService {
     }
 
     for (const [templateName, count] of templateCounts) {
-      if (count > 1) {
+      const items = templateItems.get(templateName) ?? [];
+      if (
+        count > 1 &&
+        !this.allowsConcreteTemplateMultiplicity(templateName, items)
+      ) {
         errors.push(
           `Template "${templateName}" appears ${count} times in plan (must be exactly once)`,
         );
@@ -623,23 +675,197 @@ export class PlanReviewerService {
     }
   }
 
+  private validateDraftSectionFidelity(
+    plan: PlanResult,
+    errors: string[],
+  ): void {
+    for (const item of plan) {
+      const expectedDraftSections = this.getContractExpectedDraftSections(item);
+      if (expectedDraftSections.length === 0) continue;
+
+      if (!item.visualPlan) {
+        // Missing visual plan is non-fatal: the generator falls back to the D3
+        // AI path using draftSections as context.
+        this.logger.warn(
+          `Component "${item.componentName}" has no visualPlan despite ${expectedDraftSections.length} draft section(s) — generator will use D3 fallback`,
+        );
+        continue;
+      }
+
+      const actualSections = item.visualPlan.sections;
+
+      // Reject AI-added orphan sections (no sourceRef) that exceed the draft count.
+      // These are hallucinated sections with no WP source backing.
+      const orphans = actualSections.filter(
+        (s, i) =>
+          i >= expectedDraftSections.length &&
+          !s.sourceRef?.sourceNodeId &&
+          !this.isAllowedOrphanSection(item, s, actualSections),
+      );
+      for (const orphan of orphans) {
+        errors.push(
+          `Component "${item.componentName}" has AI-added orphan section [${orphan.type}] key="${orphan.sectionKey ?? 'undefined'}" with no sourceRef — remove it`,
+        );
+      }
+
+      for (let index = 0; index < expectedDraftSections.length; index++) {
+        const expectedSection = expectedDraftSections[index];
+        const actualSection = actualSections[index];
+        const expectedLabel = this.describeSectionIdentity(expectedSection);
+
+        if (!actualSection) {
+          errors.push(
+            `Component "${item.componentName}" is missing draft-backed section ${index + 1} (${expectedLabel})`,
+          );
+          continue;
+        }
+
+        if (actualSection.type !== expectedSection.type) {
+          // Interactive section types (modal, carousel, tabs, accordion) should
+          // only be assigned when the source block is a native interactive block.
+          // Substituting a plain core/group to modal/carousel is AI hallucination
+          // — reject and restore the draft type + content to prevent fabricated UIs.
+          const interactiveTypes = [
+            'modal',
+            'carousel',
+            'tabs',
+            'accordion',
+          ] as const;
+          const nativeInteractiveBlocks = [
+            'uagb/modal',
+            'uagb/popup',
+            'uagb/slider',
+            'uagb/tabs',
+            'uagb/faq',
+            'uagb/content-toggle',
+          ];
+          const actualIsInteractive = (
+            interactiveTypes as readonly string[]
+          ).includes(actualSection.type);
+          const sourceIsNativeInteractive = nativeInteractiveBlocks.includes(
+            expectedSection.sourceRef?.blockName ?? '',
+          );
+          if (actualIsInteractive && !sourceIsNativeInteractive) {
+            errors.push(
+              `Component "${item.componentName}" section ${index + 1} illegal type substitution: draft "${expectedSection.type}" (blockName="${expectedSection.sourceRef?.blockName ?? 'unknown'}") → actual "${actualSection.type}" — source block is not a native interactive widget; rejecting to prevent hallucinated UI`,
+            );
+          } else {
+            // Semantic substitutions (search, comments, post-list, hero) are
+            // allowed. Warn but don't block.
+            this.logger.warn(
+              `Component "${item.componentName}" section ${index + 1} type substitution: draft "${expectedSection.type}" → actual "${actualSection.type}"`,
+            );
+          }
+        }
+
+        if (
+          expectedSection.sourceRef?.sourceNodeId &&
+          actualSection.sourceRef?.sourceNodeId !==
+            expectedSection.sourceRef.sourceNodeId
+        ) {
+          errors.push(
+            `Component "${item.componentName}" section ${index + 1} lost sourceNodeId "${expectedSection.sourceRef.sourceNodeId}"`,
+          );
+        }
+
+        if (
+          expectedSection.sectionKey &&
+          actualSection.sectionKey !== expectedSection.sectionKey
+        ) {
+          errors.push(
+            `Component "${item.componentName}" section ${index + 1} changed sectionKey "${expectedSection.sectionKey}" → "${actualSection.sectionKey ?? 'undefined'}"`,
+          );
+        }
+      }
+    }
+  }
+
+  private getContractExpectedDraftSections(
+    item: PlanResult[number],
+  ): SectionPlan[] {
+    if (!item.draftSections?.length) return [];
+    const allowedPostDetail =
+      item.isDetail === true && item.dataNeeds.includes('post-detail');
+    const allowedPageDetail =
+      item.isDetail === true && item.dataNeeds.includes('page-detail');
+    const stripLayoutSections = item.type === 'page';
+    const filteredSections = item.draftSections.filter((section) =>
+      this.isSectionAllowed(
+        section,
+        allowedPostDetail,
+        allowedPageDetail,
+        stripLayoutSections,
+      ),
+    );
+    const sanitizedSections = sanitizeSectionsForContract(filteredSections, {
+      componentType: item.type,
+      route: item.route,
+      isDetail: item.isDetail,
+      dataNeeds: this.toVisualDataNeeds(item.dataNeeds),
+      stripLayoutChrome: item.type === 'page',
+      sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
+    });
+    return sanitizedSections.sections;
+  }
+
+  private describeSectionIdentity(section: SectionPlan): string {
+    return [
+      section.type,
+      section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+      section.sourceRef?.sourceNodeId
+        ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  private isAllowedOrphanSection(
+    item: PlanResult[number],
+    orphan: SectionPlan,
+    actualSections: SectionPlan[],
+  ): boolean {
+    const templateBase = toTemplateBase(item.templateName);
+
+    // 404 pages may legitimately add one search section even when the source
+    // draft only produced a hero/message block. Keep this exception narrow so
+    // other AI-added orphan sections still fail hard.
+    if (
+      templateBase === '404' &&
+      item.route === '*' &&
+      orphan.type === 'search' &&
+      actualSections.filter((section) => section.type === 'search').length === 1
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
   private resolveDuplicateHomePages(
     plan: PlanResult,
     warnings: string[],
   ): PlanResult {
-    // WordPress hierarchy: front-page > home > index.
+    // WordPress hierarchy for this pipeline: frontend-page > home > index.
     // Keep the highest-priority home-like template first so duplicate-route
     // resolution later preserves "/" for the correct winner.
-    const HOME_PRIORITY = ['front-page', 'home', 'index'];
-
     const homeItems = plan
       .map((item) => ({
         item,
-        base: item.templateName.replace(/\.(php|html)$/i, '').toLowerCase(),
+        base: getHomeTemplateBase(item.templateName),
       }))
-      .filter(({ base }) => HOME_PRIORITY.includes(base))
+      .filter(
+        (item): item is { item: PlanResult[number]; base: string } =>
+          !!item.base,
+      )
       .sort(
-        (a, b) => HOME_PRIORITY.indexOf(a.base) - HOME_PRIORITY.indexOf(b.base),
+        (a, b) =>
+          HOME_TEMPLATE_PRIORITY.indexOf(
+            a.base as (typeof HOME_TEMPLATE_PRIORITY)[number],
+          ) -
+          HOME_TEMPLATE_PRIORITY.indexOf(
+            b.base as (typeof HOME_TEMPLATE_PRIORITY)[number],
+          ),
       );
 
     if (homeItems.length <= 1) return plan;
@@ -650,14 +876,18 @@ export class PlanReviewerService {
     );
 
     const rank = new Map(
-      HOME_PRIORITY.map((name, index) => [name, index] as const),
+      HOME_TEMPLATE_PRIORITY.map((name, index) => [name, index] as const),
     );
 
     return [...plan].sort((a, b) => {
-      const aBase = a.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
-      const bBase = b.templateName.replace(/\.(php|html)$/i, '').toLowerCase();
-      const aRank = rank.get(aBase);
-      const bRank = rank.get(bBase);
+      const aBase = getHomeTemplateBase(a.templateName);
+      const bBase = getHomeTemplateBase(b.templateName);
+      const aRank = aBase
+        ? rank.get(aBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
+        : undefined;
+      const bRank = bBase
+        ? rank.get(bBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
+        : undefined;
       if (aRank == null && bRank == null) return 0;
       if (aRank == null) return 1;
       if (bRank == null) return -1;
@@ -674,18 +904,22 @@ export class PlanReviewerService {
       { route: string; type: 'page'; isDetail: false }
     >();
 
-    const hasFrontPage = plan.some((item) =>
-      /^front-page$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+    const hasFrontendPage = plan.some((item) =>
+      /^frontend-page$/i.test(toTemplateBase(item.templateName)),
     );
     const hasHome = plan.some((item) =>
-      /^home$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+      /^home$/i.test(toTemplateBase(item.templateName)),
     );
     const hasIndex = plan.some((item) =>
-      /^index$/i.test(item.templateName.replace(/\.(php|html)$/i, '')),
+      /^index$/i.test(toTemplateBase(item.templateName)),
     );
 
-    if (hasFrontPage) {
-      byBase.set('front-page', { route: '/', type: 'page', isDetail: false });
+    if (hasFrontendPage) {
+      byBase.set('frontend-page', {
+        route: '/',
+        type: 'page',
+        isDetail: false,
+      });
       if (hasHome) {
         byBase.set('home', { route: '/blog', type: 'page', isDetail: false });
       }
@@ -712,9 +946,7 @@ export class PlanReviewerService {
     if (byBase.size === 0) return plan;
 
     return plan.map((item) => {
-      const base = item.templateName
-        .replace(/\.(php|html)$/i, '')
-        .toLowerCase();
+      const base = toTemplateBase(item.templateName);
       const expected = byBase.get(base);
       if (!expected) return item;
 
@@ -742,10 +974,11 @@ export class PlanReviewerService {
   }
 
   private inferRoutePolicy(item: ComponentPlan): RoutePolicy {
-    const templateBase = item.templateName
-      .replace(/\.(php|html)$/i, '')
-      .toLowerCase();
+    const templateBase = toTemplateBase(item.templateName);
     const routeSlug = this.toKebabCase(templateBase);
+    const normalizedNeeds = new Set(
+      (item.dataNeeds ?? []).map((need) => need.trim()),
+    );
 
     if (isPartialComponentName(templateBase)) {
       return {
@@ -757,7 +990,7 @@ export class PlanReviewerService {
       };
     }
 
-    if (/^(front-page|home|index)$/.test(templateBase)) {
+    if (HOME_TEMPLATE_PRIORITY_SET.has(templateBase)) {
       return {
         type: 'page',
         route: item.route ?? '/',
@@ -765,6 +998,27 @@ export class PlanReviewerService {
         isDetail: false,
         requiredDataNeeds: [],
       };
+    }
+
+    if (item.fixedSlug) {
+      if (normalizedNeeds.has('page-detail')) {
+        return {
+          type: 'page',
+          route: item.route ?? `/page/${item.fixedSlug}`,
+          routeMode: 'hard',
+          isDetail: true,
+          requiredDataNeeds: ['page-detail'],
+        };
+      }
+      if (normalizedNeeds.has('post-detail')) {
+        return {
+          type: 'page',
+          route: item.route ?? `/post/${item.fixedSlug}`,
+          routeMode: 'hard',
+          isDetail: true,
+          requiredDataNeeds: ['post-detail'],
+        };
+      }
     }
 
     if (/^404$/.test(templateBase)) {
@@ -869,6 +1123,43 @@ export class PlanReviewerService {
     };
   }
 
+  private allowsConcreteTemplateMultiplicity(
+    templateName: string,
+    items: ComponentPlan[],
+  ): boolean {
+    if (items.length <= 1) return false;
+
+    const templateBase = toTemplateBase(templateName);
+    if (
+      !/^page(?:-.+)?$/.test(templateBase) &&
+      templateBase !== 'frontend-page'
+    ) {
+      return false;
+    }
+
+    if (
+      !items.every(
+        (item) =>
+          item.type === 'page' &&
+          item.isDetail === true &&
+          !!item.fixedSlug &&
+          item.dataNeeds.includes('page-detail'),
+      )
+    ) {
+      return false;
+    }
+
+    const bindingKeys = new Set(
+      items.map((item) =>
+        String(item.fixedPageId ?? '').trim()
+          ? `id:${String(item.fixedPageId).trim()}`
+          : `slug:${String(item.fixedSlug).trim()}`,
+      ),
+    );
+
+    return bindingKeys.size === items.length;
+  }
+
   private isValidComponentName(name: string): boolean {
     return /^[A-Z][A-Za-z0-9]*$/.test(name);
   }
@@ -905,6 +1196,7 @@ export class PlanReviewerService {
       'pages',
       'menus',
       'site-info',
+      'footer-links',
     ];
     return order.filter((need) => dataNeeds.includes(need));
   }
@@ -918,6 +1210,7 @@ export class PlanReviewerService {
       'pages',
       'menus',
       'siteInfo',
+      'footerLinks',
     ];
     return order.filter((need) => dataNeeds.includes(need));
   }

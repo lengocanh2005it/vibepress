@@ -78,17 +78,17 @@ const SharedLayout = () => {
           </div>
 
           <div className="grid grid-cols-6 gap-2 text-[11px] text-[#5c6a5e] font-semibold">
-            {stepItems.map((step, idx) => (
-              <button
-                key={step.label}
-                className={`rounded-full py-1 ${idx === currentStep ? 'text-[#2f5a45] bg-[#d8f0e2]' : 'text-[#7f8e83] bg-white hover:bg-[#f2f7f0]'}`}
-                disabled={idx > currentStep + 1}
-              >
-                {step.label}
-              </button>
-            ))}
+              {stepItems.map((step, idx) => (
+                <button
+                  key={step.label}
+                  className={`rounded-full py-1 ${idx === currentStep ? 'text-[#2f5a45] bg-[#d8f0e2]' : 'text-[#7f8e83] bg-white hover:bg-[#f2f7f0]'}`}
+                  disabled={idx > currentStep + 1}
+                >
+                  {step.label}
+                </button>
+              ))}
           </div>
-        </div>
+          </div>
       </header>
 
       <main className="flex-1 pt-4 w-full min-h-[calc(100vh-76px)]">

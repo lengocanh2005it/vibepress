@@ -108,16 +108,45 @@ export interface MetricsSummary {
   };
 }
 
+export interface AuditScoreSet {
+  performance?: number;
+  accessibility?: number;
+  bestPractices?: number;
+  seo?: number;
+  [key: string]: number | undefined;
+}
+
+export interface AuditMetricDetails {
+  firstContentfulPaint?: string | null;
+  largestContentfulPaint?: string | null;
+  totalBlockingTime?: string | null;
+  cumulativeLayoutShift?: string | null;
+  speedIndex?: string | null;
+  [key: string]: string | number | null | undefined;
+}
+
+export interface PipelineMetricsPayload {
+  summary?: MetricsSummary;
+  pages?: MetricPage[];
+  requestedUrl?: string;
+  finalUrl?: string;
+  fetchTime?: string;
+  formFactor?: string;
+  throttlingMethod?: string;
+  runs?: number;
+  scores?: AuditScoreSet;
+  metrics?: AuditMetricDetails;
+  runScores?: AuditScoreSet[];
+  [key: string]: unknown;
+}
+
 interface ProgressEventData {
   previewUrl?: string;
   apiBaseUrl?: string;
   previewStage?: "baseline" | "edited" | "final";
   hasEditRequest?: boolean;
   stepDetails?: PipelineProgressStepDetails;
-  metrics?: {
-    summary: MetricsSummary;
-    pages: MetricPage[];
-  };
+  metrics?: PipelineMetricsPayload;
 }
 
 /**

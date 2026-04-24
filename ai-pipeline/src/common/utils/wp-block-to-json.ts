@@ -24,14 +24,18 @@ export interface WpNode {
   bgColor?: string; // slug or hex — from params.backgroundColor or params.style.color.background
   textColor?: string; // slug or hex — from params.textColor or params.style.color.text
   borderRadius?: string; // from params.style.border.radius
-  gap?: string; // from params.style.spacing.blockGap or params.gap — spacing preset or px value
+  gap?: string; // from params.style.spacing.blockGap or params.gap — normalized CSS gap value
   padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
   margin?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.margin
   minHeight?: string; // from params.minHeight (cover/group blocks)
   overlayColor?: string; // cover block overlay color hex (pre-resolved)
   columnWidth?: string; // wp:column percentage width (e.g. "33.33%")
   textAlign?: string; // from params.textAlign
+  justifyContent?: string; // normalized horizontal layout intent from params.layout.justifyContent / rendered classes
   align?: string; // "full" | "wide" | "center" — section width hint
+  menuOrientation?: 'horizontal' | 'vertical'; // navigation layout orientation
+  overlayMenu?: 'always' | 'mobile' | 'never'; // core/navigation responsive overlay intent
+  isResponsive?: boolean; // core/navigation responsive toggle enabled
   fontFamily?: string; // slug from params.fontFamily
   // Inline typography from params.style.typography
   typography?: {
@@ -64,6 +68,17 @@ export function wpBlocksToJsonWithSourceRefs(input: {
   });
 }
 
+export function ensureWpNodesHaveSourceRefs(input: {
+  nodes: WpNode[];
+  templateName: string;
+  sourceFile: string;
+}): WpNode[] {
+  return annotateSourceRefs(input.nodes, {
+    templateName: input.templateName,
+    sourceFile: input.sourceFile,
+  });
+}
+
 /**
  * Serialize the JSON tree to a compact string for the AI prompt.
  * Strips `params` (already processed into top-level fields) to reduce token count.
@@ -72,7 +87,7 @@ export function wpJsonToString(nodes: WpNode[]): string {
   return JSON.stringify(stripParams(nodes));
 }
 
-const USEFUL_PARAM_KEYS = new Set([
+const BASE_USEFUL_PARAM_KEYS = new Set([
   'align', // "full" | "wide" | "center" — section width
   'className', // preserve Gutenberg/custom classes for precise interaction bridge
   'layout', // { type: "flex", justifyContent, orientation, ... }
@@ -81,15 +96,21 @@ const USEFUL_PARAM_KEYS = new Set([
   'dimRatio', // cover block overlay opacity
   'contentPosition', // cover block content position
   'isStackedOnMobile', // columns stacking behaviour
+  'overlayMenu', // navigation overlay mode
+  'isResponsive', // navigation responsive collapse behaviour
+  'openSubmenusOnClick', // navigation interaction hint
   'verticalAlignment', // column vertical align
   'gradient', // gradient background slug
+  'metadata', // block metadata — carries { name: "Testimonial" } labels used for section detection
 ]);
 
 function pruneParams(
+  blockName: string,
   params: Record<string, any>,
 ): Record<string, any> | undefined {
+  const allowedKeys = getUsefulParamKeysForBlock(blockName);
   const pruned = Object.fromEntries(
-    Object.entries(params).filter(([k]) => USEFUL_PARAM_KEYS.has(k)),
+    Object.entries(params).filter(([k]) => allowedKeys.has(k)),
   );
   return Object.keys(pruned).length > 0 ? pruned : undefined;
 }
@@ -97,9 +118,61 @@ function pruneParams(
 function stripParams(nodes: WpNode[]): WpNode[] {
   return nodes.map(({ params, children, ...rest }) => ({
     ...rest,
-    ...(params ? { params: pruneParams(params) } : {}),
+    ...(params ? { params: pruneParams(rest.block, params) } : {}),
     ...(children ? { children: stripParams(children) } : {}),
   }));
+}
+
+function getUsefulParamKeysForBlock(blockName: string): Set<string> {
+  const keys = new Set(BASE_USEFUL_PARAM_KEYS);
+  if (
+    [
+      'uagb/slider',
+      'uagb/modal',
+      'uagb/tabs',
+      'uagb/faq',
+      'uagb/tabs-child',
+      'uagb/faq-child',
+    ].includes(blockName)
+  ) {
+    for (const key of [
+      'autoplay',
+      'autoplaySpeed',
+      'infiniteLoop',
+      'transitionEffect',
+      'transitionSpeed',
+      'displayDots',
+      'displayArrows',
+      'pauseOn',
+      'verticalMode',
+      'btnText',
+      'triggerText',
+      'buttonText',
+      'modalTitle',
+      'modalText',
+      'modalWidth',
+      'modalWidthType',
+      'modalHeight',
+      'modalHeightType',
+      'overlayColor',
+      'overlayclick',
+      'escpress',
+      'closeIconPosition',
+      'tabActive',
+      'tabActiveFrontend',
+      'tabsStyleD',
+      'tabAlign',
+      'tabTitle',
+      'inactiveOtherItems',
+      'expandFirstItem',
+      'enableToggle',
+      'allowMultipleOpen',
+      'multiOpen',
+    ]) {
+      keys.add(key);
+    }
+  }
+  return keys;
 }
 
 // ----------------------d--------------------------------------------------
@@ -158,6 +231,172 @@ function normalizeCssLength(value: unknown): string | undefined {
   const normalized = String(value).trim();
   if (!normalized) return undefined;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function normalizeHorizontalAlign(
+  value: unknown,
+): 'left' | 'center' | 'right' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (/(^|[\s:-])center(ed)?($|[\s:-])/.test(normalized)) return 'center';
+  if (/(^|[\s:-])right($|[\s:-])/.test(normalized)) return 'right';
+  if (/(^|[\s:-])left($|[\s:-])/.test(normalized)) return 'left';
+  return undefined;
+}
+
+function normalizeOrientation(
+  value: unknown,
+): 'horizontal' | 'vertical' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'horizontal' || normalized === 'vertical') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function normalizeOverlayMenu(
+  value: unknown,
+): 'always' | 'mobile' | 'never' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'always' ||
+    normalized === 'mobile' ||
+    normalized === 'never'
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
+function extractTextAlignFromClassLike(
+  value: unknown,
+): 'left' | 'center' | 'right' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  if (
+    /\b(has-text-align-center|text-center|justify-center|items-center|content-center|is-content-justification-center)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'center';
+  }
+  if (
+    /\b(has-text-align-right|text-right|justify-end|items-end|content-end|is-content-justification-right)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'right';
+  }
+  if (
+    /\b(has-text-align-left|text-left|justify-start|items-start|content-start|is-content-justification-left)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'left';
+  }
+  return undefined;
+}
+
+function extractTextAlignFromStyle(
+  value: unknown,
+): 'left' | 'center' | 'right' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = value.match(/text-align\s*:\s*(left|center|right)/i);
+  return normalizeHorizontalAlign(match?.[1]);
+}
+
+function extractJustifyContentFromClassLike(
+  value: unknown,
+): 'left' | 'center' | 'right' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  if (
+    /\b(is-content-justification-center|justify-center|items-center|content-center)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'center';
+  }
+  if (
+    /\b(is-content-justification-right|justify-end|items-end|content-end)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'right';
+  }
+  if (
+    /\b(is-content-justification-left|justify-start|items-start|content-start)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'left';
+  }
+  return undefined;
+}
+
+function extractJustifyContentFromStyle(
+  value: unknown,
+): 'left' | 'center' | 'right' | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = value.match(
+    /justify-content\s*:\s*(left|center|right|flex-start|flex-end)/i,
+  );
+  if (!match?.[1]) return undefined;
+  if (/flex-start/i.test(match[1])) return 'left';
+  if (/flex-end/i.test(match[1])) return 'right';
+  return normalizeHorizontalAlign(match[1]);
+}
+
+function extractTextAlignFromMarkup(
+  markup: string,
+): 'left' | 'center' | 'right' | undefined {
+  const fromStyle = extractTextAlignFromStyle(markup);
+  if (fromStyle) return fromStyle;
+
+  for (const match of markup.matchAll(/\bclass="([^"]+)"/gi)) {
+    const fromClass = extractTextAlignFromClassLike(match[1]);
+    if (fromClass) return fromClass;
+  }
+
+  return undefined;
+}
+
+function extractJustifyContentFromMarkup(
+  markup: string,
+): 'left' | 'center' | 'right' | undefined {
+  const fromStyle = extractJustifyContentFromStyle(markup);
+  if (fromStyle) return fromStyle;
+
+  for (const match of markup.matchAll(/\bclass="([^"]+)"/gi)) {
+    const fromClass = extractJustifyContentFromClassLike(match[1]);
+    if (fromClass) return fromClass;
+  }
+
+  return undefined;
+}
+
+function normalizeGapValue(value: unknown): string | undefined {
+  if (!value) return undefined;
+
+  if (typeof value === 'string') {
+    return normalizeCssLength(value);
+  }
+
+  if (typeof value !== 'object') return undefined;
+
+  const gap = value as Record<string, unknown>;
+  const rowGap = normalizeCssLength(
+    gap.top ?? gap.row ?? gap.vertical ?? gap.y,
+  );
+  const columnGap = normalizeCssLength(
+    gap.left ?? gap.column ?? gap.horizontal ?? gap.x,
+  );
+
+  if (rowGap && columnGap) return `${rowGap} ${columnGap}`;
+  return rowGap ?? columnGap ?? undefined;
 }
 
 function splitCssShorthand(value: string): string[] {
@@ -294,6 +533,9 @@ function parseBlocks(markup: string): WpNode[] {
           compact({
             block: blockName,
             params,
+            ...(blockName === 'site-logo' && params?.width
+              ? { width: Number(params.width) }
+              : {}),
           }),
         );
       }
@@ -321,6 +563,25 @@ function parseBlocks(markup: string): WpNode[] {
     remaining = remaining.slice(closeIdx + closeTag.length);
 
     const node = buildNode(blockName, params, innerMarkup);
+    const textAlign =
+      normalizeHorizontalAlign(params?.textAlign) ??
+      extractTextAlignFromClassLike(params?.className) ??
+      node.textAlign ??
+      extractTextAlignFromMarkup(innerMarkup);
+    if (textAlign) node.textAlign = textAlign;
+    const justifyContent =
+      normalizeHorizontalAlign(params?.layout?.justifyContent) ??
+      extractJustifyContentFromClassLike(params?.className) ??
+      node.justifyContent ??
+      extractJustifyContentFromMarkup(innerMarkup);
+    if (justifyContent) node.justifyContent = justifyContent;
+    const menuOrientation = normalizeOrientation(params?.layout?.orientation);
+    if (menuOrientation) node.menuOrientation = menuOrientation;
+    const overlayMenu = normalizeOverlayMenu(params?.overlayMenu);
+    if (overlayMenu) node.overlayMenu = overlayMenu;
+    if (typeof params?.isResponsive === 'boolean') {
+      node.isResponsive = params.isResponsive as boolean;
+    }
     // Lift color hints from params to top-level fields for AI visibility
     if (params?.backgroundColor)
       node.bgColor = params.backgroundColor as string;
@@ -333,8 +594,10 @@ function parseBlocks(markup: string): WpNode[] {
     const borderRadius = params?.style?.border?.radius;
     if (borderRadius) node.borderRadius = borderRadius as string;
     // Lift gap from params.style.spacing.blockGap or params.gap
-    const gap = params?.style?.spacing?.blockGap ?? params?.gap;
-    if (gap) node.gap = gap as string;
+    const gap = normalizeGapValue(
+      params?.style?.spacing?.blockGap ?? params?.gap,
+    );
+    if (gap) node.gap = gap;
     // Lift padding from params.style.spacing.padding
     const pad = params?.style?.spacing?.padding;
     const normalizedPadding = normalizeBoxSpacing(pad);
@@ -366,7 +629,9 @@ function parseBlocks(markup: string): WpNode[] {
     if (blockName === 'column' && params?.width)
       node.columnWidth = params.width as string;
     // Lift textAlign
-    if (params?.textAlign) node.textAlign = params.textAlign as string;
+    if (params?.textAlign && !node.textAlign) {
+      node.textAlign = params.textAlign as string;
+    }
     // Lift align (full/wide/center)
     if (params?.align) node.align = params.align as string;
     // Lift fontFamily slug
@@ -475,6 +740,53 @@ function buildNode(
   const coverSrc =
     blockName === 'cover' && params?.url ? { src: params.url as string } : {};
 
+  // UAGB info-box stores title, description, and CTA inside innerHTML as class-based
+  // HTML (not nested block comments). Parse them into synthetic child WpNodes so that
+  // standard mappers (mapUagbInfoBox, mapUagbSlider) can find them via flattenChildren.
+  if (blockName === 'uagb/info-box' || blockName === 'info-box') {
+    const syntheticChildren: WpNode[] = [];
+    const stripped = innerMarkup
+      .replace(/\s+class="[^"]*"/g, '')
+      .replace(/\s+style="[^"]*"/g, '');
+    const titleMatch =
+      stripped.match(
+        /<h[1-6][^>]*class="[^"]*uagb-ifb-title[^"]*"[^>]*>([\s\S]*?)<\/h[1-6]>/i,
+      ) ?? stripped.match(/<h([1-6])[^>]*>([\s\S]*?)<\/h[1-6]>/i);
+    const titleText = titleMatch
+      ? stripTags(titleMatch[titleMatch.length - 1])
+      : undefined;
+    const descMatch = innerMarkup.match(
+      /<p[^>]*class="[^"]*uagb-ifb-desc[^"]*"[^>]*>([\s\S]*?)<\/p>/i,
+    );
+    const descText = descMatch ? stripTags(descMatch[1]) : undefined;
+    const ctaMatch =
+      innerMarkup.match(
+        /<a[^>]*href="([^"]*)"[^>]*>[\s\S]*?<span[^>]*class="[^"]*uagb-inline-editing[^"]*"[^>]*>([\s\S]*?)<\/span>/i,
+      ) ?? innerMarkup.match(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+    const ctaHref = ctaMatch?.[1];
+    const ctaText = ctaMatch ? stripTags(ctaMatch[2]) : undefined;
+    if (titleText)
+      syntheticChildren.push({ block: 'heading', level: 3, text: titleText });
+    if (descText)
+      syntheticChildren.push({ block: 'paragraph', text: descText });
+    if (ctaText && ctaHref)
+      syntheticChildren.push({ block: 'button', text: ctaText, href: ctaHref });
+    if (syntheticChildren.length > 0) {
+      return compact({
+        block: blockName,
+        params,
+        ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+          ? {
+              customClassNames: extractUsefulCustomClassNamesFromParam(
+                params?.className,
+              ),
+            }
+          : {}),
+        children: syntheticChildren,
+      });
+    }
+  }
+
   // Leaf node — extract content from HTML
   const leaf = extractLeafContent(blockName, innerMarkup);
 
@@ -482,6 +794,9 @@ function buildNode(
   if (blockName === 'image') {
     if (!leaf.width && params?.width) leaf.width = params.width as number;
     if (!leaf.height && params?.height) leaf.height = params.height as number;
+  }
+  if (blockName === 'site-logo' && !leaf.width && params?.width) {
+    leaf.width = Number(params.width);
   }
 
   return compact({
@@ -561,7 +876,9 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     }
     // For list items, preserve inline HTML (e.g. <strong>, <em>, <a>) so the
     // renderer can use dangerouslySetInnerHTML to keep bold/italic formatting.
-    const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(stripped);
+    const hasInlineHtml = /<(strong|em|b|i|a|code|mark|s|u|span)[^>]*>/i.test(
+      stripped,
+    );
     if (
       (blockName === 'core/list-item' || blockName === 'list-item') &&
       hasInlineHtml

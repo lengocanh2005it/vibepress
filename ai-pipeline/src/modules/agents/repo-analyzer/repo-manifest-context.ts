@@ -17,6 +17,11 @@ function fmtList<T>(
   return overflow > 0 ? `${preview} (+${overflow} more)` : preview;
 }
 
+function fmtTokens(items: string[], limit: number): string {
+  if (items.length === 0) return 'none';
+  return fmtList(items, limit, (item) => item);
+}
+
 export function buildRepoManifestContextNote(
   manifest?: RepoThemeManifest,
   options?: RepoManifestContextOptions,
@@ -170,6 +175,108 @@ export function buildRepoManifestContextNote(
   if (structuralSignals.length > 0) {
     lines.push(`Structural signals: ${structuralSignals.join(', ')}`);
   }
+  const uagbBlockTypes = manifest.structureHints.blockTypes.filter((block) =>
+    block.startsWith('uagb/'),
+  );
+  if (includeStructureHints && uagbBlockTypes.length > 0) {
+    const limit = mode === 'compact' ? 5 : 10;
+    lines.push(
+      `Detected UAGB/Spectra block types in repo source: ${uagbBlockTypes
+        .slice(0, limit)
+        .join(
+          ', ',
+        )}${uagbBlockTypes.length > limit ? ` (+${uagbBlockTypes.length - limit} more)` : ''}`,
+    );
+  }
+  if (manifest.uagbSummary?.detected) {
+    lines.push(
+      `Merged UAGB detection: plugins=${manifest.uagbSummary.mergedPluginSlugs.join(', ') || 'none'}; blocks=${manifest.uagbSummary.mergedBlockTypes.join(', ') || 'none'}`,
+    );
+    const homeUsage =
+      manifest.uagbSummary.db.pages.find((entry) => entry.isHome) ??
+      manifest.uagbSummary.db.templates.find((entry) => entry.isHome);
+    if (homeUsage) {
+      lines.push(
+        `UAGB home from DB ${homeUsage.entityType}: ${homeUsage.slug}=[${homeUsage.blockTypes.join(', ')}]`,
+      );
+    }
+    if (manifest.uagbSummary.db.pages.length > 0) {
+      lines.push(
+        `UAGB pages from DB: ${manifest.uagbSummary.db.pages
+          .slice(0, mode === 'compact' ? 4 : 8)
+          .map((page) => `${page.slug}=[${page.blockTypes.join(', ')}]`)
+          .join(
+            ', ',
+          )}${manifest.uagbSummary.db.pages.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.pages.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+      );
+    }
+    if (manifest.uagbSummary.db.templates.length > 0) {
+      lines.push(
+        `UAGB templates from DB: ${manifest.uagbSummary.db.templates
+          .slice(0, mode === 'compact' ? 4 : 8)
+          .map(
+            (template) =>
+              `${template.slug}=[${template.blockTypes.join(', ')}]`,
+          )
+          .join(
+            ', ',
+          )}${manifest.uagbSummary.db.templates.length > (mode === 'compact' ? 4 : 8) ? ` (+${manifest.uagbSummary.db.templates.length - (mode === 'compact' ? 4 : 8)} more)` : ''}`,
+      );
+    }
+  }
+  if (
+    includeStructureHints &&
+    manifest.interactiveContracts?.spectra?.detected
+  ) {
+    const spectra = manifest.interactiveContracts.spectra;
+    const widgetLines = Object.entries(spectra.widgets)
+      .map(([widget, contract]) => {
+        if (!contract) return null;
+        const attrs =
+          contract.attrKeys.length > 0
+            ? ` attrs=${contract.attrKeys.join(', ')}`
+            : '';
+        return `${widget}:${contract.blockType}${attrs}`;
+      })
+      .filter((line): line is string => !!line);
+    if (widgetLines.length > 0) {
+      lines.push(
+        `Spectra plugin contracts from repo plugin source: ${widgetLines.join(' | ')}`,
+      );
+    }
+    const appearanceLines = Object.entries(spectra.widgets)
+      .map(([widget, contract]) => {
+        if (!contract?.appearance) return null;
+        const appearance = contract.appearance;
+        const parts = [
+          `wrappers=${fmtTokens(appearance.wrapperClasses, 4)}`,
+          `items=${fmtTokens(appearance.itemClasses, 5)}`,
+          appearance.activeClasses.length > 0
+            ? `active=${fmtTokens(appearance.activeClasses, 4)}`
+            : null,
+          appearance.variantClasses.length > 0
+            ? `variants=${fmtTokens(appearance.variantClasses, 5)}`
+            : null,
+          appearance.behaviorClasses.length > 0
+            ? `behavior=${fmtTokens(appearance.behaviorClasses, 5)}`
+            : null,
+          appearance.alignmentClasses.length > 0
+            ? `align=${fmtTokens(appearance.alignmentClasses, 4)}`
+            : null,
+          appearance.styleCues.length > 0
+            ? `cues=${fmtTokens(appearance.styleCues, 3)}`
+            : null,
+        ].filter((part): part is string => !!part);
+        return `${widget}: ${parts.join('; ')}`;
+      })
+      .filter((line): line is string => !!line);
+    if (appearanceLines.length > 0) {
+      lines.push('Spectra plugin appearance cues from plugin CSS/JS:');
+      for (const line of appearanceLines) {
+        lines.push(`- ${line}`);
+      }
+    }
+  }
 
   if (mode !== 'compact' && manifest.themes.length > 0) {
     lines.push(`Available themes in repo (${manifest.themes.length} total):`);
@@ -208,6 +315,16 @@ export function buildRepoManifestContextNote(
         ? `${parentTheme.slug}${parentTheme.relativeDir ? ` → ${parentTheme.relativeDir}` : ''}`
         : `${parentTheme.slug} (missing from repo)`;
       lines.push(`Parent theme: ${parentLabel}`);
+    }
+    const interactiveActivePlugins = activePlugins.filter((plugin) =>
+      ['ultimate-addons-for-gutenberg', 'spectra'].includes(plugin.slug),
+    );
+    if (interactiveActivePlugins.length > 0) {
+      lines.push(
+        `Resolved active interactive plugins: ${interactiveActivePlugins
+          .map((plugin) => plugin.slug)
+          .join(', ')}`,
+      );
     }
     for (const note of manifest.resolvedSource.notes) {
       lines.push(note);

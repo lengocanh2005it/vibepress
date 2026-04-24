@@ -107,6 +107,7 @@ export class GenerationContractAuditService {
     const contract = plan?.find(
       (item) => item.componentName === component.name,
     );
+    const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const dataNeeds = new Set(
       (contract?.dataNeeds ?? component.dataNeeds ?? []).map((need) =>
         this.normalizeDataNeed(need),
@@ -162,25 +163,46 @@ export class GenerationContractAuditService {
       });
     }
     if (
-      dataNeeds.has('postDetail') &&
-      !hasFetch((fetch) => /^\/api\/posts\/:param$/.test(fetch.normalizedPath))
+      dataNeeds.has('footerLinks') &&
+      !hasFetch((fetch) => fetch.path === '/api/footer-links')
     ) {
       warnings.push({
         scope: 'frontend-contract',
         componentName: component.name,
         message:
-          'Plan declares `postDetail` but generated code does not fetch `/api/posts/${slug}`.',
+          'Plan declares `footerLinks` but generated code does not fetch `/api/footer-links`.',
+      });
+    }
+    if (
+      dataNeeds.has('postDetail') &&
+      !hasFetch((fetch) =>
+        fixedSlug
+          ? fetch.path === `/api/posts/${fixedSlug}`
+          : /^\/api\/posts\/:param$/.test(fetch.normalizedPath),
+      )
+    ) {
+      warnings.push({
+        scope: 'frontend-contract',
+        componentName: component.name,
+        message: fixedSlug
+          ? `Plan declares fixed-slug \`postDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/posts/${fixedSlug}\`.`
+          : 'Plan declares `postDetail` but generated code does not fetch `/api/posts/${slug}`.',
       });
     }
     if (
       dataNeeds.has('pageDetail') &&
-      !hasFetch((fetch) => /^\/api\/pages\/:param$/.test(fetch.normalizedPath))
+      !hasFetch((fetch) =>
+        fixedSlug
+          ? fetch.path === `/api/pages/${fixedSlug}`
+          : /^\/api\/pages\/:param$/.test(fetch.normalizedPath),
+      )
     ) {
       warnings.push({
         scope: 'frontend-contract',
         componentName: component.name,
-        message:
-          'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
+        message: fixedSlug
+          ? `Plan declares fixed-slug \`pageDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/pages/${fixedSlug}\`.`
+          : 'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
       });
     }
 
@@ -219,6 +241,14 @@ export class GenerationContractAuditService {
           componentName: component.name,
           message:
             'Generated code fetches `/api/site-info` but the plan does not declare `siteInfo`.',
+        });
+      }
+      if (fetch.path === '/api/footer-links' && !dataNeeds.has('footerLinks')) {
+        warnings.push({
+          scope: 'frontend-contract',
+          componentName: component.name,
+          message:
+            'Generated code fetches `/api/footer-links` but the plan does not declare `footerLinks`.',
         });
       }
     }
@@ -403,6 +433,8 @@ export class GenerationContractAuditService {
         return 'pageDetail';
       case 'site-info':
         return 'siteInfo';
+      case 'footer-links':
+        return 'footerLinks';
       default:
         return value;
     }

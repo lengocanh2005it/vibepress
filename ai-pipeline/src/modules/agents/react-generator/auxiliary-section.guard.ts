@@ -141,6 +141,8 @@ function getSectionHeadingCandidates(section: SectionPlan): string[] {
   switch (section.type) {
     case 'hero':
       return [section.heading, section.subheading].filter(isNonEmptyString);
+    case 'cta-strip':
+      return [];
     case 'cover':
       return [section.heading, section.subheading].filter(isNonEmptyString);
     case 'post-list':
@@ -154,6 +156,12 @@ function getSectionHeadingCandidates(section: SectionPlan): string[] {
     case 'search':
       return [section.title].filter(isNonEmptyString);
     case 'sidebar':
+      return [section.title].filter(isNonEmptyString);
+    case 'modal':
+      return [section.heading, section.triggerText].filter(isNonEmptyString);
+    case 'tabs':
+      return [section.title].filter(isNonEmptyString);
+    case 'accordion':
       return [section.title].filter(isNonEmptyString);
     case 'footer':
       return section.menuColumns

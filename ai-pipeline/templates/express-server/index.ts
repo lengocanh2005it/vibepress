@@ -3,13 +3,16 @@ import cors from 'cors';
 import { createConnection } from 'mysql2/promise';
 import dotenv from 'dotenv';
 import { createHash } from 'crypto';
-import { basename, extname, resolve } from 'path';
+import { basename, extname, resolve, join } from 'path';
 
 dotenv.config({ path: resolve(process.cwd(), '.env'), override: true });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve static assets copied from wp-content/uploads during preview build
+app.use('/assets', express.static(join(resolve(process.cwd(), '..', 'frontend', 'public', 'assets'))));
 
 app.get('/api', (_req, res) => {
   res.json({
@@ -1207,19 +1210,41 @@ app.get('/api/post-types/:postType/:slug', async (req, res) => {
 // Strips host, converts /pages/ → /page/ and /posts/ → /post/.
 // External URLs (different origin) are kept as-is.
 /**
- * Parse PHP serialized nav_menu_locations option.
- * Format: a:N:{s:len:"locationSlug";i:termId;...}
- * Returns Map<termId, locationSlug> — only entries where termId > 0.
+ * Read nav_menu_locations from WordPress theme_mods.
+ * Returns Map<termId, locationSlug>.
  */
-function parseNavMenuLocations(serialized: string): Map<number, string> {
-  const termToLocation = new Map<number, string>();
-  const pattern = /s:\d+:"([^"]+)";i:(\d+);/g;
-  let match;
-  while ((match = pattern.exec(serialized)) !== null) {
-    const termId = parseInt(match[2], 10);
-    if (termId > 0) termToLocation.set(termId, match[1]);
+async function queryNavMenuLocations(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+): Promise<Map<number, string>> {
+  try {
+    const [[stylesheetRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'stylesheet' LIMIT 1`,
+    );
+    const stylesheet = stylesheetRow?.option_value as string | undefined;
+    if (!stylesheet) return new Map();
+
+    const [[modsRow]] = await conn.query<any[]>(
+      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = ? LIMIT 1`,
+      [`theme_mods_${stylesheet}`],
+    );
+    const serialized = modsRow?.option_value as string | undefined;
+    if (!serialized) return new Map();
+
+    const parsed = phpUnserializeSimple(serialized);
+    const locations = parsed?.nav_menu_locations as
+      | Record<string, number>
+      | undefined;
+    if (!locations || typeof locations !== 'object') return new Map();
+
+    const termToLocation = new Map<number, string>();
+    for (const [locationSlug, termId] of Object.entries(locations)) {
+      if (termId) termToLocation.set(Number(termId), locationSlug);
+    }
+    return termToLocation;
+  } catch {
+    return new Map();
   }
-  return termToLocation;
 }
 
 /**
@@ -1236,7 +1261,7 @@ function parseNavigationBlockItems(
   order: number;
   parentId: number;
   target: string | null;
-}[] {
+  }[] {
   const items: {
     id: number;
     title: string;
@@ -1245,18 +1270,38 @@ function parseNavigationBlockItems(
     parentId: number;
     target: string | null;
   }[] = [];
-  const pattern = /<!--\s*wp:navigation-link\s+(\{[^}]*\})\s*(?:\/-->|-->)/g;
-  let match;
+  const blockStart = /<!--\s*wp:navigation-link\s+/g;
   let order = 0;
-  while ((match = pattern.exec(content)) !== null) {
+  let startMatch: RegExpExecArray | null;
+
+  while ((startMatch = blockStart.exec(content)) !== null) {
+    const jsonStart = startMatch.index + startMatch[0].length;
+    if (content[jsonStart] !== '{') continue;
+
+    let depth = 0;
+    let jsonEnd = jsonStart;
+    for (let i = jsonStart; i < content.length; i++) {
+      if (content[i] === '{') depth++;
+      else if (content[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          jsonEnd = i + 1;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) continue;
+
+    const jsonStr = content.slice(jsonStart, jsonEnd);
     try {
-      const attrs = JSON.parse(match[1]) as {
+      const attrs = JSON.parse(jsonStr) as {
         label?: string;
         url?: string;
         id?: number;
+        type?: string;
         opensInNewTab?: boolean;
       };
-      const url = normalizeMenuUrl(attrs.url ?? '', siteUrl);
+      const url = normalizeMenuUrl(attrs.url ?? '', siteUrl, attrs.type);
       if (attrs.label && url) {
         items.push({
           id: attrs.id ?? 0,
@@ -1274,7 +1319,11 @@ function parseNavigationBlockItems(
   return items;
 }
 
-function normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
+function normalizeMenuUrl(
+  raw: string,
+  siteUrl?: string | null,
+  objectType?: string | null,
+): string {
   if (!raw) return '';
   const trimmed = raw.trim();
   try {
@@ -1311,7 +1360,31 @@ function normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
   ) {
     raw = '/' + raw;
   }
-  return raw;
+  return rewriteCanonicalMenuDetailPath(raw, objectType);
+}
+
+function rewriteCanonicalMenuDetailPath(
+  raw: string,
+  objectType?: string | null,
+): string {
+  const normalizedObjectType = String(objectType ?? '')
+    .trim()
+    .toLowerCase();
+  if (normalizedObjectType !== 'page' && normalizedObjectType !== 'post') {
+    return raw;
+  }
+
+  try {
+    const parsed = new URL(raw, 'http://vp.local');
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const slug = segments.at(-1);
+    if (!slug) return raw;
+
+    const detailPrefix = normalizedObjectType === 'page' ? '/page/' : '/post/';
+    return `${detailPrefix}${slug}${parsed.search}${parsed.hash}`;
+  } catch {
+    return raw;
+  }
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -1325,14 +1398,7 @@ app.get('/api/menus', async (req, res) => {
        WHERE tt.taxonomy = 'nav_menu'`,
     );
 
-    // Resolve theme location assignments: termId → locationSlug
-    let termToLocation = new Map<number, string>();
-    const [locRows] = await conn.query<any[]>(
-      `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'nav_menu_locations' LIMIT 1`,
-    );
-    if (locRows.length > 0 && locRows[0].option_value) {
-      termToLocation = parseNavMenuLocations(locRows[0].option_value as string);
-    }
+    const termToLocation = await queryNavMenuLocations(conn, prefix);
 
     const [[siteUrlRow]] = await conn.query<any[]>(
       `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'siteurl' LIMIT 1`,
@@ -1344,12 +1410,14 @@ app.get('/api/menus', async (req, res) => {
       const [items] = await conn.query<any[]>(
         `SELECT p.ID, p.post_title, p.menu_order,
                 url_meta.meta_value AS url,
+                object_meta.meta_value AS object_type,
                 parent_meta.meta_value AS parent_id,
                 target_meta.meta_value AS target
          FROM \`${prefix}posts\` p
          INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
          INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
          LEFT JOIN \`${prefix}postmeta\` url_meta ON url_meta.post_id = p.ID AND url_meta.meta_key = '_menu_item_url'
+         LEFT JOIN \`${prefix}postmeta\` object_meta ON object_meta.post_id = p.ID AND object_meta.meta_key = '_menu_item_object'
          LEFT JOIN \`${prefix}postmeta\` parent_meta ON parent_meta.post_id = p.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
          LEFT JOIN \`${prefix}postmeta\` target_meta ON target_meta.post_id = p.ID AND target_meta.meta_key = '_menu_item_target'
          WHERE tt.term_id = ? AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'
@@ -1363,7 +1431,7 @@ app.get('/api/menus', async (req, res) => {
         items: items.map((i) => ({
           id: i.ID,
           title: i.post_title,
-          url: normalizeMenuUrl(i.url ?? '', siteUrl),
+          url: normalizeMenuUrl(i.url ?? '', siteUrl, i.object_type ?? null),
           order: i.menu_order,
           parentId: parseInt(i.parent_id ?? '0', 10),
           target: i.target?.trim() ? i.target : null,

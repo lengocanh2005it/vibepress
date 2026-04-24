@@ -8,6 +8,10 @@ import {
   type TokenScope,
 } from '../../../common/utils/token-tracker.js';
 import {
+  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
+  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
+} from '../../../common/utils/post-meta-link.util.js';
+import {
   AiLoggerService,
   type AttemptLog,
 } from '../../ai-logger/ai-logger.service.js';
@@ -20,6 +24,7 @@ import { FrameGeneratorService } from './frame-generator.service.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 import {
   buildComponentPrompt,
+  buildInlineSectionPrompt,
   buildSectionPrompt,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
@@ -27,6 +32,7 @@ import {
   buildFragmentPrompt,
   FRAGMENT_SYSTEM_PROMPT,
 } from './prompts/fragment.prompt.js';
+import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
@@ -206,11 +212,79 @@ export class CodeReviewerService {
       );
     }
 
+    const sectionAssemblyDecision = this.getSectionLevelAssemblyDecision(
+      componentPlan,
+      componentName,
+    );
+    if (!forceDirectAi && sectionAssemblyDecision.enabled) {
+      this.logger.log(
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections; ${sectionAssemblyDecision.reason})`,
+      );
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections; ${sectionAssemblyDecision.reason})`,
+      );
+      try {
+        const assembled = await this.generateComponentWithSectionAssembly({
+          componentName,
+          modelName,
+          content,
+          tokens,
+          repoManifest,
+          componentPlan: promptContext,
+          editRequestContextNote,
+          logPath,
+          systemPrompt: componentSystemPrompt,
+        });
+        if (assembled.isValid) {
+          return {
+            component: {
+              name: componentName,
+              filePath: '',
+              code: assembled.code,
+              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+            },
+            fromVisualPlan: true,
+            generationMode: 'ai',
+            attempts: assembled.attemptsUsed,
+            rawResponse: assembled.lastRawOutput || '',
+          };
+        }
+        lastError = assembled.lastError;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level assembly failed: ${assembled.lastError} — falling back to full-file generation`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level assembly failed: ${assembled.lastError} — falling back to full-file generation`,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error ?? 'unknown');
+        lastError = message;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level assembly failed: ${message} — full-file fallback`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level assembly failed: ${message} — full-file fallback`,
+        );
+      }
+    }
+
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
+      const bypassPrecomputedVisualPlan =
+        !isRetry &&
+        this.shouldBypassPrecomputedVisualPlan(componentPlan, componentName);
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
-      if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
+      if (
+        !forceDirectAi &&
+        !isRetry &&
+        componentPlan?.visualPlan &&
+        !bypassPrecomputedVisualPlan
+      ) {
         if (this.shouldUseDeterministicFirst(componentPlan, componentName)) {
           const deterministic = await this.tryDeterministicPlan(
             componentName,
@@ -324,6 +398,7 @@ export class CodeReviewerService {
               filePath: '',
               code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: true,
             generationMode: 'ai',
@@ -377,6 +452,7 @@ export class CodeReviewerService {
               filePath: '',
               code: deterministic.code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: true,
             generationMode: 'deterministic',
@@ -406,9 +482,11 @@ export class CodeReviewerService {
           logPath,
           isRetry
             ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
-            : precomputedPlanAllFailed
-              ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
-              : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
+            : bypassPrecomputedVisualPlan
+              ? `[reviewer] "${componentName}" skipping reviewed pre-computed visual plan for fixed page-detail route — generating fresh AI visual plan`
+              : precomputedPlanAllFailed
+                ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
+                : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
         const visualDataNeeds = componentPlan
           ? this.toVisualDataNeeds(componentPlan.dataNeeds)
@@ -455,7 +533,21 @@ export class CodeReviewerService {
             allowedImageSrcs: extractStaticImageSources(templateSource),
             contract: visualContract,
           });
-          const visualPlan = parsedPlan.plan;
+          const visualPlan = parsedPlan.plan
+            ? {
+                ...parsedPlan.plan,
+                ...(componentPlan?.fixedSlug
+                  ? {
+                      pageBinding: {
+                        id: componentPlan.fixedPageId,
+                        slug: componentPlan.fixedSlug,
+                        title: componentPlan.fixedTitle,
+                        route: componentPlan.route ?? undefined,
+                      },
+                    }
+                  : {}),
+              }
+            : undefined;
 
           if (visualPlan) {
             promptContext = this.buildPromptContext(componentPlan, visualPlan);
@@ -522,6 +614,7 @@ export class CodeReviewerService {
                   code,
                   requiredCustomClassNames:
                     promptContext?.requiredCustomClassNames,
+                  visualPlan: promptContext?.visualPlan,
                 },
                 fromVisualPlan: true,
                 generationMode: 'ai',
@@ -553,6 +646,7 @@ export class CodeReviewerService {
                   code: deterministic.code,
                   requiredCustomClassNames:
                     promptContext?.requiredCustomClassNames,
+                  visualPlan: promptContext?.visualPlan,
                 },
                 fromVisualPlan: true,
                 generationMode: 'deterministic',
@@ -631,6 +725,7 @@ export class CodeReviewerService {
             filePath: '',
             code,
             requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+            visualPlan: promptContext?.visualPlan,
           },
           fromVisualPlan: false,
           generationMode: 'ai',
@@ -706,6 +801,7 @@ export class CodeReviewerService {
               filePath: '',
               code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: promptContext?.visualPlan,
             },
             fromVisualPlan: false,
             generationMode: 'ai',
@@ -1018,6 +1114,9 @@ export class CodeReviewerService {
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
       type: componentPlan?.type,
+      fixedSlug: componentPlan?.fixedSlug,
+      fixedTitle: componentPlan?.fixedTitle,
+      fixedPageId: componentPlan?.fixedPageId,
       dataNeeds,
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
@@ -1039,9 +1138,11 @@ export class CodeReviewerService {
       componentName,
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
+      fixedSlug: componentPlan?.fixedSlug,
       dataNeeds: componentPlan?.dataNeeds,
       type: componentPlan?.type,
       isSubComponent,
+      visualPlan: componentPlan?.visualPlan,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
       requiredCustomClassNames:
         requiredCustomClassNames ?? componentPlan?.requiredCustomClassNames,
@@ -1124,6 +1225,36 @@ export class CodeReviewerService {
     return getComponentStrategy(componentName).deterministicFirst;
   }
 
+  private shouldBypassPrecomputedVisualPlan(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): boolean {
+    if (!componentPlan?.visualPlan) return false;
+    if (!componentPlan.fixedSlug) return false;
+    if (componentPlan.type !== 'page' || componentPlan.isDetail !== true) {
+      return false;
+    }
+    const normalizedNeeds = new Set(
+      this.toVisualDataNeeds(componentPlan.dataNeeds),
+    );
+    if (!normalizedNeeds.has('pageDetail')) return false;
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    if (sections.length === 0) return false;
+    if (sections.some((section) => section.type === 'page-content')) {
+      return false;
+    }
+
+    // Concrete bound pages vary arbitrarily by DB content. If the reviewed
+    // pre-computed visual plan turned them into a fully static multi-section
+    // composition, prefer a fresh visual-plan pass that can fall back to the
+    // exact page-content contract instead of forcing mismatched static copy.
+    this.logger.log(
+      `[reviewer] "${componentName}": bypassing reviewed pre-computed visual plan for fixed page-detail route without page-content section`,
+    );
+    return true;
+  }
+
   private shouldUseFramePath(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
@@ -1140,6 +1271,154 @@ export class CodeReviewerService {
     return false;
   }
 
+  private getSectionLevelAssemblyDecision(
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): { enabled: boolean; reason: string } {
+    if (
+      componentPlan?.type !== 'page' ||
+      !componentPlan.visualPlan ||
+      getComponentStrategy(componentName).deterministicFirst
+    ) {
+      return { enabled: false, reason: 'not eligible' };
+    }
+
+    if (componentPlan.isDetail) {
+      return { enabled: false, reason: 'detail view blocked' };
+    }
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    if (sections.length < 2) {
+      return { enabled: false, reason: 'too few sections' };
+    }
+
+    const normalizedNeeds = new Set(
+      this.toVisualDataNeeds(componentPlan.dataNeeds),
+    );
+    const interactiveTypes = new Set([
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+    ]);
+    const richTypes = new Set([
+      'hero',
+      'cta-strip',
+      'cover',
+      'media-text',
+      'card-grid',
+      'testimonial',
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+      'newsletter',
+    ]);
+    const lowComplexityTypes = new Set([
+      'page-content',
+      'post-content',
+      'comments',
+      'search',
+      'breadcrumb',
+      'sidebar',
+      'post-list',
+      'navbar',
+      'footer',
+    ]);
+
+    const richSectionCount = sections.filter((section) =>
+      richTypes.has(section.type),
+    ).length;
+    const interactiveSectionCount = sections.filter((section) =>
+      interactiveTypes.has(section.type),
+    ).length;
+    const mediaHeavySectionCount = sections.filter((section) =>
+      ['cover', 'media-text', 'carousel', 'testimonial'].includes(section.type),
+    ).length;
+    const sourceBackedSectionCount = sections.filter(
+      (section) => !!section.sourceRef?.sourceNodeId,
+    ).length;
+    const distinctTypes = new Set(sections.map((section) => section.type));
+    const lowComplexityOnly = sections.every((section) =>
+      lowComplexityTypes.has(section.type),
+    );
+    const hasPageContent = sections.some(
+      (section) => section.type === 'page-content',
+    );
+    const hasOnlyContentWrapper =
+      hasPageContent &&
+      sections.every(
+        (section) =>
+          section.type === 'page-content' ||
+          section.type === 'hero' ||
+          section.type === 'cta-strip' ||
+          section.type === 'breadcrumb' ||
+          section.type === 'sidebar',
+      );
+    const listDrivenOnly =
+      normalizedNeeds.has('posts') &&
+      sections.every((section) =>
+        [
+          'hero',
+          'cta-strip',
+          'cover',
+          'search',
+          'post-list',
+          'breadcrumb',
+          'sidebar',
+        ].includes(section.type),
+      );
+
+    if (lowComplexityOnly) {
+      return { enabled: false, reason: 'low-complexity data/content template' };
+    }
+
+    if (hasOnlyContentWrapper) {
+      return {
+        enabled: false,
+        reason: 'page-content wrapper is simpler as full-file',
+      };
+    }
+
+    if (listDrivenOnly) {
+      return {
+        enabled: false,
+        reason: 'list-driven template is simpler as full-file',
+      };
+    }
+
+    let score = 0;
+    if (sections.length >= 5) score += 3;
+    else if (sections.length >= 4) score += 2;
+    else if (sections.length >= 3) score += 1;
+
+    if (richSectionCount >= 3) score += 3;
+    else if (richSectionCount >= 2) score += 2;
+    else if (richSectionCount >= 1) score += 1;
+
+    if (interactiveSectionCount >= 1) score += 2;
+    if (mediaHeavySectionCount >= 2) score += 2;
+    if (distinctTypes.size >= 4) score += 2;
+    else if (distinctTypes.size >= 3) score += 1;
+    if (sourceBackedSectionCount >= 3) score += 1;
+    if (componentPlan.route === '/') score += 1;
+    if (componentPlan.fixedSlug) score += 1;
+    if (normalizedNeeds.has('pageDetail') && !hasPageContent) score += 1;
+
+    const enabled =
+      score >= 5 || (sections.length >= 4 && richSectionCount >= 2);
+    const reason = [
+      `score=${score}`,
+      `rich=${richSectionCount}`,
+      `interactive=${interactiveSectionCount}`,
+      `media=${mediaHeavySectionCount}`,
+      `types=${distinctTypes.size}`,
+      `sourceBacked=${sourceBackedSectionCount}`,
+    ].join(', ');
+
+    return { enabled, reason };
+  }
+
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
     const ordered: DataNeed[] = [
       'postDetail',
@@ -1149,6 +1428,7 @@ export class CodeReviewerService {
       'pages',
       'menus',
       'siteInfo',
+      'footerLinks',
     ];
     const mapped = new Set<DataNeed>();
 
@@ -1156,6 +1436,9 @@ export class CodeReviewerService {
       switch (need) {
         case 'site-info':
           mapped.add('siteInfo');
+          break;
+        case 'footer-links':
+          mapped.add('footerLinks');
           break;
         case 'post-detail':
           mapped.add('postDetail');
@@ -1221,12 +1504,14 @@ export class CodeReviewerService {
       dataNeeds: componentPlan.dataNeeds ?? [],
       isDetail: componentPlan.isDetail ?? false,
       route: componentPlan.route,
+      fixedSlug: componentPlan.fixedSlug,
     });
 
     const availableVariables = this.frameGenerator.describeVariables({
       type: componentPlan.type ?? 'page',
       dataNeeds: componentPlan.dataNeeds ?? [],
       isDetail: componentPlan.isDetail ?? false,
+      fixedSlug: componentPlan.fixedSlug,
     });
 
     const validationContext = this.buildValidationContext(
@@ -1528,11 +1813,16 @@ export class CodeReviewerService {
         const isPageContract = lastError?.includes(
           'Page detail contract violated',
         );
+        const isVisualPlanFidelity = lastError?.includes(
+          'Visual plan fidelity violated',
+        );
 
-        if (isNoJsx || isPageContract) {
+        if (isNoJsx || isPageContract || isVisualPlanFidelity) {
           const reason = isNoJsx
             ? 'No JSX return found'
-            : 'Page detail contract violated';
+            : isPageContract
+              ? 'Page detail contract violated'
+              : 'Visual plan fidelity violated';
           this.logger.warn(
             `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
           );
@@ -1545,7 +1835,12 @@ export class CodeReviewerService {
             const fixedResult = await this.selfFixDetailed(
               modelName,
               code,
-              `${reason}: ${lastError}`,
+              this.buildAutoFixErrorContext(
+                reason,
+                lastError,
+                componentPlan,
+                componentName,
+              ),
               logPath,
               `${componentName}:${logLabel}:autofix`,
             );
@@ -1721,33 +2016,38 @@ export class CodeReviewerService {
       this.canUseOpenAiVisionModel(model)
     ) {
       try {
-        const response = await this.openai.chat.completions.create({
-          model: this.resolveOpenAiModelName(model),
-          temperature: 0,
-          max_completion_tokens: this.llmFactory.getMaxTokens(),
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
-            },
-            {
-              role: 'user',
-              content: [
+        const openAiModel = this.resolveOpenAiModelName(model);
+        const response = await this.llmFactory.runWithRetry(
+          `openai-vision-fix:${openAiModel}`,
+          () =>
+            this.openai.chat.completions.create({
+              model: openAiModel,
+              temperature: 0,
+              max_completion_tokens: this.llmFactory.getMaxTokens(),
+              messages: [
                 {
-                  type: 'text',
-                  text:
-                    `This component has a validation or targeted edit request:\n${error}\n\n` +
-                    `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                  role: 'system',
+                  content:
+                    'You are a React/TypeScript expert. Fix the exact scoped UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code.',
                 },
-                ...normalizedVisionUrls.map((url) => ({
-                  type: 'image_url' as const,
-                  image_url: { url, detail: 'high' as const },
-                })),
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'text',
+                      text:
+                        `This component has a validation or targeted edit request:\n${error}\n\n` +
+                        `Fix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``,
+                    },
+                    ...normalizedVisionUrls.map((url) => ({
+                      type: 'image_url' as const,
+                      image_url: { url, detail: 'high' as const },
+                    })),
+                  ],
+                },
               ],
-            },
-          ],
-        });
+            }),
+        );
         const text = response.choices[0]?.message?.content;
         if (text) {
           const usage = response.usage;
@@ -2045,6 +2345,16 @@ export class CodeReviewerService {
       }
     }
 
+    const visualPlanChecklist = this.buildVisualPlanRetryChecklist(
+      input.componentPlan,
+      input.lastError,
+      input.componentName,
+    );
+    if (visualPlanChecklist) {
+      lines.push('');
+      lines.push(visualPlanChecklist);
+    }
+
     lines.push('');
     lines.push(
       'Return the complete corrected component file, but only change code necessary to fix the failure above.',
@@ -2124,10 +2434,37 @@ export class CodeReviewerService {
     validationContext: CodeValidationContext,
   ): string[] {
     const compact = (error ?? '').toLowerCase();
+    const fixedSlug = validationContext.fixedSlug?.trim();
+    const normalizedDataNeeds = new Set(
+      (validationContext.dataNeeds ?? []).map((need) =>
+        need === 'page-detail'
+          ? 'pageDetail'
+          : need === 'post-detail'
+            ? 'postDetail'
+            : need,
+      ),
+    );
     const instructions = [
       'Do not redesign or rewrite unrelated sections.',
       'Keep the existing approved route/data contract intact.',
     ];
+
+    if (fixedSlug) {
+      instructions.push(
+        `This component is bound to the fixed slug \`${fixedSlug}\`; do not convert it back to a dynamic slug route.`,
+      );
+      instructions.push('Do not import or call `useParams()` in this file.');
+      if (normalizedDataNeeds.has('pageDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/pages/${fixedSlug}\`, not \`/api/pages/\${slug}\` and not \`/api/pages\` + lookup.`,
+        );
+      }
+      if (normalizedDataNeeds.has('postDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/posts/${fixedSlug}\`, not \`/api/posts/\${slug}\` and not \`/api/posts\` + lookup.`,
+        );
+      }
+    }
 
     if (
       /expected corresponding|jsx|parse|closing tag|unterminated/.test(compact)
@@ -2149,6 +2486,11 @@ export class CodeReviewerService {
     if (/shared chrome contract|menus/.test(compact)) {
       instructions.push(
         'Do not hardcode nav/footer links. If this component declares menus, render them from `/api/menus` only.',
+      );
+    }
+    if (/footerlinks|footer-links|\/api\/footer-links/.test(compact)) {
+      instructions.push(
+        'If this is a Footer component, fetch `/api/footer-links` and render those columns directly; do not fall back to `/api/menus`.',
       );
     }
 
@@ -2175,6 +2517,22 @@ export class CodeReviewerService {
       );
       instructions.push(
         'Do not merge two approved sections into one shared hero/grid wrapper. If text and image belong to different approved sections, render them in separate wrappers in the original order.',
+      );
+    }
+
+    if (
+      /visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid|lost hero heading|lost hero subheading|lost post-list title/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Restore every missing visual-plan section from the approved plan. If section 2 is missing, add it back as a separate top-level JSX wrapper instead of expanding section 1.',
+      );
+      instructions.push(
+        'For each restored section, preserve the exact sectionKey/sourceNodeId pair from the approved visual plan on the outer wrapper attributes.',
+      );
+      instructions.push(
+        'If the approved plan includes a hero heading/subheading or post-list title, render that approved content exactly or keep the approved dynamic binding intact; do not drop it.',
       );
     }
 
@@ -2215,6 +2573,9 @@ export class CodeReviewerService {
       instructions.push(
         'Use `post.authorSlug` with `/author/${post.authorSlug}` and `post.categorySlugs[0]` with `/category/${post.categorySlugs[0]}`. Keep plain-text author only when it is the actual heading/title content, such as an `h1` on author/archive/detail views.',
       );
+      instructions.push(
+        "Use a single ternary JSX expression for the fallback, for example `{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={'/category/' + post.categorySlugs[0]} className='hover:underline underline-offset-4'>{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}`. Do not introduce extra brace layers around JSX branches.",
+      );
     }
 
     if (/author/.test(compact) && /route|link/.test(compact)) {
@@ -2242,6 +2603,1243 @@ export class CodeReviewerService {
     }
 
     return [...new Set(instructions)];
+  }
+
+  private async generateComponentWithSectionAssembly(input: {
+    componentName: string;
+    modelName: string;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
+    componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
+    logPath?: string;
+    systemPrompt: string;
+  }): Promise<{
+    code: string;
+    isValid: boolean;
+    attemptsUsed: number;
+    lastError?: string;
+    lastRawOutput?: string;
+    cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[];
+  }> {
+    const {
+      componentName,
+      modelName,
+      content,
+      tokens,
+      repoManifest,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+      systemPrompt,
+    } = input;
+
+    if (!componentPlan?.visualPlan) {
+      return {
+        code: '',
+        isValid: false,
+        attemptsUsed: 0,
+        lastError: 'Missing visual plan for section-level assembly',
+        cotAttempts: [],
+      };
+    }
+
+    const sections = componentPlan.visualPlan.sections ?? [];
+    const frame = this.codeGenerator.generateSectionAssemblyFrame(
+      componentPlan.visualPlan,
+    );
+    const availableVariables = this.buildSectionAssemblyAvailableVariables(
+      this.frameGenerator.describeVariables({
+        type: componentPlan.type ?? 'page',
+        dataNeeds: componentPlan.dataNeeds ?? [],
+        isDetail: componentPlan.isDetail ?? false,
+        fixedSlug: componentPlan.fixedSlug,
+      }),
+      sections,
+    );
+    const validationContext = this.buildValidationContext(
+      componentPlan,
+      componentName,
+      false,
+      undefined,
+      this.resolveRequiredCustomClassTargets(
+        componentPlan.requiredCustomClassNames,
+        tokens,
+      ),
+    );
+    const assembledSections: string[] = [];
+    let attemptsUsed = 0;
+    let lastError: string | undefined;
+    let lastRawOutput = '';
+    const cotAttempts: import('../../ai-logger/ai-logger.service.js').AttemptLog[] =
+      [];
+
+    for (let index = 0; index < sections.length; index++) {
+      const section = sections[index];
+      const sectionResult = await this.generateInlineSectionForAssembly({
+        componentName,
+        section,
+        sectionIndex: index,
+        totalSections: sections.length,
+        availableVariables,
+        modelName,
+        systemPrompt,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan,
+        editRequestContextNote,
+        logPath,
+      });
+      attemptsUsed += sectionResult.attemptsUsed;
+      lastRawOutput = sectionResult.lastRawOutput || lastRawOutput;
+      cotAttempts.push(...sectionResult.cotAttempts);
+
+      if (!sectionResult.isValid) {
+        lastError = sectionResult.lastError;
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level: section ${index + 1}/${sections.length} (${section.type}) exhausted attempts — full-file fallback`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level: section ${index + 1}/${sections.length} (${section.type}) exhausted attempts — full-file fallback`,
+        );
+        return {
+          code: '',
+          isValid: false,
+          attemptsUsed,
+          lastError: sectionResult.lastError,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+
+      assembledSections.push(sectionResult.code);
+    }
+
+    let code = this.codeGenerator.assembleSectionedComponent(
+      frame,
+      assembledSections,
+    );
+    code = this.stripSpuriousHardcodedSections(
+      this.postProcessCode(code),
+      componentName,
+    );
+    const check = this.validator.checkCodeStructure(code, validationContext);
+    if (check.fixedCode) code = check.fixedCode;
+
+    if (check.isValid) {
+      this.logger.log(
+        `[reviewer] "${componentName}" ✓ section-level one-file assembly succeeded (${sections.length} sections, ${attemptsUsed} AI attempt(s))`,
+      );
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}" ✓ section-level one-file assembly succeeded (${sections.length} sections, ${attemptsUsed} AI attempt(s))`,
+      );
+      return {
+        code,
+        isValid: true,
+        attemptsUsed,
+        lastRawOutput,
+        cotAttempts,
+      };
+    }
+
+    const targetedRetryIndexes = this.extractSectionIndexesFromVisualPlanError(
+      check.error,
+      sections.length,
+    );
+    if (targetedRetryIndexes.length > 0) {
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level final validation failed in section(s) ${targetedRetryIndexes
+          .map((value) => value + 1)
+          .join(', ')} — targeted section retry`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level final validation failed in section(s) ${targetedRetryIndexes
+          .map((value) => value + 1)
+          .join(', ')} — targeted section retry`,
+      );
+
+      for (const index of targetedRetryIndexes) {
+        const section = sections[index];
+        const narrowedError = this.buildTargetedSectionRetryError({
+          error: check.error,
+          section,
+          sectionNumber: index + 1,
+        });
+        const retryResult = await this.generateInlineSectionForAssembly({
+          componentName,
+          section,
+          sectionIndex: index,
+          totalSections: sections.length,
+          availableVariables,
+          modelName,
+          systemPrompt,
+          content,
+          tokens,
+          repoManifest,
+          componentPlan,
+          editRequestContextNote,
+          logPath,
+          initialRetryError: narrowedError,
+          maxAttempts: 2,
+          phaseLabel: 'targeted-retry',
+        });
+        attemptsUsed += retryResult.attemptsUsed;
+        lastRawOutput = retryResult.lastRawOutput || lastRawOutput;
+        cotAttempts.push(...retryResult.cotAttempts);
+        if (retryResult.isValid) {
+          assembledSections[index] = retryResult.code;
+        }
+      }
+
+      code = this.codeGenerator.assembleSectionedComponent(
+        frame,
+        assembledSections,
+      );
+      code = this.stripSpuriousHardcodedSections(
+        this.postProcessCode(code),
+        componentName,
+      );
+      const retriedCheck = this.validator.checkCodeStructure(
+        code,
+        validationContext,
+      );
+      if (retriedCheck.fixedCode) code = retriedCheck.fixedCode;
+
+      if (retriedCheck.isValid) {
+        this.logger.log(
+          `[reviewer] "${componentName}" ✓ section-level targeted retry resolved final validation`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer] "${componentName}" ✓ section-level targeted retry resolved final validation`,
+        );
+        return {
+          code,
+          isValid: true,
+          attemptsUsed,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+
+      lastError = retriedCheck.error;
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level targeted retry still invalid: ${retriedCheck.error}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level targeted retry still invalid: ${retriedCheck.error}`,
+      );
+    }
+
+    // ── R3-assembly: Self-fix pass for assembled file violations ─────────────
+    const assemblyError = lastError ?? check.error;
+    await this.log(
+      logPath,
+      `[reviewer:assembly-fix] "${componentName}" attempting self-repair: ${assemblyError}`,
+    );
+    try {
+      const fixResult = await this.selfFixDetailed(
+        modelName,
+        code,
+        assemblyError!,
+        logPath,
+        componentName,
+      );
+      const fixedCode = fixResult.code;
+      const fixCheck = this.validator.checkCodeStructure(
+        fixedCode,
+        validationContext,
+      );
+      const resolvedCode = fixCheck.fixedCode ?? fixedCode;
+      if (fixCheck.isValid) {
+        this.logger.log(
+          `[reviewer:assembly-fix] "${componentName}" ✓ self-repair resolved assembly violation`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer:assembly-fix] "${componentName}" ✓ self-repair resolved assembly violation`,
+        );
+        return {
+          code: resolvedCode,
+          isValid: true,
+          attemptsUsed,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+      this.logger.warn(
+        `[reviewer:assembly-fix] "${componentName}" self-repair still invalid: ${fixCheck.error}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:assembly-fix] "${componentName}" self-repair still invalid: ${fixCheck.error}`,
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `[reviewer:assembly-fix] "${componentName}" self-repair call failed: ${err?.message}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:assembly-fix] "${componentName}" self-repair call failed: ${err?.message}`,
+      );
+    }
+
+    this.logger.warn(
+      `[reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${assemblyError}`,
+    );
+    await this.log(
+      logPath,
+      `WARN [reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${assemblyError}`,
+    );
+
+    return {
+      code,
+      isValid: false,
+      attemptsUsed,
+      lastError: assemblyError,
+      lastRawOutput,
+      cotAttempts,
+    };
+  }
+
+  private async generateInlineSectionForAssembly(input: {
+    componentName: string;
+    section: ComponentVisualPlan['sections'][number];
+    sectionIndex: number;
+    totalSections: number;
+    availableVariables: string;
+    modelName: string;
+    systemPrompt: string;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
+    componentPlan?: ComponentPromptContext;
+    editRequestContextNote?: string;
+    logPath?: string;
+    initialRetryError?: string;
+    maxAttempts?: number;
+    phaseLabel?: string;
+  }): Promise<{
+    code: string;
+    isValid: boolean;
+    attemptsUsed: number;
+    lastError?: string;
+    lastRawOutput?: string;
+    cotAttempts: AttemptLog[];
+  }> {
+    const {
+      componentName,
+      section,
+      sectionIndex,
+      totalSections,
+      availableVariables,
+      modelName,
+      systemPrompt,
+      content,
+      tokens,
+      repoManifest,
+      componentPlan,
+      editRequestContextNote,
+      logPath,
+      initialRetryError,
+      maxAttempts = 2,
+      phaseLabel = 'initial',
+    } = input;
+
+    let sectionCode = '';
+    let sectionError = initialRetryError;
+    let lastRawOutput = '';
+    const cotAttempts: AttemptLog[] = [];
+
+    this.logger.log(
+      `[reviewer] "${componentName}" section-level (${phaseLabel}): generating section ${sectionIndex + 1}/${totalSections} (${section.type})`,
+    );
+    await this.log(
+      logPath,
+      `[reviewer] "${componentName}" section-level (${phaseLabel}): generating section ${sectionIndex + 1}/${totalSections} (${section.type})`,
+    );
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const userPrompt = buildInlineSectionPrompt({
+        componentName,
+        section,
+        sectionIndex,
+        totalSections,
+        availableVariables,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan,
+        editRequestContextNote,
+        retryError: sectionError,
+      });
+      const {
+        text: raw,
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedTokens,
+      } = await this.generateWithRetry(
+        modelName,
+        systemPrompt,
+        userPrompt,
+        4,
+        logPath,
+        `${componentName}:section-${sectionIndex + 1}:${phaseLabel}`,
+        editRequestContextNote ? 'edit-request' : 'base',
+      );
+      lastRawOutput = raw;
+      sectionCode = this.postProcessCode(raw).trim();
+      const basicError = this.validateInlineSectionOutput(sectionCode);
+      const fidelityError = basicError
+        ? undefined
+        : this.validator.checkInlineSectionFidelity(
+            sectionCode,
+            section,
+            componentName,
+            sectionIndex + 1,
+          );
+      const attemptError = basicError ?? fidelityError ?? undefined;
+      cotAttempts.push({
+        attemptNumber: cotAttempts.length + 1,
+        promptSent: {
+          system: systemPrompt,
+          user: userPrompt,
+        },
+        response: raw,
+        tokensUsed: {
+          input: inTok,
+          output: outTok,
+          total: inTok + outTok,
+          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
+        },
+        timestamp: new Date().toISOString(),
+        success: !attemptError,
+        error: attemptError,
+        validationFeedback: attemptError
+          ? undefined
+          : `section ${sectionIndex + 1} inline assembly candidate accepted`,
+      });
+      if (!attemptError) {
+        this.logger.log(
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted on attempt ${attempt}/${maxAttempts}`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted on attempt ${attempt}/${maxAttempts}`,
+        );
+        return {
+          code: sectionCode,
+          isValid: true,
+          attemptsUsed: attempt,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+      sectionError = attemptError;
+      this.logger.warn(
+        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) attempt ${attempt}/${maxAttempts} failed: ${attemptError}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) section ${sectionIndex + 1}/${totalSections} attempt ${attempt}/${maxAttempts} failed: ${attemptError}${this.formatRawOutput(raw)}`,
+      );
+    }
+
+    // ── Self-fix pass: AI repair for section that exhausted normal attempts ──
+    if (sectionError && sectionCode) {
+      await this.log(
+        logPath,
+        `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} (${section.type}) attempting self-repair: ${sectionError}`,
+      );
+      try {
+        const fixResult = await this.selfFixDetailed(
+          modelName,
+          sectionCode,
+          sectionError,
+          logPath,
+          `${componentName}:section-${sectionIndex + 1}`,
+        );
+        const fixedCode = this.postProcessCode(fixResult.code).trim();
+        const fixBasicError = this.validateInlineSectionOutput(fixedCode);
+        const fixFidelityError = fixBasicError
+          ? undefined
+          : this.validator.checkInlineSectionFidelity(
+              fixedCode,
+              section,
+              componentName,
+              sectionIndex + 1,
+            );
+        const fixError = fixBasicError ?? fixFidelityError ?? undefined;
+        if (!fixError) {
+          this.logger.log(
+            `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} ✓ self-repair resolved`,
+          );
+          await this.log(
+            logPath,
+            `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} ✓ self-repair resolved`,
+          );
+          return {
+            code: fixedCode,
+            isValid: true,
+            attemptsUsed: maxAttempts + 1,
+            lastRawOutput: fixResult.rawResponse,
+            cotAttempts,
+          };
+        }
+        this.logger.warn(
+          `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair still invalid: ${fixError}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair still invalid: ${fixError}`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair call failed: ${err?.message}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair call failed: ${err?.message}`,
+        );
+      }
+    }
+
+    return {
+      code: sectionCode,
+      isValid: false,
+      attemptsUsed: maxAttempts,
+      lastError: sectionError,
+      lastRawOutput,
+      cotAttempts,
+    };
+  }
+
+  private extractSectionIndexesFromVisualPlanError(
+    error: string | undefined,
+    totalSections: number,
+  ): number[] {
+    if (!error || !/Visual plan fidelity violated/i.test(error)) return [];
+    const matches = [...error.matchAll(/section\s+(\d+)/gi)];
+    const indexes = matches
+      .map((match) => Number(match[1]) - 1)
+      .filter(
+        (value) =>
+          Number.isInteger(value) && value >= 0 && value < totalSections,
+      );
+    return [...new Set(indexes)];
+  }
+
+  private extractSectionSpecificError(
+    error: string | undefined,
+    sectionNumber: number,
+  ): string | undefined {
+    if (!error) return undefined;
+    const lines = error
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const filtered = lines.filter((line) =>
+      new RegExp(`section\\s+${sectionNumber}\\b`, 'i').test(line),
+    );
+    if (filtered.length === 0) return error;
+    return ['Visual plan fidelity violated:', ...filtered].join('\n');
+  }
+
+  private buildSectionAssemblyAvailableVariables(
+    baseVariables: string,
+    sections: ComponentVisualPlan['sections'],
+  ): string {
+    const extras: string[] = [];
+
+    if (sections.some((section) => section.type === 'carousel')) {
+      extras.push('`activeCarousels: Record<string, number>`');
+      extras.push(
+        '`setActiveCarousels: React.Dispatch<React.SetStateAction<Record<string, number>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'tabs')) {
+      extras.push('`activeTabs: Record<string, number>`');
+      extras.push(
+        '`setActiveTabs: React.Dispatch<React.SetStateAction<Record<string, number>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'accordion')) {
+      extras.push('`openAccordions: Record<string, number[]>`');
+      extras.push(
+        '`setOpenAccordions: React.Dispatch<React.SetStateAction<Record<string, number[]>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'modal')) {
+      extras.push('`openModals: Record<string, boolean>`');
+      extras.push(
+        '`setOpenModals: React.Dispatch<React.SetStateAction<Record<string, boolean>>>`',
+      );
+    }
+
+    if (extras.length === 0) {
+      return baseVariables;
+    }
+
+    if (!baseVariables || baseVariables === '(no data variables)') {
+      return extras.join(', ');
+    }
+
+    return `${baseVariables}, ${extras.join(', ')}`;
+  }
+
+  private buildTargetedSectionRetryError(input: {
+    error: string | undefined;
+    section: ComponentVisualPlan['sections'][number];
+    sectionNumber: number;
+  }): string | undefined {
+    const baseError = this.extractSectionSpecificError(
+      input.error,
+      input.sectionNumber,
+    );
+    const requiredContent = this.buildSectionRequiredContentChecklist(
+      input.section,
+    );
+    const lines = [
+      baseError?.trim(),
+      '## TARGETED SECTION RETRY',
+      `You are regenerating only section ${input.sectionNumber} (${input.section.type}).`,
+      'Preserve every approved content field for this section exactly; do not summarize, collapse, or omit any repeated item.',
+      requiredContent,
+    ].filter(Boolean);
+    return lines.join('\n\n');
+  }
+
+  private buildSectionRequiredContentChecklist(
+    section: ComponentVisualPlan['sections'][number],
+  ): string {
+    const lines: string[] = ['## REQUIRED CONTENT CHECKLIST'];
+    const stateKey = this.resolveInteractiveSectionStateKey(section);
+
+    switch (section.type) {
+      case 'card-grid':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        if (section.subtitle) {
+          lines.push(
+            `- Keep subtitle exactly: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
+        lines.push(
+          `- Render exactly ${section.cards.length} card(s). Do not merge or drop cards.`,
+        );
+        section.cards.forEach((card, cardIndex) => {
+          lines.push(
+            `- Card ${cardIndex + 1} heading: ${JSON.stringify(card.heading)}`,
+          );
+          lines.push(
+            `- Card ${cardIndex + 1} body: ${JSON.stringify(card.body)}`,
+          );
+        });
+        break;
+      case 'accordion':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        lines.push(
+          `- Render exactly ${section.items.length} accordion item(s).`,
+        );
+        section.items.forEach((item, itemIndex) => {
+          lines.push(
+            `- Item ${itemIndex + 1} heading: ${JSON.stringify(item.heading)}`,
+          );
+          lines.push(
+            `- Item ${itemIndex + 1} body: ${JSON.stringify(item.body)}`,
+          );
+        });
+        break;
+      case 'tabs':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        lines.push(`- Render exactly ${section.tabs.length} tab(s).`);
+        section.tabs.forEach((tab, tabIndex) => {
+          lines.push(
+            `- Tab ${tabIndex + 1} label: ${JSON.stringify(tab.label)}`,
+          );
+          if (tab.heading) {
+            lines.push(
+              `- Tab ${tabIndex + 1} heading: ${JSON.stringify(tab.heading)}`,
+            );
+          }
+          if (tab.body) {
+            lines.push(
+              `- Tab ${tabIndex + 1} body: ${JSON.stringify(tab.body)}`,
+            );
+          }
+          if (tab.imageSrc) {
+            lines.push(
+              `- Tab ${tabIndex + 1} image src: ${JSON.stringify(tab.imageSrc)}`,
+            );
+          }
+          if (tab.cta?.text) {
+            lines.push(
+              `- Tab ${tabIndex + 1} CTA text: ${JSON.stringify(tab.cta.text)}`,
+            );
+          }
+        });
+        break;
+      case 'carousel':
+        if (stateKey) {
+          lines.push(
+            `- Use the exact approved carousel state key ${JSON.stringify(stateKey)} everywhere in this section. Do not mix it with any other key.`,
+          );
+        }
+        lines.push(`- Render exactly ${section.slides.length} slide(s).`);
+        section.slides.forEach((slide, slideIndex) => {
+          if (slide.heading) {
+            lines.push(
+              `- Slide ${slideIndex + 1} heading: ${JSON.stringify(slide.heading)}`,
+            );
+          }
+          if (slide.subheading) {
+            lines.push(
+              `- Slide ${slideIndex + 1} subheading: ${JSON.stringify(slide.subheading)}`,
+            );
+          }
+          if (slide.imageSrc) {
+            lines.push(
+              `- Slide ${slideIndex + 1} image src: ${JSON.stringify(slide.imageSrc)}`,
+            );
+          }
+          if (slide.cta?.text) {
+            lines.push(
+              `- Slide ${slideIndex + 1} CTA text: ${JSON.stringify(slide.cta.text)}`,
+            );
+          }
+        });
+        lines.push(
+          '- If the section renders `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` so only the active slide is shown.',
+        );
+        lines.push(
+          '- Prev/next controls must use `swiper-button-prev` and `swiper-button-next` and each button must contain a visible SVG or text child.',
+        );
+        lines.push(
+          '- Dots and arrow buttons must update `setActiveCarousels(...)`; do not leave carousel controls decorative only.',
+        );
+        break;
+      case 'modal':
+        if (stateKey) {
+          lines.push(
+            `- Use the exact approved modal state key ${JSON.stringify(stateKey)} everywhere in this section. Do not reuse any carousel or other section key.`,
+          );
+        }
+        if (section.triggerText) {
+          lines.push(
+            `- Keep trigger text exactly: ${JSON.stringify(section.triggerText)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if (section.body) {
+          lines.push(`- Keep body exactly: ${JSON.stringify(section.body)}`);
+        }
+        if (section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (cta.text) {
+              lines.push(
+                `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+              );
+            }
+          });
+        }
+        lines.push(
+          '- Render a trigger button with class `uagb-modal-trigger` and `uagb-modal-button-link`.',
+        );
+        lines.push(
+          '- Render the popup conditionally with `openModals[...] ? (...) : null`; do not inline the popup content.',
+        );
+        lines.push(
+          '- Keep the popup structure markers: `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+        );
+        lines.push(
+          '- Use `setOpenModals` to open and close the popup; do not introduce local hooks inside the section JSX.',
+        );
+        break;
+      case 'media-text':
+        if (section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if (section.body) {
+          lines.push(`- Keep body exactly: ${JSON.stringify(section.body)}`);
+        }
+        if (section.listItems?.length) {
+          lines.push(
+            `- Keep ${section.listItems.length} list item(s): ${section.listItems
+              .map((item) => JSON.stringify(item))
+              .join(', ')}`,
+          );
+          if (section.listItems.some((item) => /<[^>]+>/.test(item))) {
+            lines.push(
+              '- Some list items contain inline HTML markup such as `<strong>`. Preserve that markup in the rendered `<li>` instead of stripping or flattening it.',
+            );
+          }
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
+      case 'hero':
+      case 'cover':
+        if ('heading' in section && section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if ('subheading' in section && section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        if ('cta' in section && section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if ('ctas' in section && Array.isArray(section.ctas)) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
+      case 'cta-strip':
+        if (section.align) {
+          lines.push(
+            `- Keep alignment exactly: ${JSON.stringify(section.align)}`,
+          );
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
+      case 'testimonial':
+        lines.push(`- Keep quote exactly: ${JSON.stringify(section.quote)}`);
+        lines.push(
+          `- Keep author name exactly: ${JSON.stringify(section.authorName)}`,
+        );
+        if (section.authorTitle) {
+          lines.push(
+            `- Keep author title exactly: ${JSON.stringify(section.authorTitle)}`,
+          );
+        }
+        break;
+      case 'newsletter':
+        lines.push(
+          `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+        );
+        if (section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        lines.push(
+          `- Keep button text exactly: ${JSON.stringify(section.buttonText)}`,
+        );
+        break;
+      case 'post-list':
+        if (section.title) {
+          lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        break;
+      default:
+        lines.push(
+          '- Preserve every approved heading, body, CTA, image, and repeated child item from the approved section JSON.',
+        );
+        break;
+    }
+
+    lines.push(
+      '- If any checklist item is missing in your JSX, the retry will fail again.',
+    );
+    return lines.join('\n');
+  }
+
+  private validateInlineSectionOutput(code: string): string | undefined {
+    const trimmed = code.trim();
+    if (!trimmed) return 'Empty section JSX output';
+    if (/^\s*import\s/m.test(trimmed)) {
+      return 'Inline section output must not contain imports';
+    }
+    if (/export\s+default/.test(trimmed)) {
+      return 'Inline section output must not contain export default';
+    }
+    if (/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed)) {
+      return 'Inline section output must not declare hooks or component functions';
+    }
+    if (!/^<[\s\S]+>$/.test(trimmed)) {
+      return 'Inline section output must be a single top-level JSX wrapper';
+    }
+    return undefined;
+  }
+
+  private buildVisualPlanRetryChecklist(
+    componentPlan: ComponentPromptContext | undefined,
+    error: string | undefined,
+    componentName: string,
+  ): string {
+    if (
+      !componentPlan?.visualPlan?.sections?.length ||
+      !/visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid/i.test(
+        error ?? '',
+      )
+    ) {
+      return '';
+    }
+
+    const lines = [
+      '### Visual plan sections to preserve exactly',
+      ...componentPlan.visualPlan.sections.map((section, index) => {
+        const parts = [
+          `- section ${index + 1}: type=${section.type}`,
+          section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+          section.sourceRef?.sourceNodeId
+            ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+            : null,
+        ];
+
+        if (section.type === 'hero') {
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.subheading
+              ? `subheading=${JSON.stringify(section.subheading)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'cta-strip') {
+          parts.push(
+            section.align ? `align=${JSON.stringify(section.align)}` : null,
+          );
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
+        }
+
+        if (section.type === 'post-list') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+        }
+
+        if (section.type === 'card-grid') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          parts.push(
+            section.subtitle
+              ? `subtitle=${JSON.stringify(section.subtitle)}`
+              : null,
+          );
+          const cardHints = section.cards
+            ?.slice(0, 4)
+            .map((card, cardIndex) => {
+              const hints = [
+                card.heading
+                  ? `card${cardIndex + 1}.heading=${JSON.stringify(card.heading)}`
+                  : null,
+                card.body
+                  ? `card${cardIndex + 1}.body=${JSON.stringify(card.body)}`
+                  : null,
+              ].filter(Boolean);
+              return hints.join(' | ');
+            })
+            .filter(Boolean);
+          if (cardHints?.length) {
+            parts.push(...cardHints);
+          }
+        }
+
+        if (section.type === 'cover') {
+          parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.subheading
+              ? `subheading=${JSON.stringify(section.subheading)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'media-text') {
+          parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.body ? `body=${JSON.stringify(section.body)}` : null,
+          );
+          if (section.listItems?.length) {
+            parts.push(
+              `listItems=${JSON.stringify(section.listItems.slice(0, 6))}`,
+            );
+          }
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
+        }
+
+        if (section.type === 'modal') {
+          const stateKey = this.resolveInteractiveSectionStateKey(section);
+          parts.push(
+            section.triggerText
+              ? `triggerText=${JSON.stringify(section.triggerText)}`
+              : null,
+          );
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.body ? `body=${JSON.stringify(section.body)}` : null,
+          );
+          parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.cta?.text
+              ? `ctaText=${JSON.stringify(section.cta.text)}`
+              : null,
+          );
+          if (Array.isArray(section.ctas) && section.ctas.length > 1) {
+            parts.push(
+              ...section.ctas
+                .slice(1)
+                .map((cta, ctaIndex) =>
+                  cta.text
+                    ? `cta${ctaIndex + 2}Text=${JSON.stringify(cta.text)}`
+                    : null,
+                ),
+            );
+          }
+          parts.push(
+            'behavior=render modal trigger button plus conditional popup overlay with uagb-modal-trigger and uagb-modal-popup',
+          );
+          parts.push(
+            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+          );
+        }
+
+        if (section.type === 'carousel') {
+          const stateKey = this.resolveInteractiveSectionStateKey(section);
+          parts.push(`slideCount=${section.slides?.length ?? 0}`);
+          parts.push(
+            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+          );
+          const slideHints = section.slides
+            ?.slice(0, 6)
+            .map((slide, slideIndex) => {
+              const hints = [
+                slide.heading
+                  ? `slide${slideIndex + 1}.heading=${JSON.stringify(slide.heading)}`
+                  : null,
+                slide.subheading
+                  ? `slide${slideIndex + 1}.subheading=${JSON.stringify(slide.subheading)}`
+                  : null,
+                slide.imageSrc
+                  ? `slide${slideIndex + 1}.imageSrc=${JSON.stringify(slide.imageSrc)}`
+                  : null,
+                slide.cta?.text
+                  ? `slide${slideIndex + 1}.ctaText=${JSON.stringify(slide.cta.text)}`
+                  : null,
+              ].filter(Boolean);
+              return hints.join(' | ');
+            })
+            .filter(Boolean);
+          if (slideHints?.length) {
+            parts.push(...slideHints);
+          }
+          parts.push(
+            'behavior=bind swiper-wrapper translateX to activeCarousels[...] and render non-empty swiper-button-prev/swiper-button-next controls',
+          );
+        }
+
+        if (section.type === 'tabs') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          if (section.tabs?.length) {
+            parts.push(
+              `tabs=${JSON.stringify(
+                section.tabs.slice(0, 6).map((tab) => ({
+                  label: tab.label,
+                  heading: tab.heading,
+                  body: tab.body,
+                  imageSrc: tab.imageSrc,
+                  ctaText: tab.cta?.text,
+                })),
+              )}`,
+            );
+          }
+        }
+
+        if (section.type === 'accordion') {
+          parts.push(
+            section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          if (section.items?.length) {
+            parts.push(
+              `items=${JSON.stringify(
+                section.items.slice(0, 6).map((item) => ({
+                  heading: item.heading,
+                  body: item.body,
+                })),
+              )}`,
+            );
+          }
+        }
+
+        return parts.filter(Boolean).join(' | ');
+      }),
+      `Use data-vp-component="${componentName}" on every tracked wrapper in this file.`,
+    ];
+
+    return lines.join('\n');
+  }
+
+  private resolveInteractiveSectionStateKey(
+    section: ComponentVisualPlan['sections'][number],
+  ): string | null {
+    const raw = section.sectionKey ?? section.sourceRef?.sourceNodeId;
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  }
+
+  private buildAutoFixErrorContext(
+    reason: string,
+    lastError: string | undefined,
+    componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
+  ): string {
+    const parts = [`${reason}: ${lastError ?? 'Unknown validation error.'}`];
+    const fixedSlug = componentPlan?.fixedSlug?.trim();
+    if (fixedSlug) {
+      const boundEndpoint = componentPlan?.dataNeeds?.includes('postDetail')
+        ? `/api/posts/${fixedSlug}`
+        : componentPlan?.dataNeeds?.includes('pageDetail')
+          ? `/api/pages/${fixedSlug}`
+          : undefined;
+      const bindingLines = [
+        `Fixed slug binding: \`${fixedSlug}\`.`,
+        'Do not import or call `useParams()`.',
+      ];
+      if (boundEndpoint) {
+        bindingLines.push(
+          `Fetch the main record only from \`${boundEndpoint}\`. Do not fall back to a dynamic \`/api/.../\${slug}\` endpoint or a list endpoint plus lookup.`,
+        );
+      }
+      parts.push(bindingLines.join('\n'));
+    }
+    const checklist = this.buildVisualPlanRetryChecklist(
+      componentPlan,
+      lastError,
+      componentName,
+    );
+    if (checklist) {
+      parts.push(checklist);
+    }
+    return parts.join('\n\n');
   }
 
   // ── Code post-processors ──────────────────────────────────────────────────
@@ -2339,97 +3937,11 @@ export class CodeReviewerService {
   }
 
   private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    let next = code;
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
-      (_match, record: string, tag: string, attrs: string) =>
-        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
-    );
-
-    next = next.replace(
-      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-      (match, tag: string, attrs: string, record: string, offset: number) => {
-        if (this.isWithinHeadingTitleContext(next, offset)) return match;
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
-      (_match, record: string, attrs: string) =>
-        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
-    );
-
-    next = next.replace(
-      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-      (match, attrs: string, record: string, offset: number) => {
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
-      (
-        _match,
-        record: string,
-        categoryVar: string,
-        indexVar: string,
-        attrs: string,
-      ) =>
-        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
-    );
-
-    return next;
+    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
   }
 
   private promotePlainTextPostMetaLinks(code: string): string {
-    const isCanonicalMetaLink = (raw: string): boolean =>
-      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
-      /(?:to=|href=)[^>]*\/category\//.test(raw);
-
-    const decorateQuoted = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
-        (
-          match,
-          tag: string,
-          before: string,
-          quote: string,
-          className: string,
-        ) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}${quote}`;
-        },
-      );
-
-    const decorateTemplateLiteral = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
-        (match, tag: string, before: string, className: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className={\`${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}\`}`;
-        },
-      );
-
-    const decorateWithoutClass = (source: string) =>
-      source.replace(
-        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
-        (match, tag: string, attrs: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
-        },
-      );
-
-    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+    return promoteSharedPlainTextPostMetaLinks(code);
   }
 
   private appendUniqueClasses(existing: string, addition: string): string {
@@ -2456,7 +3968,7 @@ export class CodeReviewerService {
     const before = code.slice(Math.max(0, offset - 600), offset);
     return (
       /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
       /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
       /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
         before,
@@ -2478,7 +3990,9 @@ export class CodeReviewerService {
       /^(Page|Single|PageNoTitle|PageWide|PageWithSidebar|SingleWithSidebar)$/.test(
         componentName,
       );
-    if (!isDetailComponent) return code;
+    const isListLikePageComponent =
+      /^(Archive|Index|Search|NotFound|Page404)$/.test(componentName);
+    if (!isDetailComponent && !isListLikePageComponent) return code;
 
     // Dynamic-data reference pattern — any section containing these is kept.
     const dynamicRef =
@@ -2520,11 +4034,20 @@ export class CodeReviewerService {
       }
 
       const sectionContent = code.slice(sectionStart, j);
+      const isHeadingOnlyInventedAuxiliary =
+        isListLikePageComponent &&
+        this.isHeadingOnlyInventedAuxiliarySection(sectionContent);
+      const isTrackedApprovedSection =
+        /\bdata-vp-source-node=/.test(sectionContent) ||
+        /\bdata-vp-section-key=/.test(sectionContent) ||
+        /\bdata-vp-section-component=/.test(sectionContent);
 
       // Keep the section if it has dynamic refs or dangerouslySetInnerHTML
       if (
         dynamicRef.test(sectionContent) ||
-        /dangerouslySetInnerHTML/.test(sectionContent)
+        /dangerouslySetInnerHTML/.test(sectionContent) ||
+        isTrackedApprovedSection ||
+        (!isDetailComponent && !isHeadingOnlyInventedAuxiliary)
       ) {
         result += sectionContent;
       }
@@ -2533,6 +4056,34 @@ export class CodeReviewerService {
       i = j;
     }
     return result;
+  }
+
+  private isHeadingOnlyInventedAuxiliarySection(
+    sectionContent: string,
+  ): boolean {
+    const visibleTexts = [
+      ...sectionContent.matchAll(
+        /<(h[1-6]|p|span|strong|em|li)\b[^>]*>([\s\S]*?)<\/\1>/gi,
+      ),
+    ]
+      .map((match) => this.normalizeAuxiliaryHeadingText(match[2] ?? ''))
+      .filter(Boolean);
+    if (visibleTexts.length !== 1) return false;
+    return new Set<string>(INVENTED_AUXILIARY_SECTION_LABELS).has(
+      visibleTexts[0]!,
+    );
+  }
+
+  private normalizeAuxiliaryHeadingText(value: string): string {
+    return value
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
   }
 
   // ── Logger ────────────────────────────────────────────────────────────────

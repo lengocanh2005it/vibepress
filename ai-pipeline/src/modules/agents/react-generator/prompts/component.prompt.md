@@ -159,7 +159,7 @@ const [siteInfo, setSiteInfo] = useState<SiteInfo | null>(null);
 ⛔ `blogDescription` → ONLY if template has `block: "site-tagline"`, else omit entirely
 ⛔ Images: render `<img>` only when `src` is non-empty in template JSON or `featuredImage` from API — no placeholders, no invented paths
 ⛔ Invented content: testimonial quotes, names, job titles must come exactly from template `text` fields
-⛔ Footer nav: fetch BOTH `/api/menus` AND `/api/footer-links` in Promise.all — use non-primary menus from `/api/menus` first; if none, fall back to `/api/footer-links` columns — NEVER hardcode links
+⛔ Footer nav: ALWAYS fetch `/api/footer-links` for footer columns. You may also fetch `/api/menus`, but only to read non-primary footer/social groups. If those menu groups are absent, fall back to `/api/footer-links` columns — NEVER hardcode links
 
 **Footer multi-menu rendering — MANDATORY pattern:**
 
@@ -168,12 +168,13 @@ Each column from `/api/footer-links` has shape: `{ heading: string; links: { lab
 
 - `location` = WP theme location slug (e.g. `"primary"` = main nav, `"footer-about"`, `"social"`, etc.)
 - The **Header/Navigation** component owns the `location === "primary"` menu
-- The **Footer** component must fetch BOTH `/api/menus` AND `/api/footer-links` in a single `Promise.all`
+- The **Footer** component must always fetch `/api/footer-links`
+- The **Footer** component may also fetch `/api/menus` in the same `Promise.all`, but only to read non-primary footer/social groups
 - Render priority: non-primary menus from `/api/menus` first; if none, use `/api/footer-links` columns; if neither, render nothing
 - `item.url` from `/api/menus` is already canonical. Use `<Link to={item.url}>` directly — never prefix it.
 
 ```tsx
-// ✅ Correct — fetch both, use footer-links as fallback
+// ✅ Correct — footer-links is mandatory, menus are optional enrichment
 interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; }
 interface Menu { name: string; slug: string; location: string | null; items: MenuItem[]; }
 interface FooterColumn { heading: string; links: { label: string; url: string }[]; }
@@ -295,14 +296,15 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 | `borderRadius`                    | `rounded-[value]` — resolve CSS vars; if unresolvable, omit           |
 | `columnWidth` e.g. `"33.33%"`     | `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}`                |
 | `overlayColor` on cover           | `style={{backgroundColor:'#hex'}}` on overlay div                     |
-| `fontFamily` slug                 | `style={{fontFamily:'actual-family-string'}}`                         |
+| `fontFamily` slug                 | `style={{fontFamily:'actual-family-string'}}` only when that node/block explicitly overrides inherited theme font |
 | `typography` field                | `tracking-[v]` `uppercase` `leading-[v]` `text-[v]` `font-[v]`        |
 | `bgColor` / `textColor`           | `bg-[#hex]` / `text-[#hex]` — NEVER ignore on buttons                 |
 
 ### Theme tokens
 
 - Root wrapper: use theme tokens to reproduce the WordPress layout with Tailwind classes.
-- Body/heading fonts should come from the provided theme tokens and inline `fontFamily` only when needed.
+- Body/heading fonts should come from the provided theme tokens and inherited global CSS first. Do NOT add inline `fontFamily` on the page root or every section by default.
+- Inline `fontFamily` is only for blocks/nodes that explicitly override the inherited theme font.
 - Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
 - **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
 - Headings: exact token size/weight per level (`text-[3rem] font-[700]`)
@@ -445,13 +447,36 @@ Site: {{siteName}} | URL: {{siteUrl}}
 // ✅ Single conditional — no extra brace layer around JSX
 {post.categories?.[0] && <span>{post.categories[0]}</span>}
 {post.author && <span>{post.author}</span>}
+
+// ❌ Section container missing horizontal padding — content touches screen edge on mobile
+<section className="max-w-[1280px] mx-auto w-full flex flex-col gap-[1.2rem]">
+  <h2>Title</h2>
+</section>
+// ✅ ALWAYS add px-4 sm:px-6 lg:px-8 on the content container
+<section className="w-full bg-[#f9f9f9]">
+  <div className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 py-[min(6.5rem,8vw)] flex flex-col gap-[1.2rem]">
+    <h2>Title</h2>
+  </div>
+</section>
+
+// ❌ Arbitrary px value instead of responsive breakpoints
+<div className="max-w-[1280px] mx-auto px-[min(1.5rem,2vw)]">
+// ✅ Use px-4 sm:px-6 lg:px-8 — never substitute with px-[min(...)]
+<div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8">
+
+// ❌ Inline style padding on section — breaks responsive behaviour
+<section style={{ padding: "min(6.5rem, 8vw)" }}>
+// ✅ Use Tailwind classes — never inline style for section padding
+<section className="py-[min(6.5rem,8vw)] px-4 sm:px-6 lg:px-8">
 ```
 
 ## Final self-check before returning code
 
 - If any `className` contains `min(`, `max(`, or `clamp(`, ensure every comma is immediately followed by the next token with no space.
-- Bad: `py-[min(6.5rem, 8vw)]`
-- Good: `py-[min(6.5rem,8vw)]`
+  - Bad: `py-[min(6.5rem, 8vw)]`
+  - Good: `py-[min(6.5rem,8vw)]`
+- Every content section/container that holds text or cards **MUST** have `px-4 sm:px-6 lg:px-8` for horizontal padding. Never use `px-[min(...)]` as a substitute and never omit padding entirely.
+- Never use inline `style={{ padding: ... }}` for section/container padding. Use Tailwind `px-*` and `py-*` classes instead.
 
 ## GOLDEN RULE
 
@@ -487,6 +512,8 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `post-terms`          | `{post.categories[0] && (post.categorySlugs[0] ? <Link to={'/category/' + post.categorySlugs[0]} className="hover:underline underline-offset-4">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}` |
 
 Post list layout: mirror template structure — row layout → `flex items-baseline gap-4` with `flex-1` on title, `whitespace-nowrap shrink-0` on date/meta; card layout → `grid grid-cols-1 gap-6`.
+
+Use the explicit ternary form above for author/category meta. Do not wrap JSX branches in extra braces like `{cond && ({...})}` because that often leads to invalid TSX such as `"," expected`.
 
 ⛔ NEVER invent text not in template or API — leave empty rather than guess.
 
@@ -534,7 +561,8 @@ Rules:
 - `header` should become `<header>` with its child blocks and compound layout.
 - `footer` should become `<footer>` with link columns, menus, site info, and credit elements.
 - Respect block order and spacing (e.g., if header has nav + banner, keep order).
-- Fetch menus from `/api/menus` and render ALL navigation items — never hardcode links.
+- Header/Nav should fetch menus from `/api/menus` and render navigation items — never hardcode links.
+- Footer should always fetch `/api/footer-links`; `/api/menus` is optional and only for non-primary footer/social groups.
 - Do not produce a generic placeholder when the template explicitly defines these blocks.
 
 **For PAGE components** (any other component): ⛔ Do NOT render a `<header>` or `<footer>` — they are provided by the shared Layout wrapper.

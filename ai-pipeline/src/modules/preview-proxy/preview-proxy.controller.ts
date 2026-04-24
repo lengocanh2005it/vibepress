@@ -38,12 +38,16 @@ function forwardRequest(
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode!, proxyRes.headers as Record<string, string>);
+    res.writeHead(
+      proxyRes.statusCode!,
+      proxyRes.headers as Record<string, string>,
+    );
     proxyRes.pipe(res, { end: true });
   });
 
   proxyReq.on('error', () => {
-    if (!res.headersSent) res.status(502).send('Preview server is not responding.');
+    if (!res.headersSent)
+      res.status(502).send('Preview server is not responding.');
   });
 
   (req as any).pipe(proxyReq, { end: true });
@@ -78,7 +82,9 @@ export class PreviewProxyController {
    */
   @All(['/assets/images', '/assets/images/*splat'])
   handleAssets(@Req() req: Request, @Res() res: Response): void {
-    const referer = (req.headers.referer || req.headers.referrer || '') as string;
+    const referer = (req.headers.referer ||
+      req.headers.referrer ||
+      '') as string;
     const match = referer.match(/\/preview\/([^/]+)\//);
 
     if (!match) {

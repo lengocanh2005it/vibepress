@@ -34,6 +34,7 @@ import type {
   WpPost,
   WpSiteInfo,
 } from '../../sql/wp-query.service.js';
+import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
   buildUiSourceMapForProject,
   writeUiSourceMapArtifacts,
@@ -85,6 +86,7 @@ export class PreviewBuilderService {
     siteInfo?: WpSiteInfo;
     tokens?: ThemeTokens;
     plan?: PlanResult;
+    repoManifest?: RepoThemeManifest;
     outputDir?: string;
   }): Promise<PreviewBuilderResult> {
     const {
@@ -96,6 +98,7 @@ export class PreviewBuilderService {
       siteInfo,
       tokens,
       plan,
+      repoManifest,
     } = input;
     const rootDir = input.outputDir ?? join('./temp/generated', jobId);
     const frontendDir = join(rootDir, 'frontend');
@@ -181,6 +184,11 @@ export class PreviewBuilderService {
 
       await writeFile(join(targetDir, `${comp.name}.tsx`), comp.code, 'utf-8');
     }
+
+    await this.applySpectraCompatImport(
+      frontendDir,
+      this.shouldInjectSpectraCompatCss(components.components, repoManifest),
+    );
 
     // 3b. Copy đúng các asset mà component generated đang reference.
     // Điều này tránh case assets/ có tồn tại nhưng thiếu các ảnh con mà JSX dùng.
@@ -334,9 +342,11 @@ export class PreviewBuilderService {
     };
 
     const planRouteMap = new Map<string, string>();
+    const planByComponentName = new Map<string, PlanResult[number]>();
     if (plan) {
       for (const p of plan) {
         if (p.route) planRouteMap.set(p.componentName, p.route);
+        planByComponentName.set(p.componentName, p);
       }
     }
 
@@ -362,8 +372,13 @@ export class PreviewBuilderService {
     const routeEntries: PreviewRouteEntry[] = [];
 
     for (const c of primaryPageComponents) {
+      const componentPlan = planByComponentName.get(c.name);
+      const canonicalFixedPagePath =
+        this.buildFixedPageCanonicalRoute(componentPlan);
       const path =
+        canonicalFixedPagePath ??
         planRouteMap.get(c.name) ??
+        c.route ??
         FALLBACK_ROUTE_MAP[c.name] ??
         `/${c.name.toLowerCase()}`;
       if (usedPaths.has(path)) {
@@ -418,6 +433,7 @@ export class PreviewBuilderService {
     if (notFoundComponent) {
       const notFoundPath =
         planRouteMap.get(notFoundComponent.name) ??
+        notFoundComponent.route ??
         FALLBACK_ROUTE_MAP[notFoundComponent.name] ??
         '*';
       if (!usedPaths.has(notFoundPath)) {
@@ -464,6 +480,7 @@ ${routesBlock}
         tokens,
         content?.dbGlobalStyles ?? [],
         content?.customCssEntries ?? [],
+        themeDir,
       );
     }
 
@@ -510,8 +527,13 @@ ${routesBlock}
     const apiBaseUrl = `http://localhost:${apiPort}/api`;
     await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
     this.logger.log(`Preview ready at: ${previewUrl}`);
-    const publicBase = this.configService.get<string>('automation.previewPublicBaseUrl', '');
-    const publicPreviewUrl = publicBase ? `${publicBase}/preview/${jobId}/` : null;
+    const publicBase = this.configService.get<string>(
+      'automation.previewPublicBaseUrl',
+      '',
+    );
+    const publicPreviewUrl = publicBase
+      ? `${publicBase}/preview/${jobId}/`
+      : null;
     return {
       jobId,
       previewDir: rootDir,
@@ -591,6 +613,7 @@ ${routesBlock}
     tokens: ThemeTokens,
     globalStyles: WpDbGlobalStyle[] = [],
     customCssEntries: WpCustomCssEntry[] = [],
+    themeDir?: string,
   ): Promise<void> {
     // 1. Generate tailwind.config.js với colors từ theme.json
     const colorEntries = tokens.colors
@@ -621,14 +644,13 @@ ${fontEntries}
 `,
     );
 
-    // 2. Inject Google Fonts vào index.html
-    const googleFonts = tokens.fonts
-      .map((f) => f.name)
-      .filter(
-        (name) => !name.startsWith('System') && !name.startsWith('-apple'),
-      )
-      .map((name) => name.replace(/\s+/g, '+'))
-      .filter((v, i, a) => a.indexOf(v) === i);
+    // 2. Prefer locally copied theme fonts via @font-face. Fall back to
+    //    Google Fonts only when the theme does not declare self-hosted faces.
+    const localFontFaceCss = await this.buildLocalThemeFontFaceCss(themeDir);
+    const googleFonts =
+      localFontFaceCss.length === 0
+        ? this.buildGoogleFontQueryNames(tokens.fonts)
+        : [];
 
     if (googleFonts.length > 0) {
       const fontQuery = googleFonts
@@ -638,16 +660,21 @@ ${fontEntries}
 
       const indexPath = join(frontendDir, 'index.html');
       const indexHtml = await readFile(indexPath, 'utf-8');
-      await writeFile(
-        indexPath,
-        indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
-      );
+      if (!indexHtml.includes('fonts.googleapis.com')) {
+        await writeFile(
+          indexPath,
+          indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
+        );
+      }
     }
 
     // 3. Inject theme design tokens into index.css so all components inherit
     //    without relying solely on AI-generated inline styles.
     const d = tokens.defaults;
     const cssLines: string[] = [];
+    if (localFontFaceCss.length > 0) {
+      cssLines.push(...localFontFaceCss);
+    }
 
     const bodyProps: string[] = [];
     if (d?.bgColor) bodyProps.push(`background-color: ${d.bgColor}`);
@@ -656,14 +683,17 @@ ${fontEntries}
     if (d?.fontSize) bodyProps.push(`font-size: ${d.fontSize}`);
     if (d?.lineHeight) bodyProps.push(`line-height: ${d.lineHeight}`);
     if (bodyProps.length > 0)
-      cssLines.push(`body { ${bodyProps.join('; ')}; }`);
+      cssLines.push(`body, .wp-site-blocks { ${bodyProps.join('; ')}; }`);
+    cssLines.push(`button, input, textarea, select { font: inherit; }`);
 
     const headingProps: string[] = [];
     if (d?.headingFontFamily)
       headingProps.push(`font-family: ${d.headingFontFamily}`);
     if (d?.headingColor) headingProps.push(`color: ${d.headingColor}`);
     if (headingProps.length > 0)
-      cssLines.push(`h1, h2, h3, h4, h5, h6 { ${headingProps.join('; ')}; }`);
+      cssLines.push(
+        `h1, h2, h3, h4, h5, h6, .wp-site-blocks :is(h1, h2, h3, h4, h5, h6) { ${headingProps.join('; ')}; }`,
+      );
 
     if (d?.headings) {
       for (const [level, style] of Object.entries(d.headings)) {
@@ -675,7 +705,10 @@ ${fontEntries}
       }
     }
 
-    if (d?.linkColor) cssLines.push(`a { color: ${d.linkColor}; }`);
+    if (d?.linkColor)
+      cssLines.push(
+        `:where(a), :where(.wp-site-blocks) a { color: ${d.linkColor}; }`,
+      );
 
     if (cssLines.length > 0) {
       const cssPath = join(frontendDir, 'src', 'index.css');
@@ -694,6 +727,162 @@ ${fontEntries}
 
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
+  }
+
+  private async buildLocalThemeFontFaceCss(
+    themeDir?: string,
+  ): Promise<string[]> {
+    if (!themeDir) return [];
+
+    try {
+      const themeJsonPath = join(themeDir, 'theme.json');
+      const themeJson = JSON.parse(await readFile(themeJsonPath, 'utf-8')) as {
+        settings?: {
+          typography?: {
+            fontFamilies?: Array<{
+              fontFace?: Array<Record<string, unknown>>;
+            }>;
+          };
+        };
+      };
+
+      const fontFamilies = Array.isArray(
+        themeJson?.settings?.typography?.fontFamilies,
+      )
+        ? themeJson.settings.typography.fontFamilies
+        : [];
+
+      const rules: string[] = [];
+      for (const family of fontFamilies) {
+        const faces = Array.isArray(family?.fontFace) ? family.fontFace : [];
+        for (const face of faces) {
+          const fontFamily =
+            typeof face?.fontFamily === 'string' ? face.fontFamily.trim() : '';
+          if (!fontFamily) continue;
+
+          const srcValues = Array.isArray(face?.src)
+            ? face.src
+            : face?.src
+              ? [face.src]
+              : [];
+          const srcEntries = srcValues
+            .map((value) => this.toThemeFontFaceSrc(value))
+            .filter((value): value is string => !!value);
+          if (srcEntries.length === 0) continue;
+
+          const declarations = [
+            `font-family: ${JSON.stringify(fontFamily)}`,
+            `src: ${srcEntries.join(', ')}`,
+            `font-display: swap`,
+          ];
+
+          if (typeof face?.fontStyle === 'string' && face.fontStyle.trim()) {
+            declarations.push(`font-style: ${face.fontStyle.trim()}`);
+          }
+          if (typeof face?.fontWeight === 'string' && face.fontWeight.trim()) {
+            declarations.push(`font-weight: ${face.fontWeight.trim()}`);
+          }
+          if (
+            typeof face?.fontStretch === 'string' &&
+            face.fontStretch.trim()
+          ) {
+            declarations.push(`font-stretch: ${face.fontStretch.trim()}`);
+          }
+
+          rules.push(`@font-face { ${declarations.join('; ')}; }`);
+        }
+      }
+
+      return rules;
+    } catch {
+      return [];
+    }
+  }
+
+  private toThemeFontFaceSrc(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+
+    if (/^local\(/i.test(trimmed)) return trimmed;
+
+    const format = this.inferFontFaceFormat(trimmed);
+    const formatSuffix = format ? ` format(${JSON.stringify(format)})` : '';
+
+    if (trimmed.startsWith('file:./assets/')) {
+      const relativePath = trimmed.slice('file:./assets/'.length);
+      return `url(${JSON.stringify(`../assets/${relativePath}`)})${formatSuffix}`;
+    }
+
+    if (/^https?:\/\//i.test(trimmed)) {
+      return `url(${JSON.stringify(trimmed)})${formatSuffix}`;
+    }
+
+    return undefined;
+  }
+
+  private inferFontFaceFormat(value: string): string | undefined {
+    const cleanValue = value.split('#')[0].split('?')[0];
+    const extension = extname(cleanValue).toLowerCase();
+    switch (extension) {
+      case '.woff2':
+        return 'woff2';
+      case '.woff':
+        return 'woff';
+      case '.ttf':
+        return 'truetype';
+      case '.otf':
+        return 'opentype';
+      case '.eot':
+        return 'embedded-opentype';
+      default:
+        return undefined;
+    }
+  }
+
+  private buildGoogleFontQueryNames(fonts: ThemeTokens['fonts']): string[] {
+    return fonts
+      .map((font) => this.extractGoogleFontName(font))
+      .filter((name): name is string => Boolean(name))
+      .map((name) => name.replace(/\s+/g, '+'))
+      .filter((value, index, array) => array.indexOf(value) === index);
+  }
+
+  private extractGoogleFontName(
+    font: ThemeTokens['fonts'][number],
+  ): string | undefined {
+    const fallbackName = font.family.split(',')[0] ?? '';
+    const name = (font.name || fallbackName).trim().replace(/^['"]|['"]$/g, '');
+    if (!name) return undefined;
+
+    const normalized = name.toLowerCase();
+    const genericFamilies = new Set([
+      'serif',
+      'sans-serif',
+      'monospace',
+      'cursive',
+      'fantasy',
+      'system-ui',
+      'emoji',
+      'math',
+      'fangsong',
+      'inherit',
+      'initial',
+      'unset',
+    ]);
+
+    if (
+      normalized.startsWith('system') ||
+      normalized.startsWith('-apple') ||
+      normalized.includes('var(') ||
+      normalized.includes(',') ||
+      genericFamilies.has(normalized) ||
+      /[^a-z0-9 .&+-]/i.test(name)
+    ) {
+      return undefined;
+    }
+
+    return name;
   }
 
   private async applyWordPressCustomCss(
@@ -727,6 +916,78 @@ ${fontEntries}
 
     const block = `${marker}\n${normalizedCustomCss}\n`;
     await writeFile(cssPath, `${existingCss.trimEnd()}\n\n${block}`);
+  }
+
+  private shouldInjectSpectraCompatCss(
+    components: ReactGenerateResult['components'],
+    repoManifest?: RepoThemeManifest,
+  ): boolean {
+    const pluginSlugs = new Set<string>(
+      (repoManifest?.uagbSummary?.mergedPluginSlugs ?? []).map((slug) =>
+        slug.toLowerCase(),
+      ),
+    );
+    const knownSpectraPluginPresent =
+      pluginSlugs.has('ultimate-addons-for-gutenberg') ||
+      pluginSlugs.has('spectra') ||
+      repoManifest?.plugins.some((plugin) => {
+        const slug = plugin.slug.toLowerCase();
+        return slug === 'ultimate-addons-for-gutenberg' || slug === 'spectra';
+      }) === true;
+
+    if (!knownSpectraPluginPresent) return false;
+
+    const spectraMarkerPattern =
+      /\buagb-(?:modal|tabs|faq|slider|swiper|icon)\b|\bwp-block-uagb-faq\b|\bswiper-(?:wrapper|slide|button-prev|button-next|pagination|pagination-bullet(?:-active)?)\b|\bhide-scroll\b/;
+
+    return components.some((component) =>
+      spectraMarkerPattern.test(component.code),
+    );
+  }
+
+  private async applySpectraCompatImport(
+    frontendDir: string,
+    enabled: boolean,
+  ): Promise<void> {
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const importLine = `@import './styles/spectra-compat.css';`;
+    const existingCss = await readFile(cssPath, 'utf-8');
+
+    if (!enabled) {
+      if (!existingCss.includes(importLine)) return;
+      await writeFile(
+        cssPath,
+        existingCss
+          .replace(`${importLine}\r\n`, '')
+          .replace(`${importLine}\n`, '')
+          .replace(importLine, ''),
+        'utf-8',
+      );
+      return;
+    }
+
+    if (existingCss.includes(importLine)) return;
+
+    const lines = existingCss.split(/\r?\n/);
+    const firstDirectiveIndex = lines.findIndex((line) =>
+      [
+        '@tailwind base;',
+        '@tailwind components;',
+        '@tailwind utilities;',
+      ].includes(line.trim()),
+    );
+
+    if (firstDirectiveIndex >= 0) {
+      lines.splice(firstDirectiveIndex, 0, importLine);
+      await writeFile(cssPath, `${lines.join('\n').trimEnd()}\n`, 'utf-8');
+      return;
+    }
+
+    await writeFile(
+      cssPath,
+      `${importLine}\n${existingCss.trimStart()}`,
+      'utf-8',
+    );
   }
 
   private normalizeWordPressCustomCssSelectors(css: string): string {
@@ -966,8 +1227,26 @@ ${fontEntries}
       'is-style-rounded': `
 .is-style-rounded img, img.is-style-rounded { border-radius: min(1.5rem, 2vw); }`,
 
+      'is-style-wide': `
+:is(div, section, article, main, aside, header, footer, ul, ol).is-style-wide {
+  width: 100%;
+  max-width: none;
+}
+:is(hr, .wp-block-separator).is-style-wide,
+.is-style-wide :is(hr, .wp-block-separator) {
+  width: 100%;
+  max-width: none;
+}`,
+
       'is-style-outline': `
-.is-style-outline, .is-style-outline.vp-generated-button { background: transparent; border: 2px solid currentColor; }`,
+.is-style-outline,
+.is-style-outline.vp-generated-button,
+.vp-generated-button.is-style-outline,
+.vp-generated-link.is-style-outline {
+  color: inherit;
+  background: transparent;
+  border: 2px solid currentColor;
+}`,
 
       'is-style-fill': ``,
       'is-style-default': ``,
@@ -1027,6 +1306,16 @@ ${fontEntries}
       return renderStateRule(selectorList, state);
     };
 
+    const omitGenericButtonColorState = (
+      state?: ThemeInteractionState,
+    ): ThemeInteractionState | undefined => {
+      if (!state) return undefined;
+      const next: ThemeInteractionState = { ...state };
+      delete next.color;
+      delete next.backgroundColor;
+      return Object.keys(next).length > 0 ? next : undefined;
+    };
+
     // Collect precise bridges by target for per-target CSS overrides
     const preciseBridges = tokens.interactions?.precise ?? [];
     const imagePrecise = preciseBridges.filter((b) => b.target === 'image');
@@ -1040,18 +1329,21 @@ ${fontEntries}
       // Button generic bridge
       ...(buttonInteraction
         ? [
-            renderStateRule('.vp-generated-button', buttonInteraction.base),
+            renderStateRule(
+              '.vp-generated-button',
+              omitGenericButtonColorState(buttonInteraction.base),
+            ),
             renderStateRule(
               '.vp-generated-button:hover',
-              buttonInteraction.hover,
+              omitGenericButtonColorState(buttonInteraction.hover),
             ),
             renderStateRule(
               '.vp-generated-button:focus, .vp-generated-button:focus-visible',
-              buttonInteraction.focus,
+              omitGenericButtonColorState(buttonInteraction.focus),
             ),
             renderStateRule(
               '.vp-generated-button:active',
-              buttonInteraction.active,
+              omitGenericButtonColorState(buttonInteraction.active),
             ),
           ]
         : []),
@@ -1833,7 +2125,9 @@ ${fontEntries}
         process.kill(-proc.pid!, 'SIGTERM');
       } catch {}
     }, ttlMs).unref();
-    this.logger.log(`Dev server started (pid=${proc.pid}) in ${dir}, TTL=${ttlMs / 60000}m`);
+    this.logger.log(
+      `Dev server started (pid=${proc.pid}) in ${dir}, TTL=${ttlMs / 60000}m`,
+    );
     return proc;
   }
 
@@ -2049,5 +2343,16 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
+  }
+
+  private buildFixedPageCanonicalRoute(
+    componentPlan?: PlanResult[number],
+  ): string | null {
+    if (!componentPlan) return null;
+    if (componentPlan.type !== 'page') return null;
+    if (!componentPlan.isDetail) return null;
+    if (!componentPlan.fixedSlug?.trim()) return null;
+    if (!componentPlan.dataNeeds.includes('page-detail')) return null;
+    return `/page/${componentPlan.fixedSlug.trim()}`;
   }
 }

@@ -43,6 +43,14 @@ export function buildPlanPrompt(
         .join('\n'),
     )
     .replace(
+      '{{readingSettings}}',
+      [
+        `- show_on_front: ${content.readingSettings?.showOnFront ?? 'posts'}`,
+        `- page_on_front: ${content.readingSettings?.pageOnFrontId ?? '(none)'}`,
+        `- page_for_posts: ${content.readingSettings?.pageForPostsId ?? '(none)'}`,
+      ].join('\n'),
+    )
+    .replace(
       '{{menus}}',
       content.menus
         .map((m) => `- ${m.name}: ${m.items.length} items`)

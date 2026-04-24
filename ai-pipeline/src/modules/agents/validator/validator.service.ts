@@ -2,10 +2,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { spawn } from 'child_process';
 import ts from 'typescript';
-import puppeteer, { type Page } from 'puppeteer';
+import puppeteer, { type HTTPRequest, type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
+import type {
+  CardGridSection,
+  ComponentVisualPlan,
+  CoverSection,
+  CtaStripSection,
+  HeroSection,
+  MediaTextSection,
+  ModalSection,
+  NewsletterSection,
+  PostListSection,
+  SectionPlan,
+  TabsSection,
+  AccordionSection,
+  TestimonialSection,
+} from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import {
+  findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets,
+  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
+  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
+} from '../../../common/utils/post-meta-link.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
 const VIRTUAL_MAIN_FILE = `${VIRTUAL_ROOT}/src/main.tsx`;
 const VIRTUAL_APP_FILE = `${VIRTUAL_ROOT}/src/App.tsx`;
@@ -31,6 +51,7 @@ export interface CodeValidationContext {
   componentName?: string;
   route?: string | null;
   isDetail?: boolean;
+  fixedSlug?: string;
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   isSubComponent?: boolean;
@@ -38,6 +59,7 @@ export interface CodeValidationContext {
   requireCommentForm?: boolean;
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
+  visualPlan?: ComponentVisualPlan;
 }
 
 export interface ComponentValidationFailure {
@@ -92,11 +114,13 @@ export class ValidatorService {
         componentName: comp.name,
         route: comp.route,
         isDetail: comp.isDetail,
+        fixedSlug: comp.fixedSlug,
         dataNeeds: comp.dataNeeds,
         type: comp.type,
         isSubComponent: comp.isSubComponent,
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
+        visualPlan: comp.visualPlan,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -161,8 +185,8 @@ export class ValidatorService {
         runtimeErrors.push(`console error: ${text}`);
       });
       page.on('requestfailed', (request) => {
+        if (this.shouldIgnoreRequestFailure(request)) return;
         const url = request.url();
-        if (this.shouldIgnoreRequestFailure(url)) return;
         runtimeErrors.push(
           `request failed: ${request.method()} ${url} (${request.failure()?.errorText ?? 'unknown'})`,
         );
@@ -234,6 +258,7 @@ export class ValidatorService {
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
     let code = this.sanitizeGeneratedCode(rawCode);
+    code = this.tryAutoFixTrackingAttributes(code, context.visualPlan);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -258,6 +283,18 @@ export class ValidatorService {
         isValid: false,
         error:
           'Missing `export default` — component is truncated or incomplete.',
+      };
+    }
+
+    const visualPlanIssue = this.checkVisualPlanFidelity(
+      code,
+      context.visualPlan,
+      context.componentName,
+    );
+    if (visualPlanIssue) {
+      return {
+        isValid: false,
+        error: visualPlanIssue,
       };
     }
 
@@ -389,6 +426,7 @@ export class ValidatorService {
       'post-detail': 'postDetail',
       'page-detail': 'pageDetail',
       'site-info': 'siteInfo',
+      'footer-links': 'footerLinks',
     };
     const violations: string[] = [];
     const dataNeeds = new Set(
@@ -398,6 +436,8 @@ export class ValidatorService {
     const expectsPageDetail = dataNeeds.has('pageDetail');
     const expectsAnyDetail =
       context.isDetail === true || expectsPostDetail || expectsPageDetail;
+    const fixedSlug = context.fixedSlug?.trim();
+    const hasFixedSlug = Boolean(fixedSlug);
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
     const allowsArchiveAliasParams =
       /^Archive$/i.test(context.componentName ?? '') &&
@@ -482,6 +522,45 @@ export class ValidatorService {
         `Invalid Tailwind class \`${numericMatch[0]}\`: numeric values need brackets — write \`gap-[1rem]\` not \`gap-1rem\`.`,
       );
     }
+    if (
+      context.visualPlan?.sections.some(
+        (section) => section.type === 'carousel',
+      )
+    ) {
+      if (this.rendersStaticCarouselTrack(code)) {
+        violations.push(
+          'Carousel section renders a static `.swiper-wrapper` without any active-slide transform. Bind the track to `activeCarousels[...]` (or equivalent state) so prev/next/dots move the carousel instead of stacking all slides.',
+        );
+      }
+      if (this.hasEmptySwiperControlButton(code)) {
+        violations.push(
+          'Carousel control button is empty. `swiper-button-prev` and `swiper-button-next` must render a visible icon/text child because the preview does not load default Swiper arrow glyphs.',
+        );
+      }
+      const carouselStateIssue = this.findInteractiveStateKeyMismatch(
+        code,
+        'activeCarousels',
+      );
+      if (carouselStateIssue) {
+        violations.push(
+          `Carousel state key mismatch: ${carouselStateIssue}. Reuse one exact carousel key consistently across autoplay effects, track transform, arrows, dots, and swipe handlers.`,
+        );
+      }
+    }
+
+    if (
+      context.visualPlan?.sections.some((section) => section.type === 'modal')
+    ) {
+      const modalStateIssue = this.findInteractiveStateKeyMismatch(
+        code,
+        'openModals',
+      );
+      if (modalStateIssue) {
+        violations.push(
+          `Modal state key mismatch: ${modalStateIssue}. Reuse one exact modal key consistently for trigger, conditional popup render, overlay close, and ESC close behavior.`,
+        );
+      }
+    }
 
     // 10. Wrong siteInfo field names
     const siteInfoMatch = code.match(/\bsiteInfo\.(name|url|description)\b/);
@@ -530,7 +609,7 @@ export class ValidatorService {
       }
       if (this.fetchesSharedChromeData(code)) {
         violations.push(
-          'Layout data contract violated: page components must NOT fetch `/api/site-info` or `/api/menus` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
+          'Layout data contract violated: page components must NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` for shared site chrome. Move that logic into dedicated Header/Footer/Navigation partials.',
         );
       }
       if (this.usesSharedChromeData(code)) {
@@ -576,12 +655,13 @@ export class ValidatorService {
           code,
         );
       if (
+        isHeaderLikePartial &&
         dataNeeds.has('menus') &&
         !/\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) &&
         !/\bmenu\.items\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Header/Footer/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
+          'Shared chrome contract violated: Header/Navigation partials that declare `menus` must render menu data from `/api/menus`, not hardcoded link columns.',
         );
       }
       if (usesSiteTitle && !hasHomeLinkForBrand) {
@@ -614,17 +694,12 @@ export class ValidatorService {
         !/fetch\(\s*['"`]\/api\/footer-links\b/.test(code)
       ) {
         violations.push(
-          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and use those columns as the fallback when `/api/menus` has no footer/social groups.',
+          'Shared chrome contract violated: Footer must fetch `/api/footer-links` and render its footer columns from that API, not from `/api/menus`.',
         );
       }
-      if (
-        isFooterPartial &&
-        dataNeeds.has('menus') &&
-        !/location\s*!==\s*['"]primary['"]/.test(code) &&
-        !/slug\s*!==\s*['"]primary['"]/.test(code)
-      ) {
+      if (isFooterPartial && dataNeeds.has('menus')) {
         violations.push(
-          'Shared chrome contract violated: Footer must exclude the primary navigation menu (`location !== "primary"` and slug fallback) and render only footer/social menu groups.',
+          'Shared chrome contract violated: Footer must not declare `menus`. Use `footerLinks` for footer columns instead.',
         );
       }
     }
@@ -686,7 +761,7 @@ export class ValidatorService {
     // This avoids false positives when static text content in section headings or
     // body copy happens to contain the word (e.g. "Browse all pages and posts.").
     // "all pages." → `pages.` is followed by a space, not \w → no match.
-    const dataVars = ['menus', 'posts', 'pages', 'siteInfo'];
+    const dataVars = ['menus', 'posts', 'pages', 'siteInfo', 'footerColumns'];
     const missingState: string[] = [];
     for (const varName of dataVars) {
       const jsUsage = new RegExp(
@@ -715,9 +790,14 @@ export class ValidatorService {
       context.isSubComponent === true ||
       isPartialComponent;
     if (!skipRouteDataContractChecks) {
-      if (expectsAnyDetail && !/\buseParams\s*</.test(code)) {
+      if (expectsAnyDetail && !hasFixedSlug && !/\buseParams\s*</.test(code)) {
         violations.push(
           'Detail component is missing `useParams<{ slug: string }>()` for slug-based routing.',
+        );
+      }
+      if (hasFixedSlug && /\buseParams\s*</.test(code)) {
+        violations.push(
+          `Component is bound to the fixed slug \`${fixedSlug}\` and must not import or call \`useParams()\`. Use \`const slug = "${fixedSlug}"\` or fetch the exact endpoint directly.`,
         );
       }
       if (!effectiveRouteHasParams && /\buseParams\s*</.test(code)) {
@@ -725,30 +805,54 @@ export class ValidatorService {
           'Component uses `useParams()` even though its planned route has no URL params.',
         );
       }
-      if (expectsPostDetail && !this.matchesDetailFetch(code, 'posts')) {
+      if (
+        expectsPostDetail &&
+        !(hasFixedSlug
+          ? this.matchesExactDetailFetch(code, 'posts', fixedSlug!)
+          : this.matchesDetailFetch(code, 'posts'))
+      ) {
         violations.push(
-          'Post detail component must fetch the record via `/api/posts/${slug}` (or equivalent string concatenation with `slug`).',
+          hasFixedSlug
+            ? `Post detail component must fetch the exact bound record via \`/api/posts/${fixedSlug}\`.`
+            : 'Post detail component must fetch the record via `/api/posts/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
-      if (expectsPageDetail && !this.matchesDetailFetch(code, 'pages')) {
+      if (
+        expectsPageDetail &&
+        !(hasFixedSlug
+          ? this.matchesExactDetailFetch(code, 'pages', fixedSlug!)
+          : this.matchesDetailFetch(code, 'pages'))
+      ) {
         violations.push(
-          'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
+          hasFixedSlug
+            ? `Page detail component must fetch the exact bound record via \`/api/pages/${fixedSlug}\`.`
+            : 'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
       if (
         !dataNeeds.has('postDetail') &&
-        this.matchesDetailFetch(code, 'posts')
+        this.matchesAnyDetailFetch(code, 'posts')
       ) {
         violations.push(
-          'Component fetches `/api/posts/${slug}` even though its plan does not require post detail data.',
+          'Component fetches a post detail endpoint even though its plan does not require post detail data.',
         );
       }
       if (
         !dataNeeds.has('pageDetail') &&
-        this.matchesDetailFetch(code, 'pages')
+        this.matchesAnyDetailFetch(code, 'pages')
       ) {
         violations.push(
-          'Component fetches `/api/pages/${slug}` even though its plan does not require page detail data.',
+          'Component fetches a page detail endpoint even though its plan does not require page detail data.',
+        );
+      }
+      if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'posts')) {
+        violations.push(
+          `Fixed-slug component must not fetch dynamic post detail via \`/api/posts/\${slug}\`. Fetch only \`/api/posts/${fixedSlug}\`.`,
+        );
+      }
+      if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'pages')) {
+        violations.push(
+          `Fixed-slug component must not fetch dynamic page detail via \`/api/pages/\${slug}\`. Fetch only \`/api/pages/${fixedSlug}\`.`,
         );
       }
     }
@@ -817,6 +921,700 @@ export class ValidatorService {
       isValid: true,
       ...(code !== rawCode ? { fixedCode: code } : {}),
     };
+  }
+
+  checkInlineSectionFidelity(
+    code: string,
+    section: SectionPlan,
+    componentName?: string,
+    sectionNumber?: number,
+  ): string | null {
+    const sectionLabel = `"${componentName ?? 'Component'}" section ${sectionNumber ?? 1}`;
+    const issues: string[] = [];
+
+    if (section.sectionKey && !code.includes(section.sectionKey)) {
+      issues.push(
+        `${sectionLabel} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
+      );
+    }
+
+    if (
+      section.sourceRef?.sourceNodeId &&
+      !code.includes(section.sourceRef.sourceNodeId)
+    ) {
+      issues.push(
+        `${sectionLabel} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
+      );
+    }
+
+    issues.push(
+      ...this.checkSectionPayloadFidelity(code, section, sectionLabel, true),
+    );
+    if (issues.length === 0) return null;
+    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+  }
+
+  private checkVisualPlanFidelity(
+    code: string,
+    visualPlan?: ComponentVisualPlan,
+    componentName?: string,
+  ): string | null {
+    if (!visualPlan?.sections?.length) return null;
+
+    const issues: string[] = [];
+    const sectionKeyMatches = [
+      ...code.matchAll(/data-vp-section-key=["']([^"']+)["']/g),
+    ].map((match) => match[1]);
+    const renderedSectionKeys = new Set(sectionKeyMatches);
+
+    for (const [index, section] of visualPlan.sections.entries()) {
+      const label = `"${componentName ?? visualPlan.componentName}" section ${index + 1}`;
+      // Tracking attribute gaps are patched deterministically by tryAutoFixTrackingAttributes
+      // before the first validation attempt — skip them here to avoid burning retries.
+      if (section.sectionKey && !renderedSectionKeys.has(section.sectionKey)) {
+        issues.push(
+          `${label} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
+        );
+      }
+
+      if (
+        section.sourceRef?.sourceNodeId &&
+        !code.includes(section.sourceRef.sourceNodeId)
+      ) {
+        issues.push(
+          `${label} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
+        );
+      }
+
+      issues.push(...this.checkSectionPayloadFidelity(code, section, label));
+    }
+
+    if (issues.length === 0) return null;
+    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+  }
+
+  /**
+   * Deterministically inject missing data-vp-section-key / data-vp-source-node attributes
+   * onto section wrappers before validation runs, eliminating the need for LLM retries
+   * when the only missing things are tracking attributes.
+   *
+   * Strategy: for each section in the visual plan that has a sectionKey or sourceNodeId,
+   * find the Nth top-level JSX element inside the return block and inject the attributes.
+   */
+  tryAutoFixTrackingAttributes(
+    code: string,
+    visualPlan?: ComponentVisualPlan,
+  ): string {
+    if (!visualPlan?.sections?.length) return code;
+
+    let result = code;
+
+    for (const section of visualPlan.sections) {
+      const { sectionKey, sourceRef } = section;
+      const sourceNodeId = sourceRef?.sourceNodeId;
+      const templateName = sourceRef?.templateName;
+      const sourceFile = sourceRef?.sourceFile;
+
+      if (!sectionKey && !sourceNodeId) continue;
+
+      // Skip if already present
+      const hasKey =
+        !sectionKey || result.includes(`data-vp-section-key="${sectionKey}"`);
+      const hasNode = !sourceNodeId || result.includes(sourceNodeId);
+      if (hasKey && hasNode) continue;
+
+      // Build the attributes to inject
+      const attrs: string[] = [];
+      if (sectionKey && !hasKey)
+        attrs.push(`data-vp-section-key="${sectionKey}"`);
+      if (sourceNodeId && !hasNode) {
+        attrs.push(`data-vp-source-node="${sourceNodeId}"`);
+        if (templateName) attrs.push(`data-vp-template="${templateName}"`);
+        if (sourceFile) attrs.push(`data-vp-source-file="${sourceFile}"`);
+      }
+      if (attrs.length === 0) continue;
+      const attrBlock = ' ' + attrs.join(' ');
+
+      // Find the first top-level JSX element in the return block and inject attrs.
+      // Pattern: the outermost opening tag — either <TagName or <TagName\n — inside return (
+      result = result.replace(
+        /(\breturn\s*\(\s*\n?\s*<([A-Za-z][A-Za-z0-9]*)\b)([^>]*?>)/s,
+        (_match, returnOpen, _tag, rest) => {
+          // rest may be multi-line up to the closing >
+          // inject attrs just before the closing >
+          return returnOpen + rest.replace(/>$/, attrBlock + '>');
+        },
+      );
+    }
+
+    return result;
+  }
+
+  private checkSectionPayloadFidelity(
+    code: string,
+    section: SectionPlan,
+    label: string,
+    isInlineSection = false,
+  ): string[] {
+    switch (section.type) {
+      case 'hero':
+        return this.checkHeroPayload(code, section, label);
+      case 'cta-strip':
+        return this.checkCtaStripPayload(code, section, label);
+      case 'cover':
+        return this.checkCoverPayload(code, section, label);
+      case 'media-text':
+        return this.checkMediaTextPayload(code, section, label);
+      case 'card-grid':
+        return this.checkCardGridPayload(code, section, label);
+      case 'modal':
+        return this.checkModalPayload(code, section, label, isInlineSection);
+      case 'tabs':
+        return this.checkTabsPayload(code, section, label);
+      case 'accordion':
+        return this.checkAccordionPayload(code, section, label);
+      case 'testimonial':
+        return this.checkTestimonialPayload(code, section, label);
+      case 'newsletter':
+        return this.checkNewsletterPayload(code, section, label);
+      case 'post-list':
+        return this.checkPostListPayload(code, section, label);
+      default:
+        return [];
+    }
+  }
+
+  private checkHeroPayload(
+    code: string,
+    section: HeroSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost hero heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost hero subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireSectionCtasIfPresent(
+        code,
+        section,
+        `${label} lost hero CTA text`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.image?.src,
+        `${label} lost hero image src`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkCtaStripPayload(
+    code: string,
+    section: CtaStripSection,
+    label: string,
+  ): string[] {
+    return this.requireSectionCtasIfPresent(
+      code,
+      section,
+      `${label} lost cta-strip CTA text`,
+    );
+  }
+
+  private checkCoverPayload(
+    code: string,
+    section: CoverSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost cover image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost cover heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost cover subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireSectionCtasIfPresent(
+        code,
+        section,
+        `${label} lost cover CTA text`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkMediaTextPayload(
+    code: string,
+    section: MediaTextSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost media-text image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost media-text heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.body,
+        `${label} lost media-text body`,
+      ),
+    );
+    issues.push(
+      ...this.requireSectionCtasIfPresent(
+        code,
+        section,
+        `${label} lost media-text CTA text`,
+      ),
+    );
+    for (const item of section.listItems ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item,
+          `${label} lost media-text list item`,
+        ),
+      );
+    }
+    return issues;
+  }
+
+  private checkCardGridPayload(
+    code: string,
+    section: CardGridSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost card-grid title`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subtitle,
+        `${label} lost card-grid subtitle`,
+      ),
+    );
+
+    for (const card of section.cards ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          card.heading,
+          `${label} lost card heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          card.body,
+          `${label} lost card body`,
+        ),
+      );
+    }
+    return issues;
+  }
+
+  private checkModalPayload(
+    code: string,
+    section: ModalSection,
+    label: string,
+    isInlineSection = false,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.triggerText,
+        `${label} lost modal trigger text`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost modal heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.body,
+        `${label} lost modal body`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.imageSrc,
+        `${label} lost modal image src`,
+      ),
+    );
+    issues.push(
+      ...this.requireSectionCtasIfPresent(
+        code,
+        section,
+        `${label} lost modal CTA text`,
+      ),
+    );
+    const hasTrigger = /\buagb-modal-trigger\b/.test(code);
+    const hasPopupOverlay = /\buagb-modal-popup\b/.test(code);
+    const hasPopupContent = /\buagb-modal-popup-content\b/.test(code);
+    const hasDialogSemantics =
+      /\baria-modal\s*=\s*{?true}?|\baria-modal\s*=\s*["']true["']|\brole\s*=\s*["']dialog["']/.test(
+        code,
+      );
+    const hasPopupAffordance =
+      hasPopupOverlay || hasPopupContent || hasDialogSemantics;
+
+    if (
+      !hasTrigger ||
+      !(isInlineSection ? hasPopupAffordance : hasPopupOverlay)
+    ) {
+      issues.push(
+        `${label} modal must render a trigger button and conditional popup overlay`,
+      );
+    }
+    if (
+      hasPopupContent &&
+      !/\bopenModals\b/.test(code) &&
+      !/setOpenModals/.test(code) &&
+      !isInlineSection
+    ) {
+      issues.push(`${label} modal popup appears inline instead of interactive`);
+    }
+    return issues;
+  }
+
+  private requireSectionCtasIfPresent(
+    code: string,
+    section: { cta?: { text?: string }; ctas?: Array<{ text?: string }> },
+    reason: string,
+  ): string[] {
+    const raw =
+      Array.isArray(section.ctas) && section.ctas.length > 0
+        ? section.ctas
+        : section.cta
+          ? [section.cta]
+          : [];
+    const seen = new Set<string>();
+    return raw.flatMap((cta) => {
+      const text = typeof cta?.text === 'string' ? cta.text : undefined;
+      if (!text || seen.has(text)) return [];
+      seen.add(text);
+      return this.requireLiteralIfPresent(code, text, reason);
+    });
+  }
+
+  private checkTabsPayload(
+    code: string,
+    section: TabsSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost tabs title`,
+      ),
+    );
+    for (const tab of section.tabs ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.label,
+          `${label} lost tab label`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.heading,
+          `${label} lost tab heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.body,
+          `${label} lost tab body`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.imageSrc,
+          `${label} lost tab image src`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          tab.cta?.text,
+          `${label} lost tab CTA text`,
+        ),
+      );
+    }
+    return issues;
+  }
+
+  private checkAccordionPayload(
+    code: string,
+    section: AccordionSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.title,
+        `${label} lost accordion title`,
+      ),
+    );
+    for (const item of section.items ?? []) {
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item.heading,
+          `${label} lost accordion heading`,
+        ),
+      );
+      issues.push(
+        ...this.requireLiteralIfPresent(
+          code,
+          item.body,
+          `${label} lost accordion body`,
+        ),
+      );
+    }
+    return issues;
+  }
+
+  private checkTestimonialPayload(
+    code: string,
+    section: TestimonialSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.quote,
+        `${label} lost testimonial quote`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorName,
+        `${label} lost testimonial author`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorTitle,
+        `${label} lost testimonial author title`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.authorAvatar,
+        `${label} lost testimonial avatar`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkNewsletterPayload(
+    code: string,
+    section: NewsletterSection,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.heading,
+        `${label} lost newsletter heading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.subheading,
+        `${label} lost newsletter subheading`,
+      ),
+    );
+    issues.push(
+      ...this.requireLiteralIfPresent(
+        code,
+        section.buttonText,
+        `${label} lost newsletter button text`,
+      ),
+    );
+    return issues;
+  }
+
+  private checkPostListPayload(
+    code: string,
+    section: PostListSection,
+    label: string,
+  ): string[] {
+    if (this.isDynamicPlanBinding(section.title)) {
+      return [];
+    }
+    return this.requireLiteralIfPresent(
+      code,
+      section.title,
+      `${label} lost post-list title`,
+    );
+  }
+
+  private isDynamicPlanBinding(value?: string): boolean {
+    const normalized = value?.trim();
+    return Boolean(
+      normalized &&
+      (/^\{[a-zA-Z0-9_.]+\}$/.test(normalized) ||
+        /\{[a-zA-Z0-9_.]+\}/.test(normalized)),
+    );
+  }
+
+  private requireLiteralIfPresent(
+    code: string,
+    value: string | undefined,
+    error: string,
+  ): string[] {
+    const normalized = value?.trim();
+    if (!normalized) return [];
+    if (this.isDynamicPlanBinding(normalized)) return [];
+    if (code.includes(normalized)) return [];
+    if (this.codeSemanticallyContainsLiteral(code, normalized)) return [];
+    const preview =
+      normalized.length > 120
+        ? `${normalized.slice(0, 117).trimEnd()}...`
+        : normalized;
+    return [`${error}: ${JSON.stringify(preview)}`];
+  }
+
+  private codeSemanticallyContainsLiteral(
+    code: string,
+    literal: string,
+  ): boolean {
+    const normalizedLiteral = this.normalizeLiteralSearchText(literal);
+    if (!normalizedLiteral) return true;
+
+    const normalizedCode = this.normalizeLiteralSearchText(code);
+    if (normalizedCode.includes(normalizedLiteral)) return true;
+    if (this.codeContainsEquivalentAssetLiteral(code, literal)) return true;
+
+    const paragraphParts = normalizedLiteral
+      .split(/\n\s*\n/)
+      .map((part) => this.normalizeLiteralSearchText(part))
+      .filter(Boolean);
+    if (paragraphParts.length > 1) {
+      return paragraphParts.every((part) => normalizedCode.includes(part));
+    }
+
+    return false;
+  }
+
+  private codeContainsEquivalentAssetLiteral(
+    code: string,
+    literal: string,
+  ): boolean {
+    if (!/\/wp-content\/uploads\//i.test(literal)) return false;
+
+    const fileName = this.extractLiteralFileName(literal);
+    if (!fileName) return false;
+
+    const escapedFileName = this.escapeRegExp(fileName);
+    const localAssetPatterns = [
+      new RegExp(`/assets/images/[^"'\\s)\\]}]*${escapedFileName}`, 'i'),
+      new RegExp(`/assets/[^"'\\s)\\]}]*${escapedFileName}`, 'i'),
+    ];
+
+    return localAssetPatterns.some((pattern) => pattern.test(code));
+  }
+
+  private extractLiteralFileName(literal: string): string | null {
+    const trimmed = literal.trim();
+    if (!trimmed) return null;
+
+    try {
+      const pathname = new URL(trimmed).pathname;
+      const fileName = pathname.split('/').pop()?.trim();
+      return fileName || null;
+    } catch {
+      const normalized = trimmed.split(/[?#]/)[0] ?? trimmed;
+      const fileName = normalized.split('/').pop()?.trim();
+      return fileName || null;
+    }
+  }
+
+  private normalizeLiteralSearchText(input: string): string {
+    return input
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\\n/g, ' ')
+      .replace(/\\r/g, ' ')
+      .replace(/\\t/g, ' ')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\`/g, '`')
+      .replace(/\\\\/g, '\\')
+      .replace(/\{['"`]\s*['"`]\}/g, ' ')
+      .replace(/\{`\s*`\}/g, ' ')
+      .replace(/&nbsp;|&#160;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;|&#34;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private findMissingRequiredCustomClasses(
@@ -1397,6 +2195,26 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     code: string,
     resource: 'posts' | 'pages' | 'products',
   ): boolean {
+    return this.matchesDynamicDetailFetch(code, resource);
+  }
+
+  private matchesAnyDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+  ): boolean {
+    const escapedResource = this.escapeRegExp(resource);
+    const exactPattern = new RegExp(
+      `fetch\\(\\s*['"\`]/api/${escapedResource}/[^'"\`\\s)]+['"\`]`,
+    );
+    return (
+      this.matchesDynamicDetailFetch(code, resource) || exactPattern.test(code)
+    );
+  }
+
+  private matchesDynamicDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+  ): boolean {
     const patterns = [
       // Template literal: `/api/posts/${slug}` or `/api/posts/${encodeURIComponent(slug)}`
       new RegExp(
@@ -1412,6 +2230,60 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return patterns.some((pattern) => pattern.test(code));
   }
 
+  private matchesExactDetailFetch(
+    code: string,
+    resource: 'posts' | 'pages' | 'products',
+    slug: string,
+  ): boolean {
+    const escapedResource = this.escapeRegExp(resource);
+    const escapedSlug = this.escapeRegExp(slug);
+    const patterns = [
+      new RegExp(
+        `fetch\\(\\s*['"\`]/api/${escapedResource}/${escapedSlug}['"\`]`,
+      ),
+      new RegExp(
+        String.raw`fetch\(\s*\`/api/${escapedResource}/${escapedSlug}\``,
+      ),
+    ];
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
+  private rendersStaticCarouselTrack(code: string): boolean {
+    return /\bswiper-wrapper\b/.test(code) && !/translateX\(/.test(code);
+  }
+
+  private hasEmptySwiperControlButton(code: string): boolean {
+    return (
+      /<button\b[^>]*\bswiper-button-(?:prev|next)\b[^>]*\/>/s.test(code) ||
+      /<button\b[^>]*\bswiper-button-(?:prev|next)\b[^>]*>\s*<\/button>/s.test(
+        code,
+      )
+    );
+  }
+
+  private findInteractiveStateKeyMismatch(
+    code: string,
+    stateObjectName: 'activeCarousels' | 'openModals',
+  ): string | null {
+    const keyMatches = [
+      ...code.matchAll(
+        new RegExp(`${stateObjectName}\\[("[^"]+"|'[^']+')\\]`, 'g'),
+      ),
+    ];
+    const normalizedKeys = Array.from(
+      new Set(
+        keyMatches
+          .map((match) => match[1]?.slice(1, -1))
+          .filter((value): value is string => !!value),
+      ),
+    );
+
+    if (normalizedKeys.length <= 1) return null;
+    return `found multiple ${stateObjectName} keys: ${normalizedKeys
+      .map((key) => JSON.stringify(key))
+      .join(', ')}`;
+  }
+
   private fetchesSharedChromeData(code: string): boolean {
     return /fetch\(\s*['"`]\/api\/(?:site-info|menus|footer-links)\b/.test(
       code,
@@ -1424,7 +2296,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         code,
       ) ||
       /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(code) ||
-      /\{\s*menus\b/.test(code)
+      /\{\s*menus\b/.test(code) ||
+      /\bfooterColumns(?:\??\.)?(?:map|filter|some)\s*\(/.test(code) ||
+      /\{\s*footerColumns\b/.test(code)
     );
   }
 
@@ -1519,46 +2393,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     code: string,
     max = 3,
   ): string[] {
-    const snippets: string[] = [];
-    const patterns = [
-      {
-        pattern:
-          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-        allowHeadingContext: true,
-      },
-      {
-        pattern:
-          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-        allowHeadingContext: false,
-      },
-      {
-        pattern:
-          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
-        allowHeadingContext: false,
-      },
-    ];
-
-    for (const { pattern, allowHeadingContext } of patterns) {
-      for (const match of code.matchAll(pattern)) {
-        const raw = match[0]?.replace(/\s+/g, ' ').trim();
-        if (!raw) continue;
-        const offset = match.index ?? 0;
-        if (
-          allowHeadingContext &&
-          this.isWithinHeadingTitleContext(code, offset)
-        ) {
-          continue;
-        }
-        // Skip spans that are already inside an authorSlug/categorySlugs ternary
-        // — they are the safe no-slug fallback emitted by promotePlainTextPostMetaLinks.
-        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
-        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
-        if (snippets.length >= max) return snippets;
-      }
-      if (snippets.length >= max) break;
-    }
-
-    return snippets;
+    return findSharedPlainTextPostMetaArchiveSnippets(code, max);
   }
 
   /**
@@ -1572,7 +2407,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     const before = code.slice(Math.max(0, offset - 600), offset);
     return (
       /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?[^a-z]\[0\]\s*\?/.test(before) ||
+      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
       /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
       /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
         before,
@@ -1581,97 +2416,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private promotePlainTextPostMetaLinks(code: string): string {
-    const isCanonicalMetaLink = (raw: string): boolean =>
-      /(?:to=|href=)[^>]*\/author\//.test(raw) ||
-      /(?:to=|href=)[^>]*\/category\//.test(raw);
-
-    const decorateQuoted = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
-        (
-          match,
-          tag: string,
-          before: string,
-          quote: string,
-          className: string,
-        ) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className=${quote}${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}${quote}`;
-        },
-      );
-
-    const decorateTemplateLiteral = (source: string) =>
-      source.replace(
-        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
-        (match, tag: string, before: string, className: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${before}className={\`${this.appendUniqueClasses(
-            className,
-            'hover:underline underline-offset-4',
-          )}\`}`;
-        },
-      );
-
-    const decorateWithoutClass = (source: string) =>
-      source.replace(
-        /<(Link|a)\b((?:(?!className=)[^>])*)(?=>)/g,
-        (match, tag: string, attrs: string) => {
-          if (!isCanonicalMetaLink(match)) return match;
-          return `<${tag}${attrs} className="hover:underline underline-offset-4"`;
-        },
-      );
-
-    return decorateWithoutClass(decorateTemplateLiteral(decorateQuoted(code)));
+    return promoteSharedPlainTextPostMetaLinks(code);
   }
 
   private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    let next = code;
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.author\s*&&\s*<(span|p)\b([^>]*)>\s*\{\1\.author\}\s*<\/\2>\s*\}/g,
-      (_match, record: string, tag: string, attrs: string) =>
-        `{${record}.author && (${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>)}`,
-    );
-
-    next = next.replace(
-      /<(span|p)\b([^>]*)>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-      (match, tag: string, attrs: string, record: string, offset: number) => {
-        if (this.isWithinHeadingTitleContext(next, offset)) return match;
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.authorSlug ? <Link to={'/author/' + ${record}.authorSlug}${attrs}>{${record}.author}</Link> : <${tag}${attrs}>{${record}.author}</${tag}>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{\s*(post|item|postDetail)\.categories(?:\?\.)?\[0\]\s*&&\s*<span\b([^>]*)>\s*\{\1\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>\s*\}/g,
-      (_match, record: string, attrs: string) =>
-        `{${record}.categories?.[0] && (${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>)}`,
-    );
-
-    next = next.replace(
-      /<span\b([^>]*)>\s*\{(post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-      (match, attrs: string, record: string, offset: number) => {
-        if (this.isWithinSlugTernaryFallback(next, offset)) return match;
-        return `{${record}.categorySlugs?.[0] ? <Link to={'/category/' + ${record}.categorySlugs[0]}${attrs}>{${record}.categories[0]}</Link> : <span${attrs}>{${record}.categories[0]}</span>}`;
-      },
-    );
-
-    next = next.replace(
-      /\{(post|item|postDetail)\.categories\?\.map\(\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*\(\s*<span\b([^>]*)>\s*\{\2\}\s*<\/span>\s*\)\)\}/g,
-      (
-        _match,
-        record: string,
-        categoryVar: string,
-        indexVar: string,
-        attrs: string,
-      ) =>
-        `{${record}.categories?.map((${categoryVar}, ${indexVar}) => (${record}.categorySlugs?.[${indexVar}] ? <Link to={'/category/' + ${record}.categorySlugs[${indexVar}]}${attrs}>{${categoryVar}}</Link> : <span${attrs}>{${categoryVar}}</span>}))}`,
-    );
-
-    return next;
+    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
   }
 
   private isWithinHeadingTitleContext(code: string, offset: number): boolean {
@@ -2108,11 +2857,27 @@ export {};
     );
   }
 
-  private shouldIgnoreRequestFailure(url: string): boolean {
+  private shouldIgnoreRequestFailure(request: HTTPRequest): boolean {
+    const url = request.url();
+    const failureText = request.failure()?.errorText ?? '';
+    const isFontRequest =
+      request.resourceType() === 'font' ||
+      /\.(woff2?|ttf|otf|eot)(?:[?#].*)?$/i.test(url);
+    const isLocalPreviewFont =
+      /^https?:\/\/localhost:\d+\/preview\/assets\/fonts\//i.test(url) ||
+      /\/assets\/fonts\//i.test(url);
+
     return (
       /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url) ||
       // External resources (fonts, analytics, CDN) may be blocked by ORB or network restrictions
-      /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(url)
+      /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(
+        url,
+      ) ||
+      // Preview smoke navigates across routes quickly; local font fetches can be
+      // cancelled without indicating a visible runtime failure.
+      (isFontRequest &&
+        isLocalPreviewFont &&
+        /net::ERR_ABORTED/i.test(failureText))
     );
   }
 

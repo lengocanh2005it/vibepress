@@ -229,11 +229,47 @@ export const runAiProcess = async (
     }
 };
 
+export interface ReactVisualEditResult {
+    accepted: boolean;
+    jobId: string;
+    siteId: string;
+    logPath: string;
+    result?: {
+        componentName: string;
+        filePath: string;
+        isValid: boolean;
+        warnings: string[];
+    };
+    error?: string;
+}
+
+export const undoReactVisualEdit = async (
+    siteId: string,
+    jobId: string,
+): Promise<{ undone: boolean; jobId: string; siteId: string; componentFile?: string; error?: string }> => {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/react-visual-edit/undo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, jobId }),
+    });
+    if (!response.ok) {
+        let errorPayload: any = null;
+        try { errorPayload = await response.json(); } catch { errorPayload = null; }
+        throw new AiProcessError(
+            errorPayload?.message || 'Failed to undo visual edit.',
+            response.status,
+            errorPayload?.code,
+            errorPayload?.details,
+        );
+    }
+    return response.json();
+};
+
 export const submitReactVisualEdit = async (
     siteId: string,
     jobId: string,
     editRequest: ReactVisualEditPayload,
-) => {
+): Promise<ReactVisualEditResult> => {
     try {
         const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/react-visual-edit`, {
             method: 'POST',
