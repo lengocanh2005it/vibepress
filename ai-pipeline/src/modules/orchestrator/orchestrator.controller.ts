@@ -12,6 +12,7 @@ import { EditRequestFacadeService } from '../edit-request/edit-request.facade.se
 import type {
   RunPipelineRequestDto,
   SubmitReactVisualEditDto,
+  UndoReactVisualEditDto,
 } from './orchestrator.dto.js';
 import { OrchestratorService } from './orchestrator.service.js';
 
@@ -50,6 +51,15 @@ export class OrchestratorController {
       );
     }
     return this.orchestratorService.submitReactVisualEdit(body);
+  }
+
+  @Post('react-visual-edit/undo')
+  async undoReactVisualEdit(@Body() body: UndoReactVisualEditDto) {
+    const siteId = body?.siteId?.trim();
+    const jobId = body?.jobId?.trim();
+    if (!siteId) throw new BadRequestException('siteId is required');
+    if (!jobId) throw new BadRequestException('jobId is required');
+    return this.orchestratorService.undoLastReactEdit({ jobId, siteId });
   }
 
   @Get('status/:jobId')

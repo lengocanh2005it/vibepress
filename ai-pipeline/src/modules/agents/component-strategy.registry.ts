@@ -5,6 +5,7 @@ export type ComponentStrategyKind =
   | 'sidebar'
   | 'breadcrumb'
   | 'comments'
+  | 'post-meta'
   | 'meta-only';
 
 interface ComponentStrategyRule {
@@ -55,6 +56,13 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     allowFramePath: true,
   },
   {
+    match: /^PostMeta$/i,
+    kind: 'post-meta',
+    deterministicFirst: true,
+    skipAiVisualPlan: true,
+    allowFramePath: true,
+  },
+  {
     match: /^(Comments|Comment)$/i,
     kind: 'comments',
     deterministicFirst: true,
@@ -62,7 +70,7 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     allowFramePath: false,
   },
   {
-    match: /^(PostMeta|Widget|Pagination|Loop|ContentNone|NoResults)$/i,
+    match: /^(Widget|Pagination|Loop|ContentNone|NoResults)$/i,
     kind: 'meta-only',
     deterministicFirst: false,
     skipAiVisualPlan: true,

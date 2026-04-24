@@ -446,7 +446,10 @@ export interface RepoSpectraInteractiveContracts {
   detected: boolean;
   pluginSlug: string;
   widgets: Partial<
-    Record<'slider' | 'tabs' | 'modal' | 'accordion', RepoInteractiveWidgetContract>
+    Record<
+      'slider' | 'tabs' | 'modal' | 'accordion',
+      RepoInteractiveWidgetContract
+    >
   >;
 }
 
@@ -626,9 +629,8 @@ export class RepoAnalyzerService {
     const assetManifest = this.categorizeAssets(fileTree);
     const themes = await this.discoverThemeInventories(themeDir);
     const plugins = await this.discoverPluginManifests(themeDir);
-    const interactiveContracts = await this.extractInteractiveContracts(
-      plugins,
-    );
+    const interactiveContracts =
+      await this.extractInteractiveContracts(plugins);
     const styleSources = await this.extractStyleSources(
       themeDir,
       filesByRole,
@@ -1396,7 +1398,11 @@ export class RepoAnalyzerService {
           'Spectra slider uses Swiper-style runtime options and dynamic per-block CSS.',
         ],
         appearance: {
-          wrapperClasses: ['uagb-slider-container', 'uagb-swiper', 'swiper-wrapper'],
+          wrapperClasses: [
+            'uagb-slider-container',
+            'uagb-swiper',
+            'swiper-wrapper',
+          ],
           itemClasses: [
             'swiper-button-prev',
             'swiper-button-next',
@@ -1421,7 +1427,8 @@ export class RepoAnalyzerService {
               cue: 'dot pagination bullets appear inside the slider frame',
             },
             {
-              pattern: /background:#efefef|background-color'\s*=>\s*\$attr\['arrowBgColor'\]/,
+              pattern:
+                /background:#efefef|background-color'\s*=>\s*\$attr\['arrowBgColor'\]/,
               cue: 'arrow buttons use a filled surface instead of plain text links',
             },
           ],
@@ -1479,7 +1486,8 @@ export class RepoAnalyzerService {
               cue: 'active tab state is mirrored in both the tab button and matching body panel',
             },
             {
-              pattern: /uagb-tabs__hstyle4|uagb-tabs__vstyle9|border-radius'\s*=>\s*'30px'/,
+              pattern:
+                /uagb-tabs__hstyle4|uagb-tabs__vstyle9|border-radius'\s*=>\s*'30px'/,
               cue: 'rounded pill-style tabs are part of the Spectra variant family',
             },
             {
@@ -1487,7 +1495,8 @@ export class RepoAnalyzerService {
               cue: 'some variants distribute tabs across the row instead of using a simple underline list',
             },
             {
-              pattern: /uagb-tabs__vstyle6|uagb-tabs__vstyle7|uagb-tabs__vstyle8|uagb-tabs__vstyle9|uagb-tabs__vstyle10/,
+              pattern:
+                /uagb-tabs__vstyle6|uagb-tabs__vstyle7|uagb-tabs__vstyle8|uagb-tabs__vstyle9|uagb-tabs__vstyle10/,
               cue: 'vertical variants use a left-side tab rail with body content on the right',
             },
             {
@@ -1553,7 +1562,8 @@ export class RepoAnalyzerService {
               cue: 'the dialog includes an explicit close button with configurable position',
             },
             {
-              pattern: /overlayColor|background'\s*=>\s*\$attr\['overlayColor'\]/,
+              pattern:
+                /overlayColor|background'\s*=>\s*\$attr\['overlayColor'\]/,
               cue: 'overlay color is controlled by block settings and should not default to a generic backdrop',
             },
           ],
@@ -1564,7 +1574,10 @@ export class RepoAnalyzerService {
         blockType: 'uagb/faq',
         runtime: 'accordion-dom' as const,
         attrPath: 'includes/blocks/faq/attributes.php',
-        scriptPaths: ['includes/blocks/faq/frontend.js.php', 'assets/js/faq.js'],
+        scriptPaths: [
+          'includes/blocks/faq/frontend.js.php',
+          'assets/js/faq.js',
+        ],
         stylePaths: [
           'includes/blocks/faq/frontend.css.php',
           'assets/css/blocks/faq.css',
@@ -1643,7 +1656,9 @@ export class RepoAnalyzerService {
         attrKeys: config.preferredAttrKeys.filter((key) =>
           attrKeys.includes(key),
         ),
-        scriptFiles: config.scriptPaths.filter((_, index) => !!scriptRaw[index]),
+        scriptFiles: config.scriptPaths.filter(
+          (_, index) => !!scriptRaw[index],
+        ),
         styleFiles: config.stylePaths.filter((_, index) => !!styleRaw[index]),
         appearance: this.extractInteractiveAppearanceSignature({
           combinedSources: [attrRaw, ...scriptRaw, ...styleRaw],

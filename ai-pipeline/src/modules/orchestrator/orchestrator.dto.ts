@@ -301,3 +301,8 @@ export interface SubmitReactVisualEditDto {
   jobId: string;
   editRequest: PipelineReactVisualEditRequestDto;
 }
+
+export interface UndoReactVisualEditDto {
+  siteId: string;
+  jobId: string;
+}

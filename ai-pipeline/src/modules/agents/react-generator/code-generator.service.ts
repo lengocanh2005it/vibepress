@@ -17,6 +17,7 @@ import type {
   NewsletterSection,
   FooterSection,
   PostContentSection,
+  PostMetaSection,
   PageContentSection,
   CommentsSection,
   SearchSection,
@@ -460,6 +461,8 @@ export class CodeGeneratorService {
         case 'comments':
           needs.add('postDetail');
           break;
+        case 'post-meta':
+          break;
         case 'page-content':
           needs.add('pageDetail');
           break;
@@ -483,8 +486,12 @@ export class CodeGeneratorService {
     needsRouter: boolean,
     needsParams: boolean,
   ): string {
+    const reactHooks = ['useState', 'useEffect'];
+    if (plan.sections.some((section) => section.type === 'carousel')) {
+      reactHooks.push('useRef');
+    }
     const lines: string[] = [
-      "import React, { useState, useEffect } from 'react';",
+      `import React, { ${reactHooks.join(', ')} } from 'react';`,
     ];
     const routerParts: string[] = [];
     if (needsRouter) routerParts.push('Link');
@@ -520,6 +527,7 @@ export class CodeGeneratorService {
         'breadcrumb',
         'post-list',
         'post-content',
+        'post-meta',
         'search',
         'sidebar',
         'hero',
@@ -537,7 +545,8 @@ export class CodeGeneratorService {
   }
 
   private needsPagination(plan: ComponentVisualPlan): boolean {
-    return plan.dataNeeds.includes('posts');
+    if (!plan.dataNeeds.includes('posts')) return false;
+    return /^(archive|index|search|blog)/i.test(plan.componentName);
   }
 
   // ── State + fetch ─────────────────────────────────────────────────────────
@@ -545,6 +554,10 @@ export class CodeGeneratorService {
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
     const fixedSlug = plan.pageBinding?.slug;
+    const needsPostsPagination = this.needsPagination(plan);
+    const hasPostMetaSection = plan.sections.some(
+      (section) => section.type === 'post-meta',
+    );
     const modalSections = plan.sections.flatMap((section, index) =>
       section.type === 'modal'
         ? [
@@ -583,7 +596,22 @@ export class CodeGeneratorService {
     const supportsCommentForm = needsComments && commentsSection.showForm;
     const lines: string[] = [];
 
-    lines.push(`const ${componentName}: React.FC = () => {`);
+    if (hasPostMetaSection) {
+      lines.push(`interface ${componentName}Props {`);
+      lines.push(`  item?: Post | Page | null;`);
+      lines.push(`  post?: Post | null;`);
+      lines.push(`  className?: string;`);
+      lines.push(`}`);
+      lines.push('');
+      lines.push(
+        `const ${componentName}: React.FC<${componentName}Props> = ({ item, post, className }) => {`,
+      );
+      lines.push(
+        `  const metaSource: Post | null = post ?? (item && 'date' in item ? (item as Post) : null);`,
+      );
+    } else {
+      lines.push(`const ${componentName}: React.FC = () => {`);
+    }
 
     // State
     if (dataNeeds.includes('siteInfo'))
@@ -595,26 +623,28 @@ export class CodeGeneratorService {
         `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
     if (dataNeeds.includes('posts')) {
-      lines.push(
-        `  const [searchParams, setSearchParams] = useSearchParams();`,
-      );
-      lines.push(
-        `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
-      );
-      lines.push(`  const perPage = 10;`);
-      lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
-      lines.push(`  const updatePage = (nextPage: number) => {`);
-      lines.push(
-        `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
-      );
-      lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
-      lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
-      lines.push(`    else nextParams.set('page', String(safePage));`);
-      lines.push(`    setSearchParams(nextParams);`);
-      lines.push(
-        `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
-      );
-      lines.push(`  };`);
+      if (needsPostsPagination) {
+        lines.push(
+          `  const [searchParams, setSearchParams] = useSearchParams();`,
+        );
+        lines.push(
+          `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
+        );
+        lines.push(`  const perPage = 10;`);
+        lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
+        lines.push(`  const updatePage = (nextPage: number) => {`);
+        lines.push(
+          `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
+        );
+        lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
+        lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
+        lines.push(`    else nextParams.set('page', String(safePage));`);
+        lines.push(`    setSearchParams(nextParams);`);
+        lines.push(
+          `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
+        );
+        lines.push(`  };`);
+      }
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
     }
     if (dataNeeds.includes('pages'))
@@ -647,6 +677,61 @@ export class CodeGeneratorService {
       lines.push(
         `  const [hoveredCarousels, setHoveredCarousels] = useState<Record<string, boolean>>({});`,
       );
+      lines.push(
+        `  const carouselDragState = useRef<Record<string, { pointerId: number; startX: number; deltaX: number } | null>>({});`,
+      );
+      lines.push(
+        `  const beginCarouselDrag = (key: string, pointerId: number, clientX: number) => {`,
+      );
+      lines.push(
+        `    carouselDragState.current[key] = { pointerId, startX: clientX, deltaX: 0 };`,
+      );
+      lines.push(
+        `    setHoveredCarousels((prev) => ({ ...prev, [key]: true }));`,
+      );
+      lines.push(`  };`);
+      lines.push(
+        `  const updateCarouselDrag = (key: string, pointerId: number, clientX: number) => {`,
+      );
+      lines.push(`    const drag = carouselDragState.current[key];`);
+      lines.push(`    if (!drag || drag.pointerId !== pointerId) return;`);
+      lines.push(`    drag.deltaX = clientX - drag.startX;`);
+      lines.push(`  };`);
+      lines.push(
+        `  const finishCarouselDrag = (key: string, pointerId: number, onSwipeLeft: () => void, onSwipeRight: () => void) => {`,
+      );
+      lines.push(`    const drag = carouselDragState.current[key];`);
+      lines.push(`    if (!drag || drag.pointerId !== pointerId) return;`);
+      lines.push(`    const deltaX = drag.deltaX;`);
+      lines.push(`    carouselDragState.current[key] = null;`);
+      lines.push(
+        `    setHoveredCarousels((prev) => ({ ...prev, [key]: false }));`,
+      );
+      lines.push(`    if (Math.abs(deltaX) < 48) return;`);
+      lines.push(`    if (deltaX < 0) onSwipeLeft();`);
+      lines.push(`    else onSwipeRight();`);
+      lines.push(`  };`);
+      lines.push(
+        `  const cancelCarouselDrag = (key: string, pointerId?: number) => {`,
+      );
+      lines.push(`    const drag = carouselDragState.current[key];`);
+      lines.push(`    if (!drag) return;`);
+      lines.push(
+        `    if (typeof pointerId === 'number' && drag.pointerId !== pointerId) return;`,
+      );
+      lines.push(`    carouselDragState.current[key] = null;`);
+      lines.push(
+        `    setHoveredCarousels((prev) => ({ ...prev, [key]: false }));`,
+      );
+      lines.push(`  };`);
+      lines.push(
+        `  const isCarouselInteractiveTarget = (target: EventTarget | null) => {`,
+      );
+      lines.push(`    if (!(target instanceof Element)) return false;`);
+      lines.push(
+        `    return !!target.closest('a, button, input, textarea, select, option, [role="button"], [data-carousel-control="true"]');`,
+      );
+      lines.push(`  };`);
     }
     if (hasTabsSections) {
       lines.push(
@@ -714,7 +799,7 @@ export class CodeGeneratorService {
         `  const [commentSuccess, setCommentSuccess] = useState<string | null>(null);`,
       );
     }
-    lines.push(`  const [loading, setLoading] = useState(true);`);
+    lines.push(`  const [loading, setLoading] = useState(${dataNeeds.length > 0});`);
     lines.push(`  const [error, setError] = useState<string | null>(null);`);
     lines.push('');
 
@@ -762,9 +847,7 @@ export class CodeGeneratorService {
         `      document.body.classList.toggle('hide-scroll', openKeys.length > 0);`,
       );
       lines.push(`    }`);
-      lines.push(
-        `    const handleKeyDown = (event: KeyboardEvent) => {`,
-      );
+      lines.push(`    const handleKeyDown = (event: KeyboardEvent) => {`);
       lines.push(`      if (event.key !== 'Escape') return;`);
       lines.push(
         `      const closableKeys = openKeys.filter((key) => modalEscEnabled[key] !== false);`,
@@ -842,12 +925,19 @@ export class CodeGeneratorService {
       setters.push(`setSiteInfo(await res0.json());`);
     }
     if (dataNeeds.includes('posts')) {
-      fetches.push(
-        `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\`)`,
-      );
-      setters.push(
-        `const postsData = await res${fetches.length - 1}.json(); setPosts(Array.isArray(postsData) ? postsData : []); setTotalPages(Number(res${fetches.length - 1}.headers.get('X-WP-TotalPages') ?? '1'));`,
-      );
+      if (needsPostsPagination) {
+        fetches.push(
+          `fetch(\`/api/posts?page=\${currentPage}&perPage=\${perPage}\`)`,
+        );
+        setters.push(
+          `const postsData = await res${fetches.length - 1}.json(); setPosts(Array.isArray(postsData) ? postsData : []); setTotalPages(Number(res${fetches.length - 1}.headers.get('X-WP-TotalPages') ?? '1'));`,
+        );
+      } else {
+        fetches.push(`fetch('/api/posts')`);
+        setters.push(
+          `const postsData = await res${fetches.length - 1}.json(); setPosts(Array.isArray(postsData) ? postsData : []);`,
+        );
+      }
     }
     if (dataNeeds.includes('pages')) {
       fetches.push(`fetch('/api/pages')`);
@@ -916,7 +1006,7 @@ export class CodeGeneratorService {
 
     if (dataNeeds.includes('postDetail') || dataNeeds.includes('pageDetail')) {
       lines.push(`  }, [slug]);`);
-    } else if (dataNeeds.includes('posts')) {
+    } else if (dataNeeds.includes('posts') && needsPostsPagination) {
       lines.push(`  }, [currentPage]);`);
     } else {
       lines.push(`  }, []);`);
@@ -1237,6 +1327,9 @@ export default ${componentName};`;
       case 'post-content':
         markup = this.renderPostContent(section, ctx, py);
         break;
+      case 'post-meta':
+        markup = this.renderPostMeta(section, ctx, bg, py);
+        break;
       case 'page-content':
         markup = this.renderPageContent(section, ctx, py);
         break;
@@ -1292,7 +1385,7 @@ export default ${componentName};`;
   ): string {
     return this.buildStyleAttr({
       padding: section.paddingStyle,
-      margin: section.marginStyle,
+      margin: this.normalizeSectionMarginStyle(section.marginStyle),
       ...extra,
     });
   }
@@ -1448,10 +1541,14 @@ export default ${componentName};`;
     baseClassName: string,
     customClassNames?: string[],
   ): string {
-    const extra = [...new Set((customClassNames ?? []).map((entry) => entry.trim()))]
+    const extra = [
+      ...new Set((customClassNames ?? []).map((entry) => entry.trim())),
+    ]
       .filter(Boolean)
       .join(' ');
-    return extra ? this.appendUniqueClasses(baseClassName, extra) : baseClassName;
+    return extra
+      ? this.appendUniqueClasses(baseClassName, extra)
+      : baseClassName;
   }
 
   private buildInteractiveCtaClassName(
@@ -1869,7 +1966,9 @@ export default ${componentName};`;
                 ))}
             </nav>
             <div className="flex items-center gap-4">${cta}
-              ${mobileButtonClass ? `<button
+              ${
+                mobileButtonClass
+                  ? `<button
                 className="${mobileButtonClass} text-[${tc}]"
                 aria-label="Toggle menu"
                 onClick={() => setMobileMenuOpen(prev => !prev)}
@@ -1879,7 +1978,9 @@ export default ${componentName};`;
                 ) : (
                   <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
                 )}
-              </button>` : ''}
+              </button>`
+                  : ''
+              }
             </div>
           </div>
           {${mobileButtonClass ? 'mobileMenuOpen' : 'false'} && (
@@ -2127,6 +2228,57 @@ ${postCard}
     return `<div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}>${parts.join('\n              ')}</div>`;
   }
 
+  private renderPostMeta(
+    s: PostMetaSection,
+    ctx: RenderCtx,
+    bg: string,
+    py: string,
+  ): string {
+    const { p, l } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
+    const flex =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+    const separator = s.showSeparator === false ? '' : '<span aria-hidden="true">-</span>';
+    const parts: string[] = [];
+
+    if (s.showDate) {
+      parts.push(
+        `<time dateTime={metaSource.date} className="whitespace-nowrap">{new Date(metaSource.date).toLocaleDateString()}</time>`,
+      );
+    }
+    if (s.showAuthor) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{metaSource.author && (metaSource.authorSlug ? <Link to={\`/author/\${metaSource.authorSlug}\`} className="${metaLinkClass}">by {metaSource.author}</Link> : <span>by {metaSource.author}</span>)}`,
+      );
+    }
+    if (s.showCategories) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{metaSource.categories?.[0] && (metaSource.categorySlugs?.[0] ? <Link to={\`/category/\${metaSource.categorySlugs[0]}\`} className="${metaLinkClass}">{metaSource.categories[0]}</Link> : <span>{metaSource.categories[0]}</span>)}`,
+      );
+    }
+
+    return `      {metaSource ? (
+        <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
+          <div className="${l.containerClass}">
+            <div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}${this.buildSectionGapStyleAttr(s)}>
+              ${parts.join('\n              ')}
+            </div>
+          </div>
+        </section>
+      ) : null}`;
+  }
+
   private renderCardGrid(
     s: CardGridSection,
     ctx: RenderCtx,
@@ -2136,6 +2288,9 @@ ${postCard}
   ): string {
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const classes = s.customClassNames ?? [];
+    const hasCenteredIntro = classes.includes('vp-card-grid-intro-centered');
+    const hasAsteriskStyle = classes.includes('is-style-asterisk');
     const cardRadius = this.cardRadiusClass(ctx);
     const cardStylePreset = this.mergeBlockStyleTokens(
       this.pickBlockStyle(ctx, 'group'),
@@ -2170,20 +2325,26 @@ ${postCard}
     const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
     const cards = s.cards
       .map(
-        (
-          c,
-        ) => `          <div className="flex flex-col gap-3 ${cardRadius}"${cardStyle}>
+        (c) =>
+          `          <div className="flex flex-col gap-3 ${cardRadius}"${cardStyle}>
+            ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none" aria-hidden="true">*</span>` : ''}
             <h3 className="font-semibold"${cardHeadingStyle}>${c.heading}</h3>
             <p${cardBodyStyle}>${c.body}</p>
           </div>`,
       )
       .join('\n');
+    const intro =
+      s.title || s.subtitle
+        ? `          <div className="${hasCenteredIntro ? 'mb-10 flex flex-col items-center text-center' : 'mb-8'}">
+            ${s.title ? `<h2 className="${t.h2} font-normal${hasCenteredIntro ? ' text-center' : ''}"${titleStyle}>${s.title}</h2>` : ''}
+            ${s.subtitle ? `<p className="${hasCenteredIntro ? 'mt-4 max-w-[620px] text-center' : 'mt-4'}"${subtitleStyle}>${s.subtitle}</p>` : ''}
+          </div>`
+        : '';
 
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal mb-4"${titleStyle}>${s.title}</h2>` : ''}
-          ${s.subtitle ? `<p className="mb-8"${subtitleStyle}>${s.subtitle}</p>` : ''}
+${intro}
           <div className="grid ${colClass} gap-6"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
@@ -2936,8 +3097,28 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
   ): Record<string, string | number | undefined> {
     return {
       padding: section.paddingStyle,
-      margin: section.marginStyle,
+      margin: this.normalizeSectionMarginStyle(section.marginStyle),
     };
+  }
+
+  private normalizeSectionMarginStyle(
+    marginStyle?: string,
+  ): string | undefined {
+    if (!marginStyle) return undefined;
+    const normalized = marginStyle.trim();
+    if (!normalized) return undefined;
+
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    if (parts.length === 1) {
+      return `${parts[0]} auto`;
+    }
+    if (parts.length === 2) {
+      return `${parts[0]} auto`;
+    }
+    if (parts.length === 3) {
+      return `${parts[0]} auto ${parts[2]}`;
+    }
+    return normalized;
   }
 
   private renderBlockFaithfulNodes(
@@ -3228,7 +3409,10 @@ ${indent}</div>`;
     const menuIndex = state.navIndex++;
     const orientation =
       node.menuOrientation ??
-      (node.params?.layout?.orientation as 'horizontal' | 'vertical' | undefined) ??
+      (node.params?.layout?.orientation as
+        | 'horizontal'
+        | 'vertical'
+        | undefined) ??
       (state.componentKind === 'footer' ? 'vertical' : 'horizontal');
     const isVertical =
       orientation === 'vertical' || state.componentKind === 'footer';
@@ -3527,9 +3711,11 @@ ${indent}</ul>`;
     const closeButtonSide = (s.closeIconPosition ?? '')
       .toLowerCase()
       .includes('left')
-      ? 'left-4 sm:left-5'
-      : 'right-4 sm:right-5';
-    const modalWidth = this.normalizeCssLength(s.width) ?? '880px';
+      ? '-left-5 sm:-left-6'
+      : '-right-5 sm:-right-6';
+    const modalWidth =
+      this.normalizeCssLength(s.width) ??
+      (s.layout === 'split' && s.imageSrc ? '880px' : '500px');
     const modalHeight = this.normalizeCssLength(s.height);
     const modalShellStyle = this.buildStyleAttr({
       width: '100%',
@@ -3541,7 +3727,7 @@ ${indent}</ul>`;
     });
     const dialogBodyStyle = this.buildMergedBlockStyleAttr(
       ctx,
-      { padding: '1.5rem' },
+      { padding: s.layout === 'split' && s.imageSrc ? '1.5rem' : '1.25rem' },
       true,
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
@@ -3595,7 +3781,6 @@ ${indent}</ul>`;
             style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}
           >
             {${JSON.stringify(triggerText)}}
-            <span aria-hidden="true">+</span>
           </button>
           {openModals[${stateKey}] ? (
             <div
@@ -3618,7 +3803,7 @@ ${indent}</ul>`;
                 <button
                   type="button"
                   onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }))}
-                  className="uagb-modal-popup-close absolute top-4 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white/90 text-slate-700 shadow-sm transition-opacity hover:opacity-75 sm:top-5 ${closeButtonSide}"
+                  className="uagb-modal-popup-close absolute -top-5 z-10 inline-flex h-10 w-10 items-center justify-center text-white transition-opacity hover:opacity-75 sm:-top-6 ${closeButtonSide}"
                   aria-label="Close modal"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3664,8 +3849,9 @@ ${indent}</ul>`;
       variant.includes('style-2') ||
       variant.includes('style-3') ||
       /(^|[^a-z])hstyle4|(^|[^a-z])vstyle9|(^|[^a-z])stack4/i.test(variant);
-    const isDistributedTabs =
-      /(^|[^a-z])hstyle5|(^|[^a-z])vstyle10/i.test(variant);
+    const isDistributedTabs = /(^|[^a-z])hstyle5|(^|[^a-z])vstyle10/i.test(
+      variant,
+    );
     const spectraVariantClass = variant
       ? variant.startsWith('uagb-tabs__')
         ? variant
@@ -3717,11 +3903,10 @@ ${indent}</ul>`;
       ? 'grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start'
       : isStacked
         ? 'flex flex-col gap-4'
-      : 'flex flex-col gap-6';
-    const tabAlignClass =
-      isDistributedTabs
-        ? 'justify-between'
-        : s.tabAlign === 'center'
+        : 'flex flex-col gap-6';
+    const tabAlignClass = isDistributedTabs
+      ? 'justify-between'
+      : s.tabAlign === 'center'
         ? 'justify-center'
         : s.tabAlign === 'right'
           ? 'justify-end'
@@ -3890,10 +4075,7 @@ ${panels}
       : '';
     const items = s.items
       .map(
-        (
-          item,
-          index,
-        ) => `          <div
+        (item, index) => `          <div
             key=${index}
             className="uagb-faq-child__outer-wrap"
           >
@@ -3995,6 +4177,8 @@ ${items}
     const useStackedSlides = effect === 'fade' || s.vertical === true;
     const pauseOnHover = s.pauseOn === 'hover';
     const pauseOnClick = s.pauseOn === 'click';
+    const hasSlideImages = s.slides.some((slide) => !!slide.imageSrc);
+    const enableSwipe = s.slides.length > 1;
     const clickPauseStatement = pauseOnClick
       ? `setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }));`
       : '';
@@ -4014,12 +4198,16 @@ ${items}
     const imageRadius = this.imageRadiusClass(ctx) || this.cardRadiusClass(ctx);
     const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
-      { baseColor: '#ffffff' },
+      { baseColor: hasSlideImages ? '#ffffff' : tc },
       this.pickBlockStyle(ctx, 'heading'),
     );
     const bodyStyle = this.buildTextTokenStyleAttr(
       ctx,
-      { baseColor: 'rgba(255,255,255,0.82)' },
+      {
+        baseColor: hasSlideImages
+          ? 'rgba(255,255,255,0.82)'
+          : ctx.p.textMuted || tc,
+      },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
     const align =
@@ -4051,21 +4239,26 @@ ${items}
           ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="absolute inset-0 h-full w-full object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
           : '';
         const headingPart = slide.heading
-          ? `\n                  <h3 className="${t.h2} max-w-[18ch] font-bold text-white"${headingStyle}>${slide.heading}</h3>`
+          ? `\n                  <h3 className="${t.h2} ${hasSlideImages ? 'max-w-[18ch] font-bold text-white' : 'font-bold'}"${headingStyle}>${slide.heading}</h3>`
           : '';
         const subPart = slide.subheading
-          ? `\n                  <p className="${t.body} max-w-[60ch] text-white/82"${bodyStyle}>${slide.subheading}</p>`
+          ? `\n                  <p className="${t.body} max-w-[60ch] ${hasSlideImages ? 'text-white/82' : ''}"${bodyStyle}>${slide.subheading}</p>`
           : '';
         const ctaPart = slide.cta
           ? `\n                  <a href={${JSON.stringify(slide.cta.link)}} className="${this.buildInteractiveCtaClassName(
-              `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-6 py-3 font-semibold ${ctaAlign}`,
+              `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-6 py-3 font-semibold transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 ${ctaAlign}`,
               slide.cta,
-            )}" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>${slide.cta.text}</a>`
+            )}" data-carousel-control="true" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>${slide.cta.text}</a>`
           : '';
-        const slideSurface = `${imgPart}
+        const slideSurface = hasSlideImages
+          ? `${imgPart}
               <div className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/42 to-black/10" />
               <div className="relative z-10 flex h-full flex-col justify-end p-6 sm:p-10">
                 <div className="flex max-w-[720px] flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${slideSurfaceStyle}>${headingPart}${subPart}${ctaPart}
+                </div>
+              </div>`
+          : `<div className="relative z-10 flex h-full flex-col items-center justify-center px-6 py-3 sm:px-10 sm:py-4">
+                <div className="flex w-full max-w-[760px] flex-col gap-4 ${align}"${slideSurfaceStyle}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`;
         if (useStackedSlides) {
@@ -4111,6 +4304,27 @@ ${slideSurface}
         return { ...prev, [${stateKey}]: current + 1 };
       });
     }`;
+    const pointerDownHandler = `(event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (isCarouselInteractiveTarget(event.target)) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      beginCarouselDrag(${stateKey}, event.pointerId, event.clientX);
+    }`;
+    const pointerMoveHandler = `(event: React.PointerEvent<HTMLDivElement>) => {
+      updateCarouselDrag(${stateKey}, event.pointerId, event.clientX);
+    }`;
+    const pointerUpHandler = `(event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      finishCarouselDrag(${stateKey}, event.pointerId, ${nextHandler}, ${previousHandler});
+    }`;
+    const pointerCancelHandler = `(event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      cancelCarouselDrag(${stateKey}, event.pointerId);
+    }`;
     const dots = showDots
       ? s.slides
           .map(
@@ -4122,11 +4336,14 @@ ${slideSurface}
                 ${clickPauseStatement}
                 setActiveCarousels((prev) => ({ ...prev, [${stateKey}]: ${i} }));
               }}
+              data-carousel-control="true"
               className={(${activeIndexExpr}) === ${i}
-                ? 'swiper-pagination-bullet swiper-pagination-bullet-active h-2.5 w-8 rounded-full'
-                : 'swiper-pagination-bullet h-2.5 w-2.5 rounded-full transition-all'}
+                ? 'swiper-pagination-bullet swiper-pagination-bullet-active h-2.5 w-8 rounded-full transition-all duration-200 hover:scale-110 hover:opacity-100'
+                : 'swiper-pagination-bullet h-2.5 w-2.5 rounded-full opacity-80 transition-all duration-200 hover:scale-110 hover:opacity-100'}
               style={{
-                background: (${activeIndexExpr}) === ${i} ? '${ctx.p.accent}' : 'rgba(255,255,255,0.5)',
+                background: (${activeIndexExpr}) === ${i}
+                  ? '${ctx.p.accent}'
+                  : '${hasSlideImages ? 'rgba(255,255,255,0.5)' : 'rgba(17,17,17,0.24)'}',
               }}
             />`,
           )
@@ -4135,14 +4352,24 @@ ${slideSurface}
 
     return `
     <section className="w-full ${py} overflow-hidden bg-[${bg}] text-[${tc}]"${sectionStyle}>
-      <div className="${ctx.l.containerClass} px-4 sm:px-6">
+      <div className="${hasSlideImages ? ctx.l.containerClass : 'max-w-[920px] mx-auto w-full'} px-4 sm:px-6">
         <div
           className="uagb-slider-container uagb-swiper relative"
           onMouseEnter={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }))` : 'undefined'}}
           onMouseLeave={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: false }))` : 'undefined'}}
         >
-          <div className="swiper relative min-h-[420px] overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]">
-            ${useStackedSlides ? slides : `<div
+          <div
+            className="${hasSlideImages ? 'swiper relative min-h-[420px] overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]' : 'swiper relative min-h-[220px] overflow-visible'}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
+            style={${enableSwipe ? `{ touchAction: 'pan-y' }` : 'undefined'}}
+            onPointerDown={${enableSwipe ? pointerDownHandler : 'undefined'}}
+            onPointerMove={${enableSwipe ? pointerMoveHandler : 'undefined'}}
+            onPointerUp={${enableSwipe ? pointerUpHandler : 'undefined'}}
+            onPointerCancel={${enableSwipe ? pointerCancelHandler : 'undefined'}}
+          >
+            ${
+              useStackedSlides
+                ? slides
+                : `<div
               className="swiper-wrapper flex h-full transition-transform ease-out"
               style={{
                 transform: 'translateX(-' + ((${activeIndexExpr}) * 100) + '%)',
@@ -4150,14 +4377,18 @@ ${slideSurface}
               }}
             >
 ${slides}
-            </div>`}
+            </div>`
+            }
           </div>
-          ${showArrows ? `<div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 items-center justify-between px-3 sm:px-5">
+          ${
+            showArrows
+              ? `<div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 items-center justify-between px-3 sm:px-5">
             <button
               type="button"
               aria-label="Previous slide"
+              data-carousel-control="true"
               onClick={${previousHandler}}
-              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/35 text-white backdrop-blur-sm transition-opacity hover:opacity-90"
+              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5 ${hasSlideImages ? 'border border-white/20 bg-black/35 text-white backdrop-blur-sm' : 'border border-black/10 bg-white/95 text-[#111111] shadow-[0_10px_24px_rgba(15,23,42,0.12)]'}"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="m15 18-6-6 6-6" />
@@ -4166,17 +4397,24 @@ ${slides}
             <button
               type="button"
               aria-label="Next slide"
+              data-carousel-control="true"
               onClick={${nextHandler}}
-              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/35 text-white backdrop-blur-sm transition-opacity hover:opacity-90"
+              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5 ${hasSlideImages ? 'border border-white/20 bg-black/35 text-white backdrop-blur-sm' : 'border border-black/10 bg-white/95 text-[#111111] shadow-[0_10px_24px_rgba(15,23,42,0.12)]'}"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="m9 18 6-6-6-6" />
               </svg>
             </button>
-          </div>` : ''}
-          ${showDots ? `<div className="swiper-pagination swiper-pagination-bullets absolute inset-x-0 bottom-5 z-20 flex items-center justify-center gap-2">
+          </div>`
+              : ''
+          }
+          ${
+            showDots
+              ? `<div className="swiper-pagination swiper-pagination-bullets absolute inset-x-0 bottom-5 z-20 flex items-center justify-center gap-2">
 ${dots}
-          </div>` : ''}
+          </div>`
+              : ''
+          }
         </div>
       </div>
     </section>`;

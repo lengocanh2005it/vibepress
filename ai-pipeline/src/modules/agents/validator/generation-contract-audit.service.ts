@@ -184,10 +184,9 @@ export class GenerationContractAuditService {
       warnings.push({
         scope: 'frontend-contract',
         componentName: component.name,
-        message:
-          fixedSlug
-            ? `Plan declares fixed-slug \`postDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/posts/${fixedSlug}\`.`
-            : 'Plan declares `postDetail` but generated code does not fetch `/api/posts/${slug}`.',
+        message: fixedSlug
+          ? `Plan declares fixed-slug \`postDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/posts/${fixedSlug}\`.`
+          : 'Plan declares `postDetail` but generated code does not fetch `/api/posts/${slug}`.',
       });
     }
     if (
@@ -201,10 +200,9 @@ export class GenerationContractAuditService {
       warnings.push({
         scope: 'frontend-contract',
         componentName: component.name,
-        message:
-          fixedSlug
-            ? `Plan declares fixed-slug \`pageDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/pages/${fixedSlug}\`.`
-            : 'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
+        message: fixedSlug
+          ? `Plan declares fixed-slug \`pageDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/pages/${fixedSlug}\`.`
+          : 'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
       });
     }
 

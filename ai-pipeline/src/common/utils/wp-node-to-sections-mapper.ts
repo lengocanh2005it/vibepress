@@ -52,9 +52,34 @@ export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
 function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
   const sections: SectionPlan[] = [];
   let pendingSpacer: string | undefined;
-  for (const node of nodes) {
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index]!;
     if (isSpacerBlock(node.block)) {
       pendingSpacer = resolveSpacerHeight(node) ?? pendingSpacer;
+      continue;
+    }
+
+    const nextNode = nodes[index + 1];
+    const isHeadingNode =
+      node.block === 'core/heading' || node.block === 'heading';
+    const isNextQueryNode =
+      nextNode &&
+      (nextNode.block === 'core/query' || nextNode.block === 'query');
+    if (isHeadingNode && isNextQueryNode) {
+      let section = applyNodePresentation(mapQuery(nextNode), nextNode);
+      const title = extractNodeText(node);
+      if (title) section = { ...section, title };
+      const mapped = [applyNodePresentation(section, nextNode)];
+
+      if (pendingSpacer) {
+        mapped[0] = applyLeadingSpacer(mapped[0], pendingSpacer);
+        pendingSpacer = undefined;
+      }
+
+      for (const mappedSection of mapped) {
+        sections.push(mappedSection);
+      }
+      index += 1;
       continue;
     }
 
@@ -418,7 +443,10 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     children,
   );
   if (segmentedInteractiveSections) {
-    return segmentedInteractiveSections;
+    return applyWrapperVisualPresentation(
+      mergeGroupedSections(segmentedInteractiveSections, node),
+      node,
+    );
   }
 
   // Testimonial group: metadata.name contains "testimonial" or content starts with a curly quote
@@ -444,7 +472,10 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     );
 
   if (!hasInteractive && !hasPostContent && isButtonOnlyGroup(children)) {
-    return toMappedSections(buildStandaloneButtonsSection(node, children), node);
+    return toMappedSections(
+      buildStandaloneButtonsSection(node, children),
+      node,
+    );
   }
 
   if (!hasInteractive && !hasPostContent) {
@@ -483,7 +514,10 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   // Composite groups that mix intro copy with one or more direct rows/columns
   // should recurse into their children instead of collapsing into a single hero.
   if (!hasInteractive && !hasPostContent && isCompositeGroup(children)) {
-    return mapNodes(children, children);
+    return applyWrapperVisualPresentation(
+      mergeGroupedSections(mapNodes(children, children), node),
+      node,
+    );
   }
 
   // Group acting as a hero: has heading + paragraph (+ optional button)
@@ -515,7 +549,10 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   if (nestedSections.length === 1) {
     return [applyNodePresentation(nestedSections[0], node)];
   }
-  return nestedSections;
+  return applyWrapperVisualPresentation(
+    mergeGroupedSections(nestedSections, node),
+    node,
+  );
 }
 
 // ── query block (post list) ─────────────────────────────────────────────────
@@ -526,25 +563,6 @@ function mapQuery(node: WpNode): PostListSection {
     'post-template',
   ]);
   const templateNodes = postTemplate ? flattenChildren(postTemplate) : [];
-  const displayColumns = Number(
-    node.params?.displayLayout?.columns ??
-      postTemplate?.params?.layout?.columnCount ??
-      postTemplate?.params?.layout?.columns ??
-      0,
-  );
-  const columnsInTemplate =
-    postTemplate?.children?.some(
-      (c) => c.block === 'core/columns' || c.block === 'columns',
-    ) ?? false;
-  const layout: PostListSection['layout'] =
-    Number.isFinite(displayColumns) && displayColumns >= 3
-      ? 'grid-3'
-      : displayColumns === 2
-        ? 'grid-2'
-        : columnsInTemplate
-          ? 'grid-3'
-          : 'list';
-
   const hasAuthorBlock = templateNodes.some((child) =>
     ['core/post-author', 'post-author'].includes(child.block),
   );
@@ -560,23 +578,64 @@ function mapQuery(node: WpNode): PostListSection {
   const hasFeaturedImageBlock = templateNodes.some((child) =>
     ['core/post-featured-image', 'post-featured-image'].includes(child.block),
   );
+  const displayColumns = Number(
+    node.params?.displayLayout?.columns ??
+      postTemplate?.params?.layout?.columnCount ??
+      postTemplate?.params?.layout?.columns ??
+      0,
+  );
+  const columnsInTemplate =
+    postTemplate?.children?.some(
+      (c) => c.block === 'core/columns' || c.block === 'columns',
+    ) ?? false;
+  const compactMetaRowTemplate =
+    (hasAuthorBlock || hasDateBlock || hasTermsBlock) &&
+    !hasExcerptBlock &&
+    !hasFeaturedImageBlock;
+
+  // A post template that has only a title (no explicit meta blocks, no excerpt,
+  // no featured image) is a minimal list. WordPress themes often render date/
+  // author/category at the theme level without explicit blocks, so we should
+  // default to list layout and show meta fields rather than inferring a grid
+  // from the displayLayout columns count.
+  const isMinimalTitleOnlyTemplate =
+    !hasExcerptBlock &&
+    !hasFeaturedImageBlock &&
+    !hasAuthorBlock &&
+    !hasDateBlock &&
+    !hasTermsBlock;
+
+  const layout: PostListSection['layout'] = compactMetaRowTemplate
+    ? 'list'
+    : isMinimalTitleOnlyTemplate
+      ? 'list'
+      : Number.isFinite(displayColumns) && displayColumns >= 3
+        ? 'grid-3'
+        : displayColumns === 2
+          ? 'grid-2'
+          : columnsInTemplate
+            ? 'grid-3'
+            : 'list';
 
   return {
     type: 'post-list',
     layout,
-    showDate: booleanAttr(node.params?.displayPostDate, hasDateBlock || true),
-    showAuthor: booleanAttr(node.params?.displayAuthor, hasAuthorBlock),
-    showCategory: booleanAttr(
-      node.params?.displayPostTerms ?? node.params?.displayCategories,
-      hasTermsBlock,
-    ),
-    showExcerpt: booleanAttr(
-      node.params?.displayPostExcerpt,
-      hasExcerptBlock || true,
-    ),
+    showDate: isMinimalTitleOnlyTemplate
+      ? true
+      : booleanAttr(node.params?.displayPostDate, hasDateBlock),
+    showAuthor: isMinimalTitleOnlyTemplate
+      ? true
+      : booleanAttr(node.params?.displayAuthor, hasAuthorBlock),
+    showCategory: isMinimalTitleOnlyTemplate
+      ? true
+      : booleanAttr(
+          node.params?.displayPostTerms ?? node.params?.displayCategories,
+          hasTermsBlock,
+        ),
+    showExcerpt: booleanAttr(node.params?.displayPostExcerpt, hasExcerptBlock),
     showFeaturedImage: booleanAttr(
       node.params?.displayFeaturedImage,
-      hasFeaturedImageBlock || true,
+      hasFeaturedImageBlock,
     ),
   };
 }
@@ -623,6 +682,7 @@ function mapColumns(
   if (cards.length === 0) return null;
 
   const colCount = Math.min(Math.max(cols.length, 2), 4) as 2 | 3 | 4;
+  const nodeClasses = node.customClassNames ?? [];
   const s: CardGridSection = {
     type: 'card-grid',
     columns: colCount,
@@ -632,6 +692,12 @@ function mapColumns(
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
+  if (nodeClasses.length > 0) {
+    const extra = nodeClasses.includes('is-style-asterisk')
+      ? ['vp-card-grid-intro-centered']
+      : [];
+    s.customClassNames = uniqueClassNames([...nodeClasses, ...extra]);
+  }
   return s;
 }
 
@@ -1121,6 +1187,88 @@ function applyNodePresentation<T extends SectionPlan>(
     next.customClassNames = customClassNames;
   }
   return next;
+}
+
+function applyWrapperVisualPresentation<T extends SectionPlan>(
+  sections: T[],
+  node: WpNode,
+): T[] {
+  if (sections.length === 0) return sections;
+  if (!node.bgColor && !node.textColor) return sections;
+  return sections.map((section) => {
+    const next: T = { ...section };
+    if (node.bgColor && !next.background) next.background = node.bgColor;
+    if (node.textColor && !next.textColor) next.textColor = node.textColor;
+    return next;
+  });
+}
+
+function mergeGroupedSections(
+  sections: SectionPlan[],
+  node: WpNode,
+): SectionPlan[] {
+  if (sections.length < 2) return sections;
+
+  const merged: SectionPlan[] = [];
+  for (let index = 0; index < sections.length; index++) {
+    const current = sections[index]!;
+    const next = sections[index + 1];
+
+    if (current.type === 'hero' && canMergeHeroIntoCardGrid(current, next)) {
+      merged.push(mergeHeroIntoCardGrid(current, next, node));
+      index += 1;
+      continue;
+    }
+
+    merged.push(current);
+  }
+
+  return merged;
+}
+
+function canMergeHeroIntoCardGrid(
+  current: HeroSection,
+  next: SectionPlan | undefined,
+): next is CardGridSection {
+  if (!next || next.type !== 'card-grid') {
+    return false;
+  }
+
+  return (
+    !current.image &&
+    !current.cta &&
+    (!current.ctas || current.ctas.length === 0) &&
+    !!current.heading &&
+    next.cards.length > 0
+  );
+}
+
+function mergeHeroIntoCardGrid(
+  hero: HeroSection,
+  grid: CardGridSection,
+  node: WpNode,
+): CardGridSection {
+  const mergedClasses = uniqueClassNames([
+    ...(grid.customClassNames ?? []),
+    ...(hero.customClassNames ?? []),
+    hero.layout === 'centered' ? 'vp-card-grid-intro-centered' : '',
+  ]);
+  // is-style-asterisk implies a centered, decorated card grid in WordPress
+  const customClassNames = uniqueClassNames([
+    ...mergedClasses,
+    mergedClasses.includes('is-style-asterisk') ? 'vp-card-grid-intro-centered' : '',
+  ]);
+
+  return {
+    ...grid,
+    title: hero.heading || grid.title,
+    subtitle: hero.subheading || grid.subtitle,
+    sourceRef: node.sourceRef ?? grid.sourceRef,
+    customClassNames:
+      customClassNames.length > 0 ? customClassNames : undefined,
+    background: grid.background ?? hero.background,
+    textColor: grid.textColor ?? hero.textColor,
+  };
 }
 
 function extractLikelyButtonClassNames(values?: string[]): string[] {
@@ -1797,7 +1945,10 @@ function isButtonOnlyNode(node: WpNode): boolean {
   if (isButtonBlock(node.block)) {
     return findButtonNodes([node]).length > 0;
   }
-  if ((node.block === 'core/group' || node.block === 'group') && node.children) {
+  if (
+    (node.block === 'core/group' || node.block === 'group') &&
+    node.children
+  ) {
     return isButtonOnlyGroup(node.children);
   }
   return false;

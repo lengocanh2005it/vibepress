@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { spawn } from 'child_process';
 import ts from 'typescript';
-import puppeteer, { type Page } from 'puppeteer';
+import puppeteer, { type HTTPRequest, type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
 import type {
   CardGridSection,
@@ -185,8 +185,8 @@ export class ValidatorService {
         runtimeErrors.push(`console error: ${text}`);
       });
       page.on('requestfailed', (request) => {
+        if (this.shouldIgnoreRequestFailure(request)) return;
         const url = request.url();
-        if (this.shouldIgnoreRequestFailure(url)) return;
         runtimeErrors.push(
           `request failed: ${request.method()} ${url} (${request.failure()?.errorText ?? 'unknown'})`,
         );
@@ -258,6 +258,7 @@ export class ValidatorService {
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
     let code = this.sanitizeGeneratedCode(rawCode);
+    code = this.tryAutoFixTrackingAttributes(code, context.visualPlan);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -520,6 +521,45 @@ export class ValidatorService {
       violations.push(
         `Invalid Tailwind class \`${numericMatch[0]}\`: numeric values need brackets — write \`gap-[1rem]\` not \`gap-1rem\`.`,
       );
+    }
+    if (
+      context.visualPlan?.sections.some(
+        (section) => section.type === 'carousel',
+      )
+    ) {
+      if (this.rendersStaticCarouselTrack(code)) {
+        violations.push(
+          'Carousel section renders a static `.swiper-wrapper` without any active-slide transform. Bind the track to `activeCarousels[...]` (or equivalent state) so prev/next/dots move the carousel instead of stacking all slides.',
+        );
+      }
+      if (this.hasEmptySwiperControlButton(code)) {
+        violations.push(
+          'Carousel control button is empty. `swiper-button-prev` and `swiper-button-next` must render a visible icon/text child because the preview does not load default Swiper arrow glyphs.',
+        );
+      }
+      const carouselStateIssue = this.findInteractiveStateKeyMismatch(
+        code,
+        'activeCarousels',
+      );
+      if (carouselStateIssue) {
+        violations.push(
+          `Carousel state key mismatch: ${carouselStateIssue}. Reuse one exact carousel key consistently across autoplay effects, track transform, arrows, dots, and swipe handlers.`,
+        );
+      }
+    }
+
+    if (
+      context.visualPlan?.sections.some((section) => section.type === 'modal')
+    ) {
+      const modalStateIssue = this.findInteractiveStateKeyMismatch(
+        code,
+        'openModals',
+      );
+      if (modalStateIssue) {
+        violations.push(
+          `Modal state key mismatch: ${modalStateIssue}. Reuse one exact modal key consistently for trigger, conditional popup render, overlay close, and ESC close behavior.`,
+        );
+      }
     }
 
     // 10. Wrong siteInfo field names
@@ -908,7 +948,7 @@ export class ValidatorService {
     }
 
     issues.push(
-      ...this.checkSectionPayloadFidelity(code, section, sectionLabel),
+      ...this.checkSectionPayloadFidelity(code, section, sectionLabel, true),
     );
     if (issues.length === 0) return null;
     return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
@@ -929,6 +969,8 @@ export class ValidatorService {
 
     for (const [index, section] of visualPlan.sections.entries()) {
       const label = `"${componentName ?? visualPlan.componentName}" section ${index + 1}`;
+      // Tracking attribute gaps are patched deterministically by tryAutoFixTrackingAttributes
+      // before the first validation attempt — skip them here to avoid burning retries.
       if (section.sectionKey && !renderedSectionKeys.has(section.sectionKey)) {
         issues.push(
           `${label} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
@@ -951,10 +993,68 @@ export class ValidatorService {
     return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
   }
 
+  /**
+   * Deterministically inject missing data-vp-section-key / data-vp-source-node attributes
+   * onto section wrappers before validation runs, eliminating the need for LLM retries
+   * when the only missing things are tracking attributes.
+   *
+   * Strategy: for each section in the visual plan that has a sectionKey or sourceNodeId,
+   * find the Nth top-level JSX element inside the return block and inject the attributes.
+   */
+  tryAutoFixTrackingAttributes(
+    code: string,
+    visualPlan?: ComponentVisualPlan,
+  ): string {
+    if (!visualPlan?.sections?.length) return code;
+
+    let result = code;
+
+    for (const section of visualPlan.sections) {
+      const { sectionKey, sourceRef } = section;
+      const sourceNodeId = sourceRef?.sourceNodeId;
+      const templateName = sourceRef?.templateName;
+      const sourceFile = sourceRef?.sourceFile;
+
+      if (!sectionKey && !sourceNodeId) continue;
+
+      // Skip if already present
+      const hasKey =
+        !sectionKey || result.includes(`data-vp-section-key="${sectionKey}"`);
+      const hasNode = !sourceNodeId || result.includes(sourceNodeId);
+      if (hasKey && hasNode) continue;
+
+      // Build the attributes to inject
+      const attrs: string[] = [];
+      if (sectionKey && !hasKey)
+        attrs.push(`data-vp-section-key="${sectionKey}"`);
+      if (sourceNodeId && !hasNode) {
+        attrs.push(`data-vp-source-node="${sourceNodeId}"`);
+        if (templateName) attrs.push(`data-vp-template="${templateName}"`);
+        if (sourceFile) attrs.push(`data-vp-source-file="${sourceFile}"`);
+      }
+      if (attrs.length === 0) continue;
+      const attrBlock = ' ' + attrs.join(' ');
+
+      // Find the first top-level JSX element in the return block and inject attrs.
+      // Pattern: the outermost opening tag — either <TagName or <TagName\n — inside return (
+      result = result.replace(
+        /(\breturn\s*\(\s*\n?\s*<([A-Za-z][A-Za-z0-9]*)\b)([^>]*?>)/s,
+        (_match, returnOpen, _tag, rest) => {
+          // rest may be multi-line up to the closing >
+          // inject attrs just before the closing >
+          return returnOpen + rest.replace(/>$/, attrBlock + '>');
+        },
+      );
+    }
+
+    return result;
+  }
+
   private checkSectionPayloadFidelity(
     code: string,
     section: SectionPlan,
     label: string,
+    isInlineSection = false,
   ): string[] {
     switch (section.type) {
       case 'hero':
@@ -968,7 +1068,7 @@ export class ValidatorService {
       case 'card-grid':
         return this.checkCardGridPayload(code, section, label);
       case 'modal':
-        return this.checkModalPayload(code, section, label);
+        return this.checkModalPayload(code, section, label, isInlineSection);
       case 'tabs':
         return this.checkTabsPayload(code, section, label);
       case 'accordion':
@@ -1005,7 +1105,11 @@ export class ValidatorService {
       ),
     );
     issues.push(
-      ...this.requireSectionCtasIfPresent(code, section, `${label} lost hero CTA text`),
+      ...this.requireSectionCtasIfPresent(
+        code,
+        section,
+        `${label} lost hero CTA text`,
+      ),
     );
     issues.push(
       ...this.requireLiteralIfPresent(
@@ -1156,6 +1260,7 @@ export class ValidatorService {
     code: string,
     section: ModalSection,
     label: string,
+    isInlineSection = false,
   ): string[] {
     const issues: string[] = [];
     issues.push(
@@ -1193,6 +1298,32 @@ export class ValidatorService {
         `${label} lost modal CTA text`,
       ),
     );
+    const hasTrigger = /\buagb-modal-trigger\b/.test(code);
+    const hasPopupOverlay = /\buagb-modal-popup\b/.test(code);
+    const hasPopupContent = /\buagb-modal-popup-content\b/.test(code);
+    const hasDialogSemantics =
+      /\baria-modal\s*=\s*{?true}?|\baria-modal\s*=\s*["']true["']|\brole\s*=\s*["']dialog["']/.test(
+        code,
+      );
+    const hasPopupAffordance =
+      hasPopupOverlay || hasPopupContent || hasDialogSemantics;
+
+    if (
+      !hasTrigger ||
+      !(isInlineSection ? hasPopupAffordance : hasPopupOverlay)
+    ) {
+      issues.push(
+        `${label} modal must render a trigger button and conditional popup overlay`,
+      );
+    }
+    if (
+      hasPopupContent &&
+      !/\bopenModals\b/.test(code) &&
+      !/setOpenModals/.test(code) &&
+      !isInlineSection
+    ) {
+      issues.push(`${label} modal popup appears inline instead of interactive`);
+    }
     return issues;
   }
 
@@ -2117,6 +2248,42 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return patterns.some((pattern) => pattern.test(code));
   }
 
+  private rendersStaticCarouselTrack(code: string): boolean {
+    return /\bswiper-wrapper\b/.test(code) && !/translateX\(/.test(code);
+  }
+
+  private hasEmptySwiperControlButton(code: string): boolean {
+    return (
+      /<button\b[^>]*\bswiper-button-(?:prev|next)\b[^>]*\/>/s.test(code) ||
+      /<button\b[^>]*\bswiper-button-(?:prev|next)\b[^>]*>\s*<\/button>/s.test(
+        code,
+      )
+    );
+  }
+
+  private findInteractiveStateKeyMismatch(
+    code: string,
+    stateObjectName: 'activeCarousels' | 'openModals',
+  ): string | null {
+    const keyMatches = [
+      ...code.matchAll(
+        new RegExp(`${stateObjectName}\\[("[^"]+"|'[^']+')\\]`, 'g'),
+      ),
+    ];
+    const normalizedKeys = Array.from(
+      new Set(
+        keyMatches
+          .map((match) => match[1]?.slice(1, -1))
+          .filter((value): value is string => !!value),
+      ),
+    );
+
+    if (normalizedKeys.length <= 1) return null;
+    return `found multiple ${stateObjectName} keys: ${normalizedKeys
+      .map((key) => JSON.stringify(key))
+      .join(', ')}`;
+  }
+
   private fetchesSharedChromeData(code: string): boolean {
     return /fetch\(\s*['"`]\/api\/(?:site-info|menus|footer-links)\b/.test(
       code,
@@ -2690,13 +2857,27 @@ export {};
     );
   }
 
-  private shouldIgnoreRequestFailure(url: string): boolean {
+  private shouldIgnoreRequestFailure(request: HTTPRequest): boolean {
+    const url = request.url();
+    const failureText = request.failure()?.errorText ?? '';
+    const isFontRequest =
+      request.resourceType() === 'font' ||
+      /\.(woff2?|ttf|otf|eot)(?:[?#].*)?$/i.test(url);
+    const isLocalPreviewFont =
+      /^https?:\/\/localhost:\d+\/preview\/assets\/fonts\//i.test(url) ||
+      /\/assets\/fonts\//i.test(url);
+
     return (
       /favicon\.ico|\/@vite\/|\.map($|\?)/.test(url) ||
       // External resources (fonts, analytics, CDN) may be blocked by ORB or network restrictions
       /^https?:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.|analytics\.|gtm\.|gravatar\.com)/.test(
         url,
-      )
+      ) ||
+      // Preview smoke navigates across routes quickly; local font fetches can be
+      // cancelled without indicating a visible runtime failure.
+      (isFontRequest &&
+        isLocalPreviewFont &&
+        /net::ERR_ABORTED/i.test(failureText))
     );
   }
 

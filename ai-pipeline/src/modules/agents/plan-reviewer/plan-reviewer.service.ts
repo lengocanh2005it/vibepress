@@ -698,7 +698,9 @@ export class PlanReviewerService {
       // These are hallucinated sections with no WP source backing.
       const orphans = actualSections.filter(
         (s, i) =>
-          i >= expectedDraftSections.length && !s.sourceRef?.sourceNodeId,
+          i >= expectedDraftSections.length &&
+          !s.sourceRef?.sourceNodeId &&
+          !this.isAllowedOrphanSection(item, s, actualSections),
       );
       for (const orphan of orphans) {
         errors.push(
@@ -816,6 +818,28 @@ export class PlanReviewerService {
     ]
       .filter(Boolean)
       .join(', ');
+  }
+
+  private isAllowedOrphanSection(
+    item: PlanResult[number],
+    orphan: SectionPlan,
+    actualSections: SectionPlan[],
+  ): boolean {
+    const templateBase = toTemplateBase(item.templateName);
+
+    // 404 pages may legitimately add one search section even when the source
+    // draft only produced a hero/message block. Keep this exception narrow so
+    // other AI-added orphan sections still fail hard.
+    if (
+      templateBase === '404' &&
+      item.route === '*' &&
+      orphan.type === 'search' &&
+      actualSections.filter((section) => section.type === 'search').length === 1
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   private resolveDuplicateHomePages(

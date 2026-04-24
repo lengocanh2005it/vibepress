@@ -39,6 +39,7 @@ import { GeneratedCodeReviewService } from '../agents/react-generator/generated-
 import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
+import { ReactVisualEditService } from '../agents/react-generator/react-visual-edit.service.js';
 import type {
   RepoAnalyzeResult,
   RepoResolvedSourceSummary,
@@ -544,6 +545,7 @@ export class OrchestratorService {
     private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
     private readonly sectionEdit: SectionEditService,
+    private readonly reactVisualEdit: ReactVisualEditService,
     private readonly generatedCodeReview: GeneratedCodeReviewService,
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
@@ -655,70 +657,154 @@ export class OrchestratorService {
     jobId: string;
     siteId: string;
     logPath: string;
+    result?: {
+      componentName: string;
+      filePath: string;
+      isValid: boolean;
+      warnings: string[];
+    };
+    error?: string;
   }> {
     const state = this.jobs.get(body.jobId);
     if (!state) {
       throw new BadRequestException(`Job "${body.jobId}" not found`);
     }
 
-    const result = (state.result ?? {}) as {
+    const jobResult = (state.result ?? {}) as {
       previewDir?: string;
       frontendDir?: string;
       previewUrl?: string;
       apiBaseUrl?: string;
       uiSourceMapPath?: string;
       routeEntries?: Array<{ route: string; componentName: string }>;
+      plan?: PlanResult;
     };
 
     const previewDir =
       body.editRequest.reactSourceTarget.previewDir?.trim() ||
-      result.previewDir;
+      jobResult.previewDir;
     const frontendDir =
       body.editRequest.reactSourceTarget.frontendDir?.trim() ||
-      result.frontendDir ||
+      jobResult.frontendDir ||
       (previewDir ? join(previewDir, 'frontend') : undefined);
+    const routeEntries = body.editRequest.reactSourceTarget.routeEntries?.length
+      ? body.editRequest.reactSourceTarget.routeEntries
+      : jobResult.routeEntries;
+
     const logDir = previewDir || join('./temp/generated', body.jobId);
     const logPath = join(logDir, 'react-visual-edit-request.json');
 
-    const normalizedDto = {
-      ...body,
-      editRequest: {
-        ...body.editRequest,
-        reactSourceTarget: {
-          ...body.editRequest.reactSourceTarget,
-          previewDir,
-          frontendDir,
-          previewUrl:
-            body.editRequest.reactSourceTarget.previewUrl?.trim() ||
-            result.previewUrl,
-          apiBaseUrl:
-            body.editRequest.reactSourceTarget.apiBaseUrl?.trim() ||
-            result.apiBaseUrl,
-          uiSourceMapPath:
-            body.editRequest.reactSourceTarget.uiSourceMapPath?.trim() ||
-            result.uiSourceMapPath,
-          routeEntries: body.editRequest.reactSourceTarget.routeEntries?.length
-            ? body.editRequest.reactSourceTarget.routeEntries
-            : result.routeEntries,
-        },
-      },
-      submittedAt: new Date().toISOString(),
-    };
-
     await mkdir(logDir, { recursive: true });
-    await writeFile(logPath, JSON.stringify(normalizedDto, null, 2), 'utf-8');
+    await writeFile(
+      logPath,
+      JSON.stringify(
+        { ...body, submittedAt: new Date().toISOString() },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
 
     this.logger.log(
-      `React visual edit request received for job ${body.jobId}: ${logPath}`,
+      `[visual-edit] job=${body.jobId} frontendDir=${frontendDir} component=${body.editRequest.targetHint?.componentName ?? '(unresolved)'}`,
     );
-    this.logger.debug(JSON.stringify(normalizedDto));
 
-    return {
-      accepted: true,
-      jobId: body.jobId,
-      siteId: body.siteId,
-      logPath,
-    };
+    if (!frontendDir) {
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        logPath,
+        error:
+          'frontendDir could not be resolved — job may not have a completed preview',
+      };
+    }
+
+    if (!jobResult.plan?.length) {
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        logPath,
+        error:
+          'Plan not available for this job — re-run the pipeline to populate plan data',
+      };
+    }
+
+    try {
+      const editResult = await this.reactVisualEdit.applyEdit({
+        jobId: body.jobId,
+        frontendDir,
+        plan: jobResult.plan,
+        routeEntries,
+        editRequest: body.editRequest,
+        logPath,
+      });
+
+      return {
+        accepted: true,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        logPath,
+        result: editResult,
+      };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : String(err ?? 'unknown');
+      this.logger.warn(`[visual-edit] job=${body.jobId} failed: ${message}`);
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        logPath,
+        error: message,
+      };
+    }
+  }
+
+  async undoLastReactEdit(body: { jobId: string; siteId: string }): Promise<{
+    undone: boolean;
+    jobId: string;
+    siteId: string;
+    componentFile?: string;
+    error?: string;
+  }> {
+    const state = this.jobs.get(body.jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${body.jobId}" not found`);
+    }
+
+    const backup = this.reactVisualEdit.undoLast(body.jobId);
+    if (!backup) {
+      return {
+        undone: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        error: 'No edit to undo',
+      };
+    }
+
+    try {
+      await writeFile(backup.filePath, backup.code, 'utf-8');
+      this.logger.log(
+        `[visual-edit:undo] job=${body.jobId} restored ${backup.filePath}`,
+      );
+      return {
+        undone: true,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        componentFile: backup.filePath,
+      };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : String(err ?? 'unknown');
+      return {
+        undone: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        error: message,
+      };
+    }
   }
 
   async stop(jobId: string): Promise<PipelineStatus> {
@@ -2527,6 +2613,7 @@ export class OrchestratorService {
           exactCaptureTargets,
           dbCreds,
           metrics,
+          plan: reviewResult.plan,
         };
         // Emit final event with previewUrl from within runStep
         const subject = this.progress.get(jobId);

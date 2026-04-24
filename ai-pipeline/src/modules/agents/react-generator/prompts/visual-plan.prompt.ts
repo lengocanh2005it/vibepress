@@ -55,7 +55,12 @@ export function buildVisualPlanPrompt(input: {
   const palette = buildPaletteHint(tokens);
   const siteCtx = buildSiteContext(content);
   const imageHints = buildImageSourcesHint(templateSource);
-  const repoContext = buildRepoManifestContextNote(repoManifest);
+  const repoContext = buildRepoManifestContextNote(repoManifest, {
+    mode: 'full',
+    includeLayoutHints: true,
+    includeStyleHints: true,
+    includeStructureHints: true,
+  });
   const patternHints = buildPatternSuggestionsHint(repoManifest);
   const contractHint = buildContractHint({
     componentName,
@@ -124,6 +129,7 @@ Typography and exact column-ratio metadata may also appear when the template exp
 | \`newsletter\` | email signup section |
 | \`footer\` | page footer with nav columns |
 | \`post-content\` | single post detail (uses :slug param) |
+| \`post-meta\` | reusable byline/meta row for one current post item |
 | \`page-content\` | single page detail (uses :slug param) |
 | \`comments\`     | WordPress comments list + leave a reply form |
 | \`search\` | search input + results |
@@ -148,6 +154,7 @@ testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign? }
 newsletter:   { heading, subheading?, buttonText, layout: centered|card }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
+post-meta:    { layout?: inline|stacked, showAuthor, showDate, showCategories, showSeparator? }
 page-content: { showTitle }
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
@@ -161,6 +168,9 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 
 ## Rules
 - Preserve the original WordPress layout hierarchy and reading order as closely as possible.
+- Treat the selected WordPress source, theme files under \`themes/**\`, and interactive plugin contracts from \`plugins/ultimate-addons-for-gutenberg\` / Spectra as the primary source of truth. Prefer extracting exact structure from those sources over inferring a cleaner or more generic composition.
+- When repo hints expose concrete wrapper classes, variant names, item classes, alignment classes, or widget attr keys from Spectra/UAGB plugin source, preserve that same widget family in the plan instead of collapsing it into generic hero/card/media-text sections.
+- If theme or plugin source is sparse, keep the plan sparse. Do NOT compensate by inventing extra wrapper sections, promo rows, centered hero treatments, or broader containers.
 - When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
 - When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`sectionKey\` or different \`sourceRef.sourceNodeId\`.
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
@@ -203,6 +213,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - If the source shows a real accordion/FAQ/content-toggle widget, preserve it as an \`accordion\` section. Do NOT flatten it into a \`card-grid\`, \`hero\`, or generic text block.
 - If source widget hints say \`accordion\`, the output MUST include at least one \`accordion\` section. Preserve every source-backed accordion panel heading and body.
 - If source widget hints detect an interactive widget that is NOT represented in the deterministic draft sections, you must still add the missing source-backed section instead of silently omitting it.
+- For Spectra/UAGB widgets, prefer exact source attrs and plugin contract cues over generic defaults. Examples: preserve slider arrows/dots/autoplay/effect, modal width/height/overlay-close behavior, tabs variant/alignment, accordion toggle rules, and source-backed inner wrappers.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
   const draftHint = buildDraftSectionsHint(draftSections);
@@ -452,6 +463,7 @@ const VALID_SECTION_TYPES = new Set<string>([
   'newsletter',
   'footer',
   'post-content',
+  'post-meta',
   'page-content',
   'comments',
   'search',
@@ -647,7 +659,7 @@ function validateSectionDetailed(
 
     case 'post-list':
       if (!['list', 'grid-2', 'grid-3'].includes(raw.layout))
-        raw.layout = 'grid-3';
+        raw.layout = 'list';
       for (const f of [
         'showDate',
         'showAuthor',
@@ -729,6 +741,14 @@ function validateSectionDetailed(
       if (typeof raw.showAuthor !== 'boolean') raw.showAuthor = true;
       if (typeof raw.showDate !== 'boolean') raw.showDate = true;
       if (typeof raw.showCategories !== 'boolean') raw.showCategories = true;
+      break;
+
+    case 'post-meta':
+      if (!['inline', 'stacked'].includes(raw.layout)) raw.layout = 'inline';
+      if (typeof raw.showAuthor !== 'boolean') raw.showAuthor = true;
+      if (typeof raw.showDate !== 'boolean') raw.showDate = true;
+      if (typeof raw.showCategories !== 'boolean') raw.showCategories = true;
+      if (typeof raw.showSeparator !== 'boolean') raw.showSeparator = true;
       break;
 
     case 'page-content':
@@ -1017,9 +1037,7 @@ function isAllowedStaticImage(
   return allowedImageSrcs.includes(src.trim());
 }
 
-function normalizeCtaConfig(
-  value: unknown,
-):
+function normalizeCtaConfig(value: unknown):
   | {
       text: string;
       link: string;
@@ -1068,7 +1086,9 @@ function normalizeCtaConfig(
 
 function normalizeCtaConfigs(
   value: unknown,
-): Array<ReturnType<typeof normalizeCtaConfig> extends infer T ? NonNullable<T> : never> {
+): Array<
+  ReturnType<typeof normalizeCtaConfig> extends infer T ? NonNullable<T> : never
+> {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const result: Array<NonNullable<ReturnType<typeof normalizeCtaConfig>>> = [];

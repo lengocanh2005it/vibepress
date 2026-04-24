@@ -190,6 +190,15 @@ export interface PostContentSection extends BaseSection {
   showCategories: boolean;
 }
 
+export interface PostMetaSection extends BaseSection {
+  type: 'post-meta';
+  layout?: 'inline' | 'stacked';
+  showAuthor: boolean;
+  showDate: boolean;
+  showCategories: boolean;
+  showSeparator?: boolean;
+}
+
 export interface CommentsSection extends BaseSection {
   type: 'comments';
   showForm: boolean; // render "Leave a Reply" form
@@ -301,6 +310,7 @@ export type SectionPlan =
   | NewsletterSection
   | FooterSection
   | PostContentSection
+  | PostMetaSection
   | PageContentSection
   | SearchSection
   | BreadcrumbSection

@@ -3,6 +3,16 @@
     overflow: hidden;
   }
 
+  /* WordPress is-style-asterisk card grid decoration */
+  .is-style-asterisk > span.is-style-asterisk {
+    display: block;
+    font-size: 1.5rem;
+    line-height: 1;
+    margin-bottom: 0.5rem;
+    color: inherit;
+    opacity: 0.7;
+  }
+
   .uagb-modal-wrapper {
     width: 100%;
   }
@@ -128,6 +138,26 @@
   .uagb-slider-container .swiper-button-next {
     border-style: none;
     background: rgba(239, 239, 239, 0.9);
+    color: #111111 !important;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+  }
+
+  .uagb-slider-container .swiper-button-prev:empty::before {
+    content: '\2039';
+    font-size: 1.5rem;
+    line-height: 1;
+  }
+
+  .uagb-slider-container .swiper-button-next:empty::before {
+    content: '\203A';
+    font-size: 1.5rem;
+    line-height: 1;
   }
 
   .uagb-slider-container .swiper-pagination.swiper-pagination-bullets {

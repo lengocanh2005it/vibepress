@@ -66,7 +66,11 @@ export function normalizePlainTextPostMetaArchiveLinks(code: string): string {
       !ts.isJsxExpression(node.parent) &&
       !isInsideHeadingElement(node)
     ) {
-      const directReplacement = buildDirectMetaReplacement(node, sourceFile, code);
+      const directReplacement = buildDirectMetaReplacement(
+        node,
+        sourceFile,
+        code,
+      );
       if (directReplacement) {
         replacements.push({
           start: node.getStart(sourceFile),
@@ -150,10 +154,7 @@ export function findPlainTextPostMetaArchiveSnippets(
 
   const pushSnippet = (node: ts.Node): void => {
     if (snippets.length >= max) return;
-    const raw = node
-      .getText(sourceFile)
-      .replace(/\s+/g, ' ')
-      .trim();
+    const raw = node.getText(sourceFile).replace(/\s+/g, ' ').trim();
     if (!raw) return;
     snippets.push({
       start: node.getStart(sourceFile),
@@ -212,7 +213,11 @@ function buildGuardedMetaReplacement(
   const left = unwrapExpression(expression.left);
   const right = unwrapExpression(expression.right);
   const authorRecord = getAuthorRecordName(left, sourceFile);
-  if (authorRecord && ts.isJsxElement(right) && !isInsideHeadingElement(right)) {
+  if (
+    authorRecord &&
+    ts.isJsxElement(right) &&
+    !isInsideHeadingElement(right)
+  ) {
     const meta = matchAuthorElement(right, sourceFile);
     if (meta?.record === authorRecord) {
       return `{${authorRecord}.author && (${authorRecord}.authorSlug ? <Link to={'/author/' + ${authorRecord}.authorSlug}${decorateMetaLinkAttrs(meta.attrs)}>${meta.inner}</Link> : ${right.getText(sourceFile)})}`;
@@ -385,13 +390,22 @@ function getSupportedTagName(node: ts.JsxElement): 'span' | 'p' | null {
   return null;
 }
 
-function getOpeningAttrs(node: ts.JsxElement, sourceFile: ts.SourceFile): string {
+function getOpeningAttrs(
+  node: ts.JsxElement,
+  sourceFile: ts.SourceFile,
+): string {
   const attrs = node.openingElement.attributes.getText(sourceFile).trim();
   return attrs ? ` ${attrs}` : '';
 }
 
-function getJsxElementInner(node: ts.JsxElement, sourceFile: ts.SourceFile): string {
-  return sourceFile.text.slice(node.openingElement.end, node.closingElement.pos);
+function getJsxElementInner(
+  node: ts.JsxElement,
+  sourceFile: ts.SourceFile,
+): string {
+  return sourceFile.text.slice(
+    node.openingElement.end,
+    node.closingElement.pos,
+  );
 }
 
 function getAuthorRecordName(
@@ -414,7 +428,9 @@ function getFirstCategoryRecordName(
   return (match?.[1] as AllowedRecordName | undefined) ?? null;
 }
 
-function unwrapExpression<T extends ts.Expression>(expression: T): ts.Expression {
+function unwrapExpression<T extends ts.Expression>(
+  expression: T,
+): ts.Expression {
   let current: ts.Expression = expression;
   while (
     ts.isParenthesizedExpression(current) ||
@@ -456,9 +472,7 @@ function applySnippetReplacements(
 
   const filtered = replacements
     .filter((candidate) => candidate.replacement)
-    .sort((a, b) =>
-      a.start === b.start ? b.end - a.end : a.start - b.start,
-    )
+    .sort((a, b) => (a.start === b.start ? b.end - a.end : a.start - b.start))
     .filter((candidate, index, list) => {
       const previous = list[index - 1];
       return !previous || candidate.start >= previous.end;

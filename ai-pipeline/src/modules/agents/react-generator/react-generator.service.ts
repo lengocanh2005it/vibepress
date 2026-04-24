@@ -25,10 +25,7 @@ import type {
   ThemeInteractionTarget,
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
-import type {
-  ComponentVisualPlan,
-  SectionPlan,
-} from './visual-plan.schema.js';
+import type { ComponentVisualPlan, SectionPlan } from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
@@ -810,7 +807,9 @@ ${renders}
         parts.push(`align="${section.align}"`);
       }
       const ctas =
-        'ctas' in section && Array.isArray(section.ctas) && section.ctas.length > 0
+        'ctas' in section &&
+        Array.isArray(section.ctas) &&
+        section.ctas.length > 0
           ? section.ctas
           : 'cta' in section && section.cta
             ? [section.cta]
@@ -821,7 +820,9 @@ ${renders}
             .map((cta) => cta?.text?.trim())
             .filter((value): value is string => !!value)
             .map((value, ctaIndex) =>
-              ctaIndex === 0 ? `cta="${value}"` : `cta${ctaIndex + 1}="${value}"`,
+              ctaIndex === 0
+                ? `cta="${value}"`
+                : `cta${ctaIndex + 1}="${value}"`,
             ),
         );
       }
@@ -864,7 +865,8 @@ ${renders}
       .map((section, index) => ({
         section,
         sectionKey:
-          section.sectionKey ?? `${section.type}${index === 0 ? '' : `-${index}`}`,
+          section.sectionKey ??
+          `${section.type}${index === 0 ? '' : `-${index}`}`,
       }))
       .filter(
         ({ section, sectionKey }) =>
@@ -875,20 +877,25 @@ ${renders}
     }
 
     const missingSections = trackedSections.filter(
-      ({ sectionKey }) =>
-        !code.includes(`data-vp-section-key="${sectionKey}"`),
+      ({ sectionKey }) => !code.includes(`data-vp-section-key="${sectionKey}"`),
     );
     if (missingSections.length === 0) {
       return { code, restoredSectionKeys: [] };
     }
 
-    const anchors = this.findTopLevelSectionAnchors(code, trackedSections.length);
+    const anchors = this.findTopLevelSectionAnchors(
+      code,
+      trackedSections.length,
+    );
     if (anchors.length === 0) {
       return { code, restoredSectionKeys: [] };
     }
 
-    const mutations: Array<{ start: number; end: number; replacement: string }> =
-      [];
+    const mutations: Array<{
+      start: number;
+      end: number;
+      replacement: string;
+    }> = [];
     const restoredSectionKeys: string[] = [];
 
     trackedSections.forEach(({ section, sectionKey }, index) => {

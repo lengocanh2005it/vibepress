@@ -558,6 +558,11 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       lines.push(
         `- Default font family: do NOT hardcode this inline on every wrapper. Let global theme CSS / \`.wp-site-blocks\` inherit it, and only add \`style={{fontFamily:"${d.fontFamily}"}}\` when a specific block explicitly overrides the default.`,
       );
+    const hf = (d as any).headingFamily ?? d.headingFontFamily;
+    if (hf && d.fontFamily && hf !== d.fontFamily)
+      lines.push(
+        `- Heading font (\`${hf}\`) applies to h1–h6 ONLY. Nav links, body paragraphs, captions, and button labels must use the body font (\`${d.fontFamily}\`) — never apply the heading font to non-heading elements.`,
+      );
     if (d.lineHeight)
       lines.push(
         `- Default line height: use \`style={{lineHeight:"${d.lineHeight}"}}\` on root wrapper`,
@@ -1415,6 +1420,13 @@ function buildCompactSectionSummary(
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showCategories=${section.showCategories}`);
         break;
+      case 'post-meta':
+        parts.push(`layout=${section.layout ?? 'inline'}`);
+        parts.push(`showAuthor=${section.showAuthor}`);
+        parts.push(`showDate=${section.showDate}`);
+        parts.push(`showCategories=${section.showCategories}`);
+        parts.push(`showSeparator=${section.showSeparator !== false}`);
+        break;
       case 'page-content':
         parts.push(`showTitle=${section.showTitle}`);
         break;
@@ -1762,6 +1774,8 @@ export function buildComponentPrompt(
   const planContext = [
     buildPlanContextNote(componentPlan, componentName),
     buildVisualPlanContextNote(componentPlan?.visualPlan, componentName),
+    buildFullFileVisualPlanBehaviorChecklist(componentPlan?.visualPlan),
+    buildFullFileLiteralChecklist(componentPlan?.visualPlan),
     repoContext,
     editRequestContextNote,
   ]
@@ -1838,6 +1852,146 @@ ${
     .replace('{{siteName}}', siteInfo.siteName)
     .replace('{{siteUrl}}', siteInfo.siteUrl)
     .replace('{{templateSource}}', templateSource);
+}
+
+function buildFullFileVisualPlanBehaviorChecklist(
+  visualPlan?: ComponentVisualPlan,
+): string {
+  if (!visualPlan?.sections?.length) return '';
+
+  const lines: string[] = [];
+
+  if (visualPlan.sections.some((section) => section.type === 'modal')) {
+    lines.push('## Required interactive behavior');
+    lines.push(
+      '- Modal sections must render a real trigger button plus a conditional popup overlay. Do NOT flatten modal content inline.',
+    );
+    lines.push(
+      '- Declare and use modal state such as `const [openModals, setOpenModals] = useState<Record<string, boolean>>({});` when the approved plan contains modal sections.',
+    );
+    lines.push(
+      '- Modal trigger/button output must include `uagb-modal-trigger` and `uagb-modal-button-link`.',
+    );
+    lines.push(
+      '- Modal popup output must include `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+    );
+  }
+
+  if (visualPlan.sections.some((section) => section.type === 'carousel')) {
+    if (lines.length === 0) lines.push('## Required interactive behavior');
+    lines.push(
+      '- Carousel sections must be state-driven, not static. Declare and use carousel state such as `const [activeCarousels, setActiveCarousels] = useState<Record<string, number>>({});`.',
+    );
+    lines.push(
+      '- If you render a `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` with `translateX(...)` so prev/next/dots move the active slide.',
+    );
+    lines.push(
+      '- `swiper-button-prev` and `swiper-button-next` must render a visible SVG or text child. Do NOT leave control buttons empty.',
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function buildFullFileLiteralChecklist(
+  visualPlan?: ComponentVisualPlan,
+): string {
+  if (!visualPlan?.sections?.length) return '';
+
+  const lines: string[] = [
+    '## Full-file literal preservation checklist',
+    'Preserve every approved visual-plan literal exactly. Do not paraphrase, shorten, summarize, or replace these literals with generic copy.',
+  ];
+
+  for (let index = 0; index < visualPlan.sections.length; index++) {
+    const section = visualPlan.sections[index]!;
+    const label = `section ${index + 1} (${section.type})`;
+
+    switch (section.type) {
+      case 'cover':
+        if (section.imageSrc) {
+          lines.push(
+            `- ${label} imageSrc: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
+        }
+        if (section.subheading) {
+          lines.push(
+            `- ${label} subheading: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        break;
+      case 'card-grid':
+        if (section.title) {
+          lines.push(`- ${label} title: ${JSON.stringify(section.title)}`);
+        }
+        if (section.subtitle) {
+          lines.push(
+            `- ${label} subtitle: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
+        section.cards.forEach((card, cardIndex) => {
+          if (card.heading) {
+            lines.push(
+              `- ${label} card ${cardIndex + 1} heading: ${JSON.stringify(card.heading)}`,
+            );
+          }
+          if (card.body) {
+            lines.push(
+              `- ${label} card ${cardIndex + 1} body: ${JSON.stringify(card.body)}`,
+            );
+          }
+        });
+        break;
+      case 'media-text':
+        if (section.heading) {
+          lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
+        }
+        if (section.body) {
+          lines.push(`- ${label} body: ${JSON.stringify(section.body)}`);
+        }
+        if (section.imageSrc) {
+          lines.push(
+            `- ${label} imageSrc: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        for (const item of section.listItems ?? []) {
+          lines.push(`- ${label} listItem: ${JSON.stringify(item)}`);
+        }
+        break;
+      case 'modal':
+        if (section.triggerText) {
+          lines.push(
+            `- ${label} triggerText: ${JSON.stringify(section.triggerText)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
+        }
+        if (section.body) {
+          lines.push(`- ${label} body: ${JSON.stringify(section.body)}`);
+        }
+        if (section.imageSrc) {
+          lines.push(
+            `- ${label} imageSrc: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.cta?.text) {
+          lines.push(`- ${label} ctaText: ${JSON.stringify(section.cta.text)}`);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  lines.push(
+    '- For list item literals containing HTML tags such as `<strong>`, keep that inline HTML structure when rendering the item instead of stripping tags or rewriting the sentence.',
+  );
+
+  return lines.join('\n');
 }
 
 /**
@@ -2027,6 +2181,7 @@ When this section renders post-list/archive/search/recent-post meta:
       : '',
     input.editRequestContextNote,
     buildRetryNote(input.retryError),
+    buildInlineSectionBehaviorChecklist(input.section),
     buildInlineSectionLiteralChecklist(input.section),
     '## Approved section JSON',
     '```json',
@@ -2037,6 +2192,76 @@ When this section renders post-list/archive/search/recent-post meta:
   return planContext.join('\n\n');
 }
 
+function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
+  const stateKeyHint = resolveInteractiveSectionPromptStateKey(section);
+  switch (section.type) {
+    case 'post-meta':
+      return [
+        '## Section behavior contract',
+        '- Render metadata for the current post item only; do not fetch inside this JSX fragment.',
+        '- Prefer the existing `post` prop first, then fall back to `item` when it is a post-detail object.',
+        '- Author/category labels must use canonical archive links when `authorSlug` or `categorySlugs[0]` exists.',
+      ].join('\n');
+    case 'carousel':
+      return [
+        '## Section behavior contract',
+        '- Render a real interactive carousel, not a static stacked list of slides.',
+        stateKeyHint
+          ? `- Use the exact approved carousel state key ${stateKeyHint} everywhere in this section. Do NOT invent a different key.`
+          : '- Use one stable existing carousel state key from the approved section identity everywhere in this section.',
+        stateKeyHint
+          ? `- The same key ${stateKeyHint} must be reused consistently for autoplay, track transform, prev/next buttons, and pagination dots.`
+          : '- Reuse one exact carousel state key consistently for autoplay, track transform, prev/next buttons, and pagination dots.',
+        `- If you render a \`.swiper-wrapper\`, it must bind its transform to the existing page-shell carousel state, for example \`transform: 'translateX(-' + ((activeCarousels[${stateKeyHint ?? '"approved-carousel-key"'}] ?? 0) * 100) + '%)'\`.`,
+        '- Use the existing page-shell carousel state (`activeCarousels` / `setActiveCarousels`) for prev/next/dot navigation. Do NOT add local hooks or helper functions in this JSX fragment.',
+        '- Prev/next controls must have className markers `swiper-button-prev` and `swiper-button-next` and must render a visible child such as SVG arrows or text. Do NOT leave these buttons empty.',
+        '- Pagination dots must update `setActiveCarousels(...)` so clicking a dot moves to the selected slide.',
+      ].join('\n');
+    case 'tabs':
+      return [
+        '## Section behavior contract',
+        stateKeyHint
+          ? `- Use the exact approved tabs state key ${stateKeyHint} everywhere in this section.`
+          : '- Use one stable existing tabs state key from the approved section identity everywhere in this section.',
+        '- Use the existing page-shell tabs state (`activeTabs` / `setActiveTabs`) for tab selection. Do NOT use `activeCarousels` for tabs.',
+        '- Tab buttons must update `setActiveTabs(...)`, and the active panel visibility must read from `activeTabs[...]`.',
+      ].join('\n');
+    case 'accordion':
+      return [
+        '## Section behavior contract',
+        stateKeyHint
+          ? `- Use the exact approved accordion state key ${stateKeyHint} everywhere in this section.`
+          : '- Use one stable existing accordion state key from the approved section identity everywhere in this section.',
+        '- Use the existing page-shell accordion state (`openAccordions` / `setOpenAccordions`) for open/close behavior.',
+      ].join('\n');
+    case 'modal':
+      return [
+        '## Section behavior contract',
+        '- Render a real interactive modal, not inline static content.',
+        stateKeyHint
+          ? `- Use the exact approved modal state key ${stateKeyHint} everywhere in this section.`
+          : '- Use one stable existing modal state key from the approved section identity everywhere in this section.',
+        stateKeyHint
+          ? `- The same key ${stateKeyHint} must be reused for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.`
+          : '- Reuse one exact modal state key for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.',
+        '- Keep a visible trigger button whose className includes `uagb-modal-trigger uagb-modal-button-link`.',
+        '- Use the existing page-shell modal state (`openModals` / `setOpenModals`) to open and close the popup. Do NOT add local hooks or helper functions in this JSX fragment.',
+        `- Render the popup conditionally, for example \`{openModals[${stateKeyHint ?? '"approved-modal-key"'}] ? (...) : null}\`.`,
+        '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, and the dialog body must include `uagb-modal-popup-content`.',
+        '- The trigger must call `setOpenModals(... true)`, and the close button or overlay-close handler must call `setOpenModals(... false)`.',
+      ].join('\n');
+    default:
+      return '';
+  }
+}
+
+function resolveInteractiveSectionPromptStateKey(
+  section: SectionPlan,
+): string | null {
+  const raw = section.sectionKey ?? section.sourceRef?.sourceNodeId;
+  return raw ? JSON.stringify(raw) : null;
+}
+
 function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
   const lines: string[] = [
     '## Literal preservation checklist',
@@ -2044,6 +2269,15 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
   ];
 
   switch (section.type) {
+    case 'post-meta':
+      lines.push(`- layout: ${JSON.stringify(section.layout ?? 'inline')}`);
+      lines.push(`- showAuthor: ${JSON.stringify(section.showAuthor)}`);
+      lines.push(`- showDate: ${JSON.stringify(section.showDate)}`);
+      lines.push(`- showCategories: ${JSON.stringify(section.showCategories)}`);
+      lines.push(
+        `- showSeparator: ${JSON.stringify(section.showSeparator !== false)}`,
+      );
+      break;
     case 'media-text':
       if (section.imageSrc) {
         lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
@@ -2065,9 +2299,7 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       if (section.ctas?.length) {
         section.ctas.slice(1).forEach((cta, ctaIndex) => {
           if (cta.text) {
-            lines.push(
-              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
-            );
+            lines.push(`- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`);
           }
         });
       }
@@ -2130,6 +2362,67 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         lines.push(`- item ${index + 1} body: ${JSON.stringify(item.body)}`);
       });
       break;
+    case 'carousel':
+      lines.push(`- render exactly ${section.slides.length} slide(s)`);
+      section.slides.slice(0, 12).forEach((slide, index) => {
+        if (slide.heading) {
+          lines.push(
+            `- slide ${index + 1} heading: ${JSON.stringify(slide.heading)}`,
+          );
+        }
+        if (slide.subheading) {
+          lines.push(
+            `- slide ${index + 1} subheading: ${JSON.stringify(slide.subheading)}`,
+          );
+        }
+        if (slide.imageSrc) {
+          lines.push(
+            `- slide ${index + 1} imageSrc: ${JSON.stringify(slide.imageSrc)}`,
+          );
+        }
+        if (slide.cta?.text) {
+          lines.push(
+            `- slide ${index + 1} ctaText: ${JSON.stringify(slide.cta.text)}`,
+          );
+        }
+      });
+      lines.push(
+        '- Keep the carousel structure markers: `swiper-wrapper`, `swiper-slide`, `swiper-button-prev`, and `swiper-button-next`.',
+      );
+      lines.push(
+        '- The `.swiper-wrapper` must use a state-driven `translateX(...)` transform instead of staying static.',
+      );
+      lines.push(
+        '- Prev/next buttons must include visible SVG or text children.',
+      );
+      break;
+    case 'modal':
+      if (section.triggerText) {
+        lines.push(`- triggerText: ${JSON.stringify(section.triggerText)}`);
+      }
+      if (section.heading) {
+        lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if (section.body) {
+        lines.push(`- body: ${JSON.stringify(section.body)}`);
+      }
+      if (section.imageSrc) {
+        lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
+      }
+      if (section.cta?.text) {
+        lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      if (section.ctas?.length) {
+        section.ctas.slice(1).forEach((cta, ctaIndex) => {
+          if (cta.text) {
+            lines.push(`- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`);
+          }
+        });
+      }
+      lines.push(
+        '- Keep the Spectra modal structure markers: `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+      );
+      break;
     case 'hero':
     case 'cover':
       if ('heading' in section && section.heading) {
@@ -2144,9 +2437,7 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       if ('ctas' in section && Array.isArray(section.ctas)) {
         section.ctas.slice(1).forEach((cta, ctaIndex) => {
           if (cta.text) {
-            lines.push(
-              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
-            );
+            lines.push(`- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`);
           }
         });
       }
@@ -2161,9 +2452,7 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       if (section.ctas?.length) {
         section.ctas.slice(1).forEach((cta, ctaIndex) => {
           if (cta.text) {
-            lines.push(
-              `- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`,
-            );
+            lines.push(`- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`);
           }
         });
       }

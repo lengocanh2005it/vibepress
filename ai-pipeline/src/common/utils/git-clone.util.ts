@@ -40,7 +40,11 @@ export async function cloneRepoWithRetry(
   const cloneCandidates = buildCloneCandidates(repoUrl, token);
 
   let lastError: unknown;
-  for (let candidateIndex = 0; candidateIndex < cloneCandidates.length; candidateIndex++) {
+  for (
+    let candidateIndex = 0;
+    candidateIndex < cloneCandidates.length;
+    candidateIndex++
+  ) {
     const candidate = cloneCandidates[candidateIndex];
     const hasNextCandidate = candidateIndex < cloneCandidates.length - 1;
 
@@ -101,7 +105,10 @@ function buildCloneCandidates(
   const candidates: CloneCandidate[] = [];
   const tokens = [
     { value: explicitToken, label: 'request token' },
-    { value: process.env.GITHUB_WP_REPO_TOKEN, label: 'env GITHUB_WP_REPO_TOKEN' },
+    {
+      value: process.env.GITHUB_WP_REPO_TOKEN,
+      label: 'env GITHUB_WP_REPO_TOKEN',
+    },
     {
       value: process.env.GITHUB_REACT_REPO_TOKEN,
       label: 'env GITHUB_REACT_REPO_TOKEN',
@@ -111,7 +118,9 @@ function buildCloneCandidates(
       ...entry,
       value: entry.value?.trim(),
     }))
-    .filter((entry): entry is { value: string; label: string } => !!entry.value);
+    .filter(
+      (entry): entry is { value: string; label: string } => !!entry.value,
+    );
 
   const seen = new Set<string>();
   for (const entry of tokens) {

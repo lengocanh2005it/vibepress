@@ -224,7 +224,10 @@ export function buildRepoManifestContextNote(
       );
     }
   }
-  if (includeStructureHints && manifest.interactiveContracts?.spectra?.detected) {
+  if (
+    includeStructureHints &&
+    manifest.interactiveContracts?.spectra?.detected
+  ) {
     const spectra = manifest.interactiveContracts.spectra;
     const widgetLines = Object.entries(spectra.widgets)
       .map(([widget, contract]) => {

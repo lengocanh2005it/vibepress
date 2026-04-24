@@ -1050,6 +1050,20 @@ export class PlannerService {
             },
           ],
         };
+      case 'post-meta':
+        return {
+          ...base,
+          sections: [
+            {
+              type: 'post-meta',
+              layout: 'inline',
+              showDate: true,
+              showAuthor: true,
+              showCategories: true,
+              showSeparator: true,
+            },
+          ],
+        };
       default:
         return undefined;
     }
@@ -1238,7 +1252,10 @@ export class PlannerService {
   ): string {
     const preferredName =
       componentPlan.fixedSlug?.trim() ||
-      componentPlan.route?.trim().replace(/^\/+|\/+$/g, '').replace(/\//g, '__') ||
+      componentPlan.route
+        ?.trim()
+        .replace(/^\/+|\/+$/g, '')
+        .replace(/\//g, '__') ||
       componentPlan.componentName ||
       componentPlan.templateName;
     const safeName = preferredName
@@ -1711,7 +1728,12 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     );
     lines.push('');
 
-    const repoContext = buildRepoManifestContextNote(repoManifest);
+    const repoContext = buildRepoManifestContextNote(repoManifest, {
+      mode: 'full',
+      includeLayoutHints: true,
+      includeStyleHints: true,
+      includeStructureHints: true,
+    });
     if (repoContext) {
       lines.push(repoContext);
       lines.push('');
@@ -2482,9 +2504,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const richSectionCount = meaningful.filter((section) =>
       richTypes.has(section.type),
     ).length;
-    const distinctTypes = new Set(meaningful.map((section) => section.type)).size;
+    const distinctTypes = new Set(meaningful.map((section) => section.type))
+      .size;
 
-    return richSectionCount >= 2 || distinctTypes >= 3 || meaningful.length >= 4;
+    return (
+      richSectionCount >= 2 || distinctTypes >= 3 || meaningful.length >= 4
+    );
   }
 
   private parsePlanningSourceNodes(input: {
@@ -2665,6 +2690,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           normalize(section.authorTitle),
         ].join('|');
       case 'post-list':
+        if (section.sourceRef?.sourceNodeId) {
+          return [section.type, normalize(section.sourceRef.sourceNodeId)].join(
+            '|',
+          );
+        }
         return [
           section.type,
           normalize(section.title),
@@ -3538,6 +3568,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
             ', ',
           )}. Preserve them as interactive UI where the source shows real behavior; do not flatten them into static sections by default.`,
       );
+    }
+    const widgetSnippets = this.buildRetryWidgetSnippetEvidence(
+      fallbackSource,
+      interactiveWidgets,
+    );
+    if (widgetSnippets.length > 0) {
+      summaryLines.push('Source widget snippets (exact source evidence):');
+      for (const snippet of widgetSnippets) {
+        summaryLines.push(`- ${snippet}`);
+      }
     }
 
     return {

@@ -706,7 +706,9 @@ ${fontEntries}
     }
 
     if (d?.linkColor)
-      cssLines.push(`a, .wp-site-blocks a { color: ${d.linkColor}; }`);
+      cssLines.push(
+        `:where(a), :where(.wp-site-blocks) a { color: ${d.linkColor}; }`,
+      );
 
     if (cssLines.length > 0) {
       const cssPath = join(frontendDir, 'src', 'index.css');
@@ -780,7 +782,10 @@ ${fontEntries}
           if (typeof face?.fontWeight === 'string' && face.fontWeight.trim()) {
             declarations.push(`font-weight: ${face.fontWeight.trim()}`);
           }
-          if (typeof face?.fontStretch === 'string' && face.fontStretch.trim()) {
+          if (
+            typeof face?.fontStretch === 'string' &&
+            face.fontStretch.trim()
+          ) {
             declarations.push(`font-stretch: ${face.fontStretch.trim()}`);
           }
 
@@ -806,7 +811,7 @@ ${fontEntries}
 
     if (trimmed.startsWith('file:./assets/')) {
       const relativePath = trimmed.slice('file:./assets/'.length);
-      return `url(${JSON.stringify(`/assets/${relativePath}`)})${formatSuffix}`;
+      return `url(${JSON.stringify(`../assets/${relativePath}`)})${formatSuffix}`;
     }
 
     if (/^https?:\/\//i.test(trimmed)) {
@@ -927,9 +932,7 @@ ${fontEntries}
       pluginSlugs.has('spectra') ||
       repoManifest?.plugins.some((plugin) => {
         const slug = plugin.slug.toLowerCase();
-        return (
-          slug === 'ultimate-addons-for-gutenberg' || slug === 'spectra'
-        );
+        return slug === 'ultimate-addons-for-gutenberg' || slug === 'spectra';
       }) === true;
 
     if (!knownSpectraPluginPresent) return false;
@@ -966,12 +969,16 @@ ${fontEntries}
     if (existingCss.includes(importLine)) return;
 
     const lines = existingCss.split(/\r?\n/);
-    const componentsIndex = lines.findIndex(
-      (line) => line.trim() === '@tailwind components;',
+    const firstDirectiveIndex = lines.findIndex((line) =>
+      [
+        '@tailwind base;',
+        '@tailwind components;',
+        '@tailwind utilities;',
+      ].includes(line.trim()),
     );
 
-    if (componentsIndex >= 0) {
-      lines.splice(componentsIndex + 1, 0, importLine);
+    if (firstDirectiveIndex >= 0) {
+      lines.splice(firstDirectiveIndex, 0, importLine);
       await writeFile(cssPath, `${lines.join('\n').trimEnd()}\n`, 'utf-8');
       return;
     }
@@ -1232,7 +1239,14 @@ ${fontEntries}
 }`,
 
       'is-style-outline': `
-.is-style-outline, .is-style-outline.vp-generated-button { background: transparent; border: 2px solid currentColor; }`,
+.is-style-outline,
+.is-style-outline.vp-generated-button,
+.vp-generated-button.is-style-outline,
+.vp-generated-link.is-style-outline {
+  color: inherit;
+  background: transparent;
+  border: 2px solid currentColor;
+}`,
 
       'is-style-fill': ``,
       'is-style-default': ``,
@@ -1292,6 +1306,16 @@ ${fontEntries}
       return renderStateRule(selectorList, state);
     };
 
+    const omitGenericButtonColorState = (
+      state?: ThemeInteractionState,
+    ): ThemeInteractionState | undefined => {
+      if (!state) return undefined;
+      const next: ThemeInteractionState = { ...state };
+      delete next.color;
+      delete next.backgroundColor;
+      return Object.keys(next).length > 0 ? next : undefined;
+    };
+
     // Collect precise bridges by target for per-target CSS overrides
     const preciseBridges = tokens.interactions?.precise ?? [];
     const imagePrecise = preciseBridges.filter((b) => b.target === 'image');
@@ -1305,18 +1329,21 @@ ${fontEntries}
       // Button generic bridge
       ...(buttonInteraction
         ? [
-            renderStateRule('.vp-generated-button', buttonInteraction.base),
+            renderStateRule(
+              '.vp-generated-button',
+              omitGenericButtonColorState(buttonInteraction.base),
+            ),
             renderStateRule(
               '.vp-generated-button:hover',
-              buttonInteraction.hover,
+              omitGenericButtonColorState(buttonInteraction.hover),
             ),
             renderStateRule(
               '.vp-generated-button:focus, .vp-generated-button:focus-visible',
-              buttonInteraction.focus,
+              omitGenericButtonColorState(buttonInteraction.focus),
             ),
             renderStateRule(
               '.vp-generated-button:active',
-              buttonInteraction.active,
+              omitGenericButtonColorState(buttonInteraction.active),
             ),
           ]
         : []),

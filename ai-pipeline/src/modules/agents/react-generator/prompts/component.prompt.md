@@ -447,13 +447,36 @@ Site: {{siteName}} | URL: {{siteUrl}}
 // ✅ Single conditional — no extra brace layer around JSX
 {post.categories?.[0] && <span>{post.categories[0]}</span>}
 {post.author && <span>{post.author}</span>}
+
+// ❌ Section container missing horizontal padding — content touches screen edge on mobile
+<section className="max-w-[1280px] mx-auto w-full flex flex-col gap-[1.2rem]">
+  <h2>Title</h2>
+</section>
+// ✅ ALWAYS add px-4 sm:px-6 lg:px-8 on the content container
+<section className="w-full bg-[#f9f9f9]">
+  <div className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 py-[min(6.5rem,8vw)] flex flex-col gap-[1.2rem]">
+    <h2>Title</h2>
+  </div>
+</section>
+
+// ❌ Arbitrary px value instead of responsive breakpoints
+<div className="max-w-[1280px] mx-auto px-[min(1.5rem,2vw)]">
+// ✅ Use px-4 sm:px-6 lg:px-8 — never substitute with px-[min(...)]
+<div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8">
+
+// ❌ Inline style padding on section — breaks responsive behaviour
+<section style={{ padding: "min(6.5rem, 8vw)" }}>
+// ✅ Use Tailwind classes — never inline style for section padding
+<section className="py-[min(6.5rem,8vw)] px-4 sm:px-6 lg:px-8">
 ```
 
 ## Final self-check before returning code
 
 - If any `className` contains `min(`, `max(`, or `clamp(`, ensure every comma is immediately followed by the next token with no space.
-- Bad: `py-[min(6.5rem, 8vw)]`
-- Good: `py-[min(6.5rem,8vw)]`
+  - Bad: `py-[min(6.5rem, 8vw)]`
+  - Good: `py-[min(6.5rem,8vw)]`
+- Every content section/container that holds text or cards **MUST** have `px-4 sm:px-6 lg:px-8` for horizontal padding. Never use `px-[min(...)]` as a substitute and never omit padding entirely.
+- Never use inline `style={{ padding: ... }}` for section/container padding. Use Tailwind `px-*` and `py-*` classes instead.
 
 ## GOLDEN RULE
 

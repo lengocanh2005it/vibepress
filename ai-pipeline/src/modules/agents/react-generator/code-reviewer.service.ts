@@ -46,10 +46,7 @@ import type {
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type {
-  ComponentVisualPlan,
-  DataNeed,
-} from './visual-plan.schema.js';
+import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -1286,6 +1283,10 @@ export class CodeReviewerService {
       return { enabled: false, reason: 'not eligible' };
     }
 
+    if (componentPlan.isDetail) {
+      return { enabled: false, reason: 'detail view blocked' };
+    }
+
     const sections = componentPlan.visualPlan.sections ?? [];
     if (sections.length < 2) {
       return { enabled: false, reason: 'too few sections' };
@@ -1294,7 +1295,12 @@ export class CodeReviewerService {
     const normalizedNeeds = new Set(
       this.toVisualDataNeeds(componentPlan.dataNeeds),
     );
-    const interactiveTypes = new Set(['accordion', 'tabs', 'carousel', 'modal']);
+    const interactiveTypes = new Set([
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+    ]);
     const richTypes = new Set([
       'hero',
       'cta-strip',
@@ -1336,7 +1342,9 @@ export class CodeReviewerService {
     const lowComplexityOnly = sections.every((section) =>
       lowComplexityTypes.has(section.type),
     );
-    const hasPageContent = sections.some((section) => section.type === 'page-content');
+    const hasPageContent = sections.some(
+      (section) => section.type === 'page-content',
+    );
     const hasOnlyContentWrapper =
       hasPageContent &&
       sections.every(
@@ -1350,9 +1358,15 @@ export class CodeReviewerService {
     const listDrivenOnly =
       normalizedNeeds.has('posts') &&
       sections.every((section) =>
-        ['hero', 'cta-strip', 'cover', 'search', 'post-list', 'breadcrumb', 'sidebar'].includes(
-          section.type,
-        ),
+        [
+          'hero',
+          'cta-strip',
+          'cover',
+          'search',
+          'post-list',
+          'breadcrumb',
+          'sidebar',
+        ].includes(section.type),
       );
 
     if (lowComplexityOnly) {
@@ -1360,11 +1374,17 @@ export class CodeReviewerService {
     }
 
     if (hasOnlyContentWrapper) {
-      return { enabled: false, reason: 'page-content wrapper is simpler as full-file' };
+      return {
+        enabled: false,
+        reason: 'page-content wrapper is simpler as full-file',
+      };
     }
 
     if (listDrivenOnly) {
-      return { enabled: false, reason: 'list-driven template is simpler as full-file' };
+      return {
+        enabled: false,
+        reason: 'list-driven template is simpler as full-file',
+      };
     }
 
     let score = 0;
@@ -1385,7 +1405,8 @@ export class CodeReviewerService {
     if (componentPlan.fixedSlug) score += 1;
     if (normalizedNeeds.has('pageDetail') && !hasPageContent) score += 1;
 
-    const enabled = score >= 5 || (sections.length >= 4 && richSectionCount >= 2);
+    const enabled =
+      score >= 5 || (sections.length >= 4 && richSectionCount >= 2);
     const reason = [
       `score=${score}`,
       `rich=${richSectionCount}`,
@@ -2628,12 +2649,15 @@ export class CodeReviewerService {
     const frame = this.codeGenerator.generateSectionAssemblyFrame(
       componentPlan.visualPlan,
     );
-    const availableVariables = this.frameGenerator.describeVariables({
-      type: componentPlan.type ?? 'page',
-      dataNeeds: componentPlan.dataNeeds ?? [],
-      isDetail: componentPlan.isDetail ?? false,
-      fixedSlug: componentPlan.fixedSlug,
-    });
+    const availableVariables = this.buildSectionAssemblyAvailableVariables(
+      this.frameGenerator.describeVariables({
+        type: componentPlan.type ?? 'page',
+        dataNeeds: componentPlan.dataNeeds ?? [],
+        isDetail: componentPlan.isDetail ?? false,
+        fixedSlug: componentPlan.fixedSlug,
+      }),
+      sections,
+    );
     const validationContext = this.buildValidationContext(
       componentPlan,
       componentName,
@@ -2813,19 +2837,72 @@ export class CodeReviewerService {
       );
     }
 
+    // ── R3-assembly: Self-fix pass for assembled file violations ─────────────
+    const assemblyError = lastError ?? check.error;
+    await this.log(
+      logPath,
+      `[reviewer:assembly-fix] "${componentName}" attempting self-repair: ${assemblyError}`,
+    );
+    try {
+      const fixResult = await this.selfFixDetailed(
+        modelName,
+        code,
+        assemblyError!,
+        logPath,
+        componentName,
+      );
+      const fixedCode = fixResult.code;
+      const fixCheck = this.validator.checkCodeStructure(
+        fixedCode,
+        validationContext,
+      );
+      const resolvedCode = fixCheck.fixedCode ?? fixedCode;
+      if (fixCheck.isValid) {
+        this.logger.log(
+          `[reviewer:assembly-fix] "${componentName}" ✓ self-repair resolved assembly violation`,
+        );
+        await this.log(
+          logPath,
+          `[reviewer:assembly-fix] "${componentName}" ✓ self-repair resolved assembly violation`,
+        );
+        return {
+          code: resolvedCode,
+          isValid: true,
+          attemptsUsed,
+          lastRawOutput,
+          cotAttempts,
+        };
+      }
+      this.logger.warn(
+        `[reviewer:assembly-fix] "${componentName}" self-repair still invalid: ${fixCheck.error}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:assembly-fix] "${componentName}" self-repair still invalid: ${fixCheck.error}`,
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `[reviewer:assembly-fix] "${componentName}" self-repair call failed: ${err?.message}`,
+      );
+      await this.log(
+        logPath,
+        `WARN [reviewer:assembly-fix] "${componentName}" self-repair call failed: ${err?.message}`,
+      );
+    }
+
     this.logger.warn(
-      `[reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${check.error}`,
+      `[reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${assemblyError}`,
     );
     await this.log(
       logPath,
-      `WARN [reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${check.error}`,
+      `WARN [reviewer] "${componentName}" section-level one-file assembly produced invalid final file: ${assemblyError}`,
     );
 
     return {
       code,
       isValid: false,
       attemptsUsed,
-      lastError: lastError ?? check.error,
+      lastError: assemblyError,
       lastRawOutput,
       cotAttempts,
     };
@@ -2974,6 +3051,65 @@ export class CodeReviewerService {
       );
     }
 
+    // ── Self-fix pass: AI repair for section that exhausted normal attempts ──
+    if (sectionError && sectionCode) {
+      await this.log(
+        logPath,
+        `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} (${section.type}) attempting self-repair: ${sectionError}`,
+      );
+      try {
+        const fixResult = await this.selfFixDetailed(
+          modelName,
+          sectionCode,
+          sectionError,
+          logPath,
+          `${componentName}:section-${sectionIndex + 1}`,
+        );
+        const fixedCode = this.postProcessCode(fixResult.code).trim();
+        const fixBasicError = this.validateInlineSectionOutput(fixedCode);
+        const fixFidelityError = fixBasicError
+          ? undefined
+          : this.validator.checkInlineSectionFidelity(
+              fixedCode,
+              section,
+              componentName,
+              sectionIndex + 1,
+            );
+        const fixError = fixBasicError ?? fixFidelityError ?? undefined;
+        if (!fixError) {
+          this.logger.log(
+            `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} ✓ self-repair resolved`,
+          );
+          await this.log(
+            logPath,
+            `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} ✓ self-repair resolved`,
+          );
+          return {
+            code: fixedCode,
+            isValid: true,
+            attemptsUsed: maxAttempts + 1,
+            lastRawOutput: fixResult.rawResponse,
+            cotAttempts,
+          };
+        }
+        this.logger.warn(
+          `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair still invalid: ${fixError}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair still invalid: ${fixError}`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair call failed: ${err?.message}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} self-repair call failed: ${err?.message}`,
+        );
+      }
+    }
+
     return {
       code: sectionCode,
       isValid: false,
@@ -3015,6 +3151,51 @@ export class CodeReviewerService {
     return ['Visual plan fidelity violated:', ...filtered].join('\n');
   }
 
+  private buildSectionAssemblyAvailableVariables(
+    baseVariables: string,
+    sections: ComponentVisualPlan['sections'],
+  ): string {
+    const extras: string[] = [];
+
+    if (sections.some((section) => section.type === 'carousel')) {
+      extras.push('`activeCarousels: Record<string, number>`');
+      extras.push(
+        '`setActiveCarousels: React.Dispatch<React.SetStateAction<Record<string, number>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'tabs')) {
+      extras.push('`activeTabs: Record<string, number>`');
+      extras.push(
+        '`setActiveTabs: React.Dispatch<React.SetStateAction<Record<string, number>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'accordion')) {
+      extras.push('`openAccordions: Record<string, number[]>`');
+      extras.push(
+        '`setOpenAccordions: React.Dispatch<React.SetStateAction<Record<string, number[]>>>`',
+      );
+    }
+
+    if (sections.some((section) => section.type === 'modal')) {
+      extras.push('`openModals: Record<string, boolean>`');
+      extras.push(
+        '`setOpenModals: React.Dispatch<React.SetStateAction<Record<string, boolean>>>`',
+      );
+    }
+
+    if (extras.length === 0) {
+      return baseVariables;
+    }
+
+    if (!baseVariables || baseVariables === '(no data variables)') {
+      return extras.join(', ');
+    }
+
+    return `${baseVariables}, ${extras.join(', ')}`;
+  }
+
   private buildTargetedSectionRetryError(input: {
     error: string | undefined;
     section: ComponentVisualPlan['sections'][number];
@@ -3041,6 +3222,7 @@ export class CodeReviewerService {
     section: ComponentVisualPlan['sections'][number],
   ): string {
     const lines: string[] = ['## REQUIRED CONTENT CHECKLIST'];
+    const stateKey = this.resolveInteractiveSectionStateKey(section);
 
     switch (section.type) {
       case 'card-grid':
@@ -3112,6 +3294,11 @@ export class CodeReviewerService {
         });
         break;
       case 'carousel':
+        if (stateKey) {
+          lines.push(
+            `- Use the exact approved carousel state key ${JSON.stringify(stateKey)} everywhere in this section. Do not mix it with any other key.`,
+          );
+        }
         lines.push(`- Render exactly ${section.slides.length} slide(s).`);
         section.slides.forEach((slide, slideIndex) => {
           if (slide.heading) {
@@ -3124,7 +3311,77 @@ export class CodeReviewerService {
               `- Slide ${slideIndex + 1} subheading: ${JSON.stringify(slide.subheading)}`,
             );
           }
+          if (slide.imageSrc) {
+            lines.push(
+              `- Slide ${slideIndex + 1} image src: ${JSON.stringify(slide.imageSrc)}`,
+            );
+          }
+          if (slide.cta?.text) {
+            lines.push(
+              `- Slide ${slideIndex + 1} CTA text: ${JSON.stringify(slide.cta.text)}`,
+            );
+          }
         });
+        lines.push(
+          '- If the section renders `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` so only the active slide is shown.',
+        );
+        lines.push(
+          '- Prev/next controls must use `swiper-button-prev` and `swiper-button-next` and each button must contain a visible SVG or text child.',
+        );
+        lines.push(
+          '- Dots and arrow buttons must update `setActiveCarousels(...)`; do not leave carousel controls decorative only.',
+        );
+        break;
+      case 'modal':
+        if (stateKey) {
+          lines.push(
+            `- Use the exact approved modal state key ${JSON.stringify(stateKey)} everywhere in this section. Do not reuse any carousel or other section key.`,
+          );
+        }
+        if (section.triggerText) {
+          lines.push(
+            `- Keep trigger text exactly: ${JSON.stringify(section.triggerText)}`,
+          );
+        }
+        if (section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if (section.body) {
+          lines.push(`- Keep body exactly: ${JSON.stringify(section.body)}`);
+        }
+        if (section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
+        if (section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if (section.ctas?.length) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (cta.text) {
+              lines.push(
+                `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+              );
+            }
+          });
+        }
+        lines.push(
+          '- Render a trigger button with class `uagb-modal-trigger` and `uagb-modal-button-link`.',
+        );
+        lines.push(
+          '- Render the popup conditionally with `openModals[...] ? (...) : null`; do not inline the popup content.',
+        );
+        lines.push(
+          '- Keep the popup structure markers: `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+        );
+        lines.push(
+          '- Use `setOpenModals` to open and close the popup; do not introduce local hooks inside the section JSX.',
+        );
         break;
       case 'media-text':
         if (section.imageSrc) {
@@ -3146,6 +3403,11 @@ export class CodeReviewerService {
               .map((item) => JSON.stringify(item))
               .join(', ')}`,
           );
+          if (section.listItems.some((item) => /<[^>]+>/.test(item))) {
+            lines.push(
+              '- Some list items contain inline HTML markup such as `<strong>`. Preserve that markup in the rendered `<li>` instead of stripping or flattening it.',
+            );
+          }
         }
         if (section.cta?.text) {
           lines.push(
@@ -3189,7 +3451,9 @@ export class CodeReviewerService {
         break;
       case 'cta-strip':
         if (section.align) {
-          lines.push(`- Keep alignment exactly: ${JSON.stringify(section.align)}`);
+          lines.push(
+            `- Keep alignment exactly: ${JSON.stringify(section.align)}`,
+          );
         }
         if (section.cta?.text) {
           lines.push(
@@ -3359,6 +3623,24 @@ export class CodeReviewerService {
           }
         }
 
+        if (section.type === 'cover') {
+          parts.push(
+            section.imageSrc
+              ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.heading
+              ? `heading=${JSON.stringify(section.heading)}`
+              : null,
+          );
+          parts.push(
+            section.subheading
+              ? `subheading=${JSON.stringify(section.subheading)}`
+              : null,
+          );
+        }
+
         if (section.type === 'media-text') {
           parts.push(
             section.imageSrc
@@ -3397,6 +3679,7 @@ export class CodeReviewerService {
         }
 
         if (section.type === 'modal') {
+          const stateKey = this.resolveInteractiveSectionStateKey(section);
           parts.push(
             section.triggerText
               ? `triggerText=${JSON.stringify(section.triggerText)}`
@@ -3431,6 +3714,46 @@ export class CodeReviewerService {
                 ),
             );
           }
+          parts.push(
+            'behavior=render modal trigger button plus conditional popup overlay with uagb-modal-trigger and uagb-modal-popup',
+          );
+          parts.push(
+            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+          );
+        }
+
+        if (section.type === 'carousel') {
+          const stateKey = this.resolveInteractiveSectionStateKey(section);
+          parts.push(`slideCount=${section.slides?.length ?? 0}`);
+          parts.push(
+            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+          );
+          const slideHints = section.slides
+            ?.slice(0, 6)
+            .map((slide, slideIndex) => {
+              const hints = [
+                slide.heading
+                  ? `slide${slideIndex + 1}.heading=${JSON.stringify(slide.heading)}`
+                  : null,
+                slide.subheading
+                  ? `slide${slideIndex + 1}.subheading=${JSON.stringify(slide.subheading)}`
+                  : null,
+                slide.imageSrc
+                  ? `slide${slideIndex + 1}.imageSrc=${JSON.stringify(slide.imageSrc)}`
+                  : null,
+                slide.cta?.text
+                  ? `slide${slideIndex + 1}.ctaText=${JSON.stringify(slide.cta.text)}`
+                  : null,
+              ].filter(Boolean);
+              return hints.join(' | ');
+            })
+            .filter(Boolean);
+          if (slideHints?.length) {
+            parts.push(...slideHints);
+          }
+          parts.push(
+            'behavior=bind swiper-wrapper translateX to activeCarousels[...] and render non-empty swiper-button-prev/swiper-button-next controls',
+          );
         }
 
         if (section.type === 'tabs') {
@@ -3474,6 +3797,13 @@ export class CodeReviewerService {
     ];
 
     return lines.join('\n');
+  }
+
+  private resolveInteractiveSectionStateKey(
+    section: ComponentVisualPlan['sections'][number],
+  ): string | null {
+    const raw = section.sectionKey ?? section.sourceRef?.sourceNodeId;
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
   }
 
   private buildAutoFixErrorContext(
