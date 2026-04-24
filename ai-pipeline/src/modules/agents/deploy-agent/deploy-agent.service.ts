@@ -4,6 +4,7 @@ import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import simpleGit from 'simple-git';
+import { cloneRepoWithRetry } from '../../../common/utils/git-clone.util.js';
 
 const execAsync = promisify(exec);
 
@@ -29,12 +30,14 @@ export class DeployAgentService {
     const cloneDir = join('./temp/repos', `deploy_${jobId}`);
     await mkdir(cloneDir, { recursive: true });
 
-    const cloneUrl = accessToken
-      ? repoUrl.replace('https://', `https://${accessToken}@`)
-      : repoUrl;
-
     this.logger.log(`Cloning repo B: ${repoUrl} → ${cloneDir}`);
-    await simpleGit().clone(cloneUrl, cloneDir, ['--depth', '1']);
+    await cloneRepoWithRetry({
+      repoUrl,
+      token: accessToken,
+      destDir: cloneDir,
+      logger: this.logger,
+      label: `deploy clone:${jobId}`,
+    });
     return cloneDir;
   }
 

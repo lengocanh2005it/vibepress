@@ -242,12 +242,14 @@ export class WpQueryService {
         const [items] = await conn.query<any[]>(
           `SELECT p.ID, p.post_title, p.menu_order,
                   url_meta.meta_value AS url,
+                  object_meta.meta_value AS object_type,
                   parent_meta.meta_value AS parent_id,
                   target_meta.meta_value AS target
            FROM \`${prefix}posts\` p
            INNER JOIN \`${prefix}term_relationships\` tr ON tr.object_id = p.ID
            INNER JOIN \`${prefix}term_taxonomy\` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
            LEFT JOIN \`${prefix}postmeta\` url_meta ON url_meta.post_id = p.ID AND url_meta.meta_key = '_menu_item_url'
+           LEFT JOIN \`${prefix}postmeta\` object_meta ON object_meta.post_id = p.ID AND object_meta.meta_key = '_menu_item_object'
            LEFT JOIN \`${prefix}postmeta\` parent_meta ON parent_meta.post_id = p.ID AND parent_meta.meta_key = '_menu_item_menu_item_parent'
            LEFT JOIN \`${prefix}postmeta\` target_meta ON target_meta.post_id = p.ID AND target_meta.meta_key = '_menu_item_target'
            WHERE tt.term_id = ? AND p.post_type = 'nav_menu_item' AND p.post_status = 'publish'
@@ -262,7 +264,11 @@ export class WpQueryService {
           items: items.map((item) => ({
             id: item.ID,
             title: item.post_title,
-            url: this.normalizeMenuUrl(item.url ?? '', siteUrl),
+            url: this.normalizeMenuUrl(
+              item.url ?? '',
+              siteUrl,
+              item.object_type ?? null,
+            ),
             order: item.menu_order,
             parentId: parseInt(item.parent_id ?? '0', 10),
             target: item.target?.trim() ? item.target : null,
@@ -635,7 +641,9 @@ export class WpQueryService {
          WHERE option_name IN ('active_plugins')
             OR option_name LIKE 'elementor_%'
             OR option_name LIKE 'acf_%'
-            OR option_name LIKE 'wpseo_%'`,
+            OR option_name LIKE 'wpseo_%'
+            OR option_name LIKE 'uagb_%'
+            OR option_name LIKE 'spectra_%'`,
       );
 
       const optionMap = new Map<string, string>();
@@ -647,7 +655,7 @@ export class WpQueryService {
         optionMap.get('active_plugins') ?? '',
       );
       const plugins = activePluginFiles.map<WpPluginInfo>((pluginFile) => ({
-        slug: pluginFile.split('/')[0] || pluginFile,
+        slug: this.normalizePluginSlug(pluginFile.split('/')[0] || pluginFile),
         pluginFile,
         active: true,
         source: 'active_plugins',
@@ -885,7 +893,11 @@ export class WpQueryService {
       return siteLogoOptionUrl;
     }
 
-    const customLogoUrl = await this.resolveCustomLogoUrl(conn, prefix, siteUrl);
+    const customLogoUrl = await this.resolveCustomLogoUrl(
+      conn,
+      prefix,
+      siteUrl,
+    );
     if (customLogoUrl) return customLogoUrl;
 
     const fallbackLogoUrl = await this.resolveLogoUrlFromTemplateMarkup(
@@ -1145,7 +1157,11 @@ export class WpQueryService {
              WHERE tt2.taxonomy = '${taxonomy}' AND tr2.object_id = p.ID)`;
   }
 
-  private normalizeMenuUrl(raw: string, siteUrl?: string | null): string {
+  private normalizeMenuUrl(
+    raw: string,
+    siteUrl?: string | null,
+    objectType?: string | null,
+  ): string {
     if (!raw) return '';
     const trimmed = raw.trim();
     try {
@@ -1178,7 +1194,7 @@ export class WpQueryService {
     ) {
       raw = '/' + raw;
     }
-    return raw;
+    return rewriteCanonicalMenuDetailPath(raw, objectType);
   }
 
   private parseSerializedPhpStringArray(serialized: string): string[] {
@@ -1190,6 +1206,14 @@ export class WpQueryService {
       result.push(match[1]);
     }
     return result;
+  }
+
+  private normalizePluginSlug(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'spectra') {
+      return 'ultimate-addons-for-gutenberg';
+    }
+    return normalized;
   }
 
   private collectUsage(
@@ -1346,9 +1370,14 @@ function parseNavigationBlockItems(
         label?: string;
         url?: string;
         id?: number;
+        type?: string;
         opensInNewTab?: boolean;
       };
-      const url = normalizeNavigationMenuUrl(attrs.url ?? '', siteUrl);
+      const url = normalizeNavigationMenuUrl(
+        attrs.url ?? '',
+        siteUrl,
+        attrs.type,
+      );
       if (!attrs.label || !url) continue;
 
       items.push({
@@ -1370,6 +1399,7 @@ function parseNavigationBlockItems(
 function normalizeNavigationMenuUrl(
   raw: string,
   siteUrl?: string | null,
+  objectType?: string | null,
 ): string {
   if (!raw) return '';
   const trimmed = raw.trim();
@@ -1392,5 +1422,32 @@ function normalizeNavigationMenuUrl(
     raw = trimmed;
   }
 
-  return raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/');
+  return rewriteCanonicalMenuDetailPath(
+    raw.replace(/^\/pages\//, '/page/').replace(/^\/posts\//, '/post/'),
+    objectType,
+  );
+}
+
+function rewriteCanonicalMenuDetailPath(
+  raw: string,
+  objectType?: string | null,
+): string {
+  const normalizedObjectType = String(objectType ?? '')
+    .trim()
+    .toLowerCase();
+  if (normalizedObjectType !== 'page' && normalizedObjectType !== 'post') {
+    return raw;
+  }
+
+  try {
+    const parsed = new URL(raw, 'http://vp.local');
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const slug = segments.at(-1);
+    if (!slug) return raw;
+
+    const detailPrefix = normalizedObjectType === 'page' ? '/page/' : '/post/';
+    return `${detailPrefix}${slug}${parsed.search}${parsed.hash}`;
+  } catch {
+    return raw;
+  }
 }

@@ -215,11 +215,25 @@ export class SourceResolverService {
         `The active theme "${activeTheme.slug}" depends on ${builder}; page structure may live primarily in DB/runtime content rather than theme templates.`,
       );
     }
+    if (
+      activePlugins.some(
+        (plugin) =>
+          this.normalizeSlug(plugin.slug) === 'ultimate-addons-for-gutenberg',
+      )
+    ) {
+      notes.push(
+        'Effective source includes Spectra / UAGB. Treat repo plugin files, DB block usage, and uagb/* markup as one canonical interactive source family.',
+      );
+    }
 
     return notes;
   }
 
   private normalizeSlug(value: string): string {
-    return value.trim().toLowerCase();
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'spectra') {
+      return 'ultimate-addons-for-gutenberg';
+    }
+    return normalized;
   }
 }

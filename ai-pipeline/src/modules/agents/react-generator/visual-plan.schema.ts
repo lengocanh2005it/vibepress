@@ -8,6 +8,7 @@ import type { SourceRef } from '../../../common/utils/source-node-id.util.js';
 
 export type DataNeed =
   | 'siteInfo'
+  | 'footerLinks'
   | 'posts'
   | 'pages'
   | 'menus'
@@ -51,6 +52,12 @@ export interface BlockStyleToken {
 
 export type TypographyStyle = NonNullable<BlockStyleToken['typography']>;
 
+export interface SectionCta {
+  text: string;
+  link: string;
+  customClassNames?: string[];
+}
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
@@ -69,7 +76,13 @@ export interface NavbarSection extends BaseSection {
   type: 'navbar';
   sticky: boolean;
   menuSlug: string; // e.g. "primary"
-  cta?: { text: string; link: string; style: 'button' | 'link' };
+  orientation?: 'horizontal' | 'vertical';
+  overlayMenu?: 'always' | 'mobile' | 'never';
+  isResponsive?: boolean;
+  showSiteLogo?: boolean;
+  showSiteTitle?: boolean;
+  logoWidth?: string;
+  cta?: SectionCta & { style: 'button' | 'link' };
 }
 
 export interface HeroSection extends BaseSection {
@@ -79,8 +92,16 @@ export interface HeroSection extends BaseSection {
   subheading?: string;
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
   image?: { src: string; alt: string; position: 'right' | 'below' };
+}
+
+export interface CtaStripSection extends BaseSection {
+  type: 'cta-strip';
+  align?: 'left' | 'center' | 'right';
+  cta?: SectionCta;
+  ctas?: SectionCta[];
 }
 
 export interface CoverSection extends BaseSection {
@@ -92,7 +113,8 @@ export interface CoverSection extends BaseSection {
   subheading?: string;
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
   contentAlign: 'center' | 'left' | 'right';
 }
 
@@ -127,7 +149,8 @@ export interface MediaTextSection extends BaseSection {
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];
-  cta?: { text: string; link: string };
+  cta?: SectionCta;
+  ctas?: SectionCta[];
 }
 
 export interface TestimonialSection extends BaseSection {
@@ -136,6 +159,7 @@ export interface TestimonialSection extends BaseSection {
   authorName: string;
   authorTitle?: string;
   authorAvatar?: string;
+  contentAlign?: 'center' | 'left' | 'right';
 }
 
 export interface NewsletterSection extends BaseSection {
@@ -150,6 +174,11 @@ export interface FooterSection extends BaseSection {
   type: 'footer';
   brandDescription?: string; // uses siteInfo.blogDescription if omitted
   menuColumns: { title: string; menuSlug: string }[];
+  columnWidths?: string[];
+  showSiteLogo?: boolean;
+  showSiteTitle?: boolean;
+  showTagline?: boolean;
+  logoWidth?: string;
   copyright?: string;
 }
 
@@ -159,6 +188,15 @@ export interface PostContentSection extends BaseSection {
   showAuthor: boolean;
   showDate: boolean;
   showCategories: boolean;
+}
+
+export interface PostMetaSection extends BaseSection {
+  type: 'post-meta';
+  layout?: 'inline' | 'stacked';
+  showAuthor: boolean;
+  showDate: boolean;
+  showCategories: boolean;
+  showSeparator?: boolean;
 }
 
 export interface CommentsSection extends BaseSection {
@@ -192,9 +230,78 @@ export interface SidebarSection extends BaseSection {
   maxItems?: number;
 }
 
+export interface ModalSection extends BaseSection {
+  type: 'modal';
+  triggerText?: string;
+  heading?: string;
+  body?: string;
+  imageSrc?: string;
+  imageAlt?: string;
+  cta?: SectionCta;
+  ctas?: SectionCta[];
+  layout?: 'centered' | 'split';
+  closeOnOverlay?: boolean;
+  closeOnEsc?: boolean;
+  overlayColor?: string;
+  width?: string;
+  height?: string;
+  closeIconPosition?: string;
+}
+
+export interface TabsSection extends BaseSection {
+  type: 'tabs';
+  title?: string;
+  activeTab?: number;
+  variant?: string;
+  tabAlign?: 'left' | 'center' | 'right';
+  tabs: {
+    label: string;
+    heading?: string;
+    body?: string;
+    imageSrc?: string;
+    imageAlt?: string;
+    cta?: SectionCta;
+  }[];
+}
+
+export interface AccordionSection extends BaseSection {
+  type: 'accordion';
+  title?: string;
+  items: {
+    heading: string;
+    body: string;
+  }[];
+  allowMultiple?: boolean;
+  enableToggle?: boolean;
+  defaultOpenItems?: number[];
+  variant?: string;
+}
+
+export interface CarouselSection extends BaseSection {
+  type: 'carousel';
+  slides: {
+    heading?: string;
+    subheading?: string;
+    imageSrc?: string;
+    imageAlt?: string;
+    cta?: SectionCta;
+  }[];
+  autoplay?: boolean;
+  autoplaySpeed?: number;
+  loop?: boolean;
+  effect?: 'slide' | 'fade' | 'flip' | 'coverflow';
+  showDots?: boolean;
+  showArrows?: boolean;
+  vertical?: boolean;
+  transitionSpeed?: number;
+  pauseOn?: 'hover' | 'click';
+  contentAlign?: 'center' | 'left' | 'right';
+}
+
 export type SectionPlan =
   | NavbarSection
   | HeroSection
+  | CtaStripSection
   | CoverSection
   | PostListSection
   | CardGridSection
@@ -203,11 +310,16 @@ export type SectionPlan =
   | NewsletterSection
   | FooterSection
   | PostContentSection
+  | PostMetaSection
   | PageContentSection
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
-  | SidebarSection;
+  | SidebarSection
+  | ModalSection
+  | TabsSection
+  | AccordionSection
+  | CarouselSection;
 
 /**
  * Typography tokens derived from theme.json / style.css.
@@ -245,6 +357,13 @@ export interface LayoutTokens {
 export interface ComponentVisualPlan {
   componentName: string;
   dataNeeds: DataNeed[];
+  /** When this component is bound to one exact WordPress page, fetch by this slug instead of URL params. */
+  pageBinding?: {
+    id?: number | string;
+    slug: string;
+    title?: string;
+    route?: string;
+  };
   /** Colors — derived from theme.tokens by planner, forced on all components */
   palette: ColorPalette;
   /** Typography — derived from theme.tokens by planner, forced on all components */

@@ -14,6 +14,4 @@ export interface LlmChatResult {
   truncated?: boolean;
 }
 
-export type LlmProvider =
-  | 'openai'
-  | 'custom';
+export type LlmProvider = 'openai' | 'custom';

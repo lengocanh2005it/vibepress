@@ -12,6 +12,7 @@ import {
 // ── Data-need aliases (plan uses both forms) ──────────────────────────────────
 const NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
+  'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
   'page-detail': 'pageDetail',
 };
@@ -24,6 +25,7 @@ export interface FrameOptions {
   dataNeeds: string[];
   isDetail: boolean;
   route?: string | null;
+  fixedSlug?: string;
 }
 
 /**
@@ -48,8 +50,11 @@ export class FrameGeneratorService {
    * FRAME_PLACEHOLDER where the AI JSX block should be inserted.
    */
   generateFrame(options: FrameOptions): string {
-    const { componentName, type, dataNeeds, isDetail, route } = options;
+    const { componentName, type, dataNeeds, isDetail, route, fixedSlug } =
+      options;
     const needs = this.normalizeNeeds(dataNeeds);
+    const usesRouteParams =
+      isDetail && /:[A-Za-z_]/.test(route ?? '') && !fixedSlug;
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
     const hasPageDetail = needs.has('pageDetail') && isDetail;
@@ -57,6 +62,7 @@ export class FrameGeneratorService {
     const hasPages = needs.has('pages');
     const hasMenus = needs.has('menus');
     const hasSiteInfo = needs.has('siteInfo');
+    const hasFooterLinks = needs.has('footerLinks');
     const hasComments = needs.has('comments') && isDetail;
     const isFooter = componentName.toLowerCase().includes('footer');
     // Archive component: handles /archive, /category/:slug, /author/:slug, /tag/:slug
@@ -70,7 +76,7 @@ export class FrameGeneratorService {
 
     // ── 1. Imports ────────────────────────────────────────────────────────────
     const routerImports = ['Link'];
-    if (isDetail) routerImports.push('useParams');
+    if (usesRouteParams) routerImports.push('useParams');
     if (isArchive) {
       if (!routerImports.includes('useParams')) routerImports.push('useParams');
       routerImports.push('useLocation');
@@ -125,8 +131,10 @@ export class FrameGeneratorService {
       );
       lines.push(`    : location.pathname.startsWith('/author/') ? 'author'`);
       lines.push(`    : location.pathname.startsWith('/tag/') ? 'tag' : null;`);
-    } else if (isDetail) {
+    } else if (usesRouteParams) {
       lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+    } else if (isDetail && fixedSlug) {
+      lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
     }
     if (hasPosts || isArchive) {
       lines.push(
@@ -165,7 +173,7 @@ export class FrameGeneratorService {
     if (hasMenus && !isFooter) {
       lines.push(`  const [menus, setMenus] = useState<Menu[]>([]);`);
     }
-    if (isFooter) {
+    if (isFooter || hasFooterLinks) {
       lines.push(
         `  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);`,
       );
@@ -187,17 +195,19 @@ export class FrameGeneratorService {
       hasPages,
       hasMenus,
       hasSiteInfo,
+      hasFooterLinks,
       hasComments,
       isDetail,
       isFooter,
       isArchive,
+      fixedSlug,
     });
 
     if (fetches.length > 0) {
       lines.push('');
       const depArray = isArchive
         ? '[slug, archiveType, currentPage]'
-        : isDetail
+        : isDetail && usesRouteParams
           ? '[slug]'
           : hasPosts
             ? '[currentPage]'
@@ -304,8 +314,9 @@ export class FrameGeneratorService {
     type: 'page' | 'partial';
     dataNeeds: string[];
     isDetail: boolean;
+    fixedSlug?: string;
   }): string {
-    const { type, dataNeeds, isDetail } = options;
+    const { type, dataNeeds, isDetail, fixedSlug } = options;
     const needs = this.normalizeNeeds(dataNeeds);
     const vars: string[] = [];
 
@@ -322,9 +333,12 @@ export class FrameGeneratorService {
     if (hasPageDetail) vars.push('`page: Page | null`');
     else if (needs.has('pages')) vars.push('`pages: Page[]`');
     if (needs.has('menus')) vars.push('`menus: Menu[]`');
+    if (needs.has('footerLinks')) vars.push('`footerColumns: FooterColumn[]`');
     if (needs.has('siteInfo')) vars.push('`siteInfo: SiteInfo | null`');
     if (needs.has('comments') && isDetail) vars.push('`comments: Comment[]`');
-    if (isDetail) vars.push('`slug: string` (URL param)');
+    if (isDetail && fixedSlug)
+      vars.push(`\`slug: "${fixedSlug}"\` (fixed plan binding)`);
+    else if (isDetail) vars.push('`slug: string` (URL param)');
 
     return vars.length > 0 ? vars.join(', ') : '(no data variables)';
   }
@@ -346,10 +360,12 @@ export class FrameGeneratorService {
     hasPages: boolean;
     hasMenus: boolean;
     hasSiteInfo: boolean;
+    hasFooterLinks: boolean;
     hasComments: boolean;
     isDetail: boolean;
     isFooter: boolean;
     isArchive: boolean;
+    fixedSlug?: string;
   }): Array<{ setter: string; url: string }> {
     const fetches: Array<{ setter: string; url: string }> = [];
 
@@ -364,7 +380,12 @@ export class FrameGeneratorService {
           ` : \`/api/posts?page=\${currentPage}&perPage=\${perPage}\``,
       });
     } else if (flags.hasPostDetail) {
-      fetches.push({ setter: 'setPost', url: '`/api/posts/${slug}`' });
+      fetches.push({
+        setter: 'setPost',
+        url: flags.fixedSlug
+          ? JSON.stringify(`/api/posts/${flags.fixedSlug}`)
+          : '`/api/posts/${slug}`',
+      });
     } else if (flags.hasPosts) {
       fetches.push({
         setter: 'setPosts',
@@ -373,7 +394,12 @@ export class FrameGeneratorService {
     }
 
     if (flags.hasPageDetail) {
-      fetches.push({ setter: 'setPage', url: '`/api/pages/${slug}`' });
+      fetches.push({
+        setter: 'setPage',
+        url: flags.fixedSlug
+          ? JSON.stringify(`/api/pages/${flags.fixedSlug}`)
+          : '`/api/pages/${slug}`',
+      });
     } else if (flags.hasPages) {
       fetches.push({ setter: 'setPages', url: `'/api/pages'` });
     }
@@ -381,7 +407,7 @@ export class FrameGeneratorService {
     if (flags.hasMenus && !flags.isFooter) {
       fetches.push({ setter: 'setMenus', url: `'/api/menus'` });
     }
-    if (flags.isFooter) {
+    if (flags.isFooter || flags.hasFooterLinks) {
       fetches.push({ setter: 'setFooterColumns', url: `'/api/footer-links'` });
     }
 

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { appendFile } from 'fs/promises';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
+import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type { CardGridSection } from './visual-plan.schema.js';
@@ -211,6 +212,7 @@ export class GeneratedCodeReviewService {
     const route = contract?.route ?? component.route ?? null;
     const type = contract?.type ?? component.type ?? 'page';
     const isDetail = contract?.isDetail ?? component.isDetail ?? false;
+    const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const description = contract?.description ?? '(none)';
     const visualSectionTypes =
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
@@ -250,6 +252,7 @@ Rules:
 - Do NOT require exact text/copy matching unless the code is clearly unrelated.
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
+- If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
@@ -260,6 +263,7 @@ Approved contract:
 - type: ${type}
 - route: ${route ?? 'null'}
 - isDetail: ${String(isDetail)}
+- fixedSlug: ${fixedSlug ?? 'null'}
 - dataNeeds: ${dataNeeds.length > 0 ? dataNeeds.join(', ') : '(none)'}
 - description: ${description}
 - approved visual sections: ${visualSections}
@@ -268,7 +272,13 @@ ${this.buildVisualSectionDetailLines(contract)}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
-${this.buildApiContractLines(dataNeeds, isDetail, visualSectionTypes, isArchive)}
+${this.buildApiContractLines(
+  dataNeeds,
+  isDetail,
+  visualSectionTypes,
+  isArchive,
+  fixedSlug,
+)}
 
 Generated TSX:
 \`\`\`tsx
@@ -281,12 +291,15 @@ ${component.code}
     isDetail: boolean,
     visualSectionTypes: string[],
     isArchive = false,
+    fixedSlug?: string | null,
   ): string {
     const normalized = new Set(
       dataNeeds.map((value) => {
         switch (value) {
           case 'siteInfo':
             return 'site-info';
+          case 'footerLinks':
+            return 'footer-links';
           case 'postDetail':
             return 'post-detail';
           case 'pageDetail':
@@ -298,14 +311,25 @@ ${component.code}
     );
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
+    if (normalized.has('footer-links')) lines.push('- /api/footer-links');
     if (normalized.has('menus')) lines.push('- /api/menus');
     if (normalized.has('posts') || normalized.has('authorDetail'))
       lines.push('- /api/posts');
     if (normalized.has('pages')) lines.push('- /api/pages');
-    if (normalized.has('post-detail'))
-      lines.push('- /api/posts/${slug} only for post-detail routes');
-    if (normalized.has('page-detail'))
-      lines.push('- /api/pages/${slug} only for page-detail routes');
+    if (normalized.has('post-detail')) {
+      lines.push(
+        fixedSlug
+          ? `- /api/posts/${fixedSlug} only for this fixed-bound post-detail route`
+          : '- /api/posts/${slug} only for post-detail routes',
+      );
+    }
+    if (normalized.has('page-detail')) {
+      lines.push(
+        fixedSlug
+          ? `- /api/pages/${fixedSlug} only for this fixed-bound page-detail route`
+          : '- /api/pages/${slug} only for page-detail routes',
+      );
+    }
     if (normalized.has('categoryDetail') || isArchive) {
       lines.push('- /api/taxonomies/category — list all category terms');
       lines.push(
@@ -382,11 +406,29 @@ ${component.code}
         if (section.type === 'hero') {
           return `- hero heading="${section.heading}"`;
         }
+        if (section.type === 'cta-strip') {
+          const ctaCount =
+            Array.isArray(section.ctas) && section.ctas.length > 0
+              ? section.ctas.length
+              : section.cta
+                ? 1
+                : 0;
+          return `- cta-strip align="${section.align ?? ''}" buttons=${ctaCount}`;
+        }
         if (section.type === 'cover') {
           return `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
         if (section.type === 'media-text') {
           return `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+        }
+        if (section.type === 'modal') {
+          return `- modal trigger="${section.triggerText ?? ''}" heading="${section.heading ?? ''}"`;
+        }
+        if (section.type === 'tabs') {
+          return `- tabs title="${section.title ?? ''}" items=${section.tabs.length}`;
+        }
+        if (section.type === 'accordion') {
+          return `- accordion title="${section.title ?? ''}" items=${section.items.length}`;
         }
         if (section.type === 'post-list') {
           return `- post-list layout=${section.layout}`;
@@ -422,6 +464,10 @@ ${component.code}
     const sections = contract?.visualPlan?.sections ?? [];
     const normalizedCode = this.normalizeForTextMatch(component.code);
     const isPageComponent = (contract?.type ?? component.type) === 'page';
+    const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
+    const normalizedDataNeeds = new Set(
+      contract?.dataNeeds ?? component.dataNeeds ?? [],
+    );
 
     if (
       normalizedCode.includes('/page/page/') ||
@@ -478,6 +524,39 @@ ${component.code}
         issues.push({
           severity: 'high',
           message: `Component contains invented trailing auxiliary section heading(s) not justified by the approved contract/source: ${inventedAuxiliaryHeadings.join(' | ')}. Auxiliary/footer/sidebar-like page sections are invalid unless source-backed.`,
+        });
+      }
+    }
+
+    if (fixedSlug) {
+      if (/\buseParams\s*(?:<[^>]+>)?\s*\(/.test(component.code)) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still calls useParams(). Fixed-bound detail components must not read slug from the route.`,
+        });
+      }
+
+      if (
+        normalizedDataNeeds.has('pageDetail') &&
+        /\/api\/pages\/\$\{slug\}|\/api\/pages\/['"`]\s*\+\s*slug/.test(
+          component.code,
+        )
+      ) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still fetches dynamic page detail via \`/api/pages/\${slug}\` instead of \`/api/pages/${fixedSlug}\`.`,
+        });
+      }
+
+      if (
+        normalizedDataNeeds.has('postDetail') &&
+        /\/api\/posts\/\$\{slug\}|\/api\/posts\/['"`]\s*\+\s*slug/.test(
+          component.code,
+        )
+      ) {
+        issues.push({
+          severity: 'high',
+          message: `Component is bound to fixed slug "${fixedSlug}" but still fetches dynamic post detail via \`/api/posts/\${slug}\` instead of \`/api/posts/${fixedSlug}\`.`,
         });
       }
     }
@@ -578,44 +657,7 @@ ${component.code}
     code: string,
     max = 3,
   ): string[] {
-    const snippets: string[] = [];
-    const patterns = [
-      {
-        pattern:
-          /<(span|p)\b[\s\S]{0,200}?>\s*\{(post|item|postDetail)\.author\}\s*<\/\1>/g,
-        allowHeadingContext: true,
-      },
-      {
-        pattern:
-          /<span\b[\s\S]{0,200}?>\s*\{(?:post|item|postDetail)\.categories(?:\?\.)?\[0\](?:\s*\?\?\s*'')?\}\s*<\/span>/g,
-        allowHeadingContext: false,
-      },
-      {
-        pattern:
-          /\{(?:post|item|postDetail)\.categories\?\.map\(\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\(\s*<span\b[\s\S]{0,240}?>\s*\{\w+\}\s*<\/span>\s*\)\)\}/g,
-        allowHeadingContext: false,
-      },
-    ];
-
-    for (const { pattern, allowHeadingContext } of patterns) {
-      for (const match of code.matchAll(pattern)) {
-        const raw = match[0]?.replace(/\s+/g, ' ').trim();
-        if (!raw) continue;
-        const offset = match.index ?? 0;
-        if (
-          allowHeadingContext &&
-          this.isWithinHeadingTitleContext(code, offset)
-        ) {
-          continue;
-        }
-        if (this.isWithinSlugTernaryFallback(code, offset)) continue;
-        snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
-        if (snippets.length >= max) return snippets;
-      }
-      if (snippets.length >= max) break;
-    }
-
-    return snippets;
+    return findSharedPlainTextPostMetaArchiveSnippets(code, max);
   }
 
   private isWithinSlugTernaryFallback(code: string, offset: number): boolean {

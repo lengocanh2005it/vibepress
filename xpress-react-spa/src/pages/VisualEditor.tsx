@@ -3,8 +3,10 @@ import { useLocation } from "react-router-dom";
 import {
   AiProcessError,
   submitReactVisualEdit,
+  undoReactVisualEdit,
   type ReactVisualEditPayload,
   type ReactVisualEditRouteEntry,
+  type ReactVisualEditResult,
 } from "../services/AiService";
 import { useInspector } from "../hooks/useInspector";
 
@@ -203,6 +205,8 @@ const VisualEditor: React.FC = () => {
       text: "Chọn route trong preview, dùng Inspector để chọn component, rồi nhập yêu cầu chỉnh sửa.",
     },
   ]);
+  const [canUndo, setCanUndo] = useState(false);
+  const [isUndoing, setIsUndoing] = useState(false);
   const [annotationComment, setAnnotationComment] = useState("");
   const [savedAnnotations, setSavedAnnotations] = useState<Array<{
     id: string;
@@ -319,7 +323,8 @@ const VisualEditor: React.FC = () => {
         targetStartLine: selectedComponent?.targetStartLine,
       },
       constraints: {
-        preserveOutsideSelection: false,
+        // Khi user đã chọn element cụ thể, yêu cầu AI chỉ sửa vùng đó
+        preserveOutsideSelection: !!(selectedComponent?.vpSourceNode || (mapEntry?.startLine !== undefined && mapEntry?.endLine !== undefined)),
         preserveDataContract: true,
         rerunFromScratch: false,
       },
@@ -371,17 +376,36 @@ const VisualEditor: React.FC = () => {
     ]);
 
     try {
-      await submitReactVisualEdit(siteId, jobId, buildPayload());
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `success-${Date.now()}`,
-          role: "assistant",
-          text: "Yêu cầu đã được gửi đến AI. Backend đang xử lý.",
-          tone: "success",
-        },
-      ]);
-      setPrompt("");
+      const res: ReactVisualEditResult = await submitReactVisualEdit(siteId, jobId, buildPayload());
+      if (!res.accepted) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `error-${Date.now()}`,
+            role: "assistant",
+            text: res.error || "Backend từ chối xử lý yêu cầu.",
+            tone: "error",
+          },
+        ]);
+      } else {
+        const componentName = res.result?.componentName;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `success-${Date.now()}`,
+            role: "assistant",
+            text: componentName
+              ? `Đã cập nhật component "${componentName}" thành công.`
+              : "Chỉnh sửa đã được áp dụng thành công.",
+            tone: "success",
+          },
+        ]);
+        setCanUndo(true);
+        setPrompt("");
+        setTimeout(() => {
+          iframeRef.current?.contentWindow?.location.reload();
+        }, 400);
+      }
     } catch (submitError) {
       const message =
         submitError instanceof AiProcessError
@@ -395,6 +419,37 @@ const VisualEditor: React.FC = () => {
       ]);
     } finally {
       setIsSubmittingRequest(false);
+    }
+  };
+
+  const handleUndo = async () => {
+    if (!jobId || !siteId || isUndoing) return;
+    setIsUndoing(true);
+    try {
+      const res = await undoReactVisualEdit(siteId, jobId);
+      if (res.undone) {
+        setCanUndo(false);
+        setMessages((prev) => [
+          ...prev,
+          { id: `undo-${Date.now()}`, role: "assistant", text: "Đã hoàn tác chỉnh sửa trước đó.", tone: "default" },
+        ]);
+        setTimeout(() => {
+          iframeRef.current?.contentWindow?.location.reload();
+        }, 400);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { id: `undo-err-${Date.now()}`, role: "assistant", text: res.error || "Không có gì để hoàn tác.", tone: "error" },
+        ]);
+      }
+    } catch (err) {
+      const message = err instanceof AiProcessError ? err.message : err instanceof Error ? err.message : "Hoàn tác thất bại.";
+      setMessages((prev) => [
+        ...prev,
+        { id: `undo-err-${Date.now()}`, role: "assistant", text: message, tone: "error" },
+      ]);
+    } finally {
+      setIsUndoing(false);
     }
   };
 
@@ -464,9 +519,15 @@ const VisualEditor: React.FC = () => {
                     setLoadedSrc(frameSrc);
                   }}
                 />
-                {frameLoading && (
+                {frameLoading && !isSubmittingRequest && (
                   <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/70 text-sm font-semibold text-[#4f5d54] backdrop-blur-sm">
                     Đang tải route...
+                  </div>
+                )}
+                {isSubmittingRequest && (
+                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#1a2a22]/60 backdrop-blur-sm">
+                    <div className="h-8 w-8 animate-spin rounded-full border-4 border-white/30 border-t-white" />
+                    <p className="text-sm font-semibold text-white drop-shadow">AI đang chỉnh sửa{selectedComponent?.component ? ` "${selectedComponent.component}"` : ""}…</p>
                   </div>
                 )}
                 <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/92 px-4 py-3 shadow-lg backdrop-blur">
@@ -612,13 +673,25 @@ const VisualEditor: React.FC = () => {
                 placeholder="Yêu cầu AI chỉnh sửa (dựa trên element đã chọn)..."
                 className="h-20 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#3a6b57] focus:bg-white"
               />
-              <button
-                onClick={() => void handleSubmitRequest()}
-                disabled={isSubmittingRequest}
-                className="mt-2 w-full rounded-full bg-[#8b5c32] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#744a26] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isSubmittingRequest ? "Đang gửi..." : "Gửi cho AI"}
-              </button>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => void handleSubmitRequest()}
+                  disabled={isSubmittingRequest || isUndoing}
+                  className="flex-1 rounded-full bg-[#8b5c32] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#744a26] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isSubmittingRequest ? "Đang xử lý…" : "Gửi cho AI"}
+                </button>
+                {canUndo && (
+                  <button
+                    onClick={() => void handleUndo()}
+                    disabled={isUndoing || isSubmittingRequest}
+                    className="rounded-full border border-[#d8cfbf] bg-white px-4 py-2 text-xs font-semibold text-[#5c4033] transition hover:bg-[#f6f2eb] disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Hoàn tác chỉnh sửa vừa rồi"
+                  >
+                    {isUndoing ? "…" : "↩ Hoàn tác"}
+                  </button>
+                )}
+              </div>
             </div>
           </aside>
 
