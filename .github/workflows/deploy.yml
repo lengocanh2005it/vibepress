@@ -18,7 +18,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
             set -e
-            cd ~/app
+            cd ~/app/vibepress
             git pull origin main
             docker compose up -d --build
             docker image prune -f
