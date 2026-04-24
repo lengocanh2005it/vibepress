@@ -124,3 +124,20 @@ CREATE TABLE IF NOT EXISTS `captures` (
   KEY `idx_captures_captured_at` (`captured_at`),
   CONSTRAINT `fk_captures_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------
+-- react_migrations: các React site đã migrate và deploy thành công
+-- site_id → wp_sites.site_id
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `react_migrations` (
+  `id`             VARCHAR(36)   NOT NULL,
+  `site_id`        VARCHAR(64)   NOT NULL,
+  `github_repo_url` VARCHAR(512) NOT NULL  COMMENT 'URL GitHub repo của React app',
+  `deployed_url`   VARCHAR(512)  NOT NULL  COMMENT 'URL trang web sau khi deploy',
+  `thumbnail_url`  TEXT              NULL  COMMENT 'Ảnh chụp màn hình hoặc preview của site',
+  `created_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_react_migrations_site_id` (`site_id`),
+  CONSTRAINT `fk_react_migrations_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
