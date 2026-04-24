@@ -152,7 +152,7 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
       '        try_files $uri $uri/ /index.html;',
       '    }',
       '    location /api/ {',
-      `        proxy_pass http://host.docker.internal:${backendPort}/;`,
+      `        proxy_pass http://host.docker.internal:${backendPort};`,
       '        proxy_http_version 1.1;',
       '        proxy_set_header Host $host;',
       '        proxy_set_header X-Real-IP $remote_addr;',
