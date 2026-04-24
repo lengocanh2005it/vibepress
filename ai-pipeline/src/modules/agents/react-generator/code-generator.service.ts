@@ -2327,9 +2327,10 @@ ${postCard}
       .map(
         (c) =>
           `          <div className="flex flex-col gap-3 ${cardRadius}"${cardStyle}>
+            ${(c as any).imageSrc ? `<img src="${(c as any).imageSrc}" alt="${(c as any).imageAlt ?? ''}" className="w-full aspect-video object-cover ${cardRadius} mb-1" loading="lazy" />` : ''}
             ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none" aria-hidden="true">*</span>` : ''}
-            <h3 className="font-semibold"${cardHeadingStyle}>${c.heading}</h3>
-            <p${cardBodyStyle}>${c.body}</p>
+            ${c.heading ? `<h3 className="font-semibold"${cardHeadingStyle}>${c.heading}</h3>` : ''}
+            ${c.body ? `<p${cardBodyStyle}>${c.body}</p>` : ''}
           </div>`,
       )
       .join('\n');

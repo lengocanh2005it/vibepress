@@ -315,6 +315,11 @@ function buildForbiddenBehaviorNote(input: {
     lines.push(
       '- Do NOT duplicate content that already appears in the fetched HTML body. If the body contains columns/cards/lists/images, render the body once and stop; do not recreate those blocks as separate React sections.',
     );
+    if (isPageDetail && input.fixedSlug) {
+      lines.push(
+        '- Fixed page-detail rule: fetch the exact page record and render one canonical `page-content` body wrapper for `page.content`. Do NOT decompose stored WordPress page body into separate `hero`, `cover`, `media-text`, `card-grid`, `testimonial`, `tabs`, `accordion`, `carousel`, or `modal` sections unless the approved visual plan explicitly keeps that exact source-backed section outside the body.',
+      );
+    }
   }
   lines.push(
     '- Do NOT fetch a full list and pick index 0 as a substitute for a slug-detail endpoint.',
@@ -1704,6 +1709,9 @@ export function buildVisualPlanContextNote(
     lines.push('');
     lines.push(
       `⛔ MANDATORY LAYOUT: Full-width sections, shared chrome, grids, heroes, sidebars, and major page wrappers MUST use the class "${visualPlan.layout.containerClass}". Do NOT shrink those areas to article width.`,
+    );
+    lines.push(
+      '⛔ `testimonial`, `cta-strip`, `cover`, `media-text`, `carousel`, `modal`, `tabs`, `accordion`, `post-list`, and major CTA/blog wrappers should keep the wide section shell. Use the narrow prose container only for long-form content bodies such as `page-content`, `post-content`, and comments.',
     );
   }
   if (visualPlan.layout?.contentContainerClass) {

@@ -135,7 +135,7 @@ export interface CardGridSection extends BaseSection {
   subtitle?: string;
   columns: 2 | 3 | 4;
   columnWidths?: string[];
-  cards: { heading: string; body: string }[];
+  cards: { heading: string; body: string; imageSrc?: string; imageAlt?: string }[];
 }
 
 export interface MediaTextSection extends BaseSection {

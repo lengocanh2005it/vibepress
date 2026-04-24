@@ -69,12 +69,20 @@ export class EditRequestFacadeService {
       accepted: true,
       mode: decision.mode,
       category: decision.category,
+      editOperation: decision.editOperation,
       request: decision.request,
       summary: preparedWithResolvedTarget.summary,
       globalIntent: decision.globalIntent,
       focusHint: decision.focusHint,
       confidence: decision.confidence,
       source: decision.source,
+      warnings: decision.warnings,
+      needsInference: decision.needsInference,
+      targetScope: decision.targetScope,
+      targetCandidates: decision.targetCandidates,
+      inferredAssumptions: decision.inferredAssumptions,
+      ambiguities: decision.ambiguities,
+      recommendedStrategy: decision.recommendedStrategy,
     };
   }
 }

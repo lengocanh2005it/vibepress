@@ -468,6 +468,12 @@ ${component.code}
     const normalizedDataNeeds = new Set(
       contract?.dataNeeds ?? component.dataNeeds ?? [],
     );
+    const allowedSectionTypes = new Set(sections.map((section) => section.type));
+    const isFixedPageDetailComponent =
+      !!fixedSlug &&
+      isPageComponent &&
+      (contract?.isDetail ?? component.isDetail) === true &&
+      normalizedDataNeeds.has('page-detail');
 
     if (
       normalizedCode.includes('/page/page/') ||
@@ -561,6 +567,27 @@ ${component.code}
       }
     }
 
+    if (isFixedPageDetailComponent) {
+      if (!this.hasCanonicalPageContentRender(component.code)) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Fixed page-detail component does not render the fetched `page.content`/`item.content` body via `dangerouslySetInnerHTML`. The canonical page body must be rendered instead of replacing the page with bespoke static sections.',
+        });
+      }
+
+      const unexpectedInteractiveUi = this.findUnexpectedInteractiveUiPatterns(
+        component.code,
+        allowedSectionTypes,
+      );
+      if (unexpectedInteractiveUi.length > 0) {
+        issues.push({
+          severity: 'high',
+          message: `Fixed page-detail component renders unexpected interactive UI not approved by the visual plan: ${unexpectedInteractiveUi.join(', ')}. Do not invent standalone interactive sections around canonical page content.`,
+        });
+      }
+    }
+
     if (sections.length === 0) return issues;
 
     const trackedSections = sections
@@ -622,6 +649,52 @@ ${component.code}
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
+  }
+
+  private hasCanonicalPageContentRender(code: string): boolean {
+    return (
+      /dangerouslySetInnerHTML/.test(code) &&
+      /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code)
+    );
+  }
+
+  private findUnexpectedInteractiveUiPatterns(
+    code: string,
+    allowedSectionTypes: ReadonlySet<string>,
+  ): string[] {
+    const matches: string[] = [];
+    const patterns: Array<{ label: string; allowedType: string; test: RegExp }> =
+      [
+        {
+          label: 'tabs',
+          allowedType: 'tabs',
+          test: /\bactiveTabs\b|role=["']tablist["']|aria-selected=\{/,
+        },
+        {
+          label: 'carousel',
+          allowedType: 'carousel',
+          test: /\bactiveCarousels\b|swiper-wrapper|swiper-button-prev|swiper-button-next/,
+        },
+        {
+          label: 'modal',
+          allowedType: 'modal',
+          test: /\bopenModals\b|role=["']dialog["']|aria-modal=["']true["']/,
+        },
+        {
+          label: 'accordion',
+          allowedType: 'accordion',
+          test: /\bopenAccordion|\bactiveAccordion|aria-expanded=\{/,
+        },
+      ];
+
+    for (const pattern of patterns) {
+      if (allowedSectionTypes.has(pattern.allowedType)) continue;
+      if (pattern.test.test(code)) {
+        matches.push(pattern.label);
+      }
+    }
+
+    return matches;
   }
 
   private findCanonicalTextLinkSnippetsWithoutHoverUnderline(
@@ -778,6 +851,8 @@ ${component.code}
       'menu links must use canonical `item.url` directly',
       'invented trailing auxiliary section',
       'auxiliary/footer/sidebar-like page sections are invalid unless source-backed',
+      'does not render the fetched `page.content`/`item.content` body',
+      'renders unexpected interactive ui not approved by the visual plan',
     ];
 
     return review.issues.filter(

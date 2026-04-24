@@ -618,7 +618,7 @@ export class OrchestratorService {
       hasEditRequest: Boolean(dto.editRequest),
     });
 
-    this.executePipelineLegacy(jobId, siteId, dto, state).catch((err) => {
+    this.executePipelineLegacy(jobId, siteId, dto, state, editRequestContext).catch((err) => {
       if (err instanceof PipelineControlError) {
         void this.finalizeControlledTermination(jobId, state, err);
         return;
@@ -1176,6 +1176,7 @@ export class OrchestratorService {
     siteId: string,
     dto: RunPipelineDto,
     state: PipelineStatus,
+    editRequestContext?: ResolvedEditRequestContext,
   ): Promise<void> {
     // ── Init structured run summary ───────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
@@ -2375,6 +2376,7 @@ export class OrchestratorService {
             state,
             stepName: '8b_edit_request',
             request: dto.editRequest,
+            editRequestContext,
             plan: reviewResult.plan,
             components: buildComponents,
             fixAgentModel: resolvedModels.fixAgent,
@@ -4902,6 +4904,7 @@ export class OrchestratorService {
     state: PipelineStatus;
     stepName: string;
     request?: RunPipelineDto['editRequest'];
+    editRequestContext?: ResolvedEditRequestContext;
     plan: PlanResult;
     components: ReactGenerateResult['components'];
     fixAgentModel?: string;
@@ -4919,6 +4922,7 @@ export class OrchestratorService {
       state,
       stepName,
       request,
+      editRequestContext,
       plan,
       fixAgentModel,
       logPath,
@@ -4973,6 +4977,7 @@ export class OrchestratorService {
     const postMigrationEditTasks =
       this.editRequestPhase.buildPostMigrationEditTasks({
         request,
+        context: editRequestContext,
         plan,
         components,
         exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
@@ -5307,6 +5312,12 @@ export class OrchestratorService {
       context.focusHint
         ? `focus="${truncateForLog(context.focusHint, 140)}"`
         : null,
+      context.editOperation ? `operation=${context.editOperation}` : null,
+      context.targetScope ? `scope=${context.targetScope}` : null,
+      context.recommendedStrategy
+        ? `strategy=${context.recommendedStrategy}`
+        : null,
+      context.needsInference ? 'needsInference=true' : null,
       typeof context.confidence === 'number'
         ? `confidence=${context.confidence.toFixed(2)}`
         : null,
@@ -5335,6 +5346,52 @@ export class OrchestratorService {
       if (targetLine.length > 0) {
         lines.push(`target | ${targetLine.join(' | ')}`);
       }
+    }
+
+    if (context.targetCandidates.length > 0) {
+      lines.push(
+        `candidates | ${context.targetCandidates
+          .slice(0, 3)
+          .map((candidate) =>
+            [
+              candidate.componentName
+                ? `component=${candidate.componentName}`
+                : null,
+              candidate.route ? `route=${candidate.route}` : null,
+              candidate.templateName
+                ? `template=${candidate.templateName}`
+                : null,
+              candidate.sectionType
+                ? `sectionType=${candidate.sectionType}`
+                : null,
+              candidate.targetNodeRole
+                ? `targetRole=${candidate.targetNodeRole}`
+                : null,
+              `confidence=${candidate.confidence.toFixed(2)}`,
+            ]
+              .filter(Boolean)
+              .join(' | '),
+          )
+          .join(' || ')}`,
+      );
+    }
+
+    if (context.ambiguities.length > 0) {
+      lines.push(
+        `ambiguities | ${context.ambiguities
+          .slice(0, 3)
+          .map((entry) => truncateForLog(entry, 120))
+          .join(' || ')}`,
+      );
+    }
+
+    if (context.warnings.length > 0) {
+      lines.push(
+        `warnings | ${context.warnings
+          .slice(0, 3)
+          .map((entry) => truncateForLog(entry, 120))
+          .join(' || ')}`,
+      );
     }
 
     if (request?.pageContext) {

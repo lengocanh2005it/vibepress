@@ -19,12 +19,16 @@ export class EditRequestValidatorService {
   ): ValidatedEditRequest | EditRequestValidationFailure {
     const request = prepared.request;
     const mode = this.detectMode(request);
+    const warnings: string[] = [];
+    let needsInference = false;
 
     if (mode === 'none') {
       return {
         mode,
         request: undefined,
         summary: prepared.summary,
+        warnings,
+        needsInference,
       };
     }
 
@@ -33,22 +37,20 @@ export class EditRequestValidatorService {
         request?.prompt &&
         !this.isMeaningfulSupplementalPrompt(request.prompt)
       ) {
-        return {
-          code: 'SUPPLEMENTAL_PROMPT_TOO_VAGUE',
-          message:
-            'When captures are attached, the main prompt must still be a clear additional instruction.',
-        };
+        warnings.push(
+          'The main prompt is vague relative to the attached captures, so downstream intent resolution will infer the missing detail from captures and target hints.',
+        );
+        needsInference = true;
       }
 
       if (
         request?.prompt &&
         this.isFeaturePromptWithoutTarget(request.prompt)
       ) {
-        return {
-          code: 'SUPPLEMENTAL_PROMPT_TARGET_REQUIRED',
-          message:
-            'When requesting a new feature with captures attached, also describe which page or area it should go into.',
-        };
+        warnings.push(
+          'The request appears to add a new feature without naming a precise page or area, so downstream targeting will rely on captures and page context.',
+        );
+        needsInference = true;
       }
 
       const attachmentsMissingNotes =
@@ -56,11 +58,10 @@ export class EditRequestValidatorService {
           (attachment) => !attachment.note?.trim(),
         ) ?? [];
       if (attachmentsMissingNotes.length > 0) {
-        return {
-          code: 'CAPTURE_NOTE_REQUIRED',
-          message:
-            'Each selected capture must include a clear edit request before sending to AI.',
-        };
+        warnings.push(
+          `${attachmentsMissingNotes.length} capture(s) are missing notes. The edit flow will infer requested changes from the screenshot, DOM target, and page context.`,
+        );
+        needsInference = true;
       }
 
       const attachmentsWithVagueNotes =
@@ -68,39 +69,51 @@ export class EditRequestValidatorService {
           (attachment) => !this.isSpecificCaptureNote(attachment.note),
         ) ?? [];
       if (attachmentsWithVagueNotes.length > 0) {
-        return {
-          code: 'CAPTURE_NOTE_TOO_VAGUE',
-          message:
-            'Each capture note must describe a concrete UI change, not just a generic label.',
-        };
+        warnings.push(
+          `${attachmentsWithVagueNotes.length} capture note(s) are generic. The edit flow will treat them as soft hints rather than exact instructions.`,
+        );
+        needsInference = true;
       }
 
       return {
         mode,
         request,
         summary: prepared.summary,
+        warnings,
+        needsInference,
       };
     }
 
     if (!request?.prompt || !this.isMeaningfulPrompt(request.prompt)) {
-      return {
-        code: 'MAIN_PROMPT_REQUIRED',
-        message: 'Add a clear migration prompt when no captures are attached.',
-      };
+      if (!request?.targetHint && !request?.constraints) {
+        return {
+          code: 'MAIN_PROMPT_REQUIRED',
+          message: 'Add a clear migration prompt when no captures are attached.',
+        };
+      }
+
+      warnings.push(
+        'The request has no clear standalone prompt, so downstream intent resolution will infer the edit from target hints and constraints.',
+      );
+      needsInference = true;
     }
 
-    if (this.hasFocusTargetWithoutConcreteAction(request.prompt)) {
-      return {
-        code: 'FOCUS_TARGET_ACTION_REQUIRED',
-        message:
-          'When you mention a page like Home, also describe what should change there.',
-      };
+    if (
+      request?.prompt &&
+      this.hasFocusTargetWithoutConcreteAction(request.prompt)
+    ) {
+      warnings.push(
+        'The request names a page or area without a concrete action. Downstream edit planning will infer a conservative best-effort change strategy.',
+      );
+      needsInference = true;
     }
 
     return {
       mode,
       request,
       summary: prepared.summary,
+      warnings,
+      needsInference,
     };
   }
 
@@ -200,7 +213,9 @@ export class EditRequestValidatorService {
   private detectMode(request?: PipelineEditRequestDto): EditRequestMode {
     if (!request) return 'none';
     if ((request.attachments?.length ?? 0) > 0) return 'capture';
-    if (request.prompt) return 'no_capture';
+    if (request.prompt || request.targetHint || request.constraints) {
+      return 'no_capture';
+    }
     return 'none';
   }
 }

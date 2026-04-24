@@ -162,6 +162,11 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     return toMappedSections(mapCover(node), node);
   }
 
+  // Gallery block: map to card-grid with image cards
+  if (block === 'core/gallery' || block === 'gallery') {
+    return toMappedSections(mapGallery(node), node);
+  }
+
   // Standalone image block: preserve it as an explicit visual section instead
   // of expecting the LLM to remember an image-only region from raw HTML.
   if (block === 'core/image' || block === 'image') {
@@ -420,6 +425,21 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   return s;
 }
 
+function mapGallery(node: WpNode): CardGridSection | null {
+  const imageNodes = (node.children ?? []).filter(
+    (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
+  );
+  if (imageNodes.length === 0) return null;
+  const cards = imageNodes.map((img) => ({
+    heading: img.alt ?? '',
+    body: '',
+    imageSrc: img.src,
+    imageAlt: img.alt ?? '',
+  }));
+  const columns = Math.min(Math.max(imageNodes.length, 2), 4) as 2 | 3 | 4;
+  return { type: 'card-grid', columns, cards };
+}
+
 function mapImage(node: WpNode): CoverSection | null {
   if (!node.src) return null;
 
@@ -671,13 +691,15 @@ function mapColumns(
     .map((col) => {
       const flat = flattenChildren(col);
       const h = findFirstByBlock(flat, ['core/heading', 'heading']);
+      const img = findFirstByBlock(flat, ['core/image', 'image']);
       const body = extractRichTextFromNodes(flat);
       return {
         heading: h?.text ?? '',
         body,
+        ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
       };
     })
-    .filter((c) => c.heading || c.body);
+    .filter((c) => c.heading || c.body || c.imageSrc);
 
   if (cards.length === 0) return null;
 
@@ -1175,10 +1197,23 @@ function applyNodePresentation<T extends SectionPlan>(
         ? node.gap
         : (normalizeGapStyleValue(node.gap) ?? next.gapStyle);
   }
-  const customClassNames = uniqueClassNames([
+  const mergedClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
     ...(node.customClassNames ?? []),
   ]);
+  // For card-grid: auto-inject centered intro marker when asterisk style or
+  // when the wrapping node is center-aligned (common WP pattern for feature grids)
+  if (next.type === 'card-grid') {
+    const hasAsterisk = mergedClassNames.includes('is-style-asterisk');
+    const wrapperCentered = inferNodeAlignment(node) === 'center';
+    if (
+      (hasAsterisk || wrapperCentered) &&
+      !mergedClassNames.includes('vp-card-grid-intro-centered')
+    ) {
+      mergedClassNames.push('vp-card-grid-intro-centered');
+    }
+  }
+  const customClassNames = mergedClassNames;
   const buttonClassNames = extractLikelyButtonClassNames(node.customClassNames);
   if (buttonClassNames.length > 0) {
     applyButtonClassesToSectionCtas(next, buttonClassNames);
@@ -1345,18 +1380,20 @@ function isHeroGroup(children: WpNode[]): boolean {
   const meaningfulChildren = children.filter(
     (child) => !isSpacerBlock(child.block),
   );
-  const hasH1OrH2 = meaningfulChildren.some(
-    (c) =>
-      (c.block === 'core/heading' || c.block === 'heading') &&
-      (c.level === 1 || c.level === 2),
+  const headings = meaningfulChildren.filter(
+    (c) => c.block === 'core/heading' || c.block === 'heading',
   );
+  const hasH1OrH2 = headings.some((c) => c.level === 1 || c.level === 2);
+  // Accept a sole heading of any level when no columns are present (e.g. H3-led intro)
+  const hasSoleHeading = headings.length === 1;
+  const hasHeading = hasH1OrH2 || hasSoleHeading;
   const hasPara = meaningfulChildren.some(
     (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
   const hasDirectColumns = meaningfulChildren.some(
     (c) => c.block === 'core/columns' || c.block === 'columns',
   );
-  return hasH1OrH2 && hasPara && !hasDirectColumns;
+  return hasHeading && hasPara && !hasDirectColumns;
 }
 
 function isCompositeGroup(children: WpNode[]): boolean {
@@ -1452,6 +1489,12 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
   };
   if (title) section.title = title;
   if (subtitle) section.subtitle = subtitle;
+  // Presence of intro heading + subtitle with a card grid often indicates a
+  // centered section layout in WordPress — pre-mark it so the generator picks
+  // up centered intro styling without waiting for the outer node alignment pass.
+  if (title && subtitle) {
+    section.customClassNames = ['vp-card-grid-intro-centered'];
+  }
   return section;
 }
 
@@ -1556,7 +1599,7 @@ function inferSectionAlignment(
 }
 
 function inferNodeAlignment(node: WpNode): HorizontalAlign | undefined {
-  return (
+  const attrAlign =
     normalizeHorizontalAlign(node.textAlign) ??
     normalizeHorizontalAlign(node.justifyContent) ??
     normalizeHorizontalAlign(node.align) ??
@@ -1564,8 +1607,19 @@ function inferNodeAlignment(node: WpNode): HorizontalAlign | undefined {
     normalizeHorizontalAlign(node.params?.contentPosition) ??
     normalizeHorizontalAlign(node.params?.layout?.justifyContent) ??
     normalizeHorizontalAlign(node.params?.align) ??
-    normalizeHorizontalAlign(node.params?.layout?.horizontalAlignment)
-  );
+    normalizeHorizontalAlign(node.params?.layout?.horizontalAlignment);
+
+  if (attrAlign) return attrAlign;
+
+  // WordPress alignment utility classes (e.g. "has-text-align-center", "aligncenter")
+  for (const cls of node.customClassNames ?? []) {
+    const c = cls.trim().toLowerCase();
+    if (c === 'has-text-align-center' || c === 'aligncenter') return 'center';
+    if (c === 'has-text-align-right' || c === 'alignright') return 'right';
+    if (c === 'has-text-align-left' || c === 'alignleft') return 'left';
+  }
+
+  return undefined;
 }
 
 function normalizeHorizontalAlign(value: unknown): HorizontalAlign | undefined {

@@ -1,10 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 import type {
   PipelineEditTargetHintDto,
   PipelineReactVisualEditRequestDto,
 } from '../../orchestrator/orchestrator.dto.js';
+import {
+  buildOperationInstruction,
+  detectEditOperation,
+} from '../../edit-request/edit-operation.util.js';
 import type { ComponentPlan, PlanResult } from '../planner/planner.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import type { GeneratedComponent } from './react-generator.service.js';
@@ -70,8 +74,11 @@ export class ReactVisualEditService {
     }
 
     const filePath =
-      editRequest.targetHint?.outputFilePath?.trim() ||
-      this.deriveFilePath(frontendDir, componentName);
+      this.resolveTargetFilePath(
+        frontendDir,
+        componentName,
+        editRequest.targetHint,
+      );
 
     const currentCode = await readFile(filePath, 'utf-8');
 
@@ -180,15 +187,42 @@ export class ReactVisualEditService {
     return join(frontendDir, 'src', subDir, `${componentName}.tsx`);
   }
 
+  private resolveTargetFilePath(
+    frontendDir: string,
+    componentName: string,
+    targetHint?: PipelineEditTargetHintDto,
+  ): string {
+    const hintedPath = targetHint?.outputFilePath?.trim();
+    if (!hintedPath) {
+      return this.deriveFilePath(frontendDir, componentName);
+    }
+
+    if (isAbsolute(hintedPath)) {
+      return hintedPath;
+    }
+
+    return resolve(frontendDir, hintedPath);
+  }
+
   private buildFeedback(
     editRequest: PipelineReactVisualEditRequestDto,
     componentPlan?: ComponentPlan,
     focusedRegion?: { snippet: string; startLine: number; endLine: number },
   ): string {
     const lines: string[] = [];
+    const combinedInstruction = buildInstructionText(editRequest);
 
     if (editRequest.prompt?.trim()) {
       lines.push(editRequest.prompt.trim());
+    }
+
+    const editOperation = detectEditOperation(combinedInstruction);
+    const operationInstruction = buildOperationInstruction(
+      editOperation,
+      combinedInstruction,
+    );
+    if (operationInstruction) {
+      lines.push(operationInstruction);
     }
 
     const hint = editRequest.targetHint;
@@ -212,6 +246,18 @@ export class ReactVisualEditService {
           `Target text preview: "${hint.targetTextPreview.trim()}"`,
         );
       }
+      if (hint.componentName?.trim()) {
+        hintLines.push(`Target component: ${hint.componentName.trim()}`);
+      }
+      if (hint.route?.trim()) {
+        hintLines.push(`Target route: ${hint.route.trim()}`);
+      }
+      if (hint.templateName?.trim()) {
+        hintLines.push(`Target template: ${hint.templateName.trim()}`);
+      }
+      if (hint.outputFilePath?.trim()) {
+        hintLines.push(`Target file hint: ${hint.outputFilePath.trim()}`);
+      }
       if (hint.startLine !== undefined && hint.endLine !== undefined) {
         hintLines.push(
           `Target source lines: ${hint.startLine}–${hint.endLine}`,
@@ -221,6 +267,34 @@ export class ReactVisualEditService {
       if (hintLines.length > 0) {
         lines.push(hintLines.join('\n'));
       }
+    }
+
+    if (editRequest.pageContext) {
+      const pageContextLines = [
+        editRequest.pageContext.reactRoute
+          ? `React route: ${editRequest.pageContext.reactRoute}`
+          : null,
+        editRequest.pageContext.wordpressRoute
+          ? `WordPress route: ${editRequest.pageContext.wordpressRoute}`
+          : null,
+        editRequest.pageContext.pageTitle
+          ? `Page title: ${editRequest.pageContext.pageTitle}`
+          : null,
+      ].filter((value): value is string => Boolean(value));
+
+      if (pageContextLines.length > 0) {
+        lines.push(pageContextLines.join('\n'));
+      }
+    }
+
+    if ((editRequest.attachments?.length ?? 0) > 0) {
+      lines.push('Visual evidence and local target notes:');
+      for (const attachment of (editRequest.attachments ?? []).slice(0, 4)) {
+        lines.push(`- ${formatVisualAttachment(attachment)}`);
+      }
+      lines.push(
+        'Use these captures as primary evidence for the local change. Preserve unrelated sections and behavior.',
+      );
     }
 
     if (focusedRegion) {
@@ -240,9 +314,17 @@ export class ReactVisualEditService {
         'Constraint: preserve all data fetching, API calls, and state contracts.',
       );
     }
+    if (constraints?.rerunFromScratch) {
+      lines.push(
+        'Constraint: the user explicitly allows a broader rewrite of this component if needed, but still keep the route and data contract intact.',
+      );
+    }
 
     if (componentPlan?.description) {
       lines.push(`Component purpose: ${componentPlan.description}`);
+    }
+    if (componentPlan?.route) {
+      lines.push(`Planned route: ${componentPlan.route}`);
     }
 
     return (
@@ -250,4 +332,59 @@ export class ReactVisualEditService {
       'Apply the visual edit as described by the attached context.'
     );
   }
+}
+
+function buildInstructionText(
+  editRequest: PipelineReactVisualEditRequestDto,
+): string {
+  return [
+    editRequest.prompt?.trim(),
+    ...(editRequest.attachments ?? []).map((attachment) => attachment.note?.trim()),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ');
+}
+
+function formatVisualAttachment(
+  attachment: NonNullable<PipelineReactVisualEditRequestDto['attachments']>[number],
+): string {
+  const parts = [`id=${attachment.id}`];
+  if (attachment.note?.trim()) {
+    parts.push(`note="${truncate(attachment.note.trim(), 160)}"`);
+  }
+  if (attachment.captureContext?.page?.route) {
+    parts.push(`pageRoute=${attachment.captureContext.page.route}`);
+  }
+  if (attachment.targetNode?.route) {
+    parts.push(`targetRoute=${attachment.targetNode.route}`);
+  }
+  if (attachment.targetNode?.templateName) {
+    parts.push(`template=${attachment.targetNode.templateName}`);
+  }
+  if (attachment.targetNode?.editSourceNodeId) {
+    parts.push(`editSourceNodeId=${attachment.targetNode.editSourceNodeId}`);
+  }
+  if (attachment.targetNode?.editNodeRole) {
+    parts.push(`editRole=${attachment.targetNode.editNodeRole}`);
+  }
+  if (attachment.targetNode?.editTagName) {
+    parts.push(`editTag=${attachment.targetNode.editTagName}`);
+  }
+  if (attachment.targetNode?.nearestHeading) {
+    parts.push(
+      `heading="${truncate(attachment.targetNode.nearestHeading, 80)}"`,
+    );
+  }
+  if (attachment.domTarget?.textSnippet) {
+    parts.push(`text="${truncate(attachment.domTarget.textSnippet, 80)}"`);
+  }
+  if (attachment.asset?.publicUrl) {
+    parts.push(`image=${attachment.asset.publicUrl}`);
+  }
+  return parts.join(' | ');
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }

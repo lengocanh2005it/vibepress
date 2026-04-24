@@ -394,7 +394,11 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    const nextSections = sanitizedSections.sections;
+    const nextSections = this.normalizeFixedPageDetailSections(
+      item,
+      sanitizedSections.sections,
+      sanitizedSections.adjustments,
+    );
 
     const sectionsChanged =
       nextSections.length !== item.visualPlan.sections.length ||
@@ -805,7 +809,49 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    return sanitizedSections.sections;
+    return this.normalizeFixedPageDetailSections(
+      item,
+      sanitizedSections.sections,
+    );
+  }
+
+  private normalizeFixedPageDetailSections(
+    item: PlanResult[number],
+    sections: SectionPlan[],
+    adjustments?: string[],
+  ): SectionPlan[] {
+    const isFixedPageDetail =
+      item.type === 'page' &&
+      item.isDetail === true &&
+      !!item.fixedSlug &&
+      item.dataNeeds.includes('page-detail');
+    if (!isFixedPageDetail) return sections;
+
+    const breadcrumb = sections.find((section) => section.type === 'breadcrumb');
+    const sidebar = sections.find((section) => section.type === 'sidebar');
+    const existingPageContent = sections.find(
+      (section): section is Extract<SectionPlan, { type: 'page-content' }> =>
+        section.type === 'page-content',
+    );
+    const normalized: SectionPlan[] = [];
+    if (breadcrumb) normalized.push(breadcrumb);
+    normalized.push(
+      existingPageContent ?? {
+        type: 'page-content',
+        showTitle: !/no.?title/i.test(item.componentName),
+      },
+    );
+    if (sidebar) normalized.push(sidebar);
+
+    const changed =
+      normalized.length !== sections.length ||
+      normalized.some((section, index) => section !== sections[index]);
+    if (changed) {
+      adjustments?.push(
+        'replaced fixed page-detail rich sections with canonical page-content wrapper',
+      );
+    }
+    return normalized;
   }
 
   private describeSectionIdentity(section: SectionPlan): string {

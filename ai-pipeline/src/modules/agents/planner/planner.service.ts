@@ -922,32 +922,7 @@ export class PlannerService {
       const hasSidebarTemplate =
         /sidebar/.test(normalizedTemplate) ||
         /withsidebar|sidebar/i.test(componentPlan.componentName);
-      const richBoundPageSections = this.buildRichBoundPageDetailSections(
-        componentPlan,
-        content,
-        tokens,
-      );
-      if (richBoundPageSections?.length) {
-        return {
-          ...base,
-          layout: hasSidebarTemplate
-            ? { ...layout, contentLayout: 'sidebar-right' as const }
-            : layout,
-          sections: hasSidebarTemplate
-            ? [
-                ...richBoundPageSections,
-                {
-                  type: 'sidebar' as const,
-                  title: 'Explore',
-                  showSiteInfo: false,
-                  showPages: true,
-                  showPosts: content.posts.length > 0,
-                  maxItems: 8,
-                },
-              ]
-            : richBoundPageSections,
-        };
-      }
+      const showTitle = !/no.?title/i.test(componentPlan.componentName);
       return {
         ...base,
         layout: hasSidebarTemplate
@@ -955,9 +930,9 @@ export class PlannerService {
           : layout,
         sections: hasSidebarTemplate
           ? [
-              { type: 'page-content', showTitle: true },
+              { type: 'page-content' as const, showTitle },
               {
-                type: 'sidebar',
+                type: 'sidebar' as const,
                 title: 'Explore',
                 showSiteInfo: false,
                 showPages: true,
@@ -965,7 +940,7 @@ export class PlannerService {
                 maxItems: 8,
               },
             ]
-          : [{ type: 'page-content', showTitle: true }],
+          : [{ type: 'page-content' as const, showTitle }],
       };
     }
 
@@ -1095,13 +1070,19 @@ export class PlannerService {
 
     const headingFamily =
       d.headingFontFamily ??
+      tokens?.blockStyles?.heading?.typography?.fontFamily ??
       fontMap.get('heading') ??
       fontMap.get('headings') ??
+      fontMap.get('display') ??
       d.fontFamily ??
       'inherit';
 
     const bodyFamily =
-      d.fontFamily ?? fontMap.get('body') ?? fontMap.get('base') ?? 'inherit';
+      d.fontFamily ??
+      fontMap.get('body') ??
+      fontMap.get('base') ??
+      fontMap.get('text') ??
+      'inherit';
 
     const h1Size =
       d.headings?.h1?.fontSize ??
@@ -1299,9 +1280,14 @@ export class PlannerService {
     // Likewise, rootPadding from theme defaults is a site-shell concern and is
     // intentionally NOT propagated into per-component layout tokens, because it
     // causes generated pages to double-pad and look unnaturally narrow.
-    const sectionMaxW = d.wideWidth ?? '1280px';
+    const sectionMaxW = d.wideWidth ?? d.contentWidth ?? '1280px';
     const contentMaxW = d.contentWidth ?? '800px';
-    const containerClass = `max-w-[${sectionMaxW}] mx-auto w-full`;
+    // Clamp wide width to a sane upper bound — some themes set wideSize to
+    // e.g. "100vw" or "100%" which breaks arbitrary Tailwind values.
+    const sectionMaxWNormalized = /^\d+(\.\d+)?(px|rem|em)$/.test(sectionMaxW)
+      ? sectionMaxW
+      : '1280px';
+    const containerClass = `max-w-[${sectionMaxWNormalized}] mx-auto w-full`;
     const contentContainerClass = `max-w-[${contentMaxW}] mx-auto w-full`;
 
     const blockGap = d.blockGap ? `gap-[${d.blockGap}]` : 'gap-16';
@@ -1341,20 +1327,108 @@ export class PlannerService {
       return undefined;
     };
 
+    const background =
+      d.bgColor ??
+      pick('background', 'base', 'white', 'neutral-100', 'off-white') ??
+      '#ffffff';
+    const textColor =
+      d.textColor ??
+      pick(
+        'foreground',
+        'contrast',
+        'dark',
+        'primary-text',
+        'neutral-900',
+        'black',
+        'text',
+      ) ??
+      '#111111';
+
+    // Button bg is the most reliable accent signal — it's the brand CTA color.
+    // Link color is only used as accent when it's visually distinct from body text.
+    const linkAsAccent =
+      d.linkColor && d.linkColor !== textColor ? d.linkColor : undefined;
+    const accent =
+      d.buttonBgColor ??
+      linkAsAccent ??
+      pick(
+        'primary',
+        'accent',
+        'brand',
+        'highlight',
+        'cta',
+        'contrast-3',
+        'contrast-2',
+        'secondary',
+        'vivid-red',
+        'vivid-cyan-blue',
+        'luminous-vivid-amber',
+      ) ??
+      this.pickMostSaturatedColor(tokens?.colors) ??
+      '#0066cc';
+
     return {
-      background: d.bgColor ?? pick('background', 'base', 'white') ?? '#ffffff',
-      surface: pick('surface', 'secondary', 'light') ?? '#f5f5f5',
-      text: d.textColor ?? pick('foreground', 'contrast', 'dark') ?? '#111111',
-      textMuted: d.captionColor ?? pick('secondary-text', 'muted') ?? '#666666',
-      accent:
-        d.linkColor ??
-        d.buttonBgColor ??
-        pick('primary', 'accent', 'contrast-3') ??
-        '#0066cc',
-      accentText: d.buttonTextColor ?? pick('base', 'white') ?? '#ffffff',
-      dark: pick('dark', 'contrast') ?? d.textColor,
-      darkText: pick('light', 'base', 'white') ?? d.bgColor,
+      background,
+      surface:
+        pick(
+          'surface',
+          'secondary',
+          'light',
+          'neutral-50',
+          'neutral-100',
+          'gray-100',
+          'off-white',
+          'subtle',
+        ) ?? '#f5f5f5',
+      text: textColor,
+      textMuted:
+        d.captionColor ??
+        pick('secondary-text', 'muted', 'neutral-600', 'gray', 'subtle') ??
+        '#666666',
+      accent,
+      accentText:
+        d.buttonTextColor ?? pick('base', 'white', 'neutral-50') ?? '#ffffff',
+      dark:
+        pick('dark', 'contrast', 'black', 'neutral-900') ??
+        d.textColor ??
+        '#111111',
+      darkText:
+        pick('light', 'base', 'white', 'neutral-50') ?? d.bgColor ?? '#ffffff',
     };
+  }
+
+  /** Returns the most saturated hex color from the palette, or undefined if none is vivid. */
+  private pickMostSaturatedColor(
+    colors: ThemeTokens['colors'] | undefined,
+  ): string | undefined {
+    if (!colors?.length) return undefined;
+    let bestColor: string | undefined;
+    let bestSat = 0;
+    for (const { value } of colors) {
+      const sat = this.estimateColorSaturation(value);
+      if (sat > bestSat) {
+        bestSat = sat;
+        bestColor = value;
+      }
+    }
+    return bestSat > 30 ? bestColor : undefined;
+  }
+
+  private estimateColorSaturation(hex: string): number {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(
+      hex.trim(),
+    );
+    if (!m) return 0;
+    const r = parseInt(m[1], 16) / 255;
+    const g = parseInt(m[2], 16) / 255;
+    const b = parseInt(m[3], 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    return Math.round(s * 100);
   }
 
   // ── Layer 2: enrich dataNeeds by scanning template source ─────────────────
@@ -2479,6 +2553,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         section.type !== 'navbar' &&
         section.type !== 'footer',
     );
+    if (!meaningful.length) return false;
+
     const interactiveTypes = new Set<SectionPlan['type']>([
       'carousel',
       'modal',
@@ -2488,15 +2564,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (meaningful.some((section) => interactiveTypes.has(section.type))) {
       return true;
     }
-    if (meaningful.length < 3) return false;
 
     const richTypes = new Set<SectionPlan['type']>([
       'hero',
       'cover',
       'media-text',
       'card-grid',
-      'carousel',
+      'cta-strip',
       'testimonial',
+      'newsletter',
+      'carousel',
       'modal',
       'tabs',
       'accordion',
@@ -2507,9 +2584,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const distinctTypes = new Set(meaningful.map((section) => section.type))
       .size;
 
-    return (
-      richSectionCount >= 2 || distinctTypes >= 3 || meaningful.length >= 4
-    );
+    // Promote when mapper produced at least one recognisable rich section,
+    // or 2+ meaningful sections of any type — enough to be faithful to WP content.
+    return richSectionCount >= 1 || distinctTypes >= 2 || meaningful.length >= 2;
   }
 
   private parsePlanningSourceNodes(input: {

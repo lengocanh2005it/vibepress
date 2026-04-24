@@ -133,6 +133,29 @@ export interface AiEditRequestPayload {
             format?: string;
         };
     }>;
+    targetHint?: {
+        templateName?: string;
+        componentName?: string;
+        route?: string | null;
+        sectionIndex?: number;
+        sectionType?: string;
+        sourceNodeId?: string;
+        sectionKey?: string;
+        sectionComponentName?: string;
+        sourceFile?: string;
+        outputFilePath?: string;
+        startLine?: number;
+        endLine?: number;
+        targetNodeRole?: string;
+        targetElementTag?: string;
+        targetTextPreview?: string;
+        targetStartLine?: number;
+    };
+    constraints?: {
+        preserveOutsideSelection?: boolean;
+        preserveDataContract?: boolean;
+        rerunFromScratch?: boolean;
+    };
 }
 
 export interface ReactVisualEditRouteEntry {

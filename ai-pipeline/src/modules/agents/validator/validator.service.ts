@@ -1597,6 +1597,11 @@ export class ValidatorService {
 
   private normalizeLiteralSearchText(input: string): string {
     return input
+      .replace(
+        /\{\s*(["'`])((?:\\.|(?!\1)[\s\S])*)\1\s*\}/g,
+        (_match, _quote: string, content: string) =>
+          this.normalizeJsxStringLiteralContent(content),
+      )
       .replace(/<[^>]+>/g, ' ')
       .replace(/\\n/g, ' ')
       .replace(/\\r/g, ' ')
@@ -1615,6 +1620,18 @@ export class ValidatorService {
       .replace(/&gt;/gi, '>')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  private normalizeJsxStringLiteralContent(content: string): string {
+    return content
+      .replace(/\\r\\n/g, '\n')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\n')
+      .replace(/\\t/g, ' ')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\`/g, '`')
+      .replace(/\\\\/g, '\\');
   }
 
   private findMissingRequiredCustomClasses(

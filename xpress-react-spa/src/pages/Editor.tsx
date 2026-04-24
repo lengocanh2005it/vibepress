@@ -753,6 +753,9 @@ const EDITOR_MESSAGES: Record<
   | "unclearIntent"
   | "saveCaptureNoteRequired"
   | "selectedCaptureNoteRequired"
+  | "requestWillUseInference"
+  | "captureWillUseInferenceOnSave"
+  | "selectedCapturesWillUseInference"
   | "pipelineStartFailed"
   | "outOfScope"
   | "invalidEditRequest",
@@ -801,6 +804,18 @@ const EDITOR_MESSAGES: Record<
   selectedCaptureNoteRequired: {
     vi: "Mỗi capture đã chọn cần có note yêu cầu chỉnh sửa trước khi thêm vào chat.",
     en: "Each selected capture needs an edit request before it can be added to chat.",
+  },
+  requestWillUseInference: {
+    vi: "Yêu cầu chưa thật rõ, nhưng vẫn sẽ được gửi. AI sẽ tự suy luận thêm từ prompt, page context và captures.",
+    en: "The request is still ambiguous, but it will be sent. AI will infer the missing detail from the prompt, page context, and captures.",
+  },
+  captureWillUseInferenceOnSave: {
+    vi: "Capture này vẫn được lưu dù note chưa cụ thể. AI sẽ dựa thêm vào vùng chọn, DOM context và screenshot để suy luận.",
+    en: "This capture will still be saved even though the note is not very specific. AI will infer more from the selection, DOM context, and screenshot.",
+  },
+  selectedCapturesWillUseInference: {
+    vi: "Các capture đã chọn vẫn được thêm vào chat dù note chưa đủ rõ. AI sẽ xử lý theo cơ chế suy luận tốt nhất.",
+    en: "The selected captures will still be added to chat even though some notes are not very specific. AI will handle them with best-effort inference.",
   },
   pipelineStartFailed: {
     vi: "Không thể khởi chạy AI pipeline.",
@@ -854,11 +869,11 @@ const getChatHelperContent = (
     return language === "vi"
       ? {
           title: "Captures + optional prompt",
-          body: 'Mỗi capture vẫn cần note cụ thể. Prompt chính là tuỳ chọn và có thể dùng để thêm chỉ dẫn tổng quát, ví dụ: "Đổi background trang Home thành màu đỏ".',
+          body: 'Bạn nên thêm note cụ thể cho từng capture, nhưng vẫn có thể gửi yêu cầu chưa hoàn hảo. AI sẽ cố suy luận thêm từ vùng chọn, DOM context và prompt chính.',
         }
       : {
           title: "Captures + optional prompt",
-          body: 'Each capture still needs a specific note. The main prompt is optional and can add broader guidance, for example: "Change the Home page background to red".',
+          body: 'Specific notes on each capture are recommended, but you can still send an imperfect request. AI will infer more from the selected area, DOM context, and main prompt.',
         };
   }
 
@@ -977,8 +992,16 @@ const Editor: React.FC = () => {
       .catch(() => setWpPages([]));
   }, [siteUrl]);
 
-  const showToast = (message: string, tone: "error" | "success" = "error") => {
-    const fn = tone === "success" ? toast.success : toast.error;
+  const showToast = (
+    message: string,
+    tone: "error" | "success" | "warning" = "error",
+  ) => {
+    const fn =
+      tone === "success"
+        ? toast.success
+        : tone === "warning"
+          ? toast.warn
+          : toast.error;
     fn(message, {
       position: "top-right",
       autoClose: 4000,
@@ -987,7 +1010,9 @@ const Editor: React.FC = () => {
       className:
         tone === "success"
           ? "!rounded-2xl !border !border-[#cfe0c5] !bg-[#f4fbef] !px-4 !py-3 !text-[13px] !font-medium !text-[#3e6a39] !shadow-lg"
-          : "!rounded-2xl !border !border-[#e2beb9] !bg-[#fff4f2] !px-4 !py-3 !text-[13px] !font-medium !text-[#8c413a] !shadow-lg",
+          : tone === "warning"
+            ? "!rounded-2xl !border !border-[#ead9a4] !bg-[#fff9ea] !px-4 !py-3 !text-[13px] !font-medium !text-[#8a6a12] !shadow-lg"
+            : "!rounded-2xl !border !border-[#e2beb9] !bg-[#fff4f2] !px-4 !py-3 !text-[13px] !font-medium !text-[#8c413a] !shadow-lg",
     });
   };
 
@@ -1123,6 +1148,47 @@ const Editor: React.FC = () => {
     return hasFeatureSignal(normalized) && !hasScopeOrTargetHint(normalized);
   };
 
+  const collectInferenceWarnings = (
+    prompt: string,
+    capturesForAi: Capture[],
+    language: SupportedLanguage,
+  ) => {
+    const warnings: string[] = [];
+
+    if (capturesForAi.length > 0) {
+      if (prompt && !isMeaningfulSupplementalPrompt(prompt)) {
+        warnings.push(
+          getEditorMessage(language, "supplementalPromptTooVague"),
+        );
+      }
+      if (prompt && isFeaturePromptWithoutTarget(prompt)) {
+        warnings.push(
+          getEditorMessage(language, "supplementalPromptTargetRequired"),
+        );
+      }
+      if (capturesForAi.some((capture) => !capture.comment.trim())) {
+        warnings.push(getEditorMessage(language, "captureNoteRequired"));
+      }
+      if (
+        capturesForAi.some((capture) => capture.comment.trim()) &&
+        capturesForAi.some((capture) => !isSpecificCaptureNote(capture.comment))
+      ) {
+        warnings.push(getEditorMessage(language, "captureNoteTooVague"));
+      }
+    } else {
+      if (prompt && !isMeaningfulNoCapturePrompt(prompt)) {
+        warnings.push(getEditorMessage(language, "unclearIntent"));
+      }
+      if (prompt && hasFocusTargetWithoutAction(prompt)) {
+        warnings.push(
+          getEditorMessage(language, "focusTargetActionRequired"),
+        );
+      }
+    }
+
+    return warnings;
+  };
+
   const buildAiAttachmentPayload = (capture: Capture) => ({
     id: capture.id,
     note: capture.comment,
@@ -1208,44 +1274,21 @@ const Editor: React.FC = () => {
 
     if (!siteId) return;
 
-    if (hasCaptureInstructions) {
-      if (trimmedPrompt && !isMeaningfulSupplementalPrompt(trimmedPrompt)) {
-        showToast(
-          getEditorMessage(requestLanguage, "supplementalPromptTooVague"),
-        );
-        return;
-      }
-      if (trimmedPrompt && isFeaturePromptWithoutTarget(trimmedPrompt)) {
-        showToast(
-          getEditorMessage(requestLanguage, "supplementalPromptTargetRequired"),
-        );
-        return;
-      }
-      if (chatCaptures.some((capture) => !capture.comment.trim())) {
-        showToast(getEditorMessage(requestLanguage, "captureNoteRequired"));
-        return;
-      }
-      if (
-        chatCaptures.some((capture) => !isSpecificCaptureNote(capture.comment))
-      ) {
-        showToast(getEditorMessage(requestLanguage, "captureNoteTooVague"));
-        return;
-      }
-    } else {
-      if (!trimmedPrompt) {
-        showToast(getEditorMessage(requestLanguage, "mainPromptRequired"));
-        return;
-      }
-      if (!isMeaningfulNoCapturePrompt(trimmedPrompt)) {
-        showToast(getEditorMessage(requestLanguage, "unclearIntent"));
-        return;
-      }
-      if (hasFocusTargetWithoutAction(trimmedPrompt)) {
-        showToast(
-          getEditorMessage(requestLanguage, "focusTargetActionRequired"),
-        );
-        return;
-      }
+    if (!hasCaptureInstructions && !trimmedPrompt) {
+      showToast(getEditorMessage(requestLanguage, "mainPromptRequired"));
+      return;
+    }
+
+    const inferenceWarnings = collectInferenceWarnings(
+      trimmedPrompt,
+      chatCaptures,
+      requestLanguage,
+    );
+    if (inferenceWarnings.length > 0) {
+      showToast(
+        `${getEditorMessage(requestLanguage, "requestWillUseInference")} ${inferenceWarnings[0]}`,
+        "warning",
+      );
     }
 
     setIsSendingAiRequest(true);
@@ -1612,13 +1655,11 @@ const Editor: React.FC = () => {
   const handleSaveCapture = async () => {
     if (!selection) return;
     const captureLanguage = detectRequestLanguage("", [captureComment]);
-    if (!captureComment.trim()) {
-      showToast(getEditorMessage(captureLanguage, "saveCaptureNoteRequired"));
-      return;
-    }
-    if (!isSpecificCaptureNote(captureComment)) {
-      showToast(getEditorMessage(captureLanguage, "captureNoteTooVagueOnSave"));
-      return;
+    if (!captureComment.trim() || !isSpecificCaptureNote(captureComment)) {
+      showToast(
+        getEditorMessage(captureLanguage, "captureWillUseInferenceOnSave"),
+        "warning",
+      );
     }
     setIsSubmittingCapture(true);
     try {
@@ -1694,17 +1735,16 @@ const Editor: React.FC = () => {
       "",
       capturesToSave.map((capture) => capture.comment),
     );
-    if (capturesToSave.some((capture) => !capture.comment.trim())) {
-      showToast(
-        getEditorMessage(selectionLanguage, "selectedCaptureNoteRequired"),
-      );
-      return;
-    }
     if (
-      capturesToSave.some((capture) => !isSpecificCaptureNote(capture.comment))
+      capturesToSave.some(
+        (capture) =>
+          !capture.comment.trim() || !isSpecificCaptureNote(capture.comment),
+      )
     ) {
-      showToast(getEditorMessage(selectionLanguage, "captureNoteTooVague"));
-      return;
+      showToast(
+        getEditorMessage(selectionLanguage, "selectedCapturesWillUseInference"),
+        "warning",
+      );
     }
 
     setChatCaptures((prev) => {

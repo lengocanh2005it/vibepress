@@ -206,6 +206,8 @@ export interface PipelineClientEditRequestDto {
   language?: string;
   pageContext?: PipelineClientEditPageContextDto;
   attachments?: PipelineClientCaptureAttachmentDto[];
+  targetHint?: PipelineEditTargetHintDto;
+  constraints?: PipelineEditConstraintsDto;
 }
 
 export interface PipelineEditRequestDto {
