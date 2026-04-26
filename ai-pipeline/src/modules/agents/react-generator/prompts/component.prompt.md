@@ -8,6 +8,37 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 
 {{slugFetchingNote}}
 
+## Visual Blueprint — plan is the source of truth
+
+The plan block above contains the approved `ComponentVisualPlan`. Treat every visual field in that plan as an authoritative spec. Do NOT invent colors, button styles, card styles, or typography values that are not in the plan.
+
+**Button / CTA styling:**
+- If a section has `ctaStyle`, render its button using exactly those values as inline `style` props:
+  `background`, `color`, `borderRadius`, `padding`, `border` → map directly to `style={{ background: ..., color: ..., borderRadius: ..., padding: ..., border: ... }}`.
+- If `ctaStyle.hoverBackground` or `ctaStyle.hoverColor` is set, implement hover via `onMouseEnter`/`onMouseLeave` with local state — do NOT use Tailwind hover variants that override inline styles.
+- If `ctaStyle` is absent, fall back to `palette.accent` / `palette.accentText` + `typography.buttonRadius`.
+
+**Card styling:**
+- If a section has `cardStyle`, render each card wrapper with exactly those values: `background`, `padding`, `borderRadius`, `border`, `shadow` → `style={{ ... }}`.
+- If `cardStyle.titleStyle` or `cardStyle.bodyStyle` is set, apply those as inline `style` on the heading/paragraph element.
+- If `cardStyle.imageRadius` or `cardStyle.imageAspectRatio` is set, apply to the card image.
+- If `cardStyle` is absent, use `layout.cardRadius` and `layout.cardPadding` from the plan.
+
+**Element-level typography:**
+- If a section has `headingStyle`, `subheadingStyle`, `bodyStyle`, `quoteStyle`, or `authorStyle`, apply those as inline `style` props on the matching element (e.g. `<h2 style={{ fontFamily: ..., fontSize: ..., fontWeight: ... }}`).
+- Never ignore a `TypographyStyle` field in the plan — it was extracted from the WordPress theme and must be preserved.
+
+**Image styling:**
+- If a section has `imageRadius` or `imageAspectRatio`, apply to the `<img>` element: `style={{ borderRadius: imageRadius, aspectRatio: imageAspectRatio, objectFit: 'cover' }}`.
+
+**Carousel-specific:**
+- If `CarouselSection` has `dotsColor`, `arrowColor`, `arrowBackground`, or `slideHeight`, apply via inline `style` on the respective elements.
+
+**Modal trigger:**
+- If `ModalSection` has `triggerStyle`, render the trigger button using those values as inline style (same pattern as `ctaStyle` above).
+
+⛔ NEVER invent button colors, card backgrounds, border-radius values, or font sizes that are not present in the plan. If a field is absent in the plan, use the palette/typography/layout tokens.
+
 ## Hard Contract
 
 - Use ONLY the API endpoints explicitly allowed in the plan/context above.
@@ -18,6 +49,13 @@ You are a WordPress-to-React migration expert. Convert the WordPress template be
 - Preserve approved section boundaries exactly. If the approved plan has separate top-level sections for text and for a later image/media block, keep them as separate top-level JSX wrappers.
 - Do NOT pull an image from a later approved section up beside an earlier heading/paragraph/CTA block.
 - `flex-row`, split hero, and side-by-side text/image layouts are allowed only when the approved section itself is a real `media-text` section or a `hero` whose approved layout is already `split`.
+
+⛔ **CONTENT FIDELITY — MANDATORY for every section in the visual plan:**
+- Every non-dynamic content field in the approved visual plan **MUST appear as a literal string** in the rendered JSX. This includes: `heading`, `subheading`, `body`, `imageSrc`, CTA `text`, card `heading`, card `body`, `title`, `subtitle`, and list items.
+- Do NOT omit, truncate, summarize, or replace any of these values with a placeholder or empty string.
+- For `media-text` sections: render the exact `imageSrc` URL, the exact `heading`, the exact `body` text, and the exact CTA text — even if the section appears late in the file.
+- For `card-grid` sections: render every approved card's `heading` and `body` as literal text — do NOT stop at the first few cards. If the plan has 6 cards, render all 6.
+- If a field value is a dynamic binding pattern like `{fieldName}`, keep it as-is. Otherwise, hardcode the literal value from the plan.
 
 ## Navigation — MANDATORY
 
@@ -599,9 +637,8 @@ Rules:
   - For **card / repeating item wrappers** (post cards, testimonial cards, feature cards): apply on the outermost `<article>` or `<div>` of each card alongside any bridge class. Example: `customClassNames: ["vp-hover-lift"]` → `<article className="vp-hover-lift ..." />`.
   - These classes drive precise CSS interaction bridges (e.g., hover translate, lift, zoom, shadow) that are pre-generated in `index.css`. **Missing them = no animation.**
 - **NEVER remove `vp-generated-button`, `vp-generated-image`, or `vp-generated-link` classes** from any element. These are injected by the pipeline's interaction bridge and power hover/focus/transition CSS. If you receive code containing these classes, keep them exactly as-is.
-- **NEVER use WordPress block style classes** (`is-style-rounded`, `is-style-default`, `is-style-outline`, etc.) as styling — these have no CSS definition in the React app and silently do nothing. Convert them to Tailwind:
-  - `is-style-rounded` on image → `rounded-[min(1.5rem,2vw)]`
-  - `is-style-outline` on button → `border border-current bg-transparent` (keep `vp-generated-button` alongside)
+- Preserve WordPress block style classes like `is-style-*` when they are present in approved `customClassNames` or source-tracked nodes, and keep them on the equivalent JSX element. The preview pipeline injects compatibility CSS for detected `is-style-*` classes, so deleting them can break fidelity.
+- If an `is-style-*` class is present and you also add Tailwind utilities for parity, keep the original `is-style-*` token as well. Do not replace it with Tailwind-only styling.
 - **Card bridge classes**: if the theme tokens list a `card (.some-class)` interaction bridge, that exact class name MUST appear on the outermost `<div>` or `<article>` of each repeated card/item — never implement the effect with Tailwind `hover:` utilities or `onMouseEnter` when the CSS class is already provided.
 - Layout attributes affect the wrapper element
 - Style attributes must be converted to Tailwind utilities

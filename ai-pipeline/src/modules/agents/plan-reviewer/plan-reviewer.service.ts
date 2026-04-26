@@ -12,9 +12,33 @@ import { isPartialComponentName } from '../shared/component-kind.util.js';
 export interface PlanReviewResult {
   plan: PlanResult;
   warnings: string[];
+  warningCodes: PlanReviewWarningCode[];
   errors: string[];
   isValid: boolean;
 }
+
+export type PlanReviewWarningCode =
+  | 'template_part_enforced_partial'
+  | 'invalid_component_name_normalized'
+  | 'duplicate_component_name_normalized'
+  | 'type_normalized'
+  | 'partial_route_cleared'
+  | 'partial_is_detail_cleared'
+  | 'partial_detail_dataneeds_removed'
+  | 'route_normalized'
+  | 'missing_page_route_assigned'
+  | 'detail_flag_normalized'
+  | 'page_level_chrome_dataneeds_removed'
+  | 'template_dataneeds_normalized'
+  | 'visualplan_sections_synchronized'
+  | 'visualplan_contract_sanitized'
+  | 'visualplan_dataneeds_synchronized'
+  | 'duplicate_route_normalized'
+  | 'missing_visual_plan_fallback_ai'
+  | 'multiple_home_like_templates_detected'
+  | 'home_hierarchy_type_normalized'
+  | 'home_hierarchy_route_normalized'
+  | 'home_hierarchy_is_detail_normalized';
 
 type PlanDataNeed =
   | 'posts'
@@ -72,6 +96,7 @@ export class PlanReviewerService {
     repoManifest?: RepoThemeManifest,
   ): PlanReviewResult {
     const warnings: string[] = [];
+    const warningCodes: PlanReviewWarningCode[] = [];
     const errors: string[] = [];
     let reviewed = [...plan];
 
@@ -79,21 +104,26 @@ export class PlanReviewerService {
     // theme.json templateParts declarations are authoritative — if theme.json says
     // "header" is area:header, the component must be a partial regardless of what the AI planned.
     if (repoManifest?.themeJsonSummary.templatePartAreas.length) {
-      reviewed = this.applyManifestAreaHints(
-        reviewed,
-        repoManifest.themeJsonSummary.templatePartAreas,
-        warnings,
-      );
-    }
+        reviewed = this.applyManifestAreaHints(
+          reviewed,
+          repoManifest.themeJsonSummary.templatePartAreas,
+          warnings,
+          warningCodes,
+        );
+      }
 
-    reviewed = this.resolveDuplicateHomePages(reviewed, warnings);
-    reviewed = this.normalizeComponentNames(reviewed, warnings);
-    reviewed = this.fixTypeRouteInconsistencies(reviewed, warnings);
-    reviewed = this.alignHomeHierarchyRoutes(reviewed, warnings);
-    reviewed = this.alignRouteSemantics(reviewed, warnings);
-    reviewed = this.alignDataNeeds(reviewed, warnings);
-    reviewed = this.fixDuplicateRoutes(reviewed, warnings);
-    this.checkVisualPlanCoverage(reviewed, warnings);
+    reviewed = this.resolveDuplicateHomePages(reviewed, warnings, warningCodes);
+    reviewed = this.normalizeComponentNames(reviewed, warnings, warningCodes);
+    reviewed = this.fixTypeRouteInconsistencies(
+      reviewed,
+      warnings,
+      warningCodes,
+    );
+    reviewed = this.alignHomeHierarchyRoutes(reviewed, warnings, warningCodes);
+    reviewed = this.alignRouteSemantics(reviewed, warnings, warningCodes);
+    reviewed = this.alignDataNeeds(reviewed, warnings, warningCodes);
+    reviewed = this.fixDuplicateRoutes(reviewed, warnings, warningCodes);
+    this.checkVisualPlanCoverage(reviewed, warnings, warningCodes);
     this.validateHard(reviewed, expectedTemplateNames, errors);
     this.validateDraftSectionFidelity(reviewed, errors);
 
@@ -120,13 +150,30 @@ export class PlanReviewerService {
       this.logger.log('Plan review passed ✓');
     }
 
-    return { plan: reviewed, warnings, errors, isValid: errors.length === 0 };
+    return {
+      plan: reviewed,
+      warnings,
+      warningCodes,
+      errors,
+      isValid: errors.length === 0,
+    };
+  }
+
+  private pushWarning(
+    warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
+    code: PlanReviewWarningCode,
+    message: string,
+  ): void {
+    warnings.push(message);
+    warningCodes.push(code);
   }
 
   private applyManifestAreaHints(
     plan: PlanResult,
     templatePartAreas: { name: string; title: string; area: string }[],
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     const knownPartials = new Set(
       templatePartAreas.map((p) => p.name.toLowerCase()),
@@ -136,7 +183,10 @@ export class PlanReviewerService {
         .replace(/\.(php|html)$/i, '')
         .toLowerCase();
       if (!knownPartials.has(base) || item.type === 'partial') return item;
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'template_part_enforced_partial',
         `Template "${item.templateName}" is declared as a template part in theme.json → enforced as partial`,
       );
       return { ...item, type: 'partial', route: null, isDetail: false };
@@ -146,6 +196,7 @@ export class PlanReviewerService {
   private normalizeComponentNames(
     plan: PlanResult,
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     const used = new Set<string>();
 
@@ -156,7 +207,10 @@ export class PlanReviewerService {
         : deterministic;
 
       if (componentName !== item.componentName) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'invalid_component_name_normalized',
           `Component name "${item.componentName}" for template "${item.templateName}" was invalid → renamed to "${componentName}"`,
         );
       }
@@ -169,7 +223,10 @@ export class PlanReviewerService {
           suffix++;
           candidate = `${base}${suffix}`;
         }
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'duplicate_component_name_normalized',
           `Duplicate component name "${componentName}" for template "${item.templateName}" → renamed to "${candidate}"`,
         );
         componentName = candidate;
@@ -183,6 +240,7 @@ export class PlanReviewerService {
   private fixTypeRouteInconsistencies(
     plan: PlanResult,
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);
@@ -197,7 +255,10 @@ export class PlanReviewerService {
         policy.type === 'page';
 
       if (!isDemotedHomeTemplate && next.type !== policy.type) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'type_normalized',
           `Template "${next.templateName}" had type "${next.type}" → normalized to "${policy.type}"`,
         );
         next = { ...next, type: policy.type };
@@ -208,19 +269,28 @@ export class PlanReviewerService {
           (need) => need === 'post-detail' || need === 'page-detail',
         );
         if (next.route !== null) {
-          warnings.push(
+          this.pushWarning(
+            warnings,
+            warningCodes,
+            'partial_route_cleared',
             `Partial "${next.componentName}" had route "${next.route}" → cleared`,
           );
           next = { ...next, route: null };
         }
         if (next.isDetail) {
-          warnings.push(
+          this.pushWarning(
+            warnings,
+            warningCodes,
+            'partial_is_detail_cleared',
             `Partial "${next.componentName}" had isDetail=true → set to false`,
           );
           next = { ...next, isDetail: false };
         }
         if (detailNeeds.length > 0) {
-          warnings.push(
+          this.pushWarning(
+            warnings,
+            warningCodes,
+            'partial_detail_dataneeds_removed',
             `Partial "${next.componentName}" had detail dataNeeds (${detailNeeds.join(', ')}) → removed`,
           );
           next = {
@@ -239,6 +309,7 @@ export class PlanReviewerService {
   private alignRouteSemantics(
     plan: PlanResult,
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);
@@ -246,20 +317,29 @@ export class PlanReviewerService {
 
       if (policy.routeMode === 'hard') {
         if (next.route !== policy.route) {
-          warnings.push(
+          this.pushWarning(
+            warnings,
+            warningCodes,
+            'route_normalized',
             `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${policy.route ?? 'null'}"`,
           );
           next = { ...next, route: policy.route };
         }
       } else if (next.type === 'page' && !next.route) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'missing_page_route_assigned',
           `Page "${next.componentName}" missing route → assigned "${policy.route}"`,
         );
         next = { ...next, route: policy.route };
       }
 
       if (next.isDetail !== policy.isDetail) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'detail_flag_normalized',
           `Template "${next.templateName}" had isDetail=${String(next.isDetail)} → normalized to ${String(policy.isDetail)}`,
         );
         next = { ...next, isDetail: policy.isDetail };
@@ -281,7 +361,11 @@ export class PlanReviewerService {
     });
   }
 
-  private alignDataNeeds(plan: PlanResult, warnings: string[]): PlanResult {
+  private alignDataNeeds(
+    plan: PlanResult,
+    warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
+  ): PlanResult {
     return plan.map((item) => {
       const policy = this.inferRoutePolicy(item);
       const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
@@ -340,7 +424,10 @@ export class PlanReviewerService {
         if (needs.delete('footer-links'))
           removedChromeNeeds.push('footer-links');
         if (removedChromeNeeds.length > 0) {
-          warnings.push(
+          this.pushWarning(
+            warnings,
+            warningCodes,
+            'page_level_chrome_dataneeds_removed',
             `Template "${item.templateName}" removed page-level chrome dataNeeds (${removedChromeNeeds.join(', ')}) because shared layout partials own global chrome`,
           );
         }
@@ -356,19 +443,23 @@ export class PlanReviewerService {
       }
       const after = this.orderPlanDataNeeds([...needs]);
       if (!this.haveSameMembers(before, after)) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'template_dataneeds_normalized',
           `Template "${item.templateName}" dataNeeds [${before.join(', ')}] → [${after.join(', ')}]`,
         );
       }
 
       const next = { ...item, dataNeeds: after };
-      return this.syncVisualPlan(next, warnings);
+      return this.syncVisualPlan(next, warnings, warningCodes);
     });
   }
 
   private syncVisualPlan(
     item: PlanResult[number],
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult[number] {
     if (!item.visualPlan) return item;
 
@@ -394,7 +485,11 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    const nextSections = sanitizedSections.sections;
+    const nextSections = this.normalizeFixedPageDetailSections(
+      item,
+      sanitizedSections.sections,
+      sanitizedSections.adjustments,
+    );
 
     const sectionsChanged =
       nextSections.length !== item.visualPlan.sections.length ||
@@ -411,17 +506,26 @@ export class PlanReviewerService {
     }
 
     if (sectionsChanged) {
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'visualplan_sections_synchronized',
         `Template "${item.templateName}" visualPlan sections were synchronized to match route/detail contract`,
       );
     }
     if (sanitizedSections.adjustments.length > 0) {
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'visualplan_contract_sanitized',
         `Template "${item.templateName}" visualPlan contract sanitization: ${sanitizedSections.adjustments.join('; ')}`,
       );
     }
     if (dataNeedsChanged) {
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'visualplan_dataneeds_synchronized',
         `Template "${item.templateName}" visualPlan dataNeeds [${item.visualPlan.dataNeeds.join(', ')}] → [${nextDataNeeds.join(', ')}]`,
       );
     }
@@ -495,7 +599,11 @@ export class PlanReviewerService {
     return this.orderVisualDataNeeds([...mapped]);
   }
 
-  private fixDuplicateRoutes(plan: PlanResult, warnings: string[]): PlanResult {
+  private fixDuplicateRoutes(
+    plan: PlanResult,
+    warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
+  ): PlanResult {
     const routeCount = new Map<string, number>();
     for (const item of plan) {
       if (item.route) {
@@ -531,19 +639,29 @@ export class PlanReviewerService {
       }
 
       allRoutes.add(newRoute);
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'duplicate_route_normalized',
         `Duplicate route "${item.route}" on "${item.componentName}" → renamed to "${newRoute}"`,
       );
       return { ...item, route: newRoute, isDetail: newRoute.includes(':slug') };
     });
   }
 
-  private checkVisualPlanCoverage(plan: PlanResult, warnings: string[]): void {
+  private checkVisualPlanCoverage(
+    plan: PlanResult,
+    warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
+  ): void {
     const missing = plan
       .filter((c) => !c.visualPlan)
       .map((c) => c.componentName);
     if (missing.length > 0) {
-      warnings.push(
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'missing_visual_plan_fallback_ai',
         `${missing.length} component(s) without visual plan (generator will use fallback AI): ${missing.join(', ')}`,
       );
     }
@@ -745,7 +863,14 @@ export class PlanReviewerService {
           const sourceIsNativeInteractive = nativeInteractiveBlocks.includes(
             expectedSection.sourceRef?.blockName ?? '',
           );
-          if (actualIsInteractive && !sourceIsNativeInteractive) {
+          if (
+            sourceIsNativeInteractive &&
+            actualSection.type !== expectedSection.type
+          ) {
+            errors.push(
+              `Component "${item.componentName}" section ${index + 1} lost native interactive widget fidelity: draft "${expectedSection.type}" (blockName="${expectedSection.sourceRef?.blockName ?? 'unknown'}") → actual "${actualSection.type}" — preserve the source-backed interactive section type instead of flattening it.`,
+            );
+          } else if (actualIsInteractive && !sourceIsNativeInteractive) {
             errors.push(
               `Component "${item.componentName}" section ${index + 1} illegal type substitution: draft "${expectedSection.type}" (blockName="${expectedSection.sourceRef?.blockName ?? 'unknown'}") → actual "${actualSection.type}" — source block is not a native interactive widget; rejecting to prevent hallucinated UI`,
             );
@@ -805,7 +930,36 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    return sanitizedSections.sections;
+    return this.normalizeFixedPageDetailSections(
+      item,
+      sanitizedSections.sections,
+    );
+  }
+
+  private normalizeFixedPageDetailSections(
+    item: PlanResult[number],
+    sections: SectionPlan[],
+    adjustments?: string[],
+  ): SectionPlan[] {
+    const isFixedPageDetail =
+      item.type === 'page' &&
+      item.isDetail === true &&
+      !!item.fixedSlug &&
+      item.dataNeeds.includes('page-detail');
+    if (!isFixedPageDetail) return sections;
+
+    if (sections.length > 0) return sections;
+
+    adjustments?.push(
+      'inserted canonical page-content wrapper for fixed page-detail because no valid sections remained after sanitization',
+    );
+
+    return [
+      {
+        type: 'page-content',
+        showTitle: !/no.?title/i.test(item.componentName),
+      },
+    ];
   }
 
   private describeSectionIdentity(section: SectionPlan): string {
@@ -845,6 +999,7 @@ export class PlanReviewerService {
   private resolveDuplicateHomePages(
     plan: PlanResult,
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     // WordPress hierarchy for this pipeline: frontend-page > home > index.
     // Keep the highest-priority home-like template first so duplicate-route
@@ -871,7 +1026,10 @@ export class PlanReviewerService {
     if (homeItems.length <= 1) return plan;
 
     const winner = homeItems[0];
-    warnings.push(
+    this.pushWarning(
+      warnings,
+      warningCodes,
+      'multiple_home_like_templates_detected',
       `Multiple home-like templates detected — prioritizing "${winner.base}" for route "/" and reassigning lower-priority routes later`,
     );
 
@@ -898,6 +1056,7 @@ export class PlanReviewerService {
   private alignHomeHierarchyRoutes(
     plan: PlanResult,
     warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
     const byBase = new Map<
       string,
@@ -952,19 +1111,28 @@ export class PlanReviewerService {
 
       let next = item;
       if (next.type !== expected.type) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'home_hierarchy_type_normalized',
           `Template "${next.templateName}" had type "${next.type}" → normalized to "${expected.type}" by home hierarchy`,
         );
         next = { ...next, type: expected.type };
       }
       if (next.route !== expected.route) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'home_hierarchy_route_normalized',
           `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${expected.route}" by home hierarchy`,
         );
         next = { ...next, route: expected.route };
       }
       if (next.isDetail !== expected.isDetail) {
-        warnings.push(
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'home_hierarchy_is_detail_normalized',
           `Template "${next.templateName}" had isDetail=${String(next.isDetail)} → normalized to false by home hierarchy`,
         );
         next = { ...next, isDetail: false };

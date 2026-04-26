@@ -66,6 +66,7 @@ export class SectionEditService {
       editedComponentName: target.name,
       sectionMatches,
       currentCode: target.component.code,
+      componentPlan,
     });
     let fixed = await this.reactGenerator.fixComponent({
       component: target.component,
@@ -164,8 +165,15 @@ function buildScopedFeedback(input: {
   editedComponentName: string;
   sectionMatches: CaptureSectionMatch[];
   currentCode: string;
+  componentPlan?: PlanResult[number];
 }): string {
-  const { task, editedComponentName, sectionMatches, currentCode } = input;
+  const {
+    task,
+    editedComponentName,
+    sectionMatches,
+    currentCode,
+    componentPlan,
+  } = input;
   const lines = [task.feedback];
 
   if (editedComponentName !== task.componentName) {
@@ -215,7 +223,99 @@ function buildScopedFeedback(input: {
     'Material change requirement: do NOT return the component unchanged or with only unrelated edits. The targeted capture region must show a visible code change that implements the requested refinement while preserving source-tracking attributes.',
   );
 
+  const preservationContract = buildUntouchedSectionPreservationContract({
+    componentPlan,
+    sectionMatches,
+    exactTargets: task.exactTargets,
+  });
+  if (preservationContract) {
+    lines.push(preservationContract);
+  }
+
   return lines.join('\n\n');
+}
+
+function buildUntouchedSectionPreservationContract(input: {
+  componentPlan?: PlanResult[number];
+  sectionMatches: CaptureSectionMatch[];
+  exactTargets: ResolvedCaptureTargetRecord[];
+}): string {
+  const { componentPlan, sectionMatches, exactTargets } = input;
+  const sections = componentPlan?.visualPlan?.sections ?? [];
+  if (sections.length === 0) return '';
+
+  const targetedKeys = new Set<string>();
+  for (const target of exactTargets) {
+    if (target.sectionKey?.trim()) targetedKeys.add(target.sectionKey.trim());
+    if (target.sourceNodeId?.trim())
+      targetedKeys.add(target.sourceNodeId.trim());
+    if (target.targetSourceNodeId?.trim()) {
+      targetedKeys.add(target.targetSourceNodeId.trim());
+    }
+  }
+  for (const match of sectionMatches) {
+    const section = sections[match.sectionIndex];
+    if (!section) continue;
+    if (section.sectionKey?.trim()) targetedKeys.add(section.sectionKey.trim());
+    if (section.sourceRef?.sourceNodeId?.trim()) {
+      targetedKeys.add(section.sourceRef.sourceNodeId.trim());
+    }
+  }
+
+  const untouched = sections.filter((section) => {
+    const sectionKey = section.sectionKey?.trim();
+    const sourceNodeId = section.sourceRef?.sourceNodeId?.trim();
+    return (
+      (!sectionKey || !targetedKeys.has(sectionKey)) &&
+      (!sourceNodeId || !targetedKeys.has(sourceNodeId))
+    );
+  });
+  if (untouched.length === 0) return '';
+
+  const lines = [
+    'Untouched section preservation contract:',
+    'Do NOT remove, rewrite, reorder, or materially restyle non-target sections. Outside the requested target region, preserve existing tracked wrappers and keep the approved section text/content intact.',
+  ];
+  for (const section of untouched.slice(0, 8)) {
+    const parts = [
+      `- type=${section.type}`,
+      section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+      section.sourceRef?.sourceNodeId
+        ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+        : null,
+    ];
+    if ('heading' in section && section.heading) {
+      parts.push(`heading=${JSON.stringify(section.heading)}`);
+    }
+    if ('subheading' in section && section.subheading) {
+      parts.push(`subheading=${JSON.stringify(section.subheading)}`);
+    }
+    if ('title' in section && section.title) {
+      parts.push(`title=${JSON.stringify(section.title)}`);
+    }
+    const ctas =
+      'ctas' in section &&
+      Array.isArray(section.ctas) &&
+      section.ctas.length > 0
+        ? section.ctas
+        : 'cta' in section && section.cta
+          ? [section.cta]
+          : [];
+    ctas
+      .map((cta) => cta?.text?.trim())
+      .filter((value): value is string => !!value)
+      .slice(0, 2)
+      .forEach((value, index) => {
+        parts.push(
+          index === 0
+            ? `cta=${JSON.stringify(value)}`
+            : `cta${index + 2}=${JSON.stringify(value)}`,
+        );
+      });
+    lines.push(parts.filter(Boolean).join(' | '));
+  }
+
+  return lines.join('\n');
 }
 
 function formatLineRange(startLine?: number, endLine?: number): string {

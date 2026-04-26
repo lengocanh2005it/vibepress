@@ -150,6 +150,16 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - If a comment form exists, submit via \`POST /api/comments\` and poll \`/api/comments/submissions\` for moderation status.`;
 }
 
+/**
+ * Generic REST safety rule that does not depend on knowing specific variables.
+ * Safe to inject into any fix-agent or repair prompt.
+ */
+export const FLAT_REST_SAFETY_RULE =
+  '## Flat REST data contract — MANDATORY\n' +
+  '- This project uses flat REST objects, NOT GraphQL/WordPress rendered wrappers.\n' +
+  '- NEVER write `.node`, `.nodes`, `.edges`, `.rendered`, `.items.nodes`, or similar nested accessors.\n' +
+  '- Field access must be direct: `post.title`, `item.url`, `menu.items` — never `post.title.rendered` or `menu.items.nodes`.';
+
 export function buildFlatRestSchemaNote(availableVariables: string): string {
   const lines: string[] = [
     '## Flat REST data shapes — MANDATORY',

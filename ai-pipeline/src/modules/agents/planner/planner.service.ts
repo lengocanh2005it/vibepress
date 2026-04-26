@@ -49,6 +49,7 @@ import type {
   DataNeed,
   TypographyTokens,
   LayoutTokens,
+  PageContentSection,
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
 import {
@@ -475,6 +476,22 @@ export class PlannerService {
       fullPlan,
     );
     if (deterministicPlan) {
+      const visualPlanWithRepoDefaults = this.applyRepoInteractiveDefaults(
+        {
+          ...deterministicPlan,
+          ...(componentPlan.fixedSlug
+            ? {
+                pageBinding: {
+                  id: componentPlan.fixedPageId,
+                  slug: componentPlan.fixedSlug,
+                  title: componentPlan.fixedTitle,
+                  route: componentPlan.route ?? undefined,
+                },
+              }
+            : {}),
+        },
+        repoManifest,
+      );
       this.logger.log(
         `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓ ${this.formatSectionList(deterministicPlan.sections)}`,
       );
@@ -488,19 +505,7 @@ export class PlannerService {
         ),
         planningSourceSummary:
           'Deterministic visual-plan path; no AI source synthesis needed.',
-        visualPlan: {
-          ...deterministicPlan,
-          ...(componentPlan.fixedSlug
-            ? {
-                pageBinding: {
-                  id: componentPlan.fixedPageId,
-                  slug: componentPlan.fixedSlug,
-                  title: componentPlan.fixedTitle,
-                  route: componentPlan.route ?? undefined,
-                },
-              }
-            : {}),
-        },
+        visualPlan: visualPlanWithRepoDefaults,
       };
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
@@ -534,6 +539,7 @@ export class PlannerService {
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        repoManifest,
       );
       // Deterministically parse the WordPress block tree to get an ordered
       // draft of sections. This is injected into the prompt as a hard-ordered
@@ -742,33 +748,50 @@ export class PlannerService {
         );
         const parsed = parsedResult.plan;
         if (parsed) {
+          const degenerateSections = this.describeDegenerateSections(
+            parsed.sections,
+          );
+          if (degenerateSections.length > 0) {
+            lastReason = 'visual plan contains degenerate sections';
+            lastDropped = ` | degenerateSections: ${degenerateSections.join('; ')}`;
+            if (attempt < 2) {
+              this.logger.warn(
+                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+              );
+            }
+            continue;
+          }
+
           const layout = this.deriveComponentLayout(
             tokens,
             componentPlan.componentName,
           );
-          visualPlan = {
-            ...parsed,
-            dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
-            ...(componentPlan.fixedSlug
-              ? {
-                  pageBinding: {
-                    id: componentPlan.fixedPageId,
-                    slug: componentPlan.fixedSlug,
-                    title: componentPlan.fixedTitle,
-                    route: componentPlan.route ?? undefined,
-                  },
-                }
-              : {}),
-            palette: globalPalette,
-            typography: globalTypography,
-            layout,
-            blockStyles: tokens?.blockStyles,
-            sections: this.mergeDraftSectionPresentation(
-              parsed.sections,
-              draftSections,
-              visualContract,
-            ),
-          };
+          visualPlan = this.applyRepoInteractiveDefaults(
+            {
+              ...parsed,
+              dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+              ...(componentPlan.fixedSlug
+                ? {
+                    pageBinding: {
+                      id: componentPlan.fixedPageId,
+                      slug: componentPlan.fixedSlug,
+                      title: componentPlan.fixedTitle,
+                      route: componentPlan.route ?? undefined,
+                    },
+                  }
+                : {}),
+              palette: globalPalette,
+              typography: globalTypography,
+              layout,
+              blockStyles: tokens?.blockStyles,
+              sections: this.mergeDraftSectionPresentation(
+                parsed.sections,
+                draftSections,
+                visualContract,
+              ),
+            },
+            repoManifest,
+          );
           this.logger.log(
             `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
           );
@@ -842,9 +865,16 @@ export class PlannerService {
       );
     }
 
+    const finalizedDraftSections =
+      visualPlan?.sections?.length && Array.isArray(visualPlan.sections)
+        ? visualPlan.sections.map((section) => ({ ...section }))
+        : draftSections;
+
     return {
       ...componentPlan,
-      ...(draftSections?.length ? { draftSections } : {}),
+      ...(finalizedDraftSections?.length
+        ? { draftSections: finalizedDraftSections }
+        : {}),
       ...(detectedCustomClassNames.length > 0
         ? { customClassNames: detectedCustomClassNames }
         : {}),
@@ -922,50 +952,42 @@ export class PlannerService {
       const hasSidebarTemplate =
         /sidebar/.test(normalizedTemplate) ||
         /withsidebar|sidebar/i.test(componentPlan.componentName);
-      const richBoundPageSections = this.buildRichBoundPageDetailSections(
+      const showTitle = !/no.?title/i.test(componentPlan.componentName);
+      const richSections = this.buildRichBoundPageDetailSections(
         componentPlan,
         content,
         tokens,
       );
-      if (richBoundPageSections?.length) {
-        return {
-          ...base,
-          layout: hasSidebarTemplate
-            ? { ...layout, contentLayout: 'sidebar-right' as const }
-            : layout,
-          sections: hasSidebarTemplate
-            ? [
-                ...richBoundPageSections,
-                {
-                  type: 'sidebar' as const,
-                  title: 'Explore',
-                  showSiteInfo: false,
-                  showPages: true,
-                  showPosts: content.posts.length > 0,
-                  maxItems: 8,
-                },
-              ]
-            : richBoundPageSections,
-        };
-      }
+      const fallbackPageContent = this.buildBoundPageContentFallbackSection(
+        componentPlan,
+        content,
+        showTitle,
+      );
+      const fallbackSidebarSection = {
+        type: 'sidebar' as const,
+        title: 'Explore',
+        showSiteInfo: false,
+        showPages: true,
+        showPosts: content.posts.length > 0,
+        maxItems: 8,
+      };
+      const sections = richSections?.length
+        ? hasSidebarTemplate &&
+          !richSections.some((section) => section.type === 'sidebar')
+          ? [...richSections, fallbackSidebarSection]
+          : richSections
+        : hasSidebarTemplate
+          ? [
+              fallbackPageContent,
+              fallbackSidebarSection,
+            ]
+          : [fallbackPageContent];
       return {
         ...base,
         layout: hasSidebarTemplate
           ? { ...layout, contentLayout: 'sidebar-right' as const }
           : layout,
-        sections: hasSidebarTemplate
-          ? [
-              { type: 'page-content', showTitle: true },
-              {
-                type: 'sidebar',
-                title: 'Explore',
-                showSiteInfo: false,
-                showPages: true,
-                showPosts: content.posts.length > 0,
-                maxItems: 8,
-              },
-            ]
-          : [{ type: 'page-content', showTitle: true }],
+        sections,
       };
     }
 
@@ -1095,13 +1117,19 @@ export class PlannerService {
 
     const headingFamily =
       d.headingFontFamily ??
+      tokens?.blockStyles?.heading?.typography?.fontFamily ??
       fontMap.get('heading') ??
       fontMap.get('headings') ??
+      fontMap.get('display') ??
       d.fontFamily ??
       'inherit';
 
     const bodyFamily =
-      d.fontFamily ?? fontMap.get('body') ?? fontMap.get('base') ?? 'inherit';
+      d.fontFamily ??
+      fontMap.get('body') ??
+      fontMap.get('base') ??
+      fontMap.get('text') ??
+      'inherit';
 
     const h1Size =
       d.headings?.h1?.fontSize ??
@@ -1299,9 +1327,14 @@ export class PlannerService {
     // Likewise, rootPadding from theme defaults is a site-shell concern and is
     // intentionally NOT propagated into per-component layout tokens, because it
     // causes generated pages to double-pad and look unnaturally narrow.
-    const sectionMaxW = d.wideWidth ?? '1280px';
+    const sectionMaxW = d.wideWidth ?? d.contentWidth ?? '1280px';
     const contentMaxW = d.contentWidth ?? '800px';
-    const containerClass = `max-w-[${sectionMaxW}] mx-auto w-full`;
+    // Clamp wide width to a sane upper bound — some themes set wideSize to
+    // e.g. "100vw" or "100%" which breaks arbitrary Tailwind values.
+    const sectionMaxWNormalized = /^\d+(\.\d+)?(px|rem|em)$/.test(sectionMaxW)
+      ? sectionMaxW
+      : '1280px';
+    const containerClass = `max-w-[${sectionMaxWNormalized}] mx-auto w-full`;
     const contentContainerClass = `max-w-[${contentMaxW}] mx-auto w-full`;
 
     const blockGap = d.blockGap ? `gap-[${d.blockGap}]` : 'gap-16';
@@ -1341,20 +1374,106 @@ export class PlannerService {
       return undefined;
     };
 
+    const background =
+      d.bgColor ??
+      pick('background', 'base', 'white', 'neutral-100', 'off-white') ??
+      '#ffffff';
+    const textColor =
+      d.textColor ??
+      pick(
+        'foreground',
+        'contrast',
+        'dark',
+        'primary-text',
+        'neutral-900',
+        'black',
+        'text',
+      ) ??
+      '#111111';
+
+    // Button bg is the most reliable accent signal — it's the brand CTA color.
+    // Link color is only used as accent when it's visually distinct from body text.
+    const linkAsAccent =
+      d.linkColor && d.linkColor !== textColor ? d.linkColor : undefined;
+    const accent =
+      d.buttonBgColor ??
+      linkAsAccent ??
+      pick(
+        'primary',
+        'accent',
+        'brand',
+        'highlight',
+        'cta',
+        'contrast-3',
+        'contrast-2',
+        'secondary',
+        'vivid-red',
+        'vivid-cyan-blue',
+        'luminous-vivid-amber',
+      ) ??
+      this.pickMostSaturatedColor(tokens?.colors) ??
+      '#0066cc';
+
     return {
-      background: d.bgColor ?? pick('background', 'base', 'white') ?? '#ffffff',
-      surface: pick('surface', 'secondary', 'light') ?? '#f5f5f5',
-      text: d.textColor ?? pick('foreground', 'contrast', 'dark') ?? '#111111',
-      textMuted: d.captionColor ?? pick('secondary-text', 'muted') ?? '#666666',
-      accent:
-        d.linkColor ??
-        d.buttonBgColor ??
-        pick('primary', 'accent', 'contrast-3') ??
-        '#0066cc',
-      accentText: d.buttonTextColor ?? pick('base', 'white') ?? '#ffffff',
-      dark: pick('dark', 'contrast') ?? d.textColor,
-      darkText: pick('light', 'base', 'white') ?? d.bgColor,
+      background,
+      surface:
+        pick(
+          'surface',
+          'secondary',
+          'light',
+          'neutral-50',
+          'neutral-100',
+          'gray-100',
+          'off-white',
+          'subtle',
+        ) ?? '#f5f5f5',
+      text: textColor,
+      textMuted:
+        d.captionColor ??
+        pick('secondary-text', 'muted', 'neutral-600', 'gray', 'subtle') ??
+        '#666666',
+      accent,
+      accentText:
+        d.buttonTextColor ?? pick('base', 'white', 'neutral-50') ?? '#ffffff',
+      dark:
+        pick('dark', 'contrast', 'black', 'neutral-900') ??
+        d.textColor ??
+        '#111111',
+      darkText:
+        pick('light', 'base', 'white', 'neutral-50') ?? d.bgColor ?? '#ffffff',
     };
+  }
+
+  /** Returns the most saturated hex color from the palette, or undefined if none is vivid. */
+  private pickMostSaturatedColor(
+    colors: ThemeTokens['colors'] | undefined,
+  ): string | undefined {
+    if (!colors?.length) return undefined;
+    let bestColor: string | undefined;
+    let bestSat = 0;
+    for (const { value } of colors) {
+      const sat = this.estimateColorSaturation(value);
+      if (sat > bestSat) {
+        bestSat = sat;
+        bestColor = value;
+      }
+    }
+    return bestSat > 30 ? bestColor : undefined;
+  }
+
+  private estimateColorSaturation(hex: string): number {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+    if (!m) return 0;
+    const r = parseInt(m[1], 16) / 255;
+    const g = parseInt(m[2], 16) / 255;
+    const b = parseInt(m[3], 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    return Math.round(s * 100);
   }
 
   // ── Layer 2: enrich dataNeeds by scanning template source ─────────────────
@@ -1819,6 +1938,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         source,
         sourceMap,
         content,
+        repoManifest,
       );
       lines.push(`### ${t.name}`);
       lines.push(...evidenceLines);
@@ -1966,12 +2086,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         templateSource,
         sourceMap,
         content,
+        repoManifest,
       ) =>
         this.buildPlanningSourceCandidates(
           componentPlan as PlanResult[number],
           templateSource,
           sourceMap,
           content,
+          repoManifest,
         ),
       buildPlanningSourceContext: (
         componentPlan,
@@ -1979,6 +2101,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        repoManifest,
       ) =>
         this.buildPlanningSourceContext(
           componentPlan as PlanResult[number],
@@ -1986,6 +2109,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           sourceMap,
           content,
           hasSharedLayoutPartials,
+          repoManifest,
         ),
       buildPlanningSourceContextFromResolvedSource: (
         componentPlan,
@@ -2252,6 +2376,180 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     }
   }
 
+  private applyRepoInteractiveDefaults(
+    visualPlan: ComponentVisualPlan,
+    repoManifest?: RepoThemeManifest,
+  ): ComponentVisualPlan {
+    const spectra = repoManifest?.interactiveContracts?.spectra;
+    if (!spectra?.detected) return visualPlan;
+
+    return {
+      ...visualPlan,
+      sections: visualPlan.sections.map((section) => {
+        switch (section.type) {
+          case 'modal': {
+            const defaults = spectra.widgets.modal?.defaults;
+            if (!defaults) return section;
+            return {
+              ...section,
+              ...(section.width
+                ? {}
+                : defaults.width
+                  ? { width: defaults.width }
+                  : {}),
+              ...(section.height
+                ? {}
+                : defaults.height
+                  ? { height: defaults.height }
+                  : {}),
+              ...(section.overlayColor
+                ? {}
+                : defaults.overlayColor
+                  ? { overlayColor: defaults.overlayColor }
+                  : {}),
+            } as SectionPlan;
+          }
+          case 'tabs': {
+            const defaults = spectra.widgets.tabs?.defaults;
+            if (!defaults) return section;
+            return {
+              ...section,
+              ...(typeof section.activeTab === 'number'
+                ? {}
+                : typeof defaults.activeTab === 'number'
+                  ? { activeTab: defaults.activeTab }
+                  : {}),
+              ...(section.variant
+                ? {}
+                : defaults.variant
+                  ? { variant: defaults.variant }
+                  : {}),
+              ...(section.tabAlign
+                ? {}
+                : defaults.tabAlign === 'left' ||
+                    defaults.tabAlign === 'center' ||
+                    defaults.tabAlign === 'right'
+                  ? { tabAlign: defaults.tabAlign }
+                  : {}),
+            } as SectionPlan;
+          }
+          case 'accordion': {
+            const defaults = spectra.widgets.accordion?.defaults;
+            if (!defaults) return section;
+            return {
+              ...section,
+              ...(typeof section.allowMultiple === 'boolean'
+                ? {}
+                : typeof defaults.allowMultiple === 'boolean'
+                  ? { allowMultiple: defaults.allowMultiple }
+                  : {}),
+              ...(typeof section.enableToggle === 'boolean'
+                ? {}
+                : typeof defaults.enableToggle === 'boolean'
+                  ? { enableToggle: defaults.enableToggle }
+                  : {}),
+              ...(section.defaultOpenItems?.length
+                ? {}
+                : defaults.defaultOpenItems
+                  ? { defaultOpenItems: defaults.defaultOpenItems }
+                  : {}),
+              ...(section.variant
+                ? {}
+                : defaults.layout
+                  ? { variant: defaults.layout }
+                  : defaults.variant
+                    ? { variant: defaults.variant }
+                    : {}),
+            } as SectionPlan;
+          }
+          case 'carousel': {
+            const defaults = spectra.widgets.slider?.defaults;
+            if (!defaults) return section;
+            const sliderEffect =
+              defaults.effect === 'slide' ||
+              defaults.effect === 'fade' ||
+              defaults.effect === 'flip' ||
+              defaults.effect === 'coverflow'
+                ? defaults.effect
+                : undefined;
+            return {
+              ...section,
+              ...(section.slideHeight
+                ? {}
+                : defaults.slideHeight
+                  ? { slideHeight: defaults.slideHeight }
+                  : {}),
+              ...(section.arrowBackground
+                ? {}
+                : defaults.arrowBackground
+                  ? { arrowBackground: defaults.arrowBackground }
+                  : {}),
+              ...(section.arrowColor
+                ? {}
+                : defaults.arrowColor
+                  ? { arrowColor: defaults.arrowColor }
+                  : {}),
+              ...(section.dotsColor
+                ? {}
+                : defaults.dotsColor
+                  ? { dotsColor: defaults.dotsColor }
+                  : {}),
+              ...(typeof section.autoplay === 'boolean'
+                ? {}
+                : typeof defaults.autoplay === 'boolean'
+                  ? { autoplay: defaults.autoplay }
+                  : {}),
+              ...(typeof section.autoplaySpeed === 'number'
+                ? {}
+                : typeof defaults.autoplaySpeed === 'number'
+                  ? { autoplaySpeed: defaults.autoplaySpeed }
+                  : {}),
+              ...(typeof section.loop === 'boolean'
+                ? {}
+                : typeof defaults.loop === 'boolean'
+                  ? { loop: defaults.loop }
+                  : {}),
+              ...(section.effect
+                ? {}
+                : sliderEffect
+                  ? { effect: sliderEffect }
+                  : {}),
+              ...(typeof section.showDots === 'boolean'
+                ? {}
+                : typeof defaults.showDots === 'boolean'
+                  ? { showDots: defaults.showDots }
+                  : {}),
+              ...(typeof section.showArrows === 'boolean'
+                ? {}
+                : typeof defaults.showArrows === 'boolean'
+                  ? { showArrows: defaults.showArrows }
+                  : {}),
+              ...(typeof section.vertical === 'boolean'
+                ? {}
+                : typeof defaults.vertical === 'boolean'
+                  ? { vertical: defaults.vertical }
+                  : {}),
+              ...(typeof section.transitionSpeed === 'number'
+                ? {}
+                : typeof defaults.transitionSpeed === 'number'
+                  ? { transitionSpeed: defaults.transitionSpeed }
+                  : {}),
+              ...(section.pauseOn
+                ? {}
+                : defaults.pauseOn &&
+                    (defaults.pauseOn === 'hover' ||
+                      defaults.pauseOn === 'click')
+                  ? { pauseOn: defaults.pauseOn }
+                  : {}),
+            } as SectionPlan;
+          }
+          default:
+            return section;
+        }
+      }),
+    };
+  }
+
   private buildValidationFeedbackPrompt(
     errors: string[],
     templateNames: string[],
@@ -2304,6 +2602,7 @@ Descriptions must be specific and mention major source-backed structure/widgets 
     planningSource?: PlanningSourceContext;
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     draftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
     sourceWidgetHints: string[];
     allowedImageSrcs: string[];
@@ -2315,6 +2614,7 @@ Descriptions must be specific and mention major source-backed structure/widgets 
       planningSource,
       sourceMap,
       content,
+      repoManifest,
       draftSections,
       sourceWidgetHints,
       allowedImageSrcs,
@@ -2349,6 +2649,7 @@ Descriptions must be specific and mention major source-backed structure/widgets 
       planningSource,
       sourceMap,
       content,
+      repoManifest,
       draftSections,
       sourceWidgetHints,
       allowedImageSrcs,
@@ -2399,7 +2700,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         if (parsedNodes.length === 0) continue;
 
         const nodes = this.styleResolver.resolve(parsedNodes, tokens);
-        const draft = mapWpNodesToDraftSections(nodes);
+        const draft = this.filterDegenerateDraftSections(
+          mapWpNodesToDraftSections(nodes),
+        );
         if (draft.length === 0) continue;
 
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
@@ -2407,7 +2710,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
       if (mergedDraft.length === 0) return undefined;
 
-      return sanitizeSectionsForContract(mergedDraft, {
+      const sanitizedSections = sanitizeSectionsForContract(mergedDraft, {
         componentType: componentPlan.type,
         route: componentPlan.route,
         isDetail: componentPlan.isDetail,
@@ -2416,9 +2719,96 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         sourceBackedAuxiliaryLabels:
           planningSource?.sourceBackedAuxiliaryLabels ?? [],
       }).sections;
+      const filteredSections = this.filterDegenerateDraftSections(
+        sanitizedSections,
+      );
+      return filteredSections.length > 0 ? filteredSections : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Classify a page's post_content to determine whether it is a candidate for
+   * rich section mapping or should fall through directly to page-content.
+   *
+   * Strategy: map-first → score-second → fallback-last
+   *
+   * - simple_body: mostly paragraph/list/heading, no layout blocks → page-content
+   * - rich_candidate: has cover, uagb interactive blocks, group+columns with
+   *   image/text/buttons, team grid, stats, gallery → attempt mapping, then score
+   */
+  private classifyBoundPageDetailContent(
+    postContent: string,
+  ): 'rich_candidate' | 'simple_body' {
+    // UAGB interactive blocks are strong rich signals
+    if (/<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(postContent)) {
+      return 'rich_candidate';
+    }
+
+    // Cover block = explicit rich layout section
+    if (/<!--\s*wp:cover\b/i.test(postContent)) return 'rich_candidate';
+
+    // 2+ full-width/wide group blocks containing columns = composite layout
+    const groupMatches = [...postContent.matchAll(/<!--\s*wp:group\b[^>]*?-->/gi)];
+    let compositeGroupCount = 0;
+    for (const match of groupMatches) {
+      const startIdx = match.index ?? 0;
+      const nextClose = postContent.indexOf('<!-- /wp:group -->', startIdx);
+      const slice = nextClose > startIdx
+        ? postContent.slice(startIdx, nextClose)
+        : postContent.slice(startIdx);
+      const hasColumns = /<!--\s*wp:columns\b/i.test(slice);
+      const hasImage = /<!--\s*wp:image\b/i.test(slice);
+      const hasButtons = /<!--\s*wp:buttons?\b/i.test(slice);
+      const isWideOrFull = /\"align\"\s*:\s*\"(?:full|wide)\"/i.test(match[0]);
+      if (hasColumns && (hasImage || hasButtons || isWideOrFull)) compositeGroupCount++;
+    }
+    if (compositeGroupCount >= 2) return 'rich_candidate';
+
+    // Standalone columns block at top level = layout-bearing
+    if (/<!--\s*wp:columns\b/i.test(postContent)) return 'rich_candidate';
+
+    return 'simple_body';
+  }
+
+  /**
+   * Score draft sections to decide whether they are high-quality enough to use
+   * as rich sections, or whether page-content fallback is safer.
+   *
+   * Returns true (promote) when the draft has sufficient rich structure.
+   * Returns false (fallback) when it collapsed into too few, too sparse, or
+   * unrecognised sections.
+   */
+  private assessBoundPageDetailDraftQuality(
+    sections: SectionPlan[] | undefined,
+  ): boolean {
+    if (!sections?.length) return false;
+
+    const CHROME = new Set<SectionPlan['type']>(['page-content', 'post-content', 'sidebar', 'navbar', 'footer']);
+    const meaningful = sections.filter((s) => !CHROME.has(s.type));
+    if (!meaningful.length) return false;
+
+    const STRONG_RICH = new Set<SectionPlan['type']>([
+      'hero', 'cover', 'media-text', 'card-grid', 'cta-strip',
+      'testimonial', 'carousel', 'tabs', 'accordion', 'newsletter',
+    ]);
+    const WEAK_RICH = new Set<SectionPlan['type']>([
+      'post-list', 'search', 'breadcrumb',
+    ]);
+
+    const strongCount = meaningful.filter((s) => STRONG_RICH.has(s.type)).length;
+    const weakCount = meaningful.filter((s) => WEAK_RICH.has(s.type)).length;
+
+    // Reject if everything collapsed into one weak section
+    if (meaningful.length === 1 && !strongCount) return false;
+
+    // Require at least 1 strong rich section, OR 2+ meaningful sections that
+    // include at least one recognisable non-weak type
+    if (strongCount >= 1) return true;
+    if (meaningful.length >= 2 && weakCount < meaningful.length) return true;
+
+    return false;
   }
 
   private buildRichBoundPageDetailSections(
@@ -2433,6 +2823,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     );
     const source = String(boundPage?.content ?? '').trim();
     if (!source) return undefined;
+
+    // Fast exit for prose-only pages — no point running the mapper.
+    if (this.classifyBoundPageDetailContent(source) === 'simple_body') {
+      return undefined;
+    }
 
     try {
       const nodes = this.styleResolver.resolve(
@@ -2458,7 +2853,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           sourceBackedAuxiliaryLabels: [],
         },
       ).sections;
-      if (!this.shouldPromoteBoundPageDetailToRichSections(draftSections)) {
+
+      // map-first → score-second → fallback-last
+      if (!this.assessBoundPageDetailDraftQuality(draftSections)) {
         return undefined;
       }
       return draftSections;
@@ -2467,50 +2864,50 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
-  private shouldPromoteBoundPageDetailToRichSections(
-    sections: SectionPlan[] | undefined,
-  ): boolean {
-    if (!sections?.length) return false;
-    const meaningful = sections.filter(
-      (section) =>
-        section.type !== 'page-content' &&
-        section.type !== 'post-content' &&
-        section.type !== 'sidebar' &&
-        section.type !== 'navbar' &&
-        section.type !== 'footer',
+  private buildBoundPageContentFallbackSection(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+    showTitle: boolean,
+  ): PageContentSection {
+    const boundPage = content.pages.find(
+      (page) =>
+        String(page.id) === String(componentPlan.fixedPageId ?? '') ||
+        page.slug === componentPlan.fixedSlug,
     );
-    const interactiveTypes = new Set<SectionPlan['type']>([
-      'carousel',
-      'modal',
-      'tabs',
-      'accordion',
-    ]);
-    if (meaningful.some((section) => interactiveTypes.has(section.type))) {
-      return true;
-    }
-    if (meaningful.length < 3) return false;
+    const source = String(boundPage?.content ?? '').trim();
+    const classification = source
+      ? this.classifyBoundPageDetailContent(source)
+      : 'simple_body';
+    const hasColumns = /<!--\s*wp:columns\b/i.test(source);
+    const hasWideBlocks =
+      /\balignwide\b|"align"\s*:\s*"wide"|align="wide"/i.test(source);
+    const hasFullWidthBlocks =
+      /\balignfull\b|"align"\s*:\s*"full"|align="full"/i.test(source);
+    const hasInteractiveBlocks =
+      /<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(
+        source,
+      );
+    const shellVariant =
+      classification === 'simple_body' &&
+      !hasColumns &&
+      !hasWideBlocks &&
+      !hasFullWidthBlocks
+        ? 'article'
+        : 'wide';
 
-    const richTypes = new Set<SectionPlan['type']>([
-      'hero',
-      'cover',
-      'media-text',
-      'card-grid',
-      'carousel',
-      'testimonial',
-      'modal',
-      'tabs',
-      'accordion',
-    ]);
-    const richSectionCount = meaningful.filter((section) =>
-      richTypes.has(section.type),
-    ).length;
-    const distinctTypes = new Set(meaningful.map((section) => section.type))
-      .size;
-
-    return (
-      richSectionCount >= 2 || distinctTypes >= 3 || meaningful.length >= 4
-    );
+    return {
+      type: 'page-content',
+      showTitle,
+      shellVariant,
+      bodyPresentation:
+        shellVariant === 'article' ? 'prose' : 'wordpress-blocks',
+      hasColumns,
+      hasWideBlocks,
+      hasFullWidthBlocks,
+      hasInteractiveBlocks,
+    };
   }
+
 
   private parsePlanningSourceNodes(input: {
     source: string;
@@ -2633,6 +3030,112 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return merged;
+  }
+
+  private filterDegenerateDraftSections(
+    sections: SectionPlan[],
+  ): SectionPlan[] {
+    return sections.filter((section) => !this.isDegenerateDraftSection(section));
+  }
+
+  private describeDegenerateSections(sections: SectionPlan[]): string[] {
+    return sections
+      .filter((section) => this.isDegenerateDraftSection(section))
+      .map((section) => {
+        const sectionId =
+          section.sectionKey ||
+          section.sourceRef?.sourceNodeId ||
+          `${section.type}-${section.sourceRef?.topLevelIndex ?? 'unknown'}`;
+        return `${section.type}:${sectionId}`;
+      });
+  }
+
+  private isDegenerateDraftSection(section: SectionPlan): boolean {
+    const hasText = (value: unknown): boolean =>
+      String(value ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim().length > 0;
+    const hasCta = (cta: { text?: string; link?: string } | undefined): boolean =>
+      !!cta && (hasText(cta.text) || hasText(cta.link));
+
+    switch (section.type) {
+      case 'hero':
+        return (
+          !hasText(section.heading) &&
+          !hasText(section.subheading) &&
+          !section.image?.src &&
+          !hasCta(section.cta) &&
+          !(section.ctas ?? []).some(hasCta)
+        );
+      case 'card-grid':
+        return (
+          !hasText(section.title) &&
+          !hasText(section.subtitle) &&
+          !(section.cards ?? []).some(
+            (card) =>
+              hasText(card.heading) ||
+              hasText(card.body) ||
+              hasText(card.imageSrc) ||
+              hasText(card.imageAlt),
+          )
+        );
+      case 'media-text':
+        return (
+          !hasText(section.heading) &&
+          !hasText(section.body) &&
+          !hasText(section.imageSrc) &&
+          !(section.listItems ?? []).some(hasText) &&
+          !hasCta(section.cta) &&
+          !(section.ctas ?? []).some(hasCta)
+        );
+      case 'cover':
+        return (
+          !hasText(section.heading) &&
+          !hasText(section.subheading) &&
+          !hasText(section.imageSrc)
+        );
+      case 'testimonial':
+        return (
+          !hasText(section.quote) &&
+          !hasText(section.authorName) &&
+          !hasText(section.authorTitle) &&
+          !hasText(section.authorAvatar)
+        );
+      default:
+        return false;
+    }
+  }
+
+  private isAuthoritativeDbPlanningSource(
+    componentPlan: PlanResult[number],
+    label: string | undefined,
+  ): boolean {
+    const normalized = String(label ?? '').trim().toLowerCase();
+    if (!normalized.startsWith('db:')) return false;
+
+    if (componentPlan.route === '/') {
+      return (
+        /^db:page-on-front(?::|$)/.test(normalized) ||
+        /^db:[^:]+:(front-page|home)$/.test(normalized)
+      );
+    }
+
+    if (componentPlan.fixedSlug) {
+      return /^db:bound-page:(.+)$/.test(normalized);
+    }
+
+    return false;
+  }
+
+  private shouldDisableSupplementalPlanningSources(
+    componentPlan: PlanResult[number],
+    preferredSource: PlanningSourceCandidate,
+  ): boolean {
+    return this.isAuthoritativeDbPlanningSource(
+      componentPlan,
+      preferredSource.label,
+    );
   }
 
   private buildDraftSectionKey(section: SectionPlan): string {
@@ -2758,6 +3261,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number];
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     currentPlanningSource?: PlanningSourceContext;
     previousReason: string;
   }): PlanningSourceCandidate | null {
@@ -2765,6 +3269,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       componentPlan,
       sourceMap,
       content,
+      repoManifest,
       currentPlanningSource,
       previousReason,
     } = input;
@@ -2780,6 +3285,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       currentPlanningSource?.source ?? '',
       sourceMap,
       content,
+      repoManifest,
     );
     if (candidates.length === 0) return null;
 
@@ -2857,6 +3363,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       componentPlan,
       sourceMap,
       content,
+      repoManifest,
       currentPlanningSource: previousPlanningSource,
       previousReason,
     });
@@ -2874,6 +3381,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           sourceMap,
           content,
           hasSharedLayoutPartials,
+          repoManifest,
         ));
 
     this.logger.log(
@@ -2914,6 +3422,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       planningSource,
       sourceMap,
       content,
+      repoManifest,
       draftSections,
       sourceWidgetHints,
       allowedImageSrcs,
@@ -3038,29 +3547,32 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         tokens,
         componentPlan.componentName,
       );
-      const visualPlan = {
-        ...parsedResult.plan,
-        dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
-        ...(componentPlan.fixedSlug
-          ? {
-              pageBinding: {
-                id: componentPlan.fixedPageId,
-                slug: componentPlan.fixedSlug,
-                title: componentPlan.fixedTitle,
-                route: componentPlan.route ?? undefined,
-              },
-            }
-          : {}),
-        palette: globalPalette,
-        typography: globalTypography,
-        layout,
-        blockStyles: tokens?.blockStyles,
-        sections: this.mergeDraftSectionPresentation(
-          parsedResult.plan.sections,
-          draftSections,
-          visualContract,
-        ),
-      };
+      const visualPlan = this.applyRepoInteractiveDefaults(
+        {
+          ...parsedResult.plan,
+          dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+          ...(componentPlan.fixedSlug
+            ? {
+                pageBinding: {
+                  id: componentPlan.fixedPageId,
+                  slug: componentPlan.fixedSlug,
+                  title: componentPlan.fixedTitle,
+                  route: componentPlan.route ?? undefined,
+                },
+              }
+            : {}),
+          palette: globalPalette,
+          typography: globalTypography,
+          layout,
+          blockStyles: tokens?.blockStyles,
+          sections: this.mergeDraftSectionPresentation(
+            parsedResult.plan.sections,
+            draftSections,
+            visualContract,
+          ),
+        },
+        repoManifest,
+      );
       this.logger.log(
         `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" replan succeeded with ${parsedResult.plan.sections.length} sections`,
       );
@@ -3149,6 +3661,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     planningSource?: PlanningSourceContext;
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     draftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
     sourceWidgetHints: string[];
     allowedImageSrcs: string[];
@@ -3182,6 +3695,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceMap,
       content,
       planningSource,
+      input.repoManifest,
     );
     if (candidateLines.length > 0) {
       lines.push('Additional source candidates reviewed:');
@@ -3381,12 +3895,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext {
     const candidates = this.buildPlanningSourceCandidates(
       componentPlan,
       templateSource,
       sourceMap,
       content,
+      repoManifest,
     );
     const preferredSource = candidates[0] ?? {
       source: templateSource,
@@ -3415,6 +3931,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     candidates: PlanningSourceCandidate[] = [],
   ): PlanningSourceContext {
     const hints: string[] = [];
+    const disableSupplementalSources =
+      this.shouldDisableSupplementalPlanningSources(
+        componentPlan,
+        preferredSource,
+      );
     const sourceTemplateName =
       preferredSource.templateName ?? componentPlan.templateName;
     const sourceFile =
@@ -3434,40 +3955,44 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const preferredOrigin = this.extractPlanningSourceOrigin(
       preferredSource.label,
     );
-    const supplementalSources: PlanningSourceSupplement[] = candidates
-      .filter((candidate) => candidate.label !== preferredSource.label)
-      .filter(
-        (candidate) =>
-          this.extractPlanningSourceOrigin(candidate.label) !== preferredOrigin,
-      )
-      .filter((candidate) =>
-        this.isCompatibleSupplementalPlanningSource(
-          componentPlan,
-          preferredSource,
-          candidate,
-        ),
-      )
-      .slice(0, 2)
-      .map((candidate) => {
-        const candidateTemplateName =
-          candidate.templateName ?? componentPlan.templateName;
-        const candidateSourceFile =
-          candidate.sourceFile ??
-          inferFseSourceFile(componentPlan.templateName, componentPlan.type);
-        return {
-          source: this.scopePlanningSourceMarkup(
-            componentPlan,
-            candidate.source,
-            candidateTemplateName,
-            candidateSourceFile,
-          ),
-          label: candidate.label,
-          reason: candidate.reason,
-          templateName: candidateTemplateName,
-          sourceFile: candidateSourceFile,
-        };
-      })
-      .filter((candidate) => candidate.source.trim().length > 0);
+    const supplementalSources: PlanningSourceSupplement[] =
+      disableSupplementalSources
+        ? []
+        : candidates
+            .filter((candidate) => candidate.label !== preferredSource.label)
+            .filter(
+              (candidate) =>
+                this.extractPlanningSourceOrigin(candidate.label) !==
+                preferredOrigin,
+            )
+            .filter((candidate) =>
+              this.isCompatibleSupplementalPlanningSource(
+                componentPlan,
+                preferredSource,
+                candidate,
+              ),
+            )
+            .slice(0, 2)
+            .map((candidate) => {
+              const candidateTemplateName =
+                candidate.templateName ?? componentPlan.templateName;
+              const candidateSourceFile =
+                candidate.sourceFile ??
+                inferFseSourceFile(componentPlan.templateName, componentPlan.type);
+              return {
+                source: this.scopePlanningSourceMarkup(
+                  componentPlan,
+                  candidate.source,
+                  candidateTemplateName,
+                  candidateSourceFile,
+                ),
+                label: candidate.label,
+                reason: candidate.reason,
+                templateName: candidateTemplateName,
+                sourceFile: candidateSourceFile,
+              };
+            })
+            .filter((candidate) => candidate.source.trim().length > 0);
     const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
       : 'body-only markup';
@@ -3489,6 +4014,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     summaryLines.push(
       `Component body source narrowed to route-owned content: ${componentPlan.type === 'page' ? 'yes' : 'partial/full-source'}`,
     );
+    if (disableSupplementalSources) {
+      summaryLines.push(
+        'Source of truth policy: authoritative DB source selected; supplemental repo sources disabled.',
+      );
+    }
     if (hints.length > 0) {
       summaryLines.push(...hints.map((hint) => `- ${hint}`));
     }
@@ -3597,12 +4127,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     sourceMap: Map<string, string>,
     content: DbContentResult,
     planningSource?: PlanningSourceContext,
+    repoManifest?: RepoThemeManifest,
   ): string[] {
     const candidates = this.buildPlanningSourceCandidates(
       componentPlan,
       planningSource?.source ?? '',
       sourceMap,
       content,
+      repoManifest,
     )
       .filter((candidate) => candidate.label !== planningSource?.sourceLabel)
       .slice(0, 3);
@@ -3729,7 +4261,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     templateSource: string,
     sourceMap: Map<string, string>,
     content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): PlanningSourceCandidate[] {
+    const repoEntryChain = this.findRepoEntrySourceChain(
+      componentPlan.templateName,
+      repoManifest,
+    );
     const candidates: Array<{
       source: string;
       label: string;
@@ -3784,22 +4321,45 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         componentPlan.templateName,
         componentPlan.type,
       ),
-      priority: 15,
+      priority: repoEntryChain ? 35 : 15,
+    });
+
+    pushCandidate({
+      source: repoEntryChain?.composedSource,
+      label: repoEntryChain
+        ? `repo-chain:${repoEntryChain.entryFile}`
+        : `repo-chain:${componentPlan.templateName}`,
+      templateName: componentPlan.templateName,
+      sourceFile: repoEntryChain?.entryFile,
+      priority:
+        componentPlan.route === '/' ? 85 : componentPlan.fixedSlug ? 70 : 55,
     });
 
     if (componentPlan.route === '/') {
       for (const templateName of ['front-page', 'home', 'index']) {
+        const candidateChain = this.findRepoEntrySourceChain(
+          templateName,
+          repoManifest,
+        );
         pushCandidate({
-          source: sourceMap.get(templateName),
+          source: candidateChain?.composedSource ?? sourceMap.get(templateName),
           label: `repo:${templateName}`,
           templateName,
-          sourceFile: inferFseSourceFile(templateName, componentPlan.type),
+          sourceFile:
+            candidateChain?.entryFile ??
+            inferFseSourceFile(templateName, componentPlan.type),
           priority:
             templateName === 'front-page'
-              ? 30
+              ? candidateChain
+                ? 95
+                : 30
               : templateName === 'home'
-                ? 20
-                : 10,
+                ? candidateChain
+                  ? 75
+                  : 20
+                : candidateChain
+                  ? 60
+                  : 10,
         });
       }
 
@@ -3855,6 +4415,104 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       }
     }
 
+    // For non-Home pages with a fixedSlug, enrich candidates with page-specific repo
+    // templates and matching DB templates — mirroring the multi-source enrichment
+    // that Home pages get from the front-page/home/index template hierarchy.
+    if (componentPlan.fixedSlug && componentPlan.route !== '/') {
+      const boundPage = content.pages.find(
+        (page) =>
+          String(page.id) === String(componentPlan.fixedPageId ?? '') ||
+          page.slug === componentPlan.fixedSlug,
+      );
+
+      // WordPress page template hierarchy: assigned template > page-{slug} > page-{id} > page > singular
+      const assignedTemplate = boundPage?.template
+        ?.replace(/\.php$/, '')
+        .replace(/^templates\//, '')
+        .trim();
+      const pageTemplateNames = [
+        assignedTemplate || null,
+        `page-${componentPlan.fixedSlug}`,
+        componentPlan.fixedPageId
+          ? `page-${componentPlan.fixedPageId}`
+          : null,
+        'page',
+        'singular',
+      ].filter(
+        (t): t is string =>
+          Boolean(t) && t !== componentPlan.templateName,
+      );
+
+      for (const templateName of pageTemplateNames) {
+        const chain = this.findRepoEntrySourceChain(
+          templateName,
+          repoManifest,
+        );
+        pushCandidate({
+          source: chain?.composedSource ?? sourceMap.get(templateName),
+          label: `repo:${templateName}`,
+          templateName,
+          sourceFile:
+            chain?.entryFile ??
+            inferFseSourceFile(templateName, componentPlan.type),
+          priority:
+            assignedTemplate && templateName === assignedTemplate
+              ? chain
+                ? 85
+                : 30
+              : templateName.startsWith('page-')
+                ? chain
+                  ? 70
+                  : 20
+                : chain
+                  ? 50
+                  : 10,
+        });
+      }
+
+      // Also add the repo-chain for each page-specific template
+      for (const templateName of pageTemplateNames) {
+        const chain = this.findRepoEntrySourceChain(
+          templateName,
+          repoManifest,
+        );
+        if (chain?.composedSource) {
+          pushCandidate({
+            source: chain.composedSource,
+            label: `repo-chain:${chain.entryFile ?? templateName}`,
+            templateName,
+            sourceFile: chain.entryFile,
+            priority:
+              assignedTemplate && templateName === assignedTemplate
+                ? 80
+                : templateName.startsWith('page-')
+                  ? 65
+                  : 45,
+          });
+        }
+      }
+
+      // DB templates (FSE/theme builder) matching this page's slug or assigned template
+      const pageTemplateSlugs = new Set(
+        [
+          componentPlan.fixedSlug,
+          assignedTemplate,
+          `page-${componentPlan.fixedSlug}`,
+        ].filter(Boolean),
+      );
+      for (const dbTemplate of content.dbTemplates.filter((entry) =>
+        pageTemplateSlugs.has(entry.slug),
+      )) {
+        pushCandidate({
+          source: dbTemplate.content,
+          label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
+          templateName: dbTemplate.slug,
+          sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
+          priority: dbTemplate.slug === componentPlan.fixedSlug ? 55 : 40,
+        });
+      }
+    }
+
     for (const page of this.findRepresentativePagesForTemplate(
       componentPlan,
       content,
@@ -3868,11 +4526,32 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       });
     }
 
-    return candidates
+    const hasRichDbCandidate = candidates.some(
+      (c) => c.label.startsWith('db:') && c.source.trim().length > 0,
+    );
+    const hasAuthoritativeDbCandidate = candidates.some(
+      (c) =>
+        c.source.trim().length > 0 &&
+        this.isAuthoritativeDbPlanningSource(componentPlan, c.label),
+    );
+
+    // Keep repo-chain candidates (composed/processed) even when a DB candidate exists,
+    // since they carry structural layout information the DB page content alone lacks.
+    // Only filter raw repo: candidates (may contain raw PHP template syntax).
+    const filteredCandidates = hasAuthoritativeDbCandidate
+      ? candidates.filter((c) => c.label.startsWith('db:'))
+      : hasRichDbCandidate
+        ? candidates.filter((c) => !/^repo:/.test(c.label))
+        : candidates;
+
+    return filteredCandidates
       .map((candidate) => ({
         ...candidate,
         richness:
           this.scorePlanningSourceRichness(candidate.source) +
+          (this.isAuthoritativeDbPlanningSource(componentPlan, candidate.label)
+            ? 50000
+            : 0) +
           (componentPlan.fixedSlug &&
           candidate.label.startsWith('db:bound-page:')
             ? 10000
@@ -4237,6 +4916,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const preferredTemplate = normalize(preferredSource.templateName);
     const candidateTemplate = normalize(candidate.templateName);
     if (!preferredTemplate || !candidateTemplate) return false;
+
+    // When the preferred source is any DB source, repo file sources must not
+    // supplement it. DB content is authoritative; mixing in repo file templates
+    // only injects empty structural nodes that pollute the draft section list.
+    if (
+      preferredSource.label.startsWith('db:') &&
+      /^repo[:-]/.test(candidate.label)
+    ) {
+      return false;
+    }
+
     if (preferredTemplate === candidateTemplate) return true;
 
     if (componentPlan.route === '/') {
@@ -4289,6 +4979,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     source: string,
     sourceMap: Map<string, string>,
     content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): string[] {
     const lines: string[] = [];
     const templateHints = this.extractTemplateHints(source);
@@ -4322,6 +5013,32 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       );
     }
 
+    const repoEntryChain = this.findRepoEntrySourceChain(
+      templateName,
+      repoManifest,
+    );
+    if (repoEntryChain) {
+      lines.push(
+        `- Repo source chain: ${repoEntryChain.chainFiles.slice(0, 8).join(' -> ')}${repoEntryChain.chainFiles.length > 8 ? ' ...' : ''}`,
+      );
+      if (repoEntryChain.assetFiles.length > 0) {
+        lines.push(
+          `- Repo asset files: ${repoEntryChain.assetFiles.slice(0, 6).join(', ')}${repoEntryChain.assetFiles.length > 6 ? ' ...' : ''}`,
+        );
+      }
+      if (repoEntryChain.headingTexts.length > 0) {
+        lines.push(
+          `- Repo headings: ${repoEntryChain.headingTexts
+            .slice(0, 4)
+            .map((heading) => `"${heading}"`)
+            .join(', ')}`,
+        );
+      }
+      if (repoEntryChain.notes.length > 0) {
+        lines.push(`- Repo chain notes: ${repoEntryChain.notes.join(', ')}`);
+      }
+    }
+
     if (['front-page', 'home', 'index'].includes(templateName)) {
       const homeCandidates = this.buildPlanningSourceCandidates(
         {
@@ -4336,6 +5053,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         source,
         sourceMap,
         content,
+        repoManifest,
       );
       if (homeCandidates.length > 1) {
         lines.push(
@@ -4374,6 +5092,36 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return lines;
+  }
+
+  private findRepoEntrySourceChain(
+    templateName: string,
+    repoManifest?: RepoThemeManifest,
+  ) {
+    const normalizedTemplate = this.normalizeTemplateIdentifier(templateName);
+    if (!repoManifest) return undefined;
+
+    return repoManifest.structureHints.entrySourceChains.find((chain) => {
+      const entryName = basename(chain.entryFile)
+        .replace(/\.(php|html)$/i, '')
+        .toLowerCase();
+      if (entryName === normalizedTemplate) return true;
+
+      if (
+        normalizedTemplate === 'front-page' &&
+        ['front-page', 'home'].includes(entryName)
+      ) {
+        return true;
+      }
+      if (
+        normalizedTemplate === 'home' &&
+        ['front-page', 'home', 'index'].includes(entryName)
+      ) {
+        return true;
+      }
+
+      return false;
+    });
   }
 
   private collectAllowedImageSrcs(

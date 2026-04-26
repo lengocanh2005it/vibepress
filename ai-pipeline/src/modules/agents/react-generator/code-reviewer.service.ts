@@ -24,8 +24,10 @@ import { FrameGeneratorService } from './frame-generator.service.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 import {
   buildComponentPrompt,
+  buildComponentRepoChainNote,
   buildInlineSectionPrompt,
   buildSectionPrompt,
+  buildSpectraContractPromptNote,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
 import {
@@ -33,6 +35,7 @@ import {
   FRAGMENT_SYSTEM_PROMPT,
 } from './prompts/fragment.prompt.js';
 import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
+import { FLAT_REST_SAFETY_RULE } from './api-contract.js';
 import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
@@ -46,7 +49,11 @@ import type {
 import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { ComponentVisualPlan, DataNeed } from './visual-plan.schema.js';
+import type {
+  ComponentVisualPlan,
+  DataNeed,
+  SectionPlan,
+} from './visual-plan.schema.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -98,6 +105,64 @@ export interface ReviewResult {
   /** raw response from AI for logging */
   rawResponse: string;
 }
+
+const RICH_VISUAL_SECTION_TYPES = new Set([
+  'hero',
+  'cta-strip',
+  'cover',
+  'media-text',
+  'card-grid',
+  'testimonial',
+  'accordion',
+  'tabs',
+  'carousel',
+  'modal',
+  'newsletter',
+]);
+
+const INTERACTIVE_VISUAL_SECTION_TYPES = new Set([
+  'accordion',
+  'tabs',
+  'carousel',
+  'modal',
+]);
+
+const LOW_COMPLEXITY_VISUAL_SECTION_TYPES = new Set([
+  'page-content',
+  'post-content',
+  'comments',
+  'search',
+  'breadcrumb',
+  'sidebar',
+  'post-list',
+  'navbar',
+  'footer',
+]);
+
+const MEDIA_HEAVY_VISUAL_SECTION_TYPES = new Set([
+  'cover',
+  'media-text',
+  'carousel',
+  'testimonial',
+]);
+
+const CONTENT_WRAPPER_COMPAT_VISUAL_SECTION_TYPES = new Set([
+  'page-content',
+  'hero',
+  'cta-strip',
+  'breadcrumb',
+  'sidebar',
+]);
+
+const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
+  'hero',
+  'cta-strip',
+  'cover',
+  'search',
+  'post-list',
+  'breadcrumb',
+  'sidebar',
+]);
 
 /**
  * Code Reviewer — maps to the REVIEW subgraph in the pipeline diagram:
@@ -743,7 +808,13 @@ export class CodeReviewerService {
         const fixResult = await this.selfFixDetailed(
           fixAgentModel,
           code,
-          lastError!,
+          this.buildAutoFixErrorContext(
+            'Validation failure',
+            lastError,
+            componentPlan,
+            componentName,
+            repoManifest,
+          ),
           logPath,
           componentName,
         );
@@ -983,7 +1054,13 @@ export class CodeReviewerService {
         const fixResult = await this.selfFixDetailed(
           fixAgentModel,
           code,
-          lastError,
+          this.buildAutoFixErrorContext(
+            'Section validation failure',
+            lastError,
+            promptContext,
+            sectionName,
+            repoManifest,
+          ),
           logPath,
           sectionName,
         );
@@ -1110,6 +1187,11 @@ export class CodeReviewerService {
           );
 
     return {
+      templateName:
+        'templateName' in (componentPlan ?? {})
+          ? (componentPlan as PlanResult[number] | ComponentPromptContext)
+              ?.templateName
+          : undefined,
       description: componentPlan?.description,
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
@@ -1181,7 +1263,7 @@ export class CodeReviewerService {
         ? (componentPlan.customClassNames ?? [])
         : []),
       ...((visualPlan ?? componentPlan?.visualPlan)?.sections.flatMap(
-        (section) => section.customClassNames ?? [],
+        (section) => this.extractCustomClassNamesFromSection(section),
       ) ?? []),
     ]
       .map((className) => className.trim())
@@ -1222,7 +1304,54 @@ export class CodeReviewerService {
   ): boolean {
     if (!componentPlan?.visualPlan) return false;
     if (componentPlan.route === '*') return true;
-    return getComponentStrategy(componentName).deterministicFirst;
+    if (getComponentStrategy(componentName).deterministicFirst) return true;
+    return this.shouldPreferDeterministicVisualPlan(componentPlan);
+  }
+
+  private shouldPreferDeterministicVisualPlan(
+    componentPlan: ComponentPromptContext | undefined,
+  ): boolean {
+    if (!componentPlan?.visualPlan) return false;
+    if (componentPlan.type !== 'page') return false;
+
+    const normalizedNeeds = new Set(
+      this.toVisualDataNeeds(componentPlan.dataNeeds),
+    );
+    const signals = this.getVisualPlanSectionSignals(componentPlan);
+    if (signals.sections.length === 0) return false;
+
+    if (signals.lowComplexityOnly) return false;
+    if (signals.hasPageContent || signals.hasPostContent) return false;
+
+    const isRichFixedPageDetail =
+      componentPlan.isDetail === true &&
+      normalizedNeeds.has('pageDetail') &&
+      !!componentPlan.fixedSlug &&
+      signals.richSectionCount >= 1 &&
+      signals.sourceBackedSectionCount >= Math.min(2, signals.sections.length);
+
+    const isRichHomeLikePage =
+      componentPlan.route === '/' &&
+      signals.sections.length >= 5 &&
+      signals.richSectionCount >= 3 &&
+      signals.sourceBackedSectionCount >= 4;
+
+    const isBroadSourceBackedRichPage =
+      signals.sections.length >= 3 &&
+      signals.richSectionCount >= 2 &&
+      signals.sourceBackedSectionCount >= 3 &&
+      signals.distinctTypes.size >= 2;
+
+    const hasInteractiveSourceBackedPlan =
+      signals.interactiveSectionCount >= 1 &&
+      signals.sourceBackedSectionCount >= 2;
+
+    return (
+      isRichFixedPageDetail ||
+      isRichHomeLikePage ||
+      isBroadSourceBackedRichPage ||
+      hasInteractiveSourceBackedPlan
+    );
   }
 
   private shouldBypassPrecomputedVisualPlan(
@@ -1245,12 +1374,47 @@ export class CodeReviewerService {
       return false;
     }
 
-    // Concrete bound pages vary arbitrarily by DB content. If the reviewed
-    // pre-computed visual plan turned them into a fully static multi-section
-    // composition, prefer a fresh visual-plan pass that can fall back to the
-    // exact page-content contract instead of forcing mismatched static copy.
+    const meaningfulSections = sections.filter(
+      (section) =>
+        section.type !== 'sidebar' &&
+        section.type !== 'breadcrumb' &&
+        section.type !== 'navbar' &&
+        section.type !== 'footer',
+    );
+    const hasRichSourceBackedSections = meaningfulSections.some(
+      (section) =>
+        section.type !== 'page-content' && !!section.sourceRef?.sourceNodeId,
+    );
+    const hasInteractiveOrStructuredSections = meaningfulSections.some(
+      (section) =>
+        [
+          'hero',
+          'cover',
+          'media-text',
+          'card-grid',
+          'cta-strip',
+          'testimonial',
+          'newsletter',
+          'carousel',
+          'modal',
+          'tabs',
+          'accordion',
+          'post-list',
+        ].includes(section.type),
+    );
+
+    if (hasRichSourceBackedSections || hasInteractiveOrStructuredSections) {
+      this.logger.log(
+        `[reviewer] "${componentName}": preserving reviewed pre-computed visual plan for fixed page-detail route because it already contains source-backed rich sections`,
+      );
+      return false;
+    }
+
+    // If a fixed page-detail visual plan somehow contains only non-content
+    // shells and still no page-content wrapper, a fresh pass can recover the
+    // canonical body wrapper. Keep this bypass narrow.
     this.logger.log(
-      `[reviewer] "${componentName}": bypassing reviewed pre-computed visual plan for fixed page-detail route without page-content section`,
+      `[reviewer] "${componentName}": bypassing reviewed pre-computed visual plan for fixed page-detail route because it lacks both page-content and meaningful rich sections`,
     );
     return true;
   }
@@ -1278,7 +1442,7 @@ export class CodeReviewerService {
     if (
       componentPlan?.type !== 'page' ||
       !componentPlan.visualPlan ||
-      getComponentStrategy(componentName).deterministicFirst
+      this.shouldUseDeterministicFirst(componentPlan, componentName)
     ) {
       return { enabled: false, reason: 'not eligible' };
     }
@@ -1287,89 +1451,26 @@ export class CodeReviewerService {
       return { enabled: false, reason: 'detail view blocked' };
     }
 
-    const sections = componentPlan.visualPlan.sections ?? [];
-    if (sections.length < 2) {
-      return { enabled: false, reason: 'too few sections' };
-    }
-
     const normalizedNeeds = new Set(
       this.toVisualDataNeeds(componentPlan.dataNeeds),
     );
-    const interactiveTypes = new Set([
-      'accordion',
-      'tabs',
-      'carousel',
-      'modal',
-    ]);
-    const richTypes = new Set([
-      'hero',
-      'cta-strip',
-      'cover',
-      'media-text',
-      'card-grid',
-      'testimonial',
-      'accordion',
-      'tabs',
-      'carousel',
-      'modal',
-      'newsletter',
-    ]);
-    const lowComplexityTypes = new Set([
-      'page-content',
-      'post-content',
-      'comments',
-      'search',
-      'breadcrumb',
-      'sidebar',
-      'post-list',
-      'navbar',
-      'footer',
-    ]);
+    const signals = this.getVisualPlanSectionSignals(componentPlan);
+    if (signals.sections.length < 2) {
+      return { enabled: false, reason: 'too few sections' };
+    }
 
-    const richSectionCount = sections.filter((section) =>
-      richTypes.has(section.type),
-    ).length;
-    const interactiveSectionCount = sections.filter((section) =>
-      interactiveTypes.has(section.type),
-    ).length;
-    const mediaHeavySectionCount = sections.filter((section) =>
-      ['cover', 'media-text', 'carousel', 'testimonial'].includes(section.type),
-    ).length;
-    const sourceBackedSectionCount = sections.filter(
-      (section) => !!section.sourceRef?.sourceNodeId,
-    ).length;
-    const distinctTypes = new Set(sections.map((section) => section.type));
-    const lowComplexityOnly = sections.every((section) =>
-      lowComplexityTypes.has(section.type),
-    );
-    const hasPageContent = sections.some(
-      (section) => section.type === 'page-content',
-    );
     const hasOnlyContentWrapper =
-      hasPageContent &&
-      sections.every(
-        (section) =>
-          section.type === 'page-content' ||
-          section.type === 'hero' ||
-          section.type === 'cta-strip' ||
-          section.type === 'breadcrumb' ||
-          section.type === 'sidebar',
+      signals.hasPageContent &&
+      signals.sections.every((section) =>
+        CONTENT_WRAPPER_COMPAT_VISUAL_SECTION_TYPES.has(section.type),
       );
     const listDrivenOnly =
       normalizedNeeds.has('posts') &&
-      sections.every((section) =>
-        [
-          'hero',
-          'cta-strip',
-          'cover',
-          'search',
-          'post-list',
-          'breadcrumb',
-          'sidebar',
-        ].includes(section.type),
+      signals.sections.every((section) =>
+        LIST_DRIVEN_VISUAL_SECTION_TYPES.has(section.type),
       );
 
-    if (lowComplexityOnly) {
+    if (signals.lowComplexityOnly) {
       return { enabled: false, reason: 'low-complexity data/content template' };
     }
 
@@ -1388,35 +1489,79 @@ export class CodeReviewerService {
     }
 
     let score = 0;
-    if (sections.length >= 5) score += 3;
-    else if (sections.length >= 4) score += 2;
-    else if (sections.length >= 3) score += 1;
+    if (signals.sections.length >= 5) score += 3;
+    else if (signals.sections.length >= 4) score += 2;
+    else if (signals.sections.length >= 3) score += 1;
 
-    if (richSectionCount >= 3) score += 3;
-    else if (richSectionCount >= 2) score += 2;
-    else if (richSectionCount >= 1) score += 1;
+    if (signals.richSectionCount >= 3) score += 3;
+    else if (signals.richSectionCount >= 2) score += 2;
+    else if (signals.richSectionCount >= 1) score += 1;
 
-    if (interactiveSectionCount >= 1) score += 2;
-    if (mediaHeavySectionCount >= 2) score += 2;
-    if (distinctTypes.size >= 4) score += 2;
-    else if (distinctTypes.size >= 3) score += 1;
-    if (sourceBackedSectionCount >= 3) score += 1;
+    if (signals.interactiveSectionCount >= 1) score += 2;
+    if (signals.mediaHeavySectionCount >= 2) score += 2;
+    if (signals.distinctTypes.size >= 4) score += 2;
+    else if (signals.distinctTypes.size >= 3) score += 1;
+    if (signals.sourceBackedSectionCount >= 3) score += 1;
     if (componentPlan.route === '/') score += 1;
     if (componentPlan.fixedSlug) score += 1;
-    if (normalizedNeeds.has('pageDetail') && !hasPageContent) score += 1;
+    if (normalizedNeeds.has('pageDetail') && !signals.hasPageContent) score += 1;
 
     const enabled =
-      score >= 5 || (sections.length >= 4 && richSectionCount >= 2);
+      score >= 5 ||
+      (signals.sections.length >= 4 && signals.richSectionCount >= 2);
     const reason = [
       `score=${score}`,
-      `rich=${richSectionCount}`,
-      `interactive=${interactiveSectionCount}`,
-      `media=${mediaHeavySectionCount}`,
-      `types=${distinctTypes.size}`,
-      `sourceBacked=${sourceBackedSectionCount}`,
+      `rich=${signals.richSectionCount}`,
+      `interactive=${signals.interactiveSectionCount}`,
+      `media=${signals.mediaHeavySectionCount}`,
+      `types=${signals.distinctTypes.size}`,
+      `sourceBacked=${signals.sourceBackedSectionCount}`,
     ].join(', ');
 
     return { enabled, reason };
+  }
+
+  private getVisualPlanSectionSignals(
+    componentPlan: ComponentPromptContext | undefined,
+  ): {
+    sections: SectionPlan[];
+    richSectionCount: number;
+    interactiveSectionCount: number;
+    mediaHeavySectionCount: number;
+    sourceBackedSectionCount: number;
+    distinctTypes: Set<string>;
+    lowComplexityOnly: boolean;
+    hasPageContent: boolean;
+    hasPostContent: boolean;
+  } {
+    const sections = componentPlan?.visualPlan?.sections ?? [];
+    return {
+      sections,
+      richSectionCount: sections.filter((section) =>
+        RICH_VISUAL_SECTION_TYPES.has(section.type),
+      ).length,
+      interactiveSectionCount: sections.filter((section) =>
+        INTERACTIVE_VISUAL_SECTION_TYPES.has(section.type),
+      ).length,
+      mediaHeavySectionCount: sections.filter((section) =>
+        MEDIA_HEAVY_VISUAL_SECTION_TYPES.has(section.type),
+      ).length,
+      sourceBackedSectionCount: sections.filter(
+        (section) => !!section.sourceRef?.sourceNodeId,
+      ).length,
+      distinctTypes: new Set(sections.map((section) => section.type)),
+      lowComplexityOnly:
+        sections.length > 0 &&
+        sections.every((section) =>
+          LOW_COMPLEXITY_VISUAL_SECTION_TYPES.has(section.type),
+        ),
+      hasPageContent: sections.some(
+        (section) => section.type === 'page-content',
+      ),
+      hasPostContent: sections.some(
+        (section) => section.type === 'post-content',
+      ),
+    };
   }
 
   private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
@@ -1742,6 +1887,7 @@ export class CodeReviewerService {
               lastError,
               validationContext,
               componentPlan,
+              repoManifest,
             })
           : undefined,
       );
@@ -1840,6 +1986,7 @@ export class CodeReviewerService {
                 lastError,
                 componentPlan,
                 componentName,
+                repoManifest,
               ),
               logPath,
               `${componentName}:${logLabel}:autofix`,
@@ -2009,7 +2156,7 @@ export class CodeReviewerService {
       .filter(Boolean)
       .slice(0, 3);
 
-    const userPrompt = `This component has a validation error or targeted edit request:\n${error}\n\nFix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
+    const userPrompt = `This component has a validation error or targeted edit request:\n${error}\n\n${FLAT_REST_SAFETY_RULE}\n\nFix it and return the complete corrected code. When exact target regions or capture instructions are included, modify those regions first while preserving unrelated code.\n\`\`\`tsx\n${brokenCode}\n\`\`\``;
 
     if (
       normalizedVisionUrls.length > 0 &&
@@ -2308,6 +2455,7 @@ export class CodeReviewerService {
     lastError?: string;
     validationContext: CodeValidationContext;
     componentPlan?: ComponentPromptContext;
+    repoManifest?: RepoThemeManifest;
   }): string {
     const compactError = this.compactRetryError(input.lastError);
     const failingSnippet = this.extractFailingSnippet(
@@ -2345,6 +2493,24 @@ export class CodeReviewerService {
       }
     }
 
+    const repoChainNote = buildComponentRepoChainNote(
+      input.repoManifest,
+      input.componentPlan,
+    );
+    if (repoChainNote) {
+      lines.push('');
+      lines.push(repoChainNote);
+    }
+
+    const spectraContractNote = buildSpectraContractPromptNote(
+      input.repoManifest,
+      input.componentPlan?.visualPlan,
+    );
+    if (spectraContractNote) {
+      lines.push('');
+      lines.push(spectraContractNote);
+    }
+
     const visualPlanChecklist = this.buildVisualPlanRetryChecklist(
       input.componentPlan,
       input.lastError,
@@ -2366,7 +2532,12 @@ export class CodeReviewerService {
   private compactRetryError(error?: string): string {
     if (!error) return 'Unknown validation error.';
     const compact = error.replace(/\s+/g, ' ').trim();
-    return compact.length > 700 ? `${compact.slice(0, 700)}...` : compact;
+    // Use a larger limit for fidelity errors so all lost fields are visible to the AI
+    const limit =
+      /visual plan fidelity violated|lost media-text|lost card/i.test(compact)
+        ? 2000
+        : 700;
+    return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
   }
 
   private extractFailingSnippet(
@@ -2534,6 +2705,22 @@ export class CodeReviewerService {
       instructions.push(
         'If the approved plan includes a hero heading/subheading or post-list title, render that approved content exactly or keep the approved dynamic binding intact; do not drop it.',
       );
+
+      // Extract pinpoint lost values from the error message and add them as explicit fix hints
+      const lostFieldLines = (error ?? '')
+        .split('\n')
+        .filter((line) => /lost (media-text|card|card-grid|hero)/i.test(line));
+      if (lostFieldLines.length > 0) {
+        instructions.push(
+          'The following specific content fields were detected as missing — you MUST render each one as a literal string in the JSX:',
+        );
+        for (const line of lostFieldLines.slice(0, 20)) {
+          instructions.push(`  • ${line.trim()}`);
+        }
+        instructions.push(
+          'Do NOT omit, truncate, or replace these with placeholders. Hardcode the exact value from the approved visual plan.',
+        );
+      }
     }
 
     if (
@@ -2847,7 +3034,13 @@ export class CodeReviewerService {
       const fixResult = await this.selfFixDetailed(
         modelName,
         code,
-        assemblyError!,
+        this.buildAutoFixErrorContext(
+          'Section assembly validation failure',
+          assemblyError,
+          componentPlan,
+          componentName,
+          repoManifest,
+        ),
         logPath,
         componentName,
       );
@@ -3061,7 +3254,13 @@ export class CodeReviewerService {
         const fixResult = await this.selfFixDetailed(
           modelName,
           sectionCode,
-          sectionError,
+          this.buildAutoFixErrorContext(
+            `Section ${sectionIndex + 1}/${totalSections} validation failure`,
+            sectionError,
+            componentPlan,
+            componentName,
+            repoManifest,
+          ),
           logPath,
           `${componentName}:section-${sectionIndex + 1}`,
         );
@@ -3250,6 +3449,26 @@ export class CodeReviewerService {
         if (section.title) {
           lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
         }
+        if (typeof section.allowMultiple === 'boolean') {
+          lines.push(
+            `- Preserve allowMultiple exactly: ${section.allowMultiple}.`,
+          );
+        }
+        if (typeof section.enableToggle === 'boolean') {
+          lines.push(
+            `- Preserve enableToggle exactly: ${section.enableToggle}.`,
+          );
+        }
+        if (section.defaultOpenItems?.length) {
+          lines.push(
+            `- Preserve defaultOpenItems exactly: ${JSON.stringify(section.defaultOpenItems)}.`,
+          );
+        }
+        if (section.variant) {
+          lines.push(
+            `- Preserve accordion variant/layout exactly: ${JSON.stringify(section.variant)}.`,
+          );
+        }
         lines.push(
           `- Render exactly ${section.items.length} accordion item(s).`,
         );
@@ -3265,6 +3484,19 @@ export class CodeReviewerService {
       case 'tabs':
         if (section.title) {
           lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
+        }
+        if (typeof section.activeTab === 'number') {
+          lines.push(`- Preserve activeTab exactly: ${section.activeTab}.`);
+        }
+        if (section.variant) {
+          lines.push(
+            `- Preserve tabs variant exactly: ${JSON.stringify(section.variant)}. Do not redesign it into a different tabs family.`,
+          );
+        }
+        if (section.tabAlign) {
+          lines.push(
+            `- Preserve tab alignment exactly: ${JSON.stringify(section.tabAlign)}.`,
+          );
         }
         lines.push(`- Render exactly ${section.tabs.length} tab(s).`);
         section.tabs.forEach((tab, tabIndex) => {
@@ -3292,6 +3524,9 @@ export class CodeReviewerService {
             );
           }
         });
+        lines.push(
+          '- Keep the Spectra tabs structure markers such as `uagb-tabs__wrap`, `uagb-tabs__panel`, `uagb-tab`, and `uagb-tabs__body-wrap` when they are already part of the approved implementation path.',
+        );
         break;
       case 'carousel':
         if (stateKey) {
@@ -3300,6 +3535,41 @@ export class CodeReviewerService {
           );
         }
         lines.push(`- Render exactly ${section.slides.length} slide(s).`);
+        if (typeof section.autoplay === 'boolean') {
+          lines.push(`- Preserve autoplay exactly: ${section.autoplay}.`);
+        }
+        if (typeof section.autoplaySpeed === 'number') {
+          lines.push(
+            `- Preserve autoplaySpeed exactly: ${section.autoplaySpeed}.`,
+          );
+        }
+        if (typeof section.loop === 'boolean') {
+          lines.push(`- Preserve loop exactly: ${section.loop}.`);
+        }
+        if (section.effect) {
+          lines.push(
+            `- Preserve effect exactly: ${JSON.stringify(section.effect)}.`,
+          );
+        }
+        if (typeof section.showDots === 'boolean') {
+          lines.push(`- Preserve showDots exactly: ${section.showDots}.`);
+        }
+        if (typeof section.showArrows === 'boolean') {
+          lines.push(`- Preserve showArrows exactly: ${section.showArrows}.`);
+        }
+        if (typeof section.vertical === 'boolean') {
+          lines.push(`- Preserve vertical exactly: ${section.vertical}.`);
+        }
+        if (typeof section.transitionSpeed === 'number') {
+          lines.push(
+            `- Preserve transitionSpeed exactly: ${section.transitionSpeed}.`,
+          );
+        }
+        if (section.pauseOn) {
+          lines.push(
+            `- Preserve pauseOn exactly: ${JSON.stringify(section.pauseOn)}.`,
+          );
+        }
         section.slides.forEach((slide, slideIndex) => {
           if (slide.heading) {
             lines.push(
@@ -3370,6 +3640,17 @@ export class CodeReviewerService {
             }
           });
         }
+        if (section.width) {
+          lines.push(`- Preserve modal width exactly: ${section.width}.`);
+        }
+        if (section.height) {
+          lines.push(`- Preserve modal height exactly: ${section.height}.`);
+        }
+        if (section.overlayColor) {
+          lines.push(
+            `- Preserve overlayColor exactly: ${JSON.stringify(section.overlayColor)}.`,
+          );
+        }
         lines.push(
           '- Render a trigger button with class `uagb-modal-trigger` and `uagb-modal-button-link`.',
         );
@@ -3378,6 +3659,9 @@ export class CodeReviewerService {
         );
         lines.push(
           '- Keep the popup structure markers: `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+        );
+        lines.push(
+          '- The rendered open popup overlay must include the `active` class together with `uagb-modal-popup`; Spectra compat CSS keeps `.uagb-modal-popup` hidden until `.active` is present.',
         );
         lines.push(
           '- Use `setOpenModals` to open and close the popup; do not introduce local hooks inside the section JSX.',
@@ -3545,12 +3829,37 @@ export class CodeReviewerService {
 
     const lines = [
       '### Visual plan sections to preserve exactly',
+      'If a section below includes blueprint style or layout fields such as presentation, ctaStyle, secondaryCtaStyle, cardStyle, quoteStyle, authorStyle, imageRadius, imageAspectRatio, triggerStyle, slideHeight, dotsColor, arrowColor, arrowBackground, width, height, activeTab, variant, tabAlign, allowMultiple, enableToggle, defaultOpenItems, itemLayout, metaLayout, metaAlign, metaSeparator, itemGap, or metaGap, preserve and re-apply those exact values.',
+      'Do not replace approved blueprint styles with prettier defaults, palette fallbacks, or generic token-based classes when the plan already provides exact visual values.',
+      'If the approved plan includes source `customClassNames` on the section itself, CTA/link elements, images, card wrappers, avatar elements, or nested text nodes such as headings, quotes, subtitles, tab panels, accordion bodies, and modal copy, preserve those exact class tokens on the corresponding rendered JSX elements. Do not collapse them onto the wrong wrapper or delete them during fixes.',
+      ...(componentPlan.visualPlan.sections.some(
+        (section) => section.type === 'cover',
+      )
+        ? [
+            'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
+          ]
+        : []),
+      ...(componentPlan.visualPlan.sections.some(
+        (section) => section.type === 'carousel',
+      )
+        ? [
+            'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
+          ]
+        : []),
       ...componentPlan.visualPlan.sections.map((section, index) => {
         const parts = [
           `- section ${index + 1}: type=${section.type}`,
           section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
           section.sourceRef?.sourceNodeId
             ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
+            : null,
+          this.extractCustomClassNamesFromSection(section).length > 0
+            ? `customClassNames=${JSON.stringify(
+                this.extractCustomClassNamesFromSection(section),
+              )}`
+            : null,
+          section.presentation
+            ? `presentation=${JSON.stringify(section.presentation)}`
             : null,
         ];
 
@@ -3563,6 +3872,98 @@ export class CodeReviewerService {
           parts.push(
             section.subheading
               ? `subheading=${JSON.stringify(section.subheading)}`
+              : null,
+          );
+          parts.push(
+            section.ctaStyle
+              ? `ctaStyle=${JSON.stringify(section.ctaStyle)}`
+              : null,
+          );
+          parts.push(
+            section.secondaryCtaStyle
+              ? `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`
+              : null,
+          );
+        }
+        if (section.type === 'tabs') {
+          parts.push(
+            typeof section.activeTab === 'number'
+              ? `activeTab=${section.activeTab}`
+              : null,
+          );
+          parts.push(
+            section.variant
+              ? `variant=${JSON.stringify(section.variant)}`
+              : null,
+          );
+          parts.push(
+            section.tabAlign
+              ? `tabAlign=${JSON.stringify(section.tabAlign)}`
+              : null,
+          );
+        }
+        if (section.type === 'accordion') {
+          parts.push(
+            typeof section.allowMultiple === 'boolean'
+              ? `allowMultiple=${section.allowMultiple}`
+              : null,
+          );
+          parts.push(
+            typeof section.enableToggle === 'boolean'
+              ? `enableToggle=${section.enableToggle}`
+              : null,
+          );
+          parts.push(
+            section.defaultOpenItems?.length
+              ? `defaultOpenItems=${JSON.stringify(section.defaultOpenItems)}`
+              : null,
+          );
+          parts.push(
+            section.variant
+              ? `variant=${JSON.stringify(section.variant)}`
+              : null,
+          );
+        }
+        if (section.type === 'carousel') {
+          parts.push(
+            typeof section.autoplay === 'boolean'
+              ? `autoplay=${section.autoplay}`
+              : null,
+          );
+          parts.push(
+            typeof section.autoplaySpeed === 'number'
+              ? `autoplaySpeed=${section.autoplaySpeed}`
+              : null,
+          );
+          parts.push(
+            typeof section.loop === 'boolean' ? `loop=${section.loop}` : null,
+          );
+          parts.push(
+            section.effect ? `effect=${JSON.stringify(section.effect)}` : null,
+          );
+          parts.push(
+            typeof section.showDots === 'boolean'
+              ? `showDots=${section.showDots}`
+              : null,
+          );
+          parts.push(
+            typeof section.showArrows === 'boolean'
+              ? `showArrows=${section.showArrows}`
+              : null,
+          );
+          parts.push(
+            typeof section.vertical === 'boolean'
+              ? `vertical=${section.vertical}`
+              : null,
+          );
+          parts.push(
+            typeof section.transitionSpeed === 'number'
+              ? `transitionSpeed=${section.transitionSpeed}`
+              : null,
+          );
+          parts.push(
+            section.pauseOn
+              ? `pauseOn=${JSON.stringify(section.pauseOn)}`
               : null,
           );
         }
@@ -3587,11 +3988,52 @@ export class CodeReviewerService {
                 ),
             );
           }
+          parts.push(
+            section.ctaStyle
+              ? `ctaStyle=${JSON.stringify(section.ctaStyle)}`
+              : null,
+          );
+          parts.push(
+            section.secondaryCtaStyle
+              ? `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`
+              : null,
+          );
         }
 
         if (section.type === 'post-list') {
           parts.push(
             section.title ? `title=${JSON.stringify(section.title)}` : null,
+          );
+          parts.push(`layout=${JSON.stringify(section.layout)}`);
+          parts.push(
+            section.itemLayout
+              ? `itemLayout=${JSON.stringify(section.itemLayout)}`
+              : null,
+          );
+          parts.push(
+            section.metaLayout
+              ? `metaLayout=${JSON.stringify(section.metaLayout)}`
+              : null,
+          );
+          parts.push(
+            section.metaAlign
+              ? `metaAlign=${JSON.stringify(section.metaAlign)}`
+              : null,
+          );
+          parts.push(
+            section.metaSeparator
+              ? `metaSeparator=${JSON.stringify(section.metaSeparator)}`
+              : null,
+          );
+          parts.push(
+            section.itemGap
+              ? `itemGap=${JSON.stringify(section.itemGap)}`
+              : null,
+          );
+          parts.push(
+            section.metaGap
+              ? `metaGap=${JSON.stringify(section.metaGap)}`
+              : null,
           );
         }
 
@@ -3605,8 +4047,7 @@ export class CodeReviewerService {
               : null,
           );
           const cardHints = section.cards
-            ?.slice(0, 4)
-            .map((card, cardIndex) => {
+            ?.map((card, cardIndex) => {
               const hints = [
                 card.heading
                   ? `card${cardIndex + 1}.heading=${JSON.stringify(card.heading)}`
@@ -3621,6 +4062,16 @@ export class CodeReviewerService {
           if (cardHints?.length) {
             parts.push(...cardHints);
           }
+          parts.push(
+            section.titleStyle
+              ? `titleStyle=${JSON.stringify(section.titleStyle)}`
+              : null,
+          );
+          parts.push(
+            section.cardStyle
+              ? `cardStyle=${JSON.stringify(section.cardStyle)}`
+              : null,
+          );
         }
 
         if (section.type === 'cover') {
@@ -3676,6 +4127,26 @@ export class CodeReviewerService {
                 ),
             );
           }
+          parts.push(
+            section.imageRadius
+              ? `imageRadius=${JSON.stringify(section.imageRadius)}`
+              : null,
+          );
+          parts.push(
+            section.imageAspectRatio
+              ? `imageAspectRatio=${JSON.stringify(section.imageAspectRatio)}`
+              : null,
+          );
+          parts.push(
+            section.ctaStyle
+              ? `ctaStyle=${JSON.stringify(section.ctaStyle)}`
+              : null,
+          );
+          parts.push(
+            section.secondaryCtaStyle
+              ? `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`
+              : null,
+          );
         }
 
         if (section.type === 'modal') {
@@ -3715,18 +4186,85 @@ export class CodeReviewerService {
             );
           }
           parts.push(
-            'behavior=render modal trigger button plus conditional popup overlay with uagb-modal-trigger and uagb-modal-popup',
+            section.width ? `width=${JSON.stringify(section.width)}` : null,
           );
           parts.push(
-            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+            section.height ? `height=${JSON.stringify(section.height)}` : null,
           );
+          parts.push(
+            section.triggerStyle
+              ? `triggerStyle=${JSON.stringify(section.triggerStyle)}`
+              : null,
+          );
+          parts.push(
+            section.headingStyle
+              ? `headingStyle=${JSON.stringify(section.headingStyle)}`
+              : null,
+          );
+          parts.push(
+            section.bodyStyle
+              ? `bodyStyle=${JSON.stringify(section.bodyStyle)}`
+              : null,
+          );
+          parts.push(
+            section.ctaStyle
+              ? `ctaStyle=${JSON.stringify(section.ctaStyle)}`
+              : null,
+          );
+          parts.push(
+            section.secondaryCtaStyle
+              ? `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`
+              : null,
+          );
+          parts.push(
+            'behavior=render modal trigger button plus conditional popup overlay with uagb-modal-trigger and uagb-modal-popup',
+          );
+          parts.push(stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null);
         }
 
         if (section.type === 'carousel') {
           const stateKey = this.resolveInteractiveSectionStateKey(section);
           parts.push(`slideCount=${section.slides?.length ?? 0}`);
+          parts.push(stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null);
           parts.push(
-            stateKey ? `stateKey=${JSON.stringify(stateKey)}` : null,
+            section.slideHeight
+              ? `slideHeight=${JSON.stringify(section.slideHeight)}`
+              : null,
+          );
+          parts.push(
+            section.dotsColor
+              ? `dotsColor=${JSON.stringify(section.dotsColor)}`
+              : null,
+          );
+          parts.push(
+            section.arrowColor
+              ? `arrowColor=${JSON.stringify(section.arrowColor)}`
+              : null,
+          );
+          parts.push(
+            section.arrowBackground
+              ? `arrowBackground=${JSON.stringify(section.arrowBackground)}`
+              : null,
+          );
+          parts.push(
+            section.headingStyle
+              ? `headingStyle=${JSON.stringify(section.headingStyle)}`
+              : null,
+          );
+          parts.push(
+            section.subheadingStyle
+              ? `subheadingStyle=${JSON.stringify(section.subheadingStyle)}`
+              : null,
+          );
+          parts.push(
+            section.ctaStyle
+              ? `ctaStyle=${JSON.stringify(section.ctaStyle)}`
+              : null,
+          );
+          parts.push(
+            section.secondaryCtaStyle
+              ? `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`
+              : null,
           );
           const slideHints = section.slides
             ?.slice(0, 6)
@@ -3753,6 +4291,42 @@ export class CodeReviewerService {
           }
           parts.push(
             'behavior=bind swiper-wrapper translateX to activeCarousels[...] and render non-empty swiper-button-prev/swiper-button-next controls',
+          );
+        }
+
+        if (section.type === 'testimonial') {
+          parts.push(
+            section.quoteStyle
+              ? `quoteStyle=${JSON.stringify(section.quoteStyle)}`
+              : null,
+          );
+          parts.push(
+            section.authorStyle
+              ? `authorStyle=${JSON.stringify(section.authorStyle)}`
+              : null,
+          );
+          parts.push(
+            section.cardStyle
+              ? `cardStyle=${JSON.stringify(section.cardStyle)}`
+              : null,
+          );
+        }
+
+        if (section.type === 'newsletter') {
+          parts.push(
+            section.headingStyle
+              ? `headingStyle=${JSON.stringify(section.headingStyle)}`
+              : null,
+          );
+          parts.push(
+            section.inputStyle
+              ? `inputStyle=${JSON.stringify(section.inputStyle)}`
+              : null,
+          );
+          parts.push(
+            section.cardStyle
+              ? `cardStyle=${JSON.stringify(section.cardStyle)}`
+              : null,
           );
         }
 
@@ -3799,6 +4373,99 @@ export class CodeReviewerService {
     return lines.join('\n');
   }
 
+  private extractCustomClassNamesFromSection(section: SectionPlan): string[] {
+    const result = new Set<string>();
+    const add = (values?: string[]) => {
+      for (const className of values ?? []) {
+        const normalized = className.trim();
+        if (normalized) result.add(normalized);
+      }
+    };
+    const addCta = (cta?: { customClassNames?: string[] }) => {
+      add(cta?.customClassNames);
+    };
+
+    add(section.customClassNames);
+
+    if ('cta' in section) addCta(section.cta);
+    if ('ctas' in section) {
+      for (const cta of section.ctas ?? []) addCta(cta);
+    }
+
+    switch (section.type) {
+      case 'hero':
+        add(section.headingCustomClassNames);
+        add(section.subheadingCustomClassNames);
+        add(section.image?.customClassNames);
+        break;
+      case 'cover':
+        add(section.headingCustomClassNames);
+        add(section.subheadingCustomClassNames);
+        break;
+      case 'post-list':
+        add(section.titleCustomClassNames);
+        break;
+      case 'card-grid':
+        add(section.titleCustomClassNames);
+        add(section.subtitleCustomClassNames);
+        for (const card of section.cards) {
+          add(card.customClassNames);
+          add(card.headingCustomClassNames);
+          add(card.bodyCustomClassNames);
+          add(card.imageCustomClassNames);
+        }
+        break;
+      case 'media-text':
+        add(section.headingCustomClassNames);
+        add(section.bodyCustomClassNames);
+        add(section.imageCustomClassNames);
+        break;
+      case 'testimonial':
+        add(section.quoteCustomClassNames);
+        add(section.authorCustomClassNames);
+        add(section.authorAvatarCustomClassNames);
+        break;
+      case 'newsletter':
+        add(section.headingCustomClassNames);
+        add(section.subheadingCustomClassNames);
+        break;
+      case 'modal':
+        add(section.triggerCustomClassNames);
+        add(section.headingCustomClassNames);
+        add(section.bodyCustomClassNames);
+        add(section.imageCustomClassNames);
+        break;
+      case 'tabs':
+        add(section.titleCustomClassNames);
+        for (const tab of section.tabs) {
+          add(tab.headingCustomClassNames);
+          add(tab.bodyCustomClassNames);
+          add(tab.imageCustomClassNames);
+          addCta(tab.cta);
+        }
+        break;
+      case 'accordion':
+        add(section.titleCustomClassNames);
+        for (const item of section.items) {
+          add(item.headingCustomClassNames);
+          add(item.bodyCustomClassNames);
+        }
+        break;
+      case 'carousel':
+        for (const slide of section.slides) {
+          add(slide.headingCustomClassNames);
+          add(slide.subheadingCustomClassNames);
+          add(slide.imageCustomClassNames);
+          addCta(slide.cta);
+        }
+        break;
+      default:
+        break;
+    }
+
+    return [...result];
+  }
+
   private resolveInteractiveSectionStateKey(
     section: ComponentVisualPlan['sections'][number],
   ): string | null {
@@ -3811,6 +4478,7 @@ export class CodeReviewerService {
     lastError: string | undefined,
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
+    repoManifest?: RepoThemeManifest,
   ): string {
     const parts = [`${reason}: ${lastError ?? 'Unknown validation error.'}`];
     const fixedSlug = componentPlan?.fixedSlug?.trim();
@@ -3838,6 +4506,20 @@ export class CodeReviewerService {
     );
     if (checklist) {
       parts.push(checklist);
+    }
+    const repoChainNote = buildComponentRepoChainNote(
+      repoManifest,
+      componentPlan,
+    );
+    if (repoChainNote) {
+      parts.push(repoChainNote);
+    }
+    const spectraContractNote = buildSpectraContractPromptNote(
+      repoManifest,
+      componentPlan?.visualPlan,
+    );
+    if (spectraContractNote) {
+      parts.push(spectraContractNote);
     }
     return parts.join('\n\n');
   }

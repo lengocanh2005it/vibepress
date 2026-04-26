@@ -28,6 +28,7 @@ import type {
   CarouselSection,
   DataNeed,
   SectionCta,
+  SectionPresentation,
 } from './visual-plan.schema.js';
 import {
   COMMENT_INTERFACE,
@@ -95,7 +96,7 @@ export class CodeGeneratorService {
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
-    const interfaces = SHARED_INTERFACES;
+    const interfaces = this.buildSharedInterfaces(effectivePlan);
     const stateAndFetch = this.buildStateAndFetch(effectivePlan);
     const body = this.buildBody(effectivePlan, ctx);
 
@@ -119,7 +120,7 @@ export class CodeGeneratorService {
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
-    const interfaces = SHARED_INTERFACES;
+    const interfaces = this.buildSharedInterfaces(effectivePlan);
     const stateAndFetch = this.buildStateAndFetch(effectivePlan);
     const body = this.buildSectionAssemblyBody(effectivePlan, ctx);
 
@@ -519,6 +520,50 @@ export class CodeGeneratorService {
     return lines.join('\n');
   }
 
+  private buildSharedInterfaces(plan: ComponentVisualPlan): string {
+    const interfaces: string[] = [];
+    const push = (value: string) => {
+      if (!interfaces.includes(value)) interfaces.push(value);
+    };
+
+    if (plan.dataNeeds.includes('siteInfo')) push(SITE_INFO_INTERFACE);
+    if (plan.dataNeeds.includes('footerLinks')) push(FOOTER_COLUMN_INTERFACE);
+    if (
+      plan.dataNeeds.includes('posts') ||
+      plan.dataNeeds.includes('postDetail')
+    ) {
+      push(POST_INTERFACE);
+    }
+    if (
+      plan.dataNeeds.includes('pages') ||
+      plan.dataNeeds.includes('pageDetail')
+    ) {
+      push(PAGE_INTERFACE);
+    }
+    if (plan.sections.some((section) => section.type === 'post-meta')) {
+      push(POST_INTERFACE);
+      push(PAGE_INTERFACE);
+    }
+    if (plan.dataNeeds.includes('menus')) {
+      push(MENU_ITEM_INTERFACE);
+      push(MENU_INTERFACE);
+    }
+    if (
+      plan.sections.some((section) => section.type === 'comments') &&
+      plan.dataNeeds.includes('postDetail')
+    ) {
+      push(COMMENT_INTERFACE);
+      const commentsSection = plan.sections.find(
+        (section): section is CommentsSection => section.type === 'comments',
+      );
+      if (commentsSection?.showForm) {
+        push(COMMENT_SUBMISSION_INTERFACE);
+      }
+    }
+
+    return interfaces.join('\n\n');
+  }
+
   private needsRouter(plan: ComponentVisualPlan): boolean {
     return plan.sections.some((s) =>
       [
@@ -547,6 +592,42 @@ export class CodeGeneratorService {
   private needsPagination(plan: ComponentVisualPlan): boolean {
     if (!plan.dataNeeds.includes('posts')) return false;
     return /^(archive|index|search|blog)/i.test(plan.componentName);
+  }
+
+  private planUsesResolveAsset(plan: ComponentVisualPlan): boolean {
+    return plan.sections.some((section) => {
+      switch (section.type) {
+        case 'hero':
+          return !!section.image?.src;
+        case 'cover':
+          return section.imageSrc.startsWith('/assets/');
+        case 'media-text':
+          return !!section.imageSrc;
+        case 'testimonial':
+          return !!section.authorAvatar;
+        case 'modal':
+          return !!section.imageSrc;
+        case 'tabs':
+          return section.tabs.some((tab) => !!tab.imageSrc);
+        case 'carousel':
+          return section.slides.some((slide) => !!slide.imageSrc);
+        default:
+          return false;
+      }
+    });
+  }
+
+  private shouldPreserveFullAsset(src?: string): boolean {
+    if (!src) return false;
+    return /(screenshot|screen-shot|dashboard|mockup|interface|ui-|ui_|product|payos|checkout|invoice|receipt|report|pricing-table|comparison)/i.test(
+      src,
+    );
+  }
+
+  private inlineImageFitClass(src?: string): string {
+    return this.shouldPreserveFullAsset(src)
+      ? 'object-contain'
+      : 'object-cover';
   }
 
   // ── State + fetch ─────────────────────────────────────────────────────────
@@ -799,7 +880,9 @@ export class CodeGeneratorService {
         `  const [commentSuccess, setCommentSuccess] = useState<string | null>(null);`,
       );
     }
-    lines.push(`  const [loading, setLoading] = useState(${dataNeeds.length > 0});`);
+    lines.push(
+      `  const [loading, setLoading] = useState(${dataNeeds.length > 0});`,
+    );
     lines.push(`  const [error, setError] = useState<string | null>(null);`);
     lines.push('');
 
@@ -1183,10 +1266,12 @@ export class CodeGeneratorService {
       lines.push('');
     }
 
-    lines.push(
-      `  const resolveAsset = (src: string) => src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
-    );
-    lines.push('');
+    if (this.planUsesResolveAsset(plan)) {
+      lines.push(
+        `  const resolveAsset = (src: string) => src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+      );
+      lines.push('');
+    }
     lines.push(
       `  if (loading) return <div className="min-h-screen flex items-center justify-center"><span>Loading...</span></div>;`,
     );
@@ -1239,6 +1324,203 @@ export default ${componentName};`;
 
   private contentContainerClass(ctx: RenderCtx): string {
     return ctx.l.contentContainerClass ?? 'max-w-[800px] mx-auto w-full';
+  }
+
+  private extractMaxWidthToken(className?: string): string {
+    const match = className?.match(/max-w-\[([^\]]+)\]/);
+    return match?.[1]?.trim() || '800px';
+  }
+
+  private pageContentShellClass(
+    section: PageContentSection,
+    ctx: RenderCtx,
+  ): string {
+    return section.shellVariant === 'wide'
+      ? ctx.l.containerClass
+      : this.contentContainerClass(ctx);
+  }
+
+  private buildPageContentBodyClass(
+    section: PageContentSection,
+    ctx: RenderCtx,
+  ): string {
+    if (section.bodyPresentation !== 'wordpress-blocks') {
+      return 'prose max-w-none';
+    }
+
+    const bodyMaxWidth = this.extractMaxWidthToken(ctx.l.contentContainerClass);
+    const wideMaxWidth = this.extractMaxWidthToken(ctx.l.containerClass);
+    return [
+      'max-w-none',
+      'flex',
+      'flex-col',
+      'gap-6',
+      '[&_p]:leading-7',
+      '[&_ul]:pl-6',
+      '[&_ol]:pl-6',
+      '[&_li]:leading-7',
+      '[&_img]:h-auto',
+      '[&_img]:max-w-full',
+      '[&_img]:w-full',
+      '[&_figure]:mx-0',
+      '[&_figure]:my-8',
+      '[&_.wp-block-buttons]:flex',
+      '[&_.wp-block-buttons]:flex-wrap',
+      '[&_.wp-block-buttons]:gap-3',
+      '[&_.wp-block-button__link]:inline-flex',
+      '[&_.wp-block-button__link]:items-center',
+      '[&_.wp-block-button__link]:justify-center',
+      '[&_.wp-block-button__link]:no-underline',
+      '[&_.wp-block-separator]:my-8',
+      `[&>p]:mx-auto`,
+      `[&>p]:max-w-[${bodyMaxWidth}]`,
+      `[&>h2]:mx-auto`,
+      `[&>h2]:max-w-[${bodyMaxWidth}]`,
+      `[&>h3]:mx-auto`,
+      `[&>h3]:max-w-[${bodyMaxWidth}]`,
+      `[&>h4]:mx-auto`,
+      `[&>h4]:max-w-[${bodyMaxWidth}]`,
+      `[&>ul]:mx-auto`,
+      `[&>ul]:max-w-[${bodyMaxWidth}]`,
+      `[&>ol]:mx-auto`,
+      `[&>ol]:max-w-[${bodyMaxWidth}]`,
+      `[&>blockquote]:mx-auto`,
+      `[&>blockquote]:max-w-[${bodyMaxWidth}]`,
+      section.hasColumns
+        ? '[&_.wp-block-columns]:flex [&_.wp-block-columns]:flex-col [&_.wp-block-columns]:gap-8 md:[&_.wp-block-columns]:flex-row [&_.wp-block-column]:min-w-0 [&_.wp-block-column]:flex-1'
+        : '',
+      section.hasWideBlocks || section.hasFullWidthBlocks
+        ? `[&_.alignwide]:mx-auto [&_.alignwide]:w-full [&_.alignwide]:max-w-[${wideMaxWidth}]`
+        : '',
+      section.hasFullWidthBlocks
+        ? '[&_.alignfull]:-mx-4 sm:[&_.alignfull]:-mx-6 lg:[&_.alignfull]:-mx-8'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  private resolveSectionHorizontalAlign(
+    section: SectionPlan,
+  ): 'left' | 'center' | 'right' | undefined {
+    if (section.presentation?.contentAlign) {
+      return section.presentation.contentAlign;
+    }
+    if ('contentAlign' in section && typeof section.contentAlign === 'string') {
+      return section.contentAlign;
+    }
+    if ('align' in section && typeof section.align === 'string') {
+      return section.align;
+    }
+    if ('layout' in section) {
+      const layout = (section as { layout?: string }).layout;
+      if (layout === 'centered') return 'center';
+      if (layout === 'left') return 'left';
+    }
+    const classes = section.customClassNames ?? [];
+    if (classes.includes('vp-section-align-center')) return 'center';
+    if (classes.includes('vp-section-align-right')) return 'right';
+    if (classes.includes('vp-section-align-left')) return 'left';
+    return undefined;
+  }
+
+  private resolveSectionPresentation(
+    section: SectionPlan,
+    defaults: Partial<SectionPresentation> = {},
+  ): SectionPresentation {
+    const blueprint = section.presentation ?? {};
+    const horizontalAlign = this.resolveSectionHorizontalAlign(section);
+    const contentAlign =
+      blueprint.contentAlign ?? defaults.contentAlign ?? horizontalAlign;
+    return {
+      container: blueprint.container ?? defaults.container ?? 'shell',
+      contentAlign,
+      textAlign:
+        blueprint.textAlign ?? defaults.textAlign ?? contentAlign ?? 'left',
+      itemsAlign:
+        blueprint.itemsAlign ??
+        defaults.itemsAlign ??
+        (contentAlign === 'center'
+          ? 'center'
+          : contentAlign === 'right'
+            ? 'end'
+            : 'start'),
+      justify:
+        blueprint.justify ??
+        defaults.justify ??
+        (contentAlign === 'center'
+          ? 'center'
+          : contentAlign === 'right'
+            ? 'end'
+            : 'start'),
+      contentMaxWidth:
+        blueprint.contentMaxWidth ?? defaults.contentMaxWidth ?? undefined,
+    };
+  }
+
+  private sectionContainerClass(
+    section: SectionPlan,
+    ctx: RenderCtx,
+    fallback: SectionPresentation['container'] = 'shell',
+  ): string {
+    const presentation = this.resolveSectionPresentation(section, {
+      container: fallback,
+    });
+    return presentation.container === 'content'
+      ? this.contentContainerClass(ctx)
+      : ctx.l.containerClass;
+  }
+
+  private presentationTextAlignClass(
+    align: SectionPresentation['textAlign'],
+  ): string {
+    return align === 'center'
+      ? 'text-center'
+      : align === 'right'
+        ? 'text-right'
+        : 'text-left';
+  }
+
+  private presentationItemsAlignClass(
+    align: SectionPresentation['itemsAlign'],
+  ): string {
+    return align === 'center'
+      ? 'items-center'
+      : align === 'end'
+        ? 'items-end'
+        : align === 'stretch'
+          ? 'items-stretch'
+          : 'items-start';
+  }
+
+  private presentationJustifyValue(
+    justify: SectionPresentation['justify'],
+  ): 'start' | 'center' | 'end' {
+    return justify === 'center'
+      ? 'center'
+      : justify === 'end'
+        ? 'end'
+        : 'start';
+  }
+
+  private presentationJustifyClass(
+    justify: SectionPresentation['justify'],
+  ): string {
+    return justify === 'center'
+      ? 'justify-center'
+      : justify === 'between'
+        ? 'justify-between'
+        : justify === 'end'
+          ? 'justify-end'
+          : 'justify-start';
+  }
+
+  private presentationMaxWidthStyleAttr(
+    presentation: SectionPresentation,
+  ): string {
+    return presentation.contentMaxWidth
+      ? this.buildStyleAttr({ maxWidth: presentation.contentMaxWidth })
+      : '';
   }
 
   private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
@@ -1518,6 +1800,59 @@ export default ${componentName};`;
     );
   }
 
+  /** Converts a blueprint SectionButtonStyle into a JSX style={{ }} attribute string. */
+  private blueprintButtonStyleAttr(
+    ctaStyle: import('./visual-plan.schema.js').SectionButtonStyle,
+  ): string {
+    return this.buildStyleAttr({
+      background: ctaStyle.background,
+      color: ctaStyle.color,
+      borderRadius: ctaStyle.borderRadius,
+      padding: ctaStyle.padding,
+      border: ctaStyle.border,
+    });
+  }
+
+  /** Converts a blueprint SectionCardStyle into a JSX style={{ }} attribute string. */
+  private blueprintCardStyleAttr(
+    cardStyle: import('./visual-plan.schema.js').SectionCardStyle,
+  ): string {
+    return this.buildStyleAttr({
+      background: cardStyle.background,
+      padding: cardStyle.padding,
+      borderRadius: cardStyle.borderRadius,
+      border: cardStyle.border,
+      boxShadow: cardStyle.shadow,
+    });
+  }
+
+  /** Converts a TypographyStyle blueprint object into a JSX style={{ }} attribute string. */
+  private blueprintTypographyStyleAttr(
+    typo: import('./visual-plan.schema.js').TypographyStyle,
+  ): string {
+    return this.buildStyleAttr({
+      fontSize: typo.fontSize,
+      fontFamily: typo.fontFamily,
+      fontWeight: typo.fontWeight,
+      letterSpacing: typo.letterSpacing,
+      lineHeight: typo.lineHeight,
+      textTransform: typo.textTransform,
+    });
+  }
+
+  private blueprintInputStyleAttr(inputStyle?: {
+    background?: string;
+    borderRadius?: string;
+    border?: string;
+  }): string {
+    if (!inputStyle) return '';
+    return this.buildStyleAttr({
+      background: inputStyle.background,
+      borderRadius: inputStyle.borderRadius,
+      border: inputStyle.border,
+    });
+  }
+
   private textLinkClass(color: string, accent: string, extra = ''): string {
     return [
       extra,
@@ -1549,6 +1884,34 @@ export default ${componentName};`;
     return extra
       ? this.appendUniqueClasses(baseClassName, extra)
       : baseClassName;
+  }
+
+  private appendStyledTextAlignClass(
+    baseClassName: string,
+    customClassNames: string[] | undefined,
+    align: SectionPresentation['textAlign'],
+  ): string {
+    let className = this.appendOptionalCustomClasses(
+      baseClassName,
+      customClassNames,
+    );
+    const hasStyleVariant = (customClassNames ?? []).some((entry) =>
+      /^is-style-/i.test(entry.trim()),
+    );
+    if (!hasStyleVariant) return className;
+
+    const alignClass =
+      align === 'center'
+        ? 'text-center'
+        : align === 'right'
+          ? 'text-right'
+          : align === 'left'
+            ? 'text-left'
+            : '';
+
+    return alignClass
+      ? this.appendUniqueClasses(className, alignClass)
+      : className;
   }
 
   private buildInteractiveCtaClassName(
@@ -1584,7 +1947,11 @@ export default ${componentName};`;
   private renderButtonCtaGroup(
     ctas: SectionCta[],
     ctx: RenderCtx,
-    options?: { align?: 'start' | 'center' | 'end' },
+    options?: {
+      align?: 'start' | 'center' | 'end';
+      ctaStyle?: import('./visual-plan.schema.js').SectionButtonStyle;
+      secondaryCtaStyle?: import('./visual-plan.schema.js').SectionButtonStyle;
+    },
   ): string {
     if (ctas.length === 0) return '';
     const { p, t } = ctx;
@@ -1594,15 +1961,21 @@ export default ${componentName};`;
         : options?.align === 'end'
           ? 'justify-end'
           : 'justify-start';
-    const buttonStyle = this.buttonStyleAttr(ctx);
+    const fallbackButtonStyle = this.buttonStyleAttr(ctx);
     const links = ctas
-      .map(
-        (cta) =>
-          `<Link to="${cta.link}" className="${this.buildInteractiveCtaClassName(
-            `inline-flex items-center justify-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity`,
-            cta,
-          )}"${buttonStyle}>${cta.text}</Link>`,
-      )
+      .map((cta, i) => {
+        const blueprintStyle =
+          i === 0
+            ? options?.ctaStyle
+            : (options?.secondaryCtaStyle ?? options?.ctaStyle);
+        const styleAttr = blueprintStyle
+          ? this.blueprintButtonStyleAttr(blueprintStyle)
+          : fallbackButtonStyle;
+        const defaultClass = blueprintStyle
+          ? `inline-flex items-center justify-center px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity`
+          : `inline-flex items-center justify-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity`;
+        return `<Link to="${cta.link}" className="${this.buildInteractiveCtaClassName(defaultClass, cta)}"${styleAttr}>${cta.text}</Link>`;
+      })
       .join('');
     return `\n            <div className="flex flex-wrap items-center ${justifyClass} gap-4">${links}</div>`;
   }
@@ -1610,7 +1983,12 @@ export default ${componentName};`;
   private renderInteractiveAnchorCtaGroup(
     ctas: SectionCta[],
     ctx: RenderCtx,
-    options?: { align?: 'start' | 'center' | 'end'; baseClassName?: string },
+    options?: {
+      align?: 'start' | 'center' | 'end';
+      baseClassName?: string;
+      ctaStyle?: import('./visual-plan.schema.js').SectionButtonStyle;
+      secondaryCtaStyle?: import('./visual-plan.schema.js').SectionButtonStyle;
+    },
   ): string {
     if (ctas.length === 0) return '';
     const justifyClass =
@@ -1623,10 +2001,19 @@ export default ${componentName};`;
       options?.baseClassName ??
       `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-opacity hover:opacity-90`;
     const links = ctas
-      .map(
-        (cta) =>
-          `\n                  <a href={${JSON.stringify(cta.link)}} className="${this.buildInteractiveCtaClassName(baseClassName, cta)}" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>\n                    {${JSON.stringify(cta.text)}}\n                  </a>`,
-      )
+      .map((cta, i) => {
+        const blueprintStyle =
+          i === 0
+            ? options?.ctaStyle
+            : (options?.secondaryCtaStyle ?? options?.ctaStyle);
+        const styleAttr = blueprintStyle
+          ? this.blueprintButtonStyleAttr(blueprintStyle)
+          : this.buildStyleAttr({
+              background: ctx.p.accent,
+              color: ctx.p.accentText,
+            });
+        return `\n                  <a href={${JSON.stringify(cta.link)}} className="${this.buildInteractiveCtaClassName(baseClassName, cta)}"${styleAttr}>\n                    {${JSON.stringify(cta.text)}}\n                  </a>`;
+      })
       .join('');
     return `\n                  <div className="flex flex-wrap items-center ${justifyClass} gap-4">${links}\n                  </div>`;
   }
@@ -1661,6 +2048,17 @@ export default ${componentName};`;
     preferStyle = false,
     ctx?: RenderCtx,
   ): string {
+    return this.buildStyleAttr(
+      this.buildBlockStyleMap(style, base, preferStyle, ctx),
+    );
+  }
+
+  private buildBlockStyleMap(
+    style?: BlockStyleToken,
+    base: Record<string, string | number | undefined> = {},
+    preferStyle = false,
+    ctx?: RenderCtx,
+  ): Record<string, string | number | undefined> {
     const styleMap: Record<string, string | number | undefined> = {
       ...base,
     };
@@ -1698,7 +2096,7 @@ export default ${componentName};`;
     if (style?.spacing?.padding) styleMap.padding = style.spacing.padding;
     if (style?.spacing?.margin) styleMap.margin = style.spacing.margin;
     if (style?.spacing?.gap) styleMap.gap = style.spacing.gap;
-    return this.buildStyleAttr(styleMap);
+    return styleMap;
   }
 
   private buildTypographyStyleAttr(
@@ -1751,14 +2149,14 @@ export default ${componentName};`;
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
-  private buildTextTokenStyleAttr(
+  private buildTextTokenStyleMap(
     ctx: RenderCtx,
     options: {
       baseColor?: string;
       typography?: BlockStyleToken['typography'];
     } = {},
     ...styles: Array<BlockStyleToken | undefined>
-  ): string {
+  ): Record<string, string | number | undefined> {
     const merged = this.mergeBlockStyleTokens(...styles);
     const styleMap: Record<string, string | number | undefined> = {};
 
@@ -1784,7 +2182,20 @@ export default ${componentName};`;
       if (style.textTransform) styleMap.textTransform = style.textTransform;
     }
 
-    return this.buildStyleAttr(styleMap);
+    return styleMap;
+  }
+
+  private buildTextTokenStyleAttr(
+    ctx: RenderCtx,
+    options: {
+      baseColor?: string;
+      typography?: BlockStyleToken['typography'];
+    } = {},
+    ...styles: Array<BlockStyleToken | undefined>
+  ): string {
+    return this.buildStyleAttr(
+      this.buildTextTokenStyleMap(ctx, options, ...styles),
+    );
   }
 
   private buildMergedBlockStyleAttr(
@@ -1999,6 +2410,11 @@ export default ${componentName};`;
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+      contentAlign: s.layout === 'centered' ? 'center' : 'left',
+      contentMaxWidth: s.layout === 'centered' ? '640px' : undefined,
+    });
     const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc, typography: s.headingStyle },
@@ -2012,25 +2428,42 @@ export default ${componentName};`;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const imageRadius = this.imageRadiusClass(ctx);
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
-      align: s.layout === 'centered' ? 'center' : 'start',
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
     });
+    const imageFitClass = this.inlineImageFitClass(s.image?.src);
+    const heroImageClassName = this.appendOptionalCustomClasses(
+      `w-full h-auto ${imageFitClass} ${imageRadius}`.trim(),
+      s.image?.customClassNames,
+    );
     const image = s.image
       ? s.image.position === 'below'
-        ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto mt-8 object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
-        : `\n          <div className="flex-1"><img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`
+        ? `\n          <img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="${this.appendUniqueClasses(heroImageClassName, 'mt-8')}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
+        : `\n          <div className="flex-1"><img src={resolveAsset("${s.image.src}")} alt="${s.image.alt}" className="${heroImageClassName}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`
       : '';
 
     const isCenter = s.layout === 'centered';
     const isSplit = s.layout === 'split';
 
     if (isSplit && s.image) {
+      const heroHeadingClassName = this.appendStyledTextAlignClass(
+        `${t.h1} font-normal`,
+        s.headingCustomClassNames,
+        presentation.textAlign,
+      );
+      const heroSubheadingClassName = this.appendStyledTextAlignClass(
+        'text-lg',
+        s.subheadingCustomClassNames,
+        presentation.textAlign,
+      );
       return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
-        <div className="${l.containerClass}">
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
           <div className="flex flex-col md:flex-row gap-8 items-center"${this.buildSectionGapStyleAttr(s)}>
-            <div className="flex-1 flex flex-col gap-4">
-              ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
-              ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
+            <div className="flex-1 flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
+              ${s.heading ? `<h1 className="${heroHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
+              ${s.subheading ? `<p className="${heroSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
               ${cta}
             </div>${image}
           </div>
@@ -2038,12 +2471,22 @@ export default ${componentName};`;
       </section>`;
     }
 
+    const heroHeadingClassName = this.appendStyledTextAlignClass(
+      `${t.h1} font-normal`,
+      s.headingCustomClassNames,
+      presentation.textAlign,
+    );
+    const heroSubheadingClassName = this.appendStyledTextAlignClass(
+      'text-lg',
+      s.subheadingCustomClassNames,
+      presentation.textAlign,
+    );
     return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
-        <div className="${l.containerClass}">
-          <div className="flex flex-col ${isCenter ? 'items-center text-center' : 'items-start'} gap-6 max-w-[640px] ${isCenter ? 'mx-auto' : ''}"${this.buildSectionGapStyleAttr(s)}>
-            ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
-            ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
+          <div className="flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-6 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
+            ${s.heading ? `<h1 className="${heroHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
+            ${s.subheading ? `<p className="${heroSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
           </div>${image}
         </div>
@@ -2057,14 +2500,19 @@ export default ${componentName};`;
   ): string {
     const bg = s.background ?? ctx.p.background;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+      contentAlign: s.align ?? 'left',
+    });
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
-      align:
-        s.align === 'center' ? 'center' : s.align === 'right' ? 'end' : 'start',
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
     });
     return `      {/* CTA Strip */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
-        <div className="${ctx.l.containerClass}">
-          <div className="flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
+          <div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
             ${cta}
           </div>
         </div>
@@ -2074,6 +2522,10 @@ export default ${componentName};`;
   private renderCover(s: CoverSection, ctx: RenderCtx): string {
     const { p, t } = ctx;
     const tc = s.textColor ?? '#ffffff';
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+      contentAlign: s.contentAlign,
+    });
     const imageRadius = this.imageRadiusClass(ctx);
     const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
@@ -2097,29 +2549,30 @@ export default ${componentName};`;
       ...(s.marginStyle ? [`margin: '${s.marginStyle}'`] : []),
     ].join(', ');
     const styleAttr = ` style={{ ${extraStyles} }}`;
-    const align =
-      s.contentAlign === 'center'
-        ? 'items-center text-center'
-        : s.contentAlign === 'right'
-          ? 'items-end text-right'
-          : 'items-start text-left';
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
-      align:
-        s.contentAlign === 'center'
-          ? 'center'
-          : s.contentAlign === 'right'
-            ? 'end'
-            : 'start',
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
     });
+    const coverHeadingClassName = this.appendStyledTextAlignClass(
+      `${t.h1} font-normal`,
+      s.headingCustomClassNames,
+      presentation.textAlign,
+    );
+    const coverSubheadingClassName = this.appendStyledTextAlignClass(
+      'text-lg',
+      s.subheadingCustomClassNames,
+      presentation.textAlign,
+    );
 
     return `      {/* Cover */}
       <section${styleAttr}
         className="relative w-full flex items-center justify-center ${imageRadius}"
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
-        <div className="relative z-10 w-full flex flex-col ${align} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.buildSectionGapStyleAttr(s)}>
-          ${s.heading ? `<h1 className="${t.h1} font-normal"${headingStyle}>${s.heading}</h1>` : ''}
-          ${s.subheading ? `<p className="text-lg"${subheadingStyle}>${s.subheading}</p>` : ''}
+        <div className="relative z-10 w-full flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
+          ${s.heading ? `<h1 className="${coverHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
+          ${s.subheading ? `<p className="${coverSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
           ${cta}
         </div>
       </section>`;
@@ -2139,36 +2592,112 @@ export default ${componentName};`;
     const titleStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc },
-      this.pickBlockStyle(ctx, 'heading'),
+      this.pickBlockStyle(ctx, 'post-title', 'heading'),
     );
     const excerptStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'paragraph'),
+      this.pickBlockStyle(ctx, 'post-excerpt', 'paragraph'),
     );
     const imageRadius = this.imageRadiusClass(ctx);
     const isGrid = s.layout !== 'list';
     const cols = s.layout === 'grid-3' ? 3 : 2;
+    const postListLayout = this.resolvePostListLayoutContract(s);
+    const isEditorialList = this.isEditorialPostListLayout(s, postListLayout);
+    const hasMeta = s.showDate || s.showAuthor || s.showCategory;
     const gridClass = isGrid
       ? `grid grid-cols-1 sm:grid-cols-2 ${cols === 3 ? 'lg:grid-cols-3' : ''} gap-6`
-      : 'flex flex-col divide-y divide-black/10';
+      : 'flex flex-col';
+    const titleMetaRowClass = this.postListTitleMetaRowClass(postListLayout);
+    const titleMetaRowStyle = postListLayout.itemGap
+      ? this.buildStyleAttr({ gap: postListLayout.itemGap })
+      : '';
+    const titleColumnStyle = this.buildStyleAttr({
+      flexBasis: s.titleColumnWidth,
+      maxWidth: s.titleColumnWidth,
+    });
+    const metaColumnStyle = this.buildStyleAttr({
+      flexBasis: s.metaColumnWidth,
+      maxWidth: s.metaColumnWidth,
+    });
+    const articleStyle = this.buildStyleAttr({
+      ...(s.showDividers
+        ? {
+            borderTopColor:
+              this.normalizeCssColorToken(s.dividerColor) ?? 'rgba(0,0,0,0.12)',
+          }
+        : {}),
+      ...(postListLayout.itemGap ? { gap: postListLayout.itemGap } : {}),
+    });
+    const editorialTitleClass = this.textLinkClass(
+      tc,
+      p.accent,
+      'block text-[1.85rem] leading-[1.12] font-normal',
+    );
+    const sectionTitleClassName = this.appendStyledTextAlignClass(
+      `${t.h2} font-normal mb-8`,
+      s.titleCustomClassNames,
+      'left',
+    );
+    const titleMetaRow = hasMeta
+      ? isEditorialList
+        ? `              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-8"${titleMetaRowStyle}>
+                 <div className="min-w-0 md:flex-1"${titleColumnStyle}>
+                   <Link to={\`/post/\${post.slug}\`} className="${editorialTitleClass}"${titleStyle}>{post.title}</Link>
+                 </div>
+                 <div className="w-full md:flex-none md:pt-1"${metaColumnStyle}>
+                   ${this.postMeta(s, ctx, {
+                     inlineItem: true,
+                     editorialCompact: true,
+                     metaLayout: postListLayout.metaLayout,
+                     metaAlign: postListLayout.metaAlign,
+                     metaSeparator: postListLayout.metaSeparator,
+                     metaGap: postListLayout.metaGap,
+                   })}
+                 </div>
+               </div>`
+        : `              <div className="${titleMetaRowClass}"${titleMetaRowStyle}>
+                 <Link to={\`/post/\${post.slug}\`} className="${this.postListInlineTitleClass(tc, p.accent, postListLayout)}"${titleStyle}>{post.title}</Link>
+                 ${this.postMeta(s, ctx, {
+                   inlineItem: true,
+                   metaLayout: postListLayout.metaLayout,
+                   metaAlign: postListLayout.metaAlign,
+                   metaSeparator: postListLayout.metaSeparator,
+                   metaGap: postListLayout.metaGap,
+                 })}
+               </div>`
+      : `              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>`;
+    const stackedContent = `              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
+              ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
+              ${
+                hasMeta
+                  ? this.postMeta(s, ctx, {
+                      metaLayout: postListLayout.metaLayout,
+                      metaAlign: postListLayout.metaAlign,
+                      metaSeparator: postListLayout.metaSeparator,
+                      metaGap: postListLayout.metaGap,
+                    })
+                  : ''
+              }`;
 
     const postCard = isGrid
-      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding }, false, ctx)}>
+      ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding, gap: postListLayout.itemGap }, false, ctx)}>
               ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}` : ''}
-              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
-              ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
-              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx) : ''}
+              ${postListLayout.itemLayout === 'title-meta-inline' && hasMeta ? titleMetaRow : stackedContent}
             </article>`
-      : `            <article key={post.id} className="flex flex-col md:flex-row md:items-baseline gap-2 md:gap-4 py-4">
-              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'flex-1 text-lg')}"${titleStyle}>{post.title}</Link>
-              ${s.showDate || s.showAuthor || s.showCategory ? this.postMeta(s, ctx, true) : ''}
-            </article>`;
+      : postListLayout.itemLayout === 'title-meta-inline' && hasMeta
+        ? `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${titleMetaRow}
+               ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
+             </article>`
+        : `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${stackedContent}
+             </article>`;
 
     return `      {/* Post List */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal mb-8"${titleStyle}>${s.title}</h2>` : ''}
+          ${s.title ? `<h2 className="${sectionTitleClassName}"${titleStyle}>${s.title}</h2>` : ''}
           <div className="${gridClass}"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
 ${postCard}
@@ -2199,33 +2728,190 @@ ${postCard}
       </section>`;
   }
 
-  private postMeta(s: PostListSection, ctx: RenderCtx, inline = false): string {
+  private resolvePostListLayoutContract(s: PostListSection): {
+    itemLayout: NonNullable<PostListSection['itemLayout']>;
+    metaLayout: NonNullable<PostListSection['metaLayout']>;
+    metaAlign: NonNullable<PostListSection['metaAlign']>;
+    metaSeparator: NonNullable<PostListSection['metaSeparator']>;
+    itemGap?: string;
+    metaGap?: string;
+  } {
+    const itemLayout =
+      s.itemLayout ?? (s.layout === 'list' ? 'title-meta-inline' : 'stacked');
+    const metaAlign = s.metaAlign ?? (s.layout === 'list' ? 'end' : 'start');
+    return {
+      itemLayout,
+      metaLayout: s.metaLayout ?? 'inline',
+      metaAlign,
+      metaSeparator:
+        s.metaSeparator ??
+        (s.layout === 'list' &&
+        itemLayout === 'title-meta-inline' &&
+        metaAlign === 'end'
+          ? 'dash'
+          : 'none'),
+      itemGap: s.itemGap,
+      metaGap: s.metaGap,
+    };
+  }
+
+  private isEditorialPostListLayout(
+    s: PostListSection,
+    layout: ReturnType<CodeGeneratorService['resolvePostListLayoutContract']>,
+  ): boolean {
+    return (
+      s.layout === 'list' &&
+      layout.itemLayout === 'title-meta-inline' &&
+      layout.metaAlign === 'end' &&
+      !s.showExcerpt &&
+      !s.showFeaturedImage
+    );
+  }
+
+  private postListTitleMetaRowClass(
+    layout: ReturnType<CodeGeneratorService['resolvePostListLayoutContract']>,
+  ): string {
+    const justifyClass =
+      layout.metaAlign === 'end' ? 'justify-between' : 'justify-start';
+    return `flex flex-wrap items-baseline ${justifyClass} gap-x-4 gap-y-2`;
+  }
+
+  private postListInlineTitleClass(
+    textColor: string,
+    accentColor: string,
+    layout: ReturnType<CodeGeneratorService['resolvePostListLayoutContract']>,
+  ): string {
+    const baseClass = this.textLinkClass(
+      textColor,
+      accentColor,
+      'text-lg font-medium',
+    );
+    return layout.metaAlign === 'end'
+      ? `${baseClass} min-w-0 flex-1`
+      : baseClass;
+  }
+
+  private normalizeCssColorToken(value?: string): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (
+      /^#/.test(trimmed) ||
+      /^rgba?\(/i.test(trimmed) ||
+      /^hsla?\(/i.test(trimmed) ||
+      /^var\(/i.test(trimmed) ||
+      /^(transparent|currentColor|inherit)$/i.test(trimmed) ||
+      /^[a-z]+$/i.test(trimmed)
+    ) {
+      return trimmed;
+    }
+    return undefined;
+  }
+
+  private postListMetaSeparatorMarkup(
+    separator: NonNullable<PostListSection['metaSeparator']>,
+  ): string {
+    switch (separator) {
+      case 'dot':
+        return '<span aria-hidden="true">&middot;</span>';
+      case 'dash':
+        return '<span aria-hidden="true">-</span>';
+      case 'slash':
+        return '<span aria-hidden="true">/</span>';
+      case 'pipe':
+        return '<span aria-hidden="true">|</span>';
+      default:
+        return '';
+    }
+  }
+
+  private postMeta(
+    s: PostListSection,
+    ctx: RenderCtx,
+    options: {
+      inlineItem?: boolean;
+      editorialCompact?: boolean;
+      metaLayout?: PostListSection['metaLayout'];
+      metaAlign?: PostListSection['metaAlign'];
+      metaSeparator?: PostListSection['metaSeparator'];
+      metaGap?: string;
+    } = {},
+  ): string {
     const { p } = ctx;
     const parts: string[] = [];
     const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
-    const metaStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'site-tagline'),
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
-    if (s.showDate)
-      parts.push(
-        `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`,
+    const metaLayout = options.metaLayout ?? 'inline';
+    const metaStyle = this.buildStyleAttr({
+      ...this.buildTextTokenStyleMap(
+        ctx,
+        { baseColor: p.textMuted },
+        this.pickBlockStyle(ctx, 'site-tagline'),
+        this.pickBlockStyle(ctx, 'paragraph'),
+      ),
+      gap: options.metaGap,
+    });
+    const datePart = s.showDate
+      ? `<time className="whitespace-nowrap">{new Date(post.date).toLocaleDateString()}</time>`
+      : '';
+    const authorPart = s.showAuthor
+      ? `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <span>by {post.author}</span>)}`
+      : '';
+    const categoryPrefix =
+      s.categoryPrefix ??
+      (options.editorialCompact && s.showCategory ? 'in ' : '');
+    const categoryPart = s.showCategory
+      ? `{post.categories?.[0] && (<>{${JSON.stringify(categoryPrefix)}}{post.categorySlugs?.[0] ? <Link to={\`/category/\${post.categorySlugs[0]}\`} className="${metaLinkClass}">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>}</>)}`
+      : '';
+    if (datePart) parts.push(datePart);
+    if (authorPart) parts.push(authorPart);
+    if (categoryPart) parts.push(categoryPart);
+
+    if (options.editorialCompact && metaLayout === 'inline') {
+      const topParts = [datePart, authorPart].filter(Boolean);
+      const topSeparator = this.postListMetaSeparatorMarkup(
+        options.metaSeparator ?? 'dash',
       );
-    if (s.showAuthor) {
-      parts.push(
-        `{post.author && (post.authorSlug ? <Link to={\`/author/\${post.authorSlug}\`} className="${metaLinkClass}">by {post.author}</Link> : <span>by {post.author}</span>)}`,
-      );
+      const topContent = topSeparator
+        ? topParts
+            .map((part, index) =>
+              index === 0 ? part : `${topSeparator}\n                ${part}`,
+            )
+            .join('\n                ')
+        : topParts.join('\n                ');
+      const topRow = topContent
+        ? `\n              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                ${topContent}
+              </div>`
+        : '';
+      const categoryRow = categoryPart
+        ? `\n              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                ${categoryPart}
+              </div>`
+        : '';
+      return `<div className="text-sm text-[${p.textMuted}] flex flex-col items-start gap-y-2"${metaStyle}>${topRow}${categoryRow}
+            </div>`;
     }
-    if (s.showCategory)
-      parts.push(
-        `{post.categories?.[0] && (post.categorySlugs?.[0] ? <Link to={\`/category/\${post.categorySlugs[0]}\`} className="${metaLinkClass}">{post.categories[0]}</Link> : <span>{post.categories[0]}</span>)}`,
-      );
-    const flex = inline
-      ? 'flex items-center gap-2 whitespace-nowrap shrink-0'
-      : 'flex flex-wrap gap-2 mt-1';
-    return `<div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}>${parts.join('\n              ')}</div>`;
+
+    const separatorMarkup =
+      metaLayout === 'inline'
+        ? this.postListMetaSeparatorMarkup(options.metaSeparator ?? 'none')
+        : '';
+    const content = separatorMarkup
+      ? parts
+          .map((part, index) =>
+            index === 0 ? part : `${separatorMarkup}\n              ${part}`,
+          )
+          .join('\n              ')
+      : parts.join('\n              ');
+    const flex =
+      metaLayout === 'stacked'
+        ? 'flex flex-col items-start gap-1'
+        : options.inlineItem
+          ? options.metaAlign === 'end'
+            ? 'flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right'
+            : 'flex flex-wrap items-center gap-x-2 gap-y-1'
+          : 'flex flex-wrap items-center gap-x-2 gap-y-1 mt-1';
+    return `<div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}>${content}</div>`;
   }
 
   private renderPostMeta(
@@ -2247,7 +2933,8 @@ ${postCard}
       s.layout === 'stacked'
         ? 'flex flex-col items-start gap-2'
         : 'flex flex-wrap items-center gap-2';
-    const separator = s.showSeparator === false ? '' : '<span aria-hidden="true">-</span>';
+    const separator =
+      s.showSeparator === false ? '' : '<span aria-hidden="true">-</span>';
     const parts: string[] = [];
 
     if (s.showDate) {
@@ -2289,63 +2976,121 @@ ${postCard}
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const classes = s.customClassNames ?? [];
-    const hasCenteredIntro = classes.includes('vp-card-grid-intro-centered');
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+    });
+    const sectionAlign = presentation.contentAlign;
+    const hasCenteredIntro =
+      classes.includes('vp-card-grid-intro-centered') ||
+      sectionAlign === 'center';
     const hasAsteriskStyle = classes.includes('is-style-asterisk');
     const cardRadius = this.cardRadiusClass(ctx);
     const cardStylePreset = this.mergeBlockStyleTokens(
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
     );
-    const cardStyle = this.buildBlockStyleAttr(
-      cardStylePreset,
-      { padding: l.cardPadding },
-      true,
-      ctx,
-    );
-    const titleStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: tc },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
+    const cardStyle = s.cardStyle
+      ? this.blueprintCardStyleAttr(s.cardStyle)
+      : this.buildBlockStyleAttr(
+          cardStylePreset,
+          { padding: l.cardPadding },
+          true,
+          ctx,
+        );
+    const titleStyle = s.titleStyle
+      ? this.blueprintTypographyStyleAttr(s.titleStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
     const subtitleStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const cardHeadingStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: tc },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
-    const cardBodyStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
+    const cardHeadingStyle = s.cardStyle?.titleStyle
+      ? this.blueprintTypographyStyleAttr(s.cardStyle.titleStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
+    const cardBodyStyle = s.cardStyle?.bodyStyle
+      ? this.blueprintTypographyStyleAttr(s.cardStyle.bodyStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: p.textMuted },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+    const cardImageClass = s.cardStyle?.imageRadius
+      ? this.exactRadiusClass(s.cardStyle.imageRadius)
+      : cardRadius;
+    const cardImageStyle = this.buildStyleAttr({
+      borderRadius: s.cardStyle?.imageRadius,
+      aspectRatio: s.cardStyle?.imageAspectRatio,
+    });
     const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
+    const gridJustifyClass =
+      sectionAlign === 'center'
+        ? 'justify-items-center'
+        : sectionAlign === 'right'
+          ? 'justify-items-end'
+          : '';
     const cards = s.cards
-      .map(
-        (c) =>
-          `          <div className="flex flex-col gap-3 ${cardRadius}"${cardStyle}>
+      .map((c) => {
+        const cardClassName = this.appendOptionalCustomClasses(
+          `flex flex-col gap-3 ${cardRadius}`.trim(),
+          c.customClassNames,
+        );
+        const cardHeadingClassName = this.appendStyledTextAlignClass(
+          'font-semibold',
+          c.headingCustomClassNames,
+          presentation.textAlign,
+        );
+        const cardBodyClassName = this.appendStyledTextAlignClass(
+          '',
+          c.bodyCustomClassNames,
+          presentation.textAlign,
+        );
+        const cardImageClassName = this.appendOptionalCustomClasses(
+          `w-full ${s.cardStyle?.imageAspectRatio ? '' : 'aspect-video'} object-cover ${cardImageClass} mb-1`
+            .replace(/\s+/g, ' ')
+            .trim(),
+          c.imageCustomClassNames,
+        );
+        return `          <div className="${cardClassName}"${cardStyle}>
+            ${c.imageSrc ? `<img src="${c.imageSrc}" alt="${c.imageAlt ?? ''}" className="${cardImageClassName}" loading="lazy"${cardImageStyle} />` : ''}
             ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none" aria-hidden="true">*</span>` : ''}
-            <h3 className="font-semibold"${cardHeadingStyle}>${c.heading}</h3>
-            <p${cardBodyStyle}>${c.body}</p>
-          </div>`,
-      )
+            ${c.heading ? `<h3 className="${cardHeadingClassName}"${cardHeadingStyle}>${c.heading}</h3>` : ''}
+            ${c.body ? `<p${cardBodyClassName ? ` className="${cardBodyClassName}"` : ''}${cardBodyStyle}>${c.body}</p>` : ''}
+          </div>`;
+      })
       .join('\n');
+    const introTitleClassName = this.appendStyledTextAlignClass(
+      `${t.h2} font-normal${hasCenteredIntro ? ' text-center' : ''}`,
+      s.titleCustomClassNames,
+      hasCenteredIntro ? 'center' : presentation.textAlign,
+    );
+    const introSubtitleClassName = this.appendStyledTextAlignClass(
+      `${hasCenteredIntro ? 'mt-4 max-w-[620px] text-center' : 'mt-4'}`,
+      s.subtitleCustomClassNames,
+      hasCenteredIntro ? 'center' : presentation.textAlign,
+    );
     const intro =
       s.title || s.subtitle
-        ? `          <div className="${hasCenteredIntro ? 'mb-10 flex flex-col items-center text-center' : 'mb-8'}">
-            ${s.title ? `<h2 className="${t.h2} font-normal${hasCenteredIntro ? ' text-center' : ''}"${titleStyle}>${s.title}</h2>` : ''}
-            ${s.subtitle ? `<p className="${hasCenteredIntro ? 'mt-4 max-w-[620px] text-center' : 'mt-4'}"${subtitleStyle}>${s.subtitle}</p>` : ''}
-          </div>`
+        ? `          <div className="${hasCenteredIntro ? 'mb-10 flex flex-col items-center text-center' : `mb-8 flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}`}">
+             ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none ${hasCenteredIntro ? 'mb-2' : 'mb-3'}" aria-hidden="true">*</span>` : ''}
+             ${s.title ? `<h2 className="${introTitleClassName}"${titleStyle}>${s.title}</h2>` : ''}
+             ${s.subtitle ? `<p className="${introSubtitleClassName}"${subtitleStyle}>${s.subtitle}</p>` : ''}
+           </div>`
         : '';
 
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="${l.containerClass}">
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
 ${intro}
-          <div className="grid ${colClass} gap-6"${this.buildSectionGapStyleAttr(s)}>
+          <div className="grid ${colClass} gap-6 ${gridJustifyClass}"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
         </div>
@@ -2361,11 +3106,25 @@ ${cards}
   ): string {
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+    });
     const imageRadius =
+      this.exactRadiusClass(s.imageRadius) ||
       this.imageRadiusClass(ctx) ||
       this.cardRadiusClass(ctx) ||
       'rounded-[24px]';
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
+    const imageStyleAttr = this.buildStyleAttr({
+      ...this.buildBlockStyleMap(imageStyle, {}, false, ctx),
+      borderRadius: s.imageRadius,
+      aspectRatio: s.imageAspectRatio,
+      objectFit: s.imageAspectRatio
+        ? this.shouldPreserveFullAsset(s.imageSrc)
+          ? 'contain'
+          : 'cover'
+        : undefined,
+    });
     const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc, typography: s.headingStyle },
@@ -2389,19 +3148,35 @@ ${cards}
     const imgFirst = s.imagePosition === 'left';
     const itemWrapper = s.columnWidths?.length === 2 ? 'min-w-0' : 'flex-1';
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
-      align: 'start',
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
     });
-    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="w-full h-auto object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} /></div>`;
-    const textEl = `<div className="${itemWrapper} flex flex-col gap-4">
-            ${s.heading ? `<h2 className="${t.h3} font-[600]"${headingStyle}>${s.heading}</h2>` : ''}
-            ${s.body ? `<p${bodyStyle}>${s.body}</p>` : ''}
+    const mediaImageClassName = this.appendOptionalCustomClasses(
+      `w-full h-auto ${this.inlineImageFitClass(s.imageSrc)} ${imageRadius}`.trim(),
+      s.imageCustomClassNames,
+    );
+    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
+    const mediaHeadingClassName = this.appendStyledTextAlignClass(
+      `${t.h3} font-[600]`,
+      s.headingCustomClassNames,
+      presentation.textAlign,
+    );
+    const mediaBodyClassName = this.appendStyledTextAlignClass(
+      '',
+      s.bodyCustomClassNames,
+      presentation.textAlign,
+    );
+    const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
+            ${s.heading ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.body ? `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>` : ''}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
             ${cta}
           </div>`;
 
     return `      {/* Media + Text */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="${l.containerClass}">
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
           <div className="${layoutClass}"${this.buildSectionGapStyleAttr(s)}>
             ${imgFirst ? `${imgEl}\n            ${textEl}` : `${textEl}\n            ${imgEl}`}
           </div>
@@ -2417,18 +3192,22 @@ ${cards}
     const { p, t } = ctx;
     const bg = s.background ?? p.dark ?? '#111111';
     const tc = s.textColor ?? p.darkText ?? '#f9f9f9';
-    const quoteStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: tc },
-      this.pickBlockStyle(ctx, 'pullquote'),
-      this.pickBlockStyle(ctx, 'quote'),
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
-    const authorStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: tc },
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
+    const quoteStyle = s.quoteStyle
+      ? this.blueprintTypographyStyleAttr(s.quoteStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'pullquote'),
+          this.pickBlockStyle(ctx, 'quote'),
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+    const authorStyle = s.authorStyle
+      ? this.blueprintTypographyStyleAttr(s.authorStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
     const authorTitleStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc },
@@ -2439,29 +3218,46 @@ ${cards}
       backgroundColor: bg,
       color: tc,
     });
-
-    const align =
-      s.contentAlign === 'right'
-        ? 'items-end text-right'
-        : s.contentAlign === 'left'
-          ? 'items-start text-left'
-          : 'items-center text-center';
+    const cardStyleAttr = s.cardStyle
+      ? this.blueprintCardStyleAttr(s.cardStyle)
+      : '';
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'content',
+      contentAlign: s.contentAlign ?? 'center',
+      contentMaxWidth: '720px',
+    });
+    const align = `${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}`;
     const containerAlign =
-      s.contentAlign === 'right'
+      presentation.contentAlign === 'right'
         ? 'ml-auto'
-        : s.contentAlign === 'left'
-          ? ''
-          : 'mx-auto';
+        : presentation.contentAlign === 'center'
+          ? 'mx-auto'
+          : '';
+    const quoteClassName = this.appendStyledTextAlignClass(
+      `${t.h3} font-normal leading-snug`,
+      s.quoteCustomClassNames,
+      presentation.textAlign,
+    );
+    const authorNameClassName = this.appendStyledTextAlignClass(
+      'font-medium',
+      s.authorCustomClassNames,
+      presentation.textAlign,
+    );
+    const authorTitleClassName = this.appendStyledTextAlignClass(
+      'text-sm opacity-70',
+      s.authorCustomClassNames,
+      presentation.textAlign,
+    );
 
     return `      {/* Testimonial */}
       <section className="w-full ${py}"${styleAttr}>
-        <div className="max-w-[720px] ${containerAlign} px-4 sm:px-6 lg:px-8">
+        <div className="${this.sectionContainerClass(s, ctx, 'content')} ${containerAlign} px-4 sm:px-6 lg:px-8"${cardStyleAttr}${this.presentationMaxWidthStyleAttr(presentation)}>
           <div className="flex flex-col ${align} gap-8"${this.buildSectionGapStyleAttr(s)}>
-            <p className="${t.h3} font-normal leading-snug"${quoteStyle}>"${s.quote}"</p>
-            <div className="flex flex-col ${align.replace('text-right', '').replace('text-left', '').replace('text-center', '').trim()} gap-1">
-              ${s.authorAvatar ? `<img src={resolveAsset("${s.authorAvatar}")} alt="${s.authorName}" className="w-14 h-14 rounded-full object-cover mb-2" />` : ''}
-              <span className="font-medium"${authorStyle}>${s.authorName}</span>
-              ${s.authorTitle ? `<span className="text-sm opacity-70"${authorTitleStyle}>${s.authorTitle}</span>` : ''}
+            <p className="${quoteClassName}"${quoteStyle}>"${s.quote}"</p>
+            <div className="flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} gap-1">
+              ${s.authorAvatar ? `<img src={resolveAsset("${s.authorAvatar}")} alt="${s.authorName}" className="${this.appendOptionalCustomClasses('w-14 h-14 rounded-full object-cover mb-2', s.authorAvatarCustomClassNames)}" />` : ''}
+              <span className="${authorNameClassName}"${authorStyle}>${s.authorName}</span>
+              ${s.authorTitle ? `<span className="${authorTitleClassName}"${authorTitleStyle}>${s.authorTitle}</span>` : ''}
             </div>
           </div>
         </div>
@@ -2477,35 +3273,56 @@ ${cards}
   ): string {
     const { p, t, l } = ctx;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+      contentAlign: 'center',
+      contentMaxWidth: s.layout === 'card' ? '560px' : undefined,
+    });
     const cardRadius = this.cardRadiusClass(ctx);
-    const cardStyle = this.buildMergedBlockStyleAttr(
-      ctx,
-      { padding: l.cardPadding, gap: s.gapStyle },
-      true,
-      this.pickBlockStyle(ctx, 'group'),
-      this.pickBlockStyle(ctx, 'column'),
-    );
-    const headingStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: tc },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
+    const cardStyle = s.cardStyle
+      ? this.blueprintCardStyleAttr(s.cardStyle)
+      : this.buildMergedBlockStyleAttr(
+          ctx,
+          { padding: l.cardPadding, gap: s.gapStyle },
+          true,
+          this.pickBlockStyle(ctx, 'group'),
+          this.pickBlockStyle(ctx, 'column'),
+        );
+    const headingStyle = s.headingStyle
+      ? this.blueprintTypographyStyleAttr(s.headingStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
     const subheadingStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
+    const inputStyleAttr = this.blueprintInputStyleAttr(s.inputStyle);
+    const newsletterHeadingClassName = this.appendStyledTextAlignClass(
+      `${t.h2} font-normal${s.headingStyle ? '' : ` text-[${tc}]`}`,
+      s.headingCustomClassNames,
+      presentation.textAlign,
+    );
+    const newsletterSubheadingClassName = this.appendStyledTextAlignClass(
+      `text-[${p.textMuted}]`,
+      s.subheadingCustomClassNames,
+      presentation.textAlign,
+    );
     const inner =
       s.layout === 'card'
-        ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 max-w-[560px] mx-auto text-center flex flex-col gap-4"${cardStyle}>`
-        : `<div className="flex flex-col items-center text-center gap-4"${this.buildSectionGapStyleAttr(s)}>`;
+        ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${cardStyle}${this.presentationMaxWidthStyleAttr(presentation)}>`
+        : `<div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>`;
 
     return `      {/* Newsletter */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="${l.containerClass}">
+        <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
           ${inner}
-            <h2 className="${t.h2} font-normal text-[${tc}]"${headingStyle}>${s.heading}</h2>
-            ${s.subheading ? `<p className="text-[${p.textMuted}]"${subheadingStyle}>${s.subheading}</p>` : ''}
+            <h2 className="${newsletterHeadingClassName}"${headingStyle}>${s.heading}</h2>
+            ${s.subheading ? `<p className="${newsletterSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
+            <input type="email" placeholder="Your email" className="w-full max-w-sm rounded-md border border-black/10 bg-white px-4 py-3 text-sm text-[${tc}] placeholder:text-[${p.textMuted}]"${inputStyleAttr} />
             <button className="self-center bg-[${p.accent}] text-[${p.accentText}] px-6 py-3 ${t.buttonRadius} hover:opacity-90 transition-opacity"${this.buttonStyleAttr(ctx)}>
               ${s.buttonText}
             </button>
@@ -2791,9 +3608,10 @@ ${renderCommentCard('reply')}
     const { p } = ctx;
     const bg = s.background ?? p.background;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const shellClass = this.pageContentShellClass(s, ctx);
     return `      {/* Page Content */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
-        <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
+        <div className="${shellClass} px-4 sm:px-6 lg:px-8">
 ${this.renderPageContentInner(s, ctx)}
         </div>
       </section>`;
@@ -2977,12 +3795,15 @@ ${this.renderSidebarCard(s, ctx, 10)}
   ): string {
     const { p, t } = ctx;
     const tc = s.textColor ?? p.text;
+    const bodyClass = this.buildPageContentBodyClass(s, ctx);
+    const titleWrapperClass =
+      s.shellVariant === 'wide' ? this.contentContainerClass(ctx) : '';
     return `          {item && (
-            <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
-              ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
-              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
-            </article>
-          )}`;
+             <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
+               ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
+               <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
+             </article>
+           )}`;
   }
 
   private renderSidebarCard(
@@ -3706,7 +4527,7 @@ ${indent}</ul>`;
     const triggerText = s.triggerText || s.heading || 'Open';
     const modalTextColor = ctx.p.text;
     const modalMutedTextColor = ctx.p.textMuted || ctx.p.text;
-    const overlayColor = s.overlayColor?.trim() || 'rgba(15, 23, 42, 0.72)';
+    const overlayColor = s.overlayColor?.trim() || 'rgba(0, 0, 0, 0.7)';
     const closeOnOverlay = s.closeOnOverlay !== false;
     const closeButtonSide = (s.closeIconPosition ?? '')
       .toLowerCase()
@@ -3715,7 +4536,7 @@ ${indent}</ul>`;
       : '-right-5 sm:-right-6';
     const modalWidth =
       this.normalizeCssLength(s.width) ??
-      (s.layout === 'split' && s.imageSrc ? '880px' : '500px');
+      (s.layout === 'split' && s.imageSrc ? '880px' : '700px');
     const modalHeight = this.normalizeCssLength(s.height);
     const modalShellStyle = this.buildStyleAttr({
       width: '100%',
@@ -3732,16 +4553,20 @@ ${indent}</ul>`;
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
     );
-    const headingTextStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: modalTextColor },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
-    const bodyTextStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: modalMutedTextColor },
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
+    const headingTextStyle = s.headingStyle
+      ? this.blueprintTypographyStyleAttr(s.headingStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: modalTextColor },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
+    const bodyTextStyle = s.bodyStyle
+      ? this.blueprintTypographyStyleAttr(s.bodyStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: modalMutedTextColor },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
     const imageStyle = this.buildBlockStyleAttr(
       this.pickBlockStyle(ctx, 'image', 'gallery'),
       {},
@@ -3750,20 +4575,24 @@ ${indent}</ul>`;
     );
     const imageRadius = this.imageRadiusClass(ctx) || 'rounded-[24px]';
     const triggerHeadingPart = s.heading
-      ? `\n          <div className="max-w-2xl">\n            <h2 className="${t.h2} font-semibold" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
+      ? `\n          <div className="max-w-2xl">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.headingCustomClassNames, s.presentation?.textAlign)}" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
       : '';
     const headingPart = s.heading
-      ? `\n                  <h3 className="${t.h2} font-semibold tracking-[-0.02em]"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
+      ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold tracking-[-0.02em]`, s.headingCustomClassNames, s.presentation?.textAlign)}"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
       : '';
     const bodyPart = s.body
-      ? `\n                  <div className="${t.body} leading-7"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
       : '';
     const ctaPart = this.renderInteractiveAnchorCtaGroup(
       this.resolveSectionCtas(s),
       ctx,
+      {
+        ctaStyle: s.ctaStyle,
+        secondaryCtaStyle: s.secondaryCtaStyle,
+      },
     );
     const imagePart = s.imageSrc
-      ? `\n                <div className="relative overflow-hidden ${imageRadius} bg-slate-100">\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="h-full min-h-[240px] w-full object-cover"${imageStyle} />\n                </div>`
+      ? `\n                <div className="relative overflow-hidden ${imageRadius} bg-slate-100">\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses('h-full min-h-[240px] w-full object-cover', s.imageCustomClassNames)}"${imageStyle} />\n                </div>`
       : '';
     const contentGridClass =
       s.layout === 'split' && s.imageSrc
@@ -3777,8 +4606,8 @@ ${indent}</ul>`;
           <button
             type="button"
             onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: true }))}
-            className="uagb-modal-trigger uagb-modal-button-link inline-flex items-center justify-center gap-2 ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-transform transition-opacity hover:-translate-y-0.5 hover:opacity-90"
-            style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}
+            className="${this.appendOptionalCustomClasses(`uagb-modal-trigger uagb-modal-button-link inline-flex items-center justify-center gap-2 ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-transform transition-opacity hover:-translate-y-0.5 hover:opacity-90`, s.triggerCustomClassNames)}"
+            ${s.triggerStyle ? this.blueprintButtonStyleAttr(s.triggerStyle) : this.buildStyleAttr({ background: ctx.p.accent, color: ctx.p.accentText })}
           >
             {${JSON.stringify(triggerText)}}
           </button>
@@ -3918,7 +4747,7 @@ ${indent}</ul>`;
       ? 'rounded-[24px] border border-black/10 bg-white/70 p-2 shadow-[0_18px_40px_rgba(15,23,42,0.06)]'
       : 'border-b border-black/10 pb-1';
     const titlePart = s.title
-      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${t.h2} font-semibold"${titleStyle}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
+      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.titleCustomClassNames, 'left')}"${titleStyle}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
       : '';
     const tabButtons = s.tabs
       .map(
@@ -3970,13 +4799,13 @@ ${indent}</ul>`;
     const panels = s.tabs
       .map((tab, index) => {
         const headingPart = tab.heading
-          ? `\n                <h3 className="${t.h3} font-semibold"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
+          ? `\n                <h3 className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold`, tab.headingCustomClassNames, 'left')}"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
           : '';
         const bodyPart = tab.body
-          ? `\n                <div className="${t.body} leading-7"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
           : '';
         const imagePart = tab.imageSrc
-          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="h-auto w-full ${imageRadius} object-cover"${imageStyle} />`
+          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`h-auto w-full ${imageRadius} object-cover`, tab.imageCustomClassNames)}"${imageStyle} />`
           : '';
         const ctaPart = tab.cta
           ? `\n                <a href={${JSON.stringify(tab.cta.link)}} className="${this.buildInteractiveCtaClassName(
@@ -4071,7 +4900,7 @@ ${panels}
       this.pickBlockStyle(ctx, 'paragraph'),
     );
     const titlePart = s.title
-      ? `\n          <h2 className="${t.h2} font-semibold"${titleStyle}>{${JSON.stringify(s.title)}}</h2>`
+      ? `\n          <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.titleCustomClassNames, 'left')}"${titleStyle}>{${JSON.stringify(s.title)}}</h2>`
       : '';
     const items = s.items
       .map(
@@ -4123,7 +4952,7 @@ ${panels}
               className="uagb-faq-questions-button uagb-faq-questions flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
               style={{ color: '${tc}' }}
             >
-              <span className="${t.h3} font-semibold pr-4"${itemHeadingStyle}>{${JSON.stringify(item.heading)}}</span>
+              <span className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold pr-4`, item.headingCustomClassNames, 'left')}"${itemHeadingStyle}>{${JSON.stringify(item.heading)}}</span>
               <span
                 className="uagb-faq-icon-wrap inline-flex h-10 w-10 items-center justify-center rounded-full transition-transform"
                 style={{
@@ -4141,7 +4970,7 @@ ${panels}
             </button>
             {((${openStateExpr}).includes(${index})) ? (
               <div id="${domKey}-panel-${index}" className="uagb-faq-content border-t border-black/10 px-5 pb-5 pt-1">
-                <div className="${t.body} leading-7"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
+                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
               </div>
             ) : null}
             </div>
@@ -4185,6 +5014,16 @@ ${items}
     const showArrows = s.showArrows !== false && s.slides.length > 1;
     const showDots = s.showDots !== false && s.slides.length > 1;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const slideMinHeight =
+      s.slideHeight ?? (hasSlideImages ? '420px' : '220px');
+    const dotsActiveColor = s.dotsColor ?? ctx.p.accent;
+    const dotsInactiveColor = hasSlideImages
+      ? 'rgba(255,255,255,0.5)'
+      : 'rgba(17,17,17,0.24)';
+    const arrowBg =
+      s.arrowBackground ??
+      (hasSlideImages ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.95)');
+    const arrowFg = s.arrowColor ?? (hasSlideImages ? '#ffffff' : '#111111');
     const slideSurfaceStyle = this.buildBlockStyleAttr(
       this.mergeBlockStyleTokens(
         this.pickBlockStyle(ctx, 'group'),
@@ -4196,32 +5035,37 @@ ${items}
     );
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const imageRadius = this.imageRadiusClass(ctx) || this.cardRadiusClass(ctx);
-    const headingStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      { baseColor: hasSlideImages ? '#ffffff' : tc },
-      this.pickBlockStyle(ctx, 'heading'),
-    );
-    const bodyStyle = this.buildTextTokenStyleAttr(
-      ctx,
-      {
-        baseColor: hasSlideImages
-          ? 'rgba(255,255,255,0.82)'
-          : ctx.p.textMuted || tc,
-      },
-      this.pickBlockStyle(ctx, 'paragraph'),
-    );
-    const align =
-      s.contentAlign === 'right'
-        ? 'items-end text-right'
-        : s.contentAlign === 'left'
-          ? 'items-start text-left'
-          : 'items-center text-center';
+    const headingStyle = s.headingStyle
+      ? this.blueprintTypographyStyleAttr(s.headingStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: hasSlideImages ? '#ffffff' : tc },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
+    const bodyStyle = s.subheadingStyle
+      ? this.blueprintTypographyStyleAttr(s.subheadingStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          {
+            baseColor: hasSlideImages
+              ? 'rgba(255,255,255,0.82)'
+              : ctx.p.textMuted || tc,
+          },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+    const presentation = this.resolveSectionPresentation(s, {
+      container: hasSlideImages ? 'shell' : 'content',
+      contentAlign: s.contentAlign ?? 'center',
+      contentMaxWidth: hasSlideImages ? '720px' : '760px',
+    });
+    const align = `${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}`;
     const ctaAlign =
-      s.contentAlign === 'right'
+      presentation.justify === 'end'
         ? 'self-end'
-        : s.contentAlign === 'left'
-          ? 'self-start'
-          : 'self-center';
+        : presentation.justify === 'center'
+          ? 'self-center'
+          : 'self-start';
+    const ctaJustify = this.presentationJustifyValue(presentation.justify);
     const activeTransform =
       effect === 'flip'
         ? 'perspective(1400px) rotateY(0deg) scale(1)'
@@ -4236,29 +5080,31 @@ ${items}
     const slides = s.slides
       .map((slide, i) => {
         const imgPart = slide.imageSrc
-          ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="absolute inset-0 h-full w-full object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
+          ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`absolute inset-0 h-full w-full object-cover ${imageRadius}`, slide.imageCustomClassNames)}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
           : '';
         const headingPart = slide.heading
-          ? `\n                  <h3 className="${t.h2} ${hasSlideImages ? 'max-w-[18ch] font-bold text-white' : 'font-bold'}"${headingStyle}>${slide.heading}</h3>`
+          ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} ${hasSlideImages ? 'max-w-[18ch] font-bold text-white' : 'font-bold'}`, slide.headingCustomClassNames, presentation.textAlign)}"${headingStyle}>${slide.heading}</h3>`
           : '';
         const subPart = slide.subheading
-          ? `\n                  <p className="${t.body} max-w-[60ch] ${hasSlideImages ? 'text-white/82' : ''}"${bodyStyle}>${slide.subheading}</p>`
+          ? `\n                  <p className="${this.appendStyledTextAlignClass(`${t.body} max-w-[60ch] ${hasSlideImages ? 'text-white/82' : ''}`.trim(), slide.subheadingCustomClassNames, presentation.textAlign)}"${bodyStyle}>${slide.subheading}</p>`
           : '';
         const ctaPart = slide.cta
-          ? `\n                  <a href={${JSON.stringify(slide.cta.link)}} className="${this.buildInteractiveCtaClassName(
-              `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-6 py-3 font-semibold transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 ${ctaAlign}`,
-              slide.cta,
-            )}" data-carousel-control="true" style={{ background: '${ctx.p.accent}', color: '${ctx.p.accentText}' }}>${slide.cta.text}</a>`
+          ? this.renderInteractiveAnchorCtaGroup([slide.cta], ctx, {
+              align: ctaJustify,
+              baseClassName: `inline-flex items-center justify-center ${ctx.t.buttonRadius} px-6 py-3 font-semibold transition-all duration-200 hover:-translate-y-0.5 hover:opacity-90 ${ctaAlign}`,
+              ctaStyle: s.ctaStyle,
+              secondaryCtaStyle: s.secondaryCtaStyle,
+            })
           : '';
         const slideSurface = hasSlideImages
           ? `${imgPart}
               <div className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/42 to-black/10" />
               <div className="relative z-10 flex h-full flex-col justify-end p-6 sm:p-10">
-                <div className="flex max-w-[720px] flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${slideSurfaceStyle}>${headingPart}${subPart}${ctaPart}
+                <div className="flex flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${slideSurfaceStyle}${this.presentationMaxWidthStyleAttr(presentation)}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`
           : `<div className="relative z-10 flex h-full flex-col items-center justify-center px-6 py-3 sm:px-10 sm:py-4">
-                <div className="flex w-full max-w-[760px] flex-col gap-4 ${align}"${slideSurfaceStyle}>${headingPart}${subPart}${ctaPart}
+                <div className="flex w-full flex-col gap-4 ${align}"${slideSurfaceStyle}${this.presentationMaxWidthStyleAttr(presentation)}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`;
         if (useStackedSlides) {
@@ -4342,8 +5188,8 @@ ${slideSurface}
                 : 'swiper-pagination-bullet h-2.5 w-2.5 rounded-full opacity-80 transition-all duration-200 hover:scale-110 hover:opacity-100'}
               style={{
                 background: (${activeIndexExpr}) === ${i}
-                  ? '${ctx.p.accent}'
-                  : '${hasSlideImages ? 'rgba(255,255,255,0.5)' : 'rgba(17,17,17,0.24)'}',
+                  ? '${dotsActiveColor}'
+                  : '${dotsInactiveColor}',
               }}
             />`,
           )
@@ -4352,15 +5198,18 @@ ${slideSurface}
 
     return `
     <section className="w-full ${py} overflow-hidden bg-[${bg}] text-[${tc}]"${sectionStyle}>
-      <div className="${hasSlideImages ? ctx.l.containerClass : 'max-w-[920px] mx-auto w-full'} px-4 sm:px-6">
+      <div className="${this.sectionContainerClass(s, ctx, hasSlideImages ? 'shell' : 'content')} px-4 sm:px-6">
         <div
           className="uagb-slider-container uagb-swiper relative"
           onMouseEnter={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }))` : 'undefined'}}
           onMouseLeave={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: false }))` : 'undefined'}}
         >
           <div
-            className="${hasSlideImages ? 'swiper relative min-h-[420px] overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]' : 'swiper relative min-h-[220px] overflow-visible'}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
-            style={${enableSwipe ? `{ touchAction: 'pan-y' }` : 'undefined'}}
+            className="${hasSlideImages ? `swiper relative overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]` : `swiper relative overflow-visible`}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
+            ${this.buildStyleAttr({
+              minHeight: slideMinHeight,
+              touchAction: enableSwipe ? 'pan-y' : undefined,
+            })}
             onPointerDown={${enableSwipe ? pointerDownHandler : 'undefined'}}
             onPointerMove={${enableSwipe ? pointerMoveHandler : 'undefined'}}
             onPointerUp={${enableSwipe ? pointerUpHandler : 'undefined'}}
@@ -4388,7 +5237,8 @@ ${slides}
               aria-label="Previous slide"
               data-carousel-control="true"
               onClick={${previousHandler}}
-              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5 ${hasSlideImages ? 'border border-white/20 bg-black/35 text-white backdrop-blur-sm' : 'border border-black/10 bg-white/95 text-[#111111] shadow-[0_10px_24px_rgba(15,23,42,0.12)]'}"
+              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5"
+              style={{ background: '${arrowBg}', color: '${arrowFg}', border: '${hasSlideImages ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(0,0,0,0.1)'}' }}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="m15 18-6-6 6-6" />
@@ -4399,7 +5249,8 @@ ${slides}
               aria-label="Next slide"
               data-carousel-control="true"
               onClick={${nextHandler}}
-              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5 ${hasSlideImages ? 'border border-white/20 bg-black/35 text-white backdrop-blur-sm' : 'border border-black/10 bg-white/95 text-[#111111] shadow-[0_10px_24px_rgba(15,23,42,0.12)]'}"
+              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5"
+              style={{ background: '${arrowBg}', color: '${arrowFg}', border: '${hasSlideImages ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(0,0,0,0.1)'}' }}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="m9 18 6-6-6-6" />

@@ -10,9 +10,11 @@ import {
   WpSiteCapabilities,
   WpCustomPostType,
   WpDbTemplate,
+  WpDbNavigation,
   WpDbGlobalStyle,
   WpCustomCssEntry,
   WpReadingSettings,
+  WpResolvedReadingPageRef,
 } from '../../sql/wp-query.service.js';
 import type {
   DetectedPlugin,
@@ -41,6 +43,7 @@ export interface DbContentResult {
   posts: WpPost[];
   pages: WpPage[];
   menus: WpMenu[];
+  dbNavigations: WpDbNavigation[];
   dbTemplates: WpDbTemplate[];
   dbGlobalStyles: WpDbGlobalStyle[];
   customCssEntries: WpCustomCssEntry[];
@@ -73,6 +76,7 @@ export class DbContentService {
       posts,
       pages,
       menus,
+      dbNavigations,
       dbTemplates,
       dbGlobalStyles,
       customCssEntries,
@@ -84,6 +88,7 @@ export class DbContentService {
       this.wpQuery.getPosts(connectionString),
       this.wpQuery.getPages(connectionString),
       this.wpQuery.getMenus(connectionString),
+      this.wpQuery.getDbNavigations(connectionString),
       this.wpQuery.getDbTemplates(connectionString),
       this.wpQuery.getDbGlobalStyles(connectionString),
       this.wpQuery.getCustomCssEntries(connectionString),
@@ -91,13 +96,18 @@ export class DbContentService {
       this.wpQuery.getTaxonomies(connectionString),
       this.wpQuery.getRuntimeFeatures(connectionString),
     ]);
+    const enrichedReadingSettings = this.materializeReadingSettings(
+      readingSettings,
+      pages,
+    );
+
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
       runtimeFeatures,
     });
 
     this.logger.log(
-      `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ` +
+      `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ${dbNavigations.length} db navigations, ` +
         `${dbTemplates.length} db templates, ${dbGlobalStyles.length} db global styles, ${customCssEntries.length} custom css entries, ` +
         `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
@@ -122,16 +132,42 @@ export class DbContentService {
       posts,
       pages,
       menus,
+      dbNavigations,
       dbTemplates,
       dbGlobalStyles,
       customCssEntries,
-      readingSettings,
+      readingSettings: enrichedReadingSettings,
       taxonomies,
       plugins: runtimeFeatures.plugins,
       customPostTypes: runtimeFeatures.customPostTypes,
       capabilities: runtimeFeatures.capabilities,
       detectedPlugins: discovery.detectedPlugins,
       discovery: discovery.summary,
+    };
+  }
+
+  private materializeReadingSettings(
+    readingSettings: WpReadingSettings,
+    pages: WpPage[],
+  ): WpReadingSettings {
+    const resolvePageRef = (
+      pageId: number | null,
+    ): WpResolvedReadingPageRef | null => {
+      if (pageId === null) return null;
+      const page = pages.find((entry) => Number(entry.id) === Number(pageId));
+      if (!page) return null;
+      return {
+        id: page.id,
+        slug: page.slug,
+        title: page.title,
+        template: page.template,
+      };
+    };
+
+    return {
+      ...readingSettings,
+      pageOnFront: resolvePageRef(readingSettings.pageOnFrontId),
+      pageForPosts: resolvePageRef(readingSettings.pageForPostsId),
     };
   }
 }

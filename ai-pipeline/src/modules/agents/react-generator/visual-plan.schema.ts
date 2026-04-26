@@ -58,6 +58,38 @@ export interface SectionCta {
   customClassNames?: string[];
 }
 
+export interface SectionButtonStyle {
+  variant?: 'solid' | 'outline' | 'ghost' | 'link';
+  background?: string;
+  color?: string;
+  hoverBackground?: string;
+  hoverColor?: string;
+  border?: string; // e.g. "1px solid #d8613c"
+  borderRadius?: string; // e.g. "8px" | "9999px"
+  padding?: string; // CSS shorthand e.g. "0.75rem 1.5rem"
+}
+
+export interface SectionCardStyle {
+  background?: string;
+  padding?: string;
+  borderRadius?: string;
+  border?: string;
+  shadow?: string; // CSS box-shadow value
+  titleStyle?: TypographyStyle;
+  bodyStyle?: TypographyStyle;
+  imageRadius?: string;
+  imageAspectRatio?: string; // e.g. "16/9" | "1/1"
+}
+
+export interface SectionPresentation {
+  container?: 'shell' | 'content';
+  contentAlign?: 'left' | 'center' | 'right';
+  textAlign?: 'left' | 'center' | 'right';
+  itemsAlign?: 'start' | 'center' | 'end' | 'stretch';
+  justify?: 'start' | 'center' | 'between' | 'end';
+  contentMaxWidth?: string;
+}
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
@@ -70,6 +102,12 @@ interface BaseSection {
   paddingStyle?: string; // exact CSS shorthand from template, e.g. "2rem 1.5rem"
   marginStyle?: string; // exact CSS shorthand from template
   gapStyle?: string; // exact CSS gap between direct children inside the section
+  border?: { radius?: string; color?: string; width?: string };
+  shadow?: string;
+  // Primary and secondary CTA button visual spec — generator must not invent these
+  ctaStyle?: SectionButtonStyle;
+  secondaryCtaStyle?: SectionButtonStyle;
+  presentation?: SectionPresentation;
 }
 
 export interface NavbarSection extends BaseSection {
@@ -90,11 +128,20 @@ export interface HeroSection extends BaseSection {
   layout: 'centered' | 'left' | 'split';
   heading: string;
   subheading?: string;
+  headingCustomClassNames?: string[];
+  subheadingCustomClassNames?: string[];
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
   cta?: SectionCta;
   ctas?: SectionCta[];
-  image?: { src: string; alt: string; position: 'right' | 'below' };
+  image?: {
+    src: string;
+    alt: string;
+    position: 'right' | 'below';
+    radius?: string;
+    aspectRatio?: string;
+    customClassNames?: string[];
+  };
 }
 
 export interface CtaStripSection extends BaseSection {
@@ -111,6 +158,8 @@ export interface CoverSection extends BaseSection {
   minHeight: string; // e.g. "500px"
   heading?: string;
   subheading?: string;
+  headingCustomClassNames?: string[];
+  subheadingCustomClassNames?: string[];
   headingStyle?: TypographyStyle;
   subheadingStyle?: TypographyStyle;
   cta?: SectionCta;
@@ -121,21 +170,47 @@ export interface CoverSection extends BaseSection {
 export interface PostListSection extends BaseSection {
   type: 'post-list';
   title?: string;
+  titleCustomClassNames?: string[];
   layout: 'list' | 'grid-2' | 'grid-3';
   showDate: boolean;
   showAuthor: boolean;
   showCategory: boolean;
   showExcerpt: boolean;
   showFeaturedImage: boolean;
+  itemLayout?: 'title-meta-inline' | 'stacked';
+  metaLayout?: 'inline' | 'stacked';
+  metaAlign?: 'start' | 'end';
+  metaSeparator?: 'none' | 'dot' | 'dash' | 'slash' | 'pipe';
+  itemGap?: string;
+  metaGap?: string;
+  showDividers?: boolean;
+  dividerColor?: string;
+  titleColumnWidth?: string;
+  metaColumnWidth?: string;
+  splitCategoryLine?: boolean;
+  categoryPrefix?: string;
 }
 
 export interface CardGridSection extends BaseSection {
   type: 'card-grid';
   title?: string;
   subtitle?: string;
+  titleCustomClassNames?: string[];
+  subtitleCustomClassNames?: string[];
+  titleStyle?: TypographyStyle;
   columns: 2 | 3 | 4;
   columnWidths?: string[];
-  cards: { heading: string; body: string }[];
+  cardStyle?: SectionCardStyle;
+  cards: {
+    heading: string;
+    body: string;
+    headingCustomClassNames?: string[];
+    bodyCustomClassNames?: string[];
+    imageSrc?: string;
+    imageAlt?: string;
+    customClassNames?: string[];
+    imageCustomClassNames?: string[];
+  }[];
 }
 
 export interface MediaTextSection extends BaseSection {
@@ -143,9 +218,14 @@ export interface MediaTextSection extends BaseSection {
   imageSrc: string;
   imageAlt: string;
   imagePosition: 'left' | 'right';
+  imageRadius?: string;
+  imageAspectRatio?: string; // e.g. "16/9" | "1/1"
+  imageCustomClassNames?: string[];
   columnWidths?: string[];
   heading?: string;
   body?: string;
+  headingCustomClassNames?: string[];
+  bodyCustomClassNames?: string[];
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];
@@ -159,15 +239,26 @@ export interface TestimonialSection extends BaseSection {
   authorName: string;
   authorTitle?: string;
   authorAvatar?: string;
+  authorAvatarCustomClassNames?: string[];
+  quoteCustomClassNames?: string[];
+  authorCustomClassNames?: string[];
   contentAlign?: 'center' | 'left' | 'right';
+  quoteStyle?: TypographyStyle;
+  authorStyle?: TypographyStyle;
+  cardStyle?: SectionCardStyle;
 }
 
 export interface NewsletterSection extends BaseSection {
   type: 'newsletter';
   heading: string;
   subheading?: string;
+  headingCustomClassNames?: string[];
+  subheadingCustomClassNames?: string[];
+  headingStyle?: TypographyStyle;
   buttonText: string;
   layout: 'centered' | 'card';
+  inputStyle?: { background?: string; borderRadius?: string; border?: string };
+  cardStyle?: SectionCardStyle;
 }
 
 export interface FooterSection extends BaseSection {
@@ -209,6 +300,16 @@ export interface CommentsSection extends BaseSection {
 export interface PageContentSection extends BaseSection {
   type: 'page-content';
   showTitle: boolean;
+  /**
+   * Fallback presentation mode for bound WordPress pages that are rendered from
+   * `page.content` HTML instead of flattened visual sections.
+   */
+  shellVariant?: 'article' | 'wide';
+  bodyPresentation?: 'prose' | 'wordpress-blocks';
+  hasColumns?: boolean;
+  hasWideBlocks?: boolean;
+  hasFullWidthBlocks?: boolean;
+  hasInteractiveBlocks?: boolean;
 }
 
 export interface SearchSection extends BaseSection {
@@ -235,8 +336,12 @@ export interface ModalSection extends BaseSection {
   triggerText?: string;
   heading?: string;
   body?: string;
+  triggerCustomClassNames?: string[];
+  headingCustomClassNames?: string[];
+  bodyCustomClassNames?: string[];
   imageSrc?: string;
   imageAlt?: string;
+  imageCustomClassNames?: string[];
   cta?: SectionCta;
   ctas?: SectionCta[];
   layout?: 'centered' | 'split';
@@ -246,11 +351,15 @@ export interface ModalSection extends BaseSection {
   width?: string;
   height?: string;
   closeIconPosition?: string;
+  triggerStyle?: SectionButtonStyle;
+  headingStyle?: TypographyStyle;
+  bodyStyle?: TypographyStyle;
 }
 
 export interface TabsSection extends BaseSection {
   type: 'tabs';
   title?: string;
+  titleCustomClassNames?: string[];
   activeTab?: number;
   variant?: string;
   tabAlign?: 'left' | 'center' | 'right';
@@ -258,8 +367,11 @@ export interface TabsSection extends BaseSection {
     label: string;
     heading?: string;
     body?: string;
+    headingCustomClassNames?: string[];
+    bodyCustomClassNames?: string[];
     imageSrc?: string;
     imageAlt?: string;
+    imageCustomClassNames?: string[];
     cta?: SectionCta;
   }[];
 }
@@ -267,9 +379,12 @@ export interface TabsSection extends BaseSection {
 export interface AccordionSection extends BaseSection {
   type: 'accordion';
   title?: string;
+  titleCustomClassNames?: string[];
   items: {
     heading: string;
     body: string;
+    headingCustomClassNames?: string[];
+    bodyCustomClassNames?: string[];
   }[];
   allowMultiple?: boolean;
   enableToggle?: boolean;
@@ -282,8 +397,11 @@ export interface CarouselSection extends BaseSection {
   slides: {
     heading?: string;
     subheading?: string;
+    headingCustomClassNames?: string[];
+    subheadingCustomClassNames?: string[];
     imageSrc?: string;
     imageAlt?: string;
+    imageCustomClassNames?: string[];
     cta?: SectionCta;
   }[];
   autoplay?: boolean;
@@ -296,6 +414,12 @@ export interface CarouselSection extends BaseSection {
   transitionSpeed?: number;
   pauseOn?: 'hover' | 'click';
   contentAlign?: 'center' | 'left' | 'right';
+  slideHeight?: string; // e.g. "500px"
+  dotsColor?: string;
+  arrowColor?: string;
+  arrowBackground?: string;
+  headingStyle?: TypographyStyle;
+  subheadingStyle?: TypographyStyle;
 }
 
 export type SectionPlan =

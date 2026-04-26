@@ -1,0 +1,105 @@
+@layer components {
+  /*
+   * Baseline compatibility for WordPress block style classes.
+   * This file is always imported so generated apps do not depend on per-job
+   * post-processing just to preserve common `is-style-*` semantics.
+   */
+
+  :where([class^='is-style-'], [class*=' is-style-']) {
+    --vp-wp-style-preserved: 1;
+  }
+
+  :where(
+      img[class^='is-style-'],
+      img[class*=' is-style-'],
+      .is-style-rounded img,
+      img.is-style-rounded
+    ) {
+    display: block;
+    height: auto;
+    max-width: 100%;
+  }
+
+  :where(
+      a[class^='is-style-'],
+      a[class*=' is-style-'],
+      button[class^='is-style-'],
+      button[class*=' is-style-']
+    ) {
+    text-decoration: none;
+  }
+
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk::before {
+    content: '';
+    width: 1.5rem;
+    height: 3rem;
+    background: var(--wp--preset--color--contrast-2, currentColor);
+    clip-path: path("M11.93.684v8.039l5.633-5.633 1.216 1.23-5.66 5.66h8.04v1.737H13.2l5.701 5.701-1.23 1.23-5.742-5.742V21h-1.737v-8.094l-5.77 5.77-1.23-1.217 5.743-5.742H.842V9.98h8.162l-5.701-5.7 1.23-1.231 5.66 5.66V.684h1.737Z");
+    display: block;
+  }
+
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk:empty::before {
+    content: none;
+  }
+
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk:-moz-only-whitespace::before {
+    content: none;
+  }
+
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-center::before,
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-center::before {
+    margin: 0 auto;
+  }
+
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-right::before,
+  :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.text-right::before {
+    margin-left: auto;
+  }
+
+  .rtl
+    :is(h1, h2, h3, h4, h5, h6).is-style-asterisk.has-text-align-left::before {
+    margin-right: auto;
+  }
+
+  .is-style-checkmark-list {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .is-style-checkmark-list li {
+    padding-left: 1.75em;
+    position: relative;
+  }
+
+  .is-style-checkmark-list li::before {
+    content: '✓';
+    position: absolute;
+    left: 0;
+    color: currentColor;
+  }
+
+  .is-style-rounded img,
+  img.is-style-rounded {
+    border-radius: min(1.5rem, 2vw);
+  }
+
+  :is(div, section, article, main, aside, header, footer, ul, ol).is-style-wide {
+    width: 100%;
+    max-width: none;
+  }
+
+  :is(hr, .wp-block-separator).is-style-wide,
+  .is-style-wide :is(hr, .wp-block-separator) {
+    width: 100%;
+    max-width: none;
+  }
+
+  .is-style-outline,
+  .is-style-outline.vp-generated-button,
+  .vp-generated-button.is-style-outline,
+  .vp-generated-link.is-style-outline {
+    color: inherit;
+    background: transparent;
+    border: 2px solid currentColor;
+  }
+}

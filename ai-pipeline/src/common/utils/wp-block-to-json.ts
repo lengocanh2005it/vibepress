@@ -150,6 +150,8 @@ function getUsefulParamKeysForBlock(blockName: string): Set<string> {
       'buttonText',
       'modalTitle',
       'modalText',
+      'modalCtaText',
+      'modalCtaLink',
       'modalWidth',
       'modalWidthType',
       'modalHeight',
@@ -696,9 +698,15 @@ function buildNode(
   innerMarkup: string,
 ): WpNode {
   const hasNestedBlocks = /<!-- wp:[a-z]/.test(innerMarkup);
+  const modalSyntheticChildren = isUagbModalBlock(blockName)
+    ? extractUagbModalTriggerChildren(innerMarkup)
+    : [];
 
   if (hasNestedBlocks) {
-    const children = parseBlocks(innerMarkup);
+    const children = mergeSyntheticChildren(
+      parseBlocks(innerMarkup),
+      modalSyntheticChildren,
+    );
     // For navigation blocks: keep navigation-link children as HINTS so the AI can
     // identify which WP menu corresponds to this navigation block (by matching item
     // labels/slugs). The AI must still ALWAYS fetch from GET /api/menus and render
@@ -811,6 +819,9 @@ function buildNode(
       : {}),
     ...coverSrc,
     ...leaf,
+    ...(modalSyntheticChildren.length > 0
+      ? { children: modalSyntheticChildren }
+      : {}),
   });
 }
 
@@ -936,6 +947,83 @@ function extractUsefulCustomClassNamesFromHtml(html: string): string[] {
       .filter(Boolean),
   );
   return extractUsefulCustomClassNames(tokens);
+}
+
+function isUagbModalBlock(blockName: string): boolean {
+  return blockName === 'uagb/modal' || blockName === 'modal';
+}
+
+function extractUagbModalTriggerChildren(innerMarkup: string): WpNode[] {
+  const matches = Array.from(
+    innerMarkup.matchAll(
+      /<(a|button)\b([^>]*\bclass="[^"]*\buagb-modal-(?:trigger|button-link)\b[^"]*"[^>]*)>([\s\S]*?)<\/\1>/gi,
+    ),
+  );
+  const nodes: WpNode[] = [];
+  const seen = new Set<string>();
+
+  for (const match of matches) {
+    const tag = String(match[1] ?? '').toLowerCase();
+    const attrs = String(match[2] ?? '');
+    const inner = String(match[3] ?? '');
+    const text = stripTags(inner).replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+
+    const className = attrs.match(/\bclass="([^"]+)"/i)?.[1];
+    const customClassNames = extractUsefulCustomClassNamesFromParam(className);
+    const href =
+      tag === 'a' ? (attrs.match(/\bhref="([^"]+)"/i)?.[1] ?? '#') : undefined;
+    const signature = [
+      text,
+      href ?? '',
+      (customClassNames ?? []).join('|'),
+    ].join('::');
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+
+    nodes.push(
+      compact({
+        block: 'button',
+        text,
+        ...(href ? { href } : {}),
+        ...(customClassNames?.length ? { customClassNames } : {}),
+      }),
+    );
+  }
+
+  return nodes;
+}
+
+function mergeSyntheticChildren(
+  children: WpNode[],
+  syntheticChildren: WpNode[],
+): WpNode[] {
+  if (syntheticChildren.length === 0) return children;
+  const merged = [...syntheticChildren];
+  const seen = new Set(
+    syntheticChildren.map((node) =>
+      [
+        node.block,
+        node.text ?? '',
+        node.href ?? '',
+        (node.customClassNames ?? []).join('|'),
+      ].join('::'),
+    ),
+  );
+
+  for (const child of children) {
+    const signature = [
+      child.block,
+      child.text ?? '',
+      child.href ?? '',
+      (child.customClassNames ?? []).join('|'),
+    ].join('::');
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    merged.push(child);
+  }
+
+  return merged;
 }
 
 function extractUsefulCustomClassNames(tokens: string[]): string[] {

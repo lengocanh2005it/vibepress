@@ -62,6 +62,10 @@ export function buildVisualPlanPrompt(input: {
     includeStructureHints: true,
   });
   const patternHints = buildPatternSuggestionsHint(repoManifest);
+  const spectraHints = buildSpectraPlanningHint(
+    repoManifest,
+    sourceWidgetHints,
+  );
   const contractHint = buildContractHint({
     componentName,
     componentType,
@@ -98,11 +102,27 @@ interface ComponentVisualPlan {
 }
 \`\`\`
 
-Every section also supports optional exact spacing fields and preserved custom class hooks from the template:
+Every section also supports optional exact spacing fields, presentation/layout fields, and preserved custom class hooks from the template:
 \`\`\`
-{ paddingStyle?: string, marginStyle?: string, gapStyle?: string, customClassNames?: string[] }
+{
+  paddingStyle?: string,
+  marginStyle?: string,
+  gapStyle?: string,
+  presentation?: { container?: shell|content, contentAlign?: left|center|right, textAlign?: left|center|right, itemsAlign?: start|center|end|stretch, justify?: start|center|between|end, contentMaxWidth?: string },
+  customClassNames?: string[]
+}
 \`\`\`
-Use them when the template source exposes real spacing values or explicit custom classes and you can preserve them exactly.
+Use them when the template source exposes real spacing values, wrapper alignment/width behavior, or explicit custom classes and you can preserve them exactly.
+
+For element-level source classes, preserve them on the closest matching blueprint field instead of collapsing everything onto the section wrapper:
+- \`hero.image.customClassNames\`
+- \`card-grid.cards[].customClassNames\`
+- \`card-grid.cards[].imageCustomClassNames\`
+- \`media-text.imageCustomClassNames\`
+- \`testimonial.authorAvatarCustomClassNames\`
+- \`modal.imageCustomClassNames\`
+- \`tabs.tabs[].imageCustomClassNames\`
+- \`carousel.slides[].imageCustomClassNames\`
 
 Typography and exact column-ratio metadata may also appear when the template exposes them:
 \`\`\`
@@ -113,6 +133,60 @@ Typography and exact column-ratio metadata may also appear when the template exp
   columnWidths?: string[]
 }
 \`\`\`
+
+## Blueprint visual fields — fill from theme when present
+
+Every section also accepts blueprint fields that make the plan a complete visual spec for code generation.
+When the template source or theme tokens expose values for these fields, you MUST include them in the section JSON.
+
+**Button / CTA style** — applies to any section with a CTA button:
+\`\`\`
+ctaStyle?: {
+  variant?: "solid" | "outline" | "ghost" | "link",
+  background?: string,   // exact hex from theme/template
+  color?: string,        // exact hex
+  hoverBackground?: string,
+  hoverColor?: string,
+  border?: string,       // e.g. "1px solid #d8613c"
+  borderRadius?: string, // e.g. "8px" or "9999px"
+  padding?: string       // e.g. "0.75rem 1.5rem"
+}
+secondaryCtaStyle?: { ... same shape ... }
+\`\`\`
+Fill ctaStyle from: button bg color in template attrs → palette.accent/palette.accentText → theme button tokens.
+Fill borderRadius from: template button border-radius → layout.buttonRadius → theme button tokens.
+
+**Card style** — for card-grid, testimonial:
+\`\`\`
+cardStyle?: {
+  background?: string,
+  padding?: string,
+  borderRadius?: string,
+  border?: string,
+  shadow?: string,
+  titleStyle?: TypographyStyle,
+  bodyStyle?: TypographyStyle,
+  imageRadius?: string,
+  imageAspectRatio?: string
+}
+\`\`\`
+Fill from: card wrapper background/padding/radius in template → layout.cardRadius/layout.cardPadding → palette.surface.
+
+**Section-specific additions:**
+- testimonial: also add quoteStyle (TypographyStyle), authorStyle (TypographyStyle), cardStyle
+- carousel: also add slideHeight (e.g. "500px"), dotsColor, arrowColor, arrowBackground
+- modal: also add triggerStyle (SectionButtonStyle), headingStyle, bodyStyle
+- card-grid: also add titleStyle (TypographyStyle for the section-level h2)
+- newsletter: also add headingStyle, inputStyle with background/borderRadius/border
+- media-text: also add imageRadius, imageAspectRatio
+
+**Rules for blueprint fields:**
+- Fill these fields ONLY when you have a concrete value from the template source, theme tokens, or a plugin repo contract surfaced below. Do NOT invent values.
+- When the template shows a button with a specific background color or border-radius, that value MUST appear in ctaStyle.
+- When the template shows cards with a specific background, padding, or radius, those MUST appear in cardStyle.
+- When typography on a specific element (quote font, card heading size) differs from the global body font, capture it in the matching Style field (quoteStyle, authorStyle, etc.).
+- For Spectra/UAGB interactive widgets, if the plugin repo contract exposes concrete defaults such as modal width/height/overlay color or slider arrow background, you MAY and SHOULD use those values when the block markup does not override them.
+- Omit a field entirely only when neither the template, nor the theme, nor the plugin repo contract provides a concrete value.
 
 ## Available section types
 
@@ -147,11 +221,11 @@ navbar:       { sticky, menuSlug, cta? }
 hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, image? } // centered|left => vertical stack (text first, image below)
 cta-strip:    { align?: left|center|right, cta?, ctas? }
 cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, contentAlign }
-post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage }
-card-grid:    { title?, subtitle?, columns: 2|3|4, columnWidths?, cards: [{heading,body}] }
-media-text:   { imageSrc, imageAlt, imagePosition: left|right, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta?, ctas? }
-testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign? }
-newsletter:   { heading, subheading?, buttonText, layout: centered|card }
+post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage, itemLayout?: title-meta-inline|stacked, metaLayout?: inline|stacked, metaAlign?: start|end, metaSeparator?: none|dot|dash|slash|pipe, itemGap?, metaGap? }
+card-grid:    { title?, titleStyle?, subtitle?, columns: 2|3|4, columnWidths?, cardStyle?, cards: [{heading,body}] }
+media-text:   { imageSrc, imageAlt, imagePosition: left|right, imageRadius?, imageAspectRatio?, columnWidths?, heading?, body?, headingStyle?, bodyStyle?, listItems?, cta?, ctas? }
+testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign?, quoteStyle?, authorStyle?, cardStyle? }
+newsletter:   { heading, headingStyle?, subheading?, buttonText, layout: centered|card, inputStyle?, cardStyle? }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
 post-meta:    { layout?: inline|stacked, showAuthor, showDate, showCategories, showSeparator? }
@@ -160,10 +234,10 @@ comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
 sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
-modal:        { triggerText?, heading?, body?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
+modal:        { triggerText?, triggerStyle?, heading?, headingStyle?, body?, bodyStyle?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
 tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
-carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], autoplay?, autoplaySpeed?, loop?, effect?, showDots?, showArrows?, vertical?, transitionSpeed?, pauseOn?, contentAlign? }
+carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }], slideHeight?, dotsColor?, arrowColor?, arrowBackground?, headingStyle?, subheadingStyle?, autoplay?, autoplaySpeed?, loop?, effect?, showDots?, showArrows?, vertical?, transitionSpeed?, pauseOn?, contentAlign? }
 \`\`\`
 
 ## Rules
@@ -224,7 +298,7 @@ ${contractHint}
 
 ${buildAuxiliaryGuardHint(sourceBackedAuxiliaryLabels)}
 
-${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${repoContext ? `${repoContext}\n\n` : ''}${patternHints ? `${patternHints}\n\n` : ''}${siteCtx}
+${sourceAnalysis ? `${sourceAnalysis}\n\n` : ''}${repoContext ? `${repoContext}\n\n` : ''}${patternHints ? `${patternHints}\n\n` : ''}${spectraHints ? `${spectraHints}\n\n` : ''}${siteCtx}
 
 ${palette}
 
@@ -394,6 +468,143 @@ function buildPatternSuggestionsHint(repoManifest?: RepoThemeManifest): string {
   if (patterns.length > 15) {
     lines.push(`- ... and ${patterns.length - 15} more`);
   }
+  return lines.join('\n');
+}
+
+function buildSpectraPlanningHint(
+  repoManifest?: RepoThemeManifest,
+  sourceWidgetHints?: string[],
+): string {
+  const spectra = repoManifest?.interactiveContracts?.spectra;
+  if (!spectra?.detected || !sourceWidgetHints?.length) return '';
+
+  const widgetConfigs: Array<{
+    hint: string;
+    contractKey: keyof typeof spectra.widgets;
+    sectionType: string;
+  }> = [
+    { hint: 'modal', contractKey: 'modal', sectionType: 'modal' },
+    { hint: 'tabs', contractKey: 'tabs', sectionType: 'tabs' },
+    {
+      hint: 'accordion',
+      contractKey: 'accordion',
+      sectionType: 'accordion',
+    },
+    { hint: 'slider', contractKey: 'slider', sectionType: 'carousel' },
+    { hint: 'carousel', contractKey: 'slider', sectionType: 'carousel' },
+  ];
+
+  const lines = [
+    '## Spectra / UAGB repo contract',
+    'The repo includes `plugins/ultimate-addons-for-gutenberg`. When the scoped source contains one of these widgets, keep the matching interactive section type in the visual plan instead of flattening it into static content.',
+  ];
+  let included = 0;
+
+  for (const config of widgetConfigs) {
+    if (!sourceWidgetHints.includes(config.hint)) continue;
+    const contract = spectra.widgets[config.contractKey];
+    if (!contract) continue;
+    included += 1;
+    lines.push(
+      `- ${config.hint}: keep as \`${config.sectionType}\`; block=${contract.blockType}; runtime=${contract.runtime}; attrs=${contract.attrKeys.join(', ') || 'none'}`,
+    );
+    const defaultParts = [
+      contract.defaults?.width ? `width=${contract.defaults.width}` : null,
+      contract.defaults?.height ? `height=${contract.defaults.height}` : null,
+      contract.defaults?.maxWidth
+        ? `maxWidth=${contract.defaults.maxWidth}`
+        : null,
+      contract.defaults?.overlayColor
+        ? `overlayColor=${contract.defaults.overlayColor}`
+        : null,
+      contract.defaults?.background
+        ? `background=${contract.defaults.background}`
+        : null,
+      contract.defaults?.textColor
+        ? `textColor=${contract.defaults.textColor}`
+        : null,
+      contract.defaults?.contentPadding
+        ? `contentPadding=${contract.defaults.contentPadding}`
+        : null,
+      contract.defaults?.slideHeight
+        ? `slideHeight=${contract.defaults.slideHeight}`
+        : null,
+      typeof contract.defaults?.activeTab === 'number'
+        ? `activeTab=${contract.defaults.activeTab}`
+        : null,
+      contract.defaults?.variant
+        ? `variant=${contract.defaults.variant}`
+        : null,
+      contract.defaults?.layout ? `layout=${contract.defaults.layout}` : null,
+      contract.defaults?.tabAlign
+        ? `tabAlign=${contract.defaults.tabAlign}`
+        : null,
+      contract.defaults?.iconPosition
+        ? `iconPosition=${contract.defaults.iconPosition}`
+        : null,
+      contract.defaults?.arrowBackground
+        ? `arrowBackground=${contract.defaults.arrowBackground}`
+        : null,
+      contract.defaults?.arrowColor
+        ? `arrowColor=${contract.defaults.arrowColor}`
+        : null,
+      contract.defaults?.dotsColor
+        ? `dotsColor=${contract.defaults.dotsColor}`
+        : null,
+      typeof contract.defaults?.autoplay === 'boolean'
+        ? `autoplay=${contract.defaults.autoplay}`
+        : null,
+      typeof contract.defaults?.autoplaySpeed === 'number'
+        ? `autoplaySpeed=${contract.defaults.autoplaySpeed}`
+        : null,
+      typeof contract.defaults?.loop === 'boolean'
+        ? `loop=${contract.defaults.loop}`
+        : null,
+      contract.defaults?.effect ? `effect=${contract.defaults.effect}` : null,
+      typeof contract.defaults?.showDots === 'boolean'
+        ? `showDots=${contract.defaults.showDots}`
+        : null,
+      typeof contract.defaults?.showArrows === 'boolean'
+        ? `showArrows=${contract.defaults.showArrows}`
+        : null,
+      typeof contract.defaults?.vertical === 'boolean'
+        ? `vertical=${contract.defaults.vertical}`
+        : null,
+      typeof contract.defaults?.transitionSpeed === 'number'
+        ? `transitionSpeed=${contract.defaults.transitionSpeed}`
+        : null,
+      contract.defaults?.pauseOn
+        ? `pauseOn=${contract.defaults.pauseOn}`
+        : null,
+      typeof contract.defaults?.allowMultiple === 'boolean'
+        ? `allowMultiple=${contract.defaults.allowMultiple}`
+        : null,
+      contract.defaults?.defaultOpenItems
+        ? `defaultOpenItems=${JSON.stringify(contract.defaults.defaultOpenItems)}`
+        : null,
+      typeof contract.defaults?.enableToggle === 'boolean'
+        ? `enableToggle=${contract.defaults.enableToggle}`
+        : null,
+    ].filter((part): part is string => !!part);
+    if (defaultParts.length > 0) {
+      lines.push(`  plugin defaults: ${defaultParts.join(', ')}`);
+    }
+    if (contract.appearance?.wrapperClasses?.length) {
+      lines.push(
+        `  wrapper markers: ${contract.appearance.wrapperClasses.slice(0, 5).join(', ')}`,
+      );
+    }
+    if (contract.appearance?.itemClasses?.length) {
+      lines.push(
+        `  item markers: ${contract.appearance.itemClasses.slice(0, 6).join(', ')}`,
+      );
+    }
+  }
+
+  if (included === 0) return '';
+  lines.push(
+    'Prefer these plugin-backed cues over generic hero/card/media-text interpretations when both could fit superficially.',
+  );
   return lines.join('\n');
 }
 
@@ -608,6 +819,17 @@ function validateSectionDetailed(
   } else {
     delete raw.columnWidths;
   }
+  const presentationNorm = sanitizeSectionPresentation(raw.presentation);
+  if (presentationNorm) raw.presentation = presentationNorm;
+  else delete raw.presentation;
+
+  // Blueprint base-section fields — apply to all section types
+  const ctaStyleNorm = sanitizeButtonStyle(raw.ctaStyle);
+  if (ctaStyleNorm) raw.ctaStyle = ctaStyleNorm;
+  else delete raw.ctaStyle;
+  const secondaryCtaStyleNorm = sanitizeButtonStyle(raw.secondaryCtaStyle);
+  if (secondaryCtaStyleNorm) raw.secondaryCtaStyle = secondaryCtaStyleNorm;
+  else delete raw.secondaryCtaStyle;
 
   // eslint-disable-next-line default-case
   switch (type) {
@@ -669,6 +891,27 @@ function validateSectionDetailed(
       ]) {
         if (typeof raw[f] !== 'boolean') raw[f] = true;
       }
+      if (!['title-meta-inline', 'stacked'].includes(raw.itemLayout)) {
+        delete raw.itemLayout;
+      }
+      if (!['inline', 'stacked'].includes(raw.metaLayout)) {
+        delete raw.metaLayout;
+      }
+      if (!['start', 'end'].includes(raw.metaAlign)) {
+        delete raw.metaAlign;
+      }
+      if (
+        !['none', 'dot', 'dash', 'slash', 'pipe'].includes(raw.metaSeparator)
+      ) {
+        delete raw.metaSeparator;
+      }
+      for (const key of ['itemGap', 'metaGap'] as const) {
+        if (typeof raw[key] === 'string' && raw[key].trim()) {
+          raw[key] = normalizeCssLengthString(raw[key]);
+        } else {
+          delete raw[key];
+        }
+      }
       break;
 
     case 'card-grid':
@@ -715,6 +958,21 @@ function validateSectionDetailed(
       if (!['center', 'left', 'right'].includes(raw.contentAlign)) {
         delete raw.contentAlign;
       }
+      {
+        const qs = sanitizeTypographyStyle(raw.quoteStyle);
+        if (qs) raw.quoteStyle = qs;
+        else delete raw.quoteStyle;
+      }
+      {
+        const as_ = sanitizeTypographyStyle(raw.authorStyle);
+        if (as_) raw.authorStyle = as_;
+        else delete raw.authorStyle;
+      }
+      {
+        const cs = sanitizeCardStyle(raw.cardStyle);
+        if (cs) raw.cardStyle = cs;
+        else delete raw.cardStyle;
+      }
       break;
 
     case 'newsletter':
@@ -722,6 +980,28 @@ function validateSectionDetailed(
         raw.heading = 'Subscribe to our newsletter';
       if (typeof raw.buttonText !== 'string') raw.buttonText = 'Subscribe';
       if (!['centered', 'card'].includes(raw.layout)) raw.layout = 'centered';
+      {
+        const hs = sanitizeTypographyStyle(raw.headingStyle);
+        if (hs) raw.headingStyle = hs;
+        else delete raw.headingStyle;
+      }
+      {
+        const cs = sanitizeCardStyle(raw.cardStyle);
+        if (cs) raw.cardStyle = cs;
+        else delete raw.cardStyle;
+      }
+      if (raw.inputStyle && typeof raw.inputStyle === 'object') {
+        const inp = raw.inputStyle as Record<string, unknown>;
+        const normalized: Record<string, string> = {};
+        for (const k of ['background', 'borderRadius', 'border'] as const) {
+          if (typeof inp[k] === 'string' && (inp[k] as string).trim())
+            normalized[k] = (inp[k] as string).trim();
+        }
+        if (Object.keys(normalized).length > 0) raw.inputStyle = normalized;
+        else delete raw.inputStyle;
+      } else {
+        delete raw.inputStyle;
+      }
       break;
 
     case 'footer':
@@ -801,6 +1081,21 @@ function validateSectionDetailed(
         delete raw.imageAlt;
       }
       if (typeof raw.imageAlt !== 'string') delete raw.imageAlt;
+      {
+        const ts = sanitizeButtonStyle(raw.triggerStyle);
+        if (ts) raw.triggerStyle = ts;
+        else delete raw.triggerStyle;
+      }
+      {
+        const mhs = sanitizeTypographyStyle(raw.headingStyle);
+        if (mhs) raw.headingStyle = mhs;
+        else delete raw.headingStyle;
+      }
+      {
+        const mbs = sanitizeTypographyStyle(raw.bodyStyle);
+        if (mbs) raw.bodyStyle = mbs;
+        else delete raw.bodyStyle;
+      }
       const modalCta = normalizeCtaConfig(raw.cta);
       if (modalCta) {
         raw.cta = modalCta;
@@ -1003,6 +1298,30 @@ function validateSectionDetailed(
       if (typeof raw.loop !== 'boolean') raw.loop = true;
       if (!['slide', 'fade', 'flip', 'coverflow'].includes(raw.effect)) {
         raw.effect = 'slide';
+      }
+      if (typeof raw.slideHeight === 'string' && raw.slideHeight.trim()) {
+        raw.slideHeight = normalizeCssLengthString(raw.slideHeight.trim());
+      } else {
+        delete raw.slideHeight;
+      }
+      raw.dotsColor =
+        sanitizeCssColorString(raw.dotsColor) ??
+        (delete raw.dotsColor, undefined);
+      raw.arrowColor =
+        sanitizeCssColorString(raw.arrowColor) ??
+        (delete raw.arrowColor, undefined);
+      raw.arrowBackground =
+        sanitizeCssColorString(raw.arrowBackground) ??
+        (delete raw.arrowBackground, undefined);
+      {
+        const chs = sanitizeTypographyStyle(raw.headingStyle);
+        if (chs) raw.headingStyle = chs;
+        else delete raw.headingStyle;
+      }
+      {
+        const css = sanitizeTypographyStyle(raw.subheadingStyle);
+        if (css) raw.subheadingStyle = css;
+        else delete raw.subheadingStyle;
       }
       if (typeof raw.showDots !== 'boolean') raw.showDots = true;
       if (typeof raw.showArrows !== 'boolean') raw.showArrows = true;
@@ -1633,4 +1952,99 @@ function normalizeCssLengthString(value: string): string {
   const normalized = value.trim();
   if (!normalized) return value;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function sanitizeButtonStyle(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const next: Record<string, string> = {};
+  const strFields = [
+    'variant',
+    'background',
+    'color',
+    'hoverBackground',
+    'hoverColor',
+    'border',
+    'borderRadius',
+    'padding',
+  ] as const;
+  for (const key of strFields) {
+    if (typeof raw[key] === 'string' && (raw[key] as string).trim()) {
+      next[key] = (raw[key] as string).trim();
+    }
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeCardStyle(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  const strFields = [
+    'background',
+    'padding',
+    'borderRadius',
+    'border',
+    'shadow',
+    'imageRadius',
+    'imageAspectRatio',
+  ] as const;
+  for (const key of strFields) {
+    if (typeof raw[key] === 'string' && (raw[key] as string).trim()) {
+      next[key] = (raw[key] as string).trim();
+    }
+  }
+  const titleStyle = sanitizeTypographyStyle(raw.titleStyle);
+  if (titleStyle) next.titleStyle = titleStyle;
+  const bodyStyle = sanitizeTypographyStyle(raw.bodyStyle);
+  if (bodyStyle) next.bodyStyle = bodyStyle;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeSectionPresentation(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const next: Record<string, string> = {};
+  if (raw.container === 'shell' || raw.container === 'content') {
+    next.container = raw.container;
+  }
+  for (const key of ['contentAlign', 'textAlign'] as const) {
+    if (raw[key] === 'left' || raw[key] === 'center' || raw[key] === 'right') {
+      next[key] = raw[key];
+    }
+  }
+  if (
+    raw.itemsAlign === 'start' ||
+    raw.itemsAlign === 'center' ||
+    raw.itemsAlign === 'end' ||
+    raw.itemsAlign === 'stretch'
+  ) {
+    next.itemsAlign = raw.itemsAlign;
+  }
+  if (
+    raw.justify === 'start' ||
+    raw.justify === 'center' ||
+    raw.justify === 'between' ||
+    raw.justify === 'end'
+  ) {
+    next.justify = raw.justify;
+  }
+  if (
+    typeof raw.contentMaxWidth === 'string' &&
+    raw.contentMaxWidth.trim().length > 0
+  ) {
+    next.contentMaxWidth = normalizeCssLengthString(raw.contentMaxWidth);
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sanitizeCssColorString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  return value.trim();
 }

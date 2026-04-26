@@ -1169,6 +1169,15 @@ ${fontEntries}
   private async applyBlockStyleBridges(frontendDir: string): Promise<void> {
     const srcDir = join(frontendDir, 'src');
     const cssPath = join(srcDir, 'index.css');
+    const builtInBridgeClasses = new Set([
+      'is-style-asterisk',
+      'is-style-checkmark-list',
+      'is-style-rounded',
+      'is-style-wide',
+      'is-style-outline',
+      'is-style-fill',
+      'is-style-default',
+    ]);
 
     // Scan all .tsx files for WordPress is-style-* classes
     const collectTsx = async (dir: string): Promise<string[]> => {
@@ -1254,6 +1263,7 @@ ${fontEntries}
 
     const cssBlocks: string[] = [];
     for (const cls of usedClasses) {
+      if (builtInBridgeClasses.has(cls)) continue;
       const rule = bridges[cls];
       if (rule && rule.trim()) cssBlocks.push(rule.trim());
     }
@@ -1491,14 +1501,34 @@ ${fontEntries}
         ),
       ]),
       // Remaining precise bridges (button/card target custom classes)
+      // For button-target precise classes like `vp-hover-shadow`, preserve the
+      // interaction motion/shadow but do not let extracted hover colors
+      // override the section/CTA palette chosen by the component plan.
       ...otherPrecise.flatMap((bridge) => [
-        renderStateRule(`.${bridge.className}`, bridge.base),
-        renderStateRule(`.${bridge.className}:hover`, bridge.hover),
+        renderStateRule(
+          `.${bridge.className}`,
+          bridge.target === 'button'
+            ? omitGenericButtonColorState(bridge.base)
+            : bridge.base,
+        ),
+        renderStateRule(
+          `.${bridge.className}:hover`,
+          bridge.target === 'button'
+            ? omitGenericButtonColorState(bridge.hover)
+            : bridge.hover,
+        ),
         renderStateRule(
           `.${bridge.className}:focus, .${bridge.className}:focus-visible`,
-          bridge.focus,
+          bridge.target === 'button'
+            ? omitGenericButtonColorState(bridge.focus)
+            : bridge.focus,
         ),
-        renderStateRule(`.${bridge.className}:active`, bridge.active),
+        renderStateRule(
+          `.${bridge.className}:active`,
+          bridge.target === 'button'
+            ? omitGenericButtonColorState(bridge.active)
+            : bridge.active,
+        ),
       ]),
     ].filter(Boolean);
 

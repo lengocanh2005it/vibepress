@@ -89,6 +89,7 @@ export interface PlannerVisualRepairDelegate {
     templateSource: string,
     sourceMap: Map<string, string>,
     content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): PlanningSourceCandidate[];
   buildPlanningSourceContext(
     componentPlan: PlannerComponentPlanLike,
@@ -96,6 +97,7 @@ export interface PlannerVisualRepairDelegate {
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext;
   buildPlanningSourceContextFromResolvedSource(
     componentPlan: PlannerComponentPlanLike,
@@ -393,6 +395,7 @@ export class PlannerVisualRepairService {
     sourceMap: Map<string, string>;
     content: DbContentResult;
     tokens: ThemeTokens | undefined;
+    repoManifest?: RepoThemeManifest;
     visualDataNeeds: DataNeed[];
     hasSharedLayoutPartials: boolean;
     currentState: PlannerVisualPlanRepairState;
@@ -412,6 +415,7 @@ export class PlannerVisualRepairService {
           componentPlan: input.componentPlan,
           sourceMap: input.sourceMap,
           content: input.content,
+          repoManifest: input.repoManifest,
           currentPlanningSource: input.currentState.planningSource,
           diagnosis,
           delegate: input.delegate,
@@ -430,6 +434,7 @@ export class PlannerVisualRepairService {
           input.sourceMap,
           input.content,
           input.hasSharedLayoutPartials,
+          input.repoManifest,
         );
 
     const state = this.buildRepairState({
@@ -445,6 +450,7 @@ export class PlannerVisualRepairService {
       planningSource,
       sourceMap: input.sourceMap,
       content: input.content,
+      repoManifest: input.repoManifest,
       draftSections: state.draftSections,
       sourceWidgetHints: state.sourceWidgetHints,
       allowedImageSrcs: state.allowedImageSrcs,
@@ -611,6 +617,7 @@ export class PlannerVisualRepairService {
     componentPlan: PlannerComponentPlanLike;
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     currentPlanningSource?: PlanningSourceContext;
     diagnosis: VisualPlanFailureDiagnosis;
     delegate: PlannerVisualRepairDelegate;
@@ -620,6 +627,7 @@ export class PlannerVisualRepairService {
       input.currentPlanningSource?.source ?? '',
       input.sourceMap,
       input.content,
+      input.repoManifest,
     );
     if (candidates.length === 0) return null;
 
@@ -669,6 +677,7 @@ export class PlannerVisualRepairService {
     planningSource?: PlanningSourceContext;
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     draftSections?: SectionPlan[];
     sourceWidgetHints: string[];
     allowedImageSrcs: string[];
@@ -742,6 +751,7 @@ export class PlannerVisualRepairService {
     planningSource?: PlanningSourceContext;
     sourceMap: Map<string, string>;
     content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
     delegate: PlannerVisualRepairDelegate;
   }): string[] {
     const candidates = input.delegate
@@ -750,6 +760,7 @@ export class PlannerVisualRepairService {
         input.planningSource?.source ?? '',
         input.sourceMap,
         input.content,
+        input.repoManifest,
       )
       .filter(
         (candidate) => candidate.label !== input.planningSource?.sourceLabel,

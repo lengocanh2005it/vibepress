@@ -3,6 +3,10 @@ import type {
   PipelineCaptureAttachmentDto,
   PipelineEditRequestDto,
 } from '../orchestrator/orchestrator.dto.js';
+import {
+  detectEditOperation,
+  buildOperationInstruction,
+} from './edit-operation.util.js';
 import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
 import { CapturePlanningService } from './capture-planning.service.js';
@@ -13,6 +17,7 @@ import type {
   UiMutationCandidate,
   UiMutationNodeRole,
 } from './ui-source-map.types.js';
+import type { ResolvedEditRequestContext } from './edit-request.types.js';
 
 export interface PostMigrationEditTask {
   componentName: string;
@@ -42,6 +47,7 @@ export class EditRequestPhaseService {
 
   buildPostMigrationEditTasks(input: {
     request?: PipelineEditRequestDto;
+    context?: ResolvedEditRequestContext;
     plan: PlanResult;
     components: GeneratedComponent[];
     exactCaptureTargets?: ResolvedCaptureTargetRecord[];
@@ -49,6 +55,7 @@ export class EditRequestPhaseService {
   }): PostMigrationEditTask[] {
     const {
       request,
+      context,
       plan,
       components,
       exactCaptureTargets,
@@ -150,6 +157,7 @@ export class EditRequestPhaseService {
         route: componentPlan?.route,
         feedback: this.buildTaskFeedback({
           request,
+          context,
           componentName,
           planComponentName,
           componentRoute: componentPlan?.route,
@@ -170,6 +178,7 @@ export class EditRequestPhaseService {
         exactTargets,
         debugSummary: this.buildTaskDebugSummary({
           request,
+          context,
           componentName,
           planComponentName,
           componentRoute: componentPlan?.route,
@@ -390,6 +399,7 @@ export class EditRequestPhaseService {
 
   private buildTaskFeedback(input: {
     request: PipelineEditRequestDto;
+    context?: ResolvedEditRequestContext;
     componentName: string;
     planComponentName: string;
     componentRoute?: string | null;
@@ -400,6 +410,7 @@ export class EditRequestPhaseService {
   }): string {
     const {
       request,
+      context,
       componentName,
       planComponentName,
       componentRoute,
@@ -408,10 +419,18 @@ export class EditRequestPhaseService {
       exactTargets,
       sectionMatches,
     } = input;
+    const editOperation =
+      context?.editOperation ?? detectEditOperation(request.prompt ?? '');
+    const operationInstruction = buildOperationInstruction(
+      editOperation,
+      request.prompt ?? '',
+    );
+
     const lines = [
       'This component was generated as part of the full-site baseline migration.',
       'Apply only the focused post-migration refinements that clearly belong to this component.',
       'Preserve unrelated layout, behavior, routing, and data contracts.',
+      operationInstruction || null,
       `Target component: ${componentName}`,
       planComponentName !== componentName
         ? `Plan component: ${planComponentName}`
@@ -437,6 +456,47 @@ export class EditRequestPhaseService {
       ].filter(Boolean);
       if (targetParts.length > 0) {
         lines.push(`Global target hint: ${targetParts.join(', ')}`);
+      }
+    }
+
+    if (context) {
+      lines.push(
+        `Resolved intent: category=${context.category}; scope=${context.targetScope}; strategy=${context.recommendedStrategy}; needsInference=${context.needsInference ? 'yes' : 'no'}`,
+      );
+      if (context.globalIntent) {
+        lines.push(`Resolved global intent: ${context.globalIntent}`);
+      }
+      if (context.focusHint) {
+        lines.push(`Resolved focus hint: ${context.focusHint}`);
+      }
+      if (context.targetCandidates.length > 0) {
+        lines.push('Highest-confidence inferred targets:');
+        for (const candidate of context.targetCandidates.slice(0, 3)) {
+          lines.push(`- ${formatIntentTargetCandidate(candidate)}`);
+        }
+      }
+      if (context.inferredAssumptions.length > 0) {
+        lines.push(
+          'Inference assumptions to preserve unless contradicted by stronger evidence:',
+        );
+        for (const assumption of context.inferredAssumptions.slice(0, 4)) {
+          lines.push(`- ${assumption}`);
+        }
+      }
+      if (context.ambiguities.length > 0) {
+        lines.push('Known ambiguities:');
+        for (const ambiguity of context.ambiguities.slice(0, 4)) {
+          lines.push(`- ${ambiguity}`);
+        }
+        lines.push(
+          'If ambiguity remains during editing, choose the smallest localized change that fits the strongest target evidence.',
+        );
+      }
+      if (context.warnings.length > 0) {
+        lines.push('Context warnings:');
+        for (const warning of context.warnings.slice(0, 4)) {
+          lines.push(`- ${warning}`);
+        }
       }
     }
 
@@ -495,6 +555,7 @@ export class EditRequestPhaseService {
 
   private buildTaskDebugSummary(input: {
     request: PipelineEditRequestDto;
+    context?: ResolvedEditRequestContext;
     componentName: string;
     planComponentName: string;
     componentRoute?: string | null;
@@ -505,6 +566,7 @@ export class EditRequestPhaseService {
   }): string {
     const {
       request,
+      context,
       componentName,
       planComponentName,
       componentRoute,
@@ -521,7 +583,45 @@ export class EditRequestPhaseService {
         : null,
       `route=${componentRoute ?? 'null'}`,
       `promptIncluded=${promptIncluded ? 'yes' : 'no'}`,
+      context?.editOperation ? `operation=${context.editOperation}` : null,
+      context?.targetScope ? `scope=${context.targetScope}` : null,
+      context?.recommendedStrategy
+        ? `strategy=${context.recommendedStrategy}`
+        : null,
+      context
+        ? `needsInference=${context.needsInference ? 'yes' : 'no'}`
+        : null,
     ].filter((value): value is string => Boolean(value));
+
+    if (context?.targetCandidates.length) {
+      parts.push(
+        `candidates=${context.targetCandidates
+          .slice(0, 3)
+          .map(
+            (candidate) =>
+              `{component=${candidate.componentName ?? 'null'},route=${candidate.route ?? 'null'},template=${candidate.templateName ?? 'null'},section=${candidate.sectionType ?? candidate.sectionKey ?? 'null'},role=${candidate.targetNodeRole ?? 'null'},confidence=${candidate.confidence.toFixed(2)}}`,
+          )
+          .join(' ')}`,
+      );
+    }
+
+    if (context?.ambiguities.length) {
+      parts.push(
+        `ambiguities=${context.ambiguities
+          .slice(0, 3)
+          .map((ambiguity) => `"${truncate(ambiguity, 80)}"`)
+          .join(' ')}`,
+      );
+    }
+
+    if (context?.warnings.length) {
+      parts.push(
+        `warnings=${context.warnings
+          .slice(0, 3)
+          .map((warning) => `"${truncate(warning, 80)}"`)
+          .join(' ')}`,
+      );
+    }
 
     if (request.targetHint) {
       const targetParts = [
@@ -791,6 +891,31 @@ function formatAttachmentInstruction(
   }
   if (attachment.asset?.publicUrl) {
     parts.push(`image=${attachment.asset.publicUrl}`);
+  }
+
+  return parts.join(' | ');
+}
+
+function formatIntentTargetCandidate(
+  candidate: ResolvedEditRequestContext['targetCandidates'][number],
+): string {
+  const parts = [
+    candidate.componentName ? `component=${candidate.componentName}` : null,
+    candidate.route ? `route=${candidate.route}` : null,
+    candidate.templateName ? `template=${candidate.templateName}` : null,
+    candidate.sectionKey ? `sectionKey=${candidate.sectionKey}` : null,
+    candidate.sectionType ? `sectionType=${candidate.sectionType}` : null,
+    candidate.targetNodeRole ? `role=${candidate.targetNodeRole}` : null,
+    `confidence=${candidate.confidence.toFixed(2)}`,
+  ].filter((value): value is string => Boolean(value));
+
+  if (candidate.evidence.length > 0) {
+    parts.push(
+      `evidence=${candidate.evidence
+        .slice(0, 3)
+        .map((entry) => `"${truncate(entry, 60)}"`)
+        .join(' ')}`,
+    );
   }
 
   return parts.join(' | ');
