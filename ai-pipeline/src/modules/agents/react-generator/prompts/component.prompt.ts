@@ -89,6 +89,7 @@ const MAX_RETRY_ERROR_CHARS = 700;
 const MAX_PLAN_TEXT_CHARS = 180;
 
 export interface ComponentPromptContext {
+  templateName?: string;
   description?: string;
   dataNeeds?: string[];
   route?: string | null;
@@ -149,11 +150,232 @@ function shouldIncludeRepoManifestContext(
   plan?: ComponentPromptContext,
 ): boolean {
   if (!plan?.visualPlan) return false;
+  if (plan.templateName) return true;
   if (/header|footer|nav/i.test(componentName ?? '')) return true;
   if (plan.dataNeeds?.includes('menus')) return true;
   return plan.visualPlan.sections.some((section) =>
     ['navbar', 'footer', 'sidebar'].includes(section.type),
   );
+}
+
+function normalizeTemplateIdentifier(value?: string | null): string {
+  return (
+    String(value ?? '')
+      .trim()
+      .replace(/\\/g, '/')
+      .split('/')
+      .pop()
+      ?.replace(/\.(php|html)$/i, '')
+      .toLowerCase() ?? ''
+  );
+}
+
+function findRepoEntrySourceChain(
+  repoManifest: RepoThemeManifest | undefined,
+  templateName?: string | null,
+) {
+  if (!repoManifest || !templateName) return undefined;
+  const normalizedTemplate = normalizeTemplateIdentifier(templateName);
+  return repoManifest.structureHints.entrySourceChains.find((chain) => {
+    const entryName = normalizeTemplateIdentifier(chain.entryFile);
+    if (entryName === normalizedTemplate) return true;
+    if (
+      normalizedTemplate === 'home' &&
+      ['front-page', 'home', 'index'].includes(entryName)
+    ) {
+      return true;
+    }
+    if (
+      normalizedTemplate === 'front-page' &&
+      ['front-page', 'home'].includes(entryName)
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
+
+export function buildComponentRepoChainNote(
+  repoManifest: RepoThemeManifest | undefined,
+  plan?: ComponentPromptContext,
+): string {
+  const chain = findRepoEntrySourceChain(repoManifest, plan?.templateName);
+  if (!chain) return '';
+
+  const lines = [
+    '## Component-specific repo source chain',
+    `This component is backed by repo chain: ${chain.chainFiles.slice(0, 10).join(' -> ')}${chain.chainFiles.length > 10 ? ' ...' : ''}`,
+  ];
+
+  if (chain.notes.length > 0) {
+    lines.push(`Repo chain notes: ${chain.notes.join(', ')}`);
+  }
+  if (chain.assetFiles.length > 0) {
+    lines.push(
+      `Chain asset files: ${chain.assetFiles.slice(0, 8).join(', ')}${chain.assetFiles.length > 8 ? ' ...' : ''}`,
+    );
+  }
+  if (chain.headingTexts.length > 0) {
+    lines.push(
+      `Chain headings: ${chain.headingTexts
+        .slice(0, 5)
+        .map((heading) => JSON.stringify(heading))
+        .join(', ')}`,
+    );
+  }
+  lines.push(
+    'Follow this repo chain when deciding section order, shared chrome ownership, and exact asset usage. Do not collapse a thin template wrapper into a generic page if the chain points to pattern-composed sections.',
+  );
+
+  return lines.join('\n');
+}
+
+function formatSpectraDefaults(defaults?: {
+  width?: string;
+  height?: string;
+  maxWidth?: string;
+  overlayColor?: string;
+  background?: string;
+  textColor?: string;
+  contentPadding?: string;
+  slideHeight?: string;
+  activeTab?: number;
+  variant?: string;
+  layout?: string;
+  tabAlign?: string;
+  iconPosition?: string;
+  arrowBackground?: string;
+  arrowColor?: string;
+  dotsColor?: string;
+  autoplay?: boolean;
+  autoplaySpeed?: number;
+  loop?: boolean;
+  effect?: string;
+  showDots?: boolean;
+  showArrows?: boolean;
+  vertical?: boolean;
+  transitionSpeed?: number;
+  pauseOn?: string;
+  allowMultiple?: boolean;
+  defaultOpenItems?: number[];
+  enableToggle?: boolean;
+}): string {
+  if (!defaults) return '';
+  return [
+    defaults.width ? `width=${defaults.width}` : null,
+    defaults.height ? `height=${defaults.height}` : null,
+    defaults.maxWidth ? `maxWidth=${defaults.maxWidth}` : null,
+    defaults.overlayColor ? `overlayColor=${defaults.overlayColor}` : null,
+    defaults.background ? `background=${defaults.background}` : null,
+    defaults.textColor ? `textColor=${defaults.textColor}` : null,
+    defaults.contentPadding
+      ? `contentPadding=${defaults.contentPadding}`
+      : null,
+    defaults.slideHeight ? `slideHeight=${defaults.slideHeight}` : null,
+    typeof defaults.activeTab === 'number'
+      ? `activeTab=${defaults.activeTab}`
+      : null,
+    defaults.variant ? `variant=${defaults.variant}` : null,
+    defaults.layout ? `layout=${defaults.layout}` : null,
+    defaults.tabAlign ? `tabAlign=${defaults.tabAlign}` : null,
+    defaults.iconPosition ? `iconPosition=${defaults.iconPosition}` : null,
+    defaults.arrowBackground
+      ? `arrowBackground=${defaults.arrowBackground}`
+      : null,
+    defaults.arrowColor ? `arrowColor=${defaults.arrowColor}` : null,
+    defaults.dotsColor ? `dotsColor=${defaults.dotsColor}` : null,
+    typeof defaults.autoplay === 'boolean'
+      ? `autoplay=${defaults.autoplay}`
+      : null,
+    typeof defaults.autoplaySpeed === 'number'
+      ? `autoplaySpeed=${defaults.autoplaySpeed}`
+      : null,
+    typeof defaults.loop === 'boolean' ? `loop=${defaults.loop}` : null,
+    defaults.effect ? `effect=${defaults.effect}` : null,
+    typeof defaults.showDots === 'boolean'
+      ? `showDots=${defaults.showDots}`
+      : null,
+    typeof defaults.showArrows === 'boolean'
+      ? `showArrows=${defaults.showArrows}`
+      : null,
+    typeof defaults.vertical === 'boolean'
+      ? `vertical=${defaults.vertical}`
+      : null,
+    typeof defaults.transitionSpeed === 'number'
+      ? `transitionSpeed=${defaults.transitionSpeed}`
+      : null,
+    defaults.pauseOn ? `pauseOn=${defaults.pauseOn}` : null,
+    typeof defaults.allowMultiple === 'boolean'
+      ? `allowMultiple=${defaults.allowMultiple}`
+      : null,
+    defaults.defaultOpenItems
+      ? `defaultOpenItems=${JSON.stringify(defaults.defaultOpenItems)}`
+      : null,
+    typeof defaults.enableToggle === 'boolean'
+      ? `enableToggle=${defaults.enableToggle}`
+      : null,
+  ]
+    .filter((part): part is string => !!part)
+    .join(', ');
+}
+
+export function buildSpectraContractPromptNote(
+  repoManifest: RepoThemeManifest | undefined,
+  visualPlan?: ComponentVisualPlan,
+): string {
+  const spectra = repoManifest?.interactiveContracts?.spectra;
+  if (!spectra?.detected || !visualPlan?.sections?.length) return '';
+
+  const widgetKeys = new Set<string>();
+  for (const section of visualPlan.sections) {
+    if (section.type === 'modal') widgetKeys.add('modal');
+    if (section.type === 'tabs') widgetKeys.add('tabs');
+    if (section.type === 'accordion') widgetKeys.add('accordion');
+    if (section.type === 'carousel') widgetKeys.add('slider');
+  }
+  if (widgetKeys.size === 0) return '';
+
+  const lines = [
+    '## Spectra / UAGB plugin contract',
+    'Interactive behavior must match the repo plugin source under `plugins/ultimate-addons-for-gutenberg`.',
+  ];
+
+  for (const key of widgetKeys) {
+    const contract = spectra.widgets[key as keyof typeof spectra.widgets];
+    if (!contract) continue;
+    const defaults = formatSpectraDefaults(contract.defaults);
+    lines.push(
+      `- ${key}: block=${contract.blockType}; runtime=${contract.runtime}; attrs=${contract.attrKeys.join(', ') || 'none'}; scripts=${contract.scriptFiles.join(', ') || 'none'}; styles=${contract.styleFiles.join(', ') || 'none'}${
+        defaults ? `; defaults=${defaults}` : ''
+      }`,
+    );
+    if (contract.appearance) {
+      const appearance = contract.appearance;
+      if (appearance.wrapperClasses.length > 0) {
+        lines.push(
+          `  wrappers=${appearance.wrapperClasses.slice(0, 5).join(', ')}`,
+        );
+      }
+      if (appearance.itemClasses.length > 0) {
+        lines.push(`  items=${appearance.itemClasses.slice(0, 6).join(', ')}`);
+      }
+      if (appearance.activeClasses.length > 0) {
+        lines.push(
+          `  active=${appearance.activeClasses.slice(0, 4).join(', ')}`,
+        );
+      }
+      if (appearance.variantClasses.length > 0) {
+        lines.push(
+          `  variants=${appearance.variantClasses.slice(0, 4).join(', ')}`,
+        );
+      }
+    }
+  }
+
+  lines.push(
+    'Preserve these plugin markers/classes when rendering interactive sections. Do not replace them with generic Tailwind-only markup if the approved plan/source expects Spectra semantics.',
+  );
+  return lines.join('\n');
 }
 
 function buildAllowedEndpointsNote(input: {
@@ -317,7 +539,7 @@ function buildForbiddenBehaviorNote(input: {
     );
     if (isPageDetail && input.fixedSlug) {
       lines.push(
-        '- Fixed page-detail rule: fetch the exact page record and render one canonical `page-content` body wrapper for `page.content`. Do NOT decompose stored WordPress page body into separate `hero`, `cover`, `media-text`, `card-grid`, `testimonial`, `tabs`, `accordion`, `carousel`, or `modal` sections unless the approved visual plan explicitly keeps that exact source-backed section outside the body.',
+        '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.',
       );
     }
   }
@@ -1360,6 +1582,9 @@ function buildCompactSectionSummary(
     if (section.sourceRef?.sourceNodeId) {
       parts.push(`sourceNodeId=${section.sourceRef.sourceNodeId}`);
     }
+    if (section.presentation) {
+      parts.push(`presentation=${JSON.stringify(section.presentation)}`);
+    }
 
     switch (section.type) {
       case 'navbar':
@@ -1367,7 +1592,7 @@ function buildCompactSectionSummary(
         parts.push(`sticky=${section.sticky}`);
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
-        pushPlanTextPart(parts, 'ctaStyle', section.cta?.style);
+        pushPlanTextPart(parts, 'ctaPresentation', section.cta?.style);
         break;
       case 'hero':
         parts.push(`layout=${section.layout}`);
@@ -1382,6 +1607,17 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'imageSrc', section.image?.src);
         pushPlanTextPart(parts, 'imageAlt', section.image?.alt);
         pushPlanTextPart(parts, 'imagePosition', section.image?.position);
+        if (section.image?.customClassNames?.length) {
+          parts.push(
+            `imageCustomClassNames=${formatClassList(section.image.customClassNames)}`,
+          );
+        }
+        if (section.ctaStyle)
+          parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
+        if (section.secondaryCtaStyle)
+          parts.push(
+            `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`,
+          );
         break;
       case 'cta-strip':
         pushPlanTextPart(parts, 'align', section.align);
@@ -1391,6 +1627,12 @@ function buildCompactSectionSummary(
           pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
           pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
         });
+        if (section.ctaStyle)
+          parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
+        if (section.secondaryCtaStyle)
+          parts.push(
+            `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`,
+          );
         break;
       case 'modal':
         parts.push(`layout=${section.layout ?? 'centered'}`);
@@ -1399,8 +1641,29 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'body', section.body, 220);
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
         pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
+        if (section.imageCustomClassNames?.length) {
+          parts.push(
+            `imageCustomClassNames=${formatClassList(section.imageCustomClassNames)}`,
+          );
+        }
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
+        if (section.width) parts.push(`width=${section.width}`);
+        if (section.height) parts.push(`height=${section.height}`);
+        if (section.overlayColor)
+          parts.push(`overlayColor=${section.overlayColor}`);
+        if (section.triggerStyle)
+          parts.push(`triggerStyle=${JSON.stringify(section.triggerStyle)}`);
+        if (section.headingStyle)
+          parts.push(`headingStyle=${JSON.stringify(section.headingStyle)}`);
+        if (section.bodyStyle)
+          parts.push(`bodyStyle=${JSON.stringify(section.bodyStyle)}`);
+        if (section.ctaStyle)
+          parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
+        if (section.secondaryCtaStyle)
+          parts.push(
+            `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`,
+          );
         break;
       case 'sidebar':
         pushPlanTextPart(parts, 'title', section.title);
@@ -1418,6 +1681,30 @@ function buildCompactSectionSummary(
         parts.push(`showCategory=${section.showCategory}`);
         parts.push(`showExcerpt=${section.showExcerpt}`);
         parts.push(`showFeaturedImage=${section.showFeaturedImage}`);
+        if (section.itemLayout) parts.push(`itemLayout=${section.itemLayout}`);
+        if (section.metaLayout) parts.push(`metaLayout=${section.metaLayout}`);
+        if (section.metaAlign) parts.push(`metaAlign=${section.metaAlign}`);
+        if (section.metaSeparator) {
+          parts.push(`metaSeparator=${section.metaSeparator}`);
+        }
+        if (section.itemGap) parts.push(`itemGap=${section.itemGap}`);
+        if (section.metaGap) parts.push(`metaGap=${section.metaGap}`);
+        if (section.showDividers)
+          parts.push(`showDividers=${section.showDividers}`);
+        if (section.dividerColor)
+          parts.push(`dividerColor=${section.dividerColor}`);
+        if (section.titleColumnWidth) {
+          parts.push(`titleColumnWidth=${section.titleColumnWidth}`);
+        }
+        if (section.metaColumnWidth) {
+          parts.push(`metaColumnWidth=${section.metaColumnWidth}`);
+        }
+        if (section.splitCategoryLine) {
+          parts.push(`splitCategoryLine=${section.splitCategoryLine}`);
+        }
+        if (section.categoryPrefix) {
+          parts.push(`categoryPrefix=${section.categoryPrefix}`);
+        }
         break;
       case 'post-content':
         parts.push(`showTitle=${section.showTitle}`);
@@ -1434,6 +1721,12 @@ function buildCompactSectionSummary(
         break;
       case 'page-content':
         parts.push(`showTitle=${section.showTitle}`);
+        if (section.shellVariant) {
+          parts.push(`shellVariant=${section.shellVariant}`);
+        }
+        if (section.bodyPresentation) {
+          parts.push(`bodyPresentation=${section.bodyPresentation}`);
+        }
         break;
       case 'cover':
         parts.push(`contentAlign=${section.contentAlign}`);
@@ -1462,7 +1755,21 @@ function buildCompactSectionSummary(
             140,
           );
           pushPlanTextPart(parts, `card${cardIndex + 1}Body`, card.body, 180);
+          if (card.customClassNames?.length) {
+            parts.push(
+              `card${cardIndex + 1}CustomClassNames=${formatClassList(card.customClassNames)}`,
+            );
+          }
+          if (card.imageCustomClassNames?.length) {
+            parts.push(
+              `card${cardIndex + 1}ImageCustomClassNames=${formatClassList(card.imageCustomClassNames)}`,
+            );
+          }
         });
+        if (section.titleStyle)
+          parts.push(`titleStyle=${JSON.stringify(section.titleStyle)}`);
+        if (section.cardStyle)
+          parts.push(`cardStyle=${JSON.stringify(section.cardStyle)}`);
         break;
       case 'media-text':
         parts.push(`imagePosition=${section.imagePosition}`);
@@ -1470,6 +1777,11 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'body', section.body, 240);
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
         pushPlanTextPart(parts, 'imageAlt', section.imageAlt);
+        if (section.imageCustomClassNames?.length) {
+          parts.push(
+            `imageCustomClassNames=${formatClassList(section.imageCustomClassNames)}`,
+          );
+        }
         pushPlanListPart(parts, 'listItems', section.listItems, {
           maxItems: 10,
           maxChars: 160,
@@ -1480,10 +1792,24 @@ function buildCompactSectionSummary(
           pushPlanTextPart(parts, `cta${ctaIndex + 2}Text`, cta.text);
           pushPlanTextPart(parts, `cta${ctaIndex + 2}Link`, cta.link);
         });
+        if (section.imageRadius)
+          parts.push(`imageRadius=${section.imageRadius}`);
+        if (section.imageAspectRatio)
+          parts.push(`imageAspectRatio=${section.imageAspectRatio}`);
+        if (section.ctaStyle)
+          parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
+        if (section.secondaryCtaStyle)
+          parts.push(
+            `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`,
+          );
         break;
       case 'tabs':
         pushPlanTextPart(parts, 'title', section.title);
         parts.push(`tabCount=${section.tabs.length}`);
+        if (typeof section.activeTab === 'number')
+          parts.push(`activeTab=${section.activeTab}`);
+        if (section.variant) parts.push(`variant=${section.variant}`);
+        if (section.tabAlign) parts.push(`tabAlign=${section.tabAlign}`);
         section.tabs.forEach((tab, tabIndex) => {
           pushPlanTextPart(parts, `tab${tabIndex + 1}Label`, tab.label, 120);
           pushPlanTextPart(
@@ -1494,6 +1820,11 @@ function buildCompactSectionSummary(
           );
           pushPlanTextPart(parts, `tab${tabIndex + 1}Body`, tab.body, 180);
           pushPlanTextPart(parts, `tab${tabIndex + 1}ImageSrc`, tab.imageSrc);
+          if (tab.imageCustomClassNames?.length) {
+            parts.push(
+              `tab${tabIndex + 1}ImageCustomClassNames=${formatClassList(tab.imageCustomClassNames)}`,
+            );
+          }
           pushPlanTextPart(
             parts,
             `tab${tabIndex + 1}CtaText`,
@@ -1506,6 +1837,14 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'title', section.title);
         parts.push(`itemCount=${section.items.length}`);
         parts.push(`allowMultiple=${section.allowMultiple ?? false}`);
+        if (typeof section.enableToggle === 'boolean')
+          parts.push(`enableToggle=${section.enableToggle}`);
+        if (section.defaultOpenItems?.length) {
+          parts.push(
+            `defaultOpenItems=${JSON.stringify(section.defaultOpenItems)}`,
+          );
+        }
+        if (section.variant) parts.push(`variant=${section.variant}`);
         section.items.forEach((item, itemIndex) => {
           pushPlanTextPart(
             parts,
@@ -1521,12 +1860,29 @@ function buildCompactSectionSummary(
         pushPlanTextPart(parts, 'authorName', section.authorName);
         pushPlanTextPart(parts, 'authorTitle', section.authorTitle);
         pushPlanTextPart(parts, 'authorAvatar', section.authorAvatar);
+        if (section.authorAvatarCustomClassNames?.length) {
+          parts.push(
+            `authorAvatarCustomClassNames=${formatClassList(section.authorAvatarCustomClassNames)}`,
+          );
+        }
+        if (section.quoteStyle)
+          parts.push(`quoteStyle=${JSON.stringify(section.quoteStyle)}`);
+        if (section.authorStyle)
+          parts.push(`authorStyle=${JSON.stringify(section.authorStyle)}`);
+        if (section.cardStyle)
+          parts.push(`cardStyle=${JSON.stringify(section.cardStyle)}`);
         break;
       case 'newsletter':
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'subheading', section.subheading);
         pushPlanTextPart(parts, 'buttonText', section.buttonText);
         parts.push(`layout=${section.layout}`);
+        if (section.headingStyle)
+          parts.push(`headingStyle=${JSON.stringify(section.headingStyle)}`);
+        if (section.inputStyle)
+          parts.push(`inputStyle=${JSON.stringify(section.inputStyle)}`);
+        if (section.cardStyle)
+          parts.push(`cardStyle=${JSON.stringify(section.cardStyle)}`);
         break;
       case 'footer':
         pushPlanTextPart(
@@ -1544,6 +1900,68 @@ function buildCompactSectionSummary(
         );
         pushPlanTextPart(parts, 'copyright', section.copyright);
         break;
+      case 'carousel':
+        parts.push(`slideCount=${section.slides.length}`);
+        if (typeof section.autoplay === 'boolean')
+          parts.push(`autoplay=${section.autoplay}`);
+        if (typeof section.autoplaySpeed === 'number')
+          parts.push(`autoplaySpeed=${section.autoplaySpeed}`);
+        if (typeof section.loop === 'boolean')
+          parts.push(`loop=${section.loop}`);
+        if (section.effect) parts.push(`effect=${section.effect}`);
+        if (typeof section.showDots === 'boolean')
+          parts.push(`showDots=${section.showDots}`);
+        if (typeof section.showArrows === 'boolean')
+          parts.push(`showArrows=${section.showArrows}`);
+        if (typeof section.vertical === 'boolean')
+          parts.push(`vertical=${section.vertical}`);
+        if (typeof section.transitionSpeed === 'number')
+          parts.push(`transitionSpeed=${section.transitionSpeed}`);
+        if (section.pauseOn) parts.push(`pauseOn=${section.pauseOn}`);
+        if (section.slideHeight)
+          parts.push(`slideHeight=${section.slideHeight}`);
+        if (section.dotsColor) parts.push(`dotsColor=${section.dotsColor}`);
+        if (section.arrowColor) parts.push(`arrowColor=${section.arrowColor}`);
+        if (section.arrowBackground)
+          parts.push(`arrowBackground=${section.arrowBackground}`);
+        if (section.headingStyle)
+          parts.push(`headingStyle=${JSON.stringify(section.headingStyle)}`);
+        if (section.subheadingStyle)
+          parts.push(
+            `subheadingStyle=${JSON.stringify(section.subheadingStyle)}`,
+          );
+        if (section.ctaStyle)
+          parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
+        if (section.secondaryCtaStyle)
+          parts.push(
+            `secondaryCtaStyle=${JSON.stringify(section.secondaryCtaStyle)}`,
+          );
+        section.slides.forEach((slide, slideIndex) => {
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}Heading`,
+            slide.heading,
+            140,
+          );
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}Subheading`,
+            slide.subheading,
+            180,
+          );
+          pushPlanTextPart(
+            parts,
+            `slide${slideIndex + 1}CtaText`,
+            slide.cta?.text,
+            120,
+          );
+          if (slide.imageCustomClassNames?.length) {
+            parts.push(
+              `slide${slideIndex + 1}ImageCustomClassNames=${formatClassList(slide.imageCustomClassNames)}`,
+            );
+          }
+        });
+        break;
       case 'search':
         pushPlanTextPart(parts, 'title', section.title);
         break;
@@ -1558,6 +1976,13 @@ function buildCompactSectionSummary(
     if (section.customClassNames?.length) {
       parts.push(
         `customClassNames=${formatClassList(section.customClassNames)}`,
+      );
+    }
+    const innerCustomClassNames =
+      extractInnerCustomClassNamesFromSection(section);
+    if (innerCustomClassNames.length > 0) {
+      parts.push(
+        `innerCustomClassNames=${formatClassList(innerCustomClassNames)}`,
       );
     }
 
@@ -1589,7 +2014,9 @@ export function buildVisualPlanContextNote(
   }
   const requiredCustomClassNames = [
     ...new Set(
-      visualPlan.sections.flatMap((section) => section.customClassNames ?? []),
+      visualPlan.sections.flatMap((section) =>
+        extractCustomClassNamesFromSection(section),
+      ),
     ),
   ];
   if (requiredCustomClassNames.length > 0) {
@@ -1723,6 +2150,60 @@ export function buildVisualPlanContextNote(
     );
   }
 
+  if (visualPlan.palette) {
+    const p = visualPlan.palette;
+    lines.push('');
+    lines.push(
+      '## Visual plan palette — authoritative colors (override theme tokens when they conflict)',
+    );
+    lines.push(
+      'If the visual plan palette conflicts with generic theme token defaults, follow the visual plan palette for this component.',
+    );
+    if (p.text) {
+      lines.push(`- All headings (h1-h6) and ordinary body text: \`text-[${p.text}]\``);
+    }
+    if (p.background) {
+      lines.push(`- Page/section background: \`bg-[${p.background}]\``);
+    }
+    if (p.accent && p.accentText) {
+      lines.push(
+        `- Accent buttons / emphasis surfaces: \`bg-[${p.accent}]\` + \`text-[${p.accentText}]\``,
+      );
+    }
+    if (p.textMuted) {
+      lines.push(`- Muted / secondary text: \`text-[${p.textMuted}]\``);
+    }
+    if (p.surface && p.surface !== p.background) {
+      lines.push(`- Surface / card background: \`bg-[${p.surface}]\``);
+    }
+  }
+
+  if (visualPlan.typography) {
+    const t = visualPlan.typography;
+    lines.push('');
+    lines.push('## Visual plan typography — authoritative type scale');
+    lines.push(
+      'If this visual plan typography conflicts with generic theme token defaults, follow the visual plan typography for this component.',
+    );
+    if (t.h1) lines.push(`- \`<h1>\`: ${t.h1}`);
+    if (t.h2) lines.push(`- \`<h2>\`: ${t.h2}`);
+    if (t.h3) lines.push(`- \`<h3>\`: ${t.h3}`);
+    if (t.body) lines.push(`- body text: ${t.body}`);
+    if (t.headingFamily) {
+      lines.push(
+        `- Heading font family: apply \`style={{fontFamily:"${t.headingFamily}"}}\` on h1-h6 only when not already provided by a more specific section typography override.`,
+      );
+    }
+    if (t.bodyFamily) {
+      lines.push(
+        `- Body font family: apply \`style={{fontFamily:"${t.bodyFamily}"}}\` to ordinary paragraphs/list text only when not already inherited from the root wrapper.`,
+      );
+    }
+    if (t.buttonRadius) {
+      lines.push(`- Button radius: \`${t.buttonRadius}\``);
+    }
+  }
+
   lines.push('');
   lines.push('## Compact visual plan summary');
   lines.push(...buildCompactSectionSummary(visualPlan, componentName));
@@ -1785,6 +2266,8 @@ export function buildComponentPrompt(
     buildFullFileVisualPlanBehaviorChecklist(componentPlan?.visualPlan),
     buildFullFileLiteralChecklist(componentPlan?.visualPlan),
     repoContext,
+    buildComponentRepoChainNote(repoManifest, componentPlan),
+    buildSpectraContractPromptNote(repoManifest, componentPlan?.visualPlan),
     editRequestContextNote,
   ]
     .filter(Boolean)
@@ -1883,6 +2366,9 @@ function buildFullFileVisualPlanBehaviorChecklist(
     lines.push(
       '- Modal popup output must include `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
     );
+    lines.push(
+      '- When the modal popup is rendered open, the popup overlay className must also include `active` so Spectra/UAGB compat CSS actually makes it visible.',
+    );
   }
 
   if (visualPlan.sections.some((section) => section.type === 'carousel')) {
@@ -1896,7 +2382,49 @@ function buildFullFileVisualPlanBehaviorChecklist(
     lines.push(
       '- `swiper-button-prev` and `swiper-button-next` must render a visible SVG or text child. Do NOT leave control buttons empty.',
     );
+    lines.push(
+      '- If you declare drag/swipe helpers such as `beginCarouselDrag`, `updateCarouselDrag`, `finishCarouselDrag`, `cancelCarouselDrag`, or `isCarouselInteractiveTarget`, you must attach them to the rendered slider shell via pointer handlers. Do NOT leave these helpers unused.',
+    );
+    lines.push(
+      '- Preserve approved carousel blueprint fields such as `slideHeight`, `dotsColor`, `arrowColor`, `arrowBackground`, `autoplay`, `autoplaySpeed`, `loop`, `effect`, `showDots`, `showArrows`, `vertical`, and `transitionSpeed`. Do NOT silently fall back to generic slider defaults when the plan already provides these values.',
+    );
   }
+
+  if (visualPlan.sections.some((section) => section.type === 'tabs')) {
+    if (lines.length === 0) lines.push('## Required interactive behavior');
+    lines.push(
+      '- Tabs sections must use shared tabs state such as `const [activeTabs, setActiveTabs] = useState<Record<string, number>>({});`. Do NOT render all tab panels permanently visible.',
+    );
+    lines.push(
+      '- Preserve approved tabs blueprint fields such as `activeTab`, `variant`, and `tabAlign`. If the plan carries a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same visual family instead of replacing it with generic pills or underlines.',
+    );
+    lines.push(
+      '- Tab triggers must update `setActiveTabs(...)`, and the active panel visibility must read from `activeTabs[...]`.',
+    );
+  }
+
+  if (visualPlan.sections.some((section) => section.type === 'accordion')) {
+    if (lines.length === 0) lines.push('## Required interactive behavior');
+    lines.push(
+      '- Accordion sections must use shared accordion state such as `const [openAccordions, setOpenAccordions] = useState<Record<string, number[]>>({});`.',
+    );
+    lines.push(
+      '- Preserve approved accordion blueprint fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into always-open static content.',
+    );
+    lines.push(
+      '- If the plan or Spectra contract implies a question-row accordion surface, keep the question button / answer panel structure instead of rewriting it as plain headings and paragraphs.',
+    );
+  }
+
+  if (visualPlan.sections.some((section) => section.type === 'modal')) {
+    lines.push(
+      '- Preserve approved modal blueprint fields such as `triggerStyle`, `width`, `height`, `overlayColor`, `ctaStyle`, and `secondaryCtaStyle`. Do NOT replace them with generic dialog sizing or palette defaults.',
+    );
+  }
+
+  lines.push(
+    '- Do NOT leave obviously unused interfaces, refs, helper functions, or local utilities in the final component file. If a helper such as `resolveAsset` or a TS interface is not used by the rendered JSX/data flow, omit it.',
+  );
 
   return lines.join('\n');
 }
@@ -2081,6 +2609,11 @@ Render ONLY the JSX for the blocks in the template source below.`;
     ),
     sourceTrackingNote,
     repoContext,
+    buildComponentRepoChainNote(input.repoManifest, input.componentPlan),
+    buildSpectraContractPromptNote(
+      input.repoManifest,
+      input.componentPlan?.visualPlan,
+    ),
     input.editRequestContextNote,
   ]
     .filter(Boolean)
@@ -2187,6 +2720,11 @@ When this section renders post-list/archive/search/recent-post meta:
           includeStructureHints: true,
         })
       : '',
+    buildComponentRepoChainNote(input.repoManifest, input.componentPlan),
+    buildSpectraContractPromptNote(
+      input.repoManifest,
+      input.componentPlan?.visualPlan,
+    ),
     input.editRequestContextNote,
     buildRetryNote(input.retryError),
     buildInlineSectionBehaviorChecklist(input.section),
@@ -2210,6 +2748,14 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- Prefer the existing `post` prop first, then fall back to `item` when it is a post-detail object.',
         '- Author/category labels must use canonical archive links when `authorSlug` or `categorySlugs[0]` exists.',
       ].join('\n');
+    case 'post-list':
+      return [
+        '## Section behavior contract',
+        '- Use the approved post-list blueprint as layout contract instead of inventing a new blog card layout.',
+        '- If `itemLayout=title-meta-inline`, keep the title and metadata on the same horizontal row on desktop, allowing only responsive wrap on narrow widths.',
+        '- If `metaLayout=inline`, keep date / author / category in one metadata row; if `metaLayout=stacked`, render them vertically.',
+        '- Preserve approved `metaAlign`, `metaSeparator`, `itemGap`, and `metaGap` values when they are present.',
+      ].join('\n');
     case 'carousel':
       return [
         '## Section behavior contract',
@@ -2224,6 +2770,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- Use the existing page-shell carousel state (`activeCarousels` / `setActiveCarousels`) for prev/next/dot navigation. Do NOT add local hooks or helper functions in this JSX fragment.',
         '- Prev/next controls must have className markers `swiper-button-prev` and `swiper-button-next` and must render a visible child such as SVG arrows or text. Do NOT leave these buttons empty.',
         '- Pagination dots must update `setActiveCarousels(...)` so clicking a dot moves to the selected slide.',
+        '- Preserve approved carousel fields such as `slideHeight`, `dotsColor`, `arrowColor`, `arrowBackground`, `autoplay`, `autoplaySpeed`, `loop`, `effect`, `showDots`, `showArrows`, `vertical`, `transitionSpeed`, and `pauseOn` when they are present in the plan.',
       ].join('\n');
     case 'tabs':
       return [
@@ -2233,6 +2780,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           : '- Use one stable existing tabs state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell tabs state (`activeTabs` / `setActiveTabs`) for tab selection. Do NOT use `activeCarousels` for tabs.',
         '- Tab buttons must update `setActiveTabs(...)`, and the active panel visibility must read from `activeTabs[...]`.',
+        '- Preserve approved tabs fields such as `activeTab`, `variant`, and `tabAlign`. If the plan uses a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same variant family instead of redesigning the tabs.',
       ].join('\n');
     case 'accordion':
       return [
@@ -2241,6 +2789,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           ? `- Use the exact approved accordion state key ${stateKeyHint} everywhere in this section.`
           : '- Use one stable existing accordion state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell accordion state (`openAccordions` / `setOpenAccordions`) for open/close behavior.',
+        '- Preserve approved accordion fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into static always-open content.',
       ].join('\n');
     case 'modal':
       return [
@@ -2256,7 +2805,9 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- Use the existing page-shell modal state (`openModals` / `setOpenModals`) to open and close the popup. Do NOT add local hooks or helper functions in this JSX fragment.',
         `- Render the popup conditionally, for example \`{openModals[${stateKeyHint ?? '"approved-modal-key"'}] ? (...) : null}\`.`,
         '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, and the dialog body must include `uagb-modal-popup-content`.',
+        '- Because Spectra compat CSS reveals the popup via `.uagb-modal-popup.active`, the rendered open overlay className must include both `uagb-modal-popup` and `active`.',
         '- The trigger must call `setOpenModals(... true)`, and the close button or overlay-close handler must call `setOpenModals(... false)`.',
+        '- Preserve approved modal fields such as `triggerStyle`, `width`, `height`, `overlayColor`, `ctaStyle`, and `secondaryCtaStyle` instead of falling back to generic dialog defaults.',
       ].join('\n');
     default:
       return '';
@@ -2275,6 +2826,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
     '## Literal preservation checklist',
     'Render these approved literals exactly as written. Do not paraphrase, truncate, summarize, or replace them with shorter summaries.',
   ];
+  if (section.presentation) {
+    lines.push(`- presentation: ${JSON.stringify(section.presentation)}`);
+  }
 
   switch (section.type) {
     case 'post-meta':
@@ -2289,6 +2843,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
     case 'media-text':
       if (section.imageSrc) {
         lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
+      }
+      if (section.imageCustomClassNames?.length) {
+        lines.push(
+          `- imageCustomClassNames: ${formatClassList(section.imageCustomClassNames)}`,
+        );
       }
       if (section.heading) {
         lines.push(`- heading: ${JSON.stringify(section.heading)}`);
@@ -2311,6 +2870,77 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           }
         });
       }
+      if (section.imageRadius) {
+        lines.push(`- imageRadius: ${section.imageRadius}`);
+      }
+      if (section.imageAspectRatio) {
+        lines.push(`- imageAspectRatio: ${section.imageAspectRatio}`);
+      }
+      if (section.ctaStyle) {
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      }
+      if (section.secondaryCtaStyle) {
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
+      }
+      break;
+    case 'post-list':
+      if (section.title) {
+        lines.push(`- title: ${JSON.stringify(section.title)}`);
+      }
+      lines.push(`- layout: ${JSON.stringify(section.layout)}`);
+      lines.push(`- showDate: ${JSON.stringify(section.showDate)}`);
+      lines.push(`- showAuthor: ${JSON.stringify(section.showAuthor)}`);
+      lines.push(`- showCategory: ${JSON.stringify(section.showCategory)}`);
+      lines.push(`- showExcerpt: ${JSON.stringify(section.showExcerpt)}`);
+      lines.push(
+        `- showFeaturedImage: ${JSON.stringify(section.showFeaturedImage)}`,
+      );
+      if (section.itemLayout) {
+        lines.push(`- itemLayout: ${JSON.stringify(section.itemLayout)}`);
+      }
+      if (section.metaLayout) {
+        lines.push(`- metaLayout: ${JSON.stringify(section.metaLayout)}`);
+      }
+      if (section.metaAlign) {
+        lines.push(`- metaAlign: ${JSON.stringify(section.metaAlign)}`);
+      }
+      if (section.metaSeparator) {
+        lines.push(`- metaSeparator: ${JSON.stringify(section.metaSeparator)}`);
+      }
+      if (section.itemGap) {
+        lines.push(`- itemGap: ${JSON.stringify(section.itemGap)}`);
+      }
+      if (section.metaGap) {
+        lines.push(`- metaGap: ${JSON.stringify(section.metaGap)}`);
+      }
+      if (section.showDividers !== undefined) {
+        lines.push(`- showDividers: ${JSON.stringify(section.showDividers)}`);
+      }
+      if (section.dividerColor) {
+        lines.push(`- dividerColor: ${JSON.stringify(section.dividerColor)}`);
+      }
+      if (section.titleColumnWidth) {
+        lines.push(
+          `- titleColumnWidth: ${JSON.stringify(section.titleColumnWidth)}`,
+        );
+      }
+      if (section.metaColumnWidth) {
+        lines.push(
+          `- metaColumnWidth: ${JSON.stringify(section.metaColumnWidth)}`,
+        );
+      }
+      if (section.splitCategoryLine !== undefined) {
+        lines.push(
+          `- splitCategoryLine: ${JSON.stringify(section.splitCategoryLine)}`,
+        );
+      }
+      if (section.categoryPrefix) {
+        lines.push(
+          `- categoryPrefix: ${JSON.stringify(section.categoryPrefix)}`,
+        );
+      }
       break;
     case 'card-grid':
       if (section.title) {
@@ -2329,13 +2959,76 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         if (card.body) {
           lines.push(`- card ${index + 1} body: ${JSON.stringify(card.body)}`);
         }
+        if (card.customClassNames?.length) {
+          lines.push(
+            `- card ${index + 1} customClassNames: ${formatClassList(card.customClassNames)}`,
+          );
+        }
+        if (card.imageCustomClassNames?.length) {
+          lines.push(
+            `- card ${index + 1} imageCustomClassNames: ${formatClassList(card.imageCustomClassNames)}`,
+          );
+        }
       });
+      if (section.titleStyle) {
+        lines.push(`- titleStyle: ${JSON.stringify(section.titleStyle)}`);
+      }
+      if (section.cardStyle) {
+        lines.push(`- cardStyle: ${JSON.stringify(section.cardStyle)}`);
+      }
+      break;
+    case 'testimonial':
+      lines.push(`- quote: ${JSON.stringify(section.quote)}`);
+      lines.push(`- authorName: ${JSON.stringify(section.authorName)}`);
+      if (section.authorTitle) {
+        lines.push(`- authorTitle: ${JSON.stringify(section.authorTitle)}`);
+      }
+      if (section.quoteStyle) {
+        lines.push(`- quoteStyle: ${JSON.stringify(section.quoteStyle)}`);
+      }
+      if (section.authorAvatarCustomClassNames?.length) {
+        lines.push(
+          `- authorAvatarCustomClassNames: ${formatClassList(section.authorAvatarCustomClassNames)}`,
+        );
+      }
+      if (section.authorStyle) {
+        lines.push(`- authorStyle: ${JSON.stringify(section.authorStyle)}`);
+      }
+      if (section.cardStyle) {
+        lines.push(`- cardStyle: ${JSON.stringify(section.cardStyle)}`);
+      }
+      break;
+    case 'newsletter':
+      lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      if (section.subheading) {
+        lines.push(`- subheading: ${JSON.stringify(section.subheading)}`);
+      }
+      lines.push(`- buttonText: ${JSON.stringify(section.buttonText)}`);
+      lines.push(`- layout: ${JSON.stringify(section.layout)}`);
+      if (section.headingStyle) {
+        lines.push(`- headingStyle: ${JSON.stringify(section.headingStyle)}`);
+      }
+      if (section.inputStyle) {
+        lines.push(`- inputStyle: ${JSON.stringify(section.inputStyle)}`);
+      }
+      if (section.cardStyle) {
+        lines.push(`- cardStyle: ${JSON.stringify(section.cardStyle)}`);
+      }
       break;
     case 'tabs':
       if (section.title) {
         lines.push(`- title: ${JSON.stringify(section.title)}`);
       }
       lines.push(`- render exactly ${section.tabs.length} tab(s)`);
+      if (typeof section.activeTab === 'number') {
+        lines.push(`- activeTab: ${section.activeTab}`);
+      }
+      if (section.variant) {
+        lines.push(`- variant: ${section.variant}`);
+      }
+      if (section.tabAlign) {
+        lines.push(`- tabAlign: ${section.tabAlign}`);
+      }
       section.tabs.slice(0, 12).forEach((tab, index) => {
         lines.push(`- tab ${index + 1} label: ${JSON.stringify(tab.label)}`);
         if (tab.heading) {
@@ -2351,6 +3044,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
             `- tab ${index + 1} imageSrc: ${JSON.stringify(tab.imageSrc)}`,
           );
         }
+        if (tab.imageCustomClassNames?.length) {
+          lines.push(
+            `- tab ${index + 1} imageCustomClassNames: ${formatClassList(tab.imageCustomClassNames)}`,
+          );
+        }
         if (tab.cta?.text) {
           lines.push(
             `- tab ${index + 1} ctaText: ${JSON.stringify(tab.cta.text)}`,
@@ -2363,6 +3061,18 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         lines.push(`- title: ${JSON.stringify(section.title)}`);
       }
       lines.push(`- render exactly ${section.items.length} accordion item(s)`);
+      lines.push(`- allowMultiple: ${section.allowMultiple ?? false}`);
+      if (typeof section.enableToggle === 'boolean') {
+        lines.push(`- enableToggle: ${section.enableToggle}`);
+      }
+      if (section.defaultOpenItems?.length) {
+        lines.push(
+          `- defaultOpenItems: ${JSON.stringify(section.defaultOpenItems)}`,
+        );
+      }
+      if (section.variant) {
+        lines.push(`- variant: ${section.variant}`);
+      }
       section.items.slice(0, 12).forEach((item, index) => {
         lines.push(
           `- item ${index + 1} heading: ${JSON.stringify(item.heading)}`,
@@ -2372,6 +3082,40 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       break;
     case 'carousel':
       lines.push(`- render exactly ${section.slides.length} slide(s)`);
+      if (typeof section.autoplay === 'boolean')
+        lines.push(`- autoplay: ${section.autoplay}`);
+      if (typeof section.autoplaySpeed === 'number')
+        lines.push(`- autoplaySpeed: ${section.autoplaySpeed}`);
+      if (typeof section.loop === 'boolean')
+        lines.push(`- loop: ${section.loop}`);
+      if (section.effect) lines.push(`- effect: ${section.effect}`);
+      if (typeof section.showDots === 'boolean')
+        lines.push(`- showDots: ${section.showDots}`);
+      if (typeof section.showArrows === 'boolean')
+        lines.push(`- showArrows: ${section.showArrows}`);
+      if (typeof section.vertical === 'boolean')
+        lines.push(`- vertical: ${section.vertical}`);
+      if (typeof section.transitionSpeed === 'number')
+        lines.push(`- transitionSpeed: ${section.transitionSpeed}`);
+      if (section.pauseOn) lines.push(`- pauseOn: ${section.pauseOn}`);
+      if (section.slideHeight)
+        lines.push(`- slideHeight: ${section.slideHeight}`);
+      if (section.dotsColor) lines.push(`- dotsColor: ${section.dotsColor}`);
+      if (section.arrowColor) lines.push(`- arrowColor: ${section.arrowColor}`);
+      if (section.arrowBackground)
+        lines.push(`- arrowBackground: ${section.arrowBackground}`);
+      if (section.headingStyle)
+        lines.push(`- headingStyle: ${JSON.stringify(section.headingStyle)}`);
+      if (section.subheadingStyle)
+        lines.push(
+          `- subheadingStyle: ${JSON.stringify(section.subheadingStyle)}`,
+        );
+      if (section.ctaStyle)
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      if (section.secondaryCtaStyle)
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
       section.slides.slice(0, 12).forEach((slide, index) => {
         if (slide.heading) {
           lines.push(
@@ -2386,6 +3130,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         if (slide.imageSrc) {
           lines.push(
             `- slide ${index + 1} imageSrc: ${JSON.stringify(slide.imageSrc)}`,
+          );
+        }
+        if (slide.imageCustomClassNames?.length) {
+          lines.push(
+            `- slide ${index + 1} imageCustomClassNames: ${formatClassList(slide.imageCustomClassNames)}`,
           );
         }
         if (slide.cta?.text) {
@@ -2403,6 +3152,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       lines.push(
         '- Prev/next buttons must include visible SVG or text children.',
       );
+      lines.push(
+        '- Preserve the approved carousel interaction/settings contract instead of falling back to a generic slider implementation.',
+      );
       break;
     case 'modal':
       if (section.triggerText) {
@@ -2417,6 +3169,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       if (section.imageSrc) {
         lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
       }
+      if (section.imageCustomClassNames?.length) {
+        lines.push(
+          `- imageCustomClassNames: ${formatClassList(section.imageCustomClassNames)}`,
+        );
+      }
       if (section.cta?.text) {
         lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
       }
@@ -2427,8 +3184,27 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           }
         });
       }
+      if (section.width) lines.push(`- width: ${section.width}`);
+      if (section.height) lines.push(`- height: ${section.height}`);
+      if (section.overlayColor)
+        lines.push(`- overlayColor: ${section.overlayColor}`);
+      if (section.triggerStyle)
+        lines.push(`- triggerStyle: ${JSON.stringify(section.triggerStyle)}`);
+      if (section.headingStyle)
+        lines.push(`- headingStyle: ${JSON.stringify(section.headingStyle)}`);
+      if (section.bodyStyle)
+        lines.push(`- bodyStyle: ${JSON.stringify(section.bodyStyle)}`);
+      if (section.ctaStyle)
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      if (section.secondaryCtaStyle)
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
       lines.push(
         '- Keep the Spectra modal structure markers: `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+      );
+      lines.push(
+        '- If the popup overlay is open/rendered, its className must also include `active` so Spectra compat CSS does not keep it hidden.',
       );
       break;
     case 'hero':
@@ -2449,6 +3225,14 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           }
         });
       }
+      if ('ctaStyle' in section && section.ctaStyle) {
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      }
+      if ('secondaryCtaStyle' in section && section.secondaryCtaStyle) {
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
+      }
       break;
     case 'cta-strip':
       if (section.align) {
@@ -2464,12 +3248,24 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           }
         });
       }
+      if (section.ctaStyle)
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      if (section.secondaryCtaStyle)
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
       break;
     default:
       lines.push(
         '- Preserve every heading, body, subtitle, CTA label, repeated item, and image src from the approved section JSON.',
       );
       break;
+  }
+  const requiredCustomClassNames = extractCustomClassNamesFromSection(section);
+  if (requiredCustomClassNames.length > 0) {
+    lines.push(
+      `- Preserve these exact source custom classes on the corresponding rendered elements: ${formatClassList(requiredCustomClassNames)}.`,
+    );
   }
 
   lines.push(
@@ -2540,6 +3336,110 @@ function extractCustomClassNamesFromNodes(nodes: WpNode[]): string[] {
   };
   for (const node of nodes) visit(node);
   return [...result];
+}
+
+function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
+  const result = new Set<string>();
+  const add = (values?: string[]) => {
+    for (const className of values ?? []) {
+      const normalized = className.trim();
+      if (normalized) result.add(normalized);
+    }
+  };
+  const addCta = (cta?: { customClassNames?: string[] }) => {
+    add(cta?.customClassNames);
+  };
+
+  add(section.customClassNames);
+
+  if ('cta' in section) addCta(section.cta);
+  if ('ctas' in section) {
+    for (const cta of section.ctas ?? []) addCta(cta);
+  }
+
+  switch (section.type) {
+    case 'hero':
+      add(section.headingCustomClassNames);
+      add(section.subheadingCustomClassNames);
+      add(section.image?.customClassNames);
+      break;
+    case 'cover':
+      add(section.headingCustomClassNames);
+      add(section.subheadingCustomClassNames);
+      break;
+    case 'post-list':
+      add(section.titleCustomClassNames);
+      break;
+    case 'card-grid':
+      add(section.titleCustomClassNames);
+      add(section.subtitleCustomClassNames);
+      for (const card of section.cards) {
+        add(card.customClassNames);
+        add(card.headingCustomClassNames);
+        add(card.bodyCustomClassNames);
+        add(card.imageCustomClassNames);
+      }
+      break;
+    case 'media-text':
+      add(section.headingCustomClassNames);
+      add(section.bodyCustomClassNames);
+      add(section.imageCustomClassNames);
+      break;
+    case 'testimonial':
+      add(section.quoteCustomClassNames);
+      add(section.authorCustomClassNames);
+      add(section.authorAvatarCustomClassNames);
+      break;
+    case 'newsletter':
+      add(section.headingCustomClassNames);
+      add(section.subheadingCustomClassNames);
+      break;
+    case 'modal':
+      add(section.triggerCustomClassNames);
+      add(section.headingCustomClassNames);
+      add(section.bodyCustomClassNames);
+      add(section.imageCustomClassNames);
+      break;
+    case 'tabs':
+      add(section.titleCustomClassNames);
+      for (const tab of section.tabs) {
+        add(tab.headingCustomClassNames);
+        add(tab.bodyCustomClassNames);
+        add(tab.imageCustomClassNames);
+        addCta(tab.cta);
+      }
+      break;
+    case 'accordion':
+      add(section.titleCustomClassNames);
+      for (const item of section.items) {
+        add(item.headingCustomClassNames);
+        add(item.bodyCustomClassNames);
+      }
+      break;
+    case 'carousel':
+      for (const slide of section.slides) {
+        add(slide.headingCustomClassNames);
+        add(slide.subheadingCustomClassNames);
+        add(slide.imageCustomClassNames);
+        addCta(slide.cta);
+      }
+      break;
+    default:
+      break;
+  }
+
+  return [...result];
+}
+
+function extractInnerCustomClassNamesFromSection(
+  section: SectionPlan,
+): string[] {
+  const outer = new Set(
+    (section.customClassNames ?? []).map((value) => value.trim()),
+  );
+  return extractCustomClassNamesFromSection(section).filter(
+    (className) => !outer.has(className),
+  );
 }
 
 function formatClassList(classNames: string[]): string {

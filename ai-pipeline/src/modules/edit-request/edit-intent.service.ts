@@ -459,7 +459,11 @@ function deriveIntentAnalysis(input: {
 }): DerivedIntentAnalysis {
   const request = input.request;
   const targetCandidates = collectTargetCandidates(request);
-  const targetScope = inferTargetScope(request, targetCandidates, input.category);
+  const targetScope = inferTargetScope(
+    request,
+    targetCandidates,
+    input.category,
+  );
   const ambiguities = collectAmbiguities(
     request,
     targetCandidates,
@@ -477,10 +481,10 @@ function deriveIntentAnalysis(input: {
   ]);
   const needsInference = Boolean(
     input.inputNeedsInference ||
-      warnings.length > 0 ||
-      ambiguities.length > 0 ||
-      (!request?.prompt?.trim() && input.category !== 'full_site_migration') ||
-      (input.category !== 'full_site_migration' && targetCandidates.length === 0),
+    warnings.length > 0 ||
+    ambiguities.length > 0 ||
+    (!request?.prompt?.trim() && input.category !== 'full_site_migration') ||
+    (input.category !== 'full_site_migration' && targetCandidates.length === 0),
   );
 
   if (needsInference) {
@@ -618,7 +622,9 @@ function inferTargetScope(
     request?.targetHint?.targetNodeRole ||
     request?.targetHint?.targetTextPreview ||
     request?.targetHint?.targetElementTag ||
-    request?.attachments?.some((attachment) => attachment.targetNode?.editNodeRole)
+    request?.attachments?.some(
+      (attachment) => attachment.targetNode?.editNodeRole,
+    )
   ) {
     return 'element';
   }
@@ -626,14 +632,18 @@ function inferTargetScope(
     request?.targetHint?.sectionKey ||
     request?.targetHint?.sectionType ||
     typeof request?.targetHint?.sectionIndex === 'number' ||
-    targetCandidates.some((candidate) => candidate.sectionKey || candidate.sectionType)
+    targetCandidates.some(
+      (candidate) => candidate.sectionKey || candidate.sectionType,
+    )
   ) {
     return 'section';
   }
   if (
     request?.targetHint?.componentName ||
     request?.targetHint?.templateName ||
-    targetCandidates.some((candidate) => candidate.componentName || candidate.templateName)
+    targetCandidates.some(
+      (candidate) => candidate.componentName || candidate.templateName,
+    )
   ) {
     return 'component';
   }
@@ -666,7 +676,9 @@ function collectAmbiguities(
   }
 
   const distinctRoutes = new Set(
-    targetCandidates.map((candidate) => normalizeRoute(candidate.route)).filter(Boolean),
+    targetCandidates
+      .map((candidate) => normalizeRoute(candidate.route))
+      .filter(Boolean),
   );
   if (distinctRoutes.size > 1) {
     ambiguities.push(
@@ -720,7 +732,9 @@ function collectAssumptions(
 
   if (
     !request.prompt?.trim() &&
-    (request.targetHint || request.constraints || (request.attachments?.length ?? 0) > 0)
+    (request.targetHint ||
+      request.constraints ||
+      (request.attachments?.length ?? 0) > 0)
   ) {
     assumptions.push(
       'Infer the requested mutation from target hints, constraints, and visual evidence because no standalone prompt was provided.',
@@ -767,7 +781,9 @@ function inferRecommendedStrategy(
   }
 
   if (category === 'full_site_migration_with_focus') {
-    return targetScope === 'site' ? 'focused-migration' : mapScopeToStrategy(targetScope);
+    return targetScope === 'site'
+      ? 'focused-migration'
+      : mapScopeToStrategy(targetScope);
   }
 
   if (category === 'targeted_component_edit') {
@@ -777,7 +793,9 @@ function inferRecommendedStrategy(
   return 'best-effort-inference';
 }
 
-function mapScopeToStrategy(targetScope: EditTargetScope): EditExecutionStrategy {
+function mapScopeToStrategy(
+  targetScope: EditTargetScope,
+): EditExecutionStrategy {
   switch (targetScope) {
     case 'element':
       return 'element-edit';
@@ -800,9 +818,11 @@ function inferBestEffortCategory(
 ): EditIntentCategory {
   if (
     preferredCategory &&
-    ['full_site_migration', 'full_site_migration_with_focus', 'targeted_component_edit'].includes(
-      preferredCategory,
-    )
+    [
+      'full_site_migration',
+      'full_site_migration_with_focus',
+      'targeted_component_edit',
+    ].includes(preferredCategory)
   ) {
     return preferredCategory;
   }
@@ -810,16 +830,17 @@ function inferBestEffortCategory(
   const instructionText = normalizeText(buildInstructionText(request));
   const hasSpecificTarget = Boolean(
     request?.targetHint?.componentName ||
-      request?.targetHint?.sectionType ||
-      request?.targetHint?.targetNodeRole ||
-      request?.attachments?.length,
+    request?.targetHint?.sectionType ||
+    request?.targetHint?.targetNodeRole ||
+    request?.attachments?.length,
   );
 
   if (looksLikeTargetedComponentEdit(instructionText) || hasSpecificTarget) {
     return 'targeted_component_edit';
   }
 
-  return request?.pageContext?.reactRoute || request?.pageContext?.wordpressRoute
+  return request?.pageContext?.reactRoute ||
+    request?.pageContext?.wordpressRoute
     ? 'full_site_migration_with_focus'
     : 'full_site_migration';
 }
@@ -833,7 +854,9 @@ function buildInstructionText(request?: PipelineEditRequestDto): string {
   ]).join(' ');
 }
 
-function firstAttachmentNote(request?: PipelineEditRequestDto): string | undefined {
+function firstAttachmentNote(
+  request?: PipelineEditRequestDto,
+): string | undefined {
   return request?.attachments
     ?.map((attachment) => attachment.note?.trim())
     .find(Boolean);
@@ -927,7 +950,10 @@ function asEditOperation(value: string | undefined): EditOperation | undefined {
     : undefined;
 }
 
-function buildTargetedEditIntent(operation: EditOperation, prompt: string): string {
+function buildTargetedEditIntent(
+  operation: EditOperation,
+  prompt: string,
+): string {
   const snippet = `"${prompt.slice(0, 120)}"`;
   switch (operation) {
     case 'add_section':
@@ -996,7 +1022,10 @@ function dedupeCandidates(
       continue;
     }
 
-    existing.evidence = dedupeStrings([...existing.evidence, ...candidate.evidence]);
+    existing.evidence = dedupeStrings([
+      ...existing.evidence,
+      ...candidate.evidence,
+    ]);
   }
 
   return Array.from(merged.values());
@@ -1017,7 +1046,9 @@ function deriveComponentNameFromTemplateName(
   return /^\d/.test(name) ? `Page${name}` : name;
 }
 
-function deriveComponentNameFromRoute(route?: string | null): string | undefined {
+function deriveComponentNameFromRoute(
+  route?: string | null,
+): string | undefined {
   const normalized = normalizeRoute(route);
   if (!normalized) return undefined;
   if (normalized === '/') return 'Home';
@@ -1072,7 +1103,9 @@ function inferSectionTypeFromCaptureSignals(
 }
 
 function normalizeNodeRole(value?: string | null): string | undefined {
-  const normalized = String(value ?? '').trim().toLowerCase();
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase();
   return normalized || undefined;
 }
 

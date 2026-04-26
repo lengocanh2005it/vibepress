@@ -1301,6 +1301,10 @@ export class ValidatorService {
     const hasTrigger = /\buagb-modal-trigger\b/.test(code);
     const hasPopupOverlay = /\buagb-modal-popup\b/.test(code);
     const hasPopupContent = /\buagb-modal-popup-content\b/.test(code);
+    const hasActivePopupOverlay =
+      /className\s*=\s*\{?["'`][^"'`]*(?:\buagb-modal-popup\b[^"'`]*\bactive\b|\bactive\b[^"'`]*\buagb-modal-popup\b)/.test(
+        code,
+      );
     const hasDialogSemantics =
       /\baria-modal\s*=\s*{?true}?|\baria-modal\s*=\s*["']true["']|\brole\s*=\s*["']dialog["']/.test(
         code,
@@ -1323,6 +1327,11 @@ export class ValidatorService {
       !isInlineSection
     ) {
       issues.push(`${label} modal popup appears inline instead of interactive`);
+    }
+    if (hasPopupOverlay && !hasActivePopupOverlay) {
+      issues.push(
+        `${label} modal popup is missing the \`active\` class on the rendered \`uagb-modal-popup\` overlay, so Spectra compat CSS will keep it hidden even when open`,
+      );
     }
     return issues;
   }

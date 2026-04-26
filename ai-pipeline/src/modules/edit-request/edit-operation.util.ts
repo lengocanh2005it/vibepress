@@ -16,17 +16,24 @@ export type EditOperation =
 
 export function detectSectionType(prompt: string): string | undefined {
   const n = normalizeOp(prompt);
-  if (/\b(carousel|slider|swiper|bang chuyen|truot)\b/.test(n)) return 'carousel';
+  if (/\b(carousel|slider|swiper|bang chuyen|truot)\b/.test(n))
+    return 'carousel';
   if (/\b(modal|popup|dialog|cua so boc|hop thoai)\b/.test(n)) return 'modal';
-  if (/\b(accordion|faq|collapse|cau hoi thuong gap)\b/.test(n)) return 'accordion';
+  if (/\b(accordion|faq|collapse|cau hoi thuong gap)\b/.test(n))
+    return 'accordion';
   if (/\b(tabs|tab panel)\b/.test(n)) return 'tabs';
-  if (/\b(card.?grid|card grid|grid bai viet|luoi)\b/.test(n)) return 'card-grid';
-  if (/\b(testimonial|review|nhan xet|cam nhan|danh gia khach hang)\b/.test(n)) return 'testimonial';
-  if (/\b(newsletter|subscribe|dang ky email|email form)\b/.test(n)) return 'newsletter';
+  if (/\b(card.?grid|card grid|grid bai viet|luoi)\b/.test(n))
+    return 'card-grid';
+  if (/\b(testimonial|review|nhan xet|cam nhan|danh gia khach hang)\b/.test(n))
+    return 'testimonial';
+  if (/\b(newsletter|subscribe|dang ky email|email form)\b/.test(n))
+    return 'newsletter';
   if (/\b(cover)\b/.test(n)) return 'cover';
   if (/\b(hero|banner chinh)\b/.test(n)) return 'hero';
-  if (/\b(media.?text|hinh anh.?chu|image.?text)\b/.test(n)) return 'media-text';
-  if (/\b(cta.?strip|cta strip|call to action strip)\b/.test(n)) return 'cta-strip';
+  if (/\b(media.?text|hinh anh.?chu|image.?text)\b/.test(n))
+    return 'media-text';
+  if (/\b(cta.?strip|cta strip|call to action strip)\b/.test(n))
+    return 'cta-strip';
   return undefined;
 }
 
@@ -36,25 +43,35 @@ export function detectEditOperation(prompt: string): EditOperation {
   const n = normalizeOp(prompt);
 
   const hasAddSignal =
-    /\b(them|tao them|tao moi|bo sung|chen vao|add|insert|introduce|create new|generate new)\b/.test(n);
+    /\b(them|tao them|tao moi|bo sung|chen vao|add|insert|introduce|create new|generate new)\b/.test(
+      n,
+    );
   const hasReplaceSignal =
-    /\b(thay bang|thay the bang|thay the boi|doi thanh|chuyen thanh|replace with|switch to|convert to)\b/.test(n);
+    /\b(thay bang|thay the bang|thay the boi|doi thanh|chuyen thanh|replace with|switch to|convert to)\b/.test(
+      n,
+    );
   const hasColorSignal =
     /\b(mau sac|doi mau|mau nen|mau chu|background color|text color|color|palette|theme color|bo mau|mau sac moi)\b/.test(
       n,
     );
   const hasLayoutSignal =
-    /\b(layout|bo cuc|cach sap xep|column|hang cot|trai phai|chia cot|doi layout|change layout)\b/.test(n);
+    /\b(layout|bo cuc|cach sap xep|column|hang cot|trai phai|chia cot|doi layout|change layout)\b/.test(
+      n,
+    );
   const hasContentSignal =
     /\b(noi dung|van ban|chu viet|text|tieu de|heading|doi noi dung|change content|update content|noi dung moi)\b/.test(
       n,
     );
   const hasAdjustSignal =
-    /\b(sua lai|dieu chinh|chinh sua lai|can chinh|fix|tweak|adjust|refine|improve|cai thien)\b/.test(n);
+    /\b(sua lai|dieu chinh|chinh sua lai|can chinh|fix|tweak|adjust|refine|improve|cai thien)\b/.test(
+      n,
+    );
 
   const sectionType = detectSectionType(n);
   const hasSectionKeyword =
-    /\b(section|vung|block|khu vuc|slider|carousel|modal|tabs|accordion|faq)\b/.test(n);
+    /\b(section|vung|block|khu vuc|slider|carousel|modal|tabs|accordion|faq)\b/.test(
+      n,
+    );
   const hasComponentKeyword =
     /\b(component|widget|thanh phan|module|interactive|tinh nang)\b/.test(n);
 
@@ -63,7 +80,8 @@ export function detectEditOperation(prompt: string): EditOperation {
     if (sectionType || hasSectionKeyword) return 'add_section';
     if (hasComponentKeyword) return 'add_component';
     // "thêm" without specific type → treat as add_section if any interactive keyword present
-    if (/\b(interactive|animation|tinh nang tuong tac)\b/.test(n)) return 'add_component';
+    if (/\b(interactive|animation|tinh nang tuong tac)\b/.test(n))
+      return 'add_component';
     return 'add_section';
   }
 
@@ -73,7 +91,8 @@ export function detectEditOperation(prompt: string): EditOperation {
   }
 
   // Style operations
-  if (hasColorSignal && !hasLayoutSignal && !hasContentSignal) return 'change_color';
+  if (hasColorSignal && !hasLayoutSignal && !hasContentSignal)
+    return 'change_color';
 
   // Layout operations
   if (hasLayoutSignal) {
@@ -95,7 +114,10 @@ export function detectEditOperation(prompt: string): EditOperation {
  * Builds a concise operation instruction block to inject into the LLM feedback.
  * Returns empty string for `general` operation (no extra instruction needed).
  */
-export function buildOperationInstruction(operation: EditOperation, prompt: string): string {
+export function buildOperationInstruction(
+  operation: EditOperation,
+  prompt: string,
+): string {
   const sectionType = detectSectionType(prompt);
 
   switch (operation) {
@@ -180,9 +202,24 @@ function buildSectionSpec(sectionType: string): string {
         {
           type: 'carousel',
           slides: [
-            { heading: 'Product 1', subheading: 'Brief description', imageSrc: '', imageAlt: 'Product 1' },
-            { heading: 'Product 2', subheading: 'Brief description', imageSrc: '', imageAlt: 'Product 2' },
-            { heading: 'Product 3', subheading: 'Brief description', imageSrc: '', imageAlt: 'Product 3' },
+            {
+              heading: 'Product 1',
+              subheading: 'Brief description',
+              imageSrc: '',
+              imageAlt: 'Product 1',
+            },
+            {
+              heading: 'Product 2',
+              subheading: 'Brief description',
+              imageSrc: '',
+              imageAlt: 'Product 2',
+            },
+            {
+              heading: 'Product 3',
+              subheading: 'Brief description',
+              imageSrc: '',
+              imageAlt: 'Product 3',
+            },
           ],
           autoplay: true,
           autoplaySpeed: 4000,

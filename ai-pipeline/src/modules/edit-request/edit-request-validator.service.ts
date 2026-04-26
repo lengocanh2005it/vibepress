@@ -88,7 +88,8 @@ export class EditRequestValidatorService {
       if (!request?.targetHint && !request?.constraints) {
         return {
           code: 'MAIN_PROMPT_REQUIRED',
-          message: 'Add a clear migration prompt when no captures are attached.',
+          message:
+            'Add a clear migration prompt when no captures are attached.',
         };
       }
 

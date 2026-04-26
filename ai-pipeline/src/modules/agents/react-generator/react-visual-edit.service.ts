@@ -73,12 +73,11 @@ export class ReactVisualEditService {
       );
     }
 
-    const filePath =
-      this.resolveTargetFilePath(
-        frontendDir,
-        componentName,
-        editRequest.targetHint,
-      );
+    const filePath = this.resolveTargetFilePath(
+      frontendDir,
+      componentName,
+      editRequest.targetHint,
+    );
 
     const currentCode = await readFile(filePath, 'utf-8');
 
@@ -339,14 +338,18 @@ function buildInstructionText(
 ): string {
   return [
     editRequest.prompt?.trim(),
-    ...(editRequest.attachments ?? []).map((attachment) => attachment.note?.trim()),
+    ...(editRequest.attachments ?? []).map((attachment) =>
+      attachment.note?.trim(),
+    ),
   ]
     .filter((value): value is string => Boolean(value))
     .join(' ');
 }
 
 function formatVisualAttachment(
-  attachment: NonNullable<PipelineReactVisualEditRequestDto['attachments']>[number],
+  attachment: NonNullable<
+    PipelineReactVisualEditRequestDto['attachments']
+  >[number],
 ): string {
   const parts = [`id=${attachment.id}`];
   if (attachment.note?.trim()) {

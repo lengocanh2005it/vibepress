@@ -391,6 +391,12 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
       'heading',
     ]);
     if (headingNode?.text) s.heading = headingNode.text;
+    const headingCustomClassNames = extractStyleVariantClassNames(
+      headingNode?.customClassNames,
+    );
+    if (headingCustomClassNames.length > 0) {
+      s.headingCustomClassNames = headingCustomClassNames;
+    }
     if (headingNode?.typography || headingNode?.fontFamily) {
       s.headingStyle = toTypographyStyle(headingNode);
     }
@@ -399,6 +405,12 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
       'paragraph',
     ]);
     if (paraNode?.text) s.subheading = paraNode.text;
+    const subheadingCustomClassNames = extractStyleVariantClassNames(
+      paraNode?.customClassNames,
+    );
+    if (subheadingCustomClassNames.length > 0) {
+      s.subheadingCustomClassNames = subheadingCustomClassNames;
+    }
     if (paraNode?.typography || paraNode?.fontFamily) {
       s.subheadingStyle = toTypographyStyle(paraNode);
     }
@@ -414,12 +426,24 @@ function mapCover(node: WpNode): CoverSection | HeroSection {
   };
   const h = findFirstByBlock(node.children ?? [], ['core/heading', 'heading']);
   if (h?.text) s.heading = h.text;
+  const heroHeadingCustomClassNames = extractStyleVariantClassNames(
+    h?.customClassNames,
+  );
+  if (heroHeadingCustomClassNames.length > 0) {
+    s.headingCustomClassNames = heroHeadingCustomClassNames;
+  }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   const p = findFirstByBlock(node.children ?? [], [
     'core/paragraph',
     'paragraph',
   ]);
   if (p?.text) s.subheading = p.text;
+  const heroSubheadingCustomClassNames = extractStyleVariantClassNames(
+    p?.customClassNames,
+  );
+  if (heroSubheadingCustomClassNames.length > 0) {
+    s.subheadingCustomClassNames = heroSubheadingCustomClassNames;
+  }
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   applySectionCtas(s, node.children ?? []);
   return s;
@@ -435,6 +459,9 @@ function mapGallery(node: WpNode): CardGridSection | null {
     body: '',
     imageSrc: img.src,
     imageAlt: img.alt ?? '',
+    ...(img.customClassNames?.length
+      ? { imageCustomClassNames: uniqueClassNames(img.customClassNames) }
+      : {}),
   }));
   const columns = Math.min(Math.max(imageNodes.length, 2), 4) as 2 | 3 | 4;
   return { type: 'card-grid', columns, cards };
@@ -469,11 +496,12 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     );
   }
 
-  // Testimonial group: metadata.name contains "testimonial" or content starts with a curly quote
+  // Testimonial groups can be explicit ("testimonial" metadata) or implicit
+  // (a long quote plus compact author/source copy nested in the group).
   const metadataName = (
     (node.params?.metadata as Record<string, string> | undefined)?.name ?? ''
   ).toLowerCase();
-  if (metadataName.includes('testimonial')) {
+  if (metadataName.includes('testimonial') || isLikelyTestimonialGroup(node)) {
     const testimonial = buildTestimonialFromGroup(node, children);
     if (testimonial) return toMappedSections(testimonial, node);
   }
@@ -496,6 +524,13 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
       buildStandaloneButtonsSection(node, children),
       node,
     );
+  }
+
+  // Group that acts as a full-width CTA banner: has buttons and a heading but
+  // no multi-column layout. A background color or full/wide alignment marks it
+  // as a standalone CTA strip so it isn't swallowed by the hero heuristic.
+  if (!hasInteractive && !hasPostContent && isCtaBannerGroup(node, children)) {
+    return toMappedSections(buildCtaBannerSection(node, children), node);
   }
 
   if (!hasInteractive && !hasPostContent) {
@@ -527,6 +562,15 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     if (headingChild) {
       const title = extractNodeText(headingChild);
       if (title) section = { ...section, title };
+      const titleCustomClassNames = extractStyleVariantClassNames(
+        headingChild.customClassNames,
+      );
+      if (titleCustomClassNames.length > 0) {
+        section = {
+          ...section,
+          titleCustomClassNames,
+        };
+      }
     }
     return [applyNodePresentation(section, node)];
   }
@@ -582,6 +626,7 @@ function mapQuery(node: WpNode): PostListSection {
     'core/post-template',
     'post-template',
   ]);
+  const templateDirectChildren = postTemplate?.children ?? [];
   const templateNodes = postTemplate ? flattenChildren(postTemplate) : [];
   const hasAuthorBlock = templateNodes.some((child) =>
     ['core/post-author', 'post-author'].includes(child.block),
@@ -598,6 +643,24 @@ function mapQuery(node: WpNode): PostListSection {
   const hasFeaturedImageBlock = templateNodes.some((child) =>
     ['core/post-featured-image', 'post-featured-image'].includes(child.block),
   );
+  const separatorNode = templateNodes.find((child) =>
+    ['core/separator', 'separator'].includes(child.block),
+  );
+  const columnsBlock = templateDirectChildren.find(
+    (child) => child.block === 'core/columns' || child.block === 'columns',
+  );
+  const columnNodes =
+    columnsBlock?.children?.filter(
+      (child) => child.block === 'core/column' || child.block === 'column',
+    ) ?? [];
+  const hasPostMetaTemplatePart = templateNodes.some((child) => {
+    const slug = String(child.params?.slug ?? '').toLowerCase();
+    return (
+      (child.block === 'core/template-part' ||
+        child.block === 'template-part') &&
+      slug.includes('post-meta')
+    );
+  });
   const displayColumns = Number(
     node.params?.displayLayout?.columns ??
       postTemplate?.params?.layout?.columnCount ??
@@ -636,6 +699,25 @@ function mapQuery(node: WpNode): PostListSection {
           : columnsInTemplate
             ? 'grid-3'
             : 'list';
+  const itemLayout: PostListSection['itemLayout'] =
+    compactMetaRowTemplate || isMinimalTitleOnlyTemplate
+      ? 'title-meta-inline'
+      : 'stacked';
+  const metaLayout: PostListSection['metaLayout'] = 'inline';
+  const metaAlign: PostListSection['metaAlign'] =
+    itemLayout === 'title-meta-inline' ? 'end' : 'start';
+  const titleColumnWidth = normalizeCssLength(columnNodes[0]?.columnWidth);
+  const metaColumnWidth = normalizeCssLength(columnNodes[1]?.columnWidth);
+  const showDividers = !!separatorNode;
+  const dividerColor = separatorNode?.bgColor ?? separatorNode?.textColor;
+  const splitCategoryLine =
+    hasPostMetaTemplatePart &&
+    itemLayout === 'title-meta-inline' &&
+    metaAlign === 'end';
+  const categoryPrefix = splitCategoryLine ? 'in ' : undefined;
+  const metaSeparator: PostListSection['metaSeparator'] = splitCategoryLine
+    ? 'dash'
+    : undefined;
 
   return {
     type: 'post-list',
@@ -657,6 +739,16 @@ function mapQuery(node: WpNode): PostListSection {
       node.params?.displayFeaturedImage,
       hasFeaturedImageBlock,
     ),
+    itemLayout,
+    metaLayout,
+    metaAlign,
+    ...(metaSeparator ? { metaSeparator } : {}),
+    ...(showDividers ? { showDividers: true } : {}),
+    ...(dividerColor ? { dividerColor } : {}),
+    ...(titleColumnWidth ? { titleColumnWidth } : {}),
+    ...(metaColumnWidth ? { metaColumnWidth } : {}),
+    ...(splitCategoryLine ? { splitCategoryLine: true } : {}),
+    ...(categoryPrefix ? { categoryPrefix } : {}),
   };
 }
 
@@ -694,9 +786,24 @@ function mapColumns(
       const img = findFirstByBlock(flat, ['core/image', 'image']);
       const body = extractRichTextFromNodes(flat);
       return {
-        heading: h?.text ?? '',
+        heading: h ? extractNodeText(h) : '',
         body,
-        ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
+        ...(img?.src
+          ? {
+              imageSrc: img.src,
+              imageAlt: img.alt ?? '',
+              ...(img.customClassNames?.length
+                ? {
+                    imageCustomClassNames: uniqueClassNames(
+                      img.customClassNames,
+                    ),
+                  }
+                : {}),
+            }
+          : {}),
+        ...(col.customClassNames?.length
+          ? { customClassNames: uniqueClassNames(col.customClassNames) }
+          : {}),
       };
     })
     .filter((c) => c.heading || c.body || c.imageSrc);
@@ -714,13 +821,37 @@ function mapColumns(
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
-  if (nodeClasses.length > 0) {
-    const extra = nodeClasses.includes('is-style-asterisk')
-      ? ['vp-card-grid-intro-centered']
-      : [];
-    s.customClassNames = uniqueClassNames([...nodeClasses, ...extra]);
+  const extraClasses: string[] = [];
+  if (nodeClasses.includes('is-style-asterisk')) {
+    extraClasses.push('vp-card-grid-intro-centered');
+  }
+  if (cards.length >= 2 && isStatsCardSet(cards)) {
+    extraClasses.push('vp-stats-row');
+  } else if (cards.length >= 2 && isTeamCardSet(cards)) {
+    extraClasses.push('vp-team-grid');
+  }
+  if (nodeClasses.length > 0 || extraClasses.length > 0) {
+    s.customClassNames = uniqueClassNames([...nodeClasses, ...extraClasses]);
   }
   return s;
+}
+
+/** Cards where every entry has a short number/%-heavy heading → stats row. */
+function isStatsCardSet(
+  cards: Array<{ heading: string; body?: string; imageSrc?: string }>,
+): boolean {
+  if (cards.some((c) => c.imageSrc)) return false;
+  return cards.every(
+    (c) =>
+      c.heading.length <= 12 && /\d/.test(c.heading) && !/</.test(c.heading),
+  );
+}
+
+/** Cards where every entry has an image AND a heading (name) → team member grid. */
+function isTeamCardSet(
+  cards: Array<{ heading: string; body?: string; imageSrc?: string }>,
+): boolean {
+  return cards.every((c) => !!c.imageSrc && !!c.heading);
 }
 
 function buildFooterFromColumns(cols: WpNode[]): FooterSection | null {
@@ -830,8 +961,17 @@ function mapStandaloneHeading(node: WpNode): HeroSection | null {
     layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
     heading: node.text ?? '',
   };
+  const headingCustomClassNames = extractStyleVariantClassNames(
+    node.customClassNames,
+  );
+  if (headingCustomClassNames.length > 0) {
+    hero.headingCustomClassNames = headingCustomClassNames;
+  }
   if (node.typography || node.fontFamily) {
     hero.headingStyle = toTypographyStyle(node);
+  }
+  if (node.customClassNames?.length) {
+    hero.customClassNames = uniqueClassNames(node.customClassNames);
   }
   return hero;
 }
@@ -848,6 +988,12 @@ function mapQuote(node: WpNode): TestimonialSection | null {
     quote,
     authorName,
   };
+  const quoteCustomClassNames = extractStyleVariantClassNames(
+    node.customClassNames,
+  );
+  if (quoteCustomClassNames.length > 0) {
+    section.quoteCustomClassNames = quoteCustomClassNames;
+  }
   const contentAlign = inferSectionAlignment(node, node.children ?? []);
   if (contentAlign) section.contentAlign = contentAlign;
   return section;
@@ -864,6 +1010,9 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     const h = flat.find(
       (c) => c.block === 'core/heading' || c.block === 'heading',
     );
+    const paragraphNode = flat.find(
+      (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+    );
     const subheading = extractRichTextFromNodes(flat);
     const img = flat.find(
       (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
@@ -871,8 +1020,27 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     const btn = findBestButtonNode(flat);
     return {
       ...(h?.text ? { heading: h.text } : {}),
+      ...(extractStyleVariantClassNames(h?.customClassNames).length
+        ? {
+            headingCustomClassNames: extractStyleVariantClassNames(
+              h?.customClassNames,
+            ),
+          }
+        : {}),
       ...(subheading ? { subheading } : {}),
+      ...(extractStyleVariantClassNames(paragraphNode?.customClassNames).length
+        ? {
+            subheadingCustomClassNames: extractStyleVariantClassNames(
+              paragraphNode?.customClassNames,
+            ),
+          }
+        : {}),
       ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
+      ...(img?.customClassNames?.length
+        ? {
+            imageCustomClassNames: uniqueClassNames(img.customClassNames),
+          }
+        : {}),
       ...(btn?.text ? { cta: buildSectionCta(btn) } : {}),
     };
   });
@@ -883,6 +1051,9 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     const h = flat.find(
       (c) => c.block === 'core/heading' || c.block === 'heading',
     );
+    const paragraphNode = flat.find(
+      (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+    );
     const subheading = extractRichTextFromNodes(flat);
     const img = flat.find(
       (c) => (c.block === 'core/image' || c.block === 'image') && c.src,
@@ -890,8 +1061,27 @@ function mapUagbSlider(node: WpNode): CarouselSection | null {
     if (!h && !img) return null;
     slides.push({
       ...(h?.text ? { heading: h.text } : {}),
+      ...(extractStyleVariantClassNames(h?.customClassNames).length
+        ? {
+            headingCustomClassNames: extractStyleVariantClassNames(
+              h?.customClassNames,
+            ),
+          }
+        : {}),
       ...(subheading ? { subheading } : {}),
+      ...(extractStyleVariantClassNames(paragraphNode?.customClassNames).length
+        ? {
+            subheadingCustomClassNames: extractStyleVariantClassNames(
+              paragraphNode?.customClassNames,
+            ),
+          }
+        : {}),
       ...(img?.src ? { imageSrc: img.src, imageAlt: img.alt ?? '' } : {}),
+      ...(img?.customClassNames?.length
+        ? {
+            imageCustomClassNames: uniqueClassNames(img.customClassNames),
+          }
+        : {}),
     });
   }
 
@@ -961,9 +1151,40 @@ function mapUagbTabs(node: WpNode): TabsSection | null {
       return {
         label: tabTitle,
         ...(heading ? { heading } : {}),
+        ...(extractStyleVariantClassNames(h?.customClassNames).length
+          ? {
+              headingCustomClassNames: extractStyleVariantClassNames(
+                h?.customClassNames,
+              ),
+            }
+          : {}),
         ...(body ? { body } : {}),
+        ...(extractStyleVariantClassNames(
+          flat.find(
+            (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+          )?.customClassNames,
+        ).length
+          ? {
+              bodyCustomClassNames: extractStyleVariantClassNames(
+                flat.find(
+                  (c) =>
+                    c.block === 'core/paragraph' || c.block === 'paragraph',
+                )?.customClassNames,
+              ),
+            }
+          : {}),
         ...(imageNode?.src
-          ? { imageSrc: imageNode.src, imageAlt: imageNode.alt ?? '' }
+          ? {
+              imageSrc: imageNode.src,
+              imageAlt: imageNode.alt ?? '',
+              ...(imageNode.customClassNames?.length
+                ? {
+                    imageCustomClassNames: uniqueClassNames(
+                      imageNode.customClassNames,
+                    ),
+                  }
+                : {}),
+            }
           : {}),
         ...(buttonNode?.text
           ? {
@@ -1022,9 +1243,39 @@ function mapAccordionLike(node: WpNode): AccordionSection | null {
       return {
         heading,
         body,
+        ...(extractStyleVariantClassNames(headingNode?.customClassNames).length
+          ? {
+              headingCustomClassNames: extractStyleVariantClassNames(
+                headingNode?.customClassNames,
+              ),
+            }
+          : {}),
+        ...(extractStyleVariantClassNames(
+          flat.find(
+            (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+          )?.customClassNames,
+        ).length
+          ? {
+              bodyCustomClassNames: extractStyleVariantClassNames(
+                flat.find(
+                  (c) =>
+                    c.block === 'core/paragraph' || c.block === 'paragraph',
+                )?.customClassNames,
+              ),
+            }
+          : {}),
       };
     })
-    .filter((item): item is { heading: string; body: string } => !!item);
+    .filter(
+      (
+        item,
+      ): item is {
+        heading: string;
+        body: string;
+        headingCustomClassNames?: string[];
+        bodyCustomClassNames?: string[];
+      } => !!item,
+    );
 
   if (items.length === 0) return null;
 
@@ -1120,6 +1371,27 @@ function mapUagbModal(node: WpNode): ModalSection | null {
     ...(heading ? { heading } : {}),
     layout: imageNode?.src ? 'split' : 'centered',
   };
+  const triggerCustomClassNames = extractStyleVariantClassNames(
+    triggerButtonNode?.customClassNames,
+  );
+  if (triggerCustomClassNames.length > 0) {
+    section.triggerCustomClassNames = triggerCustomClassNames;
+  }
+  const headingCustomClassNames = extractStyleVariantClassNames(
+    headingNode?.customClassNames,
+  );
+  if (headingCustomClassNames.length > 0) {
+    section.headingCustomClassNames = headingCustomClassNames;
+  }
+  const bodyNode = flat.find(
+    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+  );
+  const bodyCustomClassNames = extractStyleVariantClassNames(
+    bodyNode?.customClassNames,
+  );
+  if (bodyCustomClassNames.length > 0) {
+    section.bodyCustomClassNames = bodyCustomClassNames;
+  }
   const closeOnOverlay = normalizeEnableDisableAttr(node.params?.overlayclick);
   if (closeOnOverlay !== undefined) section.closeOnOverlay = closeOnOverlay;
   const closeOnEsc = normalizeEnableDisableAttr(node.params?.escpress);
@@ -1153,6 +1425,11 @@ function mapUagbModal(node: WpNode): ModalSection | null {
   if (imageNode?.src) {
     section.imageSrc = imageNode.src;
     section.imageAlt = imageNode.alt ?? '';
+    if (imageNode.customClassNames?.length) {
+      section.imageCustomClassNames = uniqueClassNames(
+        imageNode.customClassNames,
+      );
+    }
   }
   if (!section.cta && typeof node.params?.modalCtaText === 'string') {
     section.cta = {
@@ -1197,10 +1474,45 @@ function applyNodePresentation<T extends SectionPlan>(
         ? node.gap
         : (normalizeGapStyleValue(node.gap) ?? next.gapStyle);
   }
-  const mergedClassNames = uniqueClassNames([
+  let mergedClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
     ...(node.customClassNames ?? []),
   ]);
+  const inferredAlign = inferNodeAlignment(node);
+  const presentation = {
+    ...(next.presentation ?? {}),
+  };
+  if (inferredAlign && !presentation.contentAlign) {
+    presentation.contentAlign = inferredAlign;
+  }
+  if (inferredAlign && !presentation.textAlign) {
+    presentation.textAlign = inferredAlign;
+  }
+  if (!presentation.itemsAlign && inferredAlign) {
+    presentation.itemsAlign =
+      inferredAlign === 'center'
+        ? 'center'
+        : inferredAlign === 'right'
+          ? 'end'
+          : 'start';
+  }
+  if (!presentation.justify && inferredAlign) {
+    presentation.justify =
+      inferredAlign === 'center'
+        ? 'center'
+        : inferredAlign === 'right'
+          ? 'end'
+          : 'start';
+  }
+  if (node.align === 'full' || node.align === 'wide') {
+    presentation.container = 'shell';
+  }
+  if (inferredAlign) {
+    mergedClassNames = mergedClassNames.filter(
+      (className) => !/^vp-section-align-(left|center|right)$/.test(className),
+    );
+    mergedClassNames.push(`vp-section-align-${inferredAlign}`);
+  }
   // For card-grid: auto-inject centered intro marker when asterisk style or
   // when the wrapping node is center-aligned (common WP pattern for feature grids)
   if (next.type === 'card-grid') {
@@ -1220,6 +1532,9 @@ function applyNodePresentation<T extends SectionPlan>(
   }
   if (customClassNames.length > 0) {
     next.customClassNames = customClassNames;
+  }
+  if (Object.keys(presentation).length > 0) {
+    next.presentation = presentation;
   }
   return next;
 }
@@ -1283,15 +1598,25 @@ function mergeHeroIntoCardGrid(
   grid: CardGridSection,
   node: WpNode,
 ): CardGridSection {
+  const gridAlignmentClasses = (grid.customClassNames ?? []).filter(
+    (className) => /^vp-section-align-(left|center|right)$/.test(className),
+  );
+  const mergedNonAlignmentClasses = uniqueClassNames(
+    [...(grid.customClassNames ?? []), ...(hero.customClassNames ?? [])].filter(
+      (className) => !/^vp-section-align-(left|center|right)$/.test(className),
+    ),
+  );
   const mergedClasses = uniqueClassNames([
-    ...(grid.customClassNames ?? []),
-    ...(hero.customClassNames ?? []),
+    ...gridAlignmentClasses,
+    ...mergedNonAlignmentClasses,
     hero.layout === 'centered' ? 'vp-card-grid-intro-centered' : '',
   ]);
   // is-style-asterisk implies a centered, decorated card grid in WordPress
   const customClassNames = uniqueClassNames([
     ...mergedClasses,
-    mergedClasses.includes('is-style-asterisk') ? 'vp-card-grid-intro-centered' : '',
+    mergedClasses.includes('is-style-asterisk')
+      ? 'vp-card-grid-intro-centered'
+      : '',
   ]);
 
   return {
@@ -1410,36 +1735,233 @@ function buildTestimonialFromGroup(
   groupNode: WpNode,
   children: WpNode[],
 ): TestimonialSection | null {
-  const allText = flattenChildren({ children } as WpNode)
-    .filter((n) => n.block === 'core/paragraph' || n.block === 'paragraph')
-    .map((n) => n.text ?? '')
-    .filter(Boolean);
+  const flat = flattenChildren({ children } as WpNode);
+  const paragraphCandidates = collectParagraphCandidates(groupNode);
+  if (paragraphCandidates.length === 0) return null;
 
-  if (allText.length === 0) return null;
+  const quoteCandidate = selectQuoteCandidate(paragraphCandidates);
+  if (!quoteCandidate) return null;
 
-  // First paragraph is the quote; look for curly-quote wrapper or just take it
-  const quote = allText[0].replace(/^["“«]+|["”»]+$/g, '').trim();
+  const supportingCandidates = paragraphCandidates.filter(
+    (candidate) => candidate !== quoteCandidate,
+  );
+  const avatarNode = flat.find(
+    (node) =>
+      (node.block === 'core/image' || node.block === 'image') && node.src,
+  );
+  if (supportingCandidates.length === 0 && !avatarNode?.src) return null;
+
+  const quote = cleanTestimonialQuote(quoteCandidate.text);
   if (!quote) return null;
 
-  const authorName = allText[1] ?? '';
-  const authorTitle = allText[2] ?? undefined;
+  const authorNameCandidate = selectAuthorNameCandidate(
+    supportingCandidates,
+    quoteCandidate.order,
+  );
+  const authorTitleCandidate = selectAuthorTitleCandidate(
+    supportingCandidates,
+    quoteCandidate.order,
+    authorNameCandidate?.order,
+  );
+  const authorName = authorNameCandidate?.text ?? '';
+  const authorTitle = authorTitleCandidate?.text;
 
   const section: TestimonialSection = {
     type: 'testimonial',
     quote,
     authorName,
     authorTitle,
+    ...(avatarNode?.src ? { authorAvatar: avatarNode.src } : {}),
+    ...(avatarNode?.customClassNames?.length
+      ? {
+          authorAvatarCustomClassNames: uniqueClassNames(
+            avatarNode.customClassNames,
+          ),
+        }
+      : {}),
   };
+  const quoteCustomClassNames = extractStyleVariantClassNames(
+    quoteCandidate.node.customClassNames,
+  );
+  if (quoteCustomClassNames.length > 0) {
+    section.quoteCustomClassNames = quoteCustomClassNames;
+  }
+  const authorCustomClassNames = uniqueClassNames([
+    ...extractStyleVariantClassNames(
+      authorNameCandidate?.node.customClassNames,
+    ),
+    ...extractStyleVariantClassNames(
+      authorTitleCandidate?.node.customClassNames,
+    ),
+  ]);
+  if (authorCustomClassNames.length > 0) {
+    section.authorCustomClassNames = authorCustomClassNames;
+  }
   const contentAlign = inferSectionAlignment(groupNode, children);
   if (contentAlign) section.contentAlign = contentAlign;
   return section;
 }
 
+type ParagraphCandidate = {
+  node: WpNode;
+  text: string;
+  order: number;
+};
+
+function isLikelyTestimonialGroup(node: WpNode): boolean {
+  const flat = flattenChildren(node);
+  if (
+    flat.some((child) =>
+      ['core/heading', 'heading', 'core/query', 'query'].includes(child.block),
+    )
+  ) {
+    return false;
+  }
+
+  const paragraphCandidates = collectParagraphCandidates(node);
+  if (paragraphCandidates.length < 2) return false;
+
+  const quoteCandidate = selectQuoteCandidate(paragraphCandidates);
+  if (!quoteCandidate) return false;
+
+  return paragraphCandidates.some((candidate) => {
+    if (candidate === quoteCandidate) return false;
+    return (
+      looksLikePersonName(candidate.text) ||
+      looksLikeAuthorDescriptor(candidate.text)
+    );
+  });
+}
+
+function collectParagraphCandidates(node: WpNode): ParagraphCandidate[] {
+  return flattenChildren(node)
+    .filter(
+      (child) =>
+        child.block === 'core/paragraph' || child.block === 'paragraph',
+    )
+    .map((child, order) => {
+      const text = extractNodeText(child);
+      return text ? { node: child, text, order } : null;
+    })
+    .filter((candidate): candidate is ParagraphCandidate => !!candidate);
+}
+
+function selectQuoteCandidate(
+  candidates: ParagraphCandidate[],
+): ParagraphCandidate | undefined {
+  const quoted = candidates.find((candidate) => hasQuotedWrap(candidate.text));
+  if (quoted) return quoted;
+
+  const longParagraph = candidates.find((candidate) =>
+    looksLikeLongFormQuote(candidate.text),
+  );
+  if (longParagraph) return longParagraph;
+
+  return [...candidates]
+    .filter((candidate) => candidate.text.length >= 48)
+    .sort((left, right) => right.text.length - left.text.length)[0];
+}
+
+function selectAuthorNameCandidate(
+  candidates: ParagraphCandidate[],
+  quoteOrder: number,
+): ParagraphCandidate | undefined {
+  const ordered = prioritizeCandidatesAfterQuote(candidates, quoteOrder);
+  const explicitName = ordered.find((candidate) =>
+    looksLikePersonName(candidate.text),
+  );
+  if (explicitName) return explicitName;
+
+  return ordered.find(
+    (candidate) =>
+      candidate.text.length <= 80 &&
+      !looksLikeLongFormQuote(candidate.text) &&
+      !looksLikeAuthorDescriptor(candidate.text),
+  );
+}
+
+function selectAuthorTitleCandidate(
+  candidates: ParagraphCandidate[],
+  quoteOrder: number,
+  authorNameOrder?: number,
+): ParagraphCandidate | undefined {
+  const ordered = prioritizeCandidatesAfterQuote(candidates, quoteOrder).filter(
+    (candidate) => candidate.order !== authorNameOrder,
+  );
+  const descriptor = ordered.find((candidate) =>
+    looksLikeAuthorDescriptor(candidate.text),
+  );
+  if (descriptor) return descriptor;
+
+  return ordered.find(
+    (candidate) =>
+      candidate.text.length <= 120 && !looksLikeLongFormQuote(candidate.text),
+  );
+}
+
+function prioritizeCandidatesAfterQuote(
+  candidates: ParagraphCandidate[],
+  quoteOrder: number,
+): ParagraphCandidate[] {
+  const afterQuote = candidates
+    .filter((candidate) => candidate.order > quoteOrder)
+    .sort((left, right) => left.order - right.order);
+  if (afterQuote.length > 0) return afterQuote;
+  return [...candidates].sort((left, right) => left.order - right.order);
+}
+
+function cleanTestimonialQuote(text: string): string {
+  return text.replace(/^[\s"'“”‘’«»]+|[\s"'“”‘’«»]+$/g, '').trim();
+}
+
+function hasQuotedWrap(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return /^[“"‘'«]/.test(trimmed) || /[”"’'»]$/.test(trimmed);
+}
+
+function looksLikeLongFormQuote(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 48) return false;
+  return (
+    hasQuotedWrap(trimmed) || /[.!?…]/.test(trimmed) || trimmed.length >= 80
+  );
+}
+
+function looksLikePersonName(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 80) return false;
+  if (/[,:;.!?()]/.test(trimmed)) return false;
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || parts.length > 6) return false;
+  return parts.every(
+    (part) =>
+      /^[\p{L}\p{M}][\p{L}\p{M}'’.-]*$/u.test(part) &&
+      part !== part.toLowerCase(),
+  );
+}
+
+function looksLikeAuthorDescriptor(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 120) return false;
+  if (looksLikeLongFormQuote(trimmed)) return false;
+  return /,| at | @ | founder|ceo|cto|co-founder|manager|director|lead|owner|team|company|studio|agency|inc|llc/i.test(
+    trimmed,
+  );
+}
+
 function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
   let title: string | undefined;
   let subtitle: string | undefined;
+  let titleCustomClassNames: string[] | undefined;
+  let subtitleCustomClassNames: string[] | undefined;
   let columnCount: 2 | 3 | 4 = 3;
-  const cards: { heading: string; body: string }[] = [];
+  const cards: Array<{
+    heading: string;
+    body: string;
+    headingCustomClassNames?: string[];
+    bodyCustomClassNames?: string[];
+  }> = [];
   let foundCardGrid = false;
 
   for (const child of children) {
@@ -1451,6 +1973,9 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
       child.text
     ) {
       title ??= child.text;
+      titleCustomClassNames ??= extractStyleVariantClassNames(
+        child.customClassNames,
+      );
       continue;
     }
 
@@ -1460,6 +1985,9 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
       child.text
     ) {
       subtitle ??= child.text;
+      subtitleCustomClassNames ??= extractStyleVariantClassNames(
+        child.customClassNames,
+      );
       continue;
     }
 
@@ -1488,7 +2016,13 @@ function buildGroupedCardGrid(children: WpNode[]): CardGridSection | null {
     cards,
   };
   if (title) section.title = title;
+  if (titleCustomClassNames?.length) {
+    section.titleCustomClassNames = titleCustomClassNames;
+  }
   if (subtitle) section.subtitle = subtitle;
+  if (subtitleCustomClassNames?.length) {
+    section.subtitleCustomClassNames = subtitleCustomClassNames;
+  }
   // Presence of intro heading + subtitle with a card grid often indicates a
   // centered section layout in WordPress — pre-mark it so the generator picks
   // up centered intro styling without waiting for the outer node alignment pass.
@@ -1545,15 +2079,34 @@ function buildHeroFromChildren(
   const s: HeroSection = {
     type: 'hero',
     layout,
-    heading: h?.text ?? '',
+    heading: h ? extractNodeText(h) : '',
   };
+  const headingCustomClassNames = extractStyleVariantClassNames(
+    h?.customClassNames,
+  );
+  if (headingCustomClassNames.length > 0) {
+    s.headingCustomClassNames = headingCustomClassNames;
+  }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   const richSubheading = extractRichTextFromNodes(flat);
   if (richSubheading) s.subheading = richSubheading;
+  const subheadingCustomClassNames = extractStyleVariantClassNames(
+    p?.customClassNames,
+  );
+  if (subheadingCustomClassNames.length > 0) {
+    s.subheadingCustomClassNames = subheadingCustomClassNames;
+  }
   if (p?.typography || p?.fontFamily) s.subheadingStyle = toTypographyStyle(p);
   applySectionCtas(s, children);
   if (img?.src)
-    s.image = { src: img.src, alt: img.alt ?? '', position: 'right' };
+    s.image = {
+      src: img.src,
+      alt: img.alt ?? '',
+      position: 'right',
+      ...(img.customClassNames?.length
+        ? { customClassNames: uniqueClassNames(img.customClassNames) }
+        : {}),
+    };
   if (groupNode.padding) {
     s.paddingStyle = boxSpacingToCss(groupNode.padding);
   }
@@ -1667,8 +2220,29 @@ function buildMediaTextFromColumns(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
       return {
-        heading: h?.text ?? '',
+        heading: h ? extractNodeText(h) : '',
         body: extractRichTextFromNodes(flat),
+        ...(extractStyleVariantClassNames(h?.customClassNames).length
+          ? {
+              headingCustomClassNames: extractStyleVariantClassNames(
+                h?.customClassNames,
+              ),
+            }
+          : {}),
+        ...(extractStyleVariantClassNames(
+          flat.find(
+            (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+          )?.customClassNames,
+        ).length
+          ? {
+              bodyCustomClassNames: extractStyleVariantClassNames(
+                flat.find(
+                  (c) =>
+                    c.block === 'core/paragraph' || c.block === 'paragraph',
+                )?.customClassNames,
+              ),
+            }
+          : {}),
       };
     });
     return { type: 'card-grid', columns: 2, cards };
@@ -1691,15 +2265,32 @@ function buildMediaTextFromColumns(
     imageSrc: imgNode.src,
     imageAlt: imgNode.alt ?? '',
     imagePosition: imgInFirst ? 'left' : 'right',
+    ...(imgNode.customClassNames?.length
+      ? {
+          imageCustomClassNames: uniqueClassNames(imgNode.customClassNames),
+        }
+      : {}),
   };
   const columnWidths = cols
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   if (h?.text) s.heading = h.text;
+  const mediaHeadingCustomClassNames = extractStyleVariantClassNames(
+    h?.customClassNames,
+  );
+  if (mediaHeadingCustomClassNames.length > 0) {
+    s.headingCustomClassNames = mediaHeadingCustomClassNames;
+  }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
   const richBody = extractRichTextFromNodes(textFlat);
   if (richBody) s.body = richBody;
+  const mediaBodyCustomClassNames = extractStyleVariantClassNames(
+    p?.customClassNames,
+  );
+  if (mediaBodyCustomClassNames.length > 0) {
+    s.bodyCustomClassNames = mediaBodyCustomClassNames;
+  }
   if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
   if (listItems.length > 0) s.listItems = listItems;
   applySectionCtas(s, textFlat);
@@ -2008,6 +2599,47 @@ function isButtonOnlyNode(node: WpNode): boolean {
   return false;
 }
 
+/**
+ * A CTA banner group has buttons and a heading but no columns.
+ * A background color or full/wide alignment confirms it is a standalone CTA
+ * strip rather than a normal hero section.
+ */
+function isCtaBannerGroup(node: WpNode, children: WpNode[]): boolean {
+  const meaningful = children.filter((c) => !isSpacerBlock(c.block));
+  const hasButtons = meaningful.some(
+    (c) => isButtonBlock(c.block) || c.block === 'core/buttons' || c.block === 'buttons',
+  );
+  if (!hasButtons) return false;
+  const hasColumns = meaningful.some(
+    (c) => c.block === 'core/columns' || c.block === 'columns',
+  );
+  if (hasColumns) return false;
+  const hasBg = !!(
+    node.bgColor ||
+    (node.params?.backgroundColor as string | undefined) ||
+    (node.params?.gradient as string | undefined) ||
+    (node.params?.style as Record<string, unknown> | undefined)?.color
+  );
+  const isWideOrFull =
+    node.params?.align === 'full' || node.params?.align === 'wide';
+  return hasBg || isWideOrFull;
+}
+
+function buildCtaBannerSection(
+  node: WpNode,
+  children: WpNode[],
+): CtaStripSection {
+  const ctas = buildSectionCtas(children);
+  const align = inferSectionAlignment(node, children);
+  const s: CtaStripSection = {
+    type: 'cta-strip',
+    ...(align ? { align } : {}),
+  };
+  if (ctas[0]) s.cta = ctas[0];
+  if (ctas.length > 1) s.ctas = ctas;
+  return s;
+}
+
 function boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
   const { top = '0', right = top, bottom = top, left = right } = box;
   if (top === right && top === bottom && top === left) return top;
@@ -2159,4 +2791,10 @@ function uniqueClassNames(values: string[]): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function extractStyleVariantClassNames(values?: string[]): string[] {
+  return uniqueClassNames(
+    (values ?? []).filter((value) => /^is-style-/i.test(value.trim())),
+  );
 }

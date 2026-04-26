@@ -3,7 +3,7 @@ import type { AgentResult } from '@/common/types/pipeline.type.js';
 import { HttpService } from '@nestjs/axios';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { mkdir, readdir, stat, writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -30,7 +30,10 @@ import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.
 import { NormalizerService } from '../agents/normalizer/normalizer.service.js';
 import type { PhpParseResult } from '../agents/php-parser/php-parser.service.js';
 import { PhpParserService } from '../agents/php-parser/php-parser.service.js';
-import { PlanReviewerService } from '../agents/plan-reviewer/plan-reviewer.service.js';
+import {
+  PlanReviewerService,
+  type PlanReviewWarningCode,
+} from '../agents/plan-reviewer/plan-reviewer.service.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
@@ -55,6 +58,7 @@ import { CaptureReviewService } from '../edit-request/capture-review.service.js'
 import { EditRequestPhaseService } from '../edit-request/edit-request-phase.service.js';
 import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
 import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.types.js';
+import { ThemeRepoLayoutResolverService } from '../theme/theme-repo-layout-resolver.service.js';
 import {
   buildUiMutationCandidatesForGeneratedComponents,
   buildUiSourceMapForGeneratedComponents,
@@ -271,25 +275,43 @@ function collectPlanReviewBlockingIssues(
   review: {
     errors: string[];
     warnings: string[];
+    warningCodes?: PlanReviewWarningCode[];
     plan?: Array<{ componentName: string; visualPlan?: unknown }>;
   },
   strictMode: boolean,
   phase: 'architecture' | 'visual',
 ): string[] {
   const actionableWarnings: string[] = [];
+  const ignoredWarningCodes = new Set<PlanReviewWarningCode>([
+    'multiple_home_like_templates_detected',
+    'type_normalized',
+    'route_normalized',
+    'detail_flag_normalized',
+    'page_level_chrome_dataneeds_removed',
+    'template_dataneeds_normalized',
+    'visualplan_sections_synchronized',
+    'visualplan_contract_sanitized',
+    'visualplan_dataneeds_synchronized',
+    'duplicate_route_normalized',
+    'home_hierarchy_type_normalized',
+    'home_hierarchy_route_normalized',
+    'home_hierarchy_is_detail_normalized',
+  ]);
 
-  for (const warning of review.warnings) {
+  review.warnings.forEach((warning, index) => {
+    const warningCode = review.warningCodes?.[index];
+
     // Phase-D review intentionally runs before visual plans are attached.
     if (
       phase === 'architecture' &&
-      warning.includes('without visual plan (generator will use fallback AI)')
+      warningCode === 'missing_visual_plan_fallback_ai'
     ) {
-      continue;
+      return;
     }
 
     if (
       phase === 'visual' &&
-      warning.includes('without visual plan (generator will use fallback AI)')
+      warningCode === 'missing_visual_plan_fallback_ai'
     ) {
       const missingVisualPlanComponents =
         review.plan
@@ -305,28 +327,17 @@ function collectPlanReviewBlockingIssues(
           `${missingVisualPlanComponents.length} component(s) still require visual plan: ${missingVisualPlanComponents.join(', ')}`,
         );
       }
-      continue;
+      return;
     }
 
     // These are deterministic normalizations performed by the reviewer itself,
     // not something the LLM can meaningfully "fix" on the next retry.
-    if (
-      warning.includes('Multiple home-like templates detected') ||
-      warning.includes('→ normalized to ') ||
-      warning.includes('removed page-level chrome dataNeeds') ||
-      warning.includes(
-        'visualPlan sections were synchronized to match route/detail contract',
-      ) ||
-      warning.includes('visualPlan contract sanitization:') ||
-      warning.includes('visualPlan dataNeeds [') ||
-      warning.includes('Duplicate route "') ||
-      (warning.includes('Template "') && warning.includes('dataNeeds ['))
-    ) {
-      continue;
+    if (warningCode && ignoredWarningCodes.has(warningCode)) {
+      return;
     }
 
     actionableWarnings.push(warning);
-  }
+  });
 
   return strictMode
     ? [...review.errors, ...actionableWarnings]
@@ -536,6 +547,7 @@ export class OrchestratorService {
     private readonly sqlService: SqlService,
     private readonly wpQuery: WpQueryService,
     private readonly themeDetector: ThemeDetectorService,
+    private readonly themeRepoLayoutResolver: ThemeRepoLayoutResolverService,
     private readonly repoAnalyzer: RepoAnalyzerService,
     private readonly phpParser: PhpParserService,
     private readonly blockParser: BlockParserService,
@@ -618,7 +630,13 @@ export class OrchestratorService {
       hasEditRequest: Boolean(dto.editRequest),
     });
 
-    this.executePipelineLegacy(jobId, siteId, dto, state, editRequestContext).catch((err) => {
+    this.executePipelineLegacy(
+      jobId,
+      siteId,
+      dto,
+      state,
+      editRequestContext,
+    ).catch((err) => {
       if (err instanceof PipelineControlError) {
         void this.finalizeControlledTermination(jobId, state, err);
         return;
@@ -1342,6 +1360,11 @@ export class OrchestratorService {
               ? 'Parsing block templates and template parts from the FSE theme.'
               : 'Parsing PHP templates, partials, and WordPress template hints from the classic theme.',
           );
+          if (detection.type !== 'fse') {
+            throw new Error(
+              `Unsupported theme type "${detection.type}" for slug "${repoResult.themeManifest.themeTypeHints.themeSlug}". This pipeline currently supports only FSE themes.`,
+            );
+          }
           return detection.type === 'fse'
             ? this.blockParser.parse(themeDir!)
             : this.phpParser.parse(themeDir!);
@@ -2686,26 +2709,6 @@ export class OrchestratorService {
     repoRoot: string,
     dbConnectionString: string,
   ): Promise<string> {
-    // Thử theo thứ tự: <root>/themes/ rồi <root>/wp-content/themes/
-    const themesdirCandidates = [
-      join(repoRoot, 'themes'),
-      join(repoRoot, 'wp-content', 'themes'),
-    ];
-
-    let themesDir: string | undefined;
-    for (const candidate of themesdirCandidates) {
-      try {
-        await stat(candidate);
-        themesDir = candidate;
-        break;
-      } catch {
-        // try next
-      }
-    }
-
-    if (!themesDir) return repoRoot;
-
-    // Query active theme slug từ WP DB (wp_options.stylesheet)
     let activeSlug: string | undefined;
     try {
       activeSlug = await this.wpQuery.getActiveTheme(dbConnectionString);
@@ -2713,30 +2716,10 @@ export class OrchestratorService {
       this.logger.warn(`Could not query active theme from DB: ${err.message}`);
     }
 
-    if (activeSlug) {
-      const themeDir = join(themesDir, activeSlug);
-      try {
-        await stat(themeDir);
-        this.logger.log(`Active theme from DB: ${activeSlug}`);
-        return themeDir;
-      } catch {
-        this.logger.warn(
-          `Theme folder not found for slug "${activeSlug}", falling back`,
-        );
-      }
-    }
-
-    // Fallback: lấy theme đầu tiên trong themes/
-    const entries = await readdir(themesDir);
-    const firstTheme = entries[0];
-    if (firstTheme) {
-      this.logger.warn(
-        `No active theme detected, using first theme: ${firstTheme}`,
-      );
-      return join(themesDir, firstTheme);
-    }
-
-    return repoRoot;
+    return this.themeRepoLayoutResolver.resolve({
+      repoRoot,
+      activeSlug,
+    });
   }
 
   private async enrichThemeWithPluginTemplates(input: {
@@ -5020,6 +5003,19 @@ export class OrchestratorService {
       ]);
       if (revalidated.failures.length > 0) {
         const validationErr = revalidated.failures[0]?.error;
+        if (!feedbackOverride && validationErr) {
+          this.logger.warn(
+            `[Focused Edit Pass] Initial focused edit for "${fixedResult.editedComponentName}" failed validation. Retrying once with preservation feedback. Error: ${validationErr}`,
+          );
+          await this.logToFile(
+            logPath,
+            `[Focused Edit Pass] Initial focused edit for "${fixedResult.editedComponentName}" failed validation. Retrying once with preservation feedback.\n${validationErr}`,
+          );
+          return applyFocusedTask(
+            task,
+            `${task.feedback}\n\nThe previous focused edit attempt failed validation:\n${validationErr}\n\nRetry by changing only the requested target region. Preserve every other section, section order, hero/title text, CTA labels, tracked wrappers, and approved visual-plan content exactly as they already exist.`,
+          );
+        }
         this.logger.warn(
           `[Focused Edit Pass] Re-validation failed for "${fixedResult.editedComponentName}" after focused edit. Keeping the previous version. Error: ${validationErr}`,
         );

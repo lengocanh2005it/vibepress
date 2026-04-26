@@ -42,7 +42,7 @@ export function buildFragmentPrompt(options: {
         .map((s) => {
           const { type, ...rest } = s as unknown as Record<string, unknown>;
           const detail = Object.keys(rest).length
-            ? ` — ${JSON.stringify(rest).slice(0, 150)}`
+            ? ` — ${JSON.stringify(rest).slice(0, 600)}`
             : '';
           return `- ${type}${detail}`;
         })
@@ -81,7 +81,7 @@ ${buildFlatRestSchemaNote(availableVariables)}
 - Output ONE JSX fragment only — no imports, no \`export default\`, no function wrapper
 - Start with a SINGLE root element: \`<main>\`, \`<section>\`, \`<header>\`, or \`<footer>\`
 - No CSS imports, no \`style.foo\`
-- Use Tailwind utilities only — do not assume WordPress theme CSS exists at runtime.
+- Use Tailwind utilities for layout/spacing. For colors, typography, and button/card styles, prefer inline \`style\` props from the visual plan fields (ctaStyle, cardStyle, headingStyle, etc.) when present — do NOT invent values.
 - Recreate the source layout faithfully with semantic wrappers, spacing, and widths from the template and theme tokens.
 - \`<Link to="...">\` for internal paths (already imported)
 - Do NOT add \`useState\`, \`useEffect\`, \`fetch\`, or \`useParams\` — they are in the frame

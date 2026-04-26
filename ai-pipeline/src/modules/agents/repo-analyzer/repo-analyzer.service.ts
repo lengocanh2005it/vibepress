@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir } from 'fs/promises';
 import { basename, dirname, extname, join, resolve } from 'path';
+import {
+  ProfolioFseRepoAnalysisStrategy,
+  TwentyTwentyFourRepoAnalysisStrategy,
+  type ThemeRepoAnalysisManifestPatch,
+  type ThemeRepoAnalysisStrategy,
+} from './strategies/theme-repo-analysis.strategy.js';
 
 // Module-level constants — shared by bucketFiles() and categorizeAssets()
 const STYLE_EXTS = new Set(['.css', '.scss', '.sass', '.less']);
@@ -16,7 +22,14 @@ const IMAGE_EXTS = new Set([
 ]);
 const FONT_EXTS = new Set(['.woff', '.woff2', '.ttf', '.otf', '.eot']);
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.ogv']);
-const RUNTIME_DIR_PREFIXES = ['inc/', 'src/', 'app/', 'classes/', 'includes/'];
+const RUNTIME_DIR_PREFIXES = [
+  'inc/',
+  'src/',
+  'app/',
+  'class/',
+  'classes/',
+  'includes/',
+];
 
 // ─── Internal registry types ──────────────────────────────────────────────────
 interface KnownPluginDef {
@@ -246,57 +259,12 @@ const KNOWN_PLUGINS: Record<string, KnownPluginDef> = {
 
 // ─── Known themes registry ────────────────────────────────────────────────────
 const KNOWN_THEMES: Record<string, KnownThemeDef> = {
-  // WordPress default block themes
   twentytwentyfour: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  twentytwentythree: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  twentytwentytwo: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  // WordPress default classic themes
-  twentytwentyone: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  twentytwenty: { vendor: 'wordpress', usesPageBuilder: false, notes: [] },
-  // Popular multipurpose (classic/hybrid)
-  astra: { vendor: 'brainstorm-force', usesPageBuilder: false, notes: [] },
-  generatepress: { vendor: 'tom-usborne', usesPageBuilder: false, notes: [] },
-  oceanwp: { vendor: 'oceanwp', usesPageBuilder: false, notes: [] },
-  kadence: { vendor: 'kadence-wp', usesPageBuilder: false, notes: [] },
-  blocksy: { vendor: 'creativethemes', usesPageBuilder: false, notes: [] },
-  'hello-elementor': {
-    vendor: 'elementor',
-    usesPageBuilder: true,
-    pageBuilderSlug: 'elementor',
-    notes: [
-      'Hello Elementor is a minimal wrapper — all layouts are built in Elementor and stored in DB.',
-    ],
+  'profolio-fse': {
+    vendor: 'themegrovewp',
+    usesPageBuilder: false,
+    notes: [],
   },
-  // Page-builder-dependent themes
-  divi: {
-    vendor: 'elegant-themes',
-    usesPageBuilder: true,
-    pageBuilderSlug: 'divi',
-    notes: [
-      'Divi stores page layouts as serialized meta in DB — PHP template files are mostly empty wrappers.',
-    ],
-  },
-  extra: {
-    vendor: 'elegant-themes',
-    usesPageBuilder: true,
-    pageBuilderSlug: 'divi',
-    notes: [
-      'Extra (Elegant Themes) uses Divi Builder — layouts are in DB, not template files.',
-    ],
-  },
-  avada: {
-    vendor: 'theme-fusion',
-    usesPageBuilder: true,
-    pageBuilderSlug: 'fusion-builder',
-    notes: [
-      'Avada/Fusion Builder stores layouts in DB — actual page structure is not in theme template files.',
-    ],
-  },
-  betheme: { vendor: 'muffinthemes', usesPageBuilder: false, notes: [] },
-  enfold: { vendor: 'kriesi', usesPageBuilder: false, notes: [] },
-  salient: { vendor: 'themenectar', usesPageBuilder: false, notes: [] },
-  bridge: { vendor: 'qode', usesPageBuilder: false, notes: [] },
-  flatsome: { vendor: 'ux-themes', usesPageBuilder: false, notes: [] },
 };
 
 export interface RepoAnalyzeResult {
@@ -429,6 +397,7 @@ export interface RepoInteractiveWidgetContract {
   scriptFiles: string[];
   styleFiles: string[];
   appearance?: RepoInteractiveAppearanceSignature;
+  defaults?: RepoInteractiveWidgetDefaults;
   notes: string[];
 }
 
@@ -440,6 +409,37 @@ export interface RepoInteractiveAppearanceSignature {
   behaviorClasses: string[];
   alignmentClasses: string[];
   styleCues: string[];
+}
+
+export interface RepoInteractiveWidgetDefaults {
+  width?: string;
+  height?: string;
+  maxWidth?: string;
+  overlayColor?: string;
+  background?: string;
+  textColor?: string;
+  contentPadding?: string;
+  slideHeight?: string;
+  activeTab?: number;
+  variant?: string;
+  layout?: string;
+  tabAlign?: string;
+  iconPosition?: string;
+  arrowBackground?: string;
+  arrowColor?: string;
+  dotsColor?: string;
+  autoplay?: boolean;
+  autoplaySpeed?: number;
+  loop?: boolean;
+  effect?: string;
+  showDots?: boolean;
+  showArrows?: boolean;
+  vertical?: boolean;
+  transitionSpeed?: number;
+  pauseOn?: string;
+  allowMultiple?: boolean;
+  defaultOpenItems?: number[];
+  enableToggle?: boolean;
 }
 
 export interface RepoSpectraInteractiveContracts {
@@ -524,6 +524,9 @@ export interface RepoRuntimeHints {
   themeSupports: string[];
   enqueuedStyleHandles: string[];
   enqueuedScriptHandles: string[];
+  enqueuedStyleFiles: string[];
+  enqueuedScriptFiles: string[];
+  requiredPhpFiles: string[];
   imageSizes: string[];
   editorStyleFiles: string[];
 }
@@ -542,6 +545,32 @@ export interface RepoFileBlockUsage {
   blockTypes: string[];
 }
 
+export interface RepoSourceFileAnalysis {
+  file: string;
+  kind: 'template' | 'template-part' | 'pattern' | 'php-template';
+  blockTypes: string[];
+  headingTexts: string[];
+  templatePartSlugs: string[];
+  templatePartFiles: string[];
+  patternSlugs: string[];
+  patternFiles: string[];
+  referencedAssetPaths: string[];
+  referencedRuntimeFiles: string[];
+  customClasses: string[];
+}
+
+export interface RepoEntrySourceChain {
+  entryFile: string;
+  routeHint: string;
+  chainFiles: string[];
+  composedSource: string;
+  assetFiles: string[];
+  runtimeFiles: string[];
+  blockTypes: string[];
+  headingTexts: string[];
+  notes: string[];
+}
+
 export interface RepoStructureHints {
   templatePartRefs: string[];
   patternRefs: string[];
@@ -554,6 +583,8 @@ export interface RepoStructureHints {
   containsQueryLoop: boolean;
   /** Parsed metadata from PHP header comments in patterns/ files */
   patternMeta: RepoPatternMeta[];
+  fileAnalyses: RepoSourceFileAnalysis[];
+  entrySourceChains: RepoEntrySourceChain[];
 }
 
 export interface RepoAssetManifest {
@@ -580,6 +611,10 @@ export interface RepoSourceOfTruth {
 @Injectable()
 export class RepoAnalyzerService {
   private readonly logger = new Logger(RepoAnalyzerService.name);
+  private readonly themeStrategies: ThemeRepoAnalysisStrategy[] = [
+    new TwentyTwentyFourRepoAnalysisStrategy(),
+    new ProfolioFseRepoAnalysisStrategy(),
+  ];
 
   async analyze(themeDir: string): Promise<RepoAnalyzeResult> {
     this.logger.log(`Analyzing repo: ${themeDir}`);
@@ -610,7 +645,49 @@ export class RepoAnalyzerService {
     themeDir: string,
     fileTree: string[],
   ): Promise<RepoThemeManifest> {
-    const themeSlug = basename(themeDir);
+    const themeSlug = basename(themeDir).trim().toLowerCase();
+    const strategy = this.themeStrategies.find((candidate) =>
+      candidate.supports(themeSlug),
+    );
+    if (!strategy) {
+      this.logger.warn(
+        `No specialized repo analysis strategy registered for theme "${themeSlug}". Falling back to generic FSE analysis.`,
+      );
+      return this.patchManifest(
+        await this.buildGenericFseManifest(themeDir, fileTree, themeSlug),
+        {
+          sourceOfTruthNotes: [
+            `Theme strategy: "${themeSlug}" is using the generic FSE repo-analysis profile.`,
+          ],
+          themeVendorNotes: [
+            'Theme profile: generic FSE fallback profile applied because no specialized repo-analysis strategy was registered.',
+          ],
+        },
+      );
+    }
+    return strategy.buildManifest(
+      {
+        themeDir,
+        fileTree,
+        themeSlug,
+      },
+      {
+        buildGenericFseManifest: (nextThemeDir, nextFileTree, nextThemeSlug) =>
+          this.buildGenericFseManifest(
+            nextThemeDir,
+            nextFileTree,
+            nextThemeSlug,
+          ),
+        patchManifest: (manifest, patch) => this.patchManifest(manifest, patch),
+      },
+    );
+  }
+
+  private async buildGenericFseManifest(
+    themeDir: string,
+    fileTree: string[],
+    themeSlug: string,
+  ): Promise<RepoThemeManifest> {
     const filesByRole = this.bucketFiles(fileTree);
     const themeTypeHints = this.detectThemeTypeHints(
       fileTree,
@@ -658,6 +735,60 @@ export class RepoAnalyzerService {
       plugins,
       ...(interactiveContracts ? { interactiveContracts } : {}),
       sourceOfTruth,
+    };
+  }
+
+  private patchManifest(
+    manifest: RepoThemeManifest,
+    patch: ThemeRepoAnalysisManifestPatch,
+  ): RepoThemeManifest {
+    const mergeUnique = (values: string[] = [], additions: string[] = []) => [
+      ...new Set([...values, ...additions]),
+    ];
+    const mergePrioritized = (
+      preferred?: string[],
+      fallback: string[] = [],
+      limit = 40,
+    ) =>
+      (preferred?.length
+        ? [...new Set([...preferred, ...fallback])]
+        : [...fallback]
+      ).slice(0, limit);
+
+    return {
+      ...manifest,
+      themeTypeHints: {
+        ...manifest.themeTypeHints,
+        themeVendorNotes: mergeUnique(
+          manifest.themeTypeHints.themeVendorNotes,
+          patch.themeVendorNotes,
+        ),
+      },
+      sourceOfTruth: {
+        ...manifest.sourceOfTruth,
+        priorityDirectories: patch.priorityDirectories?.length
+          ? mergeUnique(
+              patch.priorityDirectories,
+              manifest.sourceOfTruth.priorityDirectories,
+            )
+          : manifest.sourceOfTruth.priorityDirectories,
+        layoutFiles: mergePrioritized(
+          patch.layoutFiles,
+          manifest.sourceOfTruth.layoutFiles,
+        ),
+        styleFiles: mergePrioritized(
+          patch.styleFiles,
+          manifest.sourceOfTruth.styleFiles,
+        ),
+        runtimeFiles: mergePrioritized(
+          patch.runtimeFiles,
+          manifest.sourceOfTruth.runtimeFiles,
+        ),
+        notes: mergeUnique(
+          manifest.sourceOfTruth.notes,
+          patch.sourceOfTruthNotes,
+        ),
+      },
     };
   }
 
@@ -890,6 +1021,9 @@ export class RepoAnalyzerService {
     const themeSupports = new Set<string>();
     const enqueuedStyleHandles = new Set<string>();
     const enqueuedScriptHandles = new Set<string>();
+    const enqueuedStyleFiles = new Set<string>();
+    const enqueuedScriptFiles = new Set<string>();
+    const requiredPhpFiles = new Set<string>();
     const imageSizes = new Set<string>();
     const editorStyleFiles = new Set<string>();
 
@@ -930,9 +1064,33 @@ export class RepoAnalyzerService {
     }
 
     for (const match of content.matchAll(
+      /wp_enqueue_style\s*\(\s*['"][^'"]+['"]\s*,[\s\S]{0,600}?['"]\/?([^'"]+\.(?:css|scss|sass|less))['"]/g,
+    )) {
+      enqueuedStyleFiles.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    for (const match of content.matchAll(
       /wp_enqueue_script\s*\(\s*['"]([^'"]+)['"]/g,
     )) {
       enqueuedScriptHandles.add(match[1]);
+    }
+
+    for (const match of content.matchAll(
+      /wp_enqueue_script\s*\(\s*['"][^'"]+['"]\s*,[\s\S]{0,600}?['"]\/?([^'"]+\.(?:js|mjs|cjs|ts))['"]/g,
+    )) {
+      enqueuedScriptFiles.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    for (const match of content.matchAll(
+      /(?:require|include)(?:_once)?\s*(?:\(\s*)?(?:get_template_directory|get_parent_theme_file_path|get_theme_file_path)\s*\([^)]*\)\s*\.\s*['"]\/?([^'"]+\.php)['"]/g,
+    )) {
+      requiredPhpFiles.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    for (const match of content.matchAll(
+      /(?:require|include)(?:_once)?\s*(?:\(\s*)?(?:get_parent_theme_file_path|get_theme_file_path)\s*\(\s*['"]\/?([^'"]+\.php)['"]\s*\)/g,
+    )) {
+      requiredPhpFiles.add(this.normalizeRepoRelativePath(match[1]));
     }
 
     for (const match of content.matchAll(
@@ -953,6 +1111,9 @@ export class RepoAnalyzerService {
       themeSupports: Array.from(themeSupports).sort(),
       enqueuedStyleHandles: Array.from(enqueuedStyleHandles).sort(),
       enqueuedScriptHandles: Array.from(enqueuedScriptHandles).sort(),
+      enqueuedStyleFiles: Array.from(enqueuedStyleFiles).sort(),
+      enqueuedScriptFiles: Array.from(enqueuedScriptFiles).sort(),
+      requiredPhpFiles: Array.from(requiredPhpFiles).sort(),
       imageSizes: Array.from(imageSizes).sort(),
       editorStyleFiles: Array.from(editorStyleFiles).sort(),
     };
@@ -962,6 +1123,7 @@ export class RepoAnalyzerService {
     themeDir: string,
     filesByRole: RepoFileBuckets,
   ): Promise<RepoStructureHints> {
+    const themeSlug = basename(themeDir).trim().toLowerCase();
     const candidates = Array.from(
       new Set([
         ...filesByRole.templates,
@@ -983,29 +1145,42 @@ export class RepoAnalyzerService {
     const referencedAssetPaths = new Set<string>();
     const patternMeta: RepoPatternMeta[] = [];
     const uagbUsages: RepoFileBlockUsage[] = [];
+    const patternSlugToFile = new Map<string, string>();
+    const fileAnalyses: RepoSourceFileAnalysis[] = [];
 
     for (const { file, content } of contents) {
       if (!content) continue;
       const fileBlockTypes = new Set<string>();
+      const fileTemplatePartSlugs = new Set<string>();
+      const filePatternSlugs = new Set<string>();
+      const fileAssetPaths = new Set<string>();
+      const fileRuntimeRefs = new Set<string>();
 
       for (const match of content.matchAll(
         /<!--\s+wp:template-part\s+(\{[\s\S]*?\})\s*\/?-->/g,
       )) {
         const slugMatch = match[1].match(/"slug"\s*:\s*"([^"]+)"/);
-        if (slugMatch?.[1]) templatePartRefs.add(slugMatch[1]);
+        if (slugMatch?.[1]) {
+          templatePartRefs.add(slugMatch[1]);
+          fileTemplatePartSlugs.add(slugMatch[1]);
+        }
       }
 
       for (const match of content.matchAll(
         /get_template_part\s*\(\s*['"]([^'"]+)['"]/g,
       )) {
         templatePartRefs.add(match[1]);
+        fileTemplatePartSlugs.add(match[1]);
       }
 
       for (const match of content.matchAll(
         /<!--\s+wp:pattern\s+(\{[\s\S]*?\})\s*\/?-->/g,
       )) {
         const slugMatch = match[1].match(/"slug"\s*:\s*"([^"]+)"/);
-        if (slugMatch?.[1]) patternRefs.add(slugMatch[1]);
+        if (slugMatch?.[1]) {
+          patternRefs.add(slugMatch[1]);
+          filePatternSlugs.add(slugMatch[1]);
+        }
       }
 
       for (const match of content.matchAll(
@@ -1019,20 +1194,36 @@ export class RepoAnalyzerService {
       for (const match of content.matchAll(
         /(?:src|href)=["']([^"']+\.(?:css|js|png|jpe?g|svg|webp|woff2?|ttf|otf|mp4|webm))["']/gi,
       )) {
-        referencedAssetPaths.add(match[1]);
+        const normalized = this.normalizeRepoRelativePath(match[1]);
+        referencedAssetPaths.add(normalized);
+        fileAssetPaths.add(normalized);
       }
 
       for (const match of content.matchAll(
         /url\((['"]?)([^'")]+\.(?:css|js|png|jpe?g|svg|webp|woff2?|ttf|otf))\1\)/gi,
       )) {
-        referencedAssetPaths.add(match[2]);
+        const normalized = this.normalizeRepoRelativePath(match[2]);
+        referencedAssetPaths.add(normalized);
+        fileAssetPaths.add(normalized);
+      }
+
+      for (const assetPath of this.extractPhpAssetPaths(content)) {
+        referencedAssetPaths.add(assetPath);
+        fileAssetPaths.add(assetPath);
+      }
+
+      for (const runtimeFile of this.extractRuntimePhpRefs(content)) {
+        fileRuntimeRefs.add(runtimeFile);
       }
 
       // Parse PHP header comments in patterns/ files
       // e.g. * Title: Hero Section \n * Slug: theme/hero \n * Categories: featured, banner
       if (file.startsWith('patterns/') && file.endsWith('.php')) {
         const meta = this.parsePatternPhpHeader(file, content);
-        if (meta) patternMeta.push(meta);
+        if (meta) {
+          patternMeta.push(meta);
+          patternSlugToFile.set(meta.slug, file);
+        }
       }
 
       const normalizedFileBlockTypes = Array.from(fileBlockTypes)
@@ -1044,9 +1235,46 @@ export class RepoAnalyzerService {
           blockTypes: normalizedFileBlockTypes,
         });
       }
+
+      const resolvedPatternFiles = this.resolvePatternFiles(
+        Array.from(filePatternSlugs),
+        filesByRole,
+        patternSlugToFile,
+        themeSlug,
+      );
+      const resolvedTemplatePartFiles = this.resolveTemplatePartFiles(
+        Array.from(fileTemplatePartSlugs),
+        filesByRole,
+      );
+
+      fileAnalyses.push({
+        file,
+        kind: this.inferSourceFileKind(file),
+        blockTypes: Array.from(fileBlockTypes).sort(),
+        headingTexts: this.extractHeadingTextsFromRepoSource(content),
+        templatePartSlugs: Array.from(fileTemplatePartSlugs).sort(),
+        templatePartFiles: resolvedTemplatePartFiles,
+        patternSlugs: Array.from(filePatternSlugs).sort(),
+        patternFiles: resolvedPatternFiles,
+        referencedAssetPaths: Array.from(fileAssetPaths).sort(),
+        referencedRuntimeFiles: Array.from(fileRuntimeRefs).sort(),
+        customClasses: this.extractCustomClassesFromRepoSource(content),
+      });
     }
 
     const normalizedBlockTypes = Array.from(blockTypes).sort();
+    const contentByFile = new Map(
+      contents
+        .filter(
+          (entry): entry is { file: string; content: string } =>
+            !!entry.content,
+        )
+        .map((entry) => [entry.file, entry.content] as const),
+    );
+    const entrySourceChains = this.buildEntrySourceChains(
+      fileAnalyses,
+      contentByFile,
+    );
 
     return {
       templatePartRefs: Array.from(templatePartRefs).sort(),
@@ -1067,6 +1295,8 @@ export class RepoAnalyzerService {
         ['query', 'query-loop', 'core/query'].includes(block),
       ),
       patternMeta,
+      fileAnalyses: fileAnalyses.sort((a, b) => a.file.localeCompare(b.file)),
+      entrySourceChains,
     };
   }
 
@@ -1104,6 +1334,314 @@ export class RepoAnalyzerService {
       categories: getList('Categories'),
       keywords: getList('Keywords'),
     };
+  }
+
+  private inferSourceFileKind(file: string): RepoSourceFileAnalysis['kind'] {
+    if (file.startsWith('templates/')) return 'template';
+    if (file.startsWith('parts/') || file.startsWith('template-parts/')) {
+      return 'template-part';
+    }
+    if (file.startsWith('patterns/')) return 'pattern';
+    return 'php-template';
+  }
+
+  private normalizeRepoRelativePath(value: string): string {
+    const normalized = String(value ?? '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^['"]|['"]$/g, '')
+      .replace(/^\.?\//, '')
+      .replace(/^\//, '');
+
+    const repoLikePath =
+      normalized.match(
+        /((?:assets|images|fonts|dist|build|inc|class|templates|parts|patterns|template-parts)\/.+)$/i,
+      )?.[1] ?? normalized;
+
+    return repoLikePath.replace(/^\/+/, '');
+  }
+
+  private extractPhpAssetPaths(content: string): string[] {
+    const refs = new Set<string>();
+
+    for (const match of content.matchAll(
+      /(?:get_template_directory_uri|get_parent_theme_file_uri|get_theme_file_uri)\s*\([^)]*\)\s*\.\s*['"]\/?([^'"]+\.(?:css|js|png|jpe?g|svg|webp|woff2?|ttf|otf|mp4|webm))['"]/g,
+    )) {
+      refs.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    for (const match of content.matchAll(
+      /((?:assets|images|fonts|dist|build)\/[^"' )]+\.(?:css|js|png|jpe?g|svg|webp|woff2?|ttf|otf|mp4|webm))/gi,
+    )) {
+      refs.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    return Array.from(refs).sort();
+  }
+
+  private extractRuntimePhpRefs(content: string): string[] {
+    const refs = new Set<string>();
+
+    for (const match of content.matchAll(
+      /(?:require|include)(?:_once)?\s*(?:\(\s*)?(?:get_template_directory|get_parent_theme_file_path|get_theme_file_path)\s*\([^)]*\)\s*\.\s*['"]\/?([^'"]+\.php)['"]/g,
+    )) {
+      refs.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    for (const match of content.matchAll(
+      /(?:require|include)(?:_once)?\s*(?:\(\s*)?(?:get_parent_theme_file_path|get_theme_file_path)\s*\(\s*['"]\/?([^'"]+\.php)['"]\s*\)/g,
+    )) {
+      refs.add(this.normalizeRepoRelativePath(match[1]));
+    }
+
+    return Array.from(refs).sort();
+  }
+
+  private resolvePatternFiles(
+    slugs: string[],
+    filesByRole: RepoFileBuckets,
+    patternSlugToFile: Map<string, string>,
+    themeSlug: string,
+  ): string[] {
+    const files = new Set<string>();
+
+    for (const slug of slugs) {
+      const normalizedSlug = String(slug ?? '').trim();
+      if (!normalizedSlug) continue;
+
+      const direct = patternSlugToFile.get(normalizedSlug);
+      if (direct) {
+        files.add(direct);
+        continue;
+      }
+
+      const slugTail = normalizedSlug.includes('/')
+        ? normalizedSlug.split('/').slice(1).join('/')
+        : normalizedSlug;
+
+      for (const candidate of [
+        normalizedSlug,
+        slugTail,
+        normalizedSlug.replace(`${themeSlug}/`, ''),
+      ]) {
+        const fileCandidate = `patterns/${candidate}.php`;
+        if (filesByRole.patterns.includes(fileCandidate))
+          files.add(fileCandidate);
+        const htmlCandidate = `patterns/${candidate}.html`;
+        if (filesByRole.patterns.includes(htmlCandidate))
+          files.add(htmlCandidate);
+      }
+    }
+
+    return Array.from(files);
+  }
+
+  private resolveTemplatePartFiles(
+    slugs: string[],
+    filesByRole: RepoFileBuckets,
+  ): string[] {
+    const files = new Set<string>();
+
+    for (const slug of slugs) {
+      const normalizedSlug = this.normalizeRepoRelativePath(slug)
+        .replace(/^parts\//, '')
+        .replace(/^template-parts\//, '')
+        .replace(/\.(php|html)$/i, '');
+
+      for (const candidate of [
+        `parts/${normalizedSlug}.html`,
+        `parts/${normalizedSlug}.php`,
+        `template-parts/${normalizedSlug}.php`,
+      ]) {
+        if (filesByRole.templateParts.includes(candidate)) files.add(candidate);
+      }
+    }
+
+    return Array.from(files);
+  }
+
+  private extractHeadingTextsFromRepoSource(content: string): string[] {
+    const texts = new Set<string>();
+    const push = (value: string | undefined) => {
+      const normalized = String(value ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (normalized.length >= 3) texts.add(normalized);
+    };
+
+    for (const match of content.matchAll(
+      /<!--\s+wp:heading(?:\s+\{[\s\S]*?\})?\s*-->\s*<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi,
+    )) {
+      push(match[1]);
+    }
+
+    for (const match of content.matchAll(
+      /esc_html__\(\s*'([^']+)'|esc_html__\(\s*"([^"]+)"/g,
+    )) {
+      push(match[1] ?? match[2]);
+    }
+
+    return Array.from(texts).slice(0, 8);
+  }
+
+  private extractCustomClassesFromRepoSource(content: string): string[] {
+    const classes = new Set<string>();
+    const collect = (raw: string) => {
+      for (const token of raw
+        .split(/\s+/)
+        .map((value) => value.trim())
+        .filter(Boolean)) {
+        if (token.length >= 2) classes.add(token);
+      }
+    };
+
+    for (const match of content.matchAll(/"className"\s*:\s*"([^"]+)"/g)) {
+      collect(match[1]);
+    }
+    for (const match of content.matchAll(/class="([^"]+)"/g)) {
+      collect(match[1]);
+    }
+
+    return Array.from(classes).sort().slice(0, 20);
+  }
+
+  private buildEntrySourceChains(
+    fileAnalyses: RepoSourceFileAnalysis[],
+    contentByFile: Map<string, string>,
+  ): RepoEntrySourceChain[] {
+    const byFile = new Map(fileAnalyses.map((entry) => [entry.file, entry]));
+    const entryFiles = fileAnalyses.filter((entry) =>
+      this.isEntrySourceFile(entry.file, entry.kind),
+    );
+
+    return entryFiles
+      .map((entry) => {
+        const chainFiles: string[] = [];
+        const assetFiles = new Set<string>();
+        const runtimeFiles = new Set<string>();
+        const blockTypes = new Set<string>();
+        const headingTexts = new Set<string>();
+        const seen = new Set<string>();
+        const composedParts: string[] = [];
+
+        const visit = (file: string) => {
+          if (seen.has(file)) return;
+          seen.add(file);
+          chainFiles.push(file);
+          const analysis = byFile.get(file);
+          const content = contentByFile.get(file);
+          if (content) {
+            composedParts.push(
+              this.wrapRepoChainContent(file, analysis?.kind, content),
+            );
+          }
+          if (!analysis) return;
+
+          for (const asset of analysis.referencedAssetPaths)
+            assetFiles.add(asset);
+          for (const runtime of analysis.referencedRuntimeFiles) {
+            runtimeFiles.add(runtime);
+          }
+          for (const blockType of analysis.blockTypes)
+            blockTypes.add(blockType);
+          for (const heading of analysis.headingTexts)
+            headingTexts.add(heading);
+
+          for (const dependency of [
+            ...analysis.templatePartFiles,
+            ...analysis.patternFiles,
+          ]) {
+            visit(dependency);
+          }
+        };
+
+        visit(entry.file);
+
+        const notes: string[] = [];
+        if (
+          blockTypes.has('core/post-content') ||
+          blockTypes.has('post-content')
+        ) {
+          notes.push('contains post-content placeholder');
+        }
+        if (
+          blockTypes.has('core/query') ||
+          blockTypes.has('query') ||
+          blockTypes.has('query-loop')
+        ) {
+          notes.push('contains query loop');
+        }
+        if (
+          chainFiles.some((file) =>
+            /parts\/header|patterns\/header/i.test(file),
+          )
+        ) {
+          notes.push('uses header source');
+        }
+        if (
+          chainFiles.some((file) =>
+            /parts\/footer|patterns\/footer/i.test(file),
+          )
+        ) {
+          notes.push('uses footer source');
+        }
+
+        return {
+          entryFile: entry.file,
+          routeHint: this.inferEntryRouteHint(entry.file),
+          chainFiles,
+          composedSource: composedParts.join('\n\n'),
+          assetFiles: Array.from(assetFiles).sort(),
+          runtimeFiles: Array.from(runtimeFiles).sort(),
+          blockTypes: Array.from(blockTypes).sort(),
+          headingTexts: Array.from(headingTexts).slice(0, 8),
+          notes,
+        };
+      })
+      .sort((a, b) => a.entryFile.localeCompare(b.entryFile));
+  }
+
+  private wrapRepoChainContent(
+    file: string,
+    kind: RepoSourceFileAnalysis['kind'] | undefined,
+    content: string,
+  ): string {
+    if (kind === 'template-part') {
+      return `<!-- vibepress:part:start ${file} -->\n${content}\n<!-- vibepress:part:end ${file} -->`;
+    }
+    if (kind === 'php-template') {
+      return `{/* WP: include start → ${file} */}\n${content}\n{/* WP: include end → ${file} */}`;
+    }
+    return content;
+  }
+
+  private isEntrySourceFile(
+    file: string,
+    kind: RepoSourceFileAnalysis['kind'],
+  ): boolean {
+    if (kind === 'template') return true;
+    if (kind !== 'pattern') return false;
+
+    const name = basename(file)
+      .replace(/\.(php|html)$/i, '')
+      .toLowerCase();
+    return (
+      /^(front-page|home|index|page|single|archive|search|404)$/.test(name) ||
+      /^(template-|page-|single-|blog-)/.test(name)
+    );
+  }
+
+  private inferEntryRouteHint(file: string): string {
+    const name = basename(file)
+      .replace(/\.(php|html)$/i, '')
+      .toLowerCase();
+    if (['front-page', 'home', 'index'].includes(name)) return 'home';
+    if (name === 'page' || name.startsWith('page-')) return 'page';
+    if (name === 'single' || name.startsWith('single-')) return 'single';
+    if (name.startsWith('template-')) return name.replace(/^template-/, '');
+    if (name.startsWith('blog-')) return 'blog';
+    return name;
   }
 
   private categorizeAssets(fileTree: string[]): RepoAssetManifest {
@@ -1215,12 +1753,15 @@ export class RepoAnalyzerService {
         ...styleSources.rootCssFiles,
         ...styleSources.assetCssFiles,
         ...styleSources.editorStyleFiles,
+        ...runtimeHints.enqueuedStyleFiles,
       ]),
     );
     const runtimeFiles = Array.from(
       new Set([
         ...(themeTypeHints.hasFunctionsPhp ? ['functions.php'] : []),
         ...filesByRole.phpRuntime,
+        ...runtimeHints.requiredPhpFiles,
+        ...runtimeHints.enqueuedScriptFiles,
       ]),
     );
     const priorityDirectories = [
@@ -1263,6 +1804,19 @@ export class RepoAnalyzerService {
     if (styleSources.discoveredFontFamilies.length > 0) {
       notes.push(
         `CSS references ${styleSources.discoveredFontFamilies.length} font family candidate(s).`,
+      );
+    }
+    if (runtimeHints.requiredPhpFiles.length > 0) {
+      notes.push(
+        `functions.php links ${runtimeHints.requiredPhpFiles.length} runtime PHP include(s): ${runtimeHints.requiredPhpFiles.slice(0, 6).join(', ')}${runtimeHints.requiredPhpFiles.length > 6 ? ' ...' : ''}.`,
+      );
+    }
+    if (
+      runtimeHints.enqueuedStyleFiles.length > 0 ||
+      runtimeHints.enqueuedScriptFiles.length > 0
+    ) {
+      notes.push(
+        `functions.php enqueues ${runtimeHints.enqueuedStyleFiles.length} stylesheet file(s) and ${runtimeHints.enqueuedScriptFiles.length} script file(s).`,
       );
     }
 
@@ -1372,7 +1926,28 @@ export class RepoAnalyzerService {
   private async extractSpectraContracts(
     plugin: RepoPluginManifest,
   ): Promise<RepoSpectraInteractiveContracts | undefined> {
-    const widgetConfigs = [
+    const widgetConfigs: Array<{
+      key: 'slider' | 'tabs' | 'modal' | 'accordion';
+      blockType: string;
+      runtime: 'swiper' | 'tabs-dom' | 'modal-dom' | 'accordion-dom';
+      attrPath: string;
+      scriptPaths: string[];
+      stylePaths: string[];
+      preferredAttrKeys: string[];
+      notes: string[];
+      appearance: {
+        wrapperClasses: string[];
+        itemClasses: string[];
+        activeClasses: string[];
+        variantPattern: RegExp;
+        behaviorPattern: RegExp;
+        alignmentClasses: string[];
+        styleCueDetectors: Array<{
+          pattern: RegExp;
+          cue: string;
+        }>;
+      };
+    }> = [
       {
         key: 'slider' as const,
         blockType: 'uagb/slider',
@@ -1650,6 +2225,16 @@ export class RepoAnalyzerService {
       }
 
       const attrKeys = this.extractPhpArrayKeys(attrRaw);
+      const defaults =
+        config.key === 'modal'
+          ? this.extractSpectraModalDefaults(styleRaw)
+          : config.key === 'slider'
+            ? this.extractSpectraSliderDefaults(attrRaw, styleRaw)
+            : config.key === 'tabs'
+              ? this.extractSpectraTabsDefaults(attrRaw)
+              : config.key === 'accordion'
+                ? this.extractSpectraAccordionDefaults(attrRaw)
+                : undefined;
       widgets[config.key] = {
         blockType: config.blockType,
         runtime: config.runtime,
@@ -1670,6 +2255,7 @@ export class RepoAnalyzerService {
           alignmentClasses: config.appearance.alignmentClasses,
           styleCueDetectors: config.appearance.styleCueDetectors,
         }),
+        ...(defaults ? { defaults } : {}),
         notes: config.notes,
       };
     }
@@ -1958,6 +2544,256 @@ export class RepoAnalyzerService {
           .filter((value): value is string => !!value),
       ),
     ).sort();
+  }
+
+  private extractSpectraModalDefaults(
+    styleSources: Array<string | null>,
+  ): RepoInteractiveWidgetDefaults | undefined {
+    const raw = styleSources.filter(Boolean).join('\n');
+    if (!raw.trim()) return undefined;
+
+    const width = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-wrap',
+      'width',
+    );
+    const height = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-wrap',
+      'height',
+    );
+    const maxWidth = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-wrap',
+      'max-width',
+    );
+    const overlayColor = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup.active',
+      'background',
+    );
+    const background = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-wrap',
+      'background',
+    );
+    const textColor = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-wrap',
+      'color',
+    );
+    const contentPadding = this.extractCssPropertyValue(
+      raw,
+      '.uagb-modal-popup .uagb-modal-popup-content',
+      'padding',
+    );
+
+    const defaults: RepoInteractiveWidgetDefaults = {
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+      ...(maxWidth ? { maxWidth } : {}),
+      ...(overlayColor ? { overlayColor } : {}),
+      ...(background ? { background } : {}),
+      ...(textColor ? { textColor } : {}),
+      ...(contentPadding ? { contentPadding } : {}),
+    };
+
+    return Object.keys(defaults).length > 0 ? defaults : undefined;
+  }
+
+  private extractSpectraSliderDefaults(
+    attrRaw: string | null,
+    styleSources: Array<string | null>,
+  ): RepoInteractiveWidgetDefaults | undefined {
+    const raw = styleSources.filter(Boolean).join('\n');
+    const hasStyle = raw.trim().length > 0;
+    const hasAttrs = (attrRaw ?? '').trim().length > 0;
+    if (!hasStyle && !hasAttrs) return undefined;
+
+    const arrowBackground =
+      (hasStyle
+        ? (this.extractCssPropertyValue(
+            raw,
+            '.uagb-slider-container .swiper-button-prev,.uagb-slider-container .swiper-button-next',
+            'background',
+          ) ??
+          this.extractCssPropertyValue(
+            raw,
+            '.uagb-slider-container .swiper-button-next,.uagb-slider-container .swiper-button-prev',
+            'background',
+          ))
+        : undefined) ?? this.extractPhpScalarDefault(attrRaw, 'arrowBgColor');
+    const arrowColor = this.extractPhpScalarDefault(attrRaw, 'arrowColor');
+    const dotsColor =
+      this.extractPhpScalarDefault(attrRaw, 'arrowColor') ?? arrowColor;
+    const slideHeight = this.extractPhpDimensionDefault(
+      attrRaw,
+      'minHeight',
+      'px',
+    );
+    const autoplay = this.extractPhpBooleanDefault(attrRaw, 'autoplay');
+    const autoplaySpeed = this.extractPhpNumberDefault(
+      attrRaw,
+      'autoplaySpeed',
+    );
+    const loop = this.extractPhpBooleanDefault(attrRaw, 'infiniteLoop');
+    const effect = this.extractPhpScalarDefault(attrRaw, 'transitionEffect');
+    const showDots = this.extractPhpBooleanDefault(attrRaw, 'displayDots');
+    const showArrows = this.extractPhpBooleanDefault(attrRaw, 'displayArrows');
+    const vertical = this.extractPhpBooleanDefault(attrRaw, 'verticalMode');
+    const transitionSpeed = this.extractPhpNumberDefault(
+      attrRaw,
+      'transitionSpeed',
+    );
+    const pauseOn = this.extractPhpScalarDefault(attrRaw, 'pauseOn');
+
+    const defaults: RepoInteractiveWidgetDefaults = {
+      ...(slideHeight ? { slideHeight } : {}),
+      ...(arrowBackground ? { arrowBackground } : {}),
+      ...(arrowColor ? { arrowColor } : {}),
+      ...(dotsColor ? { dotsColor } : {}),
+      ...(typeof autoplay === 'boolean' ? { autoplay } : {}),
+      ...(typeof autoplaySpeed === 'number' ? { autoplaySpeed } : {}),
+      ...(typeof loop === 'boolean' ? { loop } : {}),
+      ...(effect ? { effect } : {}),
+      ...(typeof showDots === 'boolean' ? { showDots } : {}),
+      ...(typeof showArrows === 'boolean' ? { showArrows } : {}),
+      ...(typeof vertical === 'boolean' ? { vertical } : {}),
+      ...(typeof transitionSpeed === 'number' ? { transitionSpeed } : {}),
+      ...(pauseOn ? { pauseOn } : {}),
+    };
+
+    return Object.keys(defaults).length > 0 ? defaults : undefined;
+  }
+
+  private extractSpectraTabsDefaults(
+    attrRaw: string | null,
+  ): RepoInteractiveWidgetDefaults | undefined {
+    if (!(attrRaw ?? '').trim()) return undefined;
+
+    const activeTab =
+      this.extractPhpNumberDefault(attrRaw, 'tabActiveFrontend') ??
+      this.extractPhpNumberDefault(attrRaw, 'tabActive');
+    const variant = this.extractPhpScalarDefault(attrRaw, 'tabsStyleD');
+    const tabAlign = this.extractPhpScalarDefault(attrRaw, 'tabAlign');
+    const iconPosition = this.extractPhpScalarDefault(attrRaw, 'iconPosition');
+
+    const defaults: RepoInteractiveWidgetDefaults = {
+      ...(typeof activeTab === 'number' ? { activeTab } : {}),
+      ...(variant ? { variant } : {}),
+      ...(tabAlign ? { tabAlign } : {}),
+      ...(iconPosition ? { iconPosition } : {}),
+    };
+
+    return Object.keys(defaults).length > 0 ? defaults : undefined;
+  }
+
+  private extractSpectraAccordionDefaults(
+    attrRaw: string | null,
+  ): RepoInteractiveWidgetDefaults | undefined {
+    if (!(attrRaw ?? '').trim()) return undefined;
+
+    const layout = this.extractPhpScalarDefault(attrRaw, 'layout');
+    const inactiveOtherItems = this.extractPhpBooleanDefault(
+      attrRaw,
+      'inactiveOtherItems',
+    );
+    const expandFirstItem = this.extractPhpBooleanDefault(
+      attrRaw,
+      'expandFirstItem',
+    );
+    const enableToggle = this.extractPhpBooleanDefault(attrRaw, 'enableToggle');
+    const allowMultiple =
+      typeof inactiveOtherItems === 'boolean' ? !inactiveOtherItems : undefined;
+    const defaultOpenItems =
+      expandFirstItem === true
+        ? [0]
+        : expandFirstItem === false
+          ? []
+          : undefined;
+
+    const defaults: RepoInteractiveWidgetDefaults = {
+      ...(layout ? { layout } : {}),
+      ...(typeof allowMultiple === 'boolean' ? { allowMultiple } : {}),
+      ...(defaultOpenItems ? { defaultOpenItems } : {}),
+      ...(typeof enableToggle === 'boolean' ? { enableToggle } : {}),
+    };
+
+    return Object.keys(defaults).length > 0 ? defaults : undefined;
+  }
+
+  private extractPhpScalarDefault(
+    raw: string | null,
+    key: string,
+  ): string | undefined {
+    if (!raw) return undefined;
+    const match = raw.match(
+      new RegExp(`'${this.escapeRegExp(key)}'\\s*=>\\s*'([^']*)'`, 'i'),
+    );
+    const value = match?.[1]?.trim();
+    return value ? value : undefined;
+  }
+
+  private extractPhpNumberDefault(
+    raw: string | null,
+    key: string,
+  ): number | undefined {
+    if (!raw) return undefined;
+    const match = raw.match(
+      new RegExp(
+        `'${this.escapeRegExp(key)}'\\s*=>\\s*(-?\\d+(?:\\.\\d+)?)`,
+        'i',
+      ),
+    );
+    const value = match?.[1];
+    if (!value) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private extractPhpBooleanDefault(
+    raw: string | null,
+    key: string,
+  ): boolean | undefined {
+    if (!raw) return undefined;
+    const match = raw.match(
+      new RegExp(`'${this.escapeRegExp(key)}'\\s*=>\\s*(true|false)`, 'i'),
+    );
+    const value = match?.[1]?.toLowerCase();
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return undefined;
+  }
+
+  private extractPhpDimensionDefault(
+    raw: string | null,
+    key: string,
+    unit: string,
+  ): string | undefined {
+    const value = this.extractPhpNumberDefault(raw, key);
+    if (typeof value !== 'number') return undefined;
+    return `${value}${unit}`;
+  }
+
+  private extractCssPropertyValue(
+    raw: string,
+    selector: string,
+    property: string,
+  ): string | undefined {
+    if (!raw.trim()) return undefined;
+    const match = raw.match(
+      new RegExp(
+        `${this.escapeRegExp(selector)}\\s*\\{[^{}]*?${this.escapeRegExp(property)}\\s*:\\s*([^;}{]+)`,
+        'i',
+      ),
+    );
+    const value = match?.[1]?.trim();
+    if (!value) return undefined;
+    return value.replace(/\s*!important$/i, '').trim();
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   private async walk(dir: string, base = dir): Promise<string[]> {

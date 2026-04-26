@@ -53,6 +53,8 @@ export interface WpSiteInfo {
   logoUrl: string | null;
   adminEmail: string;
   language: string;
+  activeTheme: string;
+  templateTheme: string;
   tablePrefix: string;
 }
 
@@ -66,9 +68,33 @@ export interface WpDbTemplate {
   postType: 'wp_template' | 'wp_template_part';
   title: string;
   slug: string;
+  canonicalSlug: string;
+  themeSlug: string | null;
+  area: string | null;
+  sourceEntityKey: string;
   content: string;
   status: string;
   modified: string;
+  blockTypes: string[];
+}
+
+export interface WpDbNavigation {
+  id: number;
+  title: string;
+  slug: string;
+  content: string;
+  status: string;
+  modified: string;
+  location: string | null;
+  items: WpMenuItem[];
+  blockTypes: string[];
+}
+
+export interface WpResolvedReadingPageRef {
+  id: number;
+  slug: string;
+  title: string;
+  template: string;
 }
 
 export interface WpDbGlobalStyle {
@@ -93,6 +119,8 @@ export interface WpReadingSettings {
   showOnFront: 'posts' | 'page';
   pageOnFrontId: number | null;
   pageForPostsId: number | null;
+  pageOnFront: WpResolvedReadingPageRef | null;
+  pageForPosts: WpResolvedReadingPageRef | null;
 }
 
 export interface WpPluginInfo {
@@ -491,6 +519,8 @@ export class WpQueryService {
         'blogdescription',
         'admin_email',
         'WPLANG',
+        'stylesheet',
+        'template',
       ];
       const [rows] = await conn.query<any[]>(
         `SELECT option_name, option_value FROM \`${prefix}options\`
@@ -511,6 +541,8 @@ export class WpQueryService {
         ),
         adminEmail: opts['admin_email'] ?? '',
         language: opts['WPLANG'] ?? 'en',
+        activeTheme: opts['stylesheet'] ?? '',
+        templateTheme: opts['template'] ?? '',
         tablePrefix: prefix,
       };
     } finally {
@@ -523,22 +555,91 @@ export class WpQueryService {
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
-        `SELECT ID, post_type, post_title, post_name, post_content, post_status, post_modified
-         FROM \`${prefix}posts\`
+        `SELECT p.ID, p.post_type, p.post_title, p.post_name, p.post_content, p.post_status, p.post_modified,
+                area_terms.slug AS area_slug
+         FROM \`${prefix}posts\` p
+         LEFT JOIN \`${prefix}term_relationships\` tr_area ON tr_area.object_id = p.ID
+         LEFT JOIN \`${prefix}term_taxonomy\` tt_area
+           ON tt_area.term_taxonomy_id = tr_area.term_taxonomy_id
+          AND tt_area.taxonomy = 'wp_template_part_area'
+         LEFT JOIN \`${prefix}terms\` area_terms ON area_terms.term_id = tt_area.term_id
          WHERE post_type IN ('wp_template', 'wp_template_part')
+           AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
+         ORDER BY p.post_modified DESC, p.ID DESC`,
+      );
+
+      return rows.map((row) => {
+        const slugInfo = this.parseDbTemplateSlug(String(row.post_name ?? ''));
+        const content = String(row.post_content ?? '');
+        return {
+          id: Number(row.ID),
+          postType: String(row.post_type) as 'wp_template' | 'wp_template_part',
+          title: String(row.post_title ?? ''),
+          slug: String(row.post_name ?? ''),
+          canonicalSlug: slugInfo.canonicalSlug,
+          themeSlug: slugInfo.themeSlug,
+          area:
+            row.post_type === 'wp_template_part'
+              ? String(row.area_slug ?? '').trim() || null
+              : null,
+          sourceEntityKey: slugInfo.sourceEntityKey,
+          content,
+          status: String(row.post_status ?? ''),
+          modified: String(row.post_modified ?? ''),
+          blockTypes: this.extractBlockTypes(content),
+        };
+      });
+    } finally {
+      await conn.end();
+    }
+  }
+
+  async getDbNavigations(connectionString: string): Promise<WpDbNavigation[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [[siteUrlRow]] = await conn.query<any[]>(
+        `SELECT option_value FROM \`${prefix}options\` WHERE option_name = 'siteurl' LIMIT 1`,
+      );
+      const siteUrl = (siteUrlRow?.option_value as string | undefined) ?? null;
+
+      const [rows] = await conn.query<any[]>(
+        `SELECT ID, post_title, post_name, post_content, post_status, post_modified
+         FROM \`${prefix}posts\`
+         WHERE post_type = 'wp_navigation'
            AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
          ORDER BY post_modified DESC, ID DESC`,
       );
 
-      return rows.map((row) => ({
-        id: Number(row.ID),
-        postType: String(row.post_type) as 'wp_template' | 'wp_template_part',
-        title: String(row.post_title ?? ''),
-        slug: String(row.post_name ?? ''),
-        content: String(row.post_content ?? ''),
-        status: String(row.post_status ?? ''),
-        modified: String(row.post_modified ?? ''),
-      }));
+      const navigations = rows.map((row) => {
+        const content = String(row.post_content ?? '');
+        return {
+          id: Number(row.ID),
+          title: String(row.post_title ?? ''),
+          slug: String(row.post_name ?? ''),
+          content,
+          status: String(row.post_status ?? ''),
+          modified: String(row.post_modified ?? ''),
+          location: null as string | null,
+          items: parseNavigationBlockItems(content, siteUrl),
+          blockTypes: this.extractBlockTypes(content),
+        };
+      });
+
+      if (navigations.length > 0) {
+        const primaryCandidate =
+          navigations.find((navigation) =>
+            /^(primary|main|header|navigation|nav|top|menu)/i.test(
+              navigation.slug,
+            ),
+          ) ??
+          navigations.reduce((best, current) =>
+            current.items.length > best.items.length ? current : best,
+          );
+        primaryCandidate.location = 'primary';
+      }
+
+      return navigations;
     } finally {
       await conn.end();
     }
@@ -624,6 +725,8 @@ export class WpQueryService {
         showOnFront,
         pageOnFrontId,
         pageForPostsId,
+        pageOnFront: null,
+        pageForPosts: null,
       };
     } finally {
       await conn.end();
@@ -1139,6 +1242,46 @@ export class WpQueryService {
       .split(', ')
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  private parseDbTemplateSlug(rawSlug: string): {
+    canonicalSlug: string;
+    themeSlug: string | null;
+    sourceEntityKey: string;
+  } {
+    const trimmed = String(rawSlug ?? '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '');
+    if (!trimmed) {
+      return {
+        canonicalSlug: '',
+        themeSlug: null,
+        sourceEntityKey: '',
+      };
+    }
+
+    const [themePrefix, canonical] = trimmed.includes('//')
+      ? trimmed.split('//', 2)
+      : [null, trimmed];
+    const canonicalSlug = String(canonical ?? '').trim();
+    const themeSlug = themePrefix ? String(themePrefix).trim() || null : null;
+
+    return {
+      canonicalSlug,
+      themeSlug,
+      sourceEntityKey: (themeSlug
+        ? `${themeSlug}//${canonicalSlug}`
+        : canonicalSlug
+      ).toLowerCase(),
+    };
+  }
+
+  private extractBlockTypes(content: string): string[] {
+    return this.collectUsage(
+      [content],
+      /<!--\s*wp:([a-z0-9-]+\/[a-z0-9-]+|[a-z0-9-]+)\b/gi,
+    ).map(([blockType]) => blockType);
   }
 
   private taxonomyNamesSubquery(prefix: string, taxonomy: string): string {

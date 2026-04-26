@@ -3,7 +3,10 @@ import type {
   PipelineCaptureAttachmentDto,
   PipelineEditRequestDto,
 } from '../orchestrator/orchestrator.dto.js';
-import { detectEditOperation, buildOperationInstruction } from './edit-operation.util.js';
+import {
+  detectEditOperation,
+  buildOperationInstruction,
+} from './edit-operation.util.js';
 import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
 import { CapturePlanningService } from './capture-planning.service.js';
@@ -418,7 +421,10 @@ export class EditRequestPhaseService {
     } = input;
     const editOperation =
       context?.editOperation ?? detectEditOperation(request.prompt ?? '');
-    const operationInstruction = buildOperationInstruction(editOperation, request.prompt ?? '');
+    const operationInstruction = buildOperationInstruction(
+      editOperation,
+      request.prompt ?? '',
+    );
 
     const lines = [
       'This component was generated as part of the full-site baseline migration.',
@@ -470,7 +476,9 @@ export class EditRequestPhaseService {
         }
       }
       if (context.inferredAssumptions.length > 0) {
-        lines.push('Inference assumptions to preserve unless contradicted by stronger evidence:');
+        lines.push(
+          'Inference assumptions to preserve unless contradicted by stronger evidence:',
+        );
         for (const assumption of context.inferredAssumptions.slice(0, 4)) {
           lines.push(`- ${assumption}`);
         }
@@ -580,7 +588,9 @@ export class EditRequestPhaseService {
       context?.recommendedStrategy
         ? `strategy=${context.recommendedStrategy}`
         : null,
-      context ? `needsInference=${context.needsInference ? 'yes' : 'no'}` : null,
+      context
+        ? `needsInference=${context.needsInference ? 'yes' : 'no'}`
+        : null,
     ].filter((value): value is string => Boolean(value));
 
     if (context?.targetCandidates.length) {

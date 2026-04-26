@@ -5,7 +5,7 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { CardGridSection } from './visual-plan.schema.js';
+import type { CardGridSection, SectionPlan } from './visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   getExactInventedAuxiliaryLabel,
@@ -245,6 +245,7 @@ Rules:
   - do NOT fail on minor layout/section interpretation differences
 - Do NOT fail on component/function/export naming differences if the file still clearly implements the approved component.
 - If the approved visual sections include \`comments\`, comments fetching/rendering is justified.
+- If the approved visual sections include \`modal\`, \`tabs\`, \`accordion\`, or \`carousel\`, keep real interactive wiring plus the expected Spectra/UAGB-compatible structural markers. Do NOT flatten them into static cards/columns.
 - Do NOT fail only because fetched data is unused unless it clearly indicates a wrong endpoint or broken logic.
  - Do NOT flag subjective styling preferences, but DO flag material layout rewrites such as invented hero/promo sections, centered redesigns, missing sidebars, obviously different wrapper structure from the approved plan, or typography that is materially inflated beyond the approved/source visual weight (for example giant display headings or oversized menu/body text in an otherwise modest WordPress template).
  - If the template/source clearly includes an important screenshot, product composite, UI mockup, or other full illustrative image, DO flag fixed-height \`object-cover\` cropping when it visibly cuts off meaningful content that should remain visible.
@@ -468,7 +469,9 @@ ${component.code}
     const normalizedDataNeeds = new Set(
       contract?.dataNeeds ?? component.dataNeeds ?? [],
     );
-    const allowedSectionTypes = new Set(sections.map((section) => section.type));
+    const allowedSectionTypes = new Set(
+      sections.map((section) => section.type),
+    );
     const isFixedPageDetailComponent =
       !!fixedSlug &&
       isPageComponent &&
@@ -638,6 +641,10 @@ ${component.code}
       });
     }
 
+    issues.push(
+      ...this.findMissingApprovedInteractiveMarkers(component.code, sections),
+    );
+
     return issues;
   }
 
@@ -658,34 +665,152 @@ ${component.code}
     );
   }
 
+  private findMissingApprovedInteractiveMarkers(
+    code: string,
+    sections: ReadonlyArray<SectionPlan>,
+  ): CodeReviewIssue[] {
+    if (sections.length === 0) return [];
+
+    const issues: CodeReviewIssue[] = [];
+    const rawCode = code;
+    const interactiveConfigs: Array<{
+      type: string;
+      label: string;
+      markers: string[];
+      stateHints: string[];
+    }> = [
+      {
+        type: 'modal',
+        label: 'modal',
+        markers: [
+          'uagb-modal-trigger',
+          'uagb-modal-popup',
+          'uagb-modal-popup-wrap',
+          'uagb-modal-popup-content',
+        ],
+        stateHints: ['openModals', 'setOpenModals'],
+      },
+      {
+        type: 'tabs',
+        label: 'tabs',
+        markers: [
+          'uagb-tabs__wrap',
+          'uagb-tabs__panel',
+          'uagb-tabs__body-wrap',
+        ],
+        stateHints: ['activeTabs', 'setActiveTabs'],
+      },
+      {
+        type: 'accordion',
+        label: 'accordion',
+        markers: [
+          'uagb-faq__wrap',
+          'uagb-faq-item',
+          'uagb-faq-questions-button',
+          'uagb-faq-content',
+        ],
+        stateHints: ['openAccordions', 'setOpenAccordions'],
+      },
+      {
+        type: 'carousel',
+        label: 'carousel',
+        markers: [
+          'uagb-slider-container',
+          'swiper-wrapper',
+          'swiper-button-prev',
+          'swiper-button-next',
+        ],
+        stateHints: ['activeCarousels', 'setActiveCarousels'],
+      },
+    ];
+
+    for (const config of interactiveConfigs) {
+      const matchingSections = sections.filter(
+        (section) => section.type === config.type,
+      );
+      if (matchingSections.length === 0) continue;
+
+      const missingMarkers = config.markers.filter(
+        (marker) => !rawCode.includes(marker),
+      );
+      if (missingMarkers.length > 0) {
+        issues.push({
+          severity: 'high',
+          message: `Approved ${config.label} section${matchingSections.length > 1 ? 's' : ''} must preserve Spectra/UAGB-compatible markers ${config.markers.map((marker) => `\`${marker}\``).join(', ')}. Missing marker(s): ${missingMarkers.map((marker) => `\`${marker}\``).join(', ')}.`,
+        });
+      }
+
+      const missingStateHints = config.stateHints.filter(
+        (hint) => !rawCode.includes(hint),
+      );
+      if (missingStateHints.length > 0) {
+        issues.push({
+          severity: 'high',
+          message: `Approved ${config.label} section${matchingSections.length > 1 ? 's' : ''} must keep real interactive state wiring. Missing state hook/helper markers: ${missingStateHints.map((hint) => `\`${hint}\``).join(', ')}.`,
+        });
+      }
+
+      if (
+        config.type === 'carousel' &&
+        !/translateX\s*\(/.test(rawCode) &&
+        !/transform\s*:\s*['"`][^'"`]*translateX/i.test(rawCode)
+      ) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Approved carousel section must move the track with a state-driven `translateX(...)` transform instead of rendering a static slide list.',
+        });
+      }
+    }
+
+    if (sections.some((section) => section.type === 'modal')) {
+      const hasActiveModalPopup =
+        /className\s*=\s*\{?["'`][^"'`]*(?:\buagb-modal-popup\b[^"'`]*\bactive\b|\bactive\b[^"'`]*\buagb-modal-popup\b)/.test(
+          rawCode,
+        );
+      if (!hasActiveModalPopup) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Approved modal section renders a Spectra/UAGB popup without an `active` class on the open `.uagb-modal-popup` overlay. The compat CSS keeps `.uagb-modal-popup` hidden until `.active` is present, so the modal opens invisibly.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
   private findUnexpectedInteractiveUiPatterns(
     code: string,
     allowedSectionTypes: ReadonlySet<string>,
   ): string[] {
     const matches: string[] = [];
-    const patterns: Array<{ label: string; allowedType: string; test: RegExp }> =
-      [
-        {
-          label: 'tabs',
-          allowedType: 'tabs',
-          test: /\bactiveTabs\b|role=["']tablist["']|aria-selected=\{/,
-        },
-        {
-          label: 'carousel',
-          allowedType: 'carousel',
-          test: /\bactiveCarousels\b|swiper-wrapper|swiper-button-prev|swiper-button-next/,
-        },
-        {
-          label: 'modal',
-          allowedType: 'modal',
-          test: /\bopenModals\b|role=["']dialog["']|aria-modal=["']true["']/,
-        },
-        {
-          label: 'accordion',
-          allowedType: 'accordion',
-          test: /\bopenAccordion|\bactiveAccordion|aria-expanded=\{/,
-        },
-      ];
+    const patterns: Array<{
+      label: string;
+      allowedType: string;
+      test: RegExp;
+    }> = [
+      {
+        label: 'tabs',
+        allowedType: 'tabs',
+        test: /\bactiveTabs\b|role=["']tablist["']|aria-selected=\{/,
+      },
+      {
+        label: 'carousel',
+        allowedType: 'carousel',
+        test: /\bactiveCarousels\b|swiper-wrapper|swiper-button-prev|swiper-button-next/,
+      },
+      {
+        label: 'modal',
+        allowedType: 'modal',
+        test: /\bopenModals\b|role=["']dialog["']|aria-modal=["']true["']/,
+      },
+      {
+        label: 'accordion',
+        allowedType: 'accordion',
+        test: /\bopenAccordion|\bactiveAccordion|aria-expanded=\{/,
+      },
+    ];
 
     for (const pattern of patterns) {
       if (allowedSectionTypes.has(pattern.allowedType)) continue;
@@ -853,6 +978,9 @@ ${component.code}
       'auxiliary/footer/sidebar-like page sections are invalid unless source-backed',
       'does not render the fetched `page.content`/`item.content` body',
       'renders unexpected interactive ui not approved by the visual plan',
+      'must preserve spectra/uagb-compatible markers',
+      'must keep real interactive state wiring',
+      'approved carousel section must move the track',
     ];
 
     return review.issues.filter(

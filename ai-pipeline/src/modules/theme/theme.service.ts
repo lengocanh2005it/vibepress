@@ -9,6 +9,7 @@ import {
   ThemeDetectResult,
   ThemeDetectorService,
 } from './theme-detector.service.js';
+import { ThemeRepoLayoutResolverService } from './theme-repo-layout-resolver.service.js';
 
 export interface ThemeExtractResult {
   jobId: string;
@@ -24,6 +25,7 @@ export class ThemeService {
   constructor(
     private readonly configService: ConfigService,
     private readonly detector: ThemeDetectorService,
+    private readonly themeRepoLayoutResolver: ThemeRepoLayoutResolverService,
   ) {
     this.reposDir = './temp/repos';
   }
@@ -42,8 +44,7 @@ export class ThemeService {
     const zip = new AdmZip(filePath);
     zip.extractAllTo(destDir, true);
 
-    // Nếu zip chứa 1 thư mục wrapper, đi vào bên trong
-    const themeDir = await this.resolveThemeRoot(destDir);
+    const themeDir = await this.resolveResolvedThemeDir(destDir);
 
     const detection = await this.detector.detect(themeDir);
     this.logger.log(`Detected theme type: ${detection.type}`);
@@ -73,10 +74,11 @@ export class ThemeService {
       label: `theme service clone:${id}`,
     });
 
-    const detection = await this.detector.detect(destDir);
+    const themeDir = await this.resolveResolvedThemeDir(destDir);
+    const detection = await this.detector.detect(themeDir);
     this.logger.log(`Detected theme type: ${detection.type}`);
 
-    return { jobId: id, themeDir: destDir, detection };
+    return { jobId: id, themeDir, detection };
   }
 
   async cleanup(jobId: string): Promise<void> {
@@ -102,60 +104,31 @@ export class ThemeService {
     const zip = new AdmZip(filePath);
     zip.extractAllTo(destDir, true);
 
-    const themeDir = await this.findThemeFolder(destDir, activeSlug);
+    const themeDir = await this.resolveResolvedThemeDir(destDir, activeSlug);
     this.logger.log(`Found theme dir: ${themeDir}`);
 
     const detection = await this.detector.detect(themeDir);
     return { jobId: id, themeDir, detection };
   }
 
-  // Tìm folder chứa style.css với Theme Name hoặc folder name khớp slug
-  private async findThemeFolder(
+  private async resolveResolvedThemeDir(
     extractDir: string,
-    slug: string,
+    activeSlug?: string,
   ): Promise<string> {
-    const { readdir, stat, readFile } = await import('fs/promises');
-
-    const scanDir = async (dir: string, depth = 0): Promise<string | null> => {
-      if (depth > 3) return null;
-      const entries = await readdir(dir);
-      for (const entry of entries) {
-        const fullPath = join(dir, entry);
-        const s = await stat(fullPath);
-        if (!s.isDirectory()) continue;
-
-        // Kiểm tra folder name khớp slug
-        if (entry.toLowerCase() === slug.toLowerCase()) {
-          return fullPath;
-        }
-
-        // Kiểm tra style.css trong folder này
-        try {
-          const stylePath = join(fullPath, 'style.css');
-          const styleContent = await readFile(stylePath, 'utf8');
-          // WP theme slug = text slug của Theme Name, hoặc folder name
-          if (
-            styleContent.includes(`Text Domain: ${slug}`) ||
-            entry.toLowerCase() === slug.toLowerCase()
-          ) {
-            return fullPath;
-          }
-        } catch {
-          // không có style.css, tiếp tục scan sâu hơn
-        }
-
-        const found = await scanDir(fullPath, depth + 1);
-        if (found) return found;
-      }
-      return null;
-    };
-
-    const found = await scanDir(extractDir);
-    if (found) return found;
-
-    // Fallback: dùng resolveThemeRoot như cũ
-    this.logger.warn(`Theme slug "${slug}" not found in zip, using root`);
-    return this.resolveThemeRoot(extractDir);
+    const repoRoot = await this.resolveThemeRoot(extractDir);
+    try {
+      return await this.themeRepoLayoutResolver.resolve({
+        repoRoot,
+        activeSlug,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? 'unknown');
+      this.logger.warn(
+        `Theme layout resolver could not resolve a nested FSE theme from "${repoRoot}"${activeSlug ? ` for slug "${activeSlug}"` : ''}. Falling back to repo root. ${message}`,
+      );
+      return repoRoot;
+    }
   }
 
   // Nếu zip extract ra 1 folder duy nhất thì dùng folder đó làm root

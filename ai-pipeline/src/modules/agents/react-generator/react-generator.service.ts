@@ -427,10 +427,11 @@ export class ReactGeneratorService {
         : CLASSIC_CHUNK_THRESHOLD_CHARS;
     const canSplitIntoSections =
       themeType === 'fse' && !!filteredNodes && filteredNodes.length > 0;
-    const preferDirectAi =
-      themeType === 'fse' &&
-      componentPlan?.type === 'partial' &&
-      !getComponentStrategy(componentName).deterministicFirst;
+    const preferDirectAi = this.shouldPreferDirectBlockSourceAi(
+      themeType,
+      componentName,
+      componentPlan,
+    );
     if (!canSplitIntoSections || promptSourceLength <= chunkThreshold) {
       const result = await this.codeReviewer.reviewComponent({
         componentName,
@@ -536,6 +537,18 @@ export class ReactGeneratorService {
       ),
       ...subComponents,
     ];
+  }
+
+  private shouldPreferDirectBlockSourceAi(
+    themeType: 'classic' | 'fse',
+    componentName: string,
+    componentPlan: PlanResult[number] | undefined,
+  ): boolean {
+    return (
+      themeType === 'fse' &&
+      componentPlan?.type === 'partial' &&
+      !getComponentStrategy(componentName).deterministicFirst
+    );
   }
 
   private stripSharedLayoutSectionsFromPlan(
@@ -786,7 +799,9 @@ ${renders}
     componentPlan?: PlanResult[number],
   ): string | undefined {
     const sections = componentPlan?.visualPlan?.sections ?? [];
-    if (sections.length === 0) return undefined;
+    const palette = componentPlan?.visualPlan?.palette;
+    const typography = componentPlan?.visualPlan?.typography;
+    if (sections.length === 0 && !palette && !typography) return undefined;
 
     const lines = sections.map((section, index) => {
       const parts = [
@@ -849,11 +864,58 @@ ${renders}
       return parts.filter(Boolean).join(' | ');
     });
 
-    return [
-      'Visual plan sections that must remain present in the repaired code:',
-      ...lines,
-      'Do not drop sections, CTA labels, images, or card bodies from this contract.',
-    ].join('\n');
+    const blocks: string[] = [];
+
+    if (sections.length > 0) {
+      blocks.push(
+        'Visual plan sections that must remain present in the repaired code:',
+        ...lines,
+        'Do not drop sections, CTA labels, images, or card bodies from this contract.',
+      );
+
+      const interactiveTypes = new Set(['carousel', 'modal', 'tabs', 'accordion']);
+      const interactiveSections = sections.filter((s) =>
+        interactiveTypes.has(s.type),
+      );
+      if (interactiveSections.length > 0) {
+        blocks.push(
+          '',
+          'CRITICAL — interactive widget sections (do NOT drop, simplify, or replace with static UI):',
+          ...interactiveSections.map(
+            (s) =>
+              `  - ${s.type}${s.sectionKey ? ` (sectionKey=${s.sectionKey})` : ''} — must remain as an interactive ${s.type} component`,
+          ),
+        );
+      }
+    }
+
+    if (palette) {
+      const paletteLines = Object.entries(palette)
+        .map(([k, v]) => `  ${k}: ${v}`)
+        .join('\n');
+      blocks.push(
+        '',
+        'Visual plan palette — authoritative colors (must not be changed or hallucinated):',
+        paletteLines,
+      );
+    }
+
+    if (typography) {
+      const typographyLines = Object.entries(typography)
+        .map(([k, v]) =>
+          typeof v === 'object' && v !== null
+            ? `  ${k}: ${Object.entries(v).map(([tk, tv]) => `${tk}=${tv}`).join(' ')}`
+            : `  ${k}: ${v}`,
+        )
+        .join('\n');
+      blocks.push(
+        '',
+        'Visual plan typography — authoritative type scale (must not be changed):',
+        typographyLines,
+      );
+    }
+
+    return blocks.join('\n');
   }
 
   private restoreTrackedSectionMarkers(

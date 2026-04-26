@@ -1,3 +1,4 @@
+@import './styles/wp-block-style-bridges.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

@@ -22,6 +22,94 @@ function fmtTokens(items: string[], limit: number): string {
   return fmtList(items, limit, (item) => item);
 }
 
+function fmtInteractiveDefaults(defaults?: {
+  width?: string;
+  height?: string;
+  maxWidth?: string;
+  overlayColor?: string;
+  background?: string;
+  textColor?: string;
+  contentPadding?: string;
+  slideHeight?: string;
+  activeTab?: number;
+  variant?: string;
+  layout?: string;
+  tabAlign?: string;
+  iconPosition?: string;
+  arrowBackground?: string;
+  arrowColor?: string;
+  dotsColor?: string;
+  autoplay?: boolean;
+  autoplaySpeed?: number;
+  loop?: boolean;
+  effect?: string;
+  showDots?: boolean;
+  showArrows?: boolean;
+  vertical?: boolean;
+  transitionSpeed?: number;
+  pauseOn?: string;
+  allowMultiple?: boolean;
+  defaultOpenItems?: number[];
+  enableToggle?: boolean;
+}): string {
+  if (!defaults) return '';
+  const parts = [
+    defaults.width ? `width=${defaults.width}` : null,
+    defaults.height ? `height=${defaults.height}` : null,
+    defaults.maxWidth ? `maxWidth=${defaults.maxWidth}` : null,
+    defaults.overlayColor ? `overlayColor=${defaults.overlayColor}` : null,
+    defaults.background ? `background=${defaults.background}` : null,
+    defaults.textColor ? `textColor=${defaults.textColor}` : null,
+    defaults.contentPadding
+      ? `contentPadding=${defaults.contentPadding}`
+      : null,
+    defaults.slideHeight ? `slideHeight=${defaults.slideHeight}` : null,
+    typeof defaults.activeTab === 'number'
+      ? `activeTab=${defaults.activeTab}`
+      : null,
+    defaults.variant ? `variant=${defaults.variant}` : null,
+    defaults.layout ? `layout=${defaults.layout}` : null,
+    defaults.tabAlign ? `tabAlign=${defaults.tabAlign}` : null,
+    defaults.iconPosition ? `iconPosition=${defaults.iconPosition}` : null,
+    defaults.arrowBackground
+      ? `arrowBackground=${defaults.arrowBackground}`
+      : null,
+    defaults.arrowColor ? `arrowColor=${defaults.arrowColor}` : null,
+    defaults.dotsColor ? `dotsColor=${defaults.dotsColor}` : null,
+    typeof defaults.autoplay === 'boolean'
+      ? `autoplay=${defaults.autoplay}`
+      : null,
+    typeof defaults.autoplaySpeed === 'number'
+      ? `autoplaySpeed=${defaults.autoplaySpeed}`
+      : null,
+    typeof defaults.loop === 'boolean' ? `loop=${defaults.loop}` : null,
+    defaults.effect ? `effect=${defaults.effect}` : null,
+    typeof defaults.showDots === 'boolean'
+      ? `showDots=${defaults.showDots}`
+      : null,
+    typeof defaults.showArrows === 'boolean'
+      ? `showArrows=${defaults.showArrows}`
+      : null,
+    typeof defaults.vertical === 'boolean'
+      ? `vertical=${defaults.vertical}`
+      : null,
+    typeof defaults.transitionSpeed === 'number'
+      ? `transitionSpeed=${defaults.transitionSpeed}`
+      : null,
+    defaults.pauseOn ? `pauseOn=${defaults.pauseOn}` : null,
+    typeof defaults.allowMultiple === 'boolean'
+      ? `allowMultiple=${defaults.allowMultiple}`
+      : null,
+    defaults.defaultOpenItems
+      ? `defaultOpenItems=${JSON.stringify(defaults.defaultOpenItems)}`
+      : null,
+    typeof defaults.enableToggle === 'boolean'
+      ? `enableToggle=${defaults.enableToggle}`
+      : null,
+  ].filter((part): part is string => !!part);
+  return parts.join(', ');
+}
+
 export function buildRepoManifestContextNote(
   manifest?: RepoThemeManifest,
   options?: RepoManifestContextOptions,
@@ -106,6 +194,12 @@ export function buildRepoManifestContextNote(
     );
   }
 
+  if (includeStructureHints && manifest.sourceOfTruth.runtimeFiles.length > 0) {
+    lines.push(
+      `Primary runtime sources: ${manifest.sourceOfTruth.runtimeFiles.slice(0, mode === 'compact' ? 4 : 10).join(', ')}`,
+    );
+  }
+
   const { paletteColors } = manifest.themeJsonSummary;
   if (includeStyleHints && paletteColors.length > 0) {
     lines.push(
@@ -151,6 +245,40 @@ export function buildRepoManifestContextNote(
     );
   }
 
+  if (
+    includeStructureHints &&
+    manifest.runtimeHints.requiredPhpFiles.length > 0
+  ) {
+    lines.push(
+      `functions.php runtime includes: ${manifest.runtimeHints.requiredPhpFiles.slice(0, mode === 'compact' ? 4 : 8).join(', ')}`,
+    );
+  }
+
+  if (
+    includeStyleHints &&
+    (manifest.runtimeHints.enqueuedStyleFiles.length > 0 ||
+      manifest.runtimeHints.enqueuedScriptFiles.length > 0)
+  ) {
+    const styleFiles = manifest.runtimeHints.enqueuedStyleFiles.slice(
+      0,
+      mode === 'compact' ? 3 : 6,
+    );
+    const scriptFiles = manifest.runtimeHints.enqueuedScriptFiles.slice(
+      0,
+      mode === 'compact' ? 3 : 6,
+    );
+    if (styleFiles.length > 0) {
+      lines.push(
+        `functions.php enqueued style files: ${styleFiles.join(', ')}`,
+      );
+    }
+    if (scriptFiles.length > 0) {
+      lines.push(
+        `functions.php enqueued script files: ${scriptFiles.join(', ')}`,
+      );
+    }
+  }
+
   const { patternMeta } = manifest.structureHints;
   if (includeStructureHints && mode !== 'compact' && patternMeta.length > 0) {
     lines.push(`Available patterns (${patternMeta.length} total):`);
@@ -161,6 +289,34 @@ export function buildRepoManifestContextNote(
     }
     if (patternMeta.length > 12) {
       lines.push(`- ... and ${patternMeta.length - 12} more pattern(s)`);
+    }
+  }
+
+  const { entrySourceChains } = manifest.structureHints;
+  if (includeStructureHints && entrySourceChains.length > 0) {
+    lines.push('Entry layout source chains:');
+    for (const chain of entrySourceChains.slice(
+      0,
+      mode === 'compact' ? 4 : 8,
+    )) {
+      const chainPreview = fmtList(
+        chain.chainFiles,
+        mode === 'compact' ? 4 : 8,
+        (file) => file,
+      );
+      const noteSuffix =
+        chain.notes.length > 0 ? ` | notes: ${chain.notes.join(', ')}` : '';
+      lines.push(
+        `- ${chain.entryFile} [${chain.routeHint}] -> ${chainPreview}${noteSuffix}`,
+      );
+      if (mode !== 'compact' && chain.assetFiles.length > 0) {
+        lines.push(`  assets: ${fmtList(chain.assetFiles, 5, (file) => file)}`);
+      }
+      if (mode !== 'compact' && chain.headingTexts.length > 0) {
+        lines.push(
+          `  headings: ${fmtList(chain.headingTexts, 4, (text) => `"${text}"`)}`,
+        );
+      }
     }
   }
 
@@ -236,7 +392,10 @@ export function buildRepoManifestContextNote(
           contract.attrKeys.length > 0
             ? ` attrs=${contract.attrKeys.join(', ')}`
             : '';
-        return `${widget}:${contract.blockType}${attrs}`;
+        const defaults = fmtInteractiveDefaults(contract.defaults);
+        return `${widget}:${contract.blockType}${attrs}${
+          defaults ? ` defaults=${defaults}` : ''
+        }`;
       })
       .filter((line): line is string => !!line);
     if (widgetLines.length > 0) {
