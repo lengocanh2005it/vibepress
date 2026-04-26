@@ -951,7 +951,14 @@ export class ValidatorService {
       ...this.checkSectionPayloadFidelity(code, section, sectionLabel, true),
     );
     if (issues.length === 0) return null;
-    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+    const sectionAuditLine = this.buildSectionAuditLine({
+      label: sectionLabel,
+      section,
+      issues,
+      sectionIndex: (sectionNumber ?? 1) - 1,
+    });
+    const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
+    return `Visual plan fidelity violated:\n${[sectionAuditLine, ...detailLines].join('\n')}`;
   }
 
   private checkVisualPlanFidelity(
@@ -962,17 +969,48 @@ export class ValidatorService {
     if (!visualPlan?.sections?.length) return null;
 
     const issues: string[] = [];
+    const sectionAuditLines: string[] = [];
     const sectionKeyMatches = [
       ...code.matchAll(/data-vp-section-key=["']([^"']+)["']/g),
     ].map((match) => match[1]);
-    const renderedSectionKeys = new Set(sectionKeyMatches);
+    const renderedSectionKeys = [...new Set(sectionKeyMatches)];
+    const renderedSectionKeySet = new Set(renderedSectionKeys);
+    const expectedTrackedSectionKeys = visualPlan.sections
+      .map((section, index) => this.getTrackedSectionKey(section, index))
+      .filter((key): key is string => Boolean(key));
+    const missingTrackedSectionKeys = expectedTrackedSectionKeys.filter(
+      (key) => !renderedSectionKeySet.has(key),
+    );
+    const extraTrackedSectionKeys = renderedSectionKeys.filter(
+      (key) => !expectedTrackedSectionKeys.includes(key),
+    );
+
+    if (
+      expectedTrackedSectionKeys.length !== renderedSectionKeys.length ||
+      missingTrackedSectionKeys.length > 0 ||
+      extraTrackedSectionKeys.length > 0
+    ) {
+      issues.push(
+        this.buildSectionCoverageIssue({
+          totalPlannedSections: visualPlan.sections.length,
+          trackedPlannedSections: expectedTrackedSectionKeys.length,
+          trackedRenderedSections: renderedSectionKeys.length,
+          missingTrackedSectionKeys,
+          extraTrackedSectionKeys,
+        }),
+      );
+    }
 
     for (const [index, section] of visualPlan.sections.entries()) {
       const label = `"${componentName ?? visualPlan.componentName}" section ${index + 1}`;
+      const sectionIssues: string[] = [];
       // Tracking attribute gaps are patched deterministically by tryAutoFixTrackingAttributes
       // before the first validation attempt — skip them here to avoid burning retries.
-      if (section.sectionKey && !renderedSectionKeys.has(section.sectionKey)) {
-        issues.push(
+      if (
+        section.sectionKey &&
+        !renderedSectionKeySet.has(section.sectionKey)
+      ) {
+        sectionIssues.push(
           `${label} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
         );
       }
@@ -981,16 +1019,157 @@ export class ValidatorService {
         section.sourceRef?.sourceNodeId &&
         !code.includes(section.sourceRef.sourceNodeId)
       ) {
-        issues.push(
+        sectionIssues.push(
           `${label} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
         );
       }
 
-      issues.push(...this.checkSectionPayloadFidelity(code, section, label));
+      sectionIssues.push(
+        ...this.checkSectionPayloadFidelity(code, section, label),
+      );
+      sectionIssues.push(
+        ...this.checkSectionStylingFidelity(code, section, label),
+      );
+      if (sectionIssues.length > 0) {
+        issues.push(...sectionIssues);
+        sectionAuditLines.push(
+          this.buildSectionAuditLine({
+            label,
+            section,
+            issues: sectionIssues,
+            sectionIndex: index,
+          }),
+        );
+      }
     }
 
     if (issues.length === 0) return null;
-    return `Visual plan fidelity violated:\n${issues.slice(0, 12).join('\n')}`;
+    const detailLines = issues
+      .filter((issue) => !issue.startsWith('Section coverage mismatch:'))
+      .slice(0, 8)
+      .map((issue) => `detail: ${issue}`);
+    return `Visual plan fidelity violated:\n${[
+      issues[0],
+      ...sectionAuditLines.slice(0, 6),
+      ...detailLines,
+    ].join('\n')}`;
+  }
+
+  private buildSectionCoverageIssue(input: {
+    totalPlannedSections: number;
+    trackedPlannedSections: number;
+    trackedRenderedSections: number;
+    missingTrackedSectionKeys: string[];
+    extraTrackedSectionKeys: string[];
+  }): string {
+    const {
+      totalPlannedSections,
+      trackedPlannedSections,
+      trackedRenderedSections,
+      missingTrackedSectionKeys,
+      extraTrackedSectionKeys,
+    } = input;
+    const parts = [
+      `plannedTotal=${totalPlannedSections}`,
+      `plannedTracked=${trackedPlannedSections}`,
+      `renderedTracked=${trackedRenderedSections}`,
+      `missingTracked=${missingTrackedSectionKeys.length}`,
+      `extraTracked=${extraTrackedSectionKeys.length}`,
+    ];
+    if (missingTrackedSectionKeys.length > 0) {
+      parts.push(`missingKeys=${missingTrackedSectionKeys.join(', ')}`);
+    }
+    if (extraTrackedSectionKeys.length > 0) {
+      parts.push(`extraKeys=${extraTrackedSectionKeys.join(', ')}`);
+    }
+    return `Section coverage mismatch: ${parts.join(' | ')}`;
+  }
+
+  private buildSectionAuditLine(input: {
+    label: string;
+    section: SectionPlan;
+    issues: string[];
+    sectionIndex: number;
+  }): string {
+    const { label, section, issues, sectionIndex } = input;
+    const sectionKey =
+      this.getTrackedSectionKey(section, sectionIndex) ?? '(untracked)';
+    const missingKinds = this.summarizeMissingKinds(issues);
+    return [
+      `sectionAudit: ${label}`,
+      `key=${sectionKey}`,
+      `type=${section.type}`,
+      `missing=${missingKinds.join(', ') || 'unknown'}`,
+      `details=${issues.length}`,
+    ].join(' | ');
+  }
+
+  private getTrackedSectionKey(
+    section: SectionPlan,
+    _sectionIndex: number,
+  ): string | null {
+    const key = section.sectionKey?.trim();
+    return key ? key : null;
+  }
+
+  private summarizeMissingKinds(issues: string[]): string[] {
+    const kinds = new Set<string>();
+    for (const issue of issues) {
+      const normalized = issue.toLowerCase();
+      if (normalized.includes('rendered sectionkey')) {
+        kinds.add('wrapper');
+      }
+      if (normalized.includes('sourcenodeid')) {
+        kinds.add('source-node');
+      }
+      if (normalized.includes('cta text')) {
+        kinds.add('cta');
+      }
+      if (normalized.includes('button text')) {
+        kinds.add('button');
+      }
+      if (normalized.includes('image src') || normalized.includes('avatar')) {
+        kinds.add('image');
+      }
+      if (normalized.includes('subheading')) {
+        kinds.add('subheading');
+      }
+      if (normalized.includes('heading')) {
+        kinds.add('heading');
+      }
+      if (normalized.includes('subtitle')) {
+        kinds.add('subtitle');
+      }
+      if (normalized.includes('title')) {
+        kinds.add('title');
+      }
+      if (normalized.includes('body')) {
+        kinds.add('body');
+      }
+      if (normalized.includes('list item')) {
+        kinds.add('list-item');
+      }
+      if (normalized.includes('tab label')) {
+        kinds.add('tab-label');
+      }
+      if (normalized.includes('quote')) {
+        kinds.add('quote');
+      }
+      if (normalized.includes('author')) {
+        kinds.add('author');
+      }
+      if (
+        normalized.includes('popup overlay') ||
+        normalized.includes('appears inline instead of interactive') ||
+        normalized.includes('missing the `active` class')
+      ) {
+        kinds.add('interaction');
+      }
+      if (normalized.includes('styling:')) {
+        kinds.add('styling');
+      }
+    }
+    return [...kinds];
   }
 
   /**
@@ -1082,6 +1261,33 @@ export class ValidatorService {
       default:
         return [];
     }
+  }
+
+  private checkSectionStylingFidelity(
+    code: string,
+    section: SectionPlan,
+    label: string,
+  ): string[] {
+    const issues: string[] = [];
+    // Only validate specific color values extracted from WordPress (hex / rgb).
+    // Skip generic white/black/transparent — too common to signal a real miss.
+    const SKIP_GENERIC =
+      /^(#fff(fff)?|#000(000)?|transparent|inherit|initial|unset|white|black)$/i;
+
+    const checkColor = (value: string | undefined, fieldName: string) => {
+      if (!value) return;
+      const v = value.trim();
+      if (!/^#[0-9a-f]{3,8}$/i.test(v) && !/^rgb/i.test(v)) return;
+      if (SKIP_GENERIC.test(v)) return;
+      if (code.includes(v)) return;
+      issues.push(
+        `${label} styling: ${fieldName} value ${JSON.stringify(v)} missing from generated code`,
+      );
+    };
+
+    checkColor(section.background, 'background');
+    checkColor(section.textColor, 'textColor');
+    return issues;
   }
 
   private checkHeroPayload(
@@ -3009,17 +3215,27 @@ export {};
     let i = 0;
     while (i < code.length) {
       const ch = code[i];
-      // Skip single- and double-quoted string contents
-      if (ch === '"' || ch === "'") {
-        const q = ch;
+      // Skip double-quoted string contents always.
+      // For single-quote, only treat as a string delimiter when preceded by a
+      // JS operator character — not when preceded by a letter/digit (apostrophe
+      // in JSX text like "It's" or Vietnamese text would trigger a false skip).
+      if (ch === '"') {
         i++;
         while (i < code.length) {
-          if (code[i] === '\\') {
-            i += 2;
-            continue;
-          }
-          if (code[i] === q) break;
+          if (code[i] === '\\') { i += 2; continue; }
+          if (code[i] === '"') break;
           i++;
+        }
+      } else if (ch === "'") {
+        const prevNonSpace = code.slice(0, i).trimEnd().slice(-1);
+        const isJsStringContext = !prevNonSpace || /[=,([:?!&|^~+\-*/;{}\n]/.test(prevNonSpace);
+        if (isJsStringContext) {
+          i++;
+          while (i < code.length) {
+            if (code[i] === '\\') { i += 2; continue; }
+            if (code[i] === "'") break;
+            i++;
+          }
         }
         // Skip template literal contents (simplified — does not recurse into ${})
       } else if (ch === '`') {

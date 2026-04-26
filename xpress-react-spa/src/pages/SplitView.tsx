@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import type { AiEditRequestPayload } from "../services/AiService";
+import {
+  AiProcessError,
+  applyPendingEditRequest,
+  skipPendingEditRequest,
+  type AiEditRequestPayload,
+} from "../services/AiService";
 import type {
   PipelineMetricsPayload,
   PipelineProgressEvent,
@@ -11,6 +16,16 @@ interface SplitViewLocationState {
   jobId?: string;
   siteId?: string;
   editRequest?: AiEditRequestPayload;
+}
+
+interface DeferredEditUiState {
+  loading: boolean;
+  applied: boolean;
+  dismissed: boolean;
+  error: string | null;
+  previewStage?: "baseline" | "edited" | "final";
+  editApprovalRequired?: boolean;
+  editApplied?: boolean;
 }
 
 const SPLIT_VIEW_SESSION_KEY = "vp.splitView.lastRun";
@@ -738,6 +753,12 @@ const SplitView: React.FC = () => {
     useState<PipelineProgressEvent | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
+  const [deferredEditState, setDeferredEditState] = useState<DeferredEditUiState>({
+    loading: false,
+    applied: false,
+    dismissed: false,
+    error: null,
+  });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -903,15 +924,36 @@ const SplitView: React.FC = () => {
   const previewUrl =
     previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
   const previewStage =
-    previewData?.previewStage ?? completionEvent?.data?.previewStage;
+    deferredEditState.previewStage ??
+    previewData?.previewStage ??
+    completionEvent?.data?.previewStage;
   const hasEditRequest = Boolean(
     previewData?.hasEditRequest ?? completionEvent?.data?.hasEditRequest,
   );
-  const metricsData = latestMetricsEvent?.data?.metrics;
+  const editApprovalRequired = Boolean(
+    deferredEditState.editApprovalRequired ??
+      previewData?.editApprovalRequired ??
+      completionEvent?.data?.editApprovalRequired,
+  );
+  const editApplied = Boolean(
+    deferredEditState.editApplied ??
+      previewData?.editApplied ??
+      completionEvent?.data?.editApplied,
+  );
+  const metricsData =
+    deferredEditState.applied || editApplied
+      ? undefined
+      : latestMetricsEvent?.data?.metrics;
   const metricsView = useMemo(
     () => normalizeMetricsPayload(metricsData),
     [metricsData],
   );
+  const showDeferredEditPrompt =
+    Boolean(previousEditRequest) &&
+    hasEditRequest &&
+    editApprovalRequired &&
+    !editApplied &&
+    !deferredEditState.dismissed;
 
   const previewFrameSrc = useMemo(() => {
     if (!previewUrl) return "";
@@ -942,12 +984,17 @@ const SplitView: React.FC = () => {
       };
     }
 
-    if (previewStage === "baseline" && hasEditRequest) {
+    if (hasEditRequest && editApprovalRequired && !editApplied) {
       return {
-        badge: "Baseline Live",
-        title: "You are viewing the baseline preview",
+        badge: previewStage === "final" ? "Approval Needed" : "Baseline Live",
+        title:
+          previewStage === "final"
+            ? "Baseline preview is ready for approval"
+            : "You are viewing the baseline preview",
         description:
-          "The preview is already running while the pipeline applies the requested edits in the background.",
+          previewStage === "final"
+            ? "The WordPress site has already been migrated to React. Review this baseline preview first, then decide whether the stored edit request should be applied."
+            : "The WordPress site has already been migrated to React. The requested edit is stored separately and will only be applied after user approval.",
         badgeClass: "border-amber-300 bg-amber-50 text-amber-800",
       };
     }
@@ -967,23 +1014,39 @@ const SplitView: React.FC = () => {
         badge: "Edited Live",
         title: "Requested edits are now visible",
         description:
-          "The running preview has been updated with the edit request while the pipeline continues with visual metrics.",
+          "The running preview has been updated with the approved edit request.",
+        badgeClass: "border-sky-300 bg-sky-50 text-sky-800",
+      };
+    }
+
+    if (previewStage === "final" && editApplied) {
+      return {
+        badge: "Edited Final",
+        title: "Approved edits are now applied",
+        description:
+          "The baseline React preview has been updated with the approved user edits.",
         badgeClass: "border-sky-300 bg-sky-50 text-sky-800",
       };
     }
 
     return {
       badge: "Final Ready",
-      title: "The final edited preview is ready",
+      title: "The final baseline preview is ready",
       description:
-        "Pipeline execution is complete. You can inspect metrics and then push the result to GitHub.",
+        "Pipeline execution is complete. You can inspect the baseline preview and then decide whether to apply the stored edit request.",
       badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
     };
-  }, [hasEditRequest, previewStage]);
+  }, [editApplied, editApprovalRequired, hasEditRequest, previewStage]);
 
   useEffect(() => {
     startedAtRef.current = Date.now();
     setElapsedSeconds(0);
+    setDeferredEditState({
+      loading: false,
+      applied: false,
+      dismissed: false,
+      error: null,
+    });
   }, [jobId]);
 
   const isPipelineCompleted =
@@ -1097,6 +1160,94 @@ const SplitView: React.FC = () => {
       setShowStopConfirm(false);
     } catch {
       setDeleteState({ loading: false, done: false });
+    }
+  };
+
+  const handleApplyPendingEdit = async () => {
+    if (!jobId || !siteId || deferredEditState.loading) return;
+    setDeferredEditState((prev) => ({
+      ...prev,
+      loading: true,
+      error: null,
+      dismissed: false,
+    }));
+    try {
+      const response = await applyPendingEditRequest(siteId, jobId);
+      if (!response.accepted) {
+        setDeferredEditState((prev) => ({
+          ...prev,
+          loading: false,
+          error: response.error || "The pending edit request could not be applied.",
+        }));
+        return;
+      }
+
+      setDeferredEditState({
+        loading: false,
+        applied: false,
+        dismissed: true,
+        error: null,
+        previewStage: undefined,
+        editApprovalRequired: false,
+        editApplied: false,
+      });
+    } catch (error) {
+      const message =
+        error instanceof AiProcessError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Failed to apply the pending edit request.";
+      setDeferredEditState((prev) => ({
+        ...prev,
+        loading: false,
+        error: message,
+      }));
+    }
+  };
+
+  const handleSkipPendingEdit = async () => {
+    if (!jobId || !siteId || deferredEditState.loading) return;
+    setDeferredEditState((prev) => ({
+      ...prev,
+      loading: true,
+      error: null,
+      dismissed: false,
+    }));
+    try {
+      const response = await skipPendingEditRequest(siteId, jobId);
+      if (!response.accepted) {
+        setDeferredEditState((prev) => ({
+          ...prev,
+          loading: false,
+          error:
+            response.error ||
+            "The pipeline could not continue with the baseline preview.",
+        }));
+        return;
+      }
+
+      setDeferredEditState({
+        loading: false,
+        applied: false,
+        dismissed: true,
+        error: null,
+        previewStage: undefined,
+        editApprovalRequired: false,
+        editApplied: false,
+      });
+    } catch (error) {
+      const message =
+        error instanceof AiProcessError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Failed to continue with the baseline preview.";
+      setDeferredEditState((prev) => ({
+        ...prev,
+        loading: false,
+        error: message,
+      }));
     }
   };
 
@@ -1347,6 +1498,64 @@ const SplitView: React.FC = () => {
                   <span className="text-slate-900">{previewUrl}</span>
                 </p>
               </div>
+              {(showDeferredEditPrompt || deferredEditState.error) && (
+                <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-slate-800">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 rounded-full bg-amber-100 p-2 text-amber-700">
+                      <span className="material-symbols-outlined text-[18px]">
+                        rate_review
+                      </span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-slate-900">
+                        Apply the stored edit request?
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">
+                        You are currently viewing the baseline React migration.
+                        The requested edits have not been applied yet.
+                      </p>
+                      {previousEditRequest?.prompt ? (
+                        <div className="mt-3 rounded-xl border border-amber-200 bg-white px-3 py-3 text-xs leading-6 text-slate-700">
+                          <p className="font-semibold text-slate-900">
+                            Requested change
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap">
+                            {previousEditRequest.prompt}
+                          </p>
+                          {!!previousEditRequest.attachments?.length && (
+                            <p className="mt-2 text-[11px] text-slate-500">
+                              Captures attached: {previousEditRequest.attachments.length}
+                            </p>
+                          )}
+                        </div>
+                      ) : null}
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button
+                          onClick={() => void handleApplyPendingEdit()}
+                          disabled={deferredEditState.loading}
+                          className={`${actionButtonClass} border-amber-800 bg-amber-700 text-white hover:bg-amber-800 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50`}
+                        >
+                          {deferredEditState.loading
+                            ? "Applying edits…"
+                            : "Apply requested edits"}
+                        </button>
+                        <button
+                          onClick={() => void handleSkipPendingEdit()}
+                          disabled={deferredEditState.loading}
+                          className={`${actionButtonClass} border-slate-300 bg-white text-slate-800 hover:bg-slate-100 focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50`}
+                        >
+                          Continue with baseline
+                        </button>
+                      </div>
+                      {deferredEditState.error && (
+                        <p className="mt-3 text-xs text-red-700">
+                          {deferredEditState.error}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   onClick={() => window.open(previewUrl, "_blank")}

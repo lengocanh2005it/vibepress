@@ -102,17 +102,21 @@ interface ComponentVisualPlan {
 }
 \`\`\`
 
-Every section also supports optional exact spacing fields, presentation/layout fields, and preserved custom class hooks from the template:
+Every section also supports optional visual overrides, spacing fields, presentation/layout fields, and preserved custom class hooks from the template:
 \`\`\`
 {
+  background?: string,   // exact hex — section-level background override, e.g. "#1a1a2e"
+  textColor?: string,    // exact hex — section-level text color override, e.g. "#f9f9f9"
   paddingStyle?: string,
   marginStyle?: string,
   gapStyle?: string,
+  shadow?: string,       // CSS box-shadow value
+  border?: { radius?: string, color?: string, width?: string },
   presentation?: { container?: shell|content, contentAlign?: left|center|right, textAlign?: left|center|right, itemsAlign?: start|center|end|stretch, justify?: start|center|between|end, contentMaxWidth?: string },
   customClassNames?: string[]
 }
 \`\`\`
-Use them when the template source exposes real spacing values, wrapper alignment/width behavior, or explicit custom classes and you can preserve them exactly.
+Use them when the template source exposes real values. For \`background\` and \`textColor\`: set them whenever a section wrapper has a distinct background or text color that differs from the page defaults — this is critical for dark sections, colored banners, and card surfaces.
 
 For element-level source classes, preserve them on the closest matching blueprint field instead of collapsing everything onto the section wrapper:
 - \`hero.image.customClassNames\`
@@ -325,6 +329,7 @@ function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
     'The following sections were detected in the EXACT order they appear in the WordPress template.',
     'You MUST preserve this order in the `sections` array.',
     'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+    'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
     'You MUST NOT reorder, merge, split, or drop sections from this list.',
     'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
     'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',

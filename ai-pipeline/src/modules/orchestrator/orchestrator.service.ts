@@ -70,8 +70,10 @@ import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import type {
+  ApplyPendingEditRequestDto,
   PipelineCaptureAttachmentDto,
   RunPipelineDto,
+  SkipPendingEditRequestDto,
   SubmitReactVisualEditDto,
 } from './orchestrator.dto.js';
 
@@ -91,6 +93,8 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: 'baseline' | 'edited' | 'final';
   hasEditRequest?: boolean;
+  editApprovalRequired?: boolean;
+  editApplied?: boolean;
   stepDetails?: ProgressStepDetails;
   metrics?: {
     urlA?: string;
@@ -265,10 +269,27 @@ export interface PipelineStep {
 
 export interface PipelineStatus {
   jobId: string;
-  status: 'running' | 'stopping' | 'stopped' | 'done' | 'error' | 'deleted';
+  status:
+    | 'running'
+    | 'awaiting_confirmation'
+    | 'stopping'
+    | 'stopped'
+    | 'done'
+    | 'error'
+    | 'deleted';
   steps: PipelineStep[];
   result?: any;
   error?: string;
+}
+
+interface PendingEditDecision {
+  action: 'apply' | 'skip';
+}
+
+interface PendingEditApprovalGate {
+  promise: Promise<PendingEditDecision>;
+  resolve: (decision: PendingEditDecision) => void;
+  reject: (reason?: unknown) => void;
 }
 
 function collectPlanReviewBlockingIssues(
@@ -349,8 +370,18 @@ interface JobRuntimeControl {
   deleteRequested: boolean;
   finalized: boolean;
   hasEditRequest?: boolean;
+  pendingEditRequest?: RunPipelineDto['editRequest'];
+  pendingEditRequestContext?: ResolvedEditRequestContext;
+  pendingEditApproval?: boolean;
+  editApplied?: boolean;
+  siteId?: string;
   logPath?: string;
   preview?: PreviewBuilderResult;
+  buildComponents?: ReactGenerateResult['components'];
+  approvedPlan?: PlanResult;
+  previewTokens?: ThemeTokens;
+  fixAgentModel?: string;
+  confirmationGate?: PendingEditApprovalGate;
   runtimeSummary?: PipelineRuntimeSummaryDraft;
 }
 
@@ -363,11 +394,23 @@ interface PipelineRetryCounters {
   buildFix: number;
 }
 
+interface FullComponentRegenerationSummaryEntry {
+  timestamp: string;
+  stage: 'stage4-validator-fix' | 'stage5-review-fix';
+  componentName: string;
+  reasons: string[];
+  missingTargets: string[];
+  outcome: 'succeeded' | 'failed';
+  triggerErrorPreview: string;
+  finalError?: string;
+}
+
 interface PipelineRuntimeSummaryDraft {
   startedAt: string;
   repoAnalysisSummary: string[];
   stepDurationsMs: Partial<Record<string, number>>;
   retries: PipelineRetryCounters;
+  fullComponentRegenerations: FullComponentRegenerationSummaryEntry[];
 }
 
 interface PipelineAccuracySummary {
@@ -520,6 +563,7 @@ interface PipelineRunSummaryFile {
   editRequestTokenUsage: TokenUsagePhaseSummary | null;
   uiAssessment: PipelineUiAssessment;
   repoAnalysisSummary: string[];
+  fullComponentRegenerations: FullComponentRegenerationSummaryEntry[];
 }
 
 class PipelineControlError extends Error {
@@ -628,6 +672,11 @@ export class OrchestratorService {
       deleteRequested: false,
       finalized: false,
       hasEditRequest: Boolean(dto.editRequest),
+      pendingEditRequest: dto.editRequest,
+      pendingEditRequestContext: editRequestContext,
+      pendingEditApproval: Boolean(dto.editRequest),
+      editApplied: false,
+      siteId,
     });
 
     this.executePipelineLegacy(
@@ -780,6 +829,96 @@ export class OrchestratorService {
     }
   }
 
+  async approvePendingEditRequest(body: ApplyPendingEditRequestDto): Promise<{
+    accepted: boolean;
+    resumed: boolean;
+    jobId: string;
+    siteId: string;
+    action: 'apply';
+    error?: string;
+  }> {
+    const state = this.jobs.get(body.jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${body.jobId}" not found`);
+    }
+    const control = this.controls.get(body.jobId);
+    if (!control?.pendingEditRequest || !control.pendingEditApproval) {
+      return {
+        accepted: false,
+        resumed: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        action: 'apply',
+        error: 'This job is not currently waiting for edit approval.',
+      };
+    }
+    if (!control.confirmationGate || state.status !== 'awaiting_confirmation') {
+      return {
+        accepted: false,
+        resumed: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        action: 'apply',
+        error: 'The pipeline is not paused at the confirmation gate.',
+      };
+    }
+
+    control.confirmationGate.resolve({ action: 'apply' });
+    control.confirmationGate = undefined;
+    return {
+      accepted: true,
+      resumed: true,
+      jobId: body.jobId,
+      siteId: body.siteId,
+      action: 'apply',
+    };
+  }
+
+  async skipPendingEditRequest(body: SkipPendingEditRequestDto): Promise<{
+    accepted: boolean;
+    resumed: boolean;
+    jobId: string;
+    siteId: string;
+    action: 'skip';
+    error?: string;
+  }> {
+    const state = this.jobs.get(body.jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${body.jobId}" not found`);
+    }
+    const control = this.controls.get(body.jobId);
+    if (!control?.pendingEditRequest || !control.pendingEditApproval) {
+      return {
+        accepted: false,
+        resumed: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        action: 'skip',
+        error: 'This job is not currently waiting for edit approval.',
+      };
+    }
+    if (!control.confirmationGate || state.status !== 'awaiting_confirmation') {
+      return {
+        accepted: false,
+        resumed: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        action: 'skip',
+        error: 'The pipeline is not paused at the confirmation gate.',
+      };
+    }
+
+    control.confirmationGate.resolve({ action: 'skip' });
+    control.confirmationGate = undefined;
+    return {
+      accepted: true,
+      resumed: true,
+      jobId: body.jobId,
+      siteId: body.siteId,
+      action: 'skip',
+    };
+  }
+
   async undoLastReactEdit(body: { jobId: string; siteId: string }): Promise<{
     undone: boolean;
     jobId: string;
@@ -842,6 +981,10 @@ export class OrchestratorService {
     const control = this.controls.get(jobId);
     if (control) {
       control.stopRequested = true;
+      control.confirmationGate?.reject(
+        new PipelineControlError('stopped', 'Pipeline was stopped by the user'),
+      );
+      control.confirmationGate = undefined;
       await this.stopPreviewProcesses(control.preview);
     }
     state.status = 'stopping';
@@ -869,6 +1012,10 @@ export class OrchestratorService {
     if (control) {
       control.stopRequested = true;
       control.deleteRequested = true;
+      control.confirmationGate?.reject(
+        new PipelineControlError('deleted', 'Pipeline was deleted by the user'),
+      );
+      control.confirmationGate = undefined;
       await this.stopPreviewProcesses(control.preview);
     }
 
@@ -912,6 +1059,16 @@ export class OrchestratorService {
 
   private createProgressStream(): ReplaySubject<ProgressEvent> {
     return new ReplaySubject<ProgressEvent>(100);
+  }
+
+  private createPendingEditApprovalGate(): PendingEditApprovalGate {
+    let resolve!: (decision: PendingEditDecision) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<PendingEditDecision>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
   }
 
   private getStepMeta(name: string, jobId?: string) {
@@ -963,22 +1120,28 @@ export class OrchestratorService {
     if (name === '8b_edit_request') {
       return {
         ...baseMeta,
-        label: 'Apply Requested Edits',
+        label: 'Await Or Apply Requested Edits',
         activeMessage:
-          'Applying the user edit request to the running preview and validating the updated React output.',
-        doneMessage:
-          'Requested edits have been applied and synced into the running preview.',
+          'Waiting for user approval or applying the approved edit request to the running preview.',
+        doneMessage: 'Requested edit handling is complete for this preview.',
       };
     }
 
     if (name === '9_visual_compare') {
+      const editApplied = jobId
+        ? Boolean(this.controls.get(jobId)?.editApplied)
+        : false;
       return {
         ...baseMeta,
-        label: 'Evaluate Edited Preview Metrics',
-        activeMessage:
-          'Calling backend automation to compare the edited preview against WordPress.',
-        doneMessage:
-          'Final compare metrics for the edited preview have been collected.',
+        label: editApplied
+          ? 'Evaluate Edited Preview Metrics'
+          : 'Evaluate Baseline Preview Metrics',
+        activeMessage: editApplied
+          ? 'Calling backend automation to compare the edited preview against WordPress.'
+          : 'Calling backend automation to compare the baseline React preview against WordPress before any pending edit is approved.',
+        doneMessage: editApplied
+          ? 'Final compare metrics for the edited preview have been collected.'
+          : 'Final compare metrics for the baseline React preview have been collected.',
       };
     }
 
@@ -1205,6 +1368,7 @@ export class OrchestratorService {
       startedAt: new Date().toISOString(),
       repoAnalysisSummary: [],
       stepDurationsMs: {},
+      fullComponentRegenerations: [],
       retries: {
         plannerReview: 0,
         visualPlanReview: 0,
@@ -1971,6 +2135,78 @@ export class OrchestratorService {
                 ]);
                 if (revalidated.failures.length > 0) {
                   const retryError = revalidated.failures[0]?.error;
+                  if (
+                    retryError &&
+                    this.shouldRetryWithFullComponentRegeneration(retryError)
+                  ) {
+                    const regenerationDiagnostics =
+                      this.extractFullComponentRegenerationDiagnostics(
+                        retryError,
+                      );
+                    this.logger.warn(
+                      `[Stage 4: D4 Validator] "${failure.component.name}" still failed after fix with section/content fidelity errors. Attempting full component regeneration. ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )}`,
+                    );
+                    await this.logToFile(
+                      logPath,
+                      `[Stage 4: D4 Validator] "${failure.component.name}" still failed after fix with section/content fidelity errors. Attempting full component regeneration. ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )}\n${retryError}`,
+                    );
+                    const regenerated = await this.reactGenerator.fixComponent({
+                      component: targetComponent,
+                      plan: reviewResult.plan,
+                      feedback:
+                        this.buildFullComponentRegenerationFeedback(
+                          failure.component.name,
+                          retryError,
+                          regenerationDiagnostics,
+                        ),
+                      modelConfig: { fixAgent: resolvedModels.fixAgent },
+                      logPath,
+                      fixMode: 'full',
+                    });
+                    const regeneratedValidation =
+                      this.validator.collectValidationIssues([regenerated]);
+                    if (regeneratedValidation.failures.length === 0) {
+                      this.recordFullComponentRegenerationSummary(
+                        summaryDraft,
+                        {
+                          stage: 'stage4-validator-fix',
+                          componentName: failure.component.name,
+                          diagnostics: regenerationDiagnostics,
+                          outcome: 'succeeded',
+                          triggerError: retryError,
+                        },
+                      );
+                      return {
+                        compIndex,
+                        component: regeneratedValidation.components[0],
+                      };
+                    }
+                    const regeneratedError =
+                      regeneratedValidation.failures[0]?.error;
+                    this.recordFullComponentRegenerationSummary(summaryDraft, {
+                      stage: 'stage4-validator-fix',
+                      componentName: failure.component.name,
+                      diagnostics: regenerationDiagnostics,
+                      outcome: 'failed',
+                      triggerError: retryError,
+                      finalError: regeneratedError,
+                    });
+                    this.logger.warn(
+                      `[Stage 4: D4 Validator] Full regeneration still failed for "${failure.component.name}". ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )} Error: ${regeneratedError}`,
+                    );
+                    await this.logToFile(
+                      logPath,
+                      `[Stage 4: D4 Validator] Full regeneration still failed for "${failure.component.name}". ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )} Error: ${regeneratedError}`,
+                    );
+                  }
                   this.logger.warn(
                     `[Stage 4: D4 Validator] Re-validation failed for "${failure.component.name}" after fix. Error: ${retryError}`,
                   );
@@ -2109,6 +2345,78 @@ export class OrchestratorService {
                 ]);
                 if (revalidated.failures.length > 0) {
                   const validationErr = revalidated.failures[0]?.error;
+                  if (
+                    validationErr &&
+                    this.shouldRetryWithFullComponentRegeneration(validationErr)
+                  ) {
+                    const regenerationDiagnostics =
+                      this.extractFullComponentRegenerationDiagnostics(
+                        validationErr,
+                      );
+                    this.logger.warn(
+                      `[Stage 5: Fix Loop] "${failure.componentName}" still failed after fix with section/content fidelity errors. Attempting full component regeneration. ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )}`,
+                    );
+                    await this.logToFile(
+                      logPath,
+                      `[Stage 5: Fix Loop] "${failure.componentName}" still failed after fix with section/content fidelity errors. Attempting full component regeneration. ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )}\n${validationErr}`,
+                    );
+                    const regenerated = await this.reactGenerator.fixComponent({
+                      component: aiComponents[compIndex],
+                      plan: reviewResult.plan,
+                      feedback:
+                        this.buildFullComponentRegenerationFeedback(
+                          failure.componentName,
+                          validationErr,
+                          regenerationDiagnostics,
+                        ),
+                      modelConfig: { fixAgent: resolvedModels.fixAgent },
+                      logPath,
+                      fixMode: 'full',
+                    });
+                    const regeneratedValidation =
+                      this.validator.collectValidationIssues([regenerated]);
+                    if (regeneratedValidation.failures.length === 0) {
+                      this.recordFullComponentRegenerationSummary(
+                        summaryDraft,
+                        {
+                          stage: 'stage5-review-fix',
+                          componentName: failure.componentName,
+                          diagnostics: regenerationDiagnostics,
+                          outcome: 'succeeded',
+                          triggerError: validationErr,
+                        },
+                      );
+                      return {
+                        compIndex,
+                        component: regeneratedValidation.components[0],
+                      };
+                    }
+                    const regeneratedErr =
+                      regeneratedValidation.failures[0]?.error;
+                    this.recordFullComponentRegenerationSummary(summaryDraft, {
+                      stage: 'stage5-review-fix',
+                      componentName: failure.componentName,
+                      diagnostics: regenerationDiagnostics,
+                      outcome: 'failed',
+                      triggerError: validationErr,
+                      finalError: regeneratedErr,
+                    });
+                    this.logger.warn(
+                      `[Stage 5: Fix Loop] Full regeneration still failed for "${failure.componentName}" — keeping original. ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )} Error: ${regeneratedErr}`,
+                    );
+                    await this.logToFile(
+                      logPath,
+                      `[Stage 5: Fix Loop] Full regeneration still failed for "${failure.componentName}". ${this.formatFullComponentRegenerationDiagnostics(
+                        regenerationDiagnostics,
+                      )} Error: ${regeneratedErr}`,
+                    );
+                  }
                   this.logger.warn(
                     `[Stage 5: Fix Loop] Re-validation failed for "${failure.componentName}" after fix — keeping original. Error: ${validationErr}`,
                   );
@@ -2130,6 +2438,27 @@ export class OrchestratorService {
             const idx = components.findIndex((c) => c.name === fixed.name);
             if (idx !== -1) components[idx] = fixed;
           }
+
+          const postReviewValidation =
+            this.validator.collectValidationIssues(components);
+          const fatalPostReviewFailures = postReviewValidation.failures.filter(
+            (failure) =>
+              !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                failure.component,
+                failure.error,
+              ),
+          );
+          if (fatalPostReviewFailures.length > 0) {
+            throw new Error(
+              `[validator] Generated component validation failed after AI review/fix:\n${fatalPostReviewFailures
+                .map(
+                  (failure) =>
+                    `Component "${failure.component.name}": ${failure.error}`,
+                )
+                .join('\n')}`,
+            );
+          }
+          components = postReviewValidation.components;
 
           this.emitStepProgress(
             state,
@@ -2350,6 +2679,14 @@ export class OrchestratorService {
       const runtimeControl = this.controls.get(jobId);
       if (runtimeControl) {
         runtimeControl.preview = preview;
+        runtimeControl.buildComponents = buildComponents;
+        runtimeControl.approvedPlan = reviewResult.plan;
+        runtimeControl.previewTokens =
+          'tokens' in normalizedTheme
+            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
+              undefined)
+            : undefined;
+        runtimeControl.fixAgentModel = resolvedModels.fixAgent;
       }
       state.result = {
         ...(state.result ?? {}),
@@ -2359,6 +2696,8 @@ export class OrchestratorService {
         apiBaseUrl: preview.apiBaseUrl,
         previewStage: 'baseline',
         hasEditRequest,
+        editApprovalRequired: hasEditRequest,
+        editApplied: false,
         uiSourceMapPath: preview.uiSourceMapPath,
         routeEntries: preview.routeEntries,
       };
@@ -2371,105 +2710,205 @@ export class OrchestratorService {
           status: 'done',
           percent: this.calcPercentThrough('8_preview_builder', jobId),
           message: hasEditRequest
-            ? 'Baseline preview is live. The pipeline will now run a dedicated requested-edit pass.'
+            ? 'Baseline preview is live. The requested edit has been stored and is now waiting for explicit user approval.'
             : 'Preview is live and ready for inspection.',
           data: this.buildPreviewEventData({
             preview,
             previewStage: 'baseline',
             hasEditRequest,
+            editApprovalRequired: hasEditRequest,
+            editApplied: false,
           }),
         });
       }
       if (hasEditRequest) {
-        await this.runStep(state, '8b_edit_request', logPath, async () => {
-          this.emitStepProgress(
-            state,
-            '8b_edit_request',
-            0.12,
-            'Reviewing the submitted edit request against the generated React baseline.',
-            this.buildEditRequestProgressData({
-              request: dto.editRequest,
-              title: 'Reviewing the submitted user edit request',
-              summary:
-                'The baseline preview is live. This step is now applying the requested visual changes using the submitted prompt and captures.',
-            }),
-          );
-          const editPassResult = await this.applyPostMigrationEditPass({
-            jobId,
-            state,
-            stepName: '8b_edit_request',
+        const runtimeControl = this.controls.get(jobId);
+        const approvalGate = this.createPendingEditApprovalGate();
+        if (runtimeControl) {
+          runtimeControl.confirmationGate = approvalGate;
+        }
+        state.status = 'awaiting_confirmation';
+        const editApprovalData = {
+          ...this.buildPreviewEventData({
+            preview,
+            previewStage: 'baseline',
+            hasEditRequest,
+            editApprovalRequired: true,
+            editApplied: false,
+          }),
+          ...(this.buildEditRequestProgressData({
             request: dto.editRequest,
-            editRequestContext,
-            plan: reviewResult.plan,
-            components: buildComponents,
-            fixAgentModel: resolvedModels.fixAgent,
-            logPath,
-            applyProgress: 0.38,
-            reviewProgress: 0.58,
-            refixProgress: 0.72,
-          });
-          buildComponents = editPassResult.components;
+            title: 'Baseline preview is waiting for edit approval',
+            summary:
+              'The baseline React preview is ready. The requested edit has been stored, but it will only be applied after the user explicitly approves it from the frontend.',
+          }) ?? {}),
+        };
+        this.rememberStepEventData(jobId, '8b_edit_request', editApprovalData);
+        this.progress.get(jobId)?.next({
+          step: '8b_edit_request',
+          label: this.getStepMeta('8b_edit_request', jobId).label,
+          status: 'pending',
+          percent: this.calcPercentThrough('8b_edit_request', jobId),
+          message:
+            'Requested edit is pending user approval. The pipeline is paused until the user chooses Apply or Skip.',
+          data: editApprovalData,
+        });
 
-          if (!editPassResult.applied) {
+        const decision = await approvalGate.promise;
+        if (runtimeControl) {
+          runtimeControl.confirmationGate = undefined;
+        }
+        state.status = 'running';
+
+        if (decision.action === 'apply') {
+          await this.runStep(state, '8b_edit_request', logPath, async () => {
             this.emitStepProgress(
               state,
               '8b_edit_request',
-              0.92,
-              'No targeted edit mutations were required after reviewing the submitted edit request.',
-            );
-            return { applied: false, taskCount: 0 };
-          }
-
-          this.emitStepProgress(
-            state,
-            '8b_edit_request',
-            0.82,
-            `Syncing ${editPassResult.taskCount} requested edit update(s) into the running preview.`,
-          );
-          await this.previewBuilder.syncGeneratedComponents(
-            preview.previewDir,
-            buildComponents,
-            'tokens' in normalizedTheme
-              ? (normalizedTheme as any).tokens
-              : undefined,
-          );
-          await this.validator.assertPreviewBuild(preview.frontendDir);
-          await this.validator.assertPreviewRuntime(
-            preview.previewUrl,
-            preview.routeEntries.map((entry) => entry.route),
-          );
-          this.emitStepProgress(
-            state,
-            '8b_edit_request',
-            0.94,
-            'Requested edits are now visible in the running preview.',
-            {
-              ...this.buildPreviewEventData({
-                preview,
-                previewStage: 'edited',
-                hasEditRequest,
-              }),
-              ...(this.buildEditRequestProgressData({
+              0.12,
+              'Reviewing the approved edit request against the generated React baseline.',
+              this.buildEditRequestProgressData({
                 request: dto.editRequest,
-                title: 'Requested edits are now visible in preview',
+                title: 'Applying the approved user edit request',
                 summary:
-                  'The submitted edit request has been applied and synced into the live React preview.',
-              }) ?? {}),
-            },
+                  'The user approved the pending edit request. The pipeline is now applying those visual changes to the React preview.',
+              }),
+            );
+            const editPassResult = await this.applyPostMigrationEditPass({
+              jobId,
+              state,
+              stepName: '8b_edit_request',
+              request: dto.editRequest,
+              editRequestContext,
+              plan: reviewResult.plan,
+              components: buildComponents,
+              fixAgentModel: resolvedModels.fixAgent,
+              logPath,
+              applyProgress: 0.38,
+              reviewProgress: 0.58,
+              refixProgress: 0.72,
+            });
+            // After edit-request the original visual plan is no longer
+            // authoritative — user may have added/removed/changed sections.
+            // Strip it so downstream validation doesn't reject intentional changes.
+            buildComponents = editPassResult.components.map((comp) => ({
+              ...comp,
+              visualPlan: undefined,
+            }));
+
+            if (!editPassResult.applied) {
+              const approvalControl = this.controls.get(jobId);
+              if (approvalControl) {
+                approvalControl.pendingEditApproval = false;
+                approvalControl.editApplied = false;
+              }
+              this.emitStepProgress(
+                state,
+                '8b_edit_request',
+                0.92,
+                'No targeted edit mutations were required after reviewing the approved edit request.',
+              );
+              return { applied: false, taskCount: 0 };
+            }
+
+            this.emitStepProgress(
+              state,
+              '8b_edit_request',
+              0.82,
+              `Syncing ${editPassResult.taskCount} approved edit update(s) into the running preview.`,
+            );
+            await this.previewBuilder.syncGeneratedComponents(
+              preview.previewDir,
+              buildComponents,
+              'tokens' in normalizedTheme
+                ? (normalizedTheme as any).tokens
+                : undefined,
+            );
+            await this.validator.assertPreviewBuild(preview.frontendDir);
+            await this.validator.assertPreviewRuntime(
+              preview.previewUrl,
+              preview.routeEntries.map((entry) => entry.route),
+            );
+            const approvalControl = this.controls.get(jobId);
+            if (approvalControl) {
+              approvalControl.pendingEditApproval = false;
+              approvalControl.editApplied = true;
+            }
+            this.emitStepProgress(
+              state,
+              '8b_edit_request',
+              0.94,
+              'Approved edits are now visible in the running preview.',
+              {
+                ...this.buildPreviewEventData({
+                  preview,
+                  previewStage: 'edited',
+                  hasEditRequest,
+                  editApprovalRequired: false,
+                  editApplied: true,
+                }),
+                ...(this.buildEditRequestProgressData({
+                  request: dto.editRequest,
+                  title: 'Approved edits are now visible in preview',
+                  summary:
+                    'The approved edit request has been applied and synced into the live React preview.',
+                }) ?? {}),
+              },
+            );
+            state.result = {
+              ...(state.result ?? {}),
+              previewDir: preview.previewDir,
+              frontendDir: preview.frontendDir,
+              previewUrl: preview.previewUrl,
+              apiBaseUrl: preview.apiBaseUrl,
+              previewStage: 'edited',
+              hasEditRequest,
+              editApprovalRequired: false,
+              editApplied: true,
+              uiSourceMapPath: preview.uiSourceMapPath,
+              routeEntries: preview.routeEntries,
+            };
+            return { applied: true, taskCount: editPassResult.taskCount };
+          });
+        } else {
+          const editStep = state.steps.find(
+            (step) => step.name === '8b_edit_request',
           );
+          if (editStep) {
+            editStep.status = 'skipped';
+          }
+          const approvalControl = this.controls.get(jobId);
+          if (approvalControl) {
+            approvalControl.pendingEditApproval = false;
+            approvalControl.editApplied = false;
+          }
+          this.progress.get(jobId)?.next({
+            step: '8b_edit_request',
+            label: this.getStepMeta('8b_edit_request', jobId).label,
+            status: 'skipped',
+            percent: this.calcPercentThrough('8b_edit_request', jobId),
+            message:
+              'The user skipped the pending edit request. The pipeline will continue with baseline metrics and completion.',
+            data: {
+              ...editApprovalData,
+              editApprovalRequired: false,
+              editApplied: false,
+            },
+          });
           state.result = {
             ...(state.result ?? {}),
             previewDir: preview.previewDir,
             frontendDir: preview.frontendDir,
             previewUrl: preview.previewUrl,
             apiBaseUrl: preview.apiBaseUrl,
-            previewStage: 'edited',
+            previewStage: 'baseline',
             hasEditRequest,
+            editApprovalRequired: false,
+            editApplied: false,
             uiSourceMapPath: preview.uiSourceMapPath,
             routeEntries: preview.routeEntries,
           };
-          return { applied: true, taskCount: editPassResult.taskCount };
-        });
+        }
       }
       await stepDelay();
 
@@ -2555,8 +2994,15 @@ export class OrchestratorService {
           metrics
             ? this.buildPreviewEventData({
                 preview,
-                previewStage: hasEditRequest ? 'edited' : 'baseline',
+                previewStage:
+                  hasEditRequest && this.controls.get(jobId)?.editApplied
+                    ? 'edited'
+                    : 'baseline',
                 hasEditRequest,
+                editApprovalRequired: Boolean(
+                  this.controls.get(jobId)?.pendingEditApproval,
+                ),
+                editApplied: Boolean(this.controls.get(jobId)?.editApplied),
                 metrics,
               })
             : undefined,
@@ -2568,12 +3014,23 @@ export class OrchestratorService {
           frontendDir: preview.frontendDir,
           previewUrl: preview.previewUrl,
           apiBaseUrl: preview.apiBaseUrl,
-          previewStage: hasEditRequest ? 'edited' : 'baseline',
+          previewStage:
+            hasEditRequest && this.controls.get(jobId)?.editApplied
+              ? 'edited'
+              : 'baseline',
           hasEditRequest,
+          editApprovalRequired: Boolean(
+            this.controls.get(jobId)?.pendingEditApproval,
+          ),
+          editApplied: Boolean(this.controls.get(jobId)?.editApplied),
           uiSourceMapPath: preview.uiSourceMapPath,
           routeEntries: preview.routeEntries,
           metrics,
         };
+        const compareControl = this.controls.get(jobId);
+        if (compareControl) {
+          compareControl.buildComponents = buildComponents;
+        }
 
         return { metrics };
       });
@@ -2624,6 +3081,11 @@ export class OrchestratorService {
         });
 
         state.status = 'done';
+        const completedControl = this.controls.get(jobId);
+        if (completedControl) {
+          completedControl.buildComponents = buildComponents;
+          completedControl.approvedPlan = reviewResult.plan;
+        }
         state.result = {
           runSummaryPath: logPath,
           previewDir: preview.previewDir,
@@ -2632,6 +3094,10 @@ export class OrchestratorService {
           apiBaseUrl: preview.apiBaseUrl,
           previewStage: 'final',
           hasEditRequest,
+          editApprovalRequired: Boolean(
+            this.controls.get(jobId)?.pendingEditApproval,
+          ),
+          editApplied: Boolean(this.controls.get(jobId)?.editApplied),
           uiSourceMapPath: preview.uiSourceMapPath,
           routeEntries: preview.routeEntries,
           ownerCaptureTargets,
@@ -2640,6 +3106,18 @@ export class OrchestratorService {
           metrics,
           plan: reviewResult.plan,
         };
+        const migrationNotification =
+          await this.notifyAutomationMigrationCompleted({
+            siteId,
+            jobId,
+            logPath,
+          });
+        if (migrationNotification) {
+          state.result = {
+            ...(state.result ?? {}),
+            migrationNotification,
+          };
+        }
         // Emit final event with previewUrl from within runStep
         const subject = this.progress.get(jobId);
         const doneMeta = this.getStepMeta('11_done', jobId);
@@ -2653,6 +3131,10 @@ export class OrchestratorService {
             preview,
             previewStage: 'final',
             hasEditRequest,
+            editApprovalRequired: Boolean(
+              this.controls.get(jobId)?.pendingEditApproval,
+            ),
+            editApplied: Boolean(this.controls.get(jobId)?.editApplied),
             metrics,
           }),
         });
@@ -3294,6 +3776,7 @@ export class OrchestratorService {
       editRequestTokenUsage,
       uiAssessment: this.buildUiAssessment(accuracy, visualRouteResults),
       repoAnalysisSummary: summaryDraft.repoAnalysisSummary,
+      fullComponentRegenerations: summaryDraft.fullComponentRegenerations,
     };
 
     await writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf-8');
@@ -3504,14 +3987,25 @@ export class OrchestratorService {
     preview: PreviewBuilderResult;
     previewStage: 'baseline' | 'edited' | 'final';
     hasEditRequest: boolean;
+    editApprovalRequired?: boolean;
+    editApplied?: boolean;
     metrics?: ProgressEventData['metrics'];
   }): ProgressEventData {
-    const { preview, previewStage, hasEditRequest, metrics } = input;
+    const {
+      preview,
+      previewStage,
+      hasEditRequest,
+      editApprovalRequired,
+      editApplied,
+      metrics,
+    } = input;
     return {
       previewUrl: preview.previewUrl,
       apiBaseUrl: preview.apiBaseUrl,
       previewStage,
       hasEditRequest,
+      editApprovalRequired,
+      editApplied,
       metrics,
     };
   }
@@ -3537,6 +4031,84 @@ export class OrchestratorService {
     );
     return (response.data?.result ??
       response.data) as ProgressEventData['metrics'];
+  }
+
+  private async notifyAutomationMigrationCompleted(input: {
+    siteId: string;
+    jobId: string;
+    logPath?: string;
+  }): Promise<{
+    requested: boolean;
+    endpoint: string;
+    payload: { site_id: string; job_id: string };
+    responsePreview?: string;
+    error?: string;
+  } | null> {
+    const automationUrl = this.configService
+      .get<string>('automation.url', '')
+      .trim()
+      .replace(/\/$/, '');
+    if (!automationUrl) {
+      if (input.logPath) {
+        await this.logToFile(
+          input.logPath,
+          '[Automation Migration Notify] Skipped because automation.url is empty.',
+        );
+      }
+      return null;
+    }
+
+    const endpoint = `${automationUrl}/api/migrations`;
+    const payload = {
+      site_id: input.siteId,
+      job_id: input.jobId,
+    };
+
+    try {
+      const response = await lastValueFrom(
+        this.httpService.post(endpoint, payload),
+      );
+      const responsePreview = truncateForLog(
+        JSON.stringify(response.data ?? {}),
+        500,
+      );
+      this.logger.log(
+        `[Automation Migration Notify] POST ${endpoint} succeeded for job=${input.jobId} site=${input.siteId}`,
+      );
+      if (input.logPath) {
+        await this.logToFile(
+          input.logPath,
+          `[Automation Migration Notify] POST ${endpoint} payload=${JSON.stringify(
+            payload,
+          )} response=${responsePreview}`,
+        );
+      }
+      return {
+        requested: true,
+        endpoint,
+        payload,
+        responsePreview,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[Automation Migration Notify] POST ${endpoint} failed for job=${input.jobId} site=${input.siteId}: ${message}`,
+      );
+      if (input.logPath) {
+        await this.logToFile(
+          input.logPath,
+          `[Automation Migration Notify] POST ${endpoint} payload=${JSON.stringify(
+            payload,
+          )} failed: ${message}`,
+        );
+      }
+      return {
+        requested: true,
+        endpoint,
+        payload,
+        error: message,
+      };
+    }
   }
 
   private collectAutomationComparePages(
@@ -5469,6 +6041,150 @@ export class OrchestratorService {
       /^HTML attribute `.+=` found in JSX/i,
       /^`<label for=>` found/i,
     ].some((pattern) => pattern.test(error));
+  }
+
+  private shouldRetryWithFullComponentRegeneration(error: string): boolean {
+    const normalized = error.toLowerCase();
+    return (
+      normalized.includes('visual plan fidelity violated') ||
+      normalized.includes('section coverage mismatch:') ||
+      normalized.includes('sectionaudit:') ||
+      normalized.includes('missing rendered sectionkey') ||
+      normalized.includes('missing sourcenodeid') ||
+      /\blost\s+[a-z0-9-]+\s+(?:heading|subheading|title|subtitle|body|image src|cta text|button text|list item|author|quote|avatar)\b/i.test(
+        error,
+      )
+    );
+  }
+
+  private buildFullComponentRegenerationFeedback(
+    componentName: string,
+    error: string,
+    diagnostics?: {
+      reasons: string[];
+      missingTargets: string[];
+    },
+  ): string {
+    const lines = [
+      `Full component regeneration required for "${componentName}".`,
+      'The previous repair still failed because approved section content or section structure is missing.',
+      'Regenerate the entire component from the approved plan instead of patching a local fragment.',
+      'Every approved section must remain present, in order, with complete required content inside that section.',
+      'If any heading, body, image, CTA, card content, or interactive section payload is missing, restore it from the approved contract.',
+    ];
+    if (diagnostics?.reasons.length) {
+      lines.push(`Regeneration reason(s): ${diagnostics.reasons.join(', ')}`);
+    }
+    if (diagnostics?.missingTargets.length) {
+      lines.push(
+        `Missing contract targets: ${diagnostics.missingTargets.join(', ')}`,
+      );
+    }
+    lines.push(error);
+    return lines.join('\n\n');
+  }
+
+  private extractFullComponentRegenerationDiagnostics(error: string): {
+    reasons: string[];
+    missingTargets: string[];
+  } {
+    const reasons = new Set<string>();
+    const missingTargets = new Set<string>();
+    const normalized = error.toLowerCase();
+
+    if (normalized.includes('section coverage mismatch:')) {
+      reasons.add('section-coverage');
+      const missingKeysMatch = error.match(/missingKeys=([^\n|]+)/i);
+      const extraKeysMatch = error.match(/extraKeys=([^\n|]+)/i);
+      missingKeysMatch?.[1]
+        ?.split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .forEach((key) => missingTargets.add(`${key}.wrapper`));
+      extraKeysMatch?.[1]
+        ?.split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .forEach((key) => missingTargets.add(`${key}.extra`));
+    }
+
+    const sectionAuditPattern =
+      /sectionAudit:\s+[^\n|]+\|\s+key=([^|]+)\|\s+type=([^|]+)\|\s+missing=([^|]+)\|/g;
+    for (const match of error.matchAll(sectionAuditPattern)) {
+      const rawKey = match[1]?.trim() || '(untracked)';
+      const sectionType = match[2]?.trim() || 'section';
+      const missingKinds = (match[3] ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (missingKinds.length > 0) {
+        reasons.add('missing-section-content');
+      }
+      for (const kind of missingKinds) {
+        const normalizedKind = kind.replace(/\s+/g, '-').toLowerCase();
+        const key =
+          rawKey !== '(untracked)' ? rawKey : `${sectionType}-untracked`;
+        missingTargets.add(`${key}.${normalizedKind}`);
+      }
+    }
+
+    if (normalized.includes('missing rendered sectionkey')) {
+      reasons.add('missing-section-wrapper');
+    }
+    if (normalized.includes('missing sourcenodeid')) {
+      reasons.add('missing-source-node');
+    }
+    if (/\blost\s+/i.test(error)) {
+      reasons.add('missing-section-content');
+    }
+
+    return {
+      reasons: [...reasons],
+      missingTargets: [...missingTargets].slice(0, 24),
+    };
+  }
+
+  private formatFullComponentRegenerationDiagnostics(input: {
+    reasons: string[];
+    missingTargets: string[];
+  }): string {
+    const parts = [
+      input.reasons.length > 0
+        ? `regenerationReason=${input.reasons.join(',')}`
+        : null,
+      input.missingTargets.length > 0
+        ? `missing=${input.missingTargets.join(',')}`
+        : null,
+    ].filter(Boolean);
+    return parts.join(' | ');
+  }
+
+  private recordFullComponentRegenerationSummary(
+    summaryDraft: PipelineRuntimeSummaryDraft,
+    input: {
+      stage: FullComponentRegenerationSummaryEntry['stage'];
+      componentName: string;
+      diagnostics: {
+        reasons: string[];
+        missingTargets: string[];
+      };
+      outcome: FullComponentRegenerationSummaryEntry['outcome'];
+      triggerError: string;
+      finalError?: string;
+    },
+  ): void {
+    summaryDraft.fullComponentRegenerations.push({
+      timestamp: new Date().toISOString(),
+      stage: input.stage,
+      componentName: input.componentName,
+      reasons: input.diagnostics.reasons,
+      missingTargets: input.diagnostics.missingTargets,
+      outcome: input.outcome,
+      triggerErrorPreview: truncateForLog(input.triggerError, 400),
+      ...(input.finalError
+        ? { finalError: truncateForLog(input.finalError, 400) }
+        : {}),
+    });
   }
 
   /**

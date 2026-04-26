@@ -2607,7 +2607,10 @@ function isButtonOnlyNode(node: WpNode): boolean {
 function isCtaBannerGroup(node: WpNode, children: WpNode[]): boolean {
   const meaningful = children.filter((c) => !isSpacerBlock(c.block));
   const hasButtons = meaningful.some(
-    (c) => isButtonBlock(c.block) || c.block === 'core/buttons' || c.block === 'buttons',
+    (c) =>
+      isButtonBlock(c.block) ||
+      c.block === 'core/buttons' ||
+      c.block === 'buttons',
   );
   if (!hasButtons) return false;
   const hasColumns = meaningful.some(

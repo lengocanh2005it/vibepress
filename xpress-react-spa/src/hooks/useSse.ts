@@ -145,6 +145,8 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: "baseline" | "edited" | "final";
   hasEditRequest?: boolean;
+  editApprovalRequired?: boolean;
+  editApplied?: boolean;
   stepDetails?: PipelineProgressStepDetails;
   metrics?: PipelineMetricsPayload;
 }
@@ -170,6 +172,7 @@ export interface UseSseState {
 
 type PipelineJobStatus =
   | "running"
+  | "awaiting_confirmation"
   | "stopping"
   | "stopped"
   | "done"
@@ -185,6 +188,8 @@ interface PipelineStatusResponse {
     apiBaseUrl?: string;
     previewStage?: ProgressEventData["previewStage"];
     hasEditRequest?: boolean;
+    editApprovalRequired?: boolean;
+    editApplied?: boolean;
     metrics?: ProgressEventData["metrics"];
   };
 }
@@ -248,6 +253,8 @@ export function useSse(
           apiBaseUrl: status.result.apiBaseUrl,
           previewStage: status.result.previewStage ?? "final",
           hasEditRequest: status.result.hasEditRequest,
+          editApprovalRequired: status.result.editApprovalRequired,
+          editApplied: status.result.editApplied,
           metrics: status.result.metrics,
         },
       };
@@ -408,7 +415,11 @@ export function useSse(
               return;
             }
 
-            if (status.status === "running" || status.status === "stopping") {
+            if (
+              status.status === "running" ||
+              status.status === "awaiting_confirmation" ||
+              status.status === "stopping"
+            ) {
               scheduleReconnect();
               return;
             }

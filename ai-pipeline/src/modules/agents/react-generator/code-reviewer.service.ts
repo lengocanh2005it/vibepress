@@ -30,10 +30,6 @@ import {
   buildSpectraContractPromptNote,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
-import {
-  buildFragmentPrompt,
-  FRAGMENT_SYSTEM_PROMPT,
-} from './prompts/fragment.prompt.js';
 import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import { FLAT_REST_SAFETY_RULE } from './api-contract.js';
 import {
@@ -339,16 +335,12 @@ export class CodeReviewerService {
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
-      const bypassPrecomputedVisualPlan =
-        !isRetry &&
-        this.shouldBypassPrecomputedVisualPlan(componentPlan, componentName);
 
       // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
       if (
         !forceDirectAi &&
         !isRetry &&
-        componentPlan?.visualPlan &&
-        !bypassPrecomputedVisualPlan
+        componentPlan?.visualPlan
       ) {
         if (this.shouldUseDeterministicFirst(componentPlan, componentName)) {
           const deterministic = await this.tryDeterministicPlan(
@@ -369,6 +361,7 @@ export class CodeReviewerService {
                 code: deterministic.code,
                 requiredCustomClassNames:
                   promptContext?.requiredCustomClassNames,
+                visualPlan: componentPlan?.visualPlan,
               },
               fromVisualPlan: true,
               generationMode: 'deterministic',
@@ -388,6 +381,7 @@ export class CodeReviewerService {
               filePath: '',
               code: deterministic.code,
               requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+              visualPlan: componentPlan?.visualPlan,
             },
             fromVisualPlan: true,
             generationMode: 'deterministic',
@@ -547,9 +541,7 @@ export class CodeReviewerService {
           logPath,
           isRetry
             ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
-            : bypassPrecomputedVisualPlan
-              ? `[reviewer] "${componentName}" skipping reviewed pre-computed visual plan for fixed page-detail route — generating fresh AI visual plan`
-              : precomputedPlanAllFailed
+            : precomputedPlanAllFailed
                 ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
                 : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
@@ -1354,87 +1346,6 @@ export class CodeReviewerService {
     );
   }
 
-  private shouldBypassPrecomputedVisualPlan(
-    componentPlan: ComponentPromptContext | undefined,
-    componentName: string,
-  ): boolean {
-    if (!componentPlan?.visualPlan) return false;
-    if (!componentPlan.fixedSlug) return false;
-    if (componentPlan.type !== 'page' || componentPlan.isDetail !== true) {
-      return false;
-    }
-    const normalizedNeeds = new Set(
-      this.toVisualDataNeeds(componentPlan.dataNeeds),
-    );
-    if (!normalizedNeeds.has('pageDetail')) return false;
-
-    const sections = componentPlan.visualPlan.sections ?? [];
-    if (sections.length === 0) return false;
-    if (sections.some((section) => section.type === 'page-content')) {
-      return false;
-    }
-
-    const meaningfulSections = sections.filter(
-      (section) =>
-        section.type !== 'sidebar' &&
-        section.type !== 'breadcrumb' &&
-        section.type !== 'navbar' &&
-        section.type !== 'footer',
-    );
-    const hasRichSourceBackedSections = meaningfulSections.some(
-      (section) =>
-        section.type !== 'page-content' && !!section.sourceRef?.sourceNodeId,
-    );
-    const hasInteractiveOrStructuredSections = meaningfulSections.some(
-      (section) =>
-        [
-          'hero',
-          'cover',
-          'media-text',
-          'card-grid',
-          'cta-strip',
-          'testimonial',
-          'newsletter',
-          'carousel',
-          'modal',
-          'tabs',
-          'accordion',
-          'post-list',
-        ].includes(section.type),
-    );
-
-    if (hasRichSourceBackedSections || hasInteractiveOrStructuredSections) {
-      this.logger.log(
-        `[reviewer] "${componentName}": preserving reviewed pre-computed visual plan for fixed page-detail route because it already contains source-backed rich sections`,
-      );
-      return false;
-    }
-
-    // If a fixed page-detail visual plan somehow contains only non-content
-    // shells and still no page-content wrapper, a fresh pass can recover the
-    // canonical body wrapper. Keep this bypass narrow.
-    this.logger.log(
-      `[reviewer] "${componentName}": bypassing reviewed pre-computed visual plan for fixed page-detail route because it lacks both page-content and meaningful rich sections`,
-    );
-    return true;
-  }
-
-  private shouldUseFramePath(
-    componentPlan: ComponentPromptContext | undefined,
-    componentName: string,
-  ): boolean {
-    if (!componentPlan?.dataNeeds || !componentPlan?.type) return false;
-
-    const strategy = getComponentStrategy(componentName);
-    if (strategy.allowFramePath) return true;
-
-    // Default deny: frame+fragment improves syntax stability but tends to
-    // flatten structure and drift away from the original WordPress layout.
-    // Keep it only for narrowly-scoped utility/meta components unless
-    // explicitly allowlisted in the strategy registry.
-    return false;
-  }
-
   private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
@@ -1504,7 +1415,8 @@ export class CodeReviewerService {
     if (signals.sourceBackedSectionCount >= 3) score += 1;
     if (componentPlan.route === '/') score += 1;
     if (componentPlan.fixedSlug) score += 1;
-    if (normalizedNeeds.has('pageDetail') && !signals.hasPageContent) score += 1;
+    if (normalizedNeeds.has('pageDetail') && !signals.hasPageContent)
+      score += 1;
 
     const enabled =
       score >= 5 ||
@@ -1604,180 +1516,6 @@ export class CodeReviewerService {
 
     return ordered.filter((need) => mapped.has(need));
   }
-
-  // ── D0: Frame + Fragment generation ─────────────────────────────────────────
-  //
-  // Deterministically generates the TypeScript frame (imports, interfaces,
-  // useState, useEffect, loading guard) from the component plan, then asks the
-  // AI to fill in ONLY the JSX return body (~100–200 tokens instead of ~1500).
-  //
-  // On failure the TypeScript compiler is run against the assembled file and
-  // the exact error messages (line/column/code) are fed back to the AI so it
-  // can make a targeted fix instead of regenerating from scratch.
-  //
-  // Falls back to full-file generation (generateComponentWithPlan) when:
-  //  - No dataNeeds or type in the plan (cannot build a frame)
-  //  - Both fragment attempts produce invalid code
-
-  private async generateComponentWithFrame(input: {
-    componentName: string;
-    templateSource: string;
-    modelName: string;
-    componentPlan: ComponentPromptContext;
-    tokens?: ThemeTokens;
-    editRequestContextNote?: string;
-    logPath?: string;
-  }): Promise<{
-    code: string;
-    isValid: boolean;
-    attemptsUsed: number;
-    lastError?: string;
-    cotAttempts: AttemptLog[];
-  }> {
-    const {
-      componentName,
-      templateSource,
-      modelName,
-      componentPlan,
-      editRequestContextNote,
-      logPath,
-    } = input;
-
-    const frame = this.frameGenerator.generateFrame({
-      componentName,
-      type: componentPlan.type ?? 'page',
-      dataNeeds: componentPlan.dataNeeds ?? [],
-      isDetail: componentPlan.isDetail ?? false,
-      route: componentPlan.route,
-      fixedSlug: componentPlan.fixedSlug,
-    });
-
-    const availableVariables = this.frameGenerator.describeVariables({
-      type: componentPlan.type ?? 'page',
-      dataNeeds: componentPlan.dataNeeds ?? [],
-      isDetail: componentPlan.isDetail ?? false,
-      fixedSlug: componentPlan.fixedSlug,
-    });
-
-    const validationContext = this.buildValidationContext(
-      componentPlan,
-      componentName,
-      false,
-      undefined,
-      this.resolveRequiredCustomClassTargets(
-        componentPlan?.requiredCustomClassNames,
-        input.tokens,
-      ),
-    );
-
-    let lastFragment = '';
-    let lastError = '';
-    const cotAttempts: AttemptLog[] = [];
-
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const userPrompt = buildFragmentPrompt({
-        componentName,
-        availableVariables,
-        templateSource,
-        visualPlan: componentPlan.visualPlan,
-        componentType: componentPlan.type,
-        editRequestContextNote,
-        retryError: attempt > 1 ? lastError : undefined,
-        previousFragment: attempt > 1 ? lastFragment : undefined,
-      });
-
-      const {
-        text: raw,
-        inputTokens: inTok,
-        outputTokens: outTok,
-        cachedTokens,
-      } = await this.generateWithRetry(
-        modelName,
-        FRAGMENT_SYSTEM_PROMPT,
-        userPrompt,
-        3,
-        logPath,
-        `${componentName}:fragment:${attempt}`,
-        editRequestContextNote ? 'edit-request' : 'base',
-      );
-
-      lastFragment = raw
-        .replace(/^```(?:tsx|jsx|ts|js)?\s*/i, '')
-        .replace(/```\s*$/i, '')
-        .trim();
-
-      const assembled = this.frameGenerator.assembleComponent(
-        frame,
-        lastFragment,
-      );
-      const sanitized = this.validator.sanitizeGeneratedCode(
-        this.stripSpuriousHardcodedSections(
-          this.postProcessCode(assembled),
-          input.componentName,
-        ),
-      );
-      const check = this.validator.checkCodeStructure(
-        sanitized,
-        validationContext,
-      );
-      const code = check.fixedCode ?? sanitized;
-      cotAttempts.push({
-        attemptNumber: attempt,
-        promptSent: {
-          system: FRAGMENT_SYSTEM_PROMPT,
-          user: userPrompt,
-        },
-        response: raw,
-        tokensUsed: {
-          input: inTok,
-          output: outTok,
-          total: inTok + outTok,
-          ...(typeof cachedTokens === 'number' ? { cached: cachedTokens } : {}),
-        },
-        timestamp: new Date().toISOString(),
-        success: check.isValid,
-        error: check.isValid ? undefined : check.error,
-        validationFeedback: check.isValid
-          ? 'frame-fragment generation succeeded'
-          : undefined,
-      });
-
-      if (check.isValid) {
-        await this.log(
-          logPath,
-          `[reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 ✓`,
-        );
-        return { code, isValid: true, attemptsUsed: attempt, cotAttempts };
-      }
-
-      // Prefer TypeScript compiler diagnostics over generic validator message
-      const tsErrors = this.validator.extractTypeScriptErrors(
-        code,
-        componentName,
-      );
-      lastError =
-        tsErrors.length > 0
-          ? tsErrors.join('\n')
-          : (check.error ?? 'unknown validation error');
-
-      this.logger.warn(
-        `[reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 failed: ${lastError}`,
-      );
-      await this.log(
-        logPath,
-        `WARN [reviewer:frame] "${componentName}" fragment attempt ${attempt}/2 failed:\n${lastError}`,
-      );
-    }
-
-    return {
-      code: '',
-      isValid: false,
-      attemptsUsed: 2,
-      lastError,
-      cotAttempts,
-    };
-  }
-
   private async generateComponentWithPlan(input: {
     componentName: string;
     templateSource: string;
@@ -1830,45 +1568,6 @@ export class CodeReviewerService {
         tokens,
       ),
     );
-
-    // ── D0: Frame + Fragment — try before full-file generation ──────────────
-    // Skipped when the plan lacks enough context to build a frame (no dataNeeds
-    // or no type), or when direct-AI / section-chunk paths explicitly request
-    // full-file output (logLabel === 'direct-ai' has already exhausted D2).
-    if (
-      componentPlan &&
-      this.shouldUseFramePath(componentPlan, componentName)
-    ) {
-      const frameResult = await this.generateComponentWithFrame({
-        componentName,
-        templateSource,
-        modelName,
-        componentPlan,
-        tokens,
-        editRequestContextNote,
-        logPath,
-      });
-      if (frameResult.isValid) {
-        this.logger.log(
-          `[reviewer:frame] "${componentName}" ✓ frame+fragment succeeded (${frameResult.attemptsUsed} attempt(s))`,
-        );
-        return {
-          code: frameResult.code,
-          isValid: true,
-          attemptsUsed: frameResult.attemptsUsed,
-          lastRawOutput: '',
-          cotAttempts: frameResult.cotAttempts,
-        };
-      }
-      lastError = frameResult.lastError;
-      this.logger.warn(
-        `[reviewer:frame] "${componentName}" frame+fragment failed (${frameResult.lastError}) — falling back to full-file generation`,
-      );
-      await this.log(
-        logPath,
-        `WARN [reviewer:frame] "${componentName}" frame+fragment failed — full-file fallback`,
-      );
-    }
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const userPromptForAttempt = buildComponentPrompt(

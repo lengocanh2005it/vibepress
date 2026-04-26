@@ -104,13 +104,13 @@ export class PlanReviewerService {
     // theme.json templateParts declarations are authoritative — if theme.json says
     // "header" is area:header, the component must be a partial regardless of what the AI planned.
     if (repoManifest?.themeJsonSummary.templatePartAreas.length) {
-        reviewed = this.applyManifestAreaHints(
-          reviewed,
-          repoManifest.themeJsonSummary.templatePartAreas,
-          warnings,
-          warningCodes,
-        );
-      }
+      reviewed = this.applyManifestAreaHints(
+        reviewed,
+        repoManifest.themeJsonSummary.templatePartAreas,
+        warnings,
+        warningCodes,
+      );
+    }
 
     reviewed = this.resolveDuplicateHomePages(reviewed, warnings, warningCodes);
     reviewed = this.normalizeComponentNames(reviewed, warnings, warningCodes);

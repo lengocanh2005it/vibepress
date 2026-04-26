@@ -977,10 +977,7 @@ export class PlannerService {
           ? [...richSections, fallbackSidebarSection]
           : richSections
         : hasSidebarTemplate
-          ? [
-              fallbackPageContent,
-              fallbackSidebarSection,
-            ]
+          ? [fallbackPageContent, fallbackSidebarSection]
           : [fallbackPageContent];
       return {
         ...base,
@@ -2719,9 +2716,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         sourceBackedAuxiliaryLabels:
           planningSource?.sourceBackedAuxiliaryLabels ?? [],
       }).sections;
-      const filteredSections = this.filterDegenerateDraftSections(
-        sanitizedSections,
-      );
+      const filteredSections =
+        this.filterDegenerateDraftSections(sanitizedSections);
       return filteredSections.length > 0 ? filteredSections : undefined;
     } catch {
       return undefined;
@@ -2742,7 +2738,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     postContent: string,
   ): 'rich_candidate' | 'simple_body' {
     // UAGB interactive blocks are strong rich signals
-    if (/<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(postContent)) {
+    if (
+      /<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(
+        postContent,
+      )
+    ) {
       return 'rich_candidate';
     }
 
@@ -2750,19 +2750,23 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (/<!--\s*wp:cover\b/i.test(postContent)) return 'rich_candidate';
 
     // 2+ full-width/wide group blocks containing columns = composite layout
-    const groupMatches = [...postContent.matchAll(/<!--\s*wp:group\b[^>]*?-->/gi)];
+    const groupMatches = [
+      ...postContent.matchAll(/<!--\s*wp:group\b[^>]*?-->/gi),
+    ];
     let compositeGroupCount = 0;
     for (const match of groupMatches) {
       const startIdx = match.index ?? 0;
       const nextClose = postContent.indexOf('<!-- /wp:group -->', startIdx);
-      const slice = nextClose > startIdx
-        ? postContent.slice(startIdx, nextClose)
-        : postContent.slice(startIdx);
+      const slice =
+        nextClose > startIdx
+          ? postContent.slice(startIdx, nextClose)
+          : postContent.slice(startIdx);
       const hasColumns = /<!--\s*wp:columns\b/i.test(slice);
       const hasImage = /<!--\s*wp:image\b/i.test(slice);
       const hasButtons = /<!--\s*wp:buttons?\b/i.test(slice);
       const isWideOrFull = /\"align\"\s*:\s*\"(?:full|wide)\"/i.test(match[0]);
-      if (hasColumns && (hasImage || hasButtons || isWideOrFull)) compositeGroupCount++;
+      if (hasColumns && (hasImage || hasButtons || isWideOrFull))
+        compositeGroupCount++;
     }
     if (compositeGroupCount >= 2) return 'rich_candidate';
 
@@ -2785,19 +2789,37 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   ): boolean {
     if (!sections?.length) return false;
 
-    const CHROME = new Set<SectionPlan['type']>(['page-content', 'post-content', 'sidebar', 'navbar', 'footer']);
+    const CHROME = new Set<SectionPlan['type']>([
+      'page-content',
+      'post-content',
+      'sidebar',
+      'navbar',
+      'footer',
+    ]);
     const meaningful = sections.filter((s) => !CHROME.has(s.type));
     if (!meaningful.length) return false;
 
     const STRONG_RICH = new Set<SectionPlan['type']>([
-      'hero', 'cover', 'media-text', 'card-grid', 'cta-strip',
-      'testimonial', 'carousel', 'tabs', 'accordion', 'newsletter',
+      'hero',
+      'cover',
+      'media-text',
+      'card-grid',
+      'cta-strip',
+      'testimonial',
+      'carousel',
+      'tabs',
+      'accordion',
+      'newsletter',
     ]);
     const WEAK_RICH = new Set<SectionPlan['type']>([
-      'post-list', 'search', 'breadcrumb',
+      'post-list',
+      'search',
+      'breadcrumb',
     ]);
 
-    const strongCount = meaningful.filter((s) => STRONG_RICH.has(s.type)).length;
+    const strongCount = meaningful.filter((s) =>
+      STRONG_RICH.has(s.type),
+    ).length;
     const weakCount = meaningful.filter((s) => WEAK_RICH.has(s.type)).length;
 
     // Reject if everything collapsed into one weak section
@@ -2907,7 +2929,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       hasInteractiveBlocks,
     };
   }
-
 
   private parsePlanningSourceNodes(input: {
     source: string;
@@ -3035,7 +3056,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private filterDegenerateDraftSections(
     sections: SectionPlan[],
   ): SectionPlan[] {
-    return sections.filter((section) => !this.isDegenerateDraftSection(section));
+    return sections.filter(
+      (section) => !this.isDegenerateDraftSection(section),
+    );
   }
 
   private describeDegenerateSections(sections: SectionPlan[]): string[] {
@@ -3056,8 +3079,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim().length > 0;
-    const hasCta = (cta: { text?: string; link?: string } | undefined): boolean =>
-      !!cta && (hasText(cta.text) || hasText(cta.link));
+    const hasCta = (
+      cta: { text?: string; link?: string } | undefined,
+    ): boolean => !!cta && (hasText(cta.text) || hasText(cta.link));
 
     switch (section.type) {
       case 'hero':
@@ -3111,7 +3135,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number],
     label: string | undefined,
   ): boolean {
-    const normalized = String(label ?? '').trim().toLowerCase();
+    const normalized = String(label ?? '')
+      .trim()
+      .toLowerCase();
     if (!normalized.startsWith('db:')) return false;
 
     if (componentPlan.route === '/') {
@@ -3978,7 +4004,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
                 candidate.templateName ?? componentPlan.templateName;
               const candidateSourceFile =
                 candidate.sourceFile ??
-                inferFseSourceFile(componentPlan.templateName, componentPlan.type);
+                inferFseSourceFile(
+                  componentPlan.templateName,
+                  componentPlan.type,
+                );
               return {
                 source: this.scopePlanningSourceMarkup(
                   componentPlan,
@@ -4433,21 +4462,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const pageTemplateNames = [
         assignedTemplate || null,
         `page-${componentPlan.fixedSlug}`,
-        componentPlan.fixedPageId
-          ? `page-${componentPlan.fixedPageId}`
-          : null,
+        componentPlan.fixedPageId ? `page-${componentPlan.fixedPageId}` : null,
         'page',
         'singular',
       ].filter(
-        (t): t is string =>
-          Boolean(t) && t !== componentPlan.templateName,
+        (t): t is string => Boolean(t) && t !== componentPlan.templateName,
       );
 
       for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(
-          templateName,
-          repoManifest,
-        );
+        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
         pushCandidate({
           source: chain?.composedSource ?? sourceMap.get(templateName),
           label: `repo:${templateName}`,
@@ -4472,10 +4495,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
       // Also add the repo-chain for each page-specific template
       for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(
-          templateName,
-          repoManifest,
-        );
+        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
         if (chain?.composedSource) {
           pushCandidate({
             source: chain.composedSource,

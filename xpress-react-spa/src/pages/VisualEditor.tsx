@@ -26,6 +26,7 @@ interface SourceMapEntry {
 
 type PipelineJobStatus =
   | "running"
+  | "awaiting_confirmation"
   | "stopping"
   | "stopped"
   | "done"

@@ -824,7 +824,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.blockGap)
       lines.push(
-        `- Default block gap: \`${d.blockGap}\` — WordPress applies this as \`margin-block-start\` between ALL direct children of the root wrapper (not just flex/grid). Replicate this by:\n  1. Root wrapper → \`flex flex-col gap-[${d.blockGap}]\` (this is the most critical rule)\n  2. Every inner flex/grid container with NO explicit \`gap\` field → also add \`gap-[${d.blockGap}]\``,
+        `- Default block gap: \`${d.blockGap}\` — apply \`flex flex-col gap-[${d.blockGap}]\` on the component root wrapper only. Inner section containers should use their own gap values from the visual plan; do NOT repeat this global default on every nested flex/grid.`,
       );
     if (d.rootPadding)
       lines.push(
@@ -847,7 +847,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.fonts.length > 0) {
     lines.push(
-      '**Font families** — Tailwind arbitrary font-family is unreliable, but do NOT spray inline fonts everywhere. Use `style={{fontFamily:"..."}}` only for blocks/nodes that explicitly carry a different font from the inherited theme default:',
+      '**Font families** — use `style={{fontFamily:"..."}}` only for blocks/nodes that explicitly carry a different font from the inherited theme default. Do not apply font-family globally or on every wrapper:',
     );
     for (const f of tokens.fonts) {
       lines.push(`- slug \`${f.slug}\` → \`${f.family}\` (${f.name})`);
@@ -1582,6 +1582,23 @@ function buildCompactSectionSummary(
     if (section.sourceRef?.sourceNodeId) {
       parts.push(`sourceNodeId=${section.sourceRef.sourceNodeId}`);
     }
+    if (section.background) parts.push(`bg=${section.background}`);
+    if (section.textColor) parts.push(`color=${section.textColor}`);
+    if (section.paddingStyle) parts.push(`padding=${section.paddingStyle}`);
+    if (section.marginStyle) parts.push(`margin=${section.marginStyle}`);
+    if (section.gapStyle) parts.push(`gap=${section.gapStyle}`);
+    if (section.shadow) parts.push(`shadow=${section.shadow}`);
+    if (section.border) {
+      const b = section.border;
+      const bParts = [
+        b.radius ? `radius=${b.radius}` : null,
+        b.color ? `color=${b.color}` : null,
+        b.width ? `width=${b.width}` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      if (bParts) parts.push(`border={${bParts}}`);
+    }
     if (section.presentation) {
       parts.push(`presentation=${JSON.stringify(section.presentation)}`);
     }
@@ -2160,7 +2177,9 @@ export function buildVisualPlanContextNote(
       'If the visual plan palette conflicts with generic theme token defaults, follow the visual plan palette for this component.',
     );
     if (p.text) {
-      lines.push(`- All headings (h1-h6) and ordinary body text: \`text-[${p.text}]\``);
+      lines.push(
+        `- All headings (h1-h6) and ordinary body text: \`text-[${p.text}]\``,
+      );
     }
     if (p.background) {
       lines.push(`- Page/section background: \`bg-[${p.background}]\``);
@@ -2206,6 +2225,9 @@ export function buildVisualPlanContextNote(
 
   lines.push('');
   lines.push('## Compact visual plan summary');
+  lines.push(
+    'Per-section styling fields below (`bg=`, `color=`, `padding=`, `margin=`, `gap=`, `shadow=`, `border=`) are extracted from the original WordPress theme. You MUST apply them as-is using inline `style={{}}` for colors/CSS values. Do NOT replace them with palette defaults or invent your own values.',
+  );
   lines.push(...buildCompactSectionSummary(visualPlan, componentName));
 
   return lines.join('\n');

@@ -649,9 +649,17 @@ export class ReactGeneratorService {
         ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
     const visualPlanRepairNote = this.buildVisualPlanRepairNote(componentPlan);
-    const repairFeedback = visualPlanRepairNote
-      ? `${effectiveFeedback}\n\n${visualPlanRepairNote}`
-      : effectiveFeedback;
+    const hardRegenerationNote = this.buildHardRegenerationRepairNote(
+      feedback,
+      componentPlan,
+    );
+    const repairFeedback = [
+      effectiveFeedback,
+      visualPlanRepairNote,
+      hardRegenerationNote,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
 
     this.logger.log(
       fixMode === 'syntax-only'
@@ -873,7 +881,12 @@ ${renders}
         'Do not drop sections, CTA labels, images, or card bodies from this contract.',
       );
 
-      const interactiveTypes = new Set(['carousel', 'modal', 'tabs', 'accordion']);
+      const interactiveTypes = new Set([
+        'carousel',
+        'modal',
+        'tabs',
+        'accordion',
+      ]);
       const interactiveSections = sections.filter((s) =>
         interactiveTypes.has(s.type),
       );
@@ -904,7 +917,9 @@ ${renders}
       const typographyLines = Object.entries(typography)
         .map(([k, v]) =>
           typeof v === 'object' && v !== null
-            ? `  ${k}: ${Object.entries(v).map(([tk, tv]) => `${tk}=${tv}`).join(' ')}`
+            ? `  ${k}: ${Object.entries(v)
+                .map(([tk, tv]) => `${tk}=${tv}`)
+                .join(' ')}`
             : `  ${k}: ${v}`,
         )
         .join('\n');
@@ -916,6 +931,47 @@ ${renders}
     }
 
     return blocks.join('\n');
+  }
+
+  private buildHardRegenerationRepairNote(
+    feedback: string,
+    componentPlan?: PlanResult[number],
+  ): string | undefined {
+    if (!this.shouldForceFullRegenerationFromFeedback(feedback)) {
+      return undefined;
+    }
+
+    const sectionCount = componentPlan?.visualPlan?.sections?.length ?? 0;
+    const lines = [
+      'HARD REGENERATION MODE:',
+      'The current component failed section coverage or visual-plan fidelity.',
+      'Do NOT patch only a small fragment of the broken code.',
+      'Rewrite the full component from scratch so it matches the approved visual plan again.',
+      'Render every planned section in the original order.',
+      'Give every tracked section its own top-level wrapper with the exact `data-vp-section-key` and related `data-vp-*` source-tracking attributes.',
+      'Do not keep a shortened skeleton that only preserves the first few sections.',
+    ];
+    if (sectionCount > 0) {
+      lines.push(
+        `Minimum expectation: restore all ${sectionCount} approved planned section(s), unless a section is explicitly untracked canonical body content in the contract.`,
+      );
+    }
+    lines.push(
+      'If the existing code conflicts with the approved plan, prefer the approved plan and rewrite the structure accordingly.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private shouldForceFullRegenerationFromFeedback(feedback: string): boolean {
+    const normalized = feedback.toLowerCase();
+    return (
+      normalized.includes('section coverage mismatch:') ||
+      normalized.includes('visual plan fidelity violated') ||
+      normalized.includes('missing rendered sectionkey') ||
+      normalized.includes('missing sourcenodeid') ||
+      normalized.includes('sectionaudit:')
+    );
   }
 
   private restoreTrackedSectionMarkers(
