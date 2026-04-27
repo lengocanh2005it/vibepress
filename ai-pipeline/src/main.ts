@@ -24,7 +24,10 @@ async function bootstrap() {
 
     const message =
       error instanceof Error ? error.stack || error.message : String(error);
-    logger.error(`Fatal ${reason} detected. Closing Nest application.`, message);
+    logger.error(
+      `Fatal ${reason} detected. Closing Nest application.`,
+      message,
+    );
 
     try {
       await app.close();

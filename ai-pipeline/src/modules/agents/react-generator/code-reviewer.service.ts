@@ -400,7 +400,8 @@ export class CodeReviewerService {
                 name: componentName,
                 filePath: '',
                 code: deterministicFirst.code,
-                requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+                requiredCustomClassNames:
+                  promptContext?.requiredCustomClassNames,
                 visualPlan: promptContext?.visualPlan,
               },
               fromVisualPlan: true,

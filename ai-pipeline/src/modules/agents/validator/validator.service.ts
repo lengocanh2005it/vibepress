@@ -1082,7 +1082,8 @@ export class ValidatorService {
     const addLiteral = (value: string | undefined, message: string) => {
       const normalized = value?.trim();
       if (!normalized || this.isDynamicPlanBinding(normalized)) return;
-      if (contract.literals.some((literal) => literal.value === normalized)) return;
+      if (contract.literals.some((literal) => literal.value === normalized))
+        return;
       contract.literals.push({ value: normalized, message });
     };
 
@@ -1091,10 +1092,13 @@ export class ValidatorService {
       message: string,
       fields?: Array<{ name: string; message: string }>,
     ) => {
-      const existing = contract.bindings.find((binding) => binding.kind === kind);
+      const existing = contract.bindings.find(
+        (binding) => binding.kind === kind,
+      );
       if (existing) {
         for (const field of fields ?? []) {
-          if (existing.fields?.some((entry) => entry.name === field.name)) continue;
+          if (existing.fields?.some((entry) => entry.name === field.name))
+            continue;
           existing.fields = [...(existing.fields ?? []), field];
         }
         return;
@@ -1107,7 +1111,9 @@ export class ValidatorService {
       message: string,
       options?: Record<string, boolean | string | number | undefined>,
     ) => {
-      if (contract.interactions.some((interaction) => interaction.kind === kind)) {
+      if (
+        contract.interactions.some((interaction) => interaction.kind === kind)
+      ) {
         return;
       }
       contract.interactions.push({ kind, message, options });
@@ -1136,7 +1142,8 @@ export class ValidatorService {
       const seen = new Set<string>();
       for (const cta of raw) {
         const text = cta?.text?.trim();
-        if (!text || seen.has(text) || this.isDynamicPlanBinding(text)) continue;
+        if (!text || seen.has(text) || this.isDynamicPlanBinding(text))
+          continue;
         seen.add(text);
         addLiteral(text, `${label} lost ${prefix} CTA text`);
       }
@@ -1162,12 +1169,7 @@ export class ValidatorService {
         addCtaLiterals(section, 'cover');
         break;
       case 'post-list':
-        this.populatePostListContract(
-          section,
-          label,
-          addLiteral,
-          addBinding,
-        );
+        this.populatePostListContract(section, label, addLiteral, addBinding);
         break;
       case 'card-grid':
         this.populateCardGridContract(
@@ -1184,7 +1186,10 @@ export class ValidatorService {
       case 'testimonial':
         addLiteral(section.quote, `${label} lost testimonial quote`);
         addLiteral(section.authorName, `${label} lost testimonial author`);
-        addLiteral(section.authorTitle, `${label} lost testimonial author title`);
+        addLiteral(
+          section.authorTitle,
+          `${label} lost testimonial author title`,
+        );
         addLiteral(section.authorAvatar, `${label} lost testimonial avatar`);
         break;
       case 'newsletter':
@@ -1335,11 +1340,12 @@ export class ValidatorService {
       fields?: Array<{ name: string; message: string }>,
     ) => void,
   ): void {
-    addBinding(
-      'menus',
-      `${label} navbar is missing menus rendering`,
-      [{ name: 'items', message: `${label} navbar is missing menu item rendering` }],
-    );
+    addBinding('menus', `${label} navbar is missing menus rendering`, [
+      {
+        name: 'items',
+        message: `${label} navbar is missing menu item rendering`,
+      },
+    ]);
     if (section.showSiteLogo || section.showSiteTitle) {
       const fields: Array<{ name: string; message: string }> = [];
       if (section.showSiteTitle) {
@@ -1377,8 +1383,14 @@ export class ValidatorService {
       addLiteral(section.title, `${label} lost post-list title`);
     }
     const fields: Array<{ name: string; message: string }> = [
-      { name: 'title', message: `${label} post-list is missing post title rendering` },
-      { name: 'slug', message: `${label} post-list is missing post link rendering` },
+      {
+        name: 'title',
+        message: `${label} post-list is missing post title rendering`,
+      },
+      {
+        name: 'slug',
+        message: `${label} post-list is missing post link rendering`,
+      },
     ];
     if (section.showFeaturedImage) {
       fields.push({
@@ -1480,7 +1492,10 @@ export class ValidatorService {
       fields?: Array<{ name: string; message: string }>,
     ) => void,
   ): void {
-    addLiteral(section.brandDescription, `${label} lost footer brand description`);
+    addLiteral(
+      section.brandDescription,
+      `${label} lost footer brand description`,
+    );
     addLiteral(section.copyright, `${label} lost footer copyright`);
     for (const column of section.menuColumns ?? []) {
       addLiteral(column.title, `${label} lost footer menu column title`);
@@ -1660,7 +1675,12 @@ export class ValidatorService {
     addBinding(
       'posts',
       `${label} search results must render from the posts collection`,
-      [{ name: 'title', message: `${label} search results are missing post title rendering` }],
+      [
+        {
+          name: 'title',
+          message: `${label} search results are missing post title rendering`,
+        },
+      ],
     );
   }
 
@@ -1741,17 +1761,26 @@ export class ValidatorService {
     }
     if (section.menuSlug) {
       addBinding('menus', `${label} sidebar is missing menus rendering`, [
-        { name: 'items', message: `${label} sidebar is missing menu item rendering` },
+        {
+          name: 'items',
+          message: `${label} sidebar is missing menu item rendering`,
+        },
       ]);
     }
     if (section.showPages) {
       addBinding('pages', `${label} sidebar is missing pages rendering`, [
-        { name: 'title', message: `${label} sidebar is missing page title rendering` },
+        {
+          name: 'title',
+          message: `${label} sidebar is missing page title rendering`,
+        },
       ]);
     }
     if (section.showPosts) {
       addBinding('posts', `${label} sidebar is missing posts rendering`, [
-        { name: 'title', message: `${label} sidebar is missing post title rendering` },
+        {
+          name: 'title',
+          message: `${label} sidebar is missing post title rendering`,
+        },
       ]);
     }
   }
@@ -1779,7 +1808,8 @@ export class ValidatorService {
       `${label} tabs must render all approved tab panels`,
       section.tabs.map((tab) => ({
         anchors: [tab.label, tab.heading, tab.imageSrc].filter(
-          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+          (value): value is string =>
+            typeof value === 'string' && value.trim().length > 0,
         ),
         requirements: [
           { value: tab.label, message: `${label} lost tab label` },
@@ -1790,11 +1820,9 @@ export class ValidatorService {
         ],
       })),
     );
-    addInteraction(
-      'tabs',
-      `${label} tabs must render interactive tab state`,
-      { minItems: section.tabs.length },
-    );
+    addInteraction('tabs', `${label} tabs must render interactive tab state`, {
+      minItems: section.tabs.length,
+    });
   }
 
   private populateAccordionContract(
@@ -1853,8 +1881,14 @@ export class ValidatorService {
       section.slides.length,
       `${label} carousel must render all approved slides`,
       section.slides.map((slide, index) => ({
-        anchors: [slide.heading, slide.subheading, slide.imageSrc, slide.cta?.text].filter(
-          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        anchors: [
+          slide.heading,
+          slide.subheading,
+          slide.imageSrc,
+          slide.cta?.text,
+        ].filter(
+          (value): value is string =>
+            typeof value === 'string' && value.trim().length > 0,
         ),
         requirements: [
           {
@@ -1903,7 +1937,9 @@ export class ValidatorService {
     const issues: string[] = [];
 
     for (const literal of contract.literals) {
-      issues.push(...this.requireLiteralIfPresent(code, literal.value, literal.message));
+      issues.push(
+        ...this.requireLiteralIfPresent(code, literal.value, literal.message),
+      );
     }
 
     for (const binding of contract.bindings) {
@@ -1912,7 +1948,8 @@ export class ValidatorService {
         continue;
       }
       for (const field of binding.fields ?? []) {
-        if (this.codeSatisfiesBindingField(code, binding.kind, field.name)) continue;
+        if (this.codeSatisfiesBindingField(code, binding.kind, field.name))
+          continue;
         issues.push(field.message);
       }
     }
@@ -2021,7 +2058,9 @@ export class ValidatorService {
           /fetch\(\s*['"`]\/api\/footer-links['"`]/,
         ]);
       case 'site-info':
-        return /\bsiteInfo\??\.(?:siteName|blogDescription|logoUrl)\b/.test(code);
+        return /\bsiteInfo\??\.(?:siteName|blogDescription|logoUrl)\b/.test(
+          code,
+        );
       case 'comments-list':
         return this.codeMatchesAnyPattern(code, [
           /\btopLevelComments(?:\??\.)?\.map\s*\(/,
@@ -2092,7 +2131,9 @@ export class ValidatorService {
           case 'slug':
             return /\b(?:page|item)\.slug\b|<(?:Link|a)\b/i.test(code);
           case 'content':
-            return /\b(?:page|item)\.content\b|dangerouslySetInnerHTML/.test(code);
+            return /\b(?:page|item)\.content\b|dangerouslySetInnerHTML/.test(
+              code,
+            );
           default:
             return true;
         }
@@ -2115,9 +2156,10 @@ export class ValidatorService {
             return true;
         }
       case 'site-info':
-        return new RegExp(`\\bsiteInfo\\??\\.${this.escapeRegExp(field)}\\b`, 'i').test(
-          code,
-        );
+        return new RegExp(
+          `\\bsiteInfo\\??\\.${this.escapeRegExp(field)}\\b`,
+          'i',
+        ).test(code);
       case 'comments-list':
         switch (field) {
           case 'content':
@@ -2184,7 +2226,9 @@ export class ValidatorService {
   ): boolean {
     switch (interaction.kind) {
       case 'modal': {
-        const hasTrigger = /\buagb-modal-trigger\b|<(?:button|a|Link)\b/i.test(code);
+        const hasTrigger = /\buagb-modal-trigger\b|<(?:button|a|Link)\b/i.test(
+          code,
+        );
         const hasDialog =
           /\buagb-modal-popup\b|\buagb-modal-popup-content\b|\brole\s*=\s*["']dialog["']|\baria-modal\s*=\s*(?:{?true}?|["']true["'])/i.test(
             code,
@@ -2203,7 +2247,9 @@ export class ValidatorService {
           code,
         );
       case 'accordion':
-        return /(aria-expanded|accordion|setOpen|openItems|items\.map)/i.test(code);
+        return /(aria-expanded|accordion|setOpen|openItems|items\.map)/i.test(
+          code,
+        );
       case 'carousel': {
         const minItems = Number(interaction.options?.minItems ?? 0);
         if (minItems <= 1) return true;
@@ -2244,7 +2290,9 @@ export class ValidatorService {
         section,
         label,
       );
-      sectionIssues.push(...this.checkSectionStylingFidelity(code, section, label));
+      sectionIssues.push(
+        ...this.checkSectionStylingFidelity(code, section, label),
+      );
       if (sectionIssues.length > 0) {
         issues.push(...sectionIssues);
         sectionAuditLines.push(
