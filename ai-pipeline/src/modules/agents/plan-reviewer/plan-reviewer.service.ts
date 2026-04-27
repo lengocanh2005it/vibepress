@@ -822,7 +822,7 @@ export class PlanReviewerService {
       );
       for (const orphan of orphans) {
         errors.push(
-          `Component "${item.componentName}" has AI-added orphan section [${orphan.type}] key="${orphan.sectionKey ?? 'undefined'}" with no sourceRef — remove it`,
+          `Component "${item.componentName}" has AI-added orphan section [${orphan.type}] debugKey="${orphan.debugKey ?? orphan.sectionKey ?? 'undefined'}" with no sourceRef — remove it`,
         );
       }
 
@@ -892,15 +892,6 @@ export class PlanReviewerService {
             `Component "${item.componentName}" section ${index + 1} lost sourceNodeId "${expectedSection.sourceRef.sourceNodeId}"`,
           );
         }
-
-        if (
-          expectedSection.sectionKey &&
-          actualSection.sectionKey !== expectedSection.sectionKey
-        ) {
-          errors.push(
-            `Component "${item.componentName}" section ${index + 1} changed sectionKey "${expectedSection.sectionKey}" → "${actualSection.sectionKey ?? 'undefined'}"`,
-          );
-        }
       }
     }
   }
@@ -965,7 +956,9 @@ export class PlanReviewerService {
   private describeSectionIdentity(section: SectionPlan): string {
     return [
       section.type,
-      section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+      (section.debugKey ?? section.sectionKey)
+        ? `debugKey=${section.debugKey ?? section.sectionKey}`
+        : null,
       section.sourceRef?.sourceNodeId
         ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
         : null,

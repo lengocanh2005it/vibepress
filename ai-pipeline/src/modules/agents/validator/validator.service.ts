@@ -5,19 +5,24 @@ import ts from 'typescript';
 import puppeteer, { type HTTPRequest, type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
 import type {
+  BreadcrumbSection,
   CardGridSection,
+  CarouselSection,
+  CommentsSection,
   ComponentVisualPlan,
-  CoverSection,
-  CtaStripSection,
-  HeroSection,
+  FooterSection,
   MediaTextSection,
-  ModalSection,
-  NewsletterSection,
+  NavbarSection,
+  PageContentSection,
+  PostContentSection,
   PostListSection,
+  PostMetaSection,
+  SearchSection,
+  SectionObligation,
   SectionPlan,
+  SidebarSection,
   TabsSection,
   AccordionSection,
-  TestimonialSection,
 } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
@@ -70,6 +75,63 @@ export interface ComponentValidationFailure {
 export interface ComponentValidationResult {
   components: GeneratedComponent[];
   failures: ComponentValidationFailure[];
+}
+
+type SectionBindingKind =
+  | 'posts'
+  | 'pages'
+  | 'menus'
+  | 'footer-links'
+  | 'site-info'
+  | 'comments-list'
+  | 'comment-form'
+  | 'search-input'
+  | 'post-content'
+  | 'page-content';
+
+type SectionInteractionKind =
+  | 'modal'
+  | 'tabs'
+  | 'accordion'
+  | 'carousel'
+  | 'comment-form';
+
+interface SectionContractLiteral {
+  value?: string;
+  message: string;
+}
+
+interface SectionContractBindingRequirement {
+  kind: SectionBindingKind;
+  message: string;
+  fields?: Array<{ name: string; message: string }>;
+}
+
+interface SectionContractInteractionRequirement {
+  kind: SectionInteractionKind;
+  message: string;
+  options?: Record<string, boolean | string | number | undefined>;
+}
+
+interface SectionContractCollectionItem {
+  anchors: string[];
+  requirements: SectionContractLiteral[];
+  primaryLiterals?: string[];
+}
+
+interface SectionContractCollectionRequirement {
+  kind: 'cards' | 'slides' | 'tabs' | 'accordion-items';
+  minItems: number;
+  message: string;
+  items: SectionContractCollectionItem[];
+}
+
+interface SectionRenderContract {
+  role: string;
+  literals: SectionContractLiteral[];
+  bindings: SectionContractBindingRequirement[];
+  interactions: SectionContractInteractionRequirement[];
+  collections: SectionContractCollectionRequirement[];
 }
 
 @Injectable()
@@ -241,12 +303,43 @@ export class ValidatorService {
   sanitizeGeneratedCode(raw: string): string {
     let code = this.removeUnusedImports(raw);
     code = this.sanitizeTailwindClasses(code);
+    code = this.repairBrokenArbitraryValueClasses(code);
     code = this.stripDebugStatements(code);
     code = this.normalizePlainTextPostMetaArchiveLinks(code);
     code = this.promotePlainTextPostMetaLinks(code);
     code = this.ensureHoverUnderlineOnCanonicalTextLinks(code);
     code = this.ensureReactRouterLinkImport(code);
     return code;
+  }
+
+  private repairBrokenArbitraryValueClasses(raw: string): string {
+    const repairClassList = (classList: string) =>
+      classList
+        .split(/(\s+)/)
+        .map((token) => {
+          if (!token || /^\s+$/.test(token)) return token;
+          if (!token.includes('[') || token.includes(']')) return token;
+          if (!/-\[[^\]]+$/.test(token)) return token;
+          return `${token}]`;
+        })
+        .join('');
+
+    return raw
+      .replace(
+        /className="([^"]*)"/g,
+        (_match, classList: string) =>
+          `className="${repairClassList(classList)}"`,
+      )
+      .replace(
+        /className='([^']*)'/g,
+        (_match, classList: string) =>
+          `className='${repairClassList(classList)}'`,
+      )
+      .replace(
+        /className=\{`([^`]+)`\}/g,
+        (_match, classList: string) =>
+          `className={\`${repairClassList(classList)}\`}`,
+      );
   }
 
   /**
@@ -258,7 +351,6 @@ export class ValidatorService {
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
     let code = this.sanitizeGeneratedCode(rawCode);
-    code = this.tryAutoFixTrackingAttributes(code, context.visualPlan);
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -286,7 +378,7 @@ export class ValidatorService {
       };
     }
 
-    const visualPlanIssue = this.checkVisualPlanFidelity(
+    const visualPlanIssue = this.checkVisualPlanObligations(
       code,
       context.visualPlan,
       context.componentName,
@@ -341,6 +433,11 @@ export class ValidatorService {
     const jsxTagError = this.checkJsxTagBalance(code);
     if (jsxTagError) {
       return { isValid: false, error: jsxTagError };
+    }
+
+    const tsxSyntaxError = this.checkTsxSyntax(code);
+    if (tsxSyntaxError) {
+      return { isValid: false, error: tsxSyntaxError };
     }
 
     // 6. Unbalanced braces — truncated output
@@ -697,6 +794,14 @@ export class ValidatorService {
           'Shared chrome contract violated: Footer must fetch `/api/footer-links` and render its footer columns from that API, not from `/api/menus`.',
         );
       }
+      if (
+        isFooterPartial &&
+        /\b(staticSections|fallbackSections|defaultFooterColumns)\b/.test(code)
+      ) {
+        violations.push(
+          'Shared chrome contract violated: Footer must not keep hardcoded fallback footer column arrays such as `staticSections` or `defaultFooterColumns`. Render approved footer columns from `/api/footer-links` only.',
+        );
+      }
       if (isFooterPartial && dataNeeds.has('menus')) {
         violations.push(
           'Shared chrome contract violated: Footer must not declare `menus`. Use `footerLinks` for footer columns instead.',
@@ -930,25 +1035,11 @@ export class ValidatorService {
     sectionNumber?: number,
   ): string | null {
     const sectionLabel = `"${componentName ?? 'Component'}" section ${sectionNumber ?? 1}`;
-    const issues: string[] = [];
-
-    if (section.sectionKey && !code.includes(section.sectionKey)) {
-      issues.push(
-        `${sectionLabel} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
-      );
-    }
-
-    if (
-      section.sourceRef?.sourceNodeId &&
-      !code.includes(section.sourceRef.sourceNodeId)
-    ) {
-      issues.push(
-        `${sectionLabel} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
-      );
-    }
-
-    issues.push(
-      ...this.checkSectionPayloadFidelity(code, section, sectionLabel, true),
+    const issues = this.auditSectionContractFidelity(
+      code,
+      section,
+      sectionLabel,
+      true,
     );
     if (issues.length === 0) return null;
     const sectionAuditLine = this.buildSectionAuditLine({
@@ -958,10 +1049,1185 @@ export class ValidatorService {
       sectionIndex: (sectionNumber ?? 1) - 1,
     });
     const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
-    return `Visual plan fidelity violated:\n${[sectionAuditLine, ...detailLines].join('\n')}`;
+    return `Visual section contract violated:\n${[sectionAuditLine, ...detailLines].join('\n')}`;
   }
 
-  private checkVisualPlanFidelity(
+  private auditSectionContractFidelity(
+    code: string,
+    section: SectionPlan,
+    label: string,
+    isInlineSection = false,
+  ): string[] {
+    const contract = this.buildSectionRenderContract(section, label);
+    return this.auditRenderedSectionAgainstContract(
+      code,
+      contract,
+      isInlineSection,
+    );
+  }
+
+  private buildSectionRenderContract(
+    section: SectionPlan,
+    label: string,
+  ): SectionRenderContract {
+    const role = section.obligation?.role ?? section.type;
+    const contract: SectionRenderContract = {
+      role,
+      literals: [],
+      bindings: [],
+      interactions: [],
+      collections: [],
+    };
+
+    const addLiteral = (value: string | undefined, message: string) => {
+      const normalized = value?.trim();
+      if (!normalized || this.isDynamicPlanBinding(normalized)) return;
+      if (contract.literals.some((literal) => literal.value === normalized)) return;
+      contract.literals.push({ value: normalized, message });
+    };
+
+    const addBinding = (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => {
+      const existing = contract.bindings.find((binding) => binding.kind === kind);
+      if (existing) {
+        for (const field of fields ?? []) {
+          if (existing.fields?.some((entry) => entry.name === field.name)) continue;
+          existing.fields = [...(existing.fields ?? []), field];
+        }
+        return;
+      }
+      contract.bindings.push({ kind, message, fields });
+    };
+
+    const addInteraction = (
+      kind: SectionInteractionKind,
+      message: string,
+      options?: Record<string, boolean | string | number | undefined>,
+    ) => {
+      if (contract.interactions.some((interaction) => interaction.kind === kind)) {
+        return;
+      }
+      contract.interactions.push({ kind, message, options });
+    };
+
+    const addCollection = (
+      kind: SectionContractCollectionRequirement['kind'],
+      minItems: number,
+      message: string,
+      items: SectionContractCollectionItem[],
+    ) => {
+      if (minItems <= 0 && items.length === 0) return;
+      contract.collections.push({ kind, minItems, message, items });
+    };
+
+    const addCtaLiterals = (
+      payload: { cta?: { text?: string }; ctas?: Array<{ text?: string }> },
+      prefix: string,
+    ) => {
+      const raw =
+        Array.isArray(payload.ctas) && payload.ctas.length > 0
+          ? payload.ctas
+          : payload.cta
+            ? [payload.cta]
+            : [];
+      const seen = new Set<string>();
+      for (const cta of raw) {
+        const text = cta?.text?.trim();
+        if (!text || seen.has(text) || this.isDynamicPlanBinding(text)) continue;
+        seen.add(text);
+        addLiteral(text, `${label} lost ${prefix} CTA text`);
+      }
+    };
+
+    switch (section.type) {
+      case 'navbar':
+        this.populateNavbarContract(section, label, addLiteral, addBinding);
+        break;
+      case 'hero':
+        addLiteral(section.heading, `${label} lost hero heading`);
+        addLiteral(section.subheading, `${label} lost hero subheading`);
+        addLiteral(section.image?.src, `${label} lost hero image src`);
+        addCtaLiterals(section, 'hero');
+        break;
+      case 'cta-strip':
+        addCtaLiterals(section, 'cta-strip');
+        break;
+      case 'cover':
+        addLiteral(section.imageSrc, `${label} lost cover image src`);
+        addLiteral(section.heading, `${label} lost cover heading`);
+        addLiteral(section.subheading, `${label} lost cover subheading`);
+        addCtaLiterals(section, 'cover');
+        break;
+      case 'post-list':
+        this.populatePostListContract(
+          section,
+          label,
+          addLiteral,
+          addBinding,
+        );
+        break;
+      case 'card-grid':
+        this.populateCardGridContract(
+          section,
+          label,
+          addLiteral,
+          addCollection,
+        );
+        break;
+      case 'media-text':
+        this.populateMediaTextContract(section, label, addLiteral);
+        addCtaLiterals(section, 'media-text');
+        break;
+      case 'testimonial':
+        addLiteral(section.quote, `${label} lost testimonial quote`);
+        addLiteral(section.authorName, `${label} lost testimonial author`);
+        addLiteral(section.authorTitle, `${label} lost testimonial author title`);
+        addLiteral(section.authorAvatar, `${label} lost testimonial avatar`);
+        break;
+      case 'newsletter':
+        addLiteral(section.heading, `${label} lost newsletter heading`);
+        addLiteral(section.subheading, `${label} lost newsletter subheading`);
+        addLiteral(section.buttonText, `${label} lost newsletter button text`);
+        break;
+      case 'footer':
+        this.populateFooterContract(section, label, addLiteral, addBinding);
+        break;
+      case 'post-content':
+        this.populatePostContentContract(section, label, addBinding);
+        break;
+      case 'post-meta':
+        this.populatePostMetaContract(section, label, addBinding);
+        break;
+      case 'page-content':
+        this.populatePageContentContract(section, label, addBinding);
+        break;
+      case 'search':
+        this.populateSearchContract(section, label, addLiteral, addBinding);
+        break;
+      case 'comments':
+        this.populateCommentsContract(
+          section,
+          label,
+          addBinding,
+          addInteraction,
+        );
+        break;
+      case 'sidebar':
+        this.populateSidebarContract(section, label, addLiteral, addBinding);
+        break;
+      case 'modal':
+        addLiteral(section.triggerText, `${label} lost modal trigger text`);
+        addLiteral(section.heading, `${label} lost modal heading`);
+        addLiteral(section.body, `${label} lost modal body`);
+        addLiteral(section.imageSrc, `${label} lost modal image src`);
+        addCtaLiterals(section, 'modal');
+        addInteraction(
+          'modal',
+          `${label} modal must render a trigger button and conditional popup overlay`,
+        );
+        break;
+      case 'tabs':
+        this.populateTabsContract(
+          section,
+          label,
+          addLiteral,
+          addCollection,
+          addInteraction,
+        );
+        break;
+      case 'accordion':
+        this.populateAccordionContract(
+          section,
+          label,
+          addLiteral,
+          addCollection,
+          addInteraction,
+        );
+        break;
+      case 'carousel':
+        this.populateCarouselContract(
+          section,
+          label,
+          addCollection,
+          addInteraction,
+        );
+        break;
+      case 'breadcrumb':
+        this.populateBreadcrumbContract(section, label, addBinding);
+        break;
+    }
+
+    for (const capability of section.obligation?.required ?? []) {
+      switch (capability) {
+        case 'posts':
+          addBinding(
+            'posts',
+            `${label} ${role} must render from the posts collection`,
+          );
+          break;
+        case 'pages':
+          addBinding(
+            'pages',
+            `${label} ${role} must render from the pages collection`,
+          );
+          break;
+        case 'menus':
+          addBinding('menus', `${label} ${role} is missing menus rendering`);
+          break;
+        case 'site-info':
+          addBinding(
+            'site-info',
+            `${label} ${role} is missing site info rendering`,
+          );
+          break;
+        case 'comments-list':
+          addBinding(
+            'comments-list',
+            `${label} comments list is missing source-backed comment rendering`,
+          );
+          break;
+        case 'comment-form':
+          addBinding(
+            'comment-form',
+            `${label} comment form is missing required reply form structure`,
+          );
+          addInteraction(
+            'comment-form',
+            `${label} comment form is missing required reply form structure`,
+          );
+          break;
+        case 'search-input':
+          addBinding(
+            'search-input',
+            `${label} search UI is missing the search input`,
+          );
+          break;
+        case 'post-content':
+          addBinding(
+            'post-content',
+            `${label} post-content must render post detail content`,
+          );
+          break;
+        case 'page-content':
+          addBinding(
+            'page-content',
+            `${label} page-content must render page detail content`,
+          );
+          break;
+        default:
+          break;
+      }
+    }
+
+    return contract;
+  }
+
+  private populateNavbarContract(
+    section: NavbarSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addBinding(
+      'menus',
+      `${label} navbar is missing menus rendering`,
+      [{ name: 'items', message: `${label} navbar is missing menu item rendering` }],
+    );
+    if (section.showSiteLogo || section.showSiteTitle) {
+      const fields: Array<{ name: string; message: string }> = [];
+      if (section.showSiteTitle) {
+        fields.push({
+          name: 'siteName',
+          message: `${label} navbar is missing the site title`,
+        });
+      }
+      if (section.showSiteLogo) {
+        fields.push({
+          name: 'logoUrl',
+          message: `${label} navbar is missing the site logo`,
+        });
+      }
+      addBinding(
+        'site-info',
+        `${label} navbar is missing site info rendering`,
+        fields,
+      );
+    }
+    addLiteral(section.cta?.text, `${label} lost navbar CTA text`);
+  }
+
+  private populatePostListContract(
+    section: PostListSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    if (this.shouldRequireTitleLiteral(section.obligation)) {
+      addLiteral(section.title, `${label} lost post-list title`);
+    }
+    const fields: Array<{ name: string; message: string }> = [
+      { name: 'title', message: `${label} post-list is missing post title rendering` },
+      { name: 'slug', message: `${label} post-list is missing post link rendering` },
+    ];
+    if (section.showFeaturedImage) {
+      fields.push({
+        name: 'featuredImage',
+        message: `${label} post-list is missing featured-image rendering`,
+      });
+    }
+    if (section.showExcerpt) {
+      fields.push({
+        name: 'excerpt',
+        message: `${label} post-list is missing excerpt rendering`,
+      });
+    }
+    if (section.showAuthor) {
+      fields.push({
+        name: 'author',
+        message: `${label} post-list is missing author rendering`,
+      });
+    }
+    if (section.showDate) {
+      fields.push({
+        name: 'date',
+        message: `${label} post-list is missing date rendering`,
+      });
+    }
+    if (section.showCategory) {
+      fields.push({
+        name: 'categories',
+        message: `${label} post-list is missing category rendering`,
+      });
+    }
+    addBinding(
+      'posts',
+      `${label} post-list must render from the posts collection`,
+      fields,
+    );
+  }
+
+  private populateCardGridContract(
+    section: CardGridSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addCollection: (
+      kind: SectionContractCollectionRequirement['kind'],
+      minItems: number,
+      message: string,
+      items: SectionContractCollectionItem[],
+    ) => void,
+  ): void {
+    addLiteral(section.title, `${label} lost card-grid title`);
+    addLiteral(section.subtitle, `${label} lost card-grid subtitle`);
+    addCollection(
+      'cards',
+      section.cards.length,
+      `${label} card-grid must render all approved cards`,
+      section.cards.map((card) => {
+        const heading = card.heading?.trim();
+        const body = card.body?.trim();
+        const imageSrc = card.imageSrc?.trim();
+        return {
+          anchors: [heading, imageSrc, !heading ? body : undefined].filter(
+            (value): value is string =>
+              typeof value === 'string' && value.trim().length > 0,
+          ),
+          primaryLiterals: [heading, body, imageSrc].filter(
+            (value): value is string =>
+              typeof value === 'string' && value.trim().length > 0,
+          ),
+          requirements: [
+            { value: card.heading, message: `${label} lost card heading` },
+            { value: card.body, message: `${label} lost card body` },
+            { value: card.imageSrc, message: `${label} lost card image src` },
+          ],
+        };
+      }),
+    );
+  }
+
+  private populateMediaTextContract(
+    section: MediaTextSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+  ): void {
+    addLiteral(section.imageSrc, `${label} lost media-text image src`);
+    addLiteral(section.heading, `${label} lost media-text heading`);
+    addLiteral(section.body, `${label} lost media-text body`);
+    for (const item of section.listItems ?? []) {
+      addLiteral(item, `${label} lost media-text list item`);
+    }
+  }
+
+  private populateFooterContract(
+    section: FooterSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addLiteral(section.brandDescription, `${label} lost footer brand description`);
+    addLiteral(section.copyright, `${label} lost footer copyright`);
+    for (const column of section.menuColumns ?? []) {
+      addLiteral(column.title, `${label} lost footer menu column title`);
+    }
+    if (section.menuColumns?.length) {
+      addBinding(
+        'footer-links',
+        `${label} footer is missing footer-links rendering`,
+        [
+          {
+            name: 'heading',
+            message: `${label} footer is missing footer column heading rendering`,
+          },
+          {
+            name: 'links',
+            message: `${label} footer is missing footer column link rendering`,
+          },
+        ],
+      );
+    }
+    if (section.showSiteLogo || section.showSiteTitle || section.showTagline) {
+      const fields: Array<{ name: string; message: string }> = [];
+      if (section.showSiteLogo) {
+        fields.push({
+          name: 'logoUrl',
+          message: `${label} footer is missing the site logo`,
+        });
+      }
+      if (section.showSiteTitle) {
+        fields.push({
+          name: 'siteName',
+          message: `${label} footer is missing the site title`,
+        });
+      }
+      if (section.showTagline && !section.brandDescription?.trim()) {
+        fields.push({
+          name: 'blogDescription',
+          message: `${label} footer is missing the site tagline`,
+        });
+      }
+      addBinding(
+        'site-info',
+        `${label} footer is missing site info rendering`,
+        fields,
+      );
+    }
+  }
+
+  private populatePostContentContract(
+    section: PostContentSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    const fields: Array<{ name: string; message: string }> = [
+      {
+        name: 'content',
+        message: `${label} post-content must render post body HTML`,
+      },
+    ];
+    if (section.showTitle) {
+      fields.push({
+        name: 'title',
+        message: `${label} post-content is missing the post title`,
+      });
+    }
+    if (section.showAuthor) {
+      fields.push({
+        name: 'author',
+        message: `${label} post-content is missing the post author`,
+      });
+    }
+    if (section.showDate) {
+      fields.push({
+        name: 'date',
+        message: `${label} post-content is missing the post date`,
+      });
+    }
+    if (section.showCategories) {
+      fields.push({
+        name: 'categories',
+        message: `${label} post-content is missing post categories`,
+      });
+    }
+    addBinding(
+      'post-content',
+      `${label} post-content must render post detail content`,
+      fields,
+    );
+  }
+
+  private populatePostMetaContract(
+    section: PostMetaSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    const fields: Array<{ name: string; message: string }> = [];
+    if (section.showAuthor) {
+      fields.push({
+        name: 'author',
+        message: `${label} post-meta is missing author rendering`,
+      });
+    }
+    if (section.showDate) {
+      fields.push({
+        name: 'date',
+        message: `${label} post-meta is missing date rendering`,
+      });
+    }
+    if (section.showCategories) {
+      fields.push({
+        name: 'categories',
+        message: `${label} post-meta is missing category rendering`,
+      });
+    }
+    if (fields.length > 0) {
+      addBinding(
+        'post-content',
+        `${label} post-meta must render from post detail data`,
+        fields,
+      );
+    }
+  }
+
+  private populatePageContentContract(
+    section: PageContentSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    const fields: Array<{ name: string; message: string }> = [
+      {
+        name: 'content',
+        message: `${label} page-content must render page body HTML`,
+      },
+    ];
+    if (section.showTitle) {
+      fields.push({
+        name: 'title',
+        message: `${label} page-content is missing the page title`,
+      });
+    }
+    addBinding(
+      'page-content',
+      `${label} page-content must render page detail content`,
+      fields,
+    );
+  }
+
+  private populateSearchContract(
+    section: SearchSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addLiteral(section.title, `${label} lost search title`);
+    addBinding(
+      'search-input',
+      `${label} search UI is missing the search input`,
+    );
+    const requiresPostResults = section.obligation?.required?.includes('posts');
+    if (!requiresPostResults) return;
+    addBinding(
+      'posts',
+      `${label} search results must render from the posts collection`,
+      [{ name: 'title', message: `${label} search results are missing post title rendering` }],
+    );
+  }
+
+  private populateCommentsContract(
+    section: CommentsSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+    addInteraction: (
+      kind: SectionInteractionKind,
+      message: string,
+      options?: Record<string, boolean | string | number | undefined>,
+    ) => void,
+  ): void {
+    addBinding(
+      'comments-list',
+      `${label} comments list is missing source-backed comment rendering`,
+      [
+        {
+          name: 'content',
+          message: `${label} comments list is missing comment body rendering`,
+        },
+      ],
+    );
+    if (!section.showForm) return;
+    const fields: Array<{ name: string; message: string }> = [
+      {
+        name: 'content',
+        message: `${label} comment form is missing the comment textarea`,
+      },
+      {
+        name: 'submit',
+        message: `${label} comment form is missing the submit action`,
+      },
+    ];
+    if (section.requireName) {
+      fields.push({
+        name: 'author',
+        message: `${label} comment form is missing the required author field`,
+      });
+    }
+    if (section.requireEmail) {
+      fields.push({
+        name: 'email',
+        message: `${label} comment form is missing the required email field`,
+      });
+    }
+    addBinding(
+      'comment-form',
+      `${label} comment form is missing required reply form structure`,
+      fields,
+    );
+    addInteraction(
+      'comment-form',
+      `${label} comment form is missing required reply form structure`,
+    );
+  }
+
+  private populateSidebarContract(
+    section: SidebarSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addLiteral(section.title, `${label} lost sidebar title`);
+    if (section.showSiteInfo) {
+      addBinding(
+        'site-info',
+        `${label} sidebar is missing site info rendering`,
+      );
+    }
+    if (section.menuSlug) {
+      addBinding('menus', `${label} sidebar is missing menus rendering`, [
+        { name: 'items', message: `${label} sidebar is missing menu item rendering` },
+      ]);
+    }
+    if (section.showPages) {
+      addBinding('pages', `${label} sidebar is missing pages rendering`, [
+        { name: 'title', message: `${label} sidebar is missing page title rendering` },
+      ]);
+    }
+    if (section.showPosts) {
+      addBinding('posts', `${label} sidebar is missing posts rendering`, [
+        { name: 'title', message: `${label} sidebar is missing post title rendering` },
+      ]);
+    }
+  }
+
+  private populateTabsContract(
+    section: TabsSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addCollection: (
+      kind: SectionContractCollectionRequirement['kind'],
+      minItems: number,
+      message: string,
+      items: SectionContractCollectionItem[],
+    ) => void,
+    addInteraction: (
+      kind: SectionInteractionKind,
+      message: string,
+      options?: Record<string, boolean | string | number | undefined>,
+    ) => void,
+  ): void {
+    addLiteral(section.title, `${label} lost tabs title`);
+    addCollection(
+      'tabs',
+      section.tabs.length,
+      `${label} tabs must render all approved tab panels`,
+      section.tabs.map((tab) => ({
+        anchors: [tab.label, tab.heading, tab.imageSrc].filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        ),
+        requirements: [
+          { value: tab.label, message: `${label} lost tab label` },
+          { value: tab.heading, message: `${label} lost tab heading` },
+          { value: tab.body, message: `${label} lost tab body` },
+          { value: tab.imageSrc, message: `${label} lost tab image src` },
+          { value: tab.cta?.text, message: `${label} lost tab CTA text` },
+        ],
+      })),
+    );
+    addInteraction(
+      'tabs',
+      `${label} tabs must render interactive tab state`,
+      { minItems: section.tabs.length },
+    );
+  }
+
+  private populateAccordionContract(
+    section: AccordionSection,
+    label: string,
+    addLiteral: (value: string | undefined, message: string) => void,
+    addCollection: (
+      kind: SectionContractCollectionRequirement['kind'],
+      minItems: number,
+      message: string,
+      items: SectionContractCollectionItem[],
+    ) => void,
+    addInteraction: (
+      kind: SectionInteractionKind,
+      message: string,
+      options?: Record<string, boolean | string | number | undefined>,
+    ) => void,
+  ): void {
+    addLiteral(section.title, `${label} lost accordion title`);
+    addCollection(
+      'accordion-items',
+      section.items.length,
+      `${label} accordion must render all approved accordion items`,
+      section.items.map((item) => ({
+        anchors: [item.heading].filter(Boolean) as string[],
+        requirements: [
+          { value: item.heading, message: `${label} lost accordion heading` },
+          { value: item.body, message: `${label} lost accordion body` },
+        ],
+      })),
+    );
+    addInteraction(
+      'accordion',
+      `${label} accordion must render interactive expand/collapse state`,
+      { minItems: section.items.length },
+    );
+  }
+
+  private populateCarouselContract(
+    section: CarouselSection,
+    label: string,
+    addCollection: (
+      kind: SectionContractCollectionRequirement['kind'],
+      minItems: number,
+      message: string,
+      items: SectionContractCollectionItem[],
+    ) => void,
+    addInteraction: (
+      kind: SectionInteractionKind,
+      message: string,
+      options?: Record<string, boolean | string | number | undefined>,
+    ) => void,
+  ): void {
+    addCollection(
+      'slides',
+      section.slides.length,
+      `${label} carousel must render all approved slides`,
+      section.slides.map((slide, index) => ({
+        anchors: [slide.heading, slide.subheading, slide.imageSrc, slide.cta?.text].filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        ),
+        requirements: [
+          {
+            value: slide.heading,
+            message: `${label} lost carousel slide ${index + 1} heading`,
+          },
+          {
+            value: slide.subheading,
+            message: `${label} lost carousel slide ${index + 1} subheading`,
+          },
+          {
+            value: slide.imageSrc,
+            message: `${label} lost carousel slide ${index + 1} image src`,
+          },
+          {
+            value: slide.cta?.text,
+            message: `${label} lost carousel slide ${index + 1} CTA text`,
+          },
+        ],
+      })),
+    );
+    if (section.slides.length > 1) {
+      addInteraction(
+        'carousel',
+        `${label} carousel must render interactive slide state for multiple slides`,
+        { minItems: section.slides.length },
+      );
+    }
+  }
+
+  private populateBreadcrumbContract(
+    _section: BreadcrumbSection,
+    _label: string,
+    _addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {}
+
+  private auditRenderedSectionAgainstContract(
+    code: string,
+    contract: SectionRenderContract,
+    isInlineSection = false,
+  ): string[] {
+    const issues: string[] = [];
+
+    for (const literal of contract.literals) {
+      issues.push(...this.requireLiteralIfPresent(code, literal.value, literal.message));
+    }
+
+    for (const binding of contract.bindings) {
+      if (!this.codeSatisfiesBindingRequirement(code, binding.kind)) {
+        issues.push(binding.message);
+        continue;
+      }
+      for (const field of binding.fields ?? []) {
+        if (this.codeSatisfiesBindingField(code, binding.kind, field.name)) continue;
+        issues.push(field.message);
+      }
+    }
+
+    for (const interaction of contract.interactions) {
+      if (
+        this.codeSatisfiesInteractionRequirement(
+          code,
+          interaction,
+          isInlineSection,
+        )
+      ) {
+        continue;
+      }
+      issues.push(interaction.message);
+    }
+
+    for (const collection of contract.collections) {
+      const renderedCount = collection.items.filter((item) =>
+        this.codeSatisfiesCollectionItem(code, item),
+      ).length;
+      if (renderedCount < collection.minItems) {
+        issues.push(
+          `${collection.message}, but only ${renderedCount} item(s) were detected`,
+        );
+      }
+      for (const item of collection.items) {
+        for (const requirement of item.requirements) {
+          issues.push(
+            ...this.requireLiteralIfPresent(
+              code,
+              requirement.value,
+              requirement.message,
+            ),
+          );
+        }
+      }
+    }
+
+    return [...new Set(issues)];
+  }
+
+  private codeSatisfiesCollectionItem(
+    code: string,
+    item: SectionContractCollectionItem,
+  ): boolean {
+    const primaryCandidates = this.uniqueCollectionItemCandidates([
+      ...(item.primaryLiterals ?? []),
+      ...item.anchors,
+    ]);
+    if (primaryCandidates.length > 0) {
+      return primaryCandidates.some((candidate) =>
+        this.codeContainsLiteral(code, candidate),
+      );
+    }
+
+    const fallbackCandidates = this.uniqueCollectionItemCandidates(
+      item.requirements.map((requirement) => requirement.value),
+    );
+    return fallbackCandidates.some((candidate) =>
+      this.codeContainsLiteral(code, candidate),
+    );
+  }
+
+  private uniqueCollectionItemCandidates(
+    values: Array<string | undefined>,
+  ): string[] {
+    const seen = new Set<string>();
+    const candidates: string[] = [];
+
+    for (const value of values) {
+      const normalized = value?.trim();
+      if (!normalized || this.isDynamicPlanBinding(normalized)) continue;
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      candidates.push(normalized);
+    }
+
+    return candidates;
+  }
+
+  private codeSatisfiesBindingRequirement(
+    code: string,
+    kind: SectionBindingKind,
+  ): boolean {
+    switch (kind) {
+      case 'posts':
+        return this.codeMatchesAnyPattern(code, [
+          /\bposts(?:\??\.)?(?:map|slice|filter|find)\s*\(/,
+          /\b(?:post|item)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?)\b/,
+        ]);
+      case 'pages':
+        return this.codeMatchesAnyPattern(code, [
+          /\bpages(?:\??\.)?(?:map|slice|filter|find)\s*\(/,
+          /\b(?:page|item)\.(?:title|slug|content)\b/,
+        ]);
+      case 'menus':
+        return this.codeMatchesAnyPattern(code, [
+          /\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/,
+          /\bmenu(?:s)?\.(?:items|links)\b/,
+        ]);
+      case 'footer-links':
+        return this.codeMatchesAnyPattern(code, [
+          /\bfooter(?:Columns|Links)(?:\??\.)?(?:map|filter|slice|find|some)\s*\(/,
+          /\b[A-Za-z_$][\w$]*\.(?:heading|links)\b/,
+          /fetch\(\s*['"`]\/api\/footer-links['"`]/,
+        ]);
+      case 'site-info':
+        return /\bsiteInfo\??\.(?:siteName|blogDescription|logoUrl)\b/.test(code);
+      case 'comments-list':
+        return this.codeMatchesAnyPattern(code, [
+          /\btopLevelComments(?:\??\.)?\.map\s*\(/,
+          /\bcomments(?:\??\.)?(?:map|slice|filter)\s*\(/,
+          /\bcomment-list\b|\bcomment-template\b/i,
+          /\bcomment\.(?:content|author(?:Name)?|date)\b/,
+        ]);
+      case 'comment-form':
+        return this.codeMatchesAnyPattern(code, [
+          /\bcomment-form\b/i,
+          /<form\b[\s\S]*<textarea\b/i,
+          /\bhandleCommentSubmit\b/,
+        ]);
+      case 'search-input':
+        return this.codeMatchesAnyPattern(code, [
+          /<input\b[^>]*type=["']search["']/i,
+          /\bsearchQuery\b|\bsetSearchQuery\b/,
+          /<form\b[\s\S]*search/i,
+        ]);
+      case 'post-content':
+        return this.codeMatchesAnyPattern(code, [
+          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
+          /\b[A-Za-z_$][\w$]*\.(?:content|title|date|author(?:Name)?|categories?|categorySlugs?)\b/,
+        ]);
+      case 'page-content':
+        return this.codeMatchesAnyPattern(code, [
+          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
+          /\b[A-Za-z_$][\w$]*\.(?:content|title)\b/,
+        ]);
+    }
+  }
+
+  private codeSatisfiesBindingField(
+    code: string,
+    kind: SectionBindingKind,
+    field: string,
+  ): boolean {
+    switch (kind) {
+      case 'posts':
+        switch (field) {
+          case 'title':
+            return /\b(?:post|item)\.title\b/.test(code);
+          case 'slug':
+            return /\b(?:post|item)\.slug\b|<(?:Link|a)\b/i.test(code);
+          case 'excerpt':
+            return /\b(?:post|item)\.excerpt\b|excerpt/i.test(code);
+          case 'author':
+            return /\b(?:post|item)\.author(?:Name)?\b/i.test(code);
+          case 'date':
+            return /\b(?:post|item)\.date\b|<time\b/i.test(code);
+          case 'categories':
+            return /\b(?:post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
+              code,
+            );
+          case 'featuredImage':
+            return /\b(?:post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
+              code,
+            );
+          case 'content':
+            return /\b(?:post|item)\.content\b/.test(code);
+          default:
+            return true;
+        }
+      case 'pages':
+        switch (field) {
+          case 'title':
+            return /\b(?:page|item)\.title\b/.test(code);
+          case 'slug':
+            return /\b(?:page|item)\.slug\b|<(?:Link|a)\b/i.test(code);
+          case 'content':
+            return /\b(?:page|item)\.content\b|dangerouslySetInnerHTML/.test(code);
+          default:
+            return true;
+        }
+      case 'menus':
+        if (field === 'items') {
+          return /\bmenu(?:s)?\.items\b|\bmenus(?:\??\.)?(?:find|map|filter|some)\s*\(/.test(
+            code,
+          );
+        }
+        return true;
+      case 'footer-links':
+        switch (field) {
+          case 'heading':
+            return /\b[A-Za-z_$][\w$]*\.heading\b/.test(code);
+          case 'links':
+            return /\b[A-Za-z_$][\w$]*\.links\b|\bfooter(?:Columns|Links)(?:\??\.)?(?:map|filter|slice|find|some)\s*\(/.test(
+              code,
+            );
+          default:
+            return true;
+        }
+      case 'site-info':
+        return new RegExp(`\\bsiteInfo\\??\\.${this.escapeRegExp(field)}\\b`, 'i').test(
+          code,
+        );
+      case 'comments-list':
+        switch (field) {
+          case 'content':
+            return /\bcomment\.content\b|dangerouslySetInnerHTML/.test(code);
+          case 'author':
+            return /\bcomment\.author(?:Name)?\b/i.test(code);
+          case 'date':
+            return /\bcomment\.date\b|<time\b/i.test(code);
+          default:
+            return true;
+        }
+      case 'comment-form':
+        switch (field) {
+          case 'author':
+            return /\bid=["']author["']|\bname=["']author["']/.test(code);
+          case 'email':
+            return /\bid=["']email["']|\bname=["']email["']/.test(code);
+          case 'content':
+            return /<textarea\b/i.test(code);
+          case 'submit':
+            return /\bhandleCommentSubmit\b|type=["']submit["']/.test(code);
+          default:
+            return true;
+        }
+      case 'search-input':
+        return /<input\b[^>]*type=["']search["']/i.test(code);
+      case 'post-content':
+        switch (field) {
+          case 'title':
+            return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
+          case 'content':
+            return /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
+              code,
+            );
+          case 'author':
+            return /\b[A-Za-z_$][\w$]*\.author(?:Name)?\b/i.test(code);
+          case 'date':
+            return /\b[A-Za-z_$][\w$]*\.date\b|<time\b/i.test(code);
+          case 'categories':
+            return /\b[A-Za-z_$][\w$]*\.(?:categories|category|categorySlugs?)\b/i.test(
+              code,
+            );
+          default:
+            return true;
+        }
+      case 'page-content':
+        switch (field) {
+          case 'title':
+            return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
+          case 'content':
+            return /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
+              code,
+            );
+          default:
+            return true;
+        }
+    }
+  }
+
+  private codeSatisfiesInteractionRequirement(
+    code: string,
+    interaction: SectionContractInteractionRequirement,
+    isInlineSection: boolean,
+  ): boolean {
+    switch (interaction.kind) {
+      case 'modal': {
+        const hasTrigger = /\buagb-modal-trigger\b|<(?:button|a|Link)\b/i.test(code);
+        const hasDialog =
+          /\buagb-modal-popup\b|\buagb-modal-popup-content\b|\brole\s*=\s*["']dialog["']|\baria-modal\s*=\s*(?:{?true}?|["']true["'])/i.test(
+            code,
+          );
+        const hasState =
+          /\bopenModal\b|\bopenModals\b|\bsetOpenModal\b|\bsetOpenModals\b|\bisModalOpen\b|\bsetIsModalOpen\b/.test(
+            code,
+          );
+        if (isInlineSection) {
+          return hasTrigger && hasDialog;
+        }
+        return hasTrigger && hasDialog && hasState;
+      }
+      case 'tabs':
+        return /(activeTab|setActiveTab|role=["']tab["']|tablist|tabs?\.map)/i.test(
+          code,
+        );
+      case 'accordion':
+        return /(aria-expanded|accordion|setOpen|openItems|items\.map)/i.test(code);
+      case 'carousel': {
+        const minItems = Number(interaction.options?.minItems ?? 0);
+        if (minItems <= 1) return true;
+        return /(activeCarousels|setActiveCarousels|swiper-slide|keen-slider|embla|currentSlide|setCurrentSlide)/i.test(
+          code,
+        );
+      }
+      case 'comment-form':
+        return /\bcomment-form\b/i.test(code) && /<textarea\b/i.test(code);
+    }
+  }
+
+  private codeMatchesAnyPattern(code: string, patterns: RegExp[]): boolean {
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
+  private codeContainsLiteral(code: string, value: string): boolean {
+    const normalized = value.trim();
+    if (!normalized) return false;
+    if (code.includes(normalized)) return true;
+    return this.codeSemanticallyContainsLiteral(code, normalized);
+  }
+
+  private checkVisualPlanObligations(
     code: string,
     visualPlan?: ComponentVisualPlan,
     componentName?: string,
@@ -970,66 +2236,15 @@ export class ValidatorService {
 
     const issues: string[] = [];
     const sectionAuditLines: string[] = [];
-    const sectionKeyMatches = [
-      ...code.matchAll(/data-vp-section-key=["']([^"']+)["']/g),
-    ].map((match) => match[1]);
-    const renderedSectionKeys = [...new Set(sectionKeyMatches)];
-    const renderedSectionKeySet = new Set(renderedSectionKeys);
-    const expectedTrackedSectionKeys = visualPlan.sections
-      .map((section, index) => this.getTrackedSectionKey(section, index))
-      .filter((key): key is string => Boolean(key));
-    const missingTrackedSectionKeys = expectedTrackedSectionKeys.filter(
-      (key) => !renderedSectionKeySet.has(key),
-    );
-    const extraTrackedSectionKeys = renderedSectionKeys.filter(
-      (key) => !expectedTrackedSectionKeys.includes(key),
-    );
-
-    if (
-      expectedTrackedSectionKeys.length !== renderedSectionKeys.length ||
-      missingTrackedSectionKeys.length > 0 ||
-      extraTrackedSectionKeys.length > 0
-    ) {
-      issues.push(
-        this.buildSectionCoverageIssue({
-          totalPlannedSections: visualPlan.sections.length,
-          trackedPlannedSections: expectedTrackedSectionKeys.length,
-          trackedRenderedSections: renderedSectionKeys.length,
-          missingTrackedSectionKeys,
-          extraTrackedSectionKeys,
-        }),
-      );
-    }
 
     for (const [index, section] of visualPlan.sections.entries()) {
       const label = `"${componentName ?? visualPlan.componentName}" section ${index + 1}`;
-      const sectionIssues: string[] = [];
-      // Tracking attribute gaps are patched deterministically by tryAutoFixTrackingAttributes
-      // before the first validation attempt — skip them here to avoid burning retries.
-      if (
-        section.sectionKey &&
-        !renderedSectionKeySet.has(section.sectionKey)
-      ) {
-        sectionIssues.push(
-          `${label} is missing rendered sectionKey "${section.sectionKey}" from the visual plan`,
-        );
-      }
-
-      if (
-        section.sourceRef?.sourceNodeId &&
-        !code.includes(section.sourceRef.sourceNodeId)
-      ) {
-        sectionIssues.push(
-          `${label} is missing sourceNodeId "${section.sourceRef.sourceNodeId}" from the visual plan`,
-        );
-      }
-
-      sectionIssues.push(
-        ...this.checkSectionPayloadFidelity(code, section, label),
+      const sectionIssues = this.auditSectionContractFidelity(
+        code,
+        section,
+        label,
       );
-      sectionIssues.push(
-        ...this.checkSectionStylingFidelity(code, section, label),
-      );
+      sectionIssues.push(...this.checkSectionStylingFidelity(code, section, label));
       if (sectionIssues.length > 0) {
         issues.push(...sectionIssues);
         sectionAuditLines.push(
@@ -1044,45 +2259,12 @@ export class ValidatorService {
     }
 
     if (issues.length === 0) return null;
-    const detailLines = issues
-      .filter((issue) => !issue.startsWith('Section coverage mismatch:'))
-      .slice(0, 8)
-      .map((issue) => `detail: ${issue}`);
-    return `Visual plan fidelity violated:\n${[
-      issues[0],
+    const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
+    return `Visual section contracts violated:\n${[
+      `plannedSections=${visualPlan.sections.length}`,
       ...sectionAuditLines.slice(0, 6),
       ...detailLines,
     ].join('\n')}`;
-  }
-
-  private buildSectionCoverageIssue(input: {
-    totalPlannedSections: number;
-    trackedPlannedSections: number;
-    trackedRenderedSections: number;
-    missingTrackedSectionKeys: string[];
-    extraTrackedSectionKeys: string[];
-  }): string {
-    const {
-      totalPlannedSections,
-      trackedPlannedSections,
-      trackedRenderedSections,
-      missingTrackedSectionKeys,
-      extraTrackedSectionKeys,
-    } = input;
-    const parts = [
-      `plannedTotal=${totalPlannedSections}`,
-      `plannedTracked=${trackedPlannedSections}`,
-      `renderedTracked=${trackedRenderedSections}`,
-      `missingTracked=${missingTrackedSectionKeys.length}`,
-      `extraTracked=${extraTrackedSectionKeys.length}`,
-    ];
-    if (missingTrackedSectionKeys.length > 0) {
-      parts.push(`missingKeys=${missingTrackedSectionKeys.join(', ')}`);
-    }
-    if (extraTrackedSectionKeys.length > 0) {
-      parts.push(`extraKeys=${extraTrackedSectionKeys.join(', ')}`);
-    }
-    return `Section coverage mismatch: ${parts.join(' | ')}`;
   }
 
   private buildSectionAuditLine(input: {
@@ -1092,36 +2274,25 @@ export class ValidatorService {
     sectionIndex: number;
   }): string {
     const { label, section, issues, sectionIndex } = input;
-    const sectionKey =
-      this.getTrackedSectionKey(section, sectionIndex) ?? '(untracked)';
-    const missingKinds = this.summarizeMissingKinds(issues);
+    const debugKey =
+      section.debugKey?.trim() ||
+      section.sectionKey?.trim() ||
+      `${section.type}-${sectionIndex + 1}`;
+    const issueKinds = this.summarizeContractIssueKinds(issues);
     return [
-      `sectionAudit: ${label}`,
-      `key=${sectionKey}`,
+      `sectionContractAudit: ${label}`,
+      `debugKey=${debugKey}`,
       `type=${section.type}`,
-      `missing=${missingKinds.join(', ') || 'unknown'}`,
+      `role=${section.obligation?.role ?? section.type}`,
+      `issueKinds=${issueKinds.join(', ') || 'unknown'}`,
       `details=${issues.length}`,
     ].join(' | ');
   }
 
-  private getTrackedSectionKey(
-    section: SectionPlan,
-    _sectionIndex: number,
-  ): string | null {
-    const key = section.sectionKey?.trim();
-    return key ? key : null;
-  }
-
-  private summarizeMissingKinds(issues: string[]): string[] {
+  private summarizeContractIssueKinds(issues: string[]): string[] {
     const kinds = new Set<string>();
     for (const issue of issues) {
       const normalized = issue.toLowerCase();
-      if (normalized.includes('rendered sectionkey')) {
-        kinds.add('wrapper');
-      }
-      if (normalized.includes('sourcenodeid')) {
-        kinds.add('source-node');
-      }
       if (normalized.includes('cta text')) {
         kinds.add('cta');
       }
@@ -1149,8 +2320,29 @@ export class ValidatorService {
       if (normalized.includes('list item')) {
         kinds.add('list-item');
       }
+      if (normalized.includes('slide')) {
+        kinds.add('slide');
+      }
       if (normalized.includes('tab label')) {
         kinds.add('tab-label');
+      }
+      if (normalized.includes('comments list')) {
+        kinds.add('comments-list');
+      }
+      if (normalized.includes('comment form')) {
+        kinds.add('comment-form');
+      }
+      if (normalized.includes('site info')) {
+        kinds.add('site-info');
+      }
+      if (normalized.includes('menus')) {
+        kinds.add('menus');
+      }
+      if (normalized.includes('pages')) {
+        kinds.add('pages');
+      }
+      if (normalized.includes('posts')) {
+        kinds.add('posts');
       }
       if (normalized.includes('quote')) {
         kinds.add('quote');
@@ -1172,95 +2364,11 @@ export class ValidatorService {
     return [...kinds];
   }
 
-  /**
-   * Deterministically inject missing data-vp-section-key / data-vp-source-node attributes
-   * onto section wrappers before validation runs, eliminating the need for LLM retries
-   * when the only missing things are tracking attributes.
-   *
-   * Strategy: for each section in the visual plan that has a sectionKey or sourceNodeId,
-   * find the Nth top-level JSX element inside the return block and inject the attributes.
-   */
   tryAutoFixTrackingAttributes(
     code: string,
-    visualPlan?: ComponentVisualPlan,
+    _visualPlan?: ComponentVisualPlan,
   ): string {
-    if (!visualPlan?.sections?.length) return code;
-
-    let result = code;
-
-    for (const section of visualPlan.sections) {
-      const { sectionKey, sourceRef } = section;
-      const sourceNodeId = sourceRef?.sourceNodeId;
-      const templateName = sourceRef?.templateName;
-      const sourceFile = sourceRef?.sourceFile;
-
-      if (!sectionKey && !sourceNodeId) continue;
-
-      // Skip if already present
-      const hasKey =
-        !sectionKey || result.includes(`data-vp-section-key="${sectionKey}"`);
-      const hasNode = !sourceNodeId || result.includes(sourceNodeId);
-      if (hasKey && hasNode) continue;
-
-      // Build the attributes to inject
-      const attrs: string[] = [];
-      if (sectionKey && !hasKey)
-        attrs.push(`data-vp-section-key="${sectionKey}"`);
-      if (sourceNodeId && !hasNode) {
-        attrs.push(`data-vp-source-node="${sourceNodeId}"`);
-        if (templateName) attrs.push(`data-vp-template="${templateName}"`);
-        if (sourceFile) attrs.push(`data-vp-source-file="${sourceFile}"`);
-      }
-      if (attrs.length === 0) continue;
-      const attrBlock = ' ' + attrs.join(' ');
-
-      // Find the first top-level JSX element in the return block and inject attrs.
-      // Pattern: the outermost opening tag — either <TagName or <TagName\n — inside return (
-      result = result.replace(
-        /(\breturn\s*\(\s*\n?\s*<([A-Za-z][A-Za-z0-9]*)\b)([^>]*?>)/s,
-        (_match, returnOpen, _tag, rest) => {
-          // rest may be multi-line up to the closing >
-          // inject attrs just before the closing >
-          return returnOpen + rest.replace(/>$/, attrBlock + '>');
-        },
-      );
-    }
-
-    return result;
-  }
-
-  private checkSectionPayloadFidelity(
-    code: string,
-    section: SectionPlan,
-    label: string,
-    isInlineSection = false,
-  ): string[] {
-    switch (section.type) {
-      case 'hero':
-        return this.checkHeroPayload(code, section, label);
-      case 'cta-strip':
-        return this.checkCtaStripPayload(code, section, label);
-      case 'cover':
-        return this.checkCoverPayload(code, section, label);
-      case 'media-text':
-        return this.checkMediaTextPayload(code, section, label);
-      case 'card-grid':
-        return this.checkCardGridPayload(code, section, label);
-      case 'modal':
-        return this.checkModalPayload(code, section, label, isInlineSection);
-      case 'tabs':
-        return this.checkTabsPayload(code, section, label);
-      case 'accordion':
-        return this.checkAccordionPayload(code, section, label);
-      case 'testimonial':
-        return this.checkTestimonialPayload(code, section, label);
-      case 'newsletter':
-        return this.checkNewsletterPayload(code, section, label);
-      case 'post-list':
-        return this.checkPostListPayload(code, section, label);
-      default:
-        return [];
-    }
+    return code;
   }
 
   private checkSectionStylingFidelity(
@@ -1290,445 +2398,6 @@ export class ValidatorService {
     return issues;
   }
 
-  private checkHeroPayload(
-    code: string,
-    section: HeroSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.heading,
-        `${label} lost hero heading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.subheading,
-        `${label} lost hero subheading`,
-      ),
-    );
-    issues.push(
-      ...this.requireSectionCtasIfPresent(
-        code,
-        section,
-        `${label} lost hero CTA text`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.image?.src,
-        `${label} lost hero image src`,
-      ),
-    );
-    return issues;
-  }
-
-  private checkCtaStripPayload(
-    code: string,
-    section: CtaStripSection,
-    label: string,
-  ): string[] {
-    return this.requireSectionCtasIfPresent(
-      code,
-      section,
-      `${label} lost cta-strip CTA text`,
-    );
-  }
-
-  private checkCoverPayload(
-    code: string,
-    section: CoverSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.imageSrc,
-        `${label} lost cover image src`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.heading,
-        `${label} lost cover heading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.subheading,
-        `${label} lost cover subheading`,
-      ),
-    );
-    issues.push(
-      ...this.requireSectionCtasIfPresent(
-        code,
-        section,
-        `${label} lost cover CTA text`,
-      ),
-    );
-    return issues;
-  }
-
-  private checkMediaTextPayload(
-    code: string,
-    section: MediaTextSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.imageSrc,
-        `${label} lost media-text image src`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.heading,
-        `${label} lost media-text heading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.body,
-        `${label} lost media-text body`,
-      ),
-    );
-    issues.push(
-      ...this.requireSectionCtasIfPresent(
-        code,
-        section,
-        `${label} lost media-text CTA text`,
-      ),
-    );
-    for (const item of section.listItems ?? []) {
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          item,
-          `${label} lost media-text list item`,
-        ),
-      );
-    }
-    return issues;
-  }
-
-  private checkCardGridPayload(
-    code: string,
-    section: CardGridSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.title,
-        `${label} lost card-grid title`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.subtitle,
-        `${label} lost card-grid subtitle`,
-      ),
-    );
-
-    for (const card of section.cards ?? []) {
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          card.heading,
-          `${label} lost card heading`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          card.body,
-          `${label} lost card body`,
-        ),
-      );
-    }
-    return issues;
-  }
-
-  private checkModalPayload(
-    code: string,
-    section: ModalSection,
-    label: string,
-    isInlineSection = false,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.triggerText,
-        `${label} lost modal trigger text`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.heading,
-        `${label} lost modal heading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.body,
-        `${label} lost modal body`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.imageSrc,
-        `${label} lost modal image src`,
-      ),
-    );
-    issues.push(
-      ...this.requireSectionCtasIfPresent(
-        code,
-        section,
-        `${label} lost modal CTA text`,
-      ),
-    );
-    const hasTrigger = /\buagb-modal-trigger\b/.test(code);
-    const hasPopupOverlay = /\buagb-modal-popup\b/.test(code);
-    const hasPopupContent = /\buagb-modal-popup-content\b/.test(code);
-    const hasActivePopupOverlay =
-      /className\s*=\s*\{?["'`][^"'`]*(?:\buagb-modal-popup\b[^"'`]*\bactive\b|\bactive\b[^"'`]*\buagb-modal-popup\b)/.test(
-        code,
-      );
-    const hasDialogSemantics =
-      /\baria-modal\s*=\s*{?true}?|\baria-modal\s*=\s*["']true["']|\brole\s*=\s*["']dialog["']/.test(
-        code,
-      );
-    const hasPopupAffordance =
-      hasPopupOverlay || hasPopupContent || hasDialogSemantics;
-
-    if (
-      !hasTrigger ||
-      !(isInlineSection ? hasPopupAffordance : hasPopupOverlay)
-    ) {
-      issues.push(
-        `${label} modal must render a trigger button and conditional popup overlay`,
-      );
-    }
-    if (
-      hasPopupContent &&
-      !/\bopenModals\b/.test(code) &&
-      !/setOpenModals/.test(code) &&
-      !isInlineSection
-    ) {
-      issues.push(`${label} modal popup appears inline instead of interactive`);
-    }
-    if (hasPopupOverlay && !hasActivePopupOverlay) {
-      issues.push(
-        `${label} modal popup is missing the \`active\` class on the rendered \`uagb-modal-popup\` overlay, so Spectra compat CSS will keep it hidden even when open`,
-      );
-    }
-    return issues;
-  }
-
-  private requireSectionCtasIfPresent(
-    code: string,
-    section: { cta?: { text?: string }; ctas?: Array<{ text?: string }> },
-    reason: string,
-  ): string[] {
-    const raw =
-      Array.isArray(section.ctas) && section.ctas.length > 0
-        ? section.ctas
-        : section.cta
-          ? [section.cta]
-          : [];
-    const seen = new Set<string>();
-    return raw.flatMap((cta) => {
-      const text = typeof cta?.text === 'string' ? cta.text : undefined;
-      if (!text || seen.has(text)) return [];
-      seen.add(text);
-      return this.requireLiteralIfPresent(code, text, reason);
-    });
-  }
-
-  private checkTabsPayload(
-    code: string,
-    section: TabsSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.title,
-        `${label} lost tabs title`,
-      ),
-    );
-    for (const tab of section.tabs ?? []) {
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          tab.label,
-          `${label} lost tab label`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          tab.heading,
-          `${label} lost tab heading`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          tab.body,
-          `${label} lost tab body`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          tab.imageSrc,
-          `${label} lost tab image src`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          tab.cta?.text,
-          `${label} lost tab CTA text`,
-        ),
-      );
-    }
-    return issues;
-  }
-
-  private checkAccordionPayload(
-    code: string,
-    section: AccordionSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.title,
-        `${label} lost accordion title`,
-      ),
-    );
-    for (const item of section.items ?? []) {
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          item.heading,
-          `${label} lost accordion heading`,
-        ),
-      );
-      issues.push(
-        ...this.requireLiteralIfPresent(
-          code,
-          item.body,
-          `${label} lost accordion body`,
-        ),
-      );
-    }
-    return issues;
-  }
-
-  private checkTestimonialPayload(
-    code: string,
-    section: TestimonialSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.quote,
-        `${label} lost testimonial quote`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.authorName,
-        `${label} lost testimonial author`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.authorTitle,
-        `${label} lost testimonial author title`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.authorAvatar,
-        `${label} lost testimonial avatar`,
-      ),
-    );
-    return issues;
-  }
-
-  private checkNewsletterPayload(
-    code: string,
-    section: NewsletterSection,
-    label: string,
-  ): string[] {
-    const issues: string[] = [];
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.heading,
-        `${label} lost newsletter heading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.subheading,
-        `${label} lost newsletter subheading`,
-      ),
-    );
-    issues.push(
-      ...this.requireLiteralIfPresent(
-        code,
-        section.buttonText,
-        `${label} lost newsletter button text`,
-      ),
-    );
-    return issues;
-  }
-
-  private checkPostListPayload(
-    code: string,
-    section: PostListSection,
-    label: string,
-  ): string[] {
-    if (this.isDynamicPlanBinding(section.title)) {
-      return [];
-    }
-    return this.requireLiteralIfPresent(
-      code,
-      section.title,
-      `${label} lost post-list title`,
-    );
-  }
-
   private isDynamicPlanBinding(value?: string): boolean {
     const normalized = value?.trim();
     return Boolean(
@@ -1736,6 +2405,12 @@ export class ValidatorService {
       (/^\{[a-zA-Z0-9_.]+\}$/.test(normalized) ||
         /\{[a-zA-Z0-9_.]+\}/.test(normalized)),
     );
+  }
+
+  private shouldRequireTitleLiteral(obligation?: SectionObligation): boolean {
+    const explicit = obligation?.contentRequirements?.requireTitle;
+    if (typeof explicit === 'boolean') return explicit;
+    return true;
   }
 
   private requireLiteralIfPresent(
@@ -3204,6 +3879,30 @@ export {};
     return `JSX tag error: ${ts.flattenDiagnosticMessageText(jsxDiagnostic.messageText, '\n')}`;
   }
 
+  private checkTsxSyntax(code: string): string | null {
+    const sourceFile = ts.createSourceFile(
+      'component.tsx',
+      code,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const parseDiagnostics =
+      (
+        sourceFile as ts.SourceFile & {
+          parseDiagnostics?: readonly ts.Diagnostic[];
+        }
+      ).parseDiagnostics ?? [];
+    const blockingDiagnostic = parseDiagnostics.find((diag) => {
+      const message = ts.flattenDiagnosticMessageText(diag.messageText, '\n');
+      return !/closing tag|jsx element/i.test(message);
+    });
+
+    if (!blockingDiagnostic) return null;
+
+    return `TSX syntax error: ${ts.flattenDiagnosticMessageText(blockingDiagnostic.messageText, '\n')}`;
+  }
+
   /**
    * String-aware delimiter balance counter.
    * Skips characters inside single-quoted, double-quoted, and template-literal strings
@@ -3222,17 +3921,24 @@ export {};
       if (ch === '"') {
         i++;
         while (i < code.length) {
-          if (code[i] === '\\') { i += 2; continue; }
+          if (code[i] === '\\') {
+            i += 2;
+            continue;
+          }
           if (code[i] === '"') break;
           i++;
         }
       } else if (ch === "'") {
         const prevNonSpace = code.slice(0, i).trimEnd().slice(-1);
-        const isJsStringContext = !prevNonSpace || /[=,([:?!&|^~+\-*/;{}\n]/.test(prevNonSpace);
+        const isJsStringContext =
+          !prevNonSpace || /[=,([:?!&|^~+\-*/;{}\n]/.test(prevNonSpace);
         if (isJsStringContext) {
           i++;
           while (i < code.length) {
-            if (code[i] === '\\') { i += 2; continue; }
+            if (code[i] === '\\') {
+              i += 2;
+              continue;
+            }
             if (code[i] === "'") break;
             i++;
           }

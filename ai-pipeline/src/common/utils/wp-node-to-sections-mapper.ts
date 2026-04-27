@@ -1693,7 +1693,7 @@ function buildSectionKey(
   type: SectionPlan['type'],
   topLevelIndex?: number,
 ): string {
-  if (typeof topLevelIndex !== 'number' || topLevelIndex <= 0) {
+  if (typeof topLevelIndex !== 'number') {
     return type;
   }
   return `${type}-${topLevelIndex}`;

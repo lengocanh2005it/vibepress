@@ -541,6 +541,12 @@ function buildForbiddenBehaviorNote(input: {
       lines.push(
         '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.',
       );
+      lines.push(
+        '- Do NOT redesign a fixed page-detail into a centered feature article shell with classes such as `max-w-[620px]`, `max-w-2xl`, `max-w-3xl`, or broad `mx-auto` wrappers unless that exact narrow shell is clearly source-backed in the approved layout.',
+      );
+      lines.push(
+        '- Preserve the surrounding template shell/layout rhythm from the approved source. Replace the long-form body with `page.content`, but do NOT invent a new hero-centered article wrapper, oversized centered title block, or optional featured-image treatment unless the source layout already proves those elements.',
+      );
     }
   }
   lines.push(
@@ -875,8 +881,34 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     );
     lines.push('- Palette values available from the theme tokens:');
     for (const c of tokens.colors) {
-      lines.push(`  - slug \`${c.slug}\` → \`${c.value}\``);
+      lines.push(
+        `  - slug \`${c.slug}\` → \`${c.value}\` (bridge classes: \`has-${c.slug}-color\`, \`has-${c.slug}-background-color\`)`,
+      );
     }
+    lines.push(
+      '**WordPress palette bridge classes** — the preview app pre-generates `.has-[slug]-color` and `.has-[slug]-background-color` CSS rules for every palette entry above.',
+    );
+    lines.push(
+      '- When `page.content` / `post.content` HTML carries these classes, do NOT strip them — they resolve correctly in the preview.',
+    );
+    lines.push(
+      '- When `customClassNames` on a section/element applies a palette color, prefer `has-[slug]-color` or `has-[slug]-background-color` instead of an inline Tailwind arbitrary value when the source already uses that class.',
+    );
+  }
+
+  if (tokens.fontSizes.length > 0) {
+    lines.push(
+      '**WordPress font-size bridge classes** — `.has-[slug]-font-size` is pre-generated for every font-size entry. Preserve these classes from content HTML; do NOT replace them with `text-[size]` when the source already carries the `has-*` form.',
+    );
+  }
+
+  {
+    lines.push(
+      '**WordPress alignment bridge classes** — `.alignleft`, `.alignright`, `.aligncenter`, `.alignwide`, `.alignfull` are pre-generated in the preview app.',
+    );
+    lines.push(
+      '- Preserve these classes from content HTML. Do NOT manually replicate alignment via Tailwind when the source already carries an `.align*` class.',
+    );
   }
 
   if (tokens.gradients && tokens.gradients.length > 0) {
@@ -1277,6 +1309,9 @@ export function buildDataGroundingNote(
     parts.push(
       'Use `comment.author` and `comment.content` directly; moderation polling uses `/api/comments/submissions`.',
     );
+    parts.push(
+      'When comments are approved in the plan, preserve standard WordPress/FSE comment structure and classes where possible: `.wp-block-comments`, `.wp-block-comments-title`, `.comment-list`, `.comment`, `.comment-body`, `.comment-meta`, `#respond`, `.comment-respond`, `.comment-form`, `.comment-form-author`, `.comment-form-email`, `.comment-form-url`, `.comment-form-comment`, and `.form-submit`.',
+    );
     parts.push('');
   }
 
@@ -1414,7 +1449,7 @@ export function buildPlanContextNote(
         'Render top-level comments first (`comment.parentId === 0`), then indent replies. ' +
         'Show a count (e.g. "3 Comments") and an empty state ("No comments yet") when the array is empty. ' +
         'If the approved comments section includes a reply form, create controlled form state, generate/store a stable `clientToken` in `localStorage`, submit with `POST /api/comments`, show an awaiting-moderation notice, and poll `GET /api/comments/submissions?slug=${slug}&clientToken=${clientToken}` until a submission becomes approved; only then should you refetch `GET /api/comments` so the public list updates. ' +
-        'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed.',
+        'Do NOT use `comment.author_name` or `comment.author_avatar`; use `comment.author` and render a text/avatar fallback from initials if needed. Preserve WordPress/FSE comment wrapper semantics and classes such as `.wp-block-comments`, `.comment-list`, `.comment-body`, `#respond`, and `.comment-form*` instead of inventing a completely custom comments form structure.',
     );
   }
   if (isArchiveAlias) {
@@ -1578,7 +1613,9 @@ function buildCompactSectionSummary(
   return visualPlan.sections.map((section, index) => {
     const parts = [`- section ${index + 1}: type=${section.type}`];
 
-    if (section.sectionKey) parts.push(`sectionKey=${section.sectionKey}`);
+    if (section.debugKey ?? section.sectionKey) {
+      parts.push(`debugKey=${section.debugKey ?? section.sectionKey}`);
+    }
     if (section.sourceRef?.sourceNodeId) {
       parts.push(`sourceNodeId=${section.sourceRef.sourceNodeId}`);
     }
@@ -2003,9 +2040,9 @@ function buildCompactSectionSummary(
       );
     }
 
-    if (componentName && section.sectionKey) {
+    if (componentName && (section.debugKey || section.sectionKey)) {
       parts.push(
-        `sectionComponent=${buildTrackedSectionComponentName(componentName, section.sectionKey)}`,
+        `debugSection=${componentName}.${section.debugKey ?? section.sectionKey}`,
       );
     }
 
@@ -2067,10 +2104,16 @@ export function buildVisualPlanContextNote(
       '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
     );
     lines.push(
+      '⛔ For every `search` section, render the approved search widget/result block exactly as contracted. If the approved section only carries `search-input`, you MUST render a real search form/input and MUST NOT replace it with comment filtering, author filler, or promotional content.',
+    );
+    lines.push(
+      '⛔ Only render post-result rows/cards inside a `search` section when the approved section contract explicitly requires `posts`. If the approved contract is just a sidebar/site search widget, keep it as an input/form widget only.',
+    );
+    lines.push(
       '⛔ For `hero`, `cover`, `media-text`, `testimonial`, and `newsletter`, preserve the approved heading/body/image/CTA pairing for that exact section. Do NOT swap content between sections.',
     );
     lines.push(
-      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different `sectionKey` / `sourceNodeId`, keep them as separate top-level JSX wrappers in the same order. Do NOT merge two approved sections into one split row or one shared wrapper.',
+      '⛔ SECTION BOUNDARIES: If the approved plan lists separate sections with different source evidence or debug keys, keep them as separate semantic regions in the same order. Do NOT merge two approved sections into one shared wrapper or one split row.',
     );
     lines.push(
       '⛔ If one approved section is text-first and a later approved section owns the image, keep the image in the later section. Do NOT pull that image up beside the earlier text block.',
@@ -2088,17 +2131,15 @@ export function buildVisualPlanContextNote(
     const trackedSections = visualPlan.sections
       .filter((section) => !!section.sourceRef?.sourceNodeId)
       .map((section, index) => {
-        const sectionKey =
-          section.sectionKey ??
-          `${section.type}${index === 0 ? '' : `-${index}`}`;
+        const debugKey = section.debugKey?.trim() ?? section.sectionKey?.trim();
         return [
           `- section ${index + 1}: type=${section.type}`,
-          `sectionKey=${sectionKey}`,
+          debugKey ? `debugKey=${debugKey}` : null,
           `sourceNodeId=${section.sourceRef?.sourceNodeId}`,
           `template=${section.sourceRef?.templateName}`,
           `sourceFile=${section.sourceRef?.sourceFile}`,
-          componentName
-            ? `sectionComponent=${buildTrackedSectionComponentName(componentName, sectionKey)}`
+          componentName && section.debugKey
+            ? `debugSection=${componentName}.${section.debugKey}`
             : null,
         ]
           .filter(Boolean)
@@ -2107,15 +2148,12 @@ export function buildVisualPlanContextNote(
 
     if (trackedSections.length > 0) {
       lines.push('');
-      lines.push('## Section tracking markers — MANDATORY');
+      lines.push('## Source Evidence Obligations');
       lines.push(
-        'For every approved section, keep a dedicated top-level JSX wrapper and preserve these exact string-literal attributes on that wrapper:',
+        'For every approved source-backed section, preserve a distinct semantic region in JSX so the section can still be independently edited and visually validated.',
       );
       lines.push(
-        '`data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, `data-vp-section-component`.',
-      );
-      lines.push(
-        'Do NOT rename, hash, omit, or move these attributes to a child element. They are required for exact capture-to-source resolution after React generation.',
+        'Source evidence may move into ui-source-map and validator obligations, so do not rely on custom tracking attributes as the source of truth.',
       );
       lines.push(
         'Content preservation rule: inside each approved section, preserve every source-backed heading, subheading, subtitle, card heading, card body, bullet/list item, CTA label, and image src from the approved visual plan unless that exact field is a documented dynamic binding.',
@@ -2146,6 +2184,20 @@ export function buildVisualPlanContextNote(
     lines.push(
       'If a sidebar item should remain clickable but no real URL is available yet, `href="#"` is an acceptable temporary placeholder. Do NOT invent a fake internal route path.',
     );
+    if (
+      visualPlan.layout?.contentLayout === 'sidebar-left' ||
+      visualPlan.layout?.contentLayout === 'sidebar-right'
+    ) {
+      lines.push(
+        '⛔ Layout rule: keep the primary content area and the sidebar in one shared two-column wrapper (`<article>/<section>` + `<aside>`). Do NOT restack the sidebar as a separate lower section or replace it with extra cards beneath the article.',
+      );
+      lines.push(
+        '⛔ Sidebar search/widget rule: if the approved sidebar includes navigation/search widgets, keep them as site/content widgets. Do NOT replace them with unrelated comment-filter UI, author bio filler, or generic promotional cards.',
+      );
+      lines.push(
+        '⛔ Render an actual `<aside>` sibling for the sidebar area. Do NOT fake the sidebar with full-width cards below the article, and do NOT insert placeholder copy such as "About the author" / "Links I found useful and wanted to share." unless it already exists in the source.',
+      );
+    }
   }
 
   // Enforce the distinction between wide section shells and narrow prose bodies.
@@ -2164,6 +2216,29 @@ export function buildVisualPlanContextNote(
     );
     lines.push(
       '⛔ Do NOT wrap the entire page in the prose container unless the whole template is genuinely a single-column article view.',
+    );
+  }
+
+  if (visualPlan.sections.some((section) => section.type === 'footer')) {
+    lines.push('');
+    lines.push('## Footer contract — MANDATORY');
+    lines.push(
+      '- Footer partials must fetch `/api/footer-links` and render footer columns from that API data. Do NOT rebuild footer columns from `/api/menus`.',
+    );
+    lines.push(
+      '- If the approved footer plan includes `brandDescription`, render that exact approved text. Do NOT silently replace it with `siteInfo.blogDescription` or omit it.',
+    );
+    lines.push(
+      '- Do NOT declare hardcoded fallback arrays such as `staticSections`, `fallbackSections`, `defaultFooterColumns`, or placeholder footer link groups when the approved contract already provides `footerLinks`.',
+    );
+    lines.push(
+      '- If `/api/footer-links` returns an empty array, keep the footer column area structurally empty or minimal. Do NOT fabricate About/Privacy/Social columns or placeholder links.',
+    );
+    lines.push(
+      '- Render the footer column area by iterating the fetched footer-links collection directly. Do NOT create helper functions like `getColumnLinks(...)` that inject hardcoded fallback link labels per column.',
+    );
+    lines.push(
+      '- If the approved plan lists footer column titles such as `About`, `Privacy`, `Social`, use those titles only as labels for fetched API columns. Do NOT invent per-column fallback link arrays for them.',
     );
   }
 
@@ -2503,6 +2578,30 @@ function buildFullFileLiteralChecklist(
           }
         });
         break;
+      case 'search':
+        if (section.title) {
+          lines.push(`- ${label} title: ${JSON.stringify(section.title)}`);
+        }
+        if (section.obligation?.required?.length) {
+          lines.push(
+            `- ${label} requiredCapabilities: ${section.obligation.required.join(', ')}`,
+          );
+        }
+        break;
+      case 'footer':
+        if (section.brandDescription) {
+          lines.push(
+            `- ${label} brandDescription: ${JSON.stringify(section.brandDescription)}`,
+          );
+        }
+        section.menuColumns.forEach((column, columnIndex) => {
+          if (column.title) {
+            lines.push(
+              `- ${label} footer column ${columnIndex + 1} title: ${JSON.stringify(column.title)}`,
+            );
+          }
+        });
+        break;
       case 'media-text':
         if (section.heading) {
           lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
@@ -2704,7 +2803,7 @@ Return ONLY the JSX for section ${input.sectionIndex + 1} of ${input.totalSectio
 - Do NOT output imports, exports, hooks, component declarations, helper functions, or markdown fences.
 - The page shell already declares runtime variables. Use only these existing variables when needed: ${input.availableVariables}.
 - Preserve every source-backed text node from the approved section plan. Do NOT summarize, merge, or omit headings, subheadings, subtitles, card headings, card bodies, list items, CTA labels, or image sources unless the field is a documented dynamic binding like \`{query.title}\`.
-- Keep the exact source tracking attributes on the top-level wrapper: \`data-vp-source-node\`, \`data-vp-template\`, \`data-vp-source-file\`, \`data-vp-section-key\`, \`data-vp-component\`, \`data-vp-section-component\`.`,
+- Keep the approved source-backed structure and content boundaries for this section. Do not collapse distinct source-backed regions into one generic wrapper.`,
     `## Canonical post-meta rule
 When this section renders post-list/archive/search/recent-post meta:
 - NEVER output bare plain-text author/category meta when the slug field already exists.
@@ -2839,7 +2938,8 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
 function resolveInteractiveSectionPromptStateKey(
   section: SectionPlan,
 ): string | null {
-  const raw = section.sectionKey ?? section.sourceRef?.sourceNodeId;
+  const raw =
+    section.debugKey ?? section.sectionKey ?? section.sourceRef?.sourceNodeId;
   return raw ? JSON.stringify(raw) : null;
 }
 
@@ -3314,7 +3414,7 @@ function buildSourceTrackingNoteForNodes(
           `- top-level node ${index + 1}: sourceNodeId=${node.sourceRef?.sourceNodeId}`,
           `template=${node.sourceRef?.templateName}`,
           `sourceFile=${node.sourceRef?.sourceFile}`,
-          `sectionKey=${sectionKey}`,
+          `debugKey=${sectionKey}`,
           node.customClassNames?.length
             ? `customClassNames=${formatClassList(node.customClassNames)}`
             : null,
@@ -3327,10 +3427,8 @@ function buildSourceTrackingNoteForNodes(
       return '';
 
     const lines = [
-      '## Source tracking markers — MANDATORY',
-      'For each top-level source node rendered by this section component, keep a stable outer JSX wrapper with exact string-literal attributes:',
-      '`data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, `data-vp-section-component`.',
-      `Use \`data-vp-component="${componentName}"\` and \`data-vp-section-component="${sectionComponentName}"\` on every tracked wrapper in this file.`,
+      '## Source Evidence Obligations',
+      'For each top-level source-backed node rendered by this section component, keep a stable outer semantic region so ui-source-map and obligation validation can still isolate it later.',
     ];
     if (requiredCustomClassNames.length > 0) {
       lines.push(
@@ -3466,17 +3564,6 @@ function extractInnerCustomClassNamesFromSection(
 
 function formatClassList(classNames: string[]): string {
   return classNames.map((className) => `\`${className}\``).join(', ');
-}
-
-function buildTrackedSectionComponentName(
-  componentName: string,
-  sectionKey: string,
-): string {
-  return `${componentName}${sectionKey
-    .split(/[^a-zA-Z0-9]+/)
-    .filter(Boolean)
-    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
-    .join('')}Section`;
 }
 
 function compactRetryError(retryError?: string): string {

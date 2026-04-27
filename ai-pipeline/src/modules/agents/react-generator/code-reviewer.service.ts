@@ -19,9 +19,9 @@ import {
   ValidatorService,
   type CodeValidationContext,
 } from '../validator/validator.service.js';
+import { getComponentStrategy } from '../component-strategy.registry.js';
 import { CodeGeneratorService } from './code-generator.service.js';
 import { FrameGeneratorService } from './frame-generator.service.js';
-import { getComponentStrategy } from '../component-strategy.registry.js';
 import {
   buildComponentPrompt,
   buildComponentRepoChainNote,
@@ -160,6 +160,13 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
   'sidebar',
 ]);
 
+const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
+  'card-grid',
+  'carousel',
+  'tabs',
+  'accordion',
+]);
+
 /**
  * Code Reviewer — maps to the REVIEW subgraph in the pipeline diagram:
  *
@@ -220,6 +227,7 @@ export class CodeReviewerService {
     const MAX_ROUNDS = 2;
     const forceDirectAi =
       preferDirectAi || process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
+    const strategy = getComponentStrategy(componentName);
     const startTime = new Date().toISOString();
 
     let code = '';
@@ -336,60 +344,8 @@ export class CodeReviewerService {
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
 
-      // ── D1: Reviewed pre-computed visual plan → AI codegen first ────────────
-      if (
-        !forceDirectAi &&
-        !isRetry &&
-        componentPlan?.visualPlan
-      ) {
-        if (this.shouldUseDeterministicFirst(componentPlan, componentName)) {
-          const deterministic = await this.tryDeterministicPlan(
-            componentName,
-            componentPlan.visualPlan,
-            validationContext,
-            logPath,
-            'deterministic-first reviewed plan',
-          );
-          if (deterministic.isValid) {
-            this.logger.log(
-              `[reviewer] "${componentName}" ✓ deterministic-first codegen succeeded`,
-            );
-            return {
-              component: {
-                name: componentName,
-                filePath: '',
-                code: deterministic.code,
-                requiredCustomClassNames:
-                  promptContext?.requiredCustomClassNames,
-                visualPlan: componentPlan?.visualPlan,
-              },
-              fromVisualPlan: true,
-              generationMode: 'deterministic',
-              attempts,
-              rawResponse: '',
-            };
-          }
-          // Deterministic-first components must NOT escalate to AI codegen.
-          // Return best-effort code as-is; the build-fix loop will patch any
-          // TypeScript errors without giving AI free rein over the structure.
-          this.logger.warn(
-            `[reviewer] "${componentName}" deterministic-first plan produced invalid code (${deterministic.error}) — returning best-effort, AI generation blocked`,
-          );
-          return {
-            component: {
-              name: componentName,
-              filePath: '',
-              code: deterministic.code,
-              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
-              visualPlan: componentPlan?.visualPlan,
-            },
-            fromVisualPlan: true,
-            generationMode: 'deterministic',
-            attempts,
-            rawResponse: '',
-          };
-        }
-
+      // ── D1: Reviewed pre-computed visual plan → AI-first codegen ─────────────
+      if (!forceDirectAi && !isRetry && componentPlan?.visualPlan) {
         promptContext = this.buildPromptContext(
           componentPlan,
           componentPlan.visualPlan,
@@ -419,6 +375,42 @@ export class CodeReviewerService {
           logPath,
           `[reviewer] "${componentName}": using reviewed pre-computed visual plan for AI codegen (${componentPlan.visualPlan.sections.length} sections)`,
         );
+
+        if (strategy.deterministicFirst) {
+          const deterministicFirst = await this.tryDeterministicPlan(
+            componentName,
+            componentPlan.visualPlan,
+            validationContext,
+            logPath,
+            'reviewed plan (deterministic-first)',
+          );
+          if (deterministicFirst.isValid) {
+            await this.logCotProcessIfEnabled({
+              jobId,
+              step: 'code-generation',
+              componentName,
+              model: modelName,
+              startTime,
+              attempts: cotAttempts,
+              finalSuccess: true,
+            });
+
+            return {
+              component: {
+                name: componentName,
+                filePath: '',
+                code: deterministicFirst.code,
+                requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+                visualPlan: promptContext?.visualPlan,
+              },
+              fromVisualPlan: true,
+              generationMode: 'deterministic',
+              attempts,
+              rawResponse: '',
+            };
+          }
+          lastError = deterministicFirst.error ?? lastError;
+        }
 
         const planned = await this.generateComponentWithPlan({
           componentName,
@@ -467,11 +459,11 @@ export class CodeReviewerService {
         }
         lastError = planned.lastError ?? lastError;
         this.logger.warn(
-          `[reviewer] "${componentName}" AI pre-computed plan codegen failed: ${planned.lastError} — deterministic fallback`,
+          `[reviewer] "${componentName}" AI reviewed-plan codegen failed: ${planned.lastError} — deterministic fallback`,
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" AI pre-computed plan codegen failed: ${planned.lastError} — deterministic fallback`,
+          `WARN [reviewer] "${componentName}" AI reviewed-plan codegen failed: ${planned.lastError} — deterministic fallback`,
         );
 
         const deterministic = await this.tryDeterministicPlan(
@@ -479,7 +471,7 @@ export class CodeReviewerService {
           componentPlan.visualPlan,
           validationContext,
           logPath,
-          'pre-computed plan',
+          'reviewed plan',
         );
         if (deterministic.isValid) {
           cotAttempts.push({
@@ -493,7 +485,7 @@ export class CodeReviewerService {
             timestamp: new Date().toISOString(),
             success: true,
             validationFeedback:
-              'Deterministic pre-computed plan codegen succeeded',
+              'Deterministic reviewed-plan fallback succeeded',
           });
           await this.logCotProcessIfEnabled({
             jobId,
@@ -522,17 +514,17 @@ export class CodeReviewerService {
         lastError = deterministic.error ?? lastError;
         precomputedPlanAllFailed = true;
         this.logger.warn(
-          `[reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — skipping direct-AI, requesting fresh visual plan`,
+          `[reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" deterministic pre-computed plan failed: ${deterministic.error} — skipping direct-AI, requesting fresh visual plan`,
+          `WARN [reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
         );
       }
 
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
-      // Used when: no pre-computed plan on round 1, after R3→D1 retry, or when
-      // the pre-computed plan path has failed end-to-end (both AI and deterministic).
+      // Used when: no reviewed plan on round 1, after R3→D1 retry, or when
+      // the reviewed-plan path has failed end-to-end (both AI and deterministic).
       if (
         !forceDirectAi &&
         (isRetry || !componentPlan?.visualPlan || precomputedPlanAllFailed)
@@ -542,8 +534,8 @@ export class CodeReviewerService {
           isRetry
             ? `[reviewer] "${componentName}" R3→D1: restarting with fresh AI visual plan (round ${round}/${MAX_ROUNDS})`
             : precomputedPlanAllFailed
-                ? `[reviewer] "${componentName}" pre-computed plan failed end-to-end — generating fresh AI visual plan`
-                : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
+              ? `[reviewer] "${componentName}" reviewed-plan path failed end-to-end — generating fresh AI visual plan`
+              : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
         const visualDataNeeds = componentPlan
           ? this.toVisualDataNeeds(componentPlan.dataNeeds)
@@ -633,6 +625,32 @@ export class CodeReviewerService {
               logPath,
               `[reviewer] Stage 2: generating TSX with AI from visual plan (${visualPlan.sections.length} sections)`,
             );
+            if (strategy.deterministicFirst) {
+              const deterministicFirst = await this.tryDeterministicPlan(
+                componentName,
+                visualPlan,
+                validationContext,
+                logPath,
+                'AI visual plan (deterministic-first)',
+              );
+              if (deterministicFirst.isValid) {
+                return {
+                  component: {
+                    name: componentName,
+                    filePath: '',
+                    code: deterministicFirst.code,
+                    requiredCustomClassNames:
+                      promptContext?.requiredCustomClassNames,
+                    visualPlan: promptContext?.visualPlan,
+                  },
+                  fromVisualPlan: true,
+                  generationMode: 'deterministic',
+                  attempts,
+                  rawResponse: '',
+                };
+              }
+              lastError = deterministicFirst.error ?? lastError;
+            }
             const planned = await this.generateComponentWithPlan({
               componentName,
               templateSource,
@@ -1290,71 +1308,11 @@ export class CodeReviewerService {
     }
   }
 
-  private shouldUseDeterministicFirst(
-    componentPlan: ComponentPromptContext | undefined,
-    componentName: string,
-  ): boolean {
-    if (!componentPlan?.visualPlan) return false;
-    if (componentPlan.route === '*') return true;
-    if (getComponentStrategy(componentName).deterministicFirst) return true;
-    return this.shouldPreferDeterministicVisualPlan(componentPlan);
-  }
-
-  private shouldPreferDeterministicVisualPlan(
-    componentPlan: ComponentPromptContext | undefined,
-  ): boolean {
-    if (!componentPlan?.visualPlan) return false;
-    if (componentPlan.type !== 'page') return false;
-
-    const normalizedNeeds = new Set(
-      this.toVisualDataNeeds(componentPlan.dataNeeds),
-    );
-    const signals = this.getVisualPlanSectionSignals(componentPlan);
-    if (signals.sections.length === 0) return false;
-
-    if (signals.lowComplexityOnly) return false;
-    if (signals.hasPageContent || signals.hasPostContent) return false;
-
-    const isRichFixedPageDetail =
-      componentPlan.isDetail === true &&
-      normalizedNeeds.has('pageDetail') &&
-      !!componentPlan.fixedSlug &&
-      signals.richSectionCount >= 1 &&
-      signals.sourceBackedSectionCount >= Math.min(2, signals.sections.length);
-
-    const isRichHomeLikePage =
-      componentPlan.route === '/' &&
-      signals.sections.length >= 5 &&
-      signals.richSectionCount >= 3 &&
-      signals.sourceBackedSectionCount >= 4;
-
-    const isBroadSourceBackedRichPage =
-      signals.sections.length >= 3 &&
-      signals.richSectionCount >= 2 &&
-      signals.sourceBackedSectionCount >= 3 &&
-      signals.distinctTypes.size >= 2;
-
-    const hasInteractiveSourceBackedPlan =
-      signals.interactiveSectionCount >= 1 &&
-      signals.sourceBackedSectionCount >= 2;
-
-    return (
-      isRichFixedPageDetail ||
-      isRichHomeLikePage ||
-      isBroadSourceBackedRichPage ||
-      hasInteractiveSourceBackedPlan
-    );
-  }
-
   private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
-    componentName: string,
+    _componentName: string,
   ): { enabled: boolean; reason: string } {
-    if (
-      componentPlan?.type !== 'page' ||
-      !componentPlan.visualPlan ||
-      this.shouldUseDeterministicFirst(componentPlan, componentName)
-    ) {
+    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
     }
 
@@ -1659,7 +1617,7 @@ export class CodeReviewerService {
           'Page detail contract violated',
         );
         const isVisualPlanFidelity = lastError?.includes(
-          'Visual plan fidelity violated',
+          'Visual plan obligations violated',
         );
 
         if (isNoJsx || isPageContract || isVisualPlanFidelity) {
@@ -1667,7 +1625,7 @@ export class CodeReviewerService {
             ? 'No JSX return found'
             : isPageContract
               ? 'Page detail contract violated'
-              : 'Visual plan fidelity violated';
+              : 'Visual plan obligations violated';
           this.logger.warn(
             `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
           );
@@ -2233,7 +2191,9 @@ export class CodeReviewerService {
     const compact = error.replace(/\s+/g, ' ').trim();
     // Use a larger limit for fidelity errors so all lost fields are visible to the AI
     const limit =
-      /visual plan fidelity violated|lost media-text|lost card/i.test(compact)
+      /visual plan obligations violated|lost media-text|lost card/i.test(
+        compact,
+      )
         ? 2000
         : 700;
     return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
@@ -2362,6 +2322,12 @@ export class CodeReviewerService {
       instructions.push(
         'If this is a Footer component, fetch `/api/footer-links` and render those columns directly; do not fall back to `/api/menus`.',
       );
+      instructions.push(
+        'Do not create fallback per-column arrays or helper functions that synthesize About/Privacy/Social links. Iterate the fetched footer-links data directly.',
+      );
+      instructions.push(
+        'If the approved footer plan includes `brandDescription`, render that exact text and do not replace it with `siteInfo.blogDescription`.',
+      );
     }
 
     if (
@@ -2378,12 +2344,12 @@ export class CodeReviewerService {
     }
 
     if (
-      /tracked wrapper|data-vp-section-key|section boundaries can collapse|merge incorrectly/.test(
+      /section boundaries can collapse|merge incorrectly|obligation ".*" is missing required capability/.test(
         compact,
       )
     ) {
       instructions.push(
-        'Restore a dedicated top-level JSX wrapper for every approved tracked section and keep the exact `data-vp-source-node`, `data-vp-template`, `data-vp-source-file`, `data-vp-section-key`, `data-vp-component`, and `data-vp-section-component` attributes on that wrapper.',
+        'Restore a dedicated semantic region for every approved section so distinct source-backed content does not collapse into one shared wrapper.',
       );
       instructions.push(
         'Do not merge two approved sections into one shared hero/grid wrapper. If text and image belong to different approved sections, render them in separate wrappers in the original order.',
@@ -2391,15 +2357,12 @@ export class CodeReviewerService {
     }
 
     if (
-      /visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid|lost hero heading|lost hero subheading|lost post-list title/.test(
+      /visual plan obligations violated|required capability|lost hero heading|lost hero subheading|lost post-list title/.test(
         compact,
       )
     ) {
       instructions.push(
         'Restore every missing visual-plan section from the approved plan. If section 2 is missing, add it back as a separate top-level JSX wrapper instead of expanding section 1.',
-      );
-      instructions.push(
-        'For each restored section, preserve the exact sectionKey/sourceNodeId pair from the approved visual plan on the outer wrapper attributes.',
       );
       instructions.push(
         'If the approved plan includes a hero heading/subheading or post-list title, render that approved content exactly or keep the approved dynamic binding intact; do not drop it.',
@@ -2844,6 +2807,87 @@ export class CodeReviewerService {
       phaseLabel = 'initial',
     } = input;
 
+    if (
+      componentPlan?.visualPlan &&
+      DETERMINISTIC_SECTION_ASSEMBLY_TYPES.has(section.type)
+    ) {
+      this.logger.log(
+        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) using deterministic collection renderer`,
+      );
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) using deterministic collection renderer`,
+      );
+      try {
+        const deterministicCode = this.normalizeInlineSectionOutput(
+          this.postProcessCode(
+            this.codeGenerator.generateDeterministicInlineSection(
+              componentPlan.visualPlan,
+              sectionIndex,
+            ),
+          ),
+        );
+        const basicError = this.validateInlineSectionOutput(deterministicCode);
+        const fidelityError = basicError
+          ? undefined
+          : this.validator.checkInlineSectionFidelity(
+              deterministicCode,
+              section,
+              componentName,
+              sectionIndex + 1,
+            );
+        const deterministicError = basicError ?? fidelityError ?? undefined;
+        if (!deterministicError) {
+          this.logger.log(
+            `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted via deterministic collection renderer`,
+          );
+          await this.log(
+            logPath,
+            `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted via deterministic collection renderer`,
+          );
+          return {
+            code: deterministicCode,
+            isValid: true,
+            attemptsUsed: 0,
+            lastRawOutput: deterministicCode,
+            cotAttempts: [],
+          };
+        }
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): deterministic collection renderer failed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer failed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+        );
+        return {
+          code: deterministicCode,
+          isValid: false,
+          attemptsUsed: 0,
+          lastError: deterministicError,
+          lastRawOutput: deterministicCode,
+          cotAttempts: [],
+        };
+      } catch (err: any) {
+        const deterministicError =
+          err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[reviewer] "${componentName}" section-level (${phaseLabel}): deterministic collection renderer crashed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer crashed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+        );
+        return {
+          code: '',
+          isValid: false,
+          attemptsUsed: 0,
+          lastError: deterministicError,
+          cotAttempts: [],
+        };
+      }
+    }
+
     let sectionCode = '';
     let sectionError = initialRetryError;
     let lastRawOutput = '';
@@ -2886,7 +2930,9 @@ export class CodeReviewerService {
         editRequestContextNote ? 'edit-request' : 'base',
       );
       lastRawOutput = raw;
-      sectionCode = this.postProcessCode(raw).trim();
+      sectionCode = this.normalizeInlineSectionOutput(
+        this.postProcessCode(raw),
+      );
       const basicError = this.validateInlineSectionOutput(sectionCode);
       const fidelityError = basicError
         ? undefined
@@ -2963,7 +3009,9 @@ export class CodeReviewerService {
           logPath,
           `${componentName}:section-${sectionIndex + 1}`,
         );
-        const fixedCode = this.postProcessCode(fixResult.code).trim();
+        const fixedCode = this.normalizeInlineSectionOutput(
+          this.postProcessCode(fixResult.code),
+        );
         const fixBasicError = this.validateInlineSectionOutput(fixedCode);
         const fixFidelityError = fixBasicError
           ? undefined
@@ -3022,7 +3070,7 @@ export class CodeReviewerService {
     error: string | undefined,
     totalSections: number,
   ): number[] {
-    if (!error || !/Visual plan fidelity violated/i.test(error)) return [];
+    if (!error || !/Visual plan obligations violated/i.test(error)) return [];
     const matches = [...error.matchAll(/section\s+(\d+)/gi)];
     const indexes = matches
       .map((match) => Number(match[1]) - 1)
@@ -3046,7 +3094,7 @@ export class CodeReviewerService {
       new RegExp(`section\\s+${sectionNumber}\\b`, 'i').test(line),
     );
     if (filtered.length === 0) return error;
-    return ['Visual plan fidelity violated:', ...filtered].join('\n');
+    return ['Visual plan obligations violated:', ...filtered].join('\n');
   }
 
   private buildSectionAssemblyAvailableVariables(
@@ -3495,7 +3543,7 @@ export class CodeReviewerService {
   }
 
   private validateInlineSectionOutput(code: string): string | undefined {
-    const trimmed = code.trim();
+    const trimmed = this.normalizeInlineSectionOutput(code);
     if (!trimmed) return 'Empty section JSX output';
     if (/^\s*import\s/m.test(trimmed)) {
       return 'Inline section output must not contain imports';
@@ -3512,6 +3560,13 @@ export class CodeReviewerService {
     return undefined;
   }
 
+  private normalizeInlineSectionOutput(code: string): string {
+    return code
+      .trim()
+      .replace(/^(?:\s*\{\/\*[\s\S]*?\*\/\}\s*)+/, '')
+      .trim();
+  }
+
   private buildVisualPlanRetryChecklist(
     componentPlan: ComponentPromptContext | undefined,
     error: string | undefined,
@@ -3519,9 +3574,7 @@ export class CodeReviewerService {
   ): string {
     if (
       !componentPlan?.visualPlan?.sections?.length ||
-      !/visual plan fidelity violated|missing rendered sectionkey|missing sourcenodeid/i.test(
-        error ?? '',
-      )
+      !/visual plan obligations violated|required capability/i.test(error ?? '')
     ) {
       return '';
     }
@@ -3548,7 +3601,9 @@ export class CodeReviewerService {
       ...componentPlan.visualPlan.sections.map((section, index) => {
         const parts = [
           `- section ${index + 1}: type=${section.type}`,
-          section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+          (section.debugKey ?? section.sectionKey)
+            ? `debugKey=${section.debugKey ?? section.sectionKey}`
+            : null,
           section.sourceRef?.sourceNodeId
             ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
             : null,
@@ -4066,7 +4121,7 @@ export class CodeReviewerService {
 
         return parts.filter(Boolean).join(' | ');
       }),
-      `Use data-vp-component="${componentName}" on every tracked wrapper in this file.`,
+      `Keep semantic section ownership stable in "${componentName}" so each approved source-backed region remains independently editable and reviewable.`,
     ];
 
     return lines.join('\n');
@@ -4168,7 +4223,8 @@ export class CodeReviewerService {
   private resolveInteractiveSectionStateKey(
     section: ComponentVisualPlan['sections'][number],
   ): string | null {
-    const raw = section.sectionKey ?? section.sourceRef?.sourceNodeId;
+    const raw =
+      section.debugKey ?? section.sectionKey ?? section.sourceRef?.sourceNodeId;
     return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
   }
 
@@ -4418,16 +4474,10 @@ export class CodeReviewerService {
       const isHeadingOnlyInventedAuxiliary =
         isListLikePageComponent &&
         this.isHeadingOnlyInventedAuxiliarySection(sectionContent);
-      const isTrackedApprovedSection =
-        /\bdata-vp-source-node=/.test(sectionContent) ||
-        /\bdata-vp-section-key=/.test(sectionContent) ||
-        /\bdata-vp-section-component=/.test(sectionContent);
-
       // Keep the section if it has dynamic refs or dangerouslySetInnerHTML
       if (
         dynamicRef.test(sectionContent) ||
         /dangerouslySetInnerHTML/.test(sectionContent) ||
-        isTrackedApprovedSection ||
         (!isDetailComponent && !isHeadingOnlyInventedAuxiliary)
       ) {
         result += sectionContent;

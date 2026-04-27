@@ -52,6 +52,7 @@ import type {
   PageContentSection,
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
+import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
   type PlanningSourceCandidate,
@@ -792,6 +793,22 @@ export class PlannerService {
             },
             repoManifest,
           );
+          const qualityIssues =
+            this.visualRepair.assessAcceptedVisualPlanQuality(
+              visualPlan,
+              repairState,
+            );
+          if (qualityIssues.length > 0) {
+            lastReason = `visual plan quality gate failed: ${qualityIssues[0]}`;
+            lastDropped = ` | qualityIssues: ${qualityIssues.join('; ')}`;
+            if (attempt < 2) {
+              this.logger.warn(
+                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+              );
+            }
+            visualPlan = undefined;
+            continue;
+          }
           this.logger.log(
             `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
           );
@@ -990,6 +1007,7 @@ export class PlannerService {
 
     switch (strategy.kind) {
       case 'not-found':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1039,6 +1057,7 @@ export class PlannerService {
           ],
         };
       case 'sidebar':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1053,11 +1072,13 @@ export class PlannerService {
           ],
         };
       case 'breadcrumb':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [{ type: 'breadcrumb' }],
         };
       case 'comments':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1070,6 +1091,7 @@ export class PlannerService {
           ],
         };
       case 'post-meta':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1886,18 +1908,6 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     );
     lines.push('');
 
-    if (content.discovery.elementorWidgetTypes.length > 0) {
-      lines.push('## Elementor widget types in use');
-      lines.push(content.discovery.elementorWidgetTypes.join(', '));
-      lines.push(
-        'npm package hints: slides/carousel → swiper, form → react-hook-form, ' +
-          'popup → @radix-ui/react-dialog, accordion → @radix-ui/react-accordion, ' +
-          'tabs → @radix-ui/react-tabs, video → react-player, countdown → react-countdown, ' +
-          'google-maps → @react-google-maps/api',
-      );
-      lines.push('');
-    }
-
     if (content.discovery.topBlockTypes.length > 0) {
       lines.push('## Gutenberg block types in use');
       lines.push(content.discovery.topBlockTypes.join(', '));
@@ -1921,6 +1931,85 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     lines.push(`## Menus in database (${content.menus.length} total):`);
     for (const m of content.menus) {
       lines.push(`- "${m.name}" (slug: ${m.slug}) — ${m.items.length} items`);
+    }
+    lines.push('');
+
+    lines.push(`## DB navigations (${content.dbNavigations.length} total):`);
+    for (const nav of content.dbNavigations.slice(0, 12)) {
+      lines.push(
+        `- "${nav.title}" (slug: ${nav.slug}) status=${nav.status} location=${nav.location ?? '(none)'} items=${nav.items.length} blockTypes=${nav.blockTypes.join(', ') || '(none)'}`,
+      );
+    }
+    lines.push('');
+
+    lines.push(`## Taxonomies (${content.taxonomies.length} total):`);
+    for (const taxonomy of content.taxonomies.slice(0, 12)) {
+      const termPreview = taxonomy.terms
+        .slice(0, 8)
+        .map((term) => `${term.slug}(${term.count})`)
+        .join(', ');
+      lines.push(
+        `- ${taxonomy.taxonomy}: ${taxonomy.terms.length} terms${termPreview ? ` — ${termPreview}` : ''}`,
+      );
+    }
+    lines.push('');
+
+    lines.push('## Parsed global style tokens');
+    if (content.parsedGlobalStyles) {
+      lines.push(
+        `- palette=${content.parsedGlobalStyles.colorPalette.length} gradients=${content.parsedGlobalStyles.gradients.length} fontSizes=${content.parsedGlobalStyles.fontSizes.length} fontFamilies=${content.parsedGlobalStyles.fontFamilies.length} spacingSizes=${content.parsedGlobalStyles.spacingSizes.length} cssVariables=${Object.keys(content.parsedGlobalStyles.customCssVariables).length}`,
+      );
+      if (content.parsedGlobalStyles.globalColor) {
+        lines.push(`- globalColor: ${content.parsedGlobalStyles.globalColor}`);
+      }
+      if (content.parsedGlobalStyles.globalBackgroundColor) {
+        lines.push(
+          `- globalBackgroundColor: ${content.parsedGlobalStyles.globalBackgroundColor}`,
+        );
+      }
+      if (content.parsedGlobalStyles.globalFontFamily) {
+        lines.push(
+          `- globalFontFamily: ${content.parsedGlobalStyles.globalFontFamily}`,
+        );
+      }
+      if (content.parsedGlobalStyles.globalFontSize) {
+        lines.push(
+          `- globalFontSize: ${content.parsedGlobalStyles.globalFontSize}`,
+        );
+      }
+      const palettePreview = content.parsedGlobalStyles.colorPalette
+        .slice(0, 8)
+        .map((entry) => `${entry.slug}=${entry.color}`)
+        .join(', ');
+      if (palettePreview) {
+        lines.push(`- palette preview: ${palettePreview}`);
+      }
+    } else {
+      lines.push('- none');
+    }
+    lines.push('');
+
+    lines.push(
+      `## Media attachments (${content.mediaAttachments.length} total):`,
+    );
+    for (const media of content.mediaAttachments.slice(0, 20)) {
+      lines.push(
+        `- [${media.mimeType || 'unknown'}] "${media.title}" slug=${media.slug || '(none)'} alt="${media.altText || ''}" file=${media.filePath ?? media.guid}`,
+      );
+    }
+    lines.push('');
+
+    lines.push(
+      `## Custom CSS entries (${content.customCssEntries.length} total):`,
+    );
+    for (const customCss of content.customCssEntries.slice(0, 10)) {
+      const cssPreview = customCss.content
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180);
+      lines.push(
+        `- "${customCss.title}" (slug: ${customCss.slug}) status=${customCss.status}${cssPreview ? ` — ${cssPreview}` : ''}`,
+      );
     }
     lines.push('');
 
@@ -2192,7 +2281,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     draft?: SectionPlan,
   ): SectionPlan {
     if (!draft) return section;
-    // Always carry identity fields (sectionKey, sourceRef) regardless of type
+    // Always carry debug/source trace fields regardless of type
     // substitution — the AI may legitimately replace a layout hero with a
     // search, post-list, or comments section for the given component context.
     if (draft.type !== section.type) {
@@ -2378,9 +2467,11 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     repoManifest?: RepoThemeManifest,
   ): ComponentVisualPlan {
     const spectra = repoManifest?.interactiveContracts?.spectra;
-    if (!spectra?.detected) return visualPlan;
+    if (!spectra?.detected) {
+      return normalizeVisualPlanArchitecture(visualPlan);
+    }
 
-    return {
+    return normalizeVisualPlanArchitecture({
       ...visualPlan,
       sections: visualPlan.sections.map((section) => {
         switch (section.type) {
@@ -2544,7 +2635,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
             return section;
         }
       }),
-    };
+    });
   }
 
   private buildValidationFeedbackPrompt(
@@ -3066,6 +3157,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .filter((section) => this.isDegenerateDraftSection(section))
       .map((section) => {
         const sectionId =
+          section.debugKey ||
           section.sectionKey ||
           section.sourceRef?.sourceNodeId ||
           `${section.type}-${section.sourceRef?.topLevelIndex ?? 'unknown'}`;
@@ -3279,7 +3371,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           normalize(section.imageSrc),
         ].join('|');
       default:
-        return [section.type, normalize(section.sectionKey)].join('|');
+        return [
+          section.type,
+          normalize(section.debugKey ?? section.sectionKey),
+        ].join('|');
     }
   }
 
@@ -4194,7 +4289,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : draftSections.slice(0, 6);
 
     return relevant.slice(0, 6).map((section, index) => {
-      const identity = `${section.type}${section.sectionKey ? `:${section.sectionKey}` : ''}`;
+      const identity = `${section.type}${(section.debugKey ?? section.sectionKey) ? `:${section.debugKey ?? section.sectionKey}` : ''}`;
       switch (section.type) {
         case 'carousel':
           return `${identity} | slides=${section.slides.length}`;
@@ -5236,13 +5331,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   private formatSectionList(
-    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey'>>,
+    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey' | 'debugKey'>>,
   ): string {
     if (!Array.isArray(sections) || sections.length === 0) return '[]';
 
     const seen = new Map<string, number>();
     const labels = sections.map((section, index) => {
       const base =
+        section.debugKey?.trim() ||
         section.sectionKey?.trim() ||
         section.type?.trim() ||
         `section-${index + 1}`;

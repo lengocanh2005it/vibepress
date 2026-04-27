@@ -684,24 +684,8 @@ export class ReactGeneratorService {
       visionImageUrls,
       tokenScope,
     );
-    const restoredTracking = this.restoreTrackedSectionMarkers(
-      fixedCode,
-      component.name,
-      componentPlan,
-    );
-    if (restoredTracking.restoredSectionKeys.length > 0) {
-      const restoredList = restoredTracking.restoredSectionKeys.join(', ');
-      this.logger.log(
-        `[fixer] Restored tracked section markers for "${component.name}": ${restoredList}`,
-      );
-      await this.logToFile(
-        logPath,
-        `[fixer] Restored tracked section markers for "${component.name}": ${restoredList}`,
-      );
-    }
-
     return this.attachPlanContext(
-      { ...component, code: restoredTracking.code },
+      { ...component, code: fixedCode },
       componentPlan,
     );
   }
@@ -814,7 +798,9 @@ ${renders}
     const lines = sections.map((section, index) => {
       const parts = [
         `${index + 1}. ${section.type}`,
-        section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+        (section.debugKey ?? section.sectionKey)
+          ? `debugKey=${section.debugKey ?? section.sectionKey}`
+          : null,
         section.sourceRef?.sourceNodeId
           ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
           : null,
@@ -896,7 +882,7 @@ ${renders}
           'CRITICAL — interactive widget sections (do NOT drop, simplify, or replace with static UI):',
           ...interactiveSections.map(
             (s) =>
-              `  - ${s.type}${s.sectionKey ? ` (sectionKey=${s.sectionKey})` : ''} — must remain as an interactive ${s.type} component`,
+              `  - ${s.type}${(s.debugKey ?? s.sectionKey) ? ` (debugKey=${s.debugKey ?? s.sectionKey})` : ''} — must remain as an interactive ${s.type} component`,
           ),
         );
       }
@@ -945,10 +931,10 @@ ${renders}
     const lines = [
       'HARD REGENERATION MODE:',
       'The current component failed section coverage or visual-plan fidelity.',
+      'The current component failed its visual-plan obligations or contract fidelity.',
       'Do NOT patch only a small fragment of the broken code.',
       'Rewrite the full component from scratch so it matches the approved visual plan again.',
       'Render every planned section in the original order.',
-      'Give every tracked section its own top-level wrapper with the exact `data-vp-section-key` and related `data-vp-*` source-tracking attributes.',
       'Do not keep a shortened skeleton that only preserves the first few sections.',
     ];
     if (sectionCount > 0) {
@@ -966,93 +952,19 @@ ${renders}
   private shouldForceFullRegenerationFromFeedback(feedback: string): boolean {
     const normalized = feedback.toLowerCase();
     return (
-      normalized.includes('section coverage mismatch:') ||
-      normalized.includes('visual plan fidelity violated') ||
-      normalized.includes('missing rendered sectionkey') ||
-      normalized.includes('missing sourcenodeid') ||
+      normalized.includes('visual plan obligations violated') ||
+      normalized.includes('required capability') ||
+      normalized.includes('obligation "') ||
       normalized.includes('sectionaudit:')
     );
   }
 
   private restoreTrackedSectionMarkers(
     code: string,
-    componentName: string,
-    componentPlan?: PlanResult[number],
+    _componentName: string,
+    _componentPlan?: PlanResult[number],
   ): { code: string; restoredSectionKeys: string[] } {
-    const trackedSections = (componentPlan?.visualPlan?.sections ?? [])
-      .map((section, index) => ({
-        section,
-        sectionKey:
-          section.sectionKey ??
-          `${section.type}${index === 0 ? '' : `-${index}`}`,
-      }))
-      .filter(
-        ({ section, sectionKey }) =>
-          !!section.sourceRef?.sourceNodeId || !!sectionKey,
-      );
-    if (trackedSections.length === 0) {
-      return { code, restoredSectionKeys: [] };
-    }
-
-    const missingSections = trackedSections.filter(
-      ({ sectionKey }) => !code.includes(`data-vp-section-key="${sectionKey}"`),
-    );
-    if (missingSections.length === 0) {
-      return { code, restoredSectionKeys: [] };
-    }
-
-    const anchors = this.findTopLevelSectionAnchors(
-      code,
-      trackedSections.length,
-    );
-    if (anchors.length === 0) {
-      return { code, restoredSectionKeys: [] };
-    }
-
-    const mutations: Array<{
-      start: number;
-      end: number;
-      replacement: string;
-    }> = [];
-    const restoredSectionKeys: string[] = [];
-
-    trackedSections.forEach(({ section, sectionKey }, index) => {
-      if (code.includes(`data-vp-section-key="${sectionKey}"`)) return;
-      const anchor = anchors[index];
-      if (!anchor) return;
-      if (/\bdata-vp-section-key=/.test(anchor.raw)) return;
-
-      const trackingAttrs = this.buildSectionTrackingAttrs(
-        section,
-        componentName,
-        sectionKey,
-      );
-      if (!trackingAttrs) return;
-
-      mutations.push({
-        start: anchor.start,
-        end: anchor.end,
-        replacement: anchor.raw.replace(
-          /^<([A-Za-z][\w.:-]*)\b/,
-          `$&${trackingAttrs}`,
-        ),
-      });
-      restoredSectionKeys.push(sectionKey);
-    });
-
-    if (mutations.length === 0) {
-      return { code, restoredSectionKeys: [] };
-    }
-
-    let nextCode = code;
-    for (const mutation of mutations.sort((a, b) => b.start - a.start)) {
-      nextCode =
-        nextCode.slice(0, mutation.start) +
-        mutation.replacement +
-        nextCode.slice(mutation.end);
-    }
-
-    return { code: nextCode, restoredSectionKeys };
+    return { code, restoredSectionKeys: [] };
   }
 
   private findTopLevelSectionAnchors(
@@ -1172,42 +1084,11 @@ ${renders}
   }
 
   private buildSectionTrackingAttrs(
-    section: SectionPlan,
-    componentName: string,
-    sectionKeyOverride?: string,
+    _section: SectionPlan,
+    _componentName: string,
+    _sectionKeyOverride?: string,
   ): string {
-    const sectionKey = sectionKeyOverride ?? section.sectionKey ?? section.type;
-    if (!sectionKey && !section.sourceRef?.sourceNodeId) return '';
-
-    const attrs = [
-      ['data-vp-source-node', section.sourceRef?.sourceNodeId],
-      ['data-vp-template', section.sourceRef?.templateName],
-      ['data-vp-source-file', section.sourceRef?.sourceFile],
-      ['data-vp-section-key', sectionKey],
-      ['data-vp-component', componentName],
-      [
-        'data-vp-section-component',
-        this.buildTrackedSectionComponentName(componentName, sectionKey),
-      ],
-    ].filter(([, value]) => !!value);
-
-    return attrs
-      .map(
-        ([name, value]) =>
-          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
-      )
-      .join('');
-  }
-
-  private buildTrackedSectionComponentName(
-    componentName: string,
-    sectionKey: string,
-  ): string {
-    return `${componentName}${sectionKey
-      .split(/[^a-zA-Z0-9]+/)
-      .filter(Boolean)
-      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
-      .join('')}Section`;
+    return '';
   }
 
   private resolveRequiredCustomClassTargets(

@@ -254,6 +254,7 @@ Rules:
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
+- A generic backend detail endpoint such as \`/api/posts/:slug\` or \`/api/pages/:slug\` is acceptable for route flavors like \`/single-with-sidebar/:slug\` unless the approved contract explicitly requires a distinct payload shape or a fixed bound slug.
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
@@ -589,34 +590,48 @@ ${component.code}
           message: `Fixed page-detail component renders unexpected interactive UI not approved by the visual plan: ${unexpectedInteractiveUi.join(', ')}. Do not invent standalone interactive sections around canonical page content.`,
         });
       }
-    }
 
-    if (sections.length === 0) return issues;
-
-    const trackedSections = sections
-      .filter((section) => !!section.sourceRef?.sourceNodeId)
-      .map((section, index) => ({
-        section,
-        sectionKey:
-          section.sectionKey ??
-          `${section.type}${index === 0 ? '' : `-${index}`}`,
-      }));
-    if (trackedSections.length > 0) {
-      const missingTrackedWrappers = trackedSections.filter(
-        ({ sectionKey }) =>
-          !component.code.includes(`data-vp-section-key="${sectionKey}"`),
-      );
-
-      if (missingTrackedWrappers.length > 0) {
-        const missingKeys = missingTrackedWrappers.map(
-          ({ sectionKey }) => sectionKey,
-        );
+      if (this.hasUnexpectedNarrowCenteredPageShell(component.code)) {
         issues.push({
           severity: 'high',
-          message: `Generated code is missing required tracked wrapper markers for approved sections: ${missingKeys.join(', ')}. Each approved section with a source node must keep its own top-level wrapper with the exact \`data-vp-*\` attributes, otherwise section boundaries can collapse or merge incorrectly.`,
+          message:
+            'Fixed page-detail component wraps the canonical page body in a narrow centered article shell (for example `max-w-[620px] mx-auto` with hero-like centered title treatment) instead of preserving the approved source/template layout shell.',
         });
       }
     }
+
+    const expectsSidebarDetailShell =
+      (contract?.isDetail ?? component.isDetail) === true &&
+      normalizedDataNeeds.has('postDetail') &&
+      allowedSectionTypes.has('sidebar');
+    if (expectsSidebarDetailShell) {
+      if (!this.hasSidebarArticleLayout(component.code)) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Approved detail layout requires a main article + sidebar structure, but the generated component does not preserve a clear article/aside shell and appears to restack or flatten the sidebar layout.',
+        });
+      }
+
+      const inventedSidebarPlaceholders =
+        this.findInventedSidebarPlaceholderSnippets(component.code);
+      if (inventedSidebarPlaceholders.length > 0) {
+        issues.push({
+          severity: 'high',
+          message: `Sidebar contains invented placeholder copy instead of source-backed widgets/content: ${inventedSidebarPlaceholders.join(' | ')}.`,
+        });
+      }
+
+      if (this.hasCommentFilterUi(component.code)) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Sidebar/detail implementation introduces comment-filter search UI that is not justified by the approved route/data contract. Preserve sidebar/site widgets instead of repurposing search to filter comments.',
+        });
+      }
+    }
+
+    if (sections.length === 0) return issues;
 
     const cardGrids = sections.filter(
       (section): section is CardGridSection => section.type === 'card-grid',
@@ -662,6 +677,60 @@ ${component.code}
     return (
       /dangerouslySetInnerHTML/.test(code) &&
       /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code)
+    );
+  }
+
+  private hasUnexpectedNarrowCenteredPageShell(code: string): boolean {
+    if (!/dangerouslySetInnerHTML/.test(code)) return false;
+    const hasNarrowShell =
+      /<(?:article|main|section|div)\b[^>]*className="[^"]*\bmax-w-\[(?:5\d{2}|6\d{2}|7\d{2})px\][^"]*\bmx-auto\b[^"]*"/.test(
+        code,
+      ) ||
+      /<(?:article|main|section|div)\b[^>]*className="[^"]*\bmax-w-(?:2xl|3xl)\b[^"]*\bmx-auto\b[^"]*"/.test(
+        code,
+      );
+    const hasCenteredHeroTitle =
+      /<h1\b[^>]*className="[^"]*\btext-center\b[^"]*"/.test(code) ||
+      /<h1\b[^>]*className="[^"]*\btext-\[(?:2|3|4)\.\d+rem\][^"]*"/.test(code);
+    return hasNarrowShell && hasCenteredHeroTitle;
+  }
+
+  private hasSidebarArticleLayout(code: string): boolean {
+    const hasAside = /<aside\b/i.test(code);
+    const hasArticleOrMain = /<(?:article|main)\b/i.test(code);
+    return hasAside && hasArticleOrMain;
+  }
+
+  private findInventedSidebarPlaceholderSnippets(
+    code: string,
+    max = 3,
+  ): string[] {
+    const snippets: string[] = [];
+    const patterns = [
+      /Links I found useful and wanted to share\./gi,
+      /<h[1-6]\b[^>]*>\s*About the author\s*<\/h[1-6]>/gi,
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of code.matchAll(pattern)) {
+        const snippet = (match[0] ?? '').replace(/\s+/g, ' ').trim();
+        if (!snippet || snippets.includes(snippet)) continue;
+        snippets.push(
+          snippet.length > 180 ? `${snippet.slice(0, 177)}...` : snippet,
+        );
+        if (snippets.length >= max) return snippets;
+      }
+    }
+
+    return snippets;
+  }
+
+  private hasCommentFilterUi(code: string): boolean {
+    return (
+      /\bfilteredComments\b/.test(code) ||
+      /\bsetFilteredComments\b/.test(code) ||
+      /\bcomments\.filter\s*\(/.test(code) ||
+      /Search the website/.test(code)
     );
   }
 
@@ -968,9 +1037,6 @@ ${component.code}
       'approved card-grid',
       'expected card headings',
       'missing:',
-      'missing required tracked wrapper markers',
-      'data-vp-*',
-      'section boundaries can collapse',
       'duplicated route prefix',
       'extra `/page` segment',
       'menu links must use canonical `item.url` directly',
@@ -978,6 +1044,10 @@ ${component.code}
       'auxiliary/footer/sidebar-like page sections are invalid unless source-backed',
       'does not render the fetched `page.content`/`item.content` body',
       'renders unexpected interactive ui not approved by the visual plan',
+      'narrow centered article shell',
+      'main article + sidebar structure',
+      'invented placeholder copy',
+      'comment-filter search ui',
       'must preserve spectra/uagb-compatible markers',
       'must keep real interactive state wiring',
       'approved carousel section must move the track',

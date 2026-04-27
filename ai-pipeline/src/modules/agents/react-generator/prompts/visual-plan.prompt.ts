@@ -250,7 +250,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - When repo hints expose concrete wrapper classes, variant names, item classes, alignment classes, or widget attr keys from Spectra/UAGB plugin source, preserve that same widget family in the plan instead of collapsing it into generic hero/card/media-text sections.
 - If theme or plugin source is sparse, keep the plan sparse. Do NOT compensate by inventing extra wrapper sections, promo rows, centered hero treatments, or broader containers.
 - When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
-- When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`sectionKey\` or different \`sourceRef.sourceNodeId\`.
+- When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`debugKey\`/legacy \`sectionKey\` labels or different \`sourceRef.sourceNodeId\`.
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
 - If an earlier draft section owns the heading/body/CTA and a later draft section owns the image, keep them as two separate sections in the JSON output. The later image must NOT be pulled up beside the earlier text block.
 - \`hero.layout: "split"\` is allowed ONLY when that SAME single draft section already contains both the text content and the image/media content under one shared wrapper/source node.
@@ -268,6 +268,8 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - For testimonial sections specifically: only set \`authorAvatar\` when the template source contains a matching real image source. Otherwise omit \`authorAvatar\`.
 - Preserve exact padding/margin/gap from the template when visible by filling \`paddingStyle\` / \`marginStyle\` / \`gapStyle\` with concrete CSS shorthand values.
 - Preserve source-level custom classes by carrying them into \`customClassNames\` when a draft section or source node already exposes them. Do NOT drop or rename these classes.
+- When a section's \`background\` or \`textColor\` matches a named palette entry, also add the corresponding WordPress bridge class to \`customClassNames\` (e.g. palette slug "primary" → add \`"has-primary-background-color"\` or \`"has-primary-color"\`). This makes the element respond to theme CSS that targets \`has-*\` selectors.
+- WordPress block alignment classes (\`alignleft\`, \`alignright\`, \`aligncenter\`, \`alignwide\`, \`alignfull\`) detected in the source markup must be preserved in \`customClassNames\` on the matching section.
 - Preserve exact per-block typography and explicit column ratios when the template source exposes them; do not flatten them back to generic defaults.
 - Preserve the original alignment, column count, and section density when the template source makes them visible.
 - NEVER output a \`custom\` / raw JSX section. If a template has a sidebar layout, use a \`sidebar\` section plus the normal \`page-content\` or \`post-content\` section.
@@ -331,7 +333,7 @@ function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
     'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
     'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
     'You MUST NOT reorder, merge, split, or drop sections from this list.',
-    'If two adjacent draft sections have different `sectionKey` or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
+    'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
     'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
     '',
     '```json',
@@ -1789,6 +1791,19 @@ export function parseVisualPlanDetailed(
     blockGap: 'gap-16',
     includes: [] as string[],
   };
+
+  // Normalize legacy sectionKey collisions so debug labels stay readable in logs.
+  // Validation no longer depends on these keys as render identity.
+  const seenKeys = new Map<string, number>();
+  for (const section of sanitizedSections.sections) {
+    if (!section.sectionKey) continue;
+    const base = section.sectionKey;
+    const prev = seenKeys.get(base) ?? 0;
+    seenKeys.set(base, prev + 1);
+    if (prev > 0) {
+      section.sectionKey = `${base}-${prev + 1}`;
+    }
+  }
 
   return {
     plan: {

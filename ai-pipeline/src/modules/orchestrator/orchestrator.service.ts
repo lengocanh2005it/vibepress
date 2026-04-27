@@ -1,7 +1,12 @@
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import type { AgentResult } from '@/common/types/pipeline.type.js';
 import { HttpService } from '@nestjs/axios';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  BeforeApplicationShutdown,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -576,7 +581,7 @@ class PipelineControlError extends Error {
 }
 
 @Injectable()
-export class OrchestratorService {
+export class OrchestratorService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(OrchestratorService.name);
   private readonly tokenTracker = new TokenTracker();
   private readonly jobs = new Map<string, PipelineStatus>();
@@ -586,6 +591,7 @@ export class OrchestratorService {
     string,
     Map<string, ProgressEventData>
   >();
+  private shutdownBroadcasted = false;
 
   constructor(
     private readonly sqlService: SqlService,
@@ -618,6 +624,10 @@ export class OrchestratorService {
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
   ) {}
+
+  async beforeApplicationShutdown(signal?: string): Promise<void> {
+    await this.broadcastUnexpectedShutdown(signal);
+  }
 
   async run(
     siteId: string,
@@ -1294,6 +1304,101 @@ export class OrchestratorService {
       this.cleanup.terminateProcessTree(preview.frontendPid),
       this.cleanup.terminateProcessTree(preview.serverPid),
     ]);
+  }
+
+  private async broadcastUnexpectedShutdown(signal?: string): Promise<void> {
+    if (this.shutdownBroadcasted) return;
+
+    const activeJobs = [...this.jobs.entries()].filter(([, state]) =>
+      this.isActivePipelineStatus(state.status),
+    );
+    if (activeJobs.length === 0) {
+      this.shutdownBroadcasted = true;
+      return;
+    }
+
+    this.shutdownBroadcasted = true;
+    const shutdownSource = signal?.trim() || 'server shutdown';
+    const message = `AI pipeline server was interrupted (${shutdownSource}). The running workflow was stopped.`;
+
+    this.logger.warn(
+      `[shutdown] Interrupting ${activeJobs.length} active pipeline job(s) because of ${shutdownSource}.`,
+    );
+
+    await Promise.allSettled(
+      activeJobs.map(([jobId, state]) =>
+        this.interruptJobForShutdown(jobId, state, message),
+      ),
+    );
+
+    // Allow a brief flush window so connected SSE clients can receive the
+    // terminal interruption event before the HTTP server closes.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  private isActivePipelineStatus(status: PipelineStatus['status']): boolean {
+    return (
+      status === 'running' ||
+      status === 'awaiting_confirmation' ||
+      status === 'stopping'
+    );
+  }
+
+  private async interruptJobForShutdown(
+    jobId: string,
+    state: PipelineStatus,
+    message: string,
+  ): Promise<void> {
+    const control = this.controls.get(jobId);
+    if (control?.finalized) return;
+
+    if (control) {
+      control.stopRequested = true;
+      control.confirmationGate?.reject(
+        new PipelineControlError('stopped', message),
+      );
+      control.confirmationGate = undefined;
+      control.finalized = true;
+    }
+
+    state.status = 'stopped';
+    state.error = message;
+    for (const step of state.steps) {
+      if (step.status === 'running') {
+        step.status = 'stopped';
+        step.error = message;
+      }
+    }
+
+    const subject = this.progress.get(jobId);
+    subject?.next({
+      step: 'system',
+      label: 'Pipeline Interrupted',
+      status: 'stopped',
+      percent: this.calcInterruptedPercent(state),
+      message,
+    });
+    subject?.complete();
+
+    await this.stopPreviewProcesses(control?.preview);
+    this.clearStepEventData(jobId);
+  }
+
+  private calcInterruptedPercent(state: PipelineStatus): number {
+    const interruptedStep = state.steps.find(
+      (step) => step.status === 'running' || step.status === 'stopped',
+    );
+    if (interruptedStep) {
+      return this.calcPercentBefore(interruptedStep.name, state.jobId);
+    }
+
+    const completedSteps = state.steps.filter((step) => step.status === 'done');
+    const lastCompletedStep = completedSteps[completedSteps.length - 1];
+    if (lastCompletedStep) {
+      return this.calcPercentThrough(lastCompletedStep.name, state.jobId);
+    }
+
+    return 0;
   }
 
   private async finalizeControlledTermination(
@@ -2157,12 +2262,11 @@ export class OrchestratorService {
                     const regenerated = await this.reactGenerator.fixComponent({
                       component: targetComponent,
                       plan: reviewResult.plan,
-                      feedback:
-                        this.buildFullComponentRegenerationFeedback(
-                          failure.component.name,
-                          retryError,
-                          regenerationDiagnostics,
-                        ),
+                      feedback: this.buildFullComponentRegenerationFeedback(
+                        failure.component.name,
+                        retryError,
+                        regenerationDiagnostics,
+                      ),
                       modelConfig: { fixAgent: resolvedModels.fixAgent },
                       logPath,
                       fixMode: 'full',
@@ -2367,12 +2471,11 @@ export class OrchestratorService {
                     const regenerated = await this.reactGenerator.fixComponent({
                       component: aiComponents[compIndex],
                       plan: reviewResult.plan,
-                      feedback:
-                        this.buildFullComponentRegenerationFeedback(
-                          failure.componentName,
-                          validationErr,
-                          regenerationDiagnostics,
-                        ),
+                      feedback: this.buildFullComponentRegenerationFeedback(
+                        failure.componentName,
+                        validationErr,
+                        regenerationDiagnostics,
+                      ),
                       modelConfig: { fixAgent: resolvedModels.fixAgent },
                       logPath,
                       fixMode: 'full',
@@ -5585,7 +5688,7 @@ export class OrchestratorService {
           );
           return applyFocusedTask(
             task,
-            `${task.feedback}\n\nThe previous focused edit attempt failed validation:\n${validationErr}\n\nRetry by changing only the requested target region. Preserve every other section, section order, hero/title text, CTA labels, tracked wrappers, and approved visual-plan content exactly as they already exist.`,
+            `${task.feedback}\n\nThe previous focused edit attempt failed validation:\n${validationErr}\n\nRetry by changing only the requested target region. Preserve every other section, section order, hero/title text, CTA labels, semantic region boundaries, and approved visual-plan content exactly as they already exist.`,
           );
         }
         this.logger.warn(
@@ -6046,11 +6149,11 @@ export class OrchestratorService {
   private shouldRetryWithFullComponentRegeneration(error: string): boolean {
     const normalized = error.toLowerCase();
     return (
+      normalized.includes('visual plan obligations violated') ||
       normalized.includes('visual plan fidelity violated') ||
-      normalized.includes('section coverage mismatch:') ||
       normalized.includes('sectionaudit:') ||
-      normalized.includes('missing rendered sectionkey') ||
-      normalized.includes('missing sourcenodeid') ||
+      normalized.includes('required capability') ||
+      normalized.includes('obligation "') ||
       /\blost\s+[a-z0-9-]+\s+(?:heading|subheading|title|subtitle|body|image src|cta text|button text|list item|author|quote|avatar)\b/i.test(
         error,
       )
@@ -6092,24 +6195,12 @@ export class OrchestratorService {
     const missingTargets = new Set<string>();
     const normalized = error.toLowerCase();
 
-    if (normalized.includes('section coverage mismatch:')) {
-      reasons.add('section-coverage');
-      const missingKeysMatch = error.match(/missingKeys=([^\n|]+)/i);
-      const extraKeysMatch = error.match(/extraKeys=([^\n|]+)/i);
-      missingKeysMatch?.[1]
-        ?.split(',')
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .forEach((key) => missingTargets.add(`${key}.wrapper`));
-      extraKeysMatch?.[1]
-        ?.split(',')
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .forEach((key) => missingTargets.add(`${key}.extra`));
+    if (normalized.includes('visual plan obligations violated')) {
+      reasons.add('obligation-violation');
     }
 
     const sectionAuditPattern =
-      /sectionAudit:\s+[^\n|]+\|\s+key=([^|]+)\|\s+type=([^|]+)\|\s+missing=([^|]+)\|/g;
+      /sectionAudit:\s+[^\n|]+\|\s+debugKey=([^|]+)\|\s+type=([^|]+)\|\s+missing=([^|]+)\|/g;
     for (const match of error.matchAll(sectionAuditPattern)) {
       const rawKey = match[1]?.trim() || '(untracked)';
       const sectionType = match[2]?.trim() || 'section';
@@ -6128,12 +6219,6 @@ export class OrchestratorService {
       }
     }
 
-    if (normalized.includes('missing rendered sectionkey')) {
-      reasons.add('missing-section-wrapper');
-    }
-    if (normalized.includes('missing sourcenodeid')) {
-      reasons.add('missing-source-node');
-    }
     if (/\blost\s+/i.test(error)) {
       reasons.add('missing-section-content');
     }
@@ -6413,7 +6498,7 @@ function formatResolvedCaptureTargetForLog(
     `template=${target.templateName}`,
     `sourceFile=${target.sourceFile}`,
     `component=${target.componentName}`,
-    `section=${target.sectionKey}`,
+    `debugKey=${target.debugKey ?? target.sectionKey ?? 'unknown'}`,
     target.sectionComponentName
       ? `sectionComponent=${target.sectionComponentName}`
       : null,

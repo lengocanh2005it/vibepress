@@ -121,15 +121,11 @@ export class PreviewBuilderService {
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
-    // 2. Copy theme assets (images, fonts) vào public/assets/
+    // 2. Copy theme assets (images, fonts, svg, icons, ...) vào public/assets/
     if (themeDir) {
-      const themeAssetsDir = join(themeDir, 'assets');
-      const destImagesDir = join(frontendDir, 'public', 'assets', 'images');
-      const destFontsDir = join(frontendDir, 'public', 'assets', 'fonts');
-      await this.assetDownloader.copyAssets(
-        themeAssetsDir,
-        destImagesDir,
-        destFontsDir,
+      await this.assetDownloader.copyThemeAssets(
+        themeDir,
+        join(frontendDir, 'public'),
       );
     }
 
@@ -727,6 +723,7 @@ ${fontEntries}
 
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
+    await this.injectWordPressBridgeClasses(frontendDir, tokens);
   }
 
   private async buildLocalThemeFontFaceCss(
@@ -1274,6 +1271,91 @@ ${fontEntries}
     const block =
       `\n/* WordPress block style bridges */\n` + cssBlocks.join('\n');
     await writeFile(cssPath, existingCss.trimEnd() + block + '\n');
+  }
+
+  private async injectWordPressBridgeClasses(
+    frontendDir: string,
+    tokens: ThemeTokens,
+  ): Promise<void> {
+    const marker = '/* Vibepress WordPress utility class bridges */';
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existing = await readFile(cssPath, 'utf-8');
+    if (existing.includes(marker)) return;
+
+    const lines: string[] = [marker];
+
+    for (const { slug, value } of tokens.colors) {
+      lines.push(`.has-${slug}-color { color: ${value}; }`);
+      lines.push(
+        `.has-${slug}-background-color { background-color: ${value}; }`,
+      );
+    }
+
+    for (const { slug, size } of tokens.fontSizes) {
+      lines.push(`.has-${slug}-font-size { font-size: ${size}; }`);
+    }
+
+    const wideMax = tokens.defaults?.wideWidth ?? '1200px';
+    lines.push(
+      `.alignleft { float: left; margin-inline-end: 2em; margin-bottom: 1em; }`,
+    );
+    lines.push(
+      `.alignright { float: right; margin-inline-start: 2em; margin-bottom: 1em; }`,
+    );
+    lines.push(
+      `.aligncenter { margin-left: auto; margin-right: auto; display: block; }`,
+    );
+    lines.push(
+      `.alignwide { max-width: ${wideMax}; width: 100%; margin-left: auto; margin-right: auto; }`,
+    );
+    lines.push(
+      `.alignfull { max-width: 100vw; width: 100vw; margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw); }`,
+    );
+    lines.push(
+      `#respond, .comment-respond { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid rgb(0 0 0 / 0.1); }`,
+    );
+    lines.push(`.comment-reply-title { margin: 0 0 0.75rem; }`);
+    lines.push(`.comment-notes, .logged-in-as { margin: 0 0 1rem; }`);
+    lines.push(
+      `.comment-list, .children { list-style: none; margin: 0; padding: 0; }`,
+    );
+    lines.push(`.comment-list > .comment + .comment { margin-top: 1.5rem; }`);
+    lines.push(
+      `.children { margin-top: 1rem; margin-left: 1rem; padding-left: 1rem; border-left: 1px solid rgb(0 0 0 / 0.1); }`,
+    );
+    lines.push(
+      `.comment-body { display: flex; flex-direction: column; gap: 0.75rem; }`,
+    );
+    lines.push(
+      `.comment-meta { display: flex; flex-direction: column; gap: 0.75rem; }`,
+    );
+    lines.push(
+      `.comment-author { display: flex; align-items: flex-start; gap: 0.75rem; }`,
+    );
+    lines.push(`.comment-author .avatar { flex-shrink: 0; }`);
+    lines.push(`.comment-content p { margin: 0; }`);
+    lines.push(`.comment-form { display: grid; gap: 1rem; }`);
+    lines.push(
+      `.comment-form-author, .comment-form-email, .comment-form-url, .comment-form-comment, .form-submit { margin: 0; }`,
+    );
+    lines.push(
+      `.comment-form-author label, .comment-form-email label, .comment-form-url label, .comment-form-comment label { display: block; margin-bottom: 0.375rem; }`,
+    );
+    lines.push(`.comment-form input, .comment-form textarea { width: 100%; }`);
+    lines.push(`.comment-form-feedback { margin: 0; }`);
+    lines.push(`.form-submit { margin-top: 0.25rem; }`);
+    lines.push(`.submit { appearance: none; border: 0; cursor: pointer; }`);
+    lines.push(`.comment-awaiting-moderation { margin-top: 1.5rem; }`);
+    lines.push(
+      `@media (min-width: 640px) { .comment-meta { flex-direction: row; align-items: center; justify-content: space-between; } }`,
+    );
+
+    if (lines.length > 1) {
+      await writeFile(
+        cssPath,
+        `${existing.trimEnd()}\n\n${lines.join('\n')}\n`,
+      );
+    }
   }
 
   private async applyInteractionTokens(
@@ -2039,7 +2121,10 @@ ${fontEntries}
     siteUrl?: string | null,
   ): string | null {
     if (!rawUrl) return null;
-    const trimmed = String(rawUrl).trim();
+    const trimmed = String(rawUrl)
+      .trim()
+      .replace(/\\+/g, '/')
+      .replace(/\/+(?=[?#]|$)/, '');
     if (!trimmed || !/\/wp-content\/uploads\//i.test(trimmed)) return null;
 
     try {
