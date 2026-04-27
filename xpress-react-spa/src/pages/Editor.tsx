@@ -2051,7 +2051,7 @@ const Editor: React.FC = () => {
 
           {/* Floating chat button + panel */}
           {!previewCapture && (
-            <div className="absolute right-6 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none">
+            <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3 pointer-events-none">
               {isChatOpen && (
                 <div className="flex max-h-[70vh] w-[380px] max-w-[calc(100vw-48px)] min-h-0 flex-col overflow-hidden rounded-3xl border border-[#d8ddd4] bg-white pointer-events-auto">
                   <div className="shrink-0 p-3 border-b border-[#e5e8df]">
