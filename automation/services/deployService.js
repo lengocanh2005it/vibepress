@@ -69,7 +69,11 @@ async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
   console.log(`[VPS-Backend] site=${siteDir} port=${port} remote=${remoteDir}`);
   const ssh = await connectSsh();
   try {
-    await ssh.execCommand(`mkdir -p ${remoteDir}`);
+    // mkdir
+    const mkdirRes = await ssh.execCommand(`mkdir -p ${remoteDir}`);
+    if (mkdirRes.code !== 0) {
+      throw new Error(`[VPS-Backend] mkdir -p ${remoteDir} thất bại (code=${mkdirRes.code}): ${mkdirRes.stderr}`);
+    }
 
     // Upload server/ — bỏ qua node_modules
     await ssh.putDirectory(localServerDir, remoteDir, {
@@ -80,9 +84,9 @@ async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
     });
     console.log(`[VPS-Backend] Files uploaded`);
 
-    // Ghi .env qua SFTP để tránh shell-escaping
+    // Ghi .env qua SFTP
     const envContent = [
-      `PORT=${port}`,
+      `API_PORT=${port}`,
       `DB_HOST=${dbCreds.host ?? 'localhost'}`,
       `DB_PORT=${dbCreds.port ?? 3306}`,
       `DB_USER=${dbCreds.user ?? 'root'}`,
@@ -92,20 +96,27 @@ async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
     ].join('\n');
     const tmpEnv = path.join(os.tmpdir(), `vps-env-${siteDir}-${Date.now()}`);
     await fse.writeFile(tmpEnv, envContent);
-    await ssh.putFile(tmpEnv, `${remoteDir}/.env`);
-    await fse.remove(tmpEnv);
+    try {
+      await ssh.putFile(tmpEnv, `${remoteDir}/.env`);
+    } catch (err) {
+      throw new Error(`[VPS-Backend] Upload .env thất bại: ${err.message}`);
+    } finally {
+      await fse.remove(tmpEnv);
+    }
     console.log(`[VPS-Backend] .env written`);
 
     // npm install
     const install = await ssh.execCommand(`cd ${remoteDir} && npm install --production`);
-    if (install.stderr) console.warn(`[VPS-Backend] npm install: ${install.stderr.slice(0, 200)}`);
+    if (install.stderr) console.warn(`[VPS-Backend] npm install stderr: ${install.stderr.slice(0, 400)}`);
+    if (install.code !== 0) throw new Error(`[VPS-Backend] npm install thất bại (code=${install.code}): ${install.stderr.slice(0, 400)}`);
+    console.log(`[VPS-Backend] npm install done`);
 
     // PM2 start/restart
     await ssh.execCommand(`pm2 delete "${siteDir}" 2>/dev/null || true`);
     const pm2 = await ssh.execCommand(
       `cd ${remoteDir} && API_PORT=${port} pm2 start npm --name "${siteDir}" -- start && pm2 save`,
     );
-    if (pm2.code !== 0) throw new Error(`PM2 failed: ${pm2.stderr}`);
+    if (pm2.code !== 0) throw new Error(`[VPS-Backend] PM2 thất bại (code=${pm2.code}): ${pm2.stderr}`);
     console.log(`[VPS-Backend] PM2 started — port ${port}`);
   } finally {
     ssh.dispose();
