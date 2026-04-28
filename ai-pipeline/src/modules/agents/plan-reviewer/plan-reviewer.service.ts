@@ -485,9 +485,13 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    const nextSections = this.normalizeFixedPageDetailSections(
+    const nextSections = this.normalizePostDetailSections(
       item,
-      sanitizedSections.sections,
+      this.normalizeFixedPageDetailSections(
+        item,
+        sanitizedSections.sections,
+        sanitizedSections.adjustments,
+      ),
       sanitizedSections.adjustments,
     );
 
@@ -555,7 +559,7 @@ export class PlanReviewerService {
     if (section.type === 'post-content' || section.type === 'comments') {
       return allowedPostDetail;
     }
-    if (section.type === 'page-content') {
+    if (section.type === 'page-content' || section.type === 'prose-block') {
       return allowedPageDetail;
     }
     // For detail pages, hero/cover sections from the draft are layout
@@ -921,9 +925,9 @@ export class PlanReviewerService {
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
-    return this.normalizeFixedPageDetailSections(
+    return this.normalizePostDetailSections(
       item,
-      sanitizedSections.sections,
+      this.normalizeFixedPageDetailSections(item, sanitizedSections.sections),
     );
   }
 
@@ -951,6 +955,115 @@ export class PlanReviewerService {
         showTitle: !/no.?title/i.test(item.componentName),
       },
     ];
+  }
+
+  private normalizePostDetailSections(
+    item: PlanResult[number],
+    sections: SectionPlan[],
+    adjustments?: string[],
+  ): SectionPlan[] {
+    const isPostDetail =
+      item.type === 'page' &&
+      item.isDetail === true &&
+      item.dataNeeds.includes('post-detail');
+    if (!isPostDetail) return sections;
+
+    const templateBase = toTemplateBase(item.templateName);
+    const hasSidebarLayout =
+      /sidebar/.test(templateBase) ||
+      /withsidebar|sidebar/i.test(item.componentName);
+    const hasMainContent = sections.some(
+      (section) => section.type === 'post-content',
+    );
+    const hasComments = sections.some((section) => section.type === 'comments');
+    const hasSidebar = sections.some((section) => section.type === 'sidebar');
+    const hasSidebarAuxiliarySections = sections.some((section) =>
+      ['search', 'card-grid', 'breadcrumb'].includes(section.type),
+    );
+    const hasOnlyAuxiliarySections =
+      sections.length > 0 &&
+      sections.every((section) =>
+        ['search', 'card-grid', 'hero', 'cover', 'breadcrumb'].includes(
+          section.type,
+        ),
+      );
+
+    if (!hasMainContent && !hasOnlyAuxiliarySections) return sections;
+
+    const canonicalSections: SectionPlan[] = [
+      {
+        type: 'post-content',
+        showTitle: !/no.?title/i.test(item.componentName),
+        showAuthor: false,
+        showDate: false,
+        showCategories: false,
+      },
+    ];
+
+    if (item.dataNeeds.includes('comments')) {
+      canonicalSections.push({
+        type: 'comments',
+        showForm: true,
+        requireName: true,
+        requireEmail: false,
+      });
+    }
+
+    if (hasSidebarLayout) {
+      canonicalSections.splice(1, 0, {
+        type: 'sidebar',
+        title: 'Explore',
+        showSiteInfo: false,
+        showPages: true,
+        showPosts: true,
+        maxItems: 8,
+      });
+    }
+
+    if (!hasMainContent) {
+      adjustments?.push(
+        'replaced auxiliary-only post-detail sections with canonical post-content layout',
+      );
+      return canonicalSections;
+    }
+
+    const nextSections =
+      hasSidebarLayout && !hasSidebar && hasSidebarAuxiliarySections
+        ? sections.filter(
+            (section) =>
+              !['search', 'card-grid', 'breadcrumb'].includes(section.type),
+          )
+        : [...sections];
+    if (hasSidebarLayout && !hasSidebar && hasSidebarAuxiliarySections) {
+      adjustments?.push(
+        'collapsed sidebar auxiliary widgets into canonical sidebar section for post-detail layout',
+      );
+    }
+    if (item.dataNeeds.includes('comments') && !hasComments) {
+      nextSections.push({
+        type: 'comments',
+        showForm: true,
+        requireName: true,
+        requireEmail: false,
+      });
+      adjustments?.push(
+        'inserted canonical comments section for post-detail because comments dataNeed was missing from visual sections',
+      );
+    }
+    if (hasSidebarLayout && !hasSidebar) {
+      nextSections.push({
+        type: 'sidebar',
+        title: 'Explore',
+        showSiteInfo: false,
+        showPages: true,
+        showPosts: true,
+        maxItems: 8,
+      });
+      adjustments?.push(
+        'inserted canonical sidebar section for sidebar post-detail because no sidebar section remained after sanitization',
+      );
+    }
+    return nextSections;
   }
 
   private describeSectionIdentity(section: SectionPlan): string {

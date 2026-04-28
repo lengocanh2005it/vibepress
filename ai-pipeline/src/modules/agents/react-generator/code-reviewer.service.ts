@@ -103,6 +103,7 @@ export interface ReviewResult {
 }
 
 const RICH_VISUAL_SECTION_TYPES = new Set([
+  'prose-block',
   'hero',
   'cta-strip',
   'cover',
@@ -144,6 +145,7 @@ const MEDIA_HEAVY_VISUAL_SECTION_TYPES = new Set([
 
 const CONTENT_WRAPPER_COMPAT_VISUAL_SECTION_TYPES = new Set([
   'page-content',
+  'prose-block',
   'hero',
   'cta-strip',
   'breadcrumb',
@@ -161,6 +163,7 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
 ]);
 
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
+  'prose-block',
   'card-grid',
   'carousel',
   'tabs',
@@ -1427,7 +1430,8 @@ export class CodeReviewerService {
           LOW_COMPLEXITY_VISUAL_SECTION_TYPES.has(section.type),
         ),
       hasPageContent: sections.some(
-        (section) => section.type === 'page-content',
+        (section) =>
+          section.type === 'page-content' || section.type === 'prose-block',
       ),
       hasPostContent: sections.some(
         (section) => section.type === 'post-content',
@@ -3172,6 +3176,35 @@ export class CodeReviewerService {
     const stateKey = this.resolveInteractiveSectionStateKey(section);
 
     switch (section.type) {
+      case 'prose-block':
+        lines.push(
+          `- Render exactly ${section.sourceSegments.length} source segment(s) in order. Do not merge, summarize, or drop segments.`,
+        );
+        section.sourceSegments.forEach((segment, segmentIndex) => {
+          const prefix = `- Segment ${segmentIndex + 1}`;
+          switch (segment.type) {
+            case 'heading':
+              lines.push(`${prefix} heading: ${JSON.stringify(segment.text)}`);
+              break;
+            case 'paragraph':
+              lines.push(
+                `${prefix} paragraph: ${JSON.stringify(segment.text ?? segment.html)}`,
+              );
+              break;
+            case 'image':
+              lines.push(`${prefix} image src: ${JSON.stringify(segment.src)}`);
+              break;
+            case 'list':
+              lines.push(
+                `${prefix} list items: ${segment.items.map((item) => JSON.stringify(item)).join(', ')}`,
+              );
+              break;
+            case 'html':
+              lines.push(`${prefix} html: ${JSON.stringify(segment.html)}`);
+              break;
+          }
+        });
+        break;
       case 'card-grid':
         if (section.title) {
           lines.push(`- Keep title exactly: ${JSON.stringify(section.title)}`);
@@ -4148,6 +4181,14 @@ export class CodeReviewerService {
     }
 
     switch (section.type) {
+      case 'prose-block':
+        for (const segment of section.sourceSegments) {
+          add(segment.customClassNames);
+          if (segment.type === 'list') {
+            add(segment.itemCustomClassNames);
+          }
+        }
+        break;
       case 'hero':
         add(section.headingCustomClassNames);
         add(section.subheadingCustomClassNames);

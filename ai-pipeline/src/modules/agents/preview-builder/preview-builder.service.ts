@@ -39,6 +39,11 @@ import {
   buildUiSourceMapForProject,
   writeUiSourceMapArtifacts,
 } from '../../edit-request/ui-source-map.util.js';
+import {
+  SOURCE_MOTION_BOOTSTRAP_TS,
+  SOURCE_MOTION_BRIDGE_CSS,
+  SPECTRA_COMPAT_CSS,
+} from './preview-bridge-assets.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -184,6 +189,10 @@ export class PreviewBuilderService {
     await this.applySpectraCompatImport(
       frontendDir,
       this.shouldInjectSpectraCompatCss(components.components, repoManifest),
+    );
+    await this.applySourceMotionBridge(
+      frontendDir,
+      this.shouldInjectSourceMotionBridge(components.components),
     );
 
     // 3b. Copy đúng các asset mà component generated đang reference.
@@ -947,25 +956,140 @@ ${fontEntries}
     enabled: boolean,
   ): Promise<void> {
     const cssPath = join(frontendDir, 'src', 'index.css');
+    const compatCssPath = join(
+      frontendDir,
+      'src',
+      'styles',
+      'spectra-compat.css',
+    );
     const importLine = `@import './styles/spectra-compat.css';`;
     const existingCss = await readFile(cssPath, 'utf-8');
 
     if (!enabled) {
+      await rm(compatCssPath, { force: true });
       if (!existingCss.includes(importLine)) return;
       await writeFile(
         cssPath,
-        existingCss
-          .replace(`${importLine}\r\n`, '')
-          .replace(`${importLine}\n`, '')
-          .replace(importLine, ''),
+        this.removeExactLine(existingCss, importLine),
         'utf-8',
       );
       return;
     }
 
+    await writeFile(
+      compatCssPath,
+      `${SPECTRA_COMPAT_CSS.trimEnd()}\n`,
+      'utf-8',
+    );
+
     if (existingCss.includes(importLine)) return;
 
-    const lines = existingCss.split(/\r?\n/);
+    await writeFile(
+      cssPath,
+      this.insertCssImportBeforeTailwindDirectives(existingCss, importLine),
+      'utf-8',
+    );
+  }
+
+  private shouldInjectSourceMotionBridge(
+    components: ReactGenerateResult['components'],
+  ): boolean {
+    const sourceMotionPattern =
+      /\bwow\b[\s\S]{0,400}\banimate__[\w-]+\b|\banimate__[\w-]+\b[\s\S]{0,400}\bwow\b/;
+
+    return components.some((component) =>
+      sourceMotionPattern.test(component.code),
+    );
+  }
+
+  private async applySourceMotionBridge(
+    frontendDir: string,
+    enabled: boolean,
+  ): Promise<void> {
+    const indexCssPath = join(frontendDir, 'src', 'index.css');
+    const mainTsxPath = join(frontendDir, 'src', 'main.tsx');
+    const bridgeCssPath = join(
+      frontendDir,
+      'src',
+      'styles',
+      'source-motion-bridges.css',
+    );
+    const bridgeModulePath = join(frontendDir, 'src', 'source-motion.ts');
+    const cssImportLine = `@import './styles/source-motion-bridges.css';`;
+    const moduleImportLine = `import { watchForSourceMotionSignals } from './source-motion';`;
+    const moduleCallLine = `watchForSourceMotionSignals();`;
+    const [existingCss, existingMainTsx] = await Promise.all([
+      readFile(indexCssPath, 'utf-8'),
+      readFile(mainTsxPath, 'utf-8'),
+    ]);
+
+    if (!enabled) {
+      await Promise.all([
+        rm(bridgeCssPath, { force: true }),
+        rm(bridgeModulePath, { force: true }),
+      ]);
+
+      const nextCss = this.removeExactLine(existingCss, cssImportLine);
+      const nextMainTsx = this.removeExactLine(
+        this.removeExactLine(existingMainTsx, moduleImportLine),
+        moduleCallLine,
+      );
+
+      await Promise.all([
+        nextCss === existingCss
+          ? Promise.resolve()
+          : writeFile(indexCssPath, nextCss, 'utf-8'),
+        nextMainTsx === existingMainTsx
+          ? Promise.resolve()
+          : writeFile(mainTsxPath, nextMainTsx, 'utf-8'),
+      ]);
+      return;
+    }
+
+    await Promise.all([
+      writeFile(
+        bridgeCssPath,
+        `${SOURCE_MOTION_BRIDGE_CSS.trimEnd()}\n`,
+        'utf-8',
+      ),
+      writeFile(
+        bridgeModulePath,
+        `${SOURCE_MOTION_BOOTSTRAP_TS.trimEnd()}\n`,
+        'utf-8',
+      ),
+    ]);
+
+    const nextCss = this.insertCssImportBeforeTailwindDirectives(
+      existingCss,
+      cssImportLine,
+    );
+    const withModuleImport = this.insertImportLine(
+      existingMainTsx,
+      moduleImportLine,
+    );
+    const nextMainTsx = this.insertLineAfterMarker(
+      withModuleImport,
+      'startInspectorClient();',
+      moduleCallLine,
+    );
+
+    await Promise.all([
+      nextCss === existingCss
+        ? Promise.resolve()
+        : writeFile(indexCssPath, nextCss, 'utf-8'),
+      nextMainTsx === existingMainTsx
+        ? Promise.resolve()
+        : writeFile(mainTsxPath, nextMainTsx, 'utf-8'),
+    ]);
+  }
+
+  private insertCssImportBeforeTailwindDirectives(
+    source: string,
+    importLine: string,
+  ): string {
+    if (source.includes(importLine)) return source;
+
+    const lines = source.split(/\r?\n/);
     const firstDirectiveIndex = lines.findIndex((line) =>
       [
         '@tailwind base;',
@@ -976,15 +1100,51 @@ ${fontEntries}
 
     if (firstDirectiveIndex >= 0) {
       lines.splice(firstDirectiveIndex, 0, importLine);
-      await writeFile(cssPath, `${lines.join('\n').trimEnd()}\n`, 'utf-8');
-      return;
+      return `${lines.join('\n').trimEnd()}\n`;
     }
 
-    await writeFile(
-      cssPath,
-      `${importLine}\n${existingCss.trimStart()}`,
-      'utf-8',
+    return `${importLine}\n${source.trimStart()}`;
+  }
+
+  private insertImportLine(source: string, importLine: string): string {
+    if (source.includes(importLine)) return source;
+
+    const lines = source.split(/\r?\n/);
+    let lastImportIndex = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (lines[index].trim().startsWith('import ')) {
+        lastImportIndex = index;
+      }
+    }
+
+    lines.splice(lastImportIndex + 1, 0, importLine);
+    return `${lines.join('\n').trimEnd()}\n`;
+  }
+
+  private insertLineAfterMarker(
+    source: string,
+    markerLine: string,
+    nextLine: string,
+  ): string {
+    if (source.includes(nextLine)) return source;
+
+    const lines = source.split(/\r?\n/);
+    const markerIndex = lines.findIndex(
+      (line) => line.trim() === markerLine.trim(),
     );
+    if (markerIndex < 0) return `${source.trimEnd()}\n${nextLine}\n`;
+
+    lines.splice(markerIndex + 1, 0, nextLine);
+    return `${lines.join('\n').trimEnd()}\n`;
+  }
+
+  private removeExactLine(source: string, lineToRemove: string): string {
+    const lines = source.split(/\r?\n/);
+    const nextLines = lines.filter(
+      (line) => line.trim() !== lineToRemove.trim(),
+    );
+    if (nextLines.length === lines.length) return source;
+    return `${nextLines.join('\n').trimEnd()}\n`;
   }
 
   private normalizeWordPressCustomCssSelectors(css: string): string {

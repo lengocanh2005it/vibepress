@@ -1782,6 +1782,54 @@ function buildCompactSectionSummary(
           parts.push(`bodyPresentation=${section.bodyPresentation}`);
         }
         break;
+      case 'prose-block':
+        parts.push(`segments=${section.sourceSegments.length}`);
+        if (section.shellVariant) {
+          parts.push(`shellVariant=${section.shellVariant}`);
+        }
+        section.sourceSegments.slice(0, 6).forEach((segment, segmentIndex) => {
+          switch (segment.type) {
+            case 'heading':
+              pushPlanTextPart(
+                parts,
+                `segment${segmentIndex + 1}Heading`,
+                segment.text,
+              );
+              break;
+            case 'paragraph':
+              pushPlanTextPart(
+                parts,
+                `segment${segmentIndex + 1}Paragraph`,
+                segment.text ?? segment.html,
+                220,
+              );
+              break;
+            case 'image':
+              pushPlanTextPart(
+                parts,
+                `segment${segmentIndex + 1}Image`,
+                segment.src,
+              );
+              break;
+            case 'list':
+              pushPlanTextPart(
+                parts,
+                `segment${segmentIndex + 1}List`,
+                segment.items.join(' | '),
+                220,
+              );
+              break;
+            case 'html':
+              pushPlanTextPart(
+                parts,
+                `segment${segmentIndex + 1}Html`,
+                segment.html,
+                220,
+              );
+              break;
+          }
+        });
+        break;
       case 'cover':
         parts.push(`contentAlign=${section.contentAlign}`);
         parts.push(`minHeight=${section.minHeight}`);
@@ -2588,6 +2636,41 @@ function buildFullFileLiteralChecklist(
           );
         }
         break;
+      case 'prose-block':
+        lines.push(
+          `- ${label} sourceSegments: ${section.sourceSegments.length} item(s) in exact order`,
+        );
+        section.sourceSegments.forEach((segment, segmentIndex) => {
+          const segmentLabel = `${label} segment ${segmentIndex + 1}`;
+          switch (segment.type) {
+            case 'heading':
+              lines.push(
+                `- ${segmentLabel} heading: ${JSON.stringify(segment.text)}`,
+              );
+              break;
+            case 'paragraph':
+              lines.push(
+                `- ${segmentLabel} paragraph: ${JSON.stringify(segment.text ?? segment.html)}`,
+              );
+              break;
+            case 'image':
+              lines.push(
+                `- ${segmentLabel} imageSrc: ${JSON.stringify(segment.src)}`,
+              );
+              break;
+            case 'list':
+              lines.push(
+                `- ${segmentLabel} listItems: ${JSON.stringify(segment.items.slice(0, 12))}`,
+              );
+              break;
+            case 'html':
+              lines.push(
+                `- ${segmentLabel} html: ${JSON.stringify(segment.html)}`,
+              );
+              break;
+          }
+        });
+        break;
       case 'footer':
         if (section.brandDescription) {
           lines.push(
@@ -2862,6 +2945,13 @@ When this section renders post-list/archive/search/recent-post meta:
 function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
   const stateKeyHint = resolveInteractiveSectionPromptStateKey(section);
   switch (section.type) {
+    case 'prose-block':
+      return [
+        '## Section behavior contract',
+        '- Render `sourceSegments` in the exact approved order. Do not merge adjacent segments or collapse them into a single generic wrapper.',
+        '- Preserve inline HTML inside paragraph/list/html segments instead of flattening it to plain text.',
+        '- Preserve image visibility for image segments; do not replace source-backed images with placeholders.',
+      ].join('\n');
     case 'post-meta':
       return [
         '## Section behavior contract',
@@ -2953,6 +3043,35 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
   }
 
   switch (section.type) {
+    case 'prose-block':
+      if (section.shellVariant) {
+        lines.push(`- shellVariant: ${JSON.stringify(section.shellVariant)}`);
+      }
+      section.sourceSegments.forEach((segment, segmentIndex) => {
+        const prefix = `- segment${segmentIndex + 1}`;
+        switch (segment.type) {
+          case 'heading':
+            lines.push(`${prefix} heading: ${JSON.stringify(segment.text)}`);
+            break;
+          case 'paragraph':
+            lines.push(
+              `${prefix} paragraph: ${JSON.stringify(segment.text ?? segment.html)}`,
+            );
+            break;
+          case 'image':
+            lines.push(`${prefix} imageSrc: ${JSON.stringify(segment.src)}`);
+            break;
+          case 'list':
+            lines.push(
+              `${prefix} listItems: ${JSON.stringify(segment.items.slice(0, 12))}`,
+            );
+            break;
+          case 'html':
+            lines.push(`${prefix} html: ${JSON.stringify(segment.html)}`);
+            break;
+        }
+      });
+      break;
     case 'post-meta':
       lines.push(`- layout: ${JSON.stringify(section.layout ?? 'inline')}`);
       lines.push(`- showAuthor: ${JSON.stringify(section.showAuthor)}`);
@@ -3478,6 +3597,12 @@ function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
   }
 
   switch (section.type) {
+    case 'prose-block':
+      for (const segment of section.sourceSegments) {
+        add(segment.customClassNames);
+        if (segment.type === 'list') add(segment.itemCustomClassNames);
+      }
+      break;
     case 'hero':
       add(section.headingCustomClassNames);
       add(section.subheadingCustomClassNames);

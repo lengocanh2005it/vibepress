@@ -7,6 +7,7 @@ import type {
   ComponentVisualPlan,
   DataNeed,
   SectionPlan,
+  SourceSegment,
 } from '../visual-plan.schema.js';
 import {
   formatInventedAuxiliarySectionLabels,
@@ -209,6 +210,7 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 | \`post-content\` | single post detail (uses :slug param) |
 | \`post-meta\` | reusable byline/meta row for one current post item |
 | \`page-content\` | single page detail (uses :slug param) |
+| \`prose-block\` | source-backed ordered prose/image/list segments for lossless fixed page detail rendering |
 | \`comments\`     | WordPress comments list + leave a reply form |
 | \`search\` | search input + results |
 | \`breadcrumb\` | breadcrumb trail |
@@ -234,6 +236,7 @@ footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
 post-meta:    { layout?: inline|stacked, showAuthor, showDate, showCategories, showSeparator? }
 page-content: { showTitle }
+prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|paragraph|image|list|html, ... }] }
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
@@ -251,6 +254,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - If theme or plugin source is sparse, keep the plan sparse. Do NOT compensate by inventing extra wrapper sections, promo rows, centered hero treatments, or broader containers.
 - When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
 - When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`debugKey\`/legacy \`sectionKey\` labels or different \`sourceRef.sourceNodeId\`.
+- If a deterministic draft section is \`prose-block\`, preserve its \`sourceSegments\` literally and in order. Do NOT summarize them into a shorter hero/cover/media-text replacement.
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
 - If an earlier draft section owns the heading/body/CTA and a later draft section owns the image, keep them as two separate sections in the JSON output. The later image must NOT be pulled up beside the earlier text block.
 - \`hero.layout: "split"\` is allowed ONLY when that SAME single draft section already contains both the text content and the image/media content under one shared wrapper/source node.
@@ -683,6 +687,7 @@ const VALID_SECTION_TYPES = new Set<string>([
   'post-content',
   'post-meta',
   'page-content',
+  'prose-block',
   'comments',
   'search',
   'breadcrumb',
@@ -748,6 +753,143 @@ function sanitizePalette(raw: any): ColorPalette {
   if (isHex(raw?.dark)) result.dark = raw.dark;
   if (isHex(raw?.darkText)) result.darkText = raw.darkText;
   return result as ColorPalette;
+}
+
+function normalizeSourceSegment(raw: unknown): SourceSegment | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const segment = raw as Record<string, unknown>;
+  const type =
+    typeof segment.type === 'string' ? segment.type.trim().toLowerCase() : '';
+  const sourceRef =
+    segment.sourceRef && typeof segment.sourceRef === 'object'
+      ? (segment.sourceRef as SourceSegment['sourceRef'])
+      : undefined;
+  const customClassNames = Array.isArray(segment.customClassNames)
+    ? [
+        ...new Set(
+          segment.customClassNames
+            .filter(
+              (value: unknown): value is string => typeof value === 'string',
+            )
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      ]
+    : undefined;
+
+  switch (type) {
+    case 'heading': {
+      const text =
+        typeof segment.text === 'string' ? segment.text.trim() : undefined;
+      if (!text) return null;
+      return {
+        type: 'heading',
+        text,
+        ...(typeof segment.html === 'string' && segment.html.trim()
+          ? { html: segment.html.trim() }
+          : {}),
+        ...(typeof segment.level === 'number' &&
+        Number.isFinite(segment.level) &&
+        segment.level >= 1 &&
+        segment.level <= 6
+          ? { level: Math.floor(segment.level) }
+          : {}),
+        ...(customClassNames?.length ? { customClassNames } : {}),
+        ...(sanitizeTypographyStyle(segment.style)
+          ? { style: sanitizeTypographyStyle(segment.style)! }
+          : {}),
+        ...(sourceRef ? { sourceRef } : {}),
+      };
+    }
+    case 'paragraph': {
+      const html =
+        typeof segment.html === 'string' ? segment.html.trim() : undefined;
+      const text =
+        typeof segment.text === 'string' ? segment.text.trim() : undefined;
+      if (!html && !text) return null;
+      return {
+        type: 'paragraph',
+        html: html ?? text!,
+        ...(text ? { text } : {}),
+        ...(customClassNames?.length ? { customClassNames } : {}),
+        ...(sanitizeTypographyStyle(segment.style)
+          ? { style: sanitizeTypographyStyle(segment.style)! }
+          : {}),
+        ...(sourceRef ? { sourceRef } : {}),
+      };
+    }
+    case 'image': {
+      const src = typeof segment.src === 'string' ? segment.src.trim() : '';
+      if (!src) return null;
+      return {
+        type: 'image',
+        src,
+        ...(typeof segment.alt === 'string' ? { alt: segment.alt } : {}),
+        ...(typeof segment.caption === 'string' && segment.caption.trim()
+          ? { caption: segment.caption.trim() }
+          : {}),
+        ...(typeof segment.width === 'number' && Number.isFinite(segment.width)
+          ? { width: Math.round(segment.width) }
+          : {}),
+        ...(typeof segment.height === 'number' &&
+        Number.isFinite(segment.height)
+          ? { height: Math.round(segment.height) }
+          : {}),
+        ...(customClassNames?.length ? { customClassNames } : {}),
+        ...(sourceRef ? { sourceRef } : {}),
+      };
+    }
+    case 'list': {
+      const items = Array.isArray(segment.items)
+        ? segment.items
+            .filter(
+              (value: unknown): value is string => typeof value === 'string',
+            )
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [];
+      if (items.length === 0) return null;
+      const itemCustomClassNames = Array.isArray(segment.itemCustomClassNames)
+        ? [
+            ...new Set(
+              segment.itemCustomClassNames
+                .filter(
+                  (value: unknown): value is string =>
+                    typeof value === 'string',
+                )
+                .map((value) => value.trim())
+                .filter(Boolean),
+            ),
+          ]
+        : undefined;
+      return {
+        type: 'list',
+        items,
+        ...(typeof segment.ordered === 'boolean'
+          ? { ordered: segment.ordered }
+          : {}),
+        ...(customClassNames?.length ? { customClassNames } : {}),
+        ...(itemCustomClassNames?.length ? { itemCustomClassNames } : {}),
+        ...(sanitizeTypographyStyle(segment.style)
+          ? { style: sanitizeTypographyStyle(segment.style)! }
+          : {}),
+        ...(sourceRef ? { sourceRef } : {}),
+      };
+    }
+    case 'html': {
+      const html =
+        typeof segment.html === 'string' ? segment.html.trim() : undefined;
+      if (!html) return null;
+      return {
+        type: 'html',
+        html,
+        ...(customClassNames?.length ? { customClassNames } : {}),
+        ...(sourceRef ? { sourceRef } : {}),
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 /**
@@ -1040,6 +1182,23 @@ function validateSectionDetailed(
 
     case 'page-content':
       if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
+      break;
+
+    case 'prose-block':
+      if (!['article', 'wide'].includes(raw.shellVariant)) {
+        delete raw.shellVariant;
+      }
+      raw.sourceSegments = Array.isArray(raw.sourceSegments)
+        ? raw.sourceSegments
+            .map((segment) => normalizeSourceSegment(segment))
+            .filter(Boolean)
+        : [];
+      if (raw.sourceSegments.length === 0) {
+        return {
+          section: null,
+          reason: 'prose-block.sourceSegments must be a non-empty array',
+        };
+      }
       break;
 
     case 'comments':
@@ -1479,6 +1638,13 @@ export function sanitizeSectionsForContract(
       if (section.type === 'page-content' && !allowPageDetail) {
         adjustments.push(
           'removed page-content section because contract does not allow pageDetail',
+        );
+        return null;
+      }
+
+      if (section.type === 'prose-block' && !allowPageDetail) {
+        adjustments.push(
+          'removed prose-block section because contract does not allow pageDetail',
         );
         return null;
       }

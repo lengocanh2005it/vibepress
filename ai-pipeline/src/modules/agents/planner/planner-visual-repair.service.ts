@@ -820,6 +820,8 @@ export class PlannerVisualRepairService {
     return relevant.slice(0, 8).map((section, index) => {
       const identity = `${section.type}${(section.debugKey ?? section.sectionKey) ? `:${section.debugKey ?? section.sectionKey}` : ''}`;
       switch (section.type) {
+        case 'prose-block':
+          return `${identity} | segments=${section.sourceSegments.length}`;
         case 'carousel':
           return `${identity} | slides=${section.slides.length}`;
         case 'modal':

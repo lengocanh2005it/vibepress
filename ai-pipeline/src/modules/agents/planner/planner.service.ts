@@ -12,7 +12,10 @@ import {
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
-import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import {
+  mapWpNodesToDraftSections,
+  mapWpNodesToLosslessPageSections,
+} from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
 import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
@@ -2777,6 +2780,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (sources.length === 0) return undefined;
 
       let mergedDraft: SectionPlan[] = [];
+      let expectedCoverageUnits = 0;
       for (const source of sources) {
         const parsedNodes = this.parsePlanningSourceNodes({
           source: source.source,
@@ -2792,6 +2796,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           mapWpNodesToDraftSections(nodes),
         );
         if (draft.length === 0) continue;
+        expectedCoverageUnits += this.countCoverageUnits(draft);
 
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
       }
@@ -2809,10 +2814,124 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       }).sections;
       const filteredSections =
         this.filterDegenerateDraftSections(sanitizedSections);
-      return filteredSections.length > 0 ? filteredSections : undefined;
+      if (filteredSections.length === 0) return undefined;
+
+      const coverageAudit = this.assessPlanningSourceDraftCoverage({
+        componentPlan,
+        sections: filteredSections,
+        expectedCoverageUnits,
+        planningSource,
+      });
+      if (!coverageAudit.ok) {
+        this.logger.warn(
+          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+        );
+        return undefined;
+      }
+
+      return filteredSections;
     } catch {
       return undefined;
     }
+  }
+
+  private countCoverageUnits(sections: SectionPlan[] | undefined): number {
+    if (!sections?.length) return 0;
+    return sections.reduce((count, section) => {
+      if (section.type !== 'prose-block') return count + 1;
+      return count + Math.max(1, section.sourceSegments.length);
+    }, 0);
+  }
+
+  private assessPlanningSourceDraftCoverage(input: {
+    componentPlan: PlanResult[number];
+    sections: SectionPlan[];
+    expectedCoverageUnits: number;
+    planningSource?: PlanningSourceContext;
+  }): { ok: boolean; reason?: string } {
+    const { componentPlan, sections, expectedCoverageUnits, planningSource } =
+      input;
+    if (expectedCoverageUnits <= 0) return { ok: true };
+
+    const actualCoverageUnits = this.countCoverageUnits(sections);
+    const auxiliaryOnlyTypes = new Set<SectionPlan['type']>([
+      'breadcrumb',
+      'search',
+      'card-grid',
+      'hero',
+      'cover',
+    ]);
+    const canonicalContentTypes = new Set<SectionPlan['type']>([
+      'page-content',
+      'post-content',
+      'prose-block',
+      'comments',
+      'sidebar',
+    ]);
+    const nonCanonical = sections.filter(
+      (section) => !canonicalContentTypes.has(section.type),
+    );
+    const hasOnlyAuxiliarySections =
+      nonCanonical.length > 0 &&
+      nonCanonical.every((section) => auxiliaryOnlyTypes.has(section.type));
+    const hasPageBody = sections.some(
+      (section) =>
+        section.type === 'page-content' || section.type === 'prose-block',
+    );
+    const hasPostBody = sections.some(
+      (section) => section.type === 'post-content',
+    );
+    const expectsPageBody = componentPlan.dataNeeds.includes('page-detail');
+    const expectsPostBody = componentPlan.dataNeeds.includes('post-detail');
+    const isDbBackedPageSource =
+      planningSource?.sourceLabel?.startsWith('db:') ||
+      planningSource?.sourceFile?.startsWith('db:');
+
+    if (expectsPageBody && !hasPageBody) {
+      return {
+        ok: false,
+        reason: 'page-detail source draft lost canonical page body section(s)',
+      };
+    }
+    if (expectsPostBody && !hasPostBody && hasOnlyAuxiliarySections) {
+      return {
+        ok: false,
+        reason:
+          'post-detail source draft collapsed into auxiliary sections only',
+      };
+    }
+
+    if (
+      expectedCoverageUnits >= 4 &&
+      actualCoverageUnits <= 2 &&
+      hasOnlyAuxiliarySections
+    ) {
+      return {
+        ok: false,
+        reason: `source-backed section coverage collapsed to ${actualCoverageUnits}/${expectedCoverageUnits} auxiliary units`,
+      };
+    }
+
+    const minimumCoverageRatio =
+      expectsPageBody || expectsPostBody || isDbBackedPageSource ? 0.55 : 0.4;
+    const minimumCoverageUnits =
+      expectedCoverageUnits >= 6
+        ? Math.max(3, Math.ceil(expectedCoverageUnits * minimumCoverageRatio))
+        : expectedCoverageUnits >= 4
+          ? 3
+          : 0;
+
+    if (
+      minimumCoverageUnits > 0 &&
+      actualCoverageUnits < minimumCoverageUnits
+    ) {
+      return {
+        ok: false,
+        reason: `source-backed section coverage too low (${actualCoverageUnits}/${expectedCoverageUnits}; expected at least ${minimumCoverageUnits})`,
+      };
+    }
+
+    return { ok: true };
   }
 
   /**
@@ -2891,6 +3010,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (!meaningful.length) return false;
 
     const STRONG_RICH = new Set<SectionPlan['type']>([
+      'prose-block',
       'hero',
       'cover',
       'media-text',
@@ -2924,6 +3044,42 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return false;
   }
 
+  private hasSufficientBoundPageDraftCoverage(
+    nodes: { block?: string }[],
+    sections: SectionPlan[] | undefined,
+  ): boolean {
+    if (!sections?.length) return false;
+
+    const meaningfulNodeCount = nodes.filter((node) => {
+      const block = String(node.block ?? '')
+        .trim()
+        .toLowerCase();
+      if (!block) return false;
+      return ![
+        'core/separator',
+        'separator',
+        'core/spacer',
+        'spacer',
+        'core/buttons',
+        'buttons',
+        'core/button',
+        'button',
+      ].includes(block);
+    }).length;
+
+    if (meaningfulNodeCount < 6) return true;
+
+    const minimumSectionCount = Math.max(
+      3,
+      Math.ceil(meaningfulNodeCount * 0.45),
+    );
+    const coveredUnits = sections.reduce((count, section) => {
+      if (section.type !== 'prose-block') return count + 1;
+      return count + Math.max(1, section.sourceSegments.length);
+    }, 0);
+    return coveredUnits >= minimumSectionCount;
+  }
+
   private buildRichBoundPageDetailSections(
     componentPlan: PlanResult[number],
     content: DbContentResult,
@@ -2936,11 +3092,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     );
     const source = String(boundPage?.content ?? '').trim();
     if (!source) return undefined;
-
-    // Fast exit for prose-only pages — no point running the mapper.
-    if (this.classifyBoundPageDetailContent(source) === 'simple_body') {
-      return undefined;
-    }
 
     try {
       const nodes = this.styleResolver.resolve(
@@ -2956,7 +3107,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (nodes.length === 0) return undefined;
 
       const draftSections = sanitizeSectionsForContract(
-        mapWpNodesToDraftSections(nodes),
+        mapWpNodesToLosslessPageSections(nodes),
         {
           componentType: componentPlan.type,
           route: componentPlan.route,
@@ -2968,6 +3119,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       ).sections;
 
       // map-first → score-second → fallback-last
+      if (!this.hasSufficientBoundPageDraftCoverage(nodes, draftSections)) {
+        return undefined;
+      }
       if (!this.assessBoundPageDetailDraftQuality(draftSections)) {
         return undefined;
       }
@@ -3176,6 +3330,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     ): boolean => !!cta && (hasText(cta.text) || hasText(cta.link));
 
     switch (section.type) {
+      case 'prose-block':
+        return section.sourceSegments.length === 0;
       case 'hero':
         return (
           !hasText(section.heading) &&
@@ -3265,6 +3421,27 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         .toLowerCase();
 
     switch (section.type) {
+      case 'prose-block':
+        return [
+          section.type,
+          section.sourceSegments
+            .slice(0, 10)
+            .map((segment) => {
+              switch (segment.type) {
+                case 'heading':
+                  return normalize(segment.text);
+                case 'paragraph':
+                  return normalize(segment.text ?? segment.html);
+                case 'list':
+                  return segment.items.map((item) => normalize(item)).join('|');
+                case 'image':
+                  return normalize(segment.src);
+                case 'html':
+                  return normalize(segment.html);
+              }
+            })
+            .join('|'),
+        ].join('|');
       case 'hero':
         return [
           section.type,
@@ -4291,6 +4468,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return relevant.slice(0, 6).map((section, index) => {
       const identity = `${section.type}${(section.debugKey ?? section.sectionKey) ? `:${section.debugKey ?? section.sectionKey}` : ''}`;
       switch (section.type) {
+        case 'prose-block':
+          return `${identity} | segments=${section.sourceSegments.length}`;
         case 'carousel':
           return `${identity} | slides=${section.slides.length}`;
         case 'modal':

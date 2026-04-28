@@ -1209,6 +1209,31 @@ export class ValidatorService {
       case 'page-content':
         this.populatePageContentContract(section, label, addBinding);
         break;
+      case 'prose-block':
+        for (const segment of section.sourceSegments) {
+          switch (segment.type) {
+            case 'heading':
+              addLiteral(segment.text, `${label} lost prose heading`);
+              break;
+            case 'paragraph':
+              addLiteral(
+                segment.text ?? segment.html,
+                `${label} lost prose paragraph`,
+              );
+              break;
+            case 'image':
+              addLiteral(segment.src, `${label} lost prose image src`);
+              break;
+            case 'list':
+              segment.items.forEach((item) =>
+                addLiteral(item, `${label} lost prose list item`),
+              );
+              break;
+            case 'html':
+              break;
+          }
+        }
+        break;
       case 'search':
         this.populateSearchContract(section, label, addLiteral, addBinding);
         break;
@@ -1935,11 +1960,16 @@ export class ValidatorService {
     isInlineSection = false,
   ): string[] {
     const issues: string[] = [];
+    const satisfiesCanonicalPageContentBinding =
+      contract.role === 'prose-block' &&
+      this.codeSatisfiesBindingRequirement(code, 'page-content');
 
-    for (const literal of contract.literals) {
-      issues.push(
-        ...this.requireLiteralIfPresent(code, literal.value, literal.message),
-      );
+    if (!satisfiesCanonicalPageContentBinding) {
+      for (const literal of contract.literals) {
+        issues.push(
+          ...this.requireLiteralIfPresent(code, literal.value, literal.message),
+        );
+      }
     }
 
     for (const binding of contract.bindings) {

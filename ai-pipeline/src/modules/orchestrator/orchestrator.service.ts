@@ -73,6 +73,8 @@ import {
 import { getComponentStrategy } from '../agents/component-strategy.registry.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
+import { SiteCompareService } from '../site-compare/site-compare.service.js';
+import type { SiteCompareMetrics } from '../site-compare/site-compare.types.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import type {
   ApplyPendingEditRequestDto,
@@ -101,29 +103,7 @@ interface ProgressEventData {
   editApprovalRequired?: boolean;
   editApplied?: boolean;
   stepDetails?: ProgressStepDetails;
-  metrics?: {
-    urlA?: string;
-    urlB?: string;
-    diffPercentage?: number;
-    differentPixels?: number;
-    totalPixels?: number;
-    summary?: {
-      overall?: {
-        visualAvgAccuracy?: number;
-        visualPassRate?: number;
-        contentAvgOverall?: number;
-        diffPercentage?: number;
-        differentPixels?: number;
-        totalPixels?: number;
-      };
-    };
-    artifacts?: {
-      imageA?: string;
-      imageB?: string;
-      diff?: string;
-    };
-    [key: string]: unknown;
-  };
+  metrics?: SiteCompareMetrics;
 }
 
 interface ProgressStepCapturePreview {
@@ -239,9 +219,8 @@ const STEP_META: Record<
     label: 'Evaluate Final Compare Metrics',
     weight: 2,
     activeMessage:
-      'Calling backend automation to compare the WordPress site and the React preview.',
-    doneMessage:
-      'Final site-compare metrics have been collected from backend automation.',
+      'Running site compare across the WordPress site and the React preview.',
+    doneMessage: 'Final site-compare metrics have been collected.',
   },
   '10_cleanup': {
     label: 'Clean Temporary Workspace',
@@ -623,6 +602,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
+    private readonly siteCompareService: SiteCompareService,
   ) {}
 
   async beforeApplicationShutdown(signal?: string): Promise<void> {
@@ -1147,8 +1127,8 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           ? 'Evaluate Edited Preview Metrics'
           : 'Evaluate Baseline Preview Metrics',
         activeMessage: editApplied
-          ? 'Calling backend automation to compare the edited preview against WordPress.'
-          : 'Calling backend automation to compare the baseline React preview against WordPress before any pending edit is approved.',
+          ? 'Running site compare for the edited preview against WordPress.'
+          : 'Running site compare for the baseline React preview against WordPress before any pending edit is approved.',
         doneMessage: editApplied
           ? 'Final compare metrics for the edited preview have been collected.'
           : 'Final compare metrics for the baseline React preview have been collected.',
@@ -1489,7 +1469,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       control.runtimeSummary = summaryDraft;
     }
     await this.tokenTracker.init(logPath);
-    let metrics: any = null;
+    let metrics: SiteCompareMetrics | null = null;
     let visualRouteResults: any[] = [];
     try {
       const cfgPlanning = this.configService.get<string>(
@@ -3018,6 +2998,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       await this.runStep(state, '9_visual_compare', logPath, async () => {
         const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
         const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
+        const compareMode =
+          hasEditRequest && this.controls.get(jobId)?.editApplied
+            ? 'edited'
+            : 'baseline';
         const previewTokens =
           'tokens' in normalizedTheme
             ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
@@ -3028,16 +3012,25 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           state,
           '9_visual_compare',
           0.2,
-          'Calling backend automation for final site compare metrics.',
+          'Running final site compare metrics across WordPress and the React preview.',
         );
 
         try {
-          metrics = await this.compareSiteWithAutomation({
+          const compareResult = await this.compareSite({
             siteId,
             wpBaseUrl,
             reactFeUrl: preview.previewUrl,
             reactBeUrl,
+            jobId,
+            mode: compareMode,
+            routeEntries: preview.routeEntries,
           });
+          metrics = compareResult.metrics ?? null;
+          if (compareResult.warnings?.length) {
+            for (const warning of compareResult.warnings) {
+              await this.logToFile(logPath, `[site-compare] ${warning}`);
+            }
+          }
           if (metrics) {
             await this.logAutomationCompareMetrics(logPath, 'initial', metrics);
           }
@@ -3065,12 +3058,21 @@ export class OrchestratorService implements BeforeApplicationShutdown {
 
           if (visualRepairResult.applied) {
             try {
-              metrics = await this.compareSiteWithAutomation({
+              const compareResult = await this.compareSite({
                 siteId,
                 wpBaseUrl,
                 reactFeUrl: preview.previewUrl,
                 reactBeUrl,
+                jobId,
+                mode: compareMode,
+                routeEntries: preview.routeEntries,
               });
+              metrics = compareResult.metrics ?? null;
+              if (compareResult.warnings?.length) {
+                for (const warning of compareResult.warnings) {
+                  await this.logToFile(logPath, `[site-compare] ${warning}`);
+                }
+              }
               if (metrics) {
                 await this.logAutomationCompareMetrics(
                   logPath,
@@ -3093,7 +3095,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           0.9,
           metrics
             ? 'Final site-compare metrics are attached.'
-            : 'Backend site compare did not return metrics; pipeline will continue.',
+            : 'Site compare did not return metrics; pipeline will continue.',
           metrics
             ? this.buildPreviewEventData({
                 preview,
@@ -3238,7 +3240,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               this.controls.get(jobId)?.pendingEditApproval,
             ),
             editApplied: Boolean(this.controls.get(jobId)?.editApplied),
-            metrics,
+            metrics: metrics ?? undefined,
           }),
         });
         return {
@@ -4113,27 +4115,21 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     };
   }
 
-  private async compareSiteWithAutomation(input: {
+  private async compareSite(input: {
     siteId: string;
     wpBaseUrl: string;
     reactFeUrl: string;
     reactBeUrl: string;
-  }): Promise<ProgressEventData['metrics'] | undefined> {
-    const { siteId, wpBaseUrl, reactFeUrl, reactBeUrl } = input;
-    const response = await lastValueFrom(
-      this.httpService.post(
-        `${this.configService.get<string>('automation.url', '')}/site/compare`,
-        {
-          siteId,
-          wpSiteId: siteId,
-          wpBaseUrl,
-          reactFeUrl,
-          reactBeUrl,
-        },
-      ),
-    );
-    return (response.data?.result ??
-      response.data) as ProgressEventData['metrics'];
+    jobId: string;
+    mode: 'baseline' | 'edited';
+    routeEntries?: unknown[];
+  }): Promise<{
+    metrics?: SiteCompareMetrics;
+    warnings?: string[];
+    provider: 'automation' | 'openclaw';
+    fallbackUsed?: boolean;
+  }> {
+    return this.siteCompareService.compare(input);
   }
 
   private async notifyAutomationMigrationCompleted(input: {

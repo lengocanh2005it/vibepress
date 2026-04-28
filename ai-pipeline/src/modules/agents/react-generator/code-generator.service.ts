@@ -19,6 +19,7 @@ import type {
   PostContentSection,
   PostMetaSection,
   PageContentSection,
+  ProseBlockSection,
   CommentsSection,
   SearchSection,
   SidebarSection,
@@ -29,6 +30,7 @@ import type {
   DataNeed,
   SectionCta,
   SectionPresentation,
+  SourceSegment,
 } from './visual-plan.schema.js';
 import {
   COMMENT_INTERFACE,
@@ -55,6 +57,7 @@ interface RenderCtx {
   t: TypographyTokens;
   l: LayoutTokens;
   b?: Record<string, BlockStyleToken>;
+  supportsPostsPagination?: boolean;
 }
 
 interface BlockFaithfulPartialInput {
@@ -93,6 +96,7 @@ export class CodeGeneratorService {
       t: effectivePlan.typography,
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
+      supportsPostsPagination: this.needsPagination(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -117,6 +121,7 @@ export class CodeGeneratorService {
       t: effectivePlan.typography,
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
+      supportsPostsPagination: this.needsPagination(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -489,6 +494,7 @@ export class CodeGeneratorService {
         case 'post-meta':
           break;
         case 'page-content':
+        case 'prose-block':
           needs.add('pageDetail');
           break;
         case 'sidebar': {
@@ -635,6 +641,10 @@ export class CodeGeneratorService {
           return section.tabs.some((tab) => !!tab.imageSrc);
         case 'carousel':
           return section.slides.some((slide) => !!slide.imageSrc);
+        case 'prose-block':
+          return section.sourceSegments.some(
+            (segment) => segment.type === 'image' && !!segment.src,
+          );
         default:
           return false;
       }
@@ -1559,7 +1569,10 @@ export default ${componentName};`;
           ) ?? null)
         : null;
     const mainContentSection = plan.sections.find(
-      (s) => s.type === 'page-content' || s.type === 'post-content',
+      (s): s is PostContentSection | PageContentSection | ProseBlockSection =>
+        s.type === 'page-content' ||
+        s.type === 'post-content' ||
+        s.type === 'prose-block',
     );
 
     for (let index = 0; index < plan.sections.length; index++) {
@@ -1641,6 +1654,9 @@ export default ${componentName};`;
         break;
       case 'page-content':
         markup = this.renderPageContent(section, ctx, py);
+        break;
+      case 'prose-block':
+        markup = this.renderProseBlock(section, ctx, py);
         break;
       case 'comments':
         markup = this.renderComments(section, ctx, py);
@@ -2690,7 +2706,9 @@ export default ${componentName};`;
 ${postCard}
             ))}
           </div>
-          {totalPages > 1 && (
+          ${
+            ctx.supportsPostsPagination
+              ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]">
               <button
                 type="button"
@@ -2710,7 +2728,9 @@ ${postCard}
                 Next
               </button>
             </div>
-          )}
+          )}`
+              : ''
+          }
         </div>
       </section>`;
   }
@@ -3664,6 +3684,26 @@ ${this.renderPageContentInner(s, ctx)}
       </section>`;
   }
 
+  private renderProseBlock(
+    s: ProseBlockSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const { p } = ctx;
+    const bg = s.background ?? p.background;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const shellClass =
+      s.shellVariant === 'wide'
+        ? ctx.l.containerClass
+        : this.contentContainerClass(ctx);
+    return `      {/* Prose Block */}
+      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+        <div className="${shellClass} px-4 sm:px-6 lg:px-8">
+${this.renderProseBlockInner(s, ctx)}
+        </div>
+      </section>`;
+  }
+
   private renderSearch(s: SearchSection, ctx: RenderCtx, py: string): string {
     const { p, t, l } = ctx;
     const bg = s.background ?? p.background;
@@ -3712,7 +3752,9 @@ ${this.renderPageContentInner(s, ctx)}
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}"${resultLinkStyle}>{post.title}</Link>
             ))}
           </div>
-          {totalPages > 1 && (
+          ${
+            ctx.supportsPostsPagination
+              ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]"${metaStyle}>
               <button
                 type="button"
@@ -3732,7 +3774,9 @@ ${this.renderPageContentInner(s, ctx)}
                 Next
               </button>
             </div>
-          )}
+          )}`
+              : ''
+          }
         </div>
       </section>`;
   }
@@ -3762,7 +3806,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
   }
 
   private renderContentWithSidebar(
-    mainSection: PostContentSection | PageContentSection,
+    mainSection: PostContentSection | PageContentSection | ProseBlockSection,
     sidebarSection: SidebarSection,
     ctx: RenderCtx,
     sidebarLeft: boolean,
@@ -3775,7 +3819,9 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const mainContent =
       mainSection.type === 'post-content'
         ? this.renderPostContentInner(mainSection, ctx)
-        : this.renderPageContentInner(mainSection, ctx);
+        : mainSection.type === 'page-content'
+          ? this.renderPageContentInner(mainSection, ctx)
+          : this.renderProseBlockInner(mainSection, ctx);
     const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
     const gridStyle = this.buildStyleAttr({
       gridTemplateColumns: sidebarLeft
@@ -3839,9 +3885,141 @@ ${this.renderSidebarCard(s, ctx, 10)}
     return `          {item && (
              <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
                ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
-               <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
-             </article>
-           )}`;
+                <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
+              </article>
+            )}`;
+  }
+
+  private renderProseBlockInner(s: ProseBlockSection, ctx: RenderCtx): string {
+    const segments = s.sourceSegments
+      .map((segment) => this.renderSourceSegment(segment, s, ctx))
+      .filter(Boolean)
+      .join('\n');
+    return `          <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
+${segments}
+          </article>`;
+  }
+
+  private renderSourceSegment(
+    segment: SourceSegment,
+    section: ProseBlockSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const tc = section.textColor ?? p.text;
+    const bodyBaseClass = this.appendStyledTextAlignClass(
+      `${t.body} leading-7 text-[${tc}]`,
+      segment.customClassNames,
+      section.presentation?.textAlign,
+    );
+    const segmentContainerClass =
+      section.shellVariant === 'wide' && segment.type !== 'image'
+        ? this.contentContainerClass(ctx)
+        : 'w-full';
+
+    switch (segment.type) {
+      case 'heading': {
+        const level = Math.min(Math.max(segment.level ?? 2, 1), 6);
+        const tag = `h${level}`;
+        const baseClass =
+          level <= 1
+            ? `${t.h1} font-normal text-[${tc}]`
+            : level === 2
+              ? `${t.h2} font-normal text-[${tc}]`
+              : `${t.h3} font-normal text-[${tc}]`;
+        const headingClass = this.appendStyledTextAlignClass(
+          baseClass,
+          segment.customClassNames,
+          section.presentation?.textAlign,
+        );
+        const headingStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'heading'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        if (segment.html && /<[^>]+>/.test(segment.html)) {
+          return `            <div className="${segmentContainerClass}">
+              <${tag} className="${headingClass}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+        }
+        return `            <div className="${segmentContainerClass}">
+              <${tag} className="${headingClass}"${headingStyle}>${segment.text}</${tag}>
+            </div>`;
+      }
+      case 'paragraph': {
+        const paragraphStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'paragraph'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${paragraphStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+      }
+      case 'image': {
+        const imageStyle = this.buildBlockStyleAttr(
+          this.pickBlockStyle(ctx, 'image', 'gallery'),
+          {},
+          false,
+          ctx,
+        );
+        const imageClassName = this.appendOptionalCustomClasses(
+          `h-auto w-full ${this.imageRadiusClass(ctx)} ${this.inlineImageFitClass(segment.src)}`,
+          segment.customClassNames,
+        );
+        return `            <div className="w-full">
+              <img src={resolveAsset(${JSON.stringify(segment.src)})} alt={${JSON.stringify(segment.alt ?? '')}} className="${imageClassName}"${imageStyle} />
+              ${segment.caption ? `<p className="mt-3 text-sm text-[${p.textMuted}]">${segment.caption}</p>` : ''}
+            </div>`;
+      }
+      case 'list': {
+        const tag = segment.ordered ? 'ol' : 'ul';
+        const listStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'list', 'paragraph'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        const listClass = this.appendStyledTextAlignClass(
+          `${t.body} flex flex-col gap-2 pl-6 text-[${tc}] ${segment.ordered ? 'list-decimal' : 'list-disc'}`,
+          segment.customClassNames,
+          section.presentation?.textAlign,
+        );
+        const itemClass = this.appendOptionalCustomClasses(
+          'leading-7',
+          segment.itemCustomClassNames,
+        );
+        return `            <div className="${segmentContainerClass}">
+              <${tag} className="${listClass}"${listStyle}>
+                ${segment.items
+                  .map((item) =>
+                    /<[a-z]/i.test(item)
+                      ? `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
+                      : `<li className="${itemClass}">${item}</li>`,
+                  )
+                  .join('\n                ')}
+              </${tag}>
+            </div>`;
+      }
+      case 'html': {
+        const htmlStyle = this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+        return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${htmlStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+      }
+    }
   }
 
   private renderSidebarCard(

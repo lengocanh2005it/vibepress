@@ -1,4 +1,6 @@
 type SupportedLlmProfile = 'openai' | 'custom';
+type SiteCompareProvider = 'automation' | 'openclaw' | 'hybrid';
+type SiteCompareFallbackProvider = 'automation' | 'none';
 
 const OPENAI_CODE_MODEL = 'gpt-5.3-codex';
 const OPENAI_REASONING_MODEL = 'gpt-5.4';
@@ -28,6 +30,19 @@ function stripProviderPrefix(
 
 function normalizeLlmProfile(value?: string): SupportedLlmProfile {
   return value?.trim().toLowerCase() === 'custom' ? 'custom' : 'openai';
+}
+
+function normalizeSiteCompareProvider(value?: string): SiteCompareProvider {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'openclaw') return 'openclaw';
+  if (normalized === 'hybrid') return 'hybrid';
+  return 'automation';
+}
+
+function normalizeSiteCompareFallbackProvider(
+  value?: string,
+): SiteCompareFallbackProvider {
+  return value?.trim().toLowerCase() === 'none' ? 'none' : 'automation';
 }
 
 function normalizeSupportedModel(
@@ -223,6 +238,22 @@ export default () => {
       previewPublicBaseUrl: process.env.PREVIEW_PUBLIC_BASE_URL?.replace(
         /\/$/,
         '',
+      ),
+    },
+    siteCompare: {
+      provider: normalizeSiteCompareProvider(process.env.SITE_COMPARE_PROVIDER),
+      fallbackProvider: normalizeSiteCompareFallbackProvider(
+        process.env.SITE_COMPARE_FALLBACK_PROVIDER,
+      ),
+      openclawUrl: process.env.OPENCLAW_URL,
+      openclawComparePath: process.env.OPENCLAW_COMPARE_PATH || '/site/compare',
+      openclawApiKey: process.env.OPENCLAW_API_KEY,
+      openclawApiKeyHeader:
+        process.env.OPENCLAW_API_KEY_HEADER || 'Authorization',
+      openclawApiKeyPrefix: process.env.OPENCLAW_API_KEY_PREFIX || 'Bearer ',
+      openclawTimeoutMs: parseInt(
+        process.env.OPENCLAW_TIMEOUT_MS ?? '120000',
+        10,
       ),
     },
   };

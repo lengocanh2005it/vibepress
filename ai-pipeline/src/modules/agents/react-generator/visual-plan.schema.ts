@@ -134,6 +134,50 @@ export interface SectionPresentation {
   contentMaxWidth?: string;
 }
 
+export type SourceSegment =
+  | {
+      type: 'heading';
+      text: string;
+      html?: string;
+      level?: number;
+      customClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'paragraph';
+      text?: string;
+      html: string;
+      customClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'image';
+      src: string;
+      alt?: string;
+      caption?: string;
+      width?: number;
+      height?: number;
+      customClassNames?: string[];
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'list';
+      items: string[];
+      ordered?: boolean;
+      customClassNames?: string[];
+      itemCustomClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'html';
+      html: string;
+      customClassNames?: string[];
+      sourceRef?: SourceRef;
+    };
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
@@ -156,6 +200,7 @@ interface BaseSection {
   ctaStyle?: SectionButtonStyle;
   secondaryCtaStyle?: SectionButtonStyle;
   presentation?: SectionPresentation;
+  sourceSegments?: SourceSegment[];
 }
 
 export interface NavbarSection extends BaseSection {
@@ -360,6 +405,12 @@ export interface PageContentSection extends BaseSection {
   hasInteractiveBlocks?: boolean;
 }
 
+export interface ProseBlockSection extends BaseSection {
+  type: 'prose-block';
+  sourceSegments: SourceSegment[];
+  shellVariant?: 'article' | 'wide';
+}
+
 export interface SearchSection extends BaseSection {
   type: 'search';
   title?: string;
@@ -484,6 +535,7 @@ export type SectionPlan =
   | PostContentSection
   | PostMetaSection
   | PageContentSection
+  | ProseBlockSection
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
@@ -711,6 +763,29 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
       return {
         role: 'page-content',
         required: ['page-content'],
+        sourceEvidence,
+      };
+    case 'prose-block':
+      return {
+        role: 'prose-block',
+        required: [
+          ...(section.sourceSegments.some(
+            (segment) => segment.type === 'heading',
+          )
+            ? (['heading'] as SectionCapability[])
+            : []),
+          ...(section.sourceSegments.some(
+            (segment) =>
+              segment.type === 'paragraph' ||
+              segment.type === 'list' ||
+              segment.type === 'html',
+          )
+            ? (['body'] as SectionCapability[])
+            : []),
+          ...(section.sourceSegments.some((segment) => segment.type === 'image')
+            ? (['image'] as SectionCapability[])
+            : []),
+        ],
         sourceEvidence,
       };
     case 'search':

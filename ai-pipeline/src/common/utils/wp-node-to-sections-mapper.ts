@@ -26,6 +26,7 @@ import type {
   FooterSection,
   PostContentSection,
   PageContentSection,
+  ProseBlockSection,
   SearchSection,
   BreadcrumbSection,
   SidebarSection,
@@ -34,6 +35,7 @@ import type {
   TabsSection,
   AccordionSection,
   CarouselSection,
+  SourceSegment,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -47,7 +49,76 @@ export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
   return mapNodes(nodes, nodes);
 }
 
+export function mapWpNodesToLosslessPageSections(
+  nodes: WpNode[],
+): SectionPlan[] {
+  return mapNodesLosslessPage(nodes, nodes);
+}
+
 // ── Per-node dispatch ───────────────────────────────────────────────────────
+
+function mapNodesLosslessPage(
+  nodes: WpNode[],
+  siblings: WpNode[],
+): SectionPlan[] {
+  const sections: SectionPlan[] = [];
+  let pendingSpacer: string | undefined;
+  let proseRun: WpNode[] = [];
+
+  const flushProseRun = () => {
+    if (proseRun.length === 0) return;
+    const proseSection = mapNodesToProseBlock(proseRun);
+    proseRun = [];
+    if (!proseSection) return;
+    let mapped = applyNodePresentation(
+      proseSection,
+      proseSection.sourceRefNode,
+    );
+    if (pendingSpacer) {
+      mapped = applyLeadingSpacer(mapped, pendingSpacer);
+      pendingSpacer = undefined;
+    }
+    sections.push(stripSourceRefNode(mapped));
+  };
+
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index]!;
+    if (isSpacerBlock(node.block)) {
+      pendingSpacer = resolveSpacerHeight(node) ?? pendingSpacer;
+      continue;
+    }
+
+    if (isLosslessProseRunCandidate(node)) {
+      proseRun.push(node);
+      continue;
+    }
+
+    flushProseRun();
+
+    const mapped = mapLosslessPageNode(node, siblings);
+    if (mapped.length === 0) continue;
+
+    if (pendingSpacer) {
+      mapped[0] = applyLeadingSpacer(mapped[0], pendingSpacer);
+      pendingSpacer = undefined;
+    }
+
+    for (const section of mapped) {
+      sections.push(section);
+    }
+  }
+
+  flushProseRun();
+
+  if (pendingSpacer && sections.length > 0) {
+    sections[sections.length - 1] = applyTrailingSpacer(
+      sections[sections.length - 1],
+      pendingSpacer,
+    );
+  }
+
+  return sections;
+}
 
 function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
   const sections: SectionPlan[] = [];
@@ -112,6 +183,295 @@ function mapNodes(nodes: WpNode[], siblings: WpNode[]): SectionPlan[] {
     );
   }
   return sections;
+}
+
+function mapLosslessPageNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
+  const block = node.block;
+
+  if (block === 'core/columns' || block === 'columns') {
+    const losslessColumns = mapLosslessColumns(node);
+    if (losslessColumns) {
+      return losslessColumns;
+    }
+  }
+
+  if ((block === 'core/group' || block === 'group') && node.children?.length) {
+    const childSections = mapNodesLosslessPage(node.children, node.children);
+    if (childSections.length === 0) return [];
+    return applyWrapperVisualPresentation(childSections, node);
+  }
+
+  const mapped = mapNode(node, siblings);
+  if (mapped.length > 0) return mapped;
+
+  if (node.children?.length) {
+    return mapNodesLosslessPage(node.children, node.children);
+  }
+
+  const proseSection = mapNodesToProseBlock([node]);
+  if (!proseSection) return [];
+  return [
+    stripSourceRefNode(
+      applyNodePresentation(proseSection, proseSection.sourceRefNode),
+    ),
+  ];
+}
+
+function mapLosslessColumns(node: WpNode): SectionPlan[] | null {
+  const cols =
+    node.children?.filter(
+      (child) => child.block === 'core/column' || child.block === 'column',
+    ) ?? [];
+  if (cols.length === 0) return null;
+  if (!shouldDecomposeColumnsLosslessly(cols)) return null;
+
+  const sections = cols.flatMap((col) => {
+    const children = col.children ?? [];
+    if (children.length === 0) return [];
+    const nestedSections = mapNodesLosslessPage(children, children);
+    if (nestedSections.length === 0) return [];
+    return nestedSections.map((section) => applyNodePresentation(section, col));
+  });
+
+  return sections.length > 0 ? sections : null;
+}
+
+function shouldDecomposeColumnsLosslessly(cols: WpNode[]): boolean {
+  if (cols.length !== 2) return false;
+
+  const imageColumnCount = cols.filter((col) =>
+    columnContainsImage(col),
+  ).length;
+  if (imageColumnCount === 0) return false;
+
+  // A strict media-text is one image-only column beside one text-only column.
+  if (imageColumnCount === 1) {
+    const [imageCol] = cols.filter((col) => columnContainsImage(col));
+    const [textCol] = cols.filter((col) => !columnContainsImage(col));
+    if (
+      imageCol &&
+      textCol &&
+      columnIsImageDominant(imageCol) &&
+      columnHasMeaningfulTextLikeContent(textCol)
+    ) {
+      return false;
+    }
+  }
+
+  // If both columns contain images, or the image-owning column also carries
+  // prose/list content, mapping to one media-text section would drop source
+  // content from at least one side. Decompose instead.
+  return true;
+}
+
+type InternalProseBlockSection = ProseBlockSection & {
+  sourceRefNode: WpNode;
+};
+
+function stripSourceRefNode(
+  section: InternalProseBlockSection | SectionPlan,
+): SectionPlan {
+  if (!('sourceRefNode' in section)) return section;
+  const { sourceRefNode, ...rest } = section;
+  void sourceRefNode;
+  return rest as SectionPlan;
+}
+
+function isLosslessProseRunCandidate(node: WpNode): boolean {
+  const block = String(node.block ?? '')
+    .trim()
+    .toLowerCase();
+  if (!block) return false;
+
+  if (
+    [
+      'core/heading',
+      'heading',
+      'core/paragraph',
+      'paragraph',
+      'core/list',
+      'list',
+      'core/image',
+      'image',
+      'core/button',
+      'button',
+      'core/buttons',
+      'buttons',
+      'core/html',
+      'html',
+    ].includes(block)
+  ) {
+    return true;
+  }
+
+  if ((block === 'core/group' || block === 'group') && node.children?.length) {
+    return node.children.every(
+      (child) =>
+        isSpacerBlock(child.block) || isLosslessProseRunCandidate(child),
+    );
+  }
+
+  return !!String(node.html ?? '').trim();
+}
+
+function mapNodesToProseBlock(
+  nodes: WpNode[],
+): InternalProseBlockSection | null {
+  const segments = collectSourceSegmentsFromNodes(nodes);
+  if (segments.length === 0) return null;
+
+  const sourceRefNode =
+    nodes.find((node) => !!node.sourceRef) ??
+    nodes.find((node) => !!String(node.block ?? '').trim()) ??
+    nodes[0];
+  if (!sourceRefNode) return null;
+
+  const shellVariant = segments.some((segment) => segment.type === 'image')
+    ? 'wide'
+    : 'article';
+
+  return {
+    type: 'prose-block',
+    sourceSegments: segments,
+    shellVariant,
+    sourceRefNode,
+  };
+}
+
+function collectSourceSegmentsFromNodes(nodes: WpNode[]): SourceSegment[] {
+  const segments: SourceSegment[] = [];
+  for (const node of nodes) {
+    if (isSpacerBlock(node.block) || isSeparatorBlock(node.block)) continue;
+
+    if (
+      (node.block === 'core/group' || node.block === 'group') &&
+      node.children?.length
+    ) {
+      segments.push(...collectSourceSegmentsFromNodes(node.children));
+      continue;
+    }
+
+    const segment = mapNodeToSourceSegment(node);
+    if (segment) segments.push(segment);
+  }
+  return segments;
+}
+
+function mapNodeToSourceSegment(node: WpNode): SourceSegment | null {
+  const block = String(node.block ?? '')
+    .trim()
+    .toLowerCase();
+  const customClassNames = uniqueClassNames(node.customClassNames ?? []);
+
+  if (block === 'core/heading' || block === 'heading') {
+    const text = extractNodeText(node);
+    if (!text) return null;
+    return {
+      type: 'heading',
+      text,
+      ...(typeof node.html === 'string' && node.html.trim()
+        ? { html: node.html.trim() }
+        : {}),
+      ...(typeof node.level === 'number' ? { level: node.level } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(node.typography || node.fontFamily
+        ? { style: toTypographyStyle(node) }
+        : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (block === 'core/paragraph' || block === 'paragraph') {
+    const html = String(node.html ?? '').trim();
+    const text = extractNodeText(node);
+    if (!html && !text) return null;
+    return {
+      type: 'paragraph',
+      html: html || text,
+      ...(text ? { text } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(node.typography || node.fontFamily
+        ? { style: toTypographyStyle(node) }
+        : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (block === 'core/list' || block === 'list') {
+    const listItems = flattenChildren(node)
+      .filter(
+        (candidate) =>
+          candidate.block === 'core/list-item' ||
+          candidate.block === 'list-item',
+      )
+      .map((candidate) => String(candidate.html ?? candidate.text ?? '').trim())
+      .filter(Boolean);
+    if (listItems.length === 0) {
+      const html = String(node.html ?? '').trim();
+      if (!html) return null;
+      return {
+        type: 'html',
+        html,
+        ...(customClassNames.length > 0 ? { customClassNames } : {}),
+        ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+      };
+    }
+
+    const firstItem = flattenChildren(node).find(
+      (candidate) =>
+        candidate.block === 'core/list-item' || candidate.block === 'list-item',
+    );
+
+    return {
+      type: 'list',
+      items: listItems,
+      ordered: /<ol\b/i.test(String(node.html ?? '')),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(firstItem?.customClassNames?.length
+        ? { itemCustomClassNames: uniqueClassNames(firstItem.customClassNames) }
+        : {}),
+      ...(firstItem?.typography || firstItem?.fontFamily
+        ? { style: toTypographyStyle(firstItem) }
+        : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (
+    block === 'core/image' ||
+    block === 'image' ||
+    (typeof node.src === 'string' && node.src.trim())
+  ) {
+    if (!node.src?.trim()) return null;
+    const captionMatch = String(node.html ?? '').match(
+      /<figcaption[^>]*>([\s\S]*?)<\/figcaption>/i,
+    );
+    return {
+      type: 'image',
+      src: node.src,
+      ...(typeof node.alt === 'string' ? { alt: node.alt } : {}),
+      ...(captionMatch?.[1]
+        ? { caption: stripInlineHtml(captionMatch[1]) }
+        : {}),
+      ...(typeof node.width === 'number' ? { width: node.width } : {}),
+      ...(typeof node.height === 'number' ? { height: node.height } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  const html = String(node.html ?? '').trim();
+  if (!html) return null;
+  return {
+    type: 'html',
+    html,
+    ...(customClassNames.length > 0 ? { customClassNames } : {}),
+    ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+  };
+}
+
+function isSeparatorBlock(block?: string): boolean {
+  return block === 'core/separator' || block === 'separator';
 }
 
 function mergeAdjacentCardGridRows(
@@ -184,7 +544,16 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 
   // Columns: media-text or card-grid depending on content
   if (block === 'core/columns' || block === 'columns') {
-    return toMappedSections(mapColumns(node), node);
+    const mappedColumns = mapColumns(node);
+    if (mappedColumns) {
+      return toMappedSections(mappedColumns, node);
+    }
+    const childSections = mapNodes(node.children ?? [], node.children ?? []);
+    if (childSections.length === 0) return [];
+    return applyWrapperVisualPresentation(
+      mergeGroupedSections(childSections, node),
+      node,
+    );
   }
 
   // Post / page content placeholder blocks
@@ -222,6 +591,16 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
 
   if (block === 'core/heading' || block === 'heading') {
     return toMappedSections(mapStandaloneHeading(node), node);
+  }
+
+  // DB-backed pages often contain root-level prose/image runs. Preserve those
+  // blocks as explicit sections so the planner does not keep only the nearby
+  // interactive widgets and silently drop the main page body.
+  if (block === 'core/paragraph' || block === 'paragraph') {
+    return toMappedSections(mapStandaloneParagraph(node), node);
+  }
+  if (block === 'core/list' || block === 'list') {
+    return toMappedSections(mapStandaloneList(node), node);
   }
 
   // ── UAGB / Spectra blocks ───────────────────────────────────────────────
@@ -767,15 +1146,11 @@ function mapColumns(
   const footer = buildFooterFromColumns(cols);
   if (footer) return footer;
 
+  if (isDetailLayoutColumns(cols)) return null;
+
   // 2-col: check if one side is image and other is text → media-text
-  if (cols.length === 2) {
-    const hasImage = cols.some(
-      (c) =>
-        findFirstByBlock(flattenChildren(c), ['core/image', 'image']) !== null,
-    );
-    if (hasImage) {
-      return buildMediaTextFromColumns(cols);
-    }
+  if (cols.length === 2 && isStrictMediaTextColumns(cols)) {
+    return buildMediaTextFromColumns(cols);
   }
 
   // Otherwise: card-grid
@@ -834,6 +1209,104 @@ function mapColumns(
     s.customClassNames = uniqueClassNames([...nodeClasses, ...extraClasses]);
   }
   return s;
+}
+
+function isDetailLayoutColumns(cols: WpNode[]): boolean {
+  const flat = cols.flatMap((col) => flattenChildren(col));
+  const hasPostDetailCore = flat.some((node) =>
+    POST_DETAIL_LAYOUT_BLOCKS.has(node.block),
+  );
+  if (!hasPostDetailCore) return false;
+
+  return flat.some((node) => SIDEBAR_WIDGET_BLOCKS.has(node.block));
+}
+
+function isStrictMediaTextColumns(cols: WpNode[]): boolean {
+  if (cols.length !== 2) return false;
+  const imageColumns = cols.filter((col) => columnContainsImage(col));
+  if (imageColumns.length !== 1) return false;
+
+  const imageColumn = imageColumns[0]!;
+  const textColumn = cols.find((col) => col !== imageColumn);
+  if (!textColumn) return false;
+
+  return (
+    columnIsImageDominant(imageColumn) &&
+    !columnContainsImage(textColumn) &&
+    columnHasMeaningfulTextLikeContent(textColumn)
+  );
+}
+
+function columnContainsImage(col: WpNode): boolean {
+  return (
+    findFirstByBlock(flattenChildren(col), ['core/image', 'image']) !== null
+  );
+}
+
+function columnIsImageDominant(col: WpNode): boolean {
+  const meaningfulNonImageNodes = flattenChildren(col).filter((node) => {
+    const block = node.block;
+    if (
+      block === 'core/image' ||
+      block === 'image' ||
+      block === 'core/spacer' ||
+      block === 'spacer' ||
+      block === 'core/separator' ||
+      block === 'separator' ||
+      block === 'core/group' ||
+      block === 'group' ||
+      block === 'core/column' ||
+      block === 'column'
+    ) {
+      return false;
+    }
+
+    if (block === 'core/buttons' || block === 'buttons') {
+      return false;
+    }
+
+    if (block === 'core/button' || block === 'button') {
+      return !!extractNodeText(node) || !!node.href;
+    }
+
+    return (
+      !!extractNodeText(node) ||
+      !!String(node.html ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+  });
+
+  return meaningfulNonImageNodes.length === 0;
+}
+
+function columnHasMeaningfulTextLikeContent(col: WpNode): boolean {
+  return flattenChildren(col).some((node) => {
+    const block = node.block;
+    if (
+      block === 'core/image' ||
+      block === 'image' ||
+      block === 'core/spacer' ||
+      block === 'spacer' ||
+      block === 'core/separator' ||
+      block === 'separator' ||
+      block === 'core/group' ||
+      block === 'group' ||
+      block === 'core/column' ||
+      block === 'column'
+    ) {
+      return false;
+    }
+
+    return (
+      !!extractNodeText(node) ||
+      !!String(node.html ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+  });
 }
 
 /** Cards where every entry has a short number/%-heavy heading → stats row. */
@@ -974,6 +1447,84 @@ function mapStandaloneHeading(node: WpNode): HeroSection | null {
     hero.customClassNames = uniqueClassNames(node.customClassNames);
   }
   return hero;
+}
+
+function mapStandaloneParagraph(node: WpNode): HeroSection | null {
+  const text = extractNodeText(node);
+  if (!text) return null;
+
+  const preferHeading = isHeadingLikeStandaloneText(node, text);
+  const hero: HeroSection = {
+    type: 'hero',
+    layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
+    heading: preferHeading ? text : '',
+    ...(!preferHeading ? { subheading: text } : {}),
+  };
+  const classNames = extractStyleVariantClassNames(node.customClassNames);
+  if (classNames.length > 0) {
+    if (preferHeading) {
+      hero.headingCustomClassNames = classNames;
+    } else {
+      hero.subheadingCustomClassNames = classNames;
+    }
+  }
+  if (node.typography || node.fontFamily) {
+    if (preferHeading) {
+      hero.headingStyle = toTypographyStyle(node);
+    } else {
+      hero.subheadingStyle = toTypographyStyle(node);
+    }
+  }
+  if (node.customClassNames?.length) {
+    hero.customClassNames = uniqueClassNames(node.customClassNames);
+  }
+  return hero;
+}
+
+function mapStandaloneList(node: WpNode): HeroSection | null {
+  const text = extractRichTextFromNodes(flattenChildren(node));
+  if (!text) return null;
+
+  const firstListItem = flattenChildren(node).find(
+    (candidate) =>
+      candidate.block === 'core/list-item' || candidate.block === 'list-item',
+  );
+  const hero: HeroSection = {
+    type: 'hero',
+    layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
+    heading: '',
+    subheading: text,
+  };
+  const classNames = extractStyleVariantClassNames(
+    firstListItem?.customClassNames,
+  );
+  if (classNames.length > 0) {
+    hero.subheadingCustomClassNames = classNames;
+  }
+  if (firstListItem?.typography || firstListItem?.fontFamily) {
+    hero.subheadingStyle = toTypographyStyle(firstListItem);
+  }
+  if (node.customClassNames?.length) {
+    hero.customClassNames = uniqueClassNames(node.customClassNames);
+  }
+  return hero;
+}
+
+function isHeadingLikeStandaloneText(node: WpNode, text: string): boolean {
+  const html = String(node.html ?? '');
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) return false;
+
+  if (/<(?:strong|b)\b/i.test(html)) return true;
+  if (compact.length <= 72 && !/[.!?]$/.test(compact)) return true;
+  if (
+    node.typography?.fontWeight &&
+    /^(6|7|8|9)00$/.test(node.typography.fontWeight)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function mapQuote(node: WpNode): TestimonialSection | null {
@@ -2307,6 +2858,41 @@ const POST_CONTENT_BLOCKS = [
   'core/post-featured-image',
   'post-featured-image',
 ];
+
+const POST_DETAIL_LAYOUT_BLOCKS = new Set<string>([
+  ...POST_CONTENT_BLOCKS,
+  'core/post-date',
+  'post-date',
+  'core/post-author-name',
+  'post-author-name',
+  'core/post-author-biography',
+  'post-author-biography',
+  'core/post-terms',
+  'post-terms',
+  'core/comments',
+  'comments',
+  'core/comment-template',
+  'comment-template',
+  'core/comments-title',
+  'comments-title',
+  'core/post-comments-form',
+  'post-comments-form',
+  'core/comments-pagination',
+  'comments-pagination',
+]);
+
+const SIDEBAR_WIDGET_BLOCKS = new Set<string>([
+  'core/template-part',
+  'template-part',
+  'core/search',
+  'search',
+  'core/categories',
+  'categories',
+  'core/avatar',
+  'avatar',
+  'core/navigation',
+  'navigation',
+]);
 
 function hasDeepInteractiveBlock(nodes: WpNode[]): boolean {
   for (const node of nodes) {

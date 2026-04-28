@@ -23,6 +23,11 @@ interface CodeReviewResult {
   summary?: string;
 }
 
+interface ComponentReviewAttemptResult {
+  review: CodeReviewResult;
+  attemptUsed: number;
+}
+
 export interface GeneratedCodeReviewResult {
   success: boolean;
   failures: {
@@ -63,7 +68,7 @@ export class GeneratedCodeReviewService {
     for (const component of topLevelComponents) {
       const contract =
         plan.find((item) => item.componentName === component.name) ?? null;
-      const review = await this.reviewComponent(
+      const reviewed = await this.reviewComponent(
         component,
         contract,
         plan,
@@ -71,10 +76,12 @@ export class GeneratedCodeReviewService {
         logPath,
       );
       const effectiveReview = this.applyDeterministicIssues(
-        review,
+        reviewed.review,
         component,
         contract,
       );
+      const attemptSuffix =
+        reviewed.attemptUsed > 1 ? ` (attempt ${reviewed.attemptUsed})` : '';
 
       const blockingIssues = this.getBlockingIssues(
         effectiveReview,
@@ -97,30 +104,25 @@ export class GeneratedCodeReviewService {
           message: issuesMessage,
         });
 
-        if (mode === 'blocking') {
-          this.logger.warn(
-            `[AI Generated Code Review] "${component.name}" blocking: ${issuesMessage}`,
-          );
-          await this.log(
-            logPath,
-            `WARN [AI Generated Code Review] "${component.name}" blocking: ${issuesMessage}`,
-          );
-        }
-      }
-
-      if (!effectiveReview.pass || effectiveReview.issues.length > 0) {
-        if (blockingIssues.length === 0) {
-          this.logger.warn(
-            `[AI Generated Code Review] "${component.name}" advisory: ${issuesMessage}`,
-          );
-          await this.log(
-            logPath,
-            `WARN [AI Generated Code Review] "${component.name}" advisory: ${issuesMessage}`,
-          );
-        }
+        const statusLabel = mode === 'blocking' ? 'blocking' : 'failed';
+        this.logger.warn(
+          `[AI Generated Code Review] "${component.name}" ${statusLabel}${attemptSuffix}: ${issuesMessage}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [AI Generated Code Review] "${component.name}" ${statusLabel}${attemptSuffix}: ${issuesMessage}`,
+        );
+      } else if (!effectiveReview.pass || effectiveReview.issues.length > 0) {
+        this.logger.warn(
+          `[AI Generated Code Review] "${component.name}" advisory${attemptSuffix}: ${issuesMessage}`,
+        );
+        await this.log(
+          logPath,
+          `WARN [AI Generated Code Review] "${component.name}" advisory${attemptSuffix}: ${issuesMessage}`,
+        );
       } else {
         this.logger.log(
-          `[AI Generated Code Review] "${component.name}" passed`,
+          `[AI Generated Code Review] "${component.name}" passed${attemptSuffix}`,
         );
       }
     }
@@ -137,7 +139,7 @@ export class GeneratedCodeReviewService {
     plan: PlanResult,
     modelName: string,
     logPath?: string,
-  ): Promise<CodeReviewResult> {
+  ): Promise<ComponentReviewAttemptResult> {
     const reviewPrompt = this.buildReviewPrompt(component, contract, plan);
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -161,24 +163,10 @@ export class GeneratedCodeReviewService {
 
       const parsed = this.parseReviewResult(text);
       if (parsed) {
-        if (parsed.pass) {
-          this.logger.log(
-            `[AI Generated Code Review] "${component.name}" passed (attempt ${attempt})`,
-          );
-          await this.log(
-            logPath,
-            `[AI Generated Code Review] "${component.name}" passed (attempt ${attempt})`,
-          );
-        } else {
-          this.logger.warn(
-            `[AI Generated Code Review] "${component.name}" failed: ${parsed.issues.map((issue) => issue.message).join(' | ') || parsed.summary || 'unknown issue'}`,
-          );
-          await this.log(
-            logPath,
-            `WARN [AI Generated Code Review] "${component.name}" failed: ${parsed.issues.map((issue) => issue.message).join(' | ') || parsed.summary || 'unknown issue'}`,
-          );
-        }
-        return parsed;
+        return {
+          review: parsed,
+          attemptUsed: attempt,
+        };
       }
 
       this.logger.warn(
@@ -191,15 +179,18 @@ export class GeneratedCodeReviewService {
     }
 
     return {
-      pass: false,
-      issues: [
-        {
-          severity: 'high',
-          message:
-            'AI reviewer did not return valid JSON after 2 attempts, so review could not be completed safely.',
-        },
-      ],
-      summary: 'AI reviewer output was not parseable.',
+      review: {
+        pass: false,
+        issues: [
+          {
+            severity: 'high',
+            message:
+              'AI reviewer did not return valid JSON after 2 attempts, so review could not be completed safely.',
+          },
+        ],
+        summary: 'AI reviewer output was not parseable.',
+      },
+      attemptUsed: 2,
     };
   }
 
@@ -435,6 +426,9 @@ ${component.code}
         if (section.type === 'post-list') {
           return `- post-list layout=${section.layout}`;
         }
+        if (section.type === 'prose-block') {
+          return `- prose-block segments=${section.sourceSegments.length}`;
+        }
         return `- ${section.type}`;
       })
       .join('\n');
@@ -472,6 +466,13 @@ ${component.code}
     );
     const allowedSectionTypes = new Set(
       sections.map((section) => section.type),
+    );
+    const hasPageContentSection = sections.some(
+      (section) => section.type === 'page-content',
+    );
+    const hasSourceBackedProseBlock = sections.some(
+      (section) =>
+        section.type === 'prose-block' && section.sourceSegments.length > 0,
     );
     const isFixedPageDetailComponent =
       !!fixedSlug &&
@@ -572,7 +573,11 @@ ${component.code}
     }
 
     if (isFixedPageDetailComponent) {
-      if (!this.hasCanonicalPageContentRender(component.code)) {
+      if (
+        hasPageContentSection &&
+        !hasSourceBackedProseBlock &&
+        !this.hasCanonicalPageContentRender(component.code)
+      ) {
         issues.push({
           severity: 'high',
           message:
@@ -591,7 +596,11 @@ ${component.code}
         });
       }
 
-      if (this.hasUnexpectedNarrowCenteredPageShell(component.code)) {
+      if (
+        hasPageContentSection &&
+        !hasSourceBackedProseBlock &&
+        this.hasUnexpectedNarrowCenteredPageShell(component.code)
+      ) {
         issues.push({
           severity: 'high',
           message:

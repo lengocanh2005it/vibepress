@@ -1,0 +1,17 @@
+{
+  "name": "@local/openclaw-site-compare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw plugin exposing POST /site/compare for vibepress ai-pipeline.",
+  "main": "./index.js",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": ">=2026.3.24-beta.2"
+    }
+  }
+}
