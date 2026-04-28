@@ -1,4 +1,3 @@
-const { randomUUID } = require('crypto');
 const { query, queryOne } = require('../db/mysql');
 
 async function createMigration(req, res) {
@@ -11,13 +10,12 @@ async function createMigration(req, res) {
   }
 
   try {
-    const id = randomUUID();
-    await query(
-      `INSERT INTO react_migrations (id, site_id, job_id) VALUES (?, ?, ?)`,
-      [id, site_id, job_id],
+    const result = await query(
+      `INSERT INTO react_migrations (site_id, job_id) VALUES (?, ?)`,
+      [site_id, job_id],
     );
-    const migration = await queryOne('SELECT * FROM react_migrations WHERE id = ?', [id]);
-    console.log(`[Migration] Đã tạo migration id=${id} site=${site_id} job=${job_id}`);
+    const migration = await queryOne('SELECT * FROM react_migrations WHERE id = ?', [result.insertId]);
+    console.log(`[Migration] Đã tạo migration id=${result.insertId} site=${site_id} job=${job_id}`);
     return res.status(201).json(migration);
   } catch (err) {
     console.error(`[Migration] createMigration lỗi:`, err);

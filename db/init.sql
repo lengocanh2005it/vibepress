@@ -130,14 +130,14 @@ CREATE TABLE IF NOT EXISTS `captures` (
 -- site_id → wp_sites.site_id
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `react_migrations` (
-  `id`              VARCHAR(36)   NOT NULL,
-  `site_id`         VARCHAR(64)   NOT NULL,
-  `job_id`          VARCHAR(64)   NOT NULL  COMMENT 'jobId từ ai-pipeline, dùng để restart preview',
-  `github_repo_url` VARCHAR(512)      NULL  COMMENT 'URL GitHub repo, cập nhật sau khi push',
-  `deployed_url`    VARCHAR(512)      NULL  COMMENT 'URL site sau khi deploy lên VPS/Vercel',
-  `thumbnail_url`   TEXT              NULL  COMMENT 'Ảnh preview của site',
-  `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `id`              INT            NOT NULL AUTO_INCREMENT,
+  `site_id`         VARCHAR(64)    NOT NULL,
+  `job_id`          VARCHAR(64)    NOT NULL  COMMENT 'jobId từ ai-pipeline, dùng để restart preview',
+  `github_repo_url` VARCHAR(512)       NULL  COMMENT 'URL GitHub repo, cập nhật sau khi push',
+  `deployed_url`    VARCHAR(512)       NULL  COMMENT 'URL site sau khi deploy lên VPS/Vercel',
+  `thumbnail_url`   TEXT               NULL  COMMENT 'Ảnh preview của site',
+  `created_at`      DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`      DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_react_migrations_site_id` (`site_id`),
   UNIQUE KEY `uq_react_migrations_job_id` (`job_id`),

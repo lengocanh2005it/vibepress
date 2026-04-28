@@ -1320,6 +1320,16 @@ function parseNavigationBlockItems(
   return items;
 }
 
+function isInternalHostname(hostname: string, siteHostname?: string): boolean {
+  if (siteHostname && hostname === siteHostname) return true;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+  // Private IP ranges: 10.x, 172.16-31.x, 192.168.x
+  if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(hostname)) return true;
+  return false;
+}
+
 function normalizeMenuUrl(
   raw: string,
   siteUrl?: string | null,
@@ -1330,14 +1340,15 @@ function normalizeMenuUrl(
   try {
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
       const url = new URL(trimmed);
+      let siteHostname: string | undefined;
       if (siteUrl) {
         try {
-          const site = new URL(siteUrl);
-          if (url.origin !== site.origin) return trimmed;
+          siteHostname = new URL(siteUrl).hostname;
         } catch {
-          // invalid site URL — fall back to pathname rewrite
+          // invalid siteUrl — ignore
         }
       }
+      if (!isInternalHostname(url.hostname, siteHostname)) return trimmed;
       raw = `${url.pathname}${url.search}${url.hash}`;
     } else {
       raw = trimmed;
