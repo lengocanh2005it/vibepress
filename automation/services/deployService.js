@@ -118,6 +118,18 @@ async function deployBackendToVps({ workDir, siteDir, dbCreds }) {
     );
     if (pm2.code !== 0) throw new Error(`[VPS-Backend] PM2 thất bại (code=${pm2.code}): ${pm2.stderr}`);
     console.log(`[VPS-Backend] PM2 started — port ${port}`);
+
+    // Allow Docker bridge network (172.16.0.0/12) to reach the backend port.
+    // UFW's INPUT chain blocks container→host traffic by default; Docker does not add UFW exceptions automatically.
+    await ssh.execCommand(
+      `sudo ufw allow from 172.16.0.0/12 to any port ${port} proto tcp comment 'vibepress-${siteDir}' 2>/dev/null; true`,
+    );
+    console.log(`[VPS-Backend] UFW rule added for port ${port}`);
+
+    // Verify the process came online
+    await new Promise((r) => setTimeout(r, 3000));
+    const pmStatus = await ssh.execCommand(`pm2 show "${siteDir}" 2>&1 | grep -E 'status|restart'`);
+    console.log(`[VPS-Backend] PM2 status: ${pmStatus.stdout.trim() || pmStatus.stderr.trim()}`);
   } finally {
     ssh.dispose();
   }
