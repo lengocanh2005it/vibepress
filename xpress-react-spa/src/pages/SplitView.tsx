@@ -991,9 +991,10 @@ const SplitView: React.FC = () => {
 
   const previewFrameSrc = useMemo(() => {
     if (!previewUrl) return "";
-    const separator = previewUrl.includes("?") ? "&" : "?";
-    return `${previewUrl}${separator}livePreview=${previewRefreshNonce}`;
-  }, [previewRefreshNonce, previewUrl]);
+    const base = jobId ? `/preview/${jobId}/` : previewUrl;
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}livePreview=${previewRefreshNonce}`;
+  }, [jobId, previewRefreshNonce, previewUrl]);
 
   useEffect(() => {
     if (!previewUrl || !previewStage) return;
