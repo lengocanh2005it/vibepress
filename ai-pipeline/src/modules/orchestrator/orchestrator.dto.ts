@@ -304,6 +304,16 @@ export interface SubmitReactVisualEditDto {
   editRequest: PipelineReactVisualEditRequestDto;
 }
 
+export interface ApplyPendingEditRequestDto {
+  siteId: string;
+  jobId: string;
+}
+
+export interface SkipPendingEditRequestDto {
+  siteId: string;
+  jobId: string;
+}
+
 export interface UndoReactVisualEditDto {
   siteId: string;
   jobId: string;

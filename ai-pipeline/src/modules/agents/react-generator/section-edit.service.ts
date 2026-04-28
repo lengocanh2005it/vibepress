@@ -186,7 +186,7 @@ function buildScopedFeedback(input: {
     lines.push('Exact generated React target metadata:');
     for (const target of task.exactTargets) {
       lines.push(
-        `- attachment=${target.captureId} -> file=${target.outputFilePath} section=${target.sectionKey} sourceNodeId=${target.sourceNodeId} lines=${formatLineRange(target.startLine, target.endLine)} resolution=${target.resolution} confidence=${target.confidence.toFixed(2)}`,
+        `- attachment=${target.captureId} -> file=${target.outputFilePath} debugKey=${target.debugKey ?? target.sectionKey ?? 'unknown'} sourceNodeId=${target.sourceNodeId} lines=${formatLineRange(target.startLine, target.endLine)} resolution=${target.resolution} confidence=${target.confidence.toFixed(2)}`,
       );
     }
   }
@@ -220,7 +220,7 @@ function buildScopedFeedback(input: {
   }
 
   lines.push(
-    'Material change requirement: do NOT return the component unchanged or with only unrelated edits. The targeted capture region must show a visible code change that implements the requested refinement while preserving source-tracking attributes.',
+    'Material change requirement: do NOT return the component unchanged or with only unrelated edits. The targeted capture region must show a visible code change that implements the requested refinement while preserving the same semantic/source-backed ownership.',
   );
 
   const preservationContract = buildUntouchedSectionPreservationContract({
@@ -244,42 +244,46 @@ function buildUntouchedSectionPreservationContract(input: {
   const sections = componentPlan?.visualPlan?.sections ?? [];
   if (sections.length === 0) return '';
 
-  const targetedKeys = new Set<string>();
+  const targetedIds = new Set<string>();
   for (const target of exactTargets) {
-    if (target.sectionKey?.trim()) targetedKeys.add(target.sectionKey.trim());
     if (target.sourceNodeId?.trim())
-      targetedKeys.add(target.sourceNodeId.trim());
+      targetedIds.add(target.sourceNodeId.trim());
     if (target.targetSourceNodeId?.trim()) {
-      targetedKeys.add(target.targetSourceNodeId.trim());
+      targetedIds.add(target.targetSourceNodeId.trim());
     }
+    if (target.debugKey?.trim()) targetedIds.add(target.debugKey.trim());
+    if (target.sectionKey?.trim()) targetedIds.add(target.sectionKey.trim());
   }
   for (const match of sectionMatches) {
     const section = sections[match.sectionIndex];
     if (!section) continue;
-    if (section.sectionKey?.trim()) targetedKeys.add(section.sectionKey.trim());
     if (section.sourceRef?.sourceNodeId?.trim()) {
-      targetedKeys.add(section.sourceRef.sourceNodeId.trim());
+      targetedIds.add(section.sourceRef.sourceNodeId.trim());
     }
+    if (section.debugKey?.trim()) targetedIds.add(section.debugKey.trim());
+    if (section.sectionKey?.trim()) targetedIds.add(section.sectionKey.trim());
   }
 
   const untouched = sections.filter((section) => {
-    const sectionKey = section.sectionKey?.trim();
     const sourceNodeId = section.sourceRef?.sourceNodeId?.trim();
+    const debugKey = section.debugKey?.trim() ?? section.sectionKey?.trim();
     return (
-      (!sectionKey || !targetedKeys.has(sectionKey)) &&
-      (!sourceNodeId || !targetedKeys.has(sourceNodeId))
+      (!sourceNodeId || !targetedIds.has(sourceNodeId)) &&
+      (!debugKey || !targetedIds.has(debugKey))
     );
   });
   if (untouched.length === 0) return '';
 
   const lines = [
     'Untouched section preservation contract:',
-    'Do NOT remove, rewrite, reorder, or materially restyle non-target sections. Outside the requested target region, preserve existing tracked wrappers and keep the approved section text/content intact.',
+    'Do NOT remove, rewrite, reorder, or materially restyle non-target sections. Outside the requested target region, preserve existing semantic region boundaries and keep the approved section text/content intact.',
   ];
   for (const section of untouched.slice(0, 8)) {
     const parts = [
       `- type=${section.type}`,
-      section.sectionKey ? `sectionKey=${section.sectionKey}` : null,
+      (section.debugKey ?? section.sectionKey)
+        ? `debugKey=${section.debugKey ?? section.sectionKey}`
+        : null,
       section.sourceRef?.sourceNodeId
         ? `sourceNodeId=${section.sourceRef.sourceNodeId}`
         : null,
@@ -441,7 +445,7 @@ function buildNoOpRetryFeedback(input: {
     `Retry required for "${editedComponentName}".`,
     reason,
     'You MUST materially modify the targeted capture region first. Do not return the original code and do not spend the edit budget on unrelated parts of the component.',
-    'Preserve existing source-tracking attributes such as data-vp-source-node, data-vp-section-key, and related metadata on the same logical element.',
+    'Preserve the same semantic region ownership and source-backed boundaries for the targeted element.',
   ];
 
   if (sectionMatches.length > 0) {

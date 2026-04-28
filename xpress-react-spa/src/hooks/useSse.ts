@@ -145,6 +145,8 @@ interface ProgressEventData {
   apiBaseUrl?: string;
   previewStage?: "baseline" | "edited" | "final";
   hasEditRequest?: boolean;
+  editApprovalRequired?: boolean;
+  editApplied?: boolean;
   stepDetails?: PipelineProgressStepDetails;
   metrics?: PipelineMetricsPayload;
 }
@@ -165,11 +167,23 @@ export interface UseSseState {
     | "connected"
     | "reconnecting"
     | "completed"
+    | "stopped"
     | "error";
 }
 
+const createInitialState = (jobId: string): UseSseState => ({
+  isConnected: false,
+  isLoading: Boolean(jobId),
+  error: null,
+  currentEvent: null,
+  allEvents: [],
+  progress: 0,
+  connectionState: jobId ? "connecting" : "idle",
+});
+
 type PipelineJobStatus =
   | "running"
+  | "awaiting_confirmation"
   | "stopping"
   | "stopped"
   | "done"
@@ -185,6 +199,8 @@ interface PipelineStatusResponse {
     apiBaseUrl?: string;
     previewStage?: ProgressEventData["previewStage"];
     hasEditRequest?: boolean;
+    editApprovalRequired?: boolean;
+    editApplied?: boolean;
     metrics?: ProgressEventData["metrics"];
   };
 }
@@ -199,15 +215,7 @@ export function useSse(
   jobId: string,
   apiUrl: string = "/ai-api",
 ) {
-  const [state, setState] = useState<UseSseState>({
-    isConnected: false,
-    isLoading: true,
-    error: null,
-    currentEvent: null,
-    allEvents: [],
-    progress: 0,
-    connectionState: "idle",
-  });
+  const [state, setState] = useState<UseSseState>(() => createInitialState(jobId));
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const pipelineCompletedRef = useRef(false);
@@ -248,6 +256,8 @@ export function useSse(
           apiBaseUrl: status.result.apiBaseUrl,
           previewStage: status.result.previewStage ?? "final",
           hasEditRequest: status.result.hasEditRequest,
+          editApprovalRequired: status.result.editApprovalRequired,
+          editApplied: status.result.editApplied,
           metrics: status.result.metrics,
         },
       };
@@ -271,6 +281,45 @@ export function useSse(
             : [...prev.allEvents, completionEvent],
           progress: 100,
           connectionState: "completed",
+        };
+      });
+    },
+    [],
+  );
+
+  const pushSyntheticStoppedEvent = useCallback(
+    (status: PipelineStatusResponse) => {
+      setState((prev) => {
+        const stopEvent: PipelineProgressEvent = {
+          step: "system",
+          label:
+            status.status === "deleted" ? "Pipeline Deleted" : "Pipeline Stopped",
+          status: "stopped",
+          percent: prev.progress,
+          message:
+            status.error ||
+            (status.status === "deleted"
+              ? "The pipeline state was deleted."
+              : "The pipeline was stopped unexpectedly."),
+        };
+
+        const alreadyHasStopEvent = prev.allEvents.some(
+          (event) =>
+            event.step === stopEvent.step &&
+            event.status === stopEvent.status &&
+            event.message === stopEvent.message,
+        );
+
+        return {
+          ...prev,
+          isConnected: false,
+          isLoading: false,
+          error: null,
+          currentEvent: stopEvent,
+          allEvents: alreadyHasStopEvent
+            ? prev.allEvents
+            : [...prev.allEvents, stopEvent],
+          connectionState: "stopped",
         };
       });
     },
@@ -357,6 +406,25 @@ export function useSse(
           if (data.step === "11_done" && data.status === "done") {
             pipelineCompletedRef.current = true;
           }
+          if (data.status === "stopped") {
+            pipelineCompletedRef.current = false;
+            eventSource.close();
+            if (eventSourceRef.current === eventSource) {
+              eventSourceRef.current = null;
+            }
+            manuallyDisconnectedRef.current = true;
+            setState((prev) => ({
+              ...prev,
+              isConnected: false,
+              isLoading: false,
+              error: null,
+              currentEvent: data,
+              allEvents: [...prev.allEvents, data],
+              progress: data.percent,
+              connectionState: "stopped",
+            }));
+            return;
+          }
           setState((prev) => ({
             ...prev,
             currentEvent: data,
@@ -408,7 +476,16 @@ export function useSse(
               return;
             }
 
-            if (status.status === "running" || status.status === "stopping") {
+            if (status.status === "stopped" || status.status === "deleted") {
+              pushSyntheticStoppedEvent(status);
+              return;
+            }
+
+            if (
+              status.status === "running" ||
+              status.status === "awaiting_confirmation" ||
+              status.status === "stopping"
+            ) {
               scheduleReconnect();
               return;
             }
@@ -446,6 +523,7 @@ export function useSse(
     fetchPipelineStatus,
     jobId,
     pushSyntheticCompletionEvent,
+    pushSyntheticStoppedEvent,
     scheduleReconnect,
   ]);
 
@@ -473,6 +551,12 @@ export function useSse(
    */
   useEffect(() => {
     disposedRef.current = false;
+    pipelineCompletedRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    manuallyDisconnectedRef.current = false;
+    clearReconnectTimeout();
+    setState(createInitialState(jobId));
+
     if (jobId) {
       connect();
     }
@@ -481,7 +565,7 @@ export function useSse(
       disposedRef.current = true;
       disconnect();
     };
-  }, [connect, disconnect, jobId]);
+  }, [clearReconnectTimeout, connect, disconnect, jobId]);
 
   return {
     ...state,

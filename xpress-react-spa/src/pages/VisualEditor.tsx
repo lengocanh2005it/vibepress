@@ -26,6 +26,7 @@ interface SourceMapEntry {
 
 type PipelineJobStatus =
   | "running"
+  | "awaiting_confirmation"
   | "stopping"
   | "stopped"
   | "done"
@@ -243,6 +244,16 @@ const VisualEditor: React.FC = () => {
       .catch(() => {});
   }, [previewUrl]);
 
+  const sourceMapBySourceNode = useMemo(
+    () =>
+      new Map(
+        sourceMap
+          .filter((entry) => !!entry.sourceNodeId)
+          .map((entry) => [entry.sourceNodeId, entry] as const),
+      ),
+    [sourceMap],
+  );
+
   const resolvePreviewUrl = (url: string): string => {
     try {
       const parsed = new URL(url);
@@ -286,11 +297,11 @@ const VisualEditor: React.FC = () => {
     setFrameTitle(frameDocument.title || selectedRoute?.label || "React Preview");
   };
 
-  const buildPayload = (): ReactVisualEditPayload => {
-    const mapEntry = selectedComponent?.vpSourceNode
-      ? sourceMap.find((e) => e.sourceNodeId === selectedComponent.vpSourceNode)
-      : undefined;
+  const selectedMapEntry = selectedComponent?.vpSourceNode
+    ? sourceMapBySourceNode.get(selectedComponent.vpSourceNode)
+    : undefined;
 
+  const buildPayload = (): ReactVisualEditPayload => {
     return {
       prompt: prompt.trim() || undefined,
       language: /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(prompt)
@@ -305,17 +316,21 @@ const VisualEditor: React.FC = () => {
       attachments: [],
       targetHint: {
         route: selectedRoute?.route || "/",
-        // Layer 2: section identity — prefer data-vp-* from DOM, fall back to route-level component
+        // Layer 2: DOM only provides minimal identity; detailed metadata resolves via ui-source-map
         sourceNodeId: selectedComponent?.vpSourceNode,
-        sectionKey: selectedComponent?.vpSectionKey,
-        componentName: selectedComponent?.vpComponent || selectedComponent?.component || selectedRoute?.componentName,
-        sectionComponentName: selectedComponent?.vpSectionComponent,
-        templateName: selectedComponent?.vpTemplate,
-        sourceFile: selectedComponent?.vpSourceFile,
+        sectionKey: selectedComponent?.vpSectionKey || selectedMapEntry?.sectionKey,
+        componentName:
+          selectedComponent?.vpComponent ||
+          selectedMapEntry?.componentName ||
+          selectedComponent?.component ||
+          selectedRoute?.componentName,
+        sectionComponentName: selectedMapEntry?.sectionComponentName,
+        templateName: selectedMapEntry?.templateName,
+        sourceFile: selectedMapEntry?.sourceFile,
         // Layer 3: code location — from ui-source-map.json lookup
-        outputFilePath: mapEntry?.outputFilePath,
-        startLine: mapEntry?.startLine,
-        endLine: mapEntry?.endLine,
+        outputFilePath: selectedMapEntry?.outputFilePath,
+        startLine: selectedMapEntry?.startLine,
+        endLine: selectedMapEntry?.endLine,
         // Child node targeting
         targetNodeRole: selectedComponent?.targetNodeRole,
         targetElementTag: selectedComponent?.targetElementTag,
@@ -324,7 +339,11 @@ const VisualEditor: React.FC = () => {
       },
       constraints: {
         // Khi user đã chọn element cụ thể, yêu cầu AI chỉ sửa vùng đó
-        preserveOutsideSelection: !!(selectedComponent?.vpSourceNode || (mapEntry?.startLine !== undefined && mapEntry?.endLine !== undefined)),
+        preserveOutsideSelection: !!(
+          selectedComponent?.vpSourceNode ||
+          (selectedMapEntry?.startLine !== undefined &&
+            selectedMapEntry?.endLine !== undefined)
+        ),
         preserveDataContract: true,
         rerunFromScratch: false,
       },
@@ -341,18 +360,15 @@ const VisualEditor: React.FC = () => {
 
   const handleSaveAnnotation = () => {
     if (!selectedComponent) return;
-    const mapEntry = selectedComponent.vpSourceNode
-      ? sourceMap.find((e) => e.sourceNodeId === selectedComponent.vpSourceNode)
-      : undefined;
     const item = {
       id: `annotation-${Date.now()}`,
       component: selectedComponent,
       comment: annotationComment.trim(),
       route: selectedRoute?.route || "/",
       savedAt: new Date().toISOString(),
-      outputFilePath: mapEntry?.outputFilePath,
-      startLine: mapEntry?.startLine,
-      endLine: mapEntry?.endLine,
+      outputFilePath: selectedMapEntry?.outputFilePath,
+      startLine: selectedMapEntry?.startLine,
+      endLine: selectedMapEntry?.endLine,
     };
     setSavedAnnotations((prev) => [...prev, item]);
     console.log("[VisualEditor] Saved annotation:", item);
@@ -584,10 +600,12 @@ const VisualEditor: React.FC = () => {
                     <div className="px-4 py-3 border-t border-[#f0ebe3]">
                       <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f] mb-1.5">Section</p>
                       <p className="font-mono text-[11px] text-[#374151]">{selectedComponent.vpSourceNode}</p>
-                      {selectedComponent.vpSectionKey && (
+                      {(selectedComponent.vpSectionKey || selectedMapEntry?.sectionKey) && (
                         <p className="mt-0.5 text-[11px] text-[#6b7280]">
-                          key: <span className="font-semibold text-[#374151]">{selectedComponent.vpSectionKey}</span>
-                          {selectedComponent.vpComponent && <span className="ml-1.5 text-[#9ca3af]">· {selectedComponent.vpComponent}</span>}
+                          key: <span className="font-semibold text-[#374151]">{selectedComponent.vpSectionKey || selectedMapEntry?.sectionKey}</span>
+                          {(selectedComponent.vpComponent || selectedMapEntry?.componentName) && (
+                            <span className="ml-1.5 text-[#9ca3af]">· {selectedComponent.vpComponent || selectedMapEntry?.componentName}</span>
+                          )}
                         </p>
                       )}
                     </div>

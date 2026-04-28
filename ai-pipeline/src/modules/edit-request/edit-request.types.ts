@@ -47,8 +47,11 @@ export interface EditIntentTargetCandidate {
   componentName?: string;
   route?: string | null;
   templateName?: string;
+  sourceNodeId?: string;
+  debugKey?: string;
   sectionKey?: string;
   sectionType?: string;
+  outputFilePath?: string;
   targetNodeRole?: string;
   confidence: number;
   evidence: string[];

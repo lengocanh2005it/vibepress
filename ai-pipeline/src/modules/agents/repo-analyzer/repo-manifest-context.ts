@@ -130,6 +130,12 @@ export function buildRepoManifestContextNote(
     `Detected theme kind: ${themeTypeHints.detectedThemeKind} — slug: ${themeTypeHints.themeSlug}${vendorLabel}`,
   );
 
+  if (themeTypeHints.isChildTheme && themeTypeHints.parentThemeSlug) {
+    lines.push(
+      `Child theme: extends "${themeTypeHints.parentThemeSlug}" — templates not overridden in this child theme fall back to parent.`,
+    );
+  }
+
   if (themeTypeHints.usesPageBuilder) {
     const pb = themeTypeHints.pageBuilderSlug ?? 'unknown page builder';
     lines.push(
@@ -213,6 +219,19 @@ export function buildRepoManifestContextNote(
   ) {
     lines.push(
       `Discovered font families in CSS: ${manifest.styleSources.discoveredFontFamilies.slice(0, mode === 'compact' ? 4 : 8).join(', ')}`,
+    );
+  }
+
+  if (
+    includeStyleHints &&
+    manifest.styleSources.discoveredCssVariables?.length > 0
+  ) {
+    lines.push(
+      `Theme CSS color variables: ${fmtList(
+        manifest.styleSources.discoveredCssVariables,
+        mode === 'compact' ? 6 : 15,
+        (v) => `${v.name}:${v.value}`,
+      )}`,
     );
   }
 
@@ -344,6 +363,16 @@ export function buildRepoManifestContextNote(
         )}${uagbBlockTypes.length > limit ? ` (+${uagbBlockTypes.length - limit} more)` : ''}`,
     );
   }
+  if (
+    includeStructureHints &&
+    manifest.structureHints.customBlockTypes?.length > 0
+  ) {
+    const names = manifest.structureHints.customBlockTypes.map((b) => b.name);
+    lines.push(
+      `Custom block types (block.json): ${fmtList(names, mode === 'compact' ? 4 : 10, (n) => n)}`,
+    );
+  }
+
   if (manifest.uagbSummary?.detected) {
     lines.push(
       `Merged UAGB detection: plugins=${manifest.uagbSummary.mergedPluginSlugs.join(', ') || 'none'}; blocks=${manifest.uagbSummary.mergedBlockTypes.join(', ') || 'none'}`,

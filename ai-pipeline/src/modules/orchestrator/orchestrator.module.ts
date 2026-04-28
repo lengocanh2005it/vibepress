@@ -20,6 +20,7 @@ import { NormalizerModule } from '../agents/normalizer/normalizer.module.js';
 import { SourceResolverModule } from '../agents/source-resolver/source-resolver.module.js';
 import { DbTemplateOverlayService } from '../agents/db-template-overlay.service.js';
 import { EditRequestModule } from '../edit-request/edit-request.module.js';
+import { SiteCompareModule } from '../site-compare/site-compare.module.js';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { EditRequestModule } from '../edit-request/edit-request.module.js';
     NormalizerModule,
     SourceResolverModule,
     EditRequestModule,
+    SiteCompareModule,
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService, DbTemplateOverlayService],

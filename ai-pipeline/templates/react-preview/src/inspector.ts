@@ -11,13 +11,10 @@ interface ComponentInfo {
     line: number;
     column?: number;
   };
-  // Section identity — extracted from data-vp-* on nearest ancestor
+  // Section identity — minimal DOM markers; resolve detailed metadata via ui-source-map
   vpSourceNode?: string;
-  vpTemplate?: string;
-  vpSourceFile?: string;
   vpSectionKey?: string;
   vpComponent?: string;
-  vpSectionComponent?: string;
   // Child node targeting — describes the specific element clicked
   targetNodeRole?: string;
   targetElementTag?: string;
@@ -137,18 +134,15 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
 // ── data-vp-* section identity ────────────────────────────
 function getVpSectionData(el: Element): Pick<
   ComponentInfo,
-  'vpSourceNode' | 'vpTemplate' | 'vpSourceFile' | 'vpSectionKey' | 'vpComponent' | 'vpSectionComponent'
+  'vpSourceNode' | 'vpSectionKey' | 'vpComponent'
 > {
   let current: Element | null = el;
   while (current) {
     if (current instanceof HTMLElement && current.dataset.vpSourceNode) {
       return {
         vpSourceNode: current.dataset.vpSourceNode || undefined,
-        vpTemplate: current.dataset.vpTemplate || undefined,
-        vpSourceFile: current.dataset.vpSourceFile || undefined,
         vpSectionKey: current.dataset.vpSectionKey || undefined,
         vpComponent: current.dataset.vpComponent || undefined,
-        vpSectionComponent: current.dataset.vpSectionComponent || undefined,
       };
     }
     current = current.parentElement;

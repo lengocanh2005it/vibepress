@@ -65,18 +65,15 @@ function shortenPath(filePath: string): string {
   return idx !== -1 ? filePath.slice(idx + 1) : filePath;
 }
 
-// Walk up DOM để tìm nearest ancestor có data-vp-source-node và đọc toàn bộ data-vp-*
+// Walk up DOM để tìm nearest ancestor có minimal tracking markers
 function getVpSection(el: Element) {
   let node: Element | null = el;
   while (node) {
     if (node.hasAttribute("data-vp-source-node")) {
       return {
         vpSourceNode: node.getAttribute("data-vp-source-node") ?? undefined,
-        vpTemplate: node.getAttribute("data-vp-template") ?? undefined,
-        vpSourceFile: node.getAttribute("data-vp-source-file") ?? undefined,
         vpSectionKey: node.getAttribute("data-vp-section-key") ?? undefined,
         vpComponent: node.getAttribute("data-vp-component") ?? undefined,
-        vpSectionComponent: node.getAttribute("data-vp-section-component") ?? undefined,
       };
     }
     node = node.parentElement;

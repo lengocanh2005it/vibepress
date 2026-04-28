@@ -391,7 +391,7 @@ function buildIntentClassifierPrompt(input: ValidatedEditRequest): string {
 
   if (request?.targetHint) {
     lines.push(
-      `Target hint: component=${request.targetHint.componentName ?? '(none)'}; route=${request.targetHint.route ?? '(none)'}; template=${request.targetHint.templateName ?? '(none)'}; sectionType=${request.targetHint.sectionType ?? '(none)'}; sectionKey=${request.targetHint.sectionKey ?? '(none)'}; targetRole=${request.targetHint.targetNodeRole ?? '(none)'}`,
+      `Target hint: component=${request.targetHint.componentName ?? '(none)'}; route=${request.targetHint.route ?? '(none)'}; template=${request.targetHint.templateName ?? '(none)'}; sourceNodeId=${request.targetHint.sourceNodeId ?? '(none)'}; sectionType=${request.targetHint.sectionType ?? '(none)'}; debugKey=${request.targetHint.sectionKey ?? '(none)'}; targetRole=${request.targetHint.targetNodeRole ?? '(none)'}`,
     );
   }
 
@@ -524,6 +524,9 @@ function collectTargetCandidates(
       componentName: request.targetHint.componentName,
       route: request.targetHint.route,
       templateName: request.targetHint.templateName,
+      sourceNodeId: request.targetHint.sourceNodeId,
+      debugKey: request.targetHint.sectionKey,
+      outputFilePath: request.targetHint.outputFilePath,
       sectionKey: request.targetHint.sectionKey,
       sectionType: request.targetHint.sectionType,
       targetNodeRole: request.targetHint.targetNodeRole,
@@ -538,8 +541,11 @@ function collectTargetCandidates(
         request.targetHint.templateName
           ? `explicit template=${request.targetHint.templateName}`
           : undefined,
+        request.targetHint.sourceNodeId
+          ? `explicit sourceNodeId=${request.targetHint.sourceNodeId}`
+          : undefined,
         request.targetHint.sectionKey
-          ? `explicit sectionKey=${request.targetHint.sectionKey}`
+          ? `debugKey=${request.targetHint.sectionKey}`
           : undefined,
         request.targetHint.sectionType
           ? `explicit sectionType=${request.targetHint.sectionType}`
@@ -579,6 +585,8 @@ function collectTargetCandidates(
     const sectionType =
       request.targetHint?.sectionType ??
       inferSectionTypeFromCaptureSignals(attachment);
+    const sourceNodeId =
+      attachment.targetNode?.sourceNodeId ?? request.targetHint?.sourceNodeId;
     const targetNodeRole = normalizeNodeRole(
       attachment.targetNode?.editNodeRole ?? request.targetHint?.targetNodeRole,
     );
@@ -593,6 +601,7 @@ function collectTargetCandidates(
       attachment.targetNode?.blockName
         ? `block=${attachment.targetNode.blockName}`
         : undefined,
+      sourceNodeId ? `sourceNodeId=${sourceNodeId}` : undefined,
       targetNodeRole ? `targetRole=${targetNodeRole}` : undefined,
     ]);
     if (evidence.length === 0) continue;
@@ -601,6 +610,8 @@ function collectTargetCandidates(
       componentName,
       route,
       templateName,
+      sourceNodeId,
+      debugKey: request.targetHint?.sectionKey,
       sectionType,
       targetNodeRole,
       confidence: scoreAttachmentCandidateConfidence(attachment),
@@ -629,11 +640,16 @@ function inferTargetScope(
     return 'element';
   }
   if (
+    request?.targetHint?.sourceNodeId ||
     request?.targetHint?.sectionKey ||
     request?.targetHint?.sectionType ||
     typeof request?.targetHint?.sectionIndex === 'number' ||
     targetCandidates.some(
-      (candidate) => candidate.sectionKey || candidate.sectionType,
+      (candidate) =>
+        candidate.sourceNodeId ||
+        candidate.debugKey ||
+        candidate.sectionKey ||
+        candidate.sectionType,
     )
   ) {
     return 'section';
@@ -751,7 +767,7 @@ function collectAssumptions(
 
   if (targetScope === 'section') {
     assumptions.push(
-      'Prefer a localized section-level edit unless a resolved child-element target proves otherwise.',
+      'Prefer a localized source-backed region edit unless a resolved child-element target proves otherwise.',
     );
   }
 
@@ -982,7 +998,8 @@ function scoreTargetHintConfidence(
   if (targetHint.componentName) score += 0.22;
   if (targetHint.route) score += 0.16;
   if (targetHint.templateName) score += 0.12;
-  if (targetHint.sectionKey || targetHint.sectionType) score += 0.08;
+  if (targetHint.sourceNodeId) score += 0.14;
+  if (targetHint.sectionKey || targetHint.sectionType) score += 0.04;
   if (targetHint.targetNodeRole) score += 0.06;
   return clampMetric(score);
 }
@@ -1009,8 +1026,11 @@ function dedupeCandidates(
       candidate.componentName ?? '',
       normalizeRoute(candidate.route) ?? '',
       candidate.templateName ?? '',
+      candidate.sourceNodeId ?? '',
+      candidate.debugKey ?? '',
       candidate.sectionKey ?? '',
       candidate.sectionType ?? '',
+      candidate.outputFilePath ?? '',
       candidate.targetNodeRole ?? '',
     ].join('|');
     const existing = merged.get(key);

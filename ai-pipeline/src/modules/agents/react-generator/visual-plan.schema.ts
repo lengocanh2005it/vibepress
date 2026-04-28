@@ -16,6 +16,50 @@ export type DataNeed =
   | 'pageDetail'
   | 'comments';
 
+export type SectionCapability =
+  | 'heading'
+  | 'body'
+  | 'primary-cta'
+  | 'secondary-cta'
+  | 'image'
+  | 'slides'
+  | 'cards'
+  | 'posts'
+  | 'menus'
+  | 'pages'
+  | 'site-info'
+  | 'search-input'
+  | 'comments-list'
+  | 'comment-form'
+  | 'post-content'
+  | 'page-content'
+  | 'tabs'
+  | 'accordion-items'
+  | 'quote'
+  | 'author';
+
+export interface SectionSourceEvidence {
+  sourceNodeIds?: string[];
+  sourceFiles?: string[];
+  blockNames?: string[];
+  templateNames?: string[];
+}
+
+export interface SectionContentRequirements {
+  requireTitle?: boolean;
+  requireBody?: boolean;
+  requireCtaText?: boolean;
+  requireImageIfSourceHasImage?: boolean;
+}
+
+export interface SectionObligation {
+  role: string;
+  required: SectionCapability[];
+  minItems?: Partial<Record<'slides' | 'cards' | 'posts', number>>;
+  sourceEvidence?: SectionSourceEvidence;
+  contentRequirements?: SectionContentRequirements;
+}
+
 export interface ColorPalette {
   background: string; // page/root background e.g. "#f9f9f9"
   surface: string; // card / elevated surfaces e.g. "#ffffff"
@@ -90,11 +134,59 @@ export interface SectionPresentation {
   contentMaxWidth?: string;
 }
 
+export type SourceSegment =
+  | {
+      type: 'heading';
+      text: string;
+      html?: string;
+      level?: number;
+      customClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'paragraph';
+      text?: string;
+      html: string;
+      customClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'image';
+      src: string;
+      alt?: string;
+      caption?: string;
+      width?: number;
+      height?: number;
+      customClassNames?: string[];
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'list';
+      items: string[];
+      ordered?: boolean;
+      customClassNames?: string[];
+      itemCustomClassNames?: string[];
+      style?: TypographyStyle;
+      sourceRef?: SourceRef;
+    }
+  | {
+      type: 'html';
+      html: string;
+      customClassNames?: string[];
+      sourceRef?: SourceRef;
+    };
+
 // ── Section types ──────────────────────────────────────────────────────────
 
 interface BaseSection {
+  /** Debug-only identifier. Do not use this as render identity or validation truth. */
+  debugKey?: string;
+  /** @deprecated Legacy field retained for compatibility with older plan artifacts. */
   sectionKey?: string;
   sourceRef?: SourceRef;
+  obligation?: SectionObligation;
   customClassNames?: string[];
   background?: string; // overrides palette for this section
   textColor?: string;
@@ -108,6 +200,7 @@ interface BaseSection {
   ctaStyle?: SectionButtonStyle;
   secondaryCtaStyle?: SectionButtonStyle;
   presentation?: SectionPresentation;
+  sourceSegments?: SourceSegment[];
 }
 
 export interface NavbarSection extends BaseSection {
@@ -312,6 +405,12 @@ export interface PageContentSection extends BaseSection {
   hasInteractiveBlocks?: boolean;
 }
 
+export interface ProseBlockSection extends BaseSection {
+  type: 'prose-block';
+  sourceSegments: SourceSegment[];
+  shellVariant?: 'article' | 'wide';
+}
+
 export interface SearchSection extends BaseSection {
   type: 'search';
   title?: string;
@@ -436,6 +535,7 @@ export type SectionPlan =
   | PostContentSection
   | PostMetaSection
   | PageContentSection
+  | ProseBlockSection
   | SearchSection
   | BreadcrumbSection
   | CommentsSection
@@ -498,4 +598,272 @@ export interface ComponentVisualPlan {
   blockStyles?: Record<string, BlockStyleToken>;
   /** Section layout — the only thing AI contributes */
   sections: SectionPlan[];
+}
+
+export function normalizeVisualPlanArchitecture(
+  visualPlan: ComponentVisualPlan,
+): ComponentVisualPlan {
+  return {
+    ...visualPlan,
+    sections: visualPlan.sections.map((section, index) => {
+      const debugKey =
+        section.debugKey?.trim() ||
+        section.sectionKey?.trim() ||
+        `${section.type}-${index + 1}`;
+      return {
+        ...section,
+        debugKey,
+        obligation: section.obligation ?? deriveSectionObligation(section),
+      };
+    }),
+  };
+}
+
+function deriveSectionObligation(section: SectionPlan): SectionObligation {
+  const sourceEvidence: SectionSourceEvidence | undefined = section.sourceRef
+    ? {
+        sourceNodeIds: section.sourceRef.sourceNodeId
+          ? [section.sourceRef.sourceNodeId]
+          : undefined,
+        sourceFiles: section.sourceRef.sourceFile
+          ? [section.sourceRef.sourceFile]
+          : undefined,
+        blockNames: section.sourceRef.blockName
+          ? [section.sourceRef.blockName]
+          : undefined,
+        templateNames: section.sourceRef.templateName
+          ? [section.sourceRef.templateName]
+          : undefined,
+      }
+    : undefined;
+
+  switch (section.type) {
+    case 'hero':
+      return {
+        role: 'hero',
+        required: [
+          ...(section.heading ? (['heading'] as SectionCapability[]) : []),
+          ...(section.subheading ? (['body'] as SectionCapability[]) : []),
+          ...(section.image?.src ? (['image'] as SectionCapability[]) : []),
+          ...(section.ctas?.some((cta) => cta?.text) || section.cta?.text
+            ? (['primary-cta'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+        contentRequirements: {
+          requireTitle: !!section.heading,
+          requireBody: !!section.subheading,
+          requireCtaText:
+            !!section.cta?.text || !!section.ctas?.some((cta) => cta?.text),
+          requireImageIfSourceHasImage: !!section.image?.src,
+        },
+      };
+    case 'cta-strip':
+      return {
+        role: 'cta-strip',
+        required: section.cta?.text ? ['primary-cta'] : [],
+        sourceEvidence,
+        contentRequirements: {
+          requireCtaText: !!section.cta?.text,
+        },
+      };
+    case 'cover':
+      return {
+        role: 'cover',
+        required: [
+          ...(section.heading ? (['heading'] as SectionCapability[]) : []),
+          ...(section.subheading ? (['body'] as SectionCapability[]) : []),
+          ...(section.imageSrc ? (['image'] as SectionCapability[]) : []),
+          ...(section.cta?.text
+            ? (['primary-cta'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+        contentRequirements: {
+          requireTitle: !!section.heading,
+          requireBody: !!section.subheading,
+          requireCtaText: !!section.cta?.text,
+          requireImageIfSourceHasImage: !!section.imageSrc,
+        },
+      };
+    case 'post-list':
+      return {
+        role: 'post-list',
+        required: [
+          ...(section.title ? (['heading'] as SectionCapability[]) : []),
+          'posts',
+        ],
+        minItems: { posts: 1 },
+        sourceEvidence,
+        contentRequirements: {
+          requireTitle: !!section.title,
+        },
+      };
+    case 'card-grid':
+      return {
+        role: 'card-grid',
+        required: [
+          ...(section.title ? (['heading'] as SectionCapability[]) : []),
+          ...(section.subtitle ? (['body'] as SectionCapability[]) : []),
+          'cards',
+        ],
+        minItems: { cards: Math.max(1, section.cards?.length ?? 0) },
+        sourceEvidence,
+        contentRequirements: {
+          requireTitle: !!section.title,
+          requireBody: !!section.subtitle,
+        },
+      };
+    case 'media-text':
+      return {
+        role: 'media-text',
+        required: [
+          ...(section.heading ? (['heading'] as SectionCapability[]) : []),
+          ...(section.body ? (['body'] as SectionCapability[]) : []),
+          ...(section.imageSrc ? (['image'] as SectionCapability[]) : []),
+          ...(section.cta?.text
+            ? (['primary-cta'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+        contentRequirements: {
+          requireTitle: !!section.heading,
+          requireBody: !!section.body,
+          requireCtaText: !!section.cta?.text,
+          requireImageIfSourceHasImage: !!section.imageSrc,
+        },
+      };
+    case 'testimonial':
+      return {
+        role: 'testimonial',
+        required: [
+          ...(section.quote ? (['quote'] as SectionCapability[]) : []),
+          ...(section.authorName ? (['author'] as SectionCapability[]) : []),
+          ...(section.authorAvatar ? (['image'] as SectionCapability[]) : []),
+        ],
+        sourceEvidence,
+      };
+    case 'newsletter':
+      return {
+        role: 'newsletter',
+        required: [
+          ...(section.heading ? (['heading'] as SectionCapability[]) : []),
+          ...(section.subheading ? (['body'] as SectionCapability[]) : []),
+          'primary-cta',
+        ],
+        sourceEvidence,
+      };
+    case 'post-content':
+      return {
+        role: 'post-content',
+        required: ['post-content'],
+        sourceEvidence,
+      };
+    case 'page-content':
+      return {
+        role: 'page-content',
+        required: ['page-content'],
+        sourceEvidence,
+      };
+    case 'prose-block':
+      return {
+        role: 'prose-block',
+        required: [
+          ...(section.sourceSegments.some(
+            (segment) => segment.type === 'heading',
+          )
+            ? (['heading'] as SectionCapability[])
+            : []),
+          ...(section.sourceSegments.some(
+            (segment) =>
+              segment.type === 'paragraph' ||
+              segment.type === 'list' ||
+              segment.type === 'html',
+          )
+            ? (['body'] as SectionCapability[])
+            : []),
+          ...(section.sourceSegments.some((segment) => segment.type === 'image')
+            ? (['image'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+      };
+    case 'search':
+      return {
+        role: 'search',
+        required: ['search-input'],
+        sourceEvidence,
+      };
+    case 'comments':
+      return {
+        role: 'comments',
+        required: [
+          'comments-list',
+          ...(section.showForm === false
+            ? []
+            : (['comment-form'] as SectionCapability[])),
+        ],
+        sourceEvidence,
+      };
+    case 'sidebar':
+      return {
+        role: 'sidebar',
+        required: [
+          ...(section.menuSlug ? (['menus'] as SectionCapability[]) : []),
+          ...(section.showPages ? (['pages'] as SectionCapability[]) : []),
+          ...(section.showPosts ? (['posts'] as SectionCapability[]) : []),
+          ...(section.showSiteInfo
+            ? (['site-info'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+      };
+    case 'modal':
+      return {
+        role: 'modal',
+        required: [
+          ...(section.triggerText
+            ? (['primary-cta'] as SectionCapability[])
+            : []),
+          ...(section.heading ? (['heading'] as SectionCapability[]) : []),
+          ...(section.body ? (['body'] as SectionCapability[]) : []),
+          ...(section.imageSrc ? (['image'] as SectionCapability[]) : []),
+          ...(section.cta?.text
+            ? (['secondary-cta'] as SectionCapability[])
+            : []),
+        ],
+        sourceEvidence,
+      };
+    case 'tabs':
+      return {
+        role: 'tabs',
+        required: ['tabs'],
+        sourceEvidence,
+      };
+    case 'accordion':
+      return {
+        role: 'accordion',
+        required: ['accordion-items'],
+        sourceEvidence,
+      };
+    case 'carousel':
+      return {
+        role: 'carousel',
+        required: ['slides'],
+        minItems: { slides: Math.max(1, section.slides?.length ?? 0) },
+        sourceEvidence,
+      };
+    case 'navbar':
+      return {
+        role: 'navbar',
+        required: ['menus'],
+        sourceEvidence,
+      };
+    default:
+      return {
+        role: section.type,
+        required: [],
+        sourceEvidence,
+      };
+  }
 }

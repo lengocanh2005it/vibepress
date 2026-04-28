@@ -14,13 +14,10 @@ export interface ComponentInfo {
     h: number;
   };
   source?: SourceLocation;
-  // Section identity — from data-vp-* on nearest ancestor with data-vp-source-node
+  // Section identity — minimal DOM markers; detailed metadata resolves via ui-source-map
   vpSourceNode?: string;
-  vpTemplate?: string;
-  vpSourceFile?: string;
   vpSectionKey?: string;
   vpComponent?: string;
-  vpSectionComponent?: string;
   // Child node targeting — describes the specific element clicked
   targetNodeRole?: string;
   targetElementTag?: string;

@@ -520,7 +520,7 @@ export class EditRequestPhaseService {
         lines.push(`- ${formatExactTargetInstruction(target)}`);
       }
       lines.push(
-        'Make the requested change in these exact file regions first. Preserve tracking markers such as data-vp-source-node, data-vp-section-key, and related source metadata.',
+        'Make the requested change in these exact file regions first. Preserve the semantic section ownership and source-backed content boundaries resolved from ui-source-map.',
       );
       const focusedChildTargets = exactTargets.filter(
         (target) =>
@@ -599,7 +599,7 @@ export class EditRequestPhaseService {
           .slice(0, 3)
           .map(
             (candidate) =>
-              `{component=${candidate.componentName ?? 'null'},route=${candidate.route ?? 'null'},template=${candidate.templateName ?? 'null'},section=${candidate.sectionType ?? candidate.sectionKey ?? 'null'},role=${candidate.targetNodeRole ?? 'null'},confidence=${candidate.confidence.toFixed(2)}}`,
+              `{component=${candidate.componentName ?? 'null'},route=${candidate.route ?? 'null'},template=${candidate.templateName ?? 'null'},sourceNodeId=${candidate.sourceNodeId ?? 'null'},region=${candidate.sectionType ?? candidate.debugKey ?? candidate.sectionKey ?? 'null'},role=${candidate.targetNodeRole ?? 'null'},confidence=${candidate.confidence.toFixed(2)}}`,
           )
           .join(' ')}`,
       );
@@ -709,7 +709,7 @@ export class EditRequestPhaseService {
         `exactTargets=${exactTargets
           .map(
             (target) =>
-              `{attachment=${target.captureId},file=${target.outputFilePath},section=${target.sectionKey},ownerLines=${formatLineRange(target.startLine, target.endLine)},targetSourceNodeId=${target.targetSourceNodeId ?? target.sourceNodeId},targetRole=${target.targetNodeRole ?? 'section'},targetLines=${formatLineRange(target.targetStartLine, target.targetEndLine)},sourceNodeId=${target.sourceNodeId}}`,
+              `{attachment=${target.captureId},file=${target.outputFilePath},debugKey=${target.debugKey ?? target.sectionKey ?? 'null'},ownerLines=${formatLineRange(target.startLine, target.endLine)},targetSourceNodeId=${target.targetSourceNodeId ?? target.sourceNodeId},targetRole=${target.targetNodeRole ?? 'section'},targetLines=${formatLineRange(target.targetStartLine, target.targetEndLine)},sourceNodeId=${target.sourceNodeId}}`,
           )
           .join(' ')}`,
       );
@@ -903,7 +903,10 @@ function formatIntentTargetCandidate(
     candidate.componentName ? `component=${candidate.componentName}` : null,
     candidate.route ? `route=${candidate.route}` : null,
     candidate.templateName ? `template=${candidate.templateName}` : null,
-    candidate.sectionKey ? `sectionKey=${candidate.sectionKey}` : null,
+    candidate.sourceNodeId ? `sourceNodeId=${candidate.sourceNodeId}` : null,
+    (candidate.debugKey ?? candidate.sectionKey)
+      ? `debugKey=${candidate.debugKey ?? candidate.sectionKey}`
+      : null,
     candidate.sectionType ? `sectionType=${candidate.sectionType}` : null,
     candidate.targetNodeRole ? `role=${candidate.targetNodeRole}` : null,
     `confidence=${candidate.confidence.toFixed(2)}`,
@@ -991,7 +994,7 @@ function formatExactTargetInstruction(
     `attachment=${target.captureId}`,
     `sourceNodeId=${target.sourceNodeId}`,
     `file=${target.outputFilePath}`,
-    `section=${target.sectionKey}`,
+    `debugKey=${target.debugKey ?? target.sectionKey ?? 'unknown'}`,
     target.sectionComponentName
       ? `sectionComponent=${target.sectionComponentName}`
       : null,

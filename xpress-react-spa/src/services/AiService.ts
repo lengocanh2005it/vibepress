@@ -266,6 +266,15 @@ export interface ReactVisualEditResult {
     error?: string;
 }
 
+export interface PendingEditDecisionResult {
+    accepted: boolean;
+    resumed: boolean;
+    jobId: string;
+    siteId: string;
+    action: 'apply' | 'skip';
+    error?: string;
+}
+
 export const undoReactVisualEdit = async (
     siteId: string,
     jobId: string,
@@ -280,6 +289,50 @@ export const undoReactVisualEdit = async (
         try { errorPayload = await response.json(); } catch { errorPayload = null; }
         throw new AiProcessError(
             errorPayload?.message || 'Failed to undo visual edit.',
+            response.status,
+            errorPayload?.code,
+            errorPayload?.details,
+        );
+    }
+    return response.json();
+};
+
+export const applyPendingEditRequest = async (
+    siteId: string,
+    jobId: string,
+): Promise<PendingEditDecisionResult> => {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/approve-pending-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, jobId }),
+    });
+    if (!response.ok) {
+        let errorPayload: any = null;
+        try { errorPayload = await response.json(); } catch { errorPayload = null; }
+        throw new AiProcessError(
+            errorPayload?.message || 'Failed to apply the pending edit request.',
+            response.status,
+            errorPayload?.code,
+            errorPayload?.details,
+        );
+    }
+    return response.json();
+};
+
+export const skipPendingEditRequest = async (
+    siteId: string,
+    jobId: string,
+): Promise<PendingEditDecisionResult> => {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/skip-pending-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, jobId }),
+    });
+    if (!response.ok) {
+        let errorPayload: any = null;
+        try { errorPayload = await response.json(); } catch { errorPayload = null; }
+        throw new AiProcessError(
+            errorPayload?.message || 'Failed to skip the pending edit request.',
             response.status,
             errorPayload?.code,
             errorPayload?.details,

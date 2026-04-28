@@ -39,6 +39,11 @@ import {
   buildUiSourceMapForProject,
   writeUiSourceMapArtifacts,
 } from '../../edit-request/ui-source-map.util.js';
+import {
+  SOURCE_MOTION_BOOTSTRAP_TS,
+  SOURCE_MOTION_BRIDGE_CSS,
+  SPECTRA_COMPAT_CSS,
+} from './preview-bridge-assets.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -121,15 +126,11 @@ export class PreviewBuilderService {
     await mkdir(componentsDir, { recursive: true });
     await mkdir(pagesDir, { recursive: true });
 
-    // 2. Copy theme assets (images, fonts) vào public/assets/
+    // 2. Copy theme assets (images, fonts, svg, icons, ...) vào public/assets/
     if (themeDir) {
-      const themeAssetsDir = join(themeDir, 'assets');
-      const destImagesDir = join(frontendDir, 'public', 'assets', 'images');
-      const destFontsDir = join(frontendDir, 'public', 'assets', 'fonts');
-      await this.assetDownloader.copyAssets(
-        themeAssetsDir,
-        destImagesDir,
-        destFontsDir,
+      await this.assetDownloader.copyThemeAssets(
+        themeDir,
+        join(frontendDir, 'public'),
       );
     }
 
@@ -188,6 +189,10 @@ export class PreviewBuilderService {
     await this.applySpectraCompatImport(
       frontendDir,
       this.shouldInjectSpectraCompatCss(components.components, repoManifest),
+    );
+    await this.applySourceMotionBridge(
+      frontendDir,
+      this.shouldInjectSourceMotionBridge(components.components),
     );
 
     // 3b. Copy đúng các asset mà component generated đang reference.
@@ -727,6 +732,7 @@ ${fontEntries}
 
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
+    await this.injectWordPressBridgeClasses(frontendDir, tokens);
   }
 
   private async buildLocalThemeFontFaceCss(
@@ -950,25 +956,140 @@ ${fontEntries}
     enabled: boolean,
   ): Promise<void> {
     const cssPath = join(frontendDir, 'src', 'index.css');
+    const compatCssPath = join(
+      frontendDir,
+      'src',
+      'styles',
+      'spectra-compat.css',
+    );
     const importLine = `@import './styles/spectra-compat.css';`;
     const existingCss = await readFile(cssPath, 'utf-8');
 
     if (!enabled) {
+      await rm(compatCssPath, { force: true });
       if (!existingCss.includes(importLine)) return;
       await writeFile(
         cssPath,
-        existingCss
-          .replace(`${importLine}\r\n`, '')
-          .replace(`${importLine}\n`, '')
-          .replace(importLine, ''),
+        this.removeExactLine(existingCss, importLine),
         'utf-8',
       );
       return;
     }
 
+    await writeFile(
+      compatCssPath,
+      `${SPECTRA_COMPAT_CSS.trimEnd()}\n`,
+      'utf-8',
+    );
+
     if (existingCss.includes(importLine)) return;
 
-    const lines = existingCss.split(/\r?\n/);
+    await writeFile(
+      cssPath,
+      this.insertCssImportBeforeTailwindDirectives(existingCss, importLine),
+      'utf-8',
+    );
+  }
+
+  private shouldInjectSourceMotionBridge(
+    components: ReactGenerateResult['components'],
+  ): boolean {
+    const sourceMotionPattern =
+      /\bwow\b[\s\S]{0,400}\banimate__[\w-]+\b|\banimate__[\w-]+\b[\s\S]{0,400}\bwow\b/;
+
+    return components.some((component) =>
+      sourceMotionPattern.test(component.code),
+    );
+  }
+
+  private async applySourceMotionBridge(
+    frontendDir: string,
+    enabled: boolean,
+  ): Promise<void> {
+    const indexCssPath = join(frontendDir, 'src', 'index.css');
+    const mainTsxPath = join(frontendDir, 'src', 'main.tsx');
+    const bridgeCssPath = join(
+      frontendDir,
+      'src',
+      'styles',
+      'source-motion-bridges.css',
+    );
+    const bridgeModulePath = join(frontendDir, 'src', 'source-motion.ts');
+    const cssImportLine = `@import './styles/source-motion-bridges.css';`;
+    const moduleImportLine = `import { watchForSourceMotionSignals } from './source-motion';`;
+    const moduleCallLine = `watchForSourceMotionSignals();`;
+    const [existingCss, existingMainTsx] = await Promise.all([
+      readFile(indexCssPath, 'utf-8'),
+      readFile(mainTsxPath, 'utf-8'),
+    ]);
+
+    if (!enabled) {
+      await Promise.all([
+        rm(bridgeCssPath, { force: true }),
+        rm(bridgeModulePath, { force: true }),
+      ]);
+
+      const nextCss = this.removeExactLine(existingCss, cssImportLine);
+      const nextMainTsx = this.removeExactLine(
+        this.removeExactLine(existingMainTsx, moduleImportLine),
+        moduleCallLine,
+      );
+
+      await Promise.all([
+        nextCss === existingCss
+          ? Promise.resolve()
+          : writeFile(indexCssPath, nextCss, 'utf-8'),
+        nextMainTsx === existingMainTsx
+          ? Promise.resolve()
+          : writeFile(mainTsxPath, nextMainTsx, 'utf-8'),
+      ]);
+      return;
+    }
+
+    await Promise.all([
+      writeFile(
+        bridgeCssPath,
+        `${SOURCE_MOTION_BRIDGE_CSS.trimEnd()}\n`,
+        'utf-8',
+      ),
+      writeFile(
+        bridgeModulePath,
+        `${SOURCE_MOTION_BOOTSTRAP_TS.trimEnd()}\n`,
+        'utf-8',
+      ),
+    ]);
+
+    const nextCss = this.insertCssImportBeforeTailwindDirectives(
+      existingCss,
+      cssImportLine,
+    );
+    const withModuleImport = this.insertImportLine(
+      existingMainTsx,
+      moduleImportLine,
+    );
+    const nextMainTsx = this.insertLineAfterMarker(
+      withModuleImport,
+      'startInspectorClient();',
+      moduleCallLine,
+    );
+
+    await Promise.all([
+      nextCss === existingCss
+        ? Promise.resolve()
+        : writeFile(indexCssPath, nextCss, 'utf-8'),
+      nextMainTsx === existingMainTsx
+        ? Promise.resolve()
+        : writeFile(mainTsxPath, nextMainTsx, 'utf-8'),
+    ]);
+  }
+
+  private insertCssImportBeforeTailwindDirectives(
+    source: string,
+    importLine: string,
+  ): string {
+    if (source.includes(importLine)) return source;
+
+    const lines = source.split(/\r?\n/);
     const firstDirectiveIndex = lines.findIndex((line) =>
       [
         '@tailwind base;',
@@ -979,15 +1100,51 @@ ${fontEntries}
 
     if (firstDirectiveIndex >= 0) {
       lines.splice(firstDirectiveIndex, 0, importLine);
-      await writeFile(cssPath, `${lines.join('\n').trimEnd()}\n`, 'utf-8');
-      return;
+      return `${lines.join('\n').trimEnd()}\n`;
     }
 
-    await writeFile(
-      cssPath,
-      `${importLine}\n${existingCss.trimStart()}`,
-      'utf-8',
+    return `${importLine}\n${source.trimStart()}`;
+  }
+
+  private insertImportLine(source: string, importLine: string): string {
+    if (source.includes(importLine)) return source;
+
+    const lines = source.split(/\r?\n/);
+    let lastImportIndex = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (lines[index].trim().startsWith('import ')) {
+        lastImportIndex = index;
+      }
+    }
+
+    lines.splice(lastImportIndex + 1, 0, importLine);
+    return `${lines.join('\n').trimEnd()}\n`;
+  }
+
+  private insertLineAfterMarker(
+    source: string,
+    markerLine: string,
+    nextLine: string,
+  ): string {
+    if (source.includes(nextLine)) return source;
+
+    const lines = source.split(/\r?\n/);
+    const markerIndex = lines.findIndex(
+      (line) => line.trim() === markerLine.trim(),
     );
+    if (markerIndex < 0) return `${source.trimEnd()}\n${nextLine}\n`;
+
+    lines.splice(markerIndex + 1, 0, nextLine);
+    return `${lines.join('\n').trimEnd()}\n`;
+  }
+
+  private removeExactLine(source: string, lineToRemove: string): string {
+    const lines = source.split(/\r?\n/);
+    const nextLines = lines.filter(
+      (line) => line.trim() !== lineToRemove.trim(),
+    );
+    if (nextLines.length === lines.length) return source;
+    return `${nextLines.join('\n').trimEnd()}\n`;
   }
 
   private normalizeWordPressCustomCssSelectors(css: string): string {
@@ -1274,6 +1431,91 @@ ${fontEntries}
     const block =
       `\n/* WordPress block style bridges */\n` + cssBlocks.join('\n');
     await writeFile(cssPath, existingCss.trimEnd() + block + '\n');
+  }
+
+  private async injectWordPressBridgeClasses(
+    frontendDir: string,
+    tokens: ThemeTokens,
+  ): Promise<void> {
+    const marker = '/* Vibepress WordPress utility class bridges */';
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existing = await readFile(cssPath, 'utf-8');
+    if (existing.includes(marker)) return;
+
+    const lines: string[] = [marker];
+
+    for (const { slug, value } of tokens.colors) {
+      lines.push(`.has-${slug}-color { color: ${value}; }`);
+      lines.push(
+        `.has-${slug}-background-color { background-color: ${value}; }`,
+      );
+    }
+
+    for (const { slug, size } of tokens.fontSizes) {
+      lines.push(`.has-${slug}-font-size { font-size: ${size}; }`);
+    }
+
+    const wideMax = tokens.defaults?.wideWidth ?? '1200px';
+    lines.push(
+      `.alignleft { float: left; margin-inline-end: 2em; margin-bottom: 1em; }`,
+    );
+    lines.push(
+      `.alignright { float: right; margin-inline-start: 2em; margin-bottom: 1em; }`,
+    );
+    lines.push(
+      `.aligncenter { margin-left: auto; margin-right: auto; display: block; }`,
+    );
+    lines.push(
+      `.alignwide { max-width: ${wideMax}; width: 100%; margin-left: auto; margin-right: auto; }`,
+    );
+    lines.push(
+      `.alignfull { max-width: 100vw; width: 100vw; margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw); }`,
+    );
+    lines.push(
+      `#respond, .comment-respond { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid rgb(0 0 0 / 0.1); }`,
+    );
+    lines.push(`.comment-reply-title { margin: 0 0 0.75rem; }`);
+    lines.push(`.comment-notes, .logged-in-as { margin: 0 0 1rem; }`);
+    lines.push(
+      `.comment-list, .children { list-style: none; margin: 0; padding: 0; }`,
+    );
+    lines.push(`.comment-list > .comment + .comment { margin-top: 1.5rem; }`);
+    lines.push(
+      `.children { margin-top: 1rem; margin-left: 1rem; padding-left: 1rem; border-left: 1px solid rgb(0 0 0 / 0.1); }`,
+    );
+    lines.push(
+      `.comment-body { display: flex; flex-direction: column; gap: 0.75rem; }`,
+    );
+    lines.push(
+      `.comment-meta { display: flex; flex-direction: column; gap: 0.75rem; }`,
+    );
+    lines.push(
+      `.comment-author { display: flex; align-items: flex-start; gap: 0.75rem; }`,
+    );
+    lines.push(`.comment-author .avatar { flex-shrink: 0; }`);
+    lines.push(`.comment-content p { margin: 0; }`);
+    lines.push(`.comment-form { display: grid; gap: 1rem; }`);
+    lines.push(
+      `.comment-form-author, .comment-form-email, .comment-form-url, .comment-form-comment, .form-submit { margin: 0; }`,
+    );
+    lines.push(
+      `.comment-form-author label, .comment-form-email label, .comment-form-url label, .comment-form-comment label { display: block; margin-bottom: 0.375rem; }`,
+    );
+    lines.push(`.comment-form input, .comment-form textarea { width: 100%; }`);
+    lines.push(`.comment-form-feedback { margin: 0; }`);
+    lines.push(`.form-submit { margin-top: 0.25rem; }`);
+    lines.push(`.submit { appearance: none; border: 0; cursor: pointer; }`);
+    lines.push(`.comment-awaiting-moderation { margin-top: 1.5rem; }`);
+    lines.push(
+      `@media (min-width: 640px) { .comment-meta { flex-direction: row; align-items: center; justify-content: space-between; } }`,
+    );
+
+    if (lines.length > 1) {
+      await writeFile(
+        cssPath,
+        `${existing.trimEnd()}\n\n${lines.join('\n')}\n`,
+      );
+    }
   }
 
   private async applyInteractionTokens(
@@ -2039,7 +2281,10 @@ ${fontEntries}
     siteUrl?: string | null,
   ): string | null {
     if (!rawUrl) return null;
-    const trimmed = String(rawUrl).trim();
+    const trimmed = String(rawUrl)
+      .trim()
+      .replace(/\\+/g, '/')
+      .replace(/\/+(?=[?#]|$)/, '');
     if (!trimmed || !/\/wp-content\/uploads\//i.test(trimmed)) return null;
 
     try {

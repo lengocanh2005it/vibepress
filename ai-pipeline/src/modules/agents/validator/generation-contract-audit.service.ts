@@ -117,10 +117,14 @@ export class GenerationContractAuditService {
 
     const hasFetch = (predicate: (fetch: FrontendFetchCall) => boolean) =>
       fetches.some(predicate);
+    const rawCode = component.code;
+    const hasApiPath = (value: string | RegExp) =>
+      typeof value === 'string' ? rawCode.includes(value) : value.test(rawCode);
 
     if (
       dataNeeds.has('posts') &&
-      !hasFetch((fetch) => fetch.path === '/api/posts')
+      !hasFetch((fetch) => fetch.path === '/api/posts') &&
+      !hasApiPath('/api/posts')
     ) {
       warnings.push({
         scope: 'frontend-contract',
@@ -131,7 +135,8 @@ export class GenerationContractAuditService {
     }
     if (
       dataNeeds.has('pages') &&
-      !hasFetch((fetch) => fetch.path === '/api/pages')
+      !hasFetch((fetch) => fetch.path === '/api/pages') &&
+      !hasApiPath('/api/pages')
     ) {
       warnings.push({
         scope: 'frontend-contract',
@@ -142,7 +147,8 @@ export class GenerationContractAuditService {
     }
     if (
       dataNeeds.has('siteInfo') &&
-      !hasFetch((fetch) => fetch.path === '/api/site-info')
+      !hasFetch((fetch) => fetch.path === '/api/site-info') &&
+      !hasApiPath('/api/site-info')
     ) {
       warnings.push({
         scope: 'frontend-contract',
@@ -153,7 +159,8 @@ export class GenerationContractAuditService {
     }
     if (
       dataNeeds.has('menus') &&
-      !hasFetch((fetch) => fetch.path === '/api/menus')
+      !hasFetch((fetch) => fetch.path === '/api/menus') &&
+      !hasApiPath('/api/menus')
     ) {
       warnings.push({
         scope: 'frontend-contract',
@@ -164,7 +171,8 @@ export class GenerationContractAuditService {
     }
     if (
       dataNeeds.has('footerLinks') &&
-      !hasFetch((fetch) => fetch.path === '/api/footer-links')
+      !hasFetch((fetch) => fetch.path === '/api/footer-links') &&
+      !hasApiPath('/api/footer-links')
     ) {
       warnings.push({
         scope: 'frontend-contract',
@@ -262,8 +270,14 @@ export class GenerationContractAuditService {
       route === '/tag/:slug';
     if (isArchiveAlias) {
       const hasArchiveRouteDetection =
-        /archiveType/.test(component.code) &&
-        /location\.pathname\.startsWith\('\/category\/'/.test(component.code);
+        (/archiveType/.test(rawCode) &&
+          /location\.pathname\.startsWith\('\/category\/'/.test(rawCode)) ||
+        (/const\s+isCategory\s*=/.test(rawCode) &&
+          /const\s+isAuthor\s*=/.test(rawCode) &&
+          /const\s+isTag\s*=/.test(rawCode) &&
+          /location\.pathname\.startsWith\('\/category\/'/.test(rawCode) &&
+          /location\.pathname\.startsWith\('\/author\/'/.test(rawCode) &&
+          /location\.pathname\.startsWith\('\/tag\/'/.test(rawCode));
       if (!hasArchiveRouteDetection) {
         warnings.push({
           scope: 'frontend-contract',
@@ -274,8 +288,9 @@ export class GenerationContractAuditService {
       }
 
       const hasCategoryHeading =
-        /Category:/.test(component.code) ||
-        /archiveType\s*===\s*['"]category['"]/.test(component.code);
+        /Category:/.test(rawCode) ||
+        /archiveType\s*===\s*['"]category['"]/.test(rawCode) ||
+        /isCategory\s*\?/.test(rawCode);
       if (!hasCategoryHeading) {
         warnings.push({
           scope: 'frontend-contract',
@@ -300,7 +315,10 @@ export class GenerationContractAuditService {
           /^\/api\/taxonomies\/post_tag\/:param\/posts$/.test(
             fetch.normalizedPath,
           ),
-        );
+        ) ||
+        hasApiPath(/\/api\/taxonomies\/category\/\$\{[^}]+\}\/posts/) ||
+        hasApiPath(/\/api\/posts\?author=\$\{[^}]+\}/) ||
+        hasApiPath(/\/api\/taxonomies\/post_tag\/\$\{[^}]+\}\/posts/);
       if (!hasArchiveSpecificFetch) {
         warnings.push({
           scope: 'frontend-contract',

@@ -467,6 +467,14 @@ export interface RepoThemeTypeHints {
   hasStyleCss: boolean;
   hasTemplatePartsPhp: boolean;
   themeSlug: string;
+  /** True when style.css declares a Template: header (child theme) */
+  isChildTheme?: boolean;
+  /** Slug of the parent theme extracted from style.css Template: header */
+  parentThemeSlug?: string;
+  /** True when the theme ships woocommerce/ template overrides */
+  hasWooCommerceOverrides?: boolean;
+  /** Up to 20 paths of WooCommerce template override files */
+  woocommerceOverrideFiles?: string[];
   themeVendor?: string;
   usesPageBuilder: boolean;
   pageBuilderSlug?: string;
@@ -516,6 +524,8 @@ export interface RepoStyleSources {
   editorStyleFiles: string[];
   enqueuedStyleHandles: string[];
   discoveredFontFamilies: string[];
+  /** CSS custom properties and SCSS variables that hold color values, e.g. --color-primary: #d8613c */
+  discoveredCssVariables: { name: string; value: string }[];
 }
 
 export interface RepoRuntimeHints {
@@ -571,6 +581,12 @@ export interface RepoEntrySourceChain {
   notes: string[];
 }
 
+export interface RepoCustomBlockType {
+  name: string;
+  category?: string;
+  attributes?: Record<string, { type?: string; default?: unknown }>;
+}
+
 export interface RepoStructureHints {
   templatePartRefs: string[];
   patternRefs: string[];
@@ -585,6 +601,8 @@ export interface RepoStructureHints {
   patternMeta: RepoPatternMeta[];
   fileAnalyses: RepoSourceFileAnalysis[];
   entrySourceChains: RepoEntrySourceChain[];
+  /** Custom block types registered via block.json in the theme/plugin */
+  customBlockTypes: RepoCustomBlockType[];
 }
 
 export interface RepoAssetManifest {
@@ -689,18 +707,21 @@ export class RepoAnalyzerService {
     themeSlug: string,
   ): Promise<RepoThemeManifest> {
     const filesByRole = this.bucketFiles(fileTree);
+
+    const [functionsPhp, themeJsonRaw, styleCssRaw, structureHints] =
+      await Promise.all([
+        this.readOptionalText(themeDir, 'functions.php'),
+        this.readOptionalText(themeDir, 'theme.json'),
+        this.readOptionalText(themeDir, 'style.css'),
+        this.extractStructureHints(themeDir, fileTree, filesByRole),
+      ]);
+
     const themeTypeHints = this.detectThemeTypeHints(
       fileTree,
       filesByRole,
       themeSlug,
+      styleCssRaw,
     );
-
-    const [functionsPhp, themeJsonRaw, structureHints] = await Promise.all([
-      this.readOptionalText(themeDir, 'functions.php'),
-      this.readOptionalText(themeDir, 'theme.json'),
-      this.extractStructureHints(themeDir, filesByRole),
-    ]);
-
     const runtimeHints = this.extractFunctionsPhpHints(functionsPhp);
     const themeJsonSummary = this.extractThemeJsonSummary(themeJsonRaw);
     const assetManifest = this.categorizeAssets(fileTree);
@@ -865,6 +886,7 @@ export class RepoAnalyzerService {
     fileTree: string[],
     filesByRole: RepoFileBuckets,
     themeSlug: string,
+    styleCssRaw?: string | null,
   ): RepoThemeTypeHints {
     const hasThemeJson = fileTree.includes('theme.json');
     const hasTemplatesDir = filesByRole.templates.length > 0;
@@ -886,6 +908,37 @@ export class RepoAnalyzerService {
 
     const knownTheme = KNOWN_THEMES[themeSlug];
 
+    // Child theme detection: style.css header may contain "Template: parent-slug"
+    let isChildTheme: boolean | undefined;
+    let parentThemeSlug: string | undefined;
+    if (styleCssRaw) {
+      const templateMatch = styleCssRaw.match(/^[\s*]*Template\s*:\s*(.+)$/m);
+      if (templateMatch?.[1]) {
+        parentThemeSlug = templateMatch[1].trim().toLowerCase();
+        isChildTheme = true;
+      }
+    }
+
+    // WooCommerce template override detection
+    const hasWooCommerceOverrides = fileTree.some((file) =>
+      file.startsWith('woocommerce/'),
+    );
+    const woocommerceOverrideFiles = hasWooCommerceOverrides
+      ? fileTree.filter((file) => file.startsWith('woocommerce/')).slice(0, 20)
+      : undefined;
+
+    const themeVendorNotes = [...(knownTheme?.notes ?? [])];
+    if (isChildTheme && parentThemeSlug) {
+      themeVendorNotes.push(
+        `Child theme: extends "${parentThemeSlug}" — templates not overridden in child fall back to parent theme.`,
+      );
+    }
+    if (hasWooCommerceOverrides) {
+      themeVendorNotes.push(
+        `WooCommerce template overrides detected in woocommerce/ folder (${woocommerceOverrideFiles?.length ?? 0} files) — WC pages use theme-customized templates.`,
+      );
+    }
+
     return {
       detectedThemeKind,
       hasThemeJson,
@@ -899,7 +952,11 @@ export class RepoAnalyzerService {
       themeVendor: knownTheme?.vendor,
       usesPageBuilder: knownTheme?.usesPageBuilder ?? false,
       pageBuilderSlug: knownTheme?.pageBuilderSlug,
-      themeVendorNotes: knownTheme?.notes ?? [],
+      themeVendorNotes,
+      ...(isChildTheme !== undefined ? { isChildTheme } : {}),
+      ...(parentThemeSlug ? { parentThemeSlug } : {}),
+      ...(hasWooCommerceOverrides ? { hasWooCommerceOverrides } : {}),
+      ...(woocommerceOverrideFiles?.length ? { woocommerceOverrideFiles } : {}),
     };
   }
 
@@ -1121,6 +1178,7 @@ export class RepoAnalyzerService {
 
   private async extractStructureHints(
     themeDir: string,
+    fileTree: string[],
     filesByRole: RepoFileBuckets,
   ): Promise<RepoStructureHints> {
     const themeSlug = basename(themeDir).trim().toLowerCase();
@@ -1276,6 +1334,45 @@ export class RepoAnalyzerService {
       contentByFile,
     );
 
+    // Parse block.json files for custom block type definitions
+    const blockJsonFiles = fileTree
+      .filter((file) => basename(file) === 'block.json')
+      .slice(0, 30);
+    const customBlockTypes: RepoCustomBlockType[] = [];
+    const blockJsonContents = await Promise.all(
+      blockJsonFiles.map((file) => this.readOptionalText(themeDir, file)),
+    );
+    for (const raw of blockJsonContents) {
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof parsed.name !== 'string') continue;
+        const entry: RepoCustomBlockType = { name: parsed.name };
+        if (typeof parsed.category === 'string') {
+          entry.category = parsed.category;
+        }
+        if (parsed.attributes && typeof parsed.attributes === 'object') {
+          const attrs: Record<string, { type?: string; default?: unknown }> =
+            {};
+          for (const [key, attr] of Object.entries(
+            parsed.attributes as Record<string, unknown>,
+          )) {
+            if (attr && typeof attr === 'object') {
+              const a = attr as Record<string, unknown>;
+              const attrEntry: { type?: string; default?: unknown } = {};
+              if (typeof a.type === 'string') attrEntry.type = a.type;
+              if (a.default !== undefined) attrEntry.default = a.default;
+              attrs[key] = attrEntry;
+            }
+          }
+          if (Object.keys(attrs).length > 0) entry.attributes = attrs;
+        }
+        customBlockTypes.push(entry);
+      } catch {
+        // skip malformed block.json
+      }
+    }
+
     return {
       templatePartRefs: Array.from(templatePartRefs).sort(),
       patternRefs: Array.from(patternRefs).sort(),
@@ -1297,6 +1394,7 @@ export class RepoAnalyzerService {
       patternMeta,
       fileAnalyses: fileAnalyses.sort((a, b) => a.file.localeCompare(b.file)),
       entrySourceChains,
+      customBlockTypes,
     };
   }
 
@@ -1698,8 +1796,15 @@ export class RepoAnalyzerService {
     const cssContents = await Promise.all(
       cssCandidates.map((file) => this.readOptionalText(themeDir, file)),
     );
+
+    const discoveredCssVariablesMap = new Map<string, string>();
+    const COLOR_VALUE_RE =
+      /#[0-9a-fA-F]{3,8}|rgba?\s*\([^)]+\)|hsla?\s*\([^)]+\)/;
+
     for (const content of cssContents) {
       if (!content) continue;
+
+      // Font families
       for (const match of content.matchAll(/font-family\s*:\s*([^;{}]+)/gi)) {
         const families = match[1]
           .split(',')
@@ -1718,7 +1823,47 @@ export class RepoAnalyzerService {
           );
         for (const family of families) discoveredFontFamilies.add(family);
       }
+
+      // CSS custom properties: --name: <color-value>
+      for (const match of content.matchAll(
+        /--([a-zA-Z0-9_-]+)\s*:\s*([^;{}]+)/g,
+      )) {
+        const name = `--${match[1].trim()}`;
+        const value = match[2]
+          .trim()
+          .replace(/\s*!important$/i, '')
+          .trim();
+        if (
+          COLOR_VALUE_RE.test(value) &&
+          !discoveredCssVariablesMap.has(name)
+        ) {
+          discoveredCssVariablesMap.set(name, value);
+        }
+      }
+
+      // SCSS variables: $name: <color-value>
+      for (const match of content.matchAll(
+        /\$([a-zA-Z0-9_-]+)\s*:\s*([^;{}]+)/g,
+      )) {
+        const name = `$${match[1].trim()}`;
+        const value = match[2]
+          .trim()
+          .replace(/\s*!important$/i, '')
+          .trim();
+        if (
+          COLOR_VALUE_RE.test(value) &&
+          !discoveredCssVariablesMap.has(name)
+        ) {
+          discoveredCssVariablesMap.set(name, value);
+        }
+      }
     }
+
+    const discoveredCssVariables = Array.from(
+      discoveredCssVariablesMap.entries(),
+    )
+      .map(([name, value]) => ({ name, value }))
+      .slice(0, 40);
 
     return {
       rootCssFiles,
@@ -1726,6 +1871,7 @@ export class RepoAnalyzerService {
       editorStyleFiles: runtimeHints.editorStyleFiles,
       enqueuedStyleHandles: runtimeHints.enqueuedStyleHandles,
       discoveredFontFamilies: Array.from(discoveredFontFamilies).sort(),
+      discoveredCssVariables,
     };
   }
 

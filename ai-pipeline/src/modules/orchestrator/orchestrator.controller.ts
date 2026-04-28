@@ -10,7 +10,9 @@ import {
 import { Observable, map } from 'rxjs';
 import { EditRequestFacadeService } from '../edit-request/edit-request.facade.service.js';
 import type {
+  ApplyPendingEditRequestDto,
   RunPipelineRequestDto,
+  SkipPendingEditRequestDto,
   SubmitReactVisualEditDto,
   UndoReactVisualEditDto,
 } from './orchestrator.dto.js';
@@ -51,6 +53,32 @@ export class OrchestratorController {
       );
     }
     return this.orchestratorService.submitReactVisualEdit(body);
+  }
+
+  @Post('approve-pending-edit')
+  async approvePendingEdit(@Body() body: ApplyPendingEditRequestDto) {
+    const siteId = body?.siteId?.trim();
+    const jobId = body?.jobId?.trim();
+    if (!siteId) {
+      throw new BadRequestException('siteId is required');
+    }
+    if (!jobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    return this.orchestratorService.approvePendingEditRequest(body);
+  }
+
+  @Post('skip-pending-edit')
+  async skipPendingEdit(@Body() body: SkipPendingEditRequestDto) {
+    const siteId = body?.siteId?.trim();
+    const jobId = body?.jobId?.trim();
+    if (!siteId) {
+      throw new BadRequestException('siteId is required');
+    }
+    if (!jobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    return this.orchestratorService.skipPendingEditRequest(body);
   }
 
   @Post('react-visual-edit/undo')

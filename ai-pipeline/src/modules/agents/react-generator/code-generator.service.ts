@@ -19,6 +19,7 @@ import type {
   PostContentSection,
   PostMetaSection,
   PageContentSection,
+  ProseBlockSection,
   CommentsSection,
   SearchSection,
   SidebarSection,
@@ -29,6 +30,7 @@ import type {
   DataNeed,
   SectionCta,
   SectionPresentation,
+  SourceSegment,
 } from './visual-plan.schema.js';
 import {
   COMMENT_INTERFACE,
@@ -55,6 +57,7 @@ interface RenderCtx {
   t: TypographyTokens;
   l: LayoutTokens;
   b?: Record<string, BlockStyleToken>;
+  supportsPostsPagination?: boolean;
 }
 
 interface BlockFaithfulPartialInput {
@@ -93,6 +96,7 @@ export class CodeGeneratorService {
       t: effectivePlan.typography,
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
+      supportsPostsPagination: this.needsPagination(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -117,6 +121,7 @@ export class CodeGeneratorService {
       t: effectivePlan.typography,
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
+      supportsPostsPagination: this.needsPagination(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -138,6 +143,30 @@ export class CodeGeneratorService {
       );
     }
     return assembled;
+  }
+
+  generateDeterministicInlineSection(
+    plan: ComponentVisualPlan,
+    sectionIndex: number,
+  ): string {
+    const effectiveDataNeeds = this.deriveDataNeeds(plan);
+    const effectivePlan = { ...plan, dataNeeds: effectiveDataNeeds };
+    const ctx: RenderCtx = {
+      p: effectivePlan.palette,
+      t: effectivePlan.typography,
+      l: effectivePlan.layout,
+      b: effectivePlan.blockStyles,
+    };
+    const section = effectivePlan.sections[sectionIndex];
+    if (!section) {
+      throw new Error(`Missing section at index ${sectionIndex}`);
+    }
+    return this.renderSection(
+      section,
+      ctx,
+      effectivePlan.componentName,
+      sectionIndex,
+    );
   }
 
   generateBlockFaithfulPartial(input: BlockFaithfulPartialInput): string {
@@ -465,6 +494,7 @@ export class CodeGeneratorService {
         case 'post-meta':
           break;
         case 'page-content':
+        case 'prose-block':
           needs.add('pageDetail');
           break;
         case 'sidebar': {
@@ -611,6 +641,10 @@ export class CodeGeneratorService {
           return section.tabs.some((tab) => !!tab.imageSrc);
         case 'carousel':
           return section.slides.some((slide) => !!slide.imageSrc);
+        case 'prose-block':
+          return section.sourceSegments.some(
+            (segment) => segment.type === 'image' && !!segment.src,
+          );
         default:
           return false;
       }
@@ -869,6 +903,7 @@ export class CodeGeneratorService {
       lines.push(`  });`);
       lines.push(`  const [commentAuthor, setCommentAuthor] = useState('');`);
       lines.push(`  const [commentEmail, setCommentEmail] = useState('');`);
+      lines.push(`  const [commentWebsite, setCommentWebsite] = useState('');`);
       lines.push(`  const [commentContent, setCommentContent] = useState('');`);
       lines.push(
         `  const [submittingComment, setSubmittingComment] = useState(false);`,
@@ -1226,6 +1261,7 @@ export class CodeGeneratorService {
       lines.push(`          slug,`);
       lines.push(`          author: ${authorValue},`);
       lines.push(`          email: ${emailValue},`);
+      lines.push(`          website: commentWebsite.trim(),`);
       lines.push(`          content: commentContent.trim(),`);
       lines.push(`          parentId: 0,`);
       lines.push(`          clientToken: commentClientToken,`);
@@ -1255,6 +1291,7 @@ export class CodeGeneratorService {
         lines.push(`      setCommentAuthor('');`);
       if (commentsSection.requireEmail)
         lines.push(`      setCommentEmail('');`);
+      lines.push(`      setCommentWebsite('');`);
       lines.push(`    } catch (err) {`);
       lines.push(
         `      setCommentError(err instanceof Error ? err.message : 'Could not post comment');`,
@@ -1532,7 +1569,10 @@ export default ${componentName};`;
           ) ?? null)
         : null;
     const mainContentSection = plan.sections.find(
-      (s) => s.type === 'page-content' || s.type === 'post-content',
+      (s): s is PostContentSection | PageContentSection | ProseBlockSection =>
+        s.type === 'page-content' ||
+        s.type === 'post-content' ||
+        s.type === 'prose-block',
     );
 
     for (let index = 0; index < plan.sections.length; index++) {
@@ -1615,6 +1655,9 @@ export default ${componentName};`;
       case 'page-content':
         markup = this.renderPageContent(section, ctx, py);
         break;
+      case 'prose-block':
+        markup = this.renderProseBlock(section, ctx, py);
+        break;
       case 'comments':
         markup = this.renderComments(section, ctx, py);
         break;
@@ -1661,6 +1704,16 @@ export default ${componentName};`;
       .join(', ')} }}`;
   }
 
+  private mergeStyleAttrs(
+    ...styleAttrs: Array<string | null | undefined>
+  ): string {
+    const mergedEntries = styleAttrs
+      .map((attr) => attr?.match(/style=\{\{\s*([\s\S]*?)\s*\}\}/)?.[1]?.trim())
+      .filter((entry): entry is string => !!entry);
+    if (mergedEntries.length === 0) return '';
+    return ` style={{ ${mergedEntries.join(', ')} }}`;
+  }
+
   private buildSectionStyleAttr(
     section: SectionPlan,
     extra: Record<string, string | number | undefined> = {},
@@ -1688,20 +1741,8 @@ export default ${componentName};`;
     markup: string,
     componentName: string,
   ): string {
-    const withCustomClasses = this.applySectionCustomClasses(
-      markup,
-      section.customClassNames,
-    );
-    const trackingAttrs = this.buildSectionTrackingAttrs(
-      section,
-      componentName,
-    );
-    if (!trackingAttrs) return withCustomClasses;
-
-    return withCustomClasses.replace(
-      /(<(?:section|header|footer|main|article|aside|nav|div)\b)(?![^>]*\bdata-vp-section-key=)/,
-      `$1${trackingAttrs}`,
-    );
+    void componentName;
+    return this.applySectionCustomClasses(markup, section.customClassNames);
   }
 
   private applySectionCustomClasses(
@@ -1732,44 +1773,6 @@ export default ${componentName};`;
       /(<(?:section|header|footer|main|article|aside|nav|div)\b)/,
       `$1 className="${normalized.join(' ')}"`,
     );
-  }
-
-  private buildSectionTrackingAttrs(
-    section: SectionPlan,
-    componentName: string,
-  ): string {
-    const sectionKey = section.sectionKey ?? section.type;
-    if (!sectionKey && !section.sourceRef?.sourceNodeId) return '';
-
-    const attrs = [
-      ['data-vp-source-node', section.sourceRef?.sourceNodeId],
-      ['data-vp-template', section.sourceRef?.templateName],
-      ['data-vp-source-file', section.sourceRef?.sourceFile],
-      ['data-vp-section-key', sectionKey],
-      ['data-vp-component', componentName],
-      [
-        'data-vp-section-component',
-        this.buildTrackedSectionComponentName(componentName, sectionKey),
-      ],
-    ].filter(([, value]) => !!value);
-
-    return attrs
-      .map(
-        ([name, value]) =>
-          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
-      )
-      .join('');
-  }
-
-  private buildTrackedSectionComponentName(
-    componentName: string,
-    sectionKey: string,
-  ): string {
-    return `${componentName}${sectionKey
-      .split(/[^a-zA-Z0-9]+/)
-      .filter(Boolean)
-      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
-      .join('')}Section`;
   }
 
   private exactRadiusClass(value?: string): string {
@@ -2484,7 +2487,7 @@ export default ${componentName};`;
     return `      {/* Hero */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
-          <div className="flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-6 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
+          <div className="flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-6 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''}"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
             ${s.heading ? `<h1 className="${heroHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
             ${s.subheading ? `<p className="${heroSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
@@ -2512,7 +2515,7 @@ export default ${componentName};`;
     return `      {/* CTA Strip */}
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
-          <div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
+          <div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
             ${cta}
           </div>
         </div>
@@ -2570,7 +2573,7 @@ export default ${componentName};`;
         className="relative w-full flex items-center justify-center ${imageRadius}"
       >
         <div className="absolute inset-0 bg-black" style={{ opacity: ${s.dimRatio / 100} }} />
-        <div className="relative z-10 w-full flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>
+        <div className="relative z-10 w-full flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)} gap-4 px-4 sm:px-6 lg:px-8 py-16"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
           ${s.heading ? `<h1 className="${coverHeadingClassName}"${headingStyle}>${s.heading}</h1>` : ''}
           ${s.subheading ? `<p className="${coverSubheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
           ${cta}
@@ -2703,7 +2706,9 @@ export default ${componentName};`;
 ${postCard}
             ))}
           </div>
-          {totalPages > 1 && (
+          ${
+            ctx.supportsPostsPagination
+              ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]">
               <button
                 type="button"
@@ -2723,7 +2728,9 @@ ${postCard}
                 Next
               </button>
             </div>
-          )}
+          )}`
+              : ''
+          }
         </div>
       </section>`;
   }
@@ -2958,7 +2965,7 @@ ${postCard}
     return `      {metaSource ? (
         <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
           <div className="${l.containerClass}">
-            <div className="text-sm text-[${p.textMuted}] ${flex}"${metaStyle}${this.buildSectionGapStyleAttr(s)}>
+            <div className="text-sm text-[${p.textMuted}] ${flex}"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
               ${parts.join('\n              ')}
             </div>
           </div>
@@ -3251,7 +3258,7 @@ ${cards}
 
     return `      {/* Testimonial */}
       <section className="w-full ${py}"${styleAttr}>
-        <div className="${this.sectionContainerClass(s, ctx, 'content')} ${containerAlign} px-4 sm:px-6 lg:px-8"${cardStyleAttr}${this.presentationMaxWidthStyleAttr(presentation)}>
+        <div className="${this.sectionContainerClass(s, ctx, 'content')} ${containerAlign} px-4 sm:px-6 lg:px-8"${this.mergeStyleAttrs(cardStyleAttr, this.presentationMaxWidthStyleAttr(presentation))}>
           <div className="flex flex-col ${align} gap-8"${this.buildSectionGapStyleAttr(s)}>
             <p className="${quoteClassName}"${quoteStyle}>"${s.quote}"</p>
             <div className="flex flex-col ${this.presentationItemsAlignClass(presentation.itemsAlign)} gap-1">
@@ -3313,8 +3320,8 @@ ${cards}
     );
     const inner =
       s.layout === 'card'
-        ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${cardStyle}${this.presentationMaxWidthStyleAttr(presentation)}>`
-        : `<div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.buildSectionGapStyleAttr(s)}${this.presentationMaxWidthStyleAttr(presentation)}>`;
+        ? `<div className="bg-[${p.surface}] ${cardRadius || 'rounded-2xl'} p-8 md:p-12 ${presentation.contentAlign === 'center' ? 'mx-auto' : presentation.contentAlign === 'right' ? 'ml-auto' : ''} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.mergeStyleAttrs(cardStyle, this.presentationMaxWidthStyleAttr(presentation))}>`
+        : `<div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>`;
 
     return `      {/* Newsletter */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -3379,8 +3386,6 @@ ${cards}
     const brandDescriptionExpr = s.brandDescription
       ? JSON.stringify(s.brandDescription)
       : 'siteInfo?.blogDescription';
-    const footerColumnsExpr =
-      '(footerColumns.length > 0 ? footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0) : fallbackFooterColumns)';
     const fallbackColumns = JSON.stringify(
       s.menuColumns.map((col) => ({ heading: col.title, links: [] })),
     );
@@ -3419,8 +3424,20 @@ ${cards}
             <div className="min-w-0">
               <div className="grid ${menuGridClass} items-start gap-8">
                 {(() => {
-                  const fallbackFooterColumns = ${fallbackColumns};
-                  return ${footerColumnsExpr}.map((column, columnIndex) => (
+                  const approvedFooterColumns = ${fallbackColumns};
+                  const displayFooterColumns = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);
+                  const orderedFooterColumns = approvedFooterColumns
+                    .map((approvedColumn) =>
+                      displayFooterColumns.find(
+                        (column) =>
+                          String(column.heading ?? '').trim().toLowerCase() ===
+                          String(approvedColumn.heading ?? '').trim().toLowerCase(),
+                      ),
+                    )
+                    .filter((column): column is FooterColumn => Boolean(column));
+                  const columnsToRender =
+                    orderedFooterColumns.length > 0 ? orderedFooterColumns : displayFooterColumns;
+                  return columnsToRender.map((column, columnIndex) => (
                     <div key={column.heading ?? columnIndex} className="flex min-w-0 flex-col gap-3">
                       <h3 className="font-semibold text-[${tc}]"${columnHeadingStyle}>{column.heading}</h3>
                       <nav className="flex flex-col gap-2">
@@ -3493,11 +3510,24 @@ ${this.renderPostContentInner(s, ctx)}
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
+    const commentCardStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        padding: '1rem',
+        borderRadius: '5px',
+        borderColor: 'rgb(0 0 0 / 0.08)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'group'),
+      this.pickBlockStyle(ctx, 'column'),
+    );
     const inputStyle = this.buildMergedBlockStyleAttr(
       ctx,
       {
         color: tc,
-        backgroundColor: 'transparent',
+        backgroundColor: '#ffffff',
         borderColor: 'rgb(0 0 0 / 0.2)',
         borderWidth: '1px',
         borderStyle: 'solid',
@@ -3516,38 +3546,72 @@ ${this.renderPostContentInner(s, ctx)}
     );
     const renderCommentCard = (
       commentVar: string,
-    ) => `                      <div className="flex items-start gap-3">
-                         <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]">
-                           {${commentVar}.author.charAt(0).toUpperCase()}
-                         </span>
-                         <div className="flex-1">
-                           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</div>
-                            <time className="text-xs text-[${p.textMuted}]"${metaStyle}>{${commentVar}.date}</time>
-                           </div>
-                          <p className="mt-2 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
-                         </div>
-                       </div>`;
+    ) => `                      <article className="comment-body wp-block-group has-base-background-color has-background"${commentCardStyle}>
+                        <footer className="comment-meta">
+                          <div className="comment-author vcard flex items-start gap-3">
+                            <span className="avatar avatar-44 photo inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]" aria-hidden="true">
+                              {${commentVar}.author.charAt(0).toUpperCase()}
+                            </span>
+                            <div className="wp-block-group flex flex-col gap-0.5">
+                              <b className="fn text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</b>
+                              <a href={'#comment-' + ${commentVar}.id} className="comment-date text-xs text-[${p.textMuted}]"${metaStyle}>
+                                <time dateTime={${commentVar}.date}>{${commentVar}.date}</time>
+                              </a>
+                            </div>
+                          </div>
+                        </footer>
+                        <div className="comment-content wp-block-comment-content">
+                          <p className="mt-3 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
+                        </div>
+                      </article>`;
     const formBlock = s.showForm
       ? `
-              <div className="flex flex-col gap-4 pt-6 border-t border-black/10">
-                <h3 className="${t.h3} font-normal text-[${tc}]"${headingStyle}>Leave a Reply</h3>
-                <form className="flex flex-col gap-3" onSubmit={handleCommentSubmit}>
-                  ${s.requireName ? `<input type="text" placeholder="Name *" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />` : ''}
-                  ${s.requireEmail ? `<input type="email" placeholder="Email *" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />` : ''}
-                  <textarea rows={4} placeholder="Your comment..." value={commentContent} onChange={(event) => setCommentContent(event.target.value)} className="${t.buttonRadius} text-sm resize-none"${inputStyle} />
-                  {commentError ? <p className="text-sm text-red-600">{commentError}</p> : null}
-                  {commentSuccess ? <p className="text-sm text-green-700">{commentSuccess}</p> : null}
-                  <button type="submit" disabled={submittingComment} className="self-start bg-[${p.accent}] text-[${p.accentText}] px-5 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity text-sm disabled:cursor-not-allowed disabled:opacity-60"${this.buttonStyleAttr(ctx)}>
-                    {submittingComment ? 'Posting...' : 'Post Comment'}
-                  </button>
+              <div id="respond" className="comment-respond">
+                <h3 id="reply-title" className="comment-reply-title ${t.h3} font-normal text-[${tc}]"${headingStyle}>
+                  Leave a Reply
+                </h3>
+                <p className="comment-notes text-sm text-[${p.textMuted}]"${bodyStyle}>
+                  Your email address will not be published. Required fields are marked *
+                </p>
+                <form id="commentform" className="comment-form" onSubmit={handleCommentSubmit}>
+                  ${
+                    s.requireName
+                      ? `<p className="comment-form-author">
+                    <label htmlFor="author" className="text-sm font-medium text-[${tc}]"${authorStyle}>Name *</label>
+                    <input id="author" name="author" type="text" autoComplete="name" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />
+                  </p>`
+                      : ''
+                  }
+                  ${
+                    s.requireEmail
+                      ? `<p className="comment-form-email">
+                    <label htmlFor="email" className="text-sm font-medium text-[${tc}]"${authorStyle}>Email *</label>
+                    <input id="email" name="email" type="email" autoComplete="email" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />
+                  </p>`
+                      : ''
+                  }
+                  <p className="comment-form-url">
+                    <label htmlFor="url" className="text-sm font-medium text-[${tc}]"${authorStyle}>Website</label>
+                    <input id="url" name="url" type="url" autoComplete="url" value={commentWebsite} onChange={(event) => setCommentWebsite(event.target.value)} className="${t.buttonRadius} text-sm" spellCheck={false}${inputStyle} />
+                  </p>
+                  <p className="comment-form-comment">
+                    <label htmlFor="comment" className="text-sm font-medium text-[${tc}]"${authorStyle}>Comment *</label>
+                    <textarea id="comment" name="comment" rows={6} required value={commentContent} onChange={(event) => setCommentContent(event.target.value)} className="${t.buttonRadius} text-sm resize-y"${inputStyle} />
+                  </p>
+                  {commentError ? <p className="comment-form-feedback text-sm text-red-600">{commentError}</p> : null}
+                  {commentSuccess ? <p className="comment-form-feedback text-sm text-green-700">{commentSuccess}</p> : null}
+                  <p className="form-submit">
+                    <button id="submit" type="submit" disabled={submittingComment} className="submit wp-element-button bg-[${p.accent}] text-[${p.accentText}] px-5 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity text-sm disabled:cursor-not-allowed disabled:opacity-60"${this.buttonStyleAttr(ctx)}>
+                      {submittingComment ? 'Posting...' : 'Post Comment'}
+                    </button>
+                  </p>
                 </form>
               </div>`
       : '';
     const pendingBlock = s.showForm
       ? `
               {pendingComments.length > 0 ? (
-                <div className="rounded-[24px] border border-black/10 bg-black/5"${moderationStyle}>
+                <div className="comment-awaiting-moderation rounded-[24px] border border-black/10 bg-black/5"${moderationStyle}>
                   <p className="text-sm font-medium text-[${tc}]"${authorStyle}>
                     {pendingComments.length === 1
                       ? '1 comment is awaiting moderation.'
@@ -3565,34 +3629,37 @@ ${this.renderPostContentInner(s, ctx)}
               ) : null}`
       : '';
     return `      {/* Comments */}
-      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+      <section className="wp-block-comments wp-block-comments-query-loop bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6 lg:px-8">
           {item && (
-            <div className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
-              <h2 className="${t.h2} font-normal text-[${tc}]"${headingStyle}>
-                {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
-              </h2>
+            <div className="wp-block-group flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
+              <div className="wp-block-group flex flex-col gap-2">
+                <h2 className="wp-block-heading ${t.h2} font-normal text-[${tc}]"${headingStyle}>
+                  Comments
+                </h2>
+                <p className="wp-block-comments-title text-sm text-[${p.textMuted}]"${metaStyle}>
+                  {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
+                </p>
+              </div>
               {topLevelComments.length > 0 ? (
-                <div className="flex flex-col gap-6">
+                <ol className="comment-list wp-block-comment-template">
                   {topLevelComments.map((comment) => (
-                    <div key={comment.id} className="flex flex-col gap-4">
+                    <li key={comment.id} id={\`comment-\${comment.id}\`} className="comment depth-1">
 ${renderCommentCard('comment')}
                       {repliesFor(comment.id).length > 0 ? (
-                        <div className="ml-4 border-l border-black/10 pl-4 sm:ml-10 sm:pl-6">
-                          <div className="flex flex-col gap-4">
+                        <ol className="children">
                             {repliesFor(comment.id).map((reply) => (
-                              <div key={reply.id} className="flex flex-col gap-2">
+                              <li key={reply.id} id={\`comment-\${reply.id}\`} className="comment depth-2">
 ${renderCommentCard('reply')}
-                              </div>
+                              </li>
                             ))}
-                          </div>
-                        </div>
+                        </ol>
                       ) : null}
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ol>
               ) : (
-                <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>No comments yet.</p>
+                <p className="no-comments text-sm text-[${p.textMuted}]"${bodyStyle}>No comments yet.</p>
               )}${pendingBlock}${formBlock}
             </div>
           )}
@@ -3613,6 +3680,26 @@ ${renderCommentCard('reply')}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${shellClass} px-4 sm:px-6 lg:px-8">
 ${this.renderPageContentInner(s, ctx)}
+        </div>
+      </section>`;
+  }
+
+  private renderProseBlock(
+    s: ProseBlockSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const { p } = ctx;
+    const bg = s.background ?? p.background;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const shellClass =
+      s.shellVariant === 'wide'
+        ? ctx.l.containerClass
+        : this.contentContainerClass(ctx);
+    return `      {/* Prose Block */}
+      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+        <div className="${shellClass} px-4 sm:px-6 lg:px-8">
+${this.renderProseBlockInner(s, ctx)}
         </div>
       </section>`;
   }
@@ -3665,7 +3752,9 @@ ${this.renderPageContentInner(s, ctx)}
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}"${resultLinkStyle}>{post.title}</Link>
             ))}
           </div>
-          {totalPages > 1 && (
+          ${
+            ctx.supportsPostsPagination
+              ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]"${metaStyle}>
               <button
                 type="button"
@@ -3685,7 +3774,9 @@ ${this.renderPageContentInner(s, ctx)}
                 Next
               </button>
             </div>
-          )}
+          )}`
+              : ''
+          }
         </div>
       </section>`;
   }
@@ -3715,7 +3806,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
   }
 
   private renderContentWithSidebar(
-    mainSection: PostContentSection | PageContentSection,
+    mainSection: PostContentSection | PageContentSection | ProseBlockSection,
     sidebarSection: SidebarSection,
     ctx: RenderCtx,
     sidebarLeft: boolean,
@@ -3728,7 +3819,9 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const mainContent =
       mainSection.type === 'post-content'
         ? this.renderPostContentInner(mainSection, ctx)
-        : this.renderPageContentInner(mainSection, ctx);
+        : mainSection.type === 'page-content'
+          ? this.renderPageContentInner(mainSection, ctx)
+          : this.renderProseBlockInner(mainSection, ctx);
     const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
     const gridStyle = this.buildStyleAttr({
       gridTemplateColumns: sidebarLeft
@@ -3736,21 +3829,12 @@ ${this.renderSidebarCard(s, ctx, 10)}
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
       gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
     });
-    const mainAttrs = this.buildSectionTrackingAttrs(
-      mainSection,
-      componentName,
-    );
-    const sidebarAttrs = this.buildSectionTrackingAttrs(
-      sidebarSection,
-      componentName,
-    );
-
     return `      {/* Main Content With Sidebar */}
-      <section${mainAttrs} className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+      <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
-            ${sidebarLeft ? `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
-            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside${sidebarAttrs} className="min-w-0">${sidebarCard.trim()}</aside>`}
+            ${sidebarLeft ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>` : `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>`}
+            ${sidebarLeft ? `<div className="min-w-0"><div className="${this.contentContainerClass(ctx)}">${mainContent.trim()}</div></div>` : `<aside className="min-w-0">${sidebarCard.trim()}</aside>`}
           </div>
         </div>
       </section>`;
@@ -3801,9 +3885,141 @@ ${this.renderSidebarCard(s, ctx, 10)}
     return `          {item && (
              <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
                ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
-               <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
-             </article>
-           )}`;
+                <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
+              </article>
+            )}`;
+  }
+
+  private renderProseBlockInner(s: ProseBlockSection, ctx: RenderCtx): string {
+    const segments = s.sourceSegments
+      .map((segment) => this.renderSourceSegment(segment, s, ctx))
+      .filter(Boolean)
+      .join('\n');
+    return `          <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
+${segments}
+          </article>`;
+  }
+
+  private renderSourceSegment(
+    segment: SourceSegment,
+    section: ProseBlockSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const tc = section.textColor ?? p.text;
+    const bodyBaseClass = this.appendStyledTextAlignClass(
+      `${t.body} leading-7 text-[${tc}]`,
+      segment.customClassNames,
+      section.presentation?.textAlign,
+    );
+    const segmentContainerClass =
+      section.shellVariant === 'wide' && segment.type !== 'image'
+        ? this.contentContainerClass(ctx)
+        : 'w-full';
+
+    switch (segment.type) {
+      case 'heading': {
+        const level = Math.min(Math.max(segment.level ?? 2, 1), 6);
+        const tag = `h${level}`;
+        const baseClass =
+          level <= 1
+            ? `${t.h1} font-normal text-[${tc}]`
+            : level === 2
+              ? `${t.h2} font-normal text-[${tc}]`
+              : `${t.h3} font-normal text-[${tc}]`;
+        const headingClass = this.appendStyledTextAlignClass(
+          baseClass,
+          segment.customClassNames,
+          section.presentation?.textAlign,
+        );
+        const headingStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'heading'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        if (segment.html && /<[^>]+>/.test(segment.html)) {
+          return `            <div className="${segmentContainerClass}">
+              <${tag} className="${headingClass}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+        }
+        return `            <div className="${segmentContainerClass}">
+              <${tag} className="${headingClass}"${headingStyle}>${segment.text}</${tag}>
+            </div>`;
+      }
+      case 'paragraph': {
+        const paragraphStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'paragraph'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${paragraphStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+      }
+      case 'image': {
+        const imageStyle = this.buildBlockStyleAttr(
+          this.pickBlockStyle(ctx, 'image', 'gallery'),
+          {},
+          false,
+          ctx,
+        );
+        const imageClassName = this.appendOptionalCustomClasses(
+          `h-auto w-full ${this.imageRadiusClass(ctx)} ${this.inlineImageFitClass(segment.src)}`,
+          segment.customClassNames,
+        );
+        return `            <div className="w-full">
+              <img src={resolveAsset(${JSON.stringify(segment.src)})} alt={${JSON.stringify(segment.alt ?? '')}} className="${imageClassName}"${imageStyle} />
+              ${segment.caption ? `<p className="mt-3 text-sm text-[${p.textMuted}]">${segment.caption}</p>` : ''}
+            </div>`;
+      }
+      case 'list': {
+        const tag = segment.ordered ? 'ol' : 'ul';
+        const listStyle = this.mergeStyleAttrs(
+          this.buildTextTokenStyleAttr(
+            ctx,
+            { baseColor: tc },
+            this.pickBlockStyle(ctx, 'list', 'paragraph'),
+          ),
+          segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
+        );
+        const listClass = this.appendStyledTextAlignClass(
+          `${t.body} flex flex-col gap-2 pl-6 text-[${tc}] ${segment.ordered ? 'list-decimal' : 'list-disc'}`,
+          segment.customClassNames,
+          section.presentation?.textAlign,
+        );
+        const itemClass = this.appendOptionalCustomClasses(
+          'leading-7',
+          segment.itemCustomClassNames,
+        );
+        return `            <div className="${segmentContainerClass}">
+              <${tag} className="${listClass}"${listStyle}>
+                ${segment.items
+                  .map((item) =>
+                    /<[a-z]/i.test(item)
+                      ? `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
+                      : `<li className="${itemClass}">${item}</li>`,
+                  )
+                  .join('\n                ')}
+              </${tag}>
+            </div>`;
+      }
+      case 'html': {
+        const htmlStyle = this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: tc },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+        return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${htmlStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+            </div>`;
+      }
+    }
   }
 
   private renderSidebarCard(
@@ -3964,27 +4180,9 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
     markup: string,
     componentName: string,
   ): string {
-    if (!node.sourceRef?.sourceNodeId || !markup) return markup;
-
-    const attrs = [
-      ['data-vp-source-node', node.sourceRef.sourceNodeId],
-      ['data-vp-template', node.sourceRef.templateName],
-      ['data-vp-source-file', node.sourceRef.sourceFile],
-      ['data-vp-section-key', node.block.replace(/^core\//, '')],
-      ['data-vp-component', componentName],
-      ['data-vp-section-component', componentName],
-    ]
-      .filter(([, value]) => !!value)
-      .map(
-        ([name, value]) =>
-          ` ${name}="${String(value).replace(/"/g, '&quot;')}"`,
-      )
-      .join('');
-
-    return markup.replace(
-      /(<(?:section|header|footer|main|article|aside|nav|div|ul|li|p|h1|h2|h3|h4|h5|h6|form|span|img|a|Link)\b)(?![^>]*\bdata-vp-source-node=)/,
-      `$1${attrs}`,
-    );
+    void node;
+    void componentName;
+    return markup;
   }
 
   private renderBlockFaithfulNode(
@@ -4504,6 +4702,7 @@ ${indent}</ul>`;
     sectionIndex: number,
   ): string {
     return (
+      section.debugKey ??
       section.sectionKey ??
       section.sourceRef?.sourceNodeId ??
       `${section.type}-${sectionIndex + 1}`
@@ -5100,11 +5299,11 @@ ${items}
           ? `${imgPart}
               <div className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/42 to-black/10" />
               <div className="relative z-10 flex h-full flex-col justify-end p-6 sm:p-10">
-                <div className="flex flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${slideSurfaceStyle}${this.presentationMaxWidthStyleAttr(presentation)}>${headingPart}${subPart}${ctaPart}
+                <div className="flex flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`
           : `<div className="relative z-10 flex h-full flex-col items-center justify-center px-6 py-3 sm:px-10 sm:py-4">
-                <div className="flex w-full flex-col gap-4 ${align}"${slideSurfaceStyle}${this.presentationMaxWidthStyleAttr(presentation)}>${headingPart}${subPart}${ctaPart}
+                <div className="flex w-full flex-col gap-4 ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`;
         if (useStackedSlides) {

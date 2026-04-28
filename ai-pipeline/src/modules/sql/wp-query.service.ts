@@ -190,6 +190,34 @@ export interface WpTaxonomy {
   terms: WpTaxonomyTerm[];
 }
 
+export interface WpMediaAttachment {
+  id: number;
+  title: string;
+  slug: string;
+  /** Full URL from wp_posts.guid */
+  guid: string;
+  mimeType: string;
+  altText: string;
+  caption: string;
+  /** Relative path from uploads dir (from _wp_attached_file postmeta) */
+  filePath: string | null;
+}
+
+export interface WpGlobalStyleTokens {
+  colorPalette: { slug: string; name: string; color: string }[];
+  gradients: { slug: string; name: string; gradient: string }[];
+  fontSizes: { slug: string; name: string; size: string }[];
+  fontFamilies: { slug: string; name: string; fontFamily: string }[];
+  spacingSizes: { slug: string; name: string; size: string }[];
+  globalColor?: string;
+  globalBackgroundColor?: string;
+  globalFontFamily?: string;
+  globalFontSize?: string;
+  globalLineHeight?: string;
+  /** CSS custom properties defined in global styles (--var: value) */
+  customCssVariables: Record<string, string>;
+}
+
 @Injectable()
 export class WpQueryService {
   private readonly logger = new Logger(WpQueryService.name);
@@ -897,6 +925,120 @@ export class WpQueryService {
       };
     } finally {
       await conn.end();
+    }
+  }
+
+  async getMediaAttachments(
+    connectionString: string,
+    limit = 500,
+  ): Promise<WpMediaAttachment[]> {
+    const conn = await this.createConnection(connectionString);
+    try {
+      const prefix = await this.getTablePrefix(conn);
+      const [rows] = await conn.query<any[]>(
+        `SELECT p.ID, p.post_title, p.post_name, p.guid, p.post_mime_type,
+                p.post_excerpt AS caption,
+                pm_alt.meta_value AS alt_text,
+                pm_file.meta_value AS file_path
+         FROM \`${prefix}posts\` p
+         LEFT JOIN \`${prefix}postmeta\` pm_alt
+           ON pm_alt.post_id = p.ID AND pm_alt.meta_key = '_wp_attachment_image_alt'
+         LEFT JOIN \`${prefix}postmeta\` pm_file
+           ON pm_file.post_id = p.ID AND pm_file.meta_key = '_wp_attached_file'
+         WHERE p.post_type = 'attachment' AND p.post_status = 'inherit'
+         ORDER BY p.post_date DESC
+         LIMIT ?`,
+        [limit],
+      );
+      return rows.map((row) => ({
+        id: Number(row.ID),
+        title: String(row.post_title ?? ''),
+        slug: String(row.post_name ?? ''),
+        guid: String(row.guid ?? ''),
+        mimeType: String(row.post_mime_type ?? ''),
+        altText: String(row.alt_text ?? ''),
+        caption: String(row.caption ?? ''),
+        filePath: row.file_path ? String(row.file_path) : null,
+      }));
+    } finally {
+      await conn.end();
+    }
+  }
+
+  static parseGlobalStylesContent(content: string): WpGlobalStyleTokens {
+    const empty: WpGlobalStyleTokens = {
+      colorPalette: [],
+      gradients: [],
+      fontSizes: [],
+      fontFamilies: [],
+      spacingSizes: [],
+      customCssVariables: {},
+    };
+    if (!content?.trim()) return empty;
+    try {
+      const parsed = JSON.parse(content);
+      const settings = parsed?.settings ?? {};
+      const styles = parsed?.styles ?? {};
+
+      const colorPalette = (settings?.color?.palette ?? []).map((c: any) => ({
+        slug: String(c.slug ?? ''),
+        name: String(c.name ?? ''),
+        color: String(c.color ?? ''),
+      }));
+
+      const gradients = (settings?.color?.gradients ?? []).map((g: any) => ({
+        slug: String(g.slug ?? ''),
+        name: String(g.name ?? ''),
+        gradient: String(g.gradient ?? ''),
+      }));
+
+      const fontSizes = (settings?.typography?.fontSizes ?? []).map(
+        (f: any) => ({
+          slug: String(f.slug ?? ''),
+          name: String(f.name ?? ''),
+          size: String(f.size ?? ''),
+        }),
+      );
+
+      const fontFamilies = (settings?.typography?.fontFamilies ?? []).map(
+        (f: any) => ({
+          slug: String(f.slug ?? ''),
+          name: String(f.name ?? ''),
+          fontFamily: String(f.fontFamily ?? ''),
+        }),
+      );
+
+      const spacingSizes = (settings?.spacing?.spacingSizes ?? []).map(
+        (s: any) => ({
+          slug: String(s.slug ?? ''),
+          name: String(s.name ?? ''),
+          size: String(s.size ?? ''),
+        }),
+      );
+
+      const customCssVariables: Record<string, string> = {};
+      const cssText = styles?.css ?? '';
+      for (const match of (cssText as string).matchAll(
+        /--([^:\s;{}]+)\s*:\s*([^;{}]+)/g,
+      )) {
+        customCssVariables[`--${match[1].trim()}`] = match[2].trim();
+      }
+
+      return {
+        colorPalette,
+        gradients,
+        fontSizes,
+        fontFamilies,
+        spacingSizes,
+        globalColor: styles?.color?.text ?? undefined,
+        globalBackgroundColor: styles?.color?.background ?? undefined,
+        globalFontFamily: styles?.typography?.fontFamily ?? undefined,
+        globalFontSize: styles?.typography?.fontSize ?? undefined,
+        globalLineHeight: styles?.typography?.lineHeight ?? undefined,
+        customCssVariables,
+      };
+    } catch {
+      return empty;
     }
   }
 
