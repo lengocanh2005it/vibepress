@@ -113,4 +113,45 @@ async function deletePostFromLocalDb(siteId, postId) {
   }
 }
 
-module.exports = { createSiteDatabase, dropSiteDatabase, syncPostToLocalDb, deletePostFromLocalDb };
+async function syncCommentToLocalDb(siteId, commentData) {
+  const dbName = `site_${siteId.replace(/-/g, '_')}`;
+  const conn   = await getAdminConnection();
+
+  try {
+    await conn.query(`USE \`${dbName}\`;`);
+    await conn.query(`SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION';`);
+    await conn.query('SET FOREIGN_KEY_CHECKS=0;');
+
+    async function replaceRows(table, rows) {
+      if (!rows || rows.length === 0) return;
+      for (const row of rows) {
+        const cols         = Object.keys(row).map(c => `\`${c}\``).join(', ');
+        const placeholders = Object.keys(row).map(() => '?').join(', ');
+        await conn.query(`REPLACE INTO \`${table}\` (${cols}) VALUES (${placeholders})`, Object.values(row));
+      }
+    }
+
+    await replaceRows('wp_comments',    commentData.comments);
+    await replaceRows('wp_commentmeta', commentData.commentmeta);
+
+    await conn.query('SET FOREIGN_KEY_CHECKS=1;');
+  } finally {
+    await conn.end();
+  }
+}
+
+async function deleteCommentFromLocalDb(siteId, commentId) {
+  const dbName = `site_${siteId.replace(/-/g, '_')}`;
+  const conn   = await getAdminConnection();
+  try {
+    await conn.query(`USE \`${dbName}\`;`);
+    await conn.query('SET FOREIGN_KEY_CHECKS=0;');
+    await conn.query('DELETE FROM `wp_comments` WHERE comment_ID = ?',    [commentId]);
+    await conn.query('DELETE FROM `wp_commentmeta` WHERE comment_id = ?', [commentId]);
+    await conn.query('SET FOREIGN_KEY_CHECKS=1;');
+  } finally {
+    await conn.end();
+  }
+}
+
+module.exports = { createSiteDatabase, dropSiteDatabase, syncPostToLocalDb, deletePostFromLocalDb, syncCommentToLocalDb, deleteCommentFromLocalDb };

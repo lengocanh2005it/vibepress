@@ -15,6 +15,8 @@ const {
   dropSiteDatabase,
   syncPostToLocalDb,
   deletePostFromLocalDb,
+  syncCommentToLocalDb,
+  deleteCommentFromLocalDb,
 } = require("../services/siteDbService");
 const { simpleGit } = require("simple-git");
 const { extractWpress } = require("../utils/wpressExtractor");
@@ -952,6 +954,64 @@ async function notifyContentChange(req, res) {
 }
 
 // -------------------------------------------------------
+// POST /api/wp/notify-comment-change
+// Plugin gọi sau wp_insert_comment / edit_comment / wp_set_comment_status / deleted_comment.
+// Backend fetch comment data từ plugin rồi REPLACE INTO / DELETE trên local MySQL.
+// -------------------------------------------------------
+async function notifyCommentChange(req, res) {
+  const apiKey = req.headers["x-vibepress-key"];
+  const { siteUrl, commentId, action } = req.body ?? {};
+
+  if (!commentId || !siteUrl) {
+    return res
+      .status(400)
+      .json({ success: false, error: "siteUrl and commentId are required" });
+  }
+
+  const site = normalizeSite(
+    await queryOne(
+      "SELECT * FROM wp_sites WHERE site_url = ? AND api_key = ?",
+      [siteUrl, apiKey],
+    ),
+  );
+  if (!site) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+
+  // Trả ngay để plugin không bị block
+  res.status(202).json({ success: true });
+
+  try {
+    if (action === "delete") {
+      await deleteCommentFromLocalDb(site.siteId, commentId);
+      console.log(
+        `[CommentSync] deleted commentId=${commentId} from local DB — siteId=${site.siteId}`,
+      );
+      return;
+    }
+
+    const response = await axios.get(
+      `${siteUrl}/wp-json/vibepress/v1/comment-data`,
+      {
+        params: { comment_id: commentId },
+        headers: { "X-Vibepress-Key": site.apiKey },
+        timeout: 15000,
+      },
+    );
+
+    await syncCommentToLocalDb(site.siteId, response.data);
+    console.log(
+      `[CommentSync] synced commentId=${commentId} to local DB — siteId=${site.siteId}`,
+    );
+  } catch (e) {
+    console.error(
+      `[CommentSync] FAILED commentId=${commentId} siteId=${site.siteId}:`,
+      e.message,
+    );
+  }
+}
+
+// -------------------------------------------------------
 // GET /api/wp/commits?repoUrl=https://github.com/owner/repo
 // Trả về lịch sử commit của repo từ GitHub API
 // -------------------------------------------------------
@@ -1277,6 +1337,7 @@ module.exports = {
   proxyWpPage,
   proxyWpAsset,
   notifyContentChange,
+  notifyCommentChange,
   getDBinfoBySiteId,
   getSqlDumpTables,
   getSqlDumpRows,
