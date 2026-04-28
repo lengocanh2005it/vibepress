@@ -39,7 +39,7 @@ export default function ReactProjects() {
     <div className="min-h-screen bg-[#faf6f0] text-[#2e3230] antialiased">
       <TopNav />
 
-      <div className="pt-[72px] flex h-screen overflow-hidden">
+      <div className="pt-[65px] flex h-screen overflow-hidden">
 
         {/* ── Featured panel (left) ─────────────────────────────── */}
         <div className="relative flex-1 overflow-hidden">
@@ -60,20 +60,21 @@ export default function ReactProjects() {
                 className="absolute inset-0 bg-cover bg-center transition-all duration-700"
                 style={{ backgroundImage: `url(${active.thumbnail_url || FALLBACK})` }}
               />
-              {/* Gradient overlays — warm tone phù hợp với palette dự án */}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#faf6f0] via-[#faf6f0]/40 to-transparent" />
-              <div className="absolute inset-0 bg-gradient-to-r from-[#faf6f0]/60 to-transparent" />
+              {/* Gradient tối nhẹ ở dưới để đọc text */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-black/10 to-transparent" />
 
               {/* Content */}
               <div className="relative z-10 flex flex-col justify-end h-full px-12 pb-14">
-                {/* Big number */}
+                {/* Big number — ngoài panel mờ */}
                 <span
-                  className="font-headline font-extrabold leading-none mb-3 select-none text-[#2e3230]/10"
+                  className="font-headline font-extrabold leading-none mb-3 select-none text-white/40"
                   style={{ fontSize: 'clamp(88px, 13vw, 168px)' }}
                 >
                   {String(items.indexOf(active) + 1).padStart(2, '0')}
                 </span>
 
+                {/* Frosted panel bao quanh thông tin chính */}
+                <div className="relative bg-white/50 backdrop-blur-md rounded-2xl border border-white/60 shadow-xl px-6 py-5 w-fit max-w-full">
                 {/* Badge */}
                 <span className="inline-flex items-center gap-1.5 bg-[#4a7c59]/10 text-[#4a7c59] text-xs font-bold px-3 py-1 rounded-full w-fit mb-3 border border-[#4a7c59]/20">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#4a7c59] animate-pulse" />
@@ -87,7 +88,7 @@ export default function ReactProjects() {
                   {active.site_name || active.site_url || 'Unnamed site'}
                 </h1>
 
-                <p className="text-[#4a4e4a]/60 text-sm mb-6">
+                <p className="text-[#4a4e4a]/70 text-sm mb-5">
                   Migrated {formatDate(active.created_at)}
                 </p>
 
@@ -115,6 +116,7 @@ export default function ReactProjects() {
                     </a>
                   )}
                 </div>
+                </div>{/* end frosted panel */}
               </div>
             </>
           )}
@@ -140,14 +142,17 @@ export default function ReactProjects() {
                   <button
                     key={item.id}
                     onClick={() => setActive(item)}
-                    className={`relative flex gap-3 p-4 text-left transition-all group ${
-                      isActive
-                        ? 'bg-[#4a7c59]/8 border-l-[3px] border-[#4a7c59]'
-                        : 'hover:bg-[#f5f2eb] border-l-[3px] border-transparent'
+                    className={`relative flex gap-4 p-4 text-left transition-all group ${
+                      isActive ? 'bg-[#4a7c59]/10' : 'hover:bg-[#f5f2eb]'
                     }`}
                   >
+                    {/* Active left indicator */}
+                    <div className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-r-full transition-all ${
+                      isActive ? 'bg-[#4a7c59]' : 'bg-transparent'
+                    }`} />
+
                     {/* Thumbnail */}
-                    <div className="relative w-[84px] h-[56px] shrink-0 rounded-lg overflow-hidden border border-[#e8e4dc]">
+                    <div className="relative w-[120px] h-[80px] shrink-0 rounded-xl overflow-hidden border border-[#e8e4dc]">
                       <img
                         src={item.thumbnail_url || FALLBACK}
                         alt={item.site_name || ''}
