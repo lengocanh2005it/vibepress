@@ -1968,7 +1968,7 @@ const SplitView: React.FC = () => {
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  onClick={() => window.open(previewUrl, "_blank")}
+                  onClick={() => window.open(jobId ? `/preview/${jobId}/` : previewUrl, "_blank")}
                   className={`${actionButtonClass} border-teal-800 bg-teal-700 text-white hover:bg-teal-800 focus-visible:ring-teal-500`}
                 >
                   Open Preview

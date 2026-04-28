@@ -306,18 +306,6 @@ async function uploadTheme(req, res) {
       `Upload WP source for ${projectId}`,
     );
 
-    // updateProject(projectId, (p) => {
-    // 	p.status = 'running_mock_ai';
-    // 	p.updatedAt = new Date().toISOString();
-    // });
-    // await simulateAIConversion(projectId, reactOutputDir);
-
-    // updateProject(projectId, (p) => {
-    // 	p.status = 'pushing_react_repo';
-    // 	p.updatedAt = new Date().toISOString();
-    // });
-    // await pushDirectoryToRepo(reactOutputDir, project.reactRepoUrl, `Mock AI output for ${projectId}`);
-
     updateProject(projectId, (p) => {
       p.status = "completed";
       p.updatedAt = new Date().toISOString();

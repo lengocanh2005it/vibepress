@@ -4157,7 +4157,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       return null;
     }
 
-    const endpoint = `${automationUrl}/api/migrations`;
+    const endpoint = `${automationUrl}/migrations`;
     const payload = {
       site_id: input.siteId,
       job_id: input.jobId,
