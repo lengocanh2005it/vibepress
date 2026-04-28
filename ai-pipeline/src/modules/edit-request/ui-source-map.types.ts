@@ -3,7 +3,8 @@ import type { SourceRef } from '../../common/utils/source-node-id.util.js';
 export interface GeneratedSectionRef {
   sourceNodeId: string;
   componentName: string;
-  sectionKey: string;
+  sectionKey?: string;
+  debugKey?: string;
   sectionComponentName?: string;
   outputFilePath: string;
   exportName?: string;
@@ -27,7 +28,8 @@ export type UiMutationNodeRole =
 
 export interface UiSourceMapEntry extends SourceRef {
   componentName: string;
-  sectionKey: string;
+  sectionKey?: string;
+  debugKey?: string;
   sectionComponentName?: string;
   outputFilePath: string;
   exportName?: string;
@@ -56,7 +58,8 @@ export interface ResolvedCaptureTargetRecord {
   templateName: string;
   sourceFile: string;
   componentName: string;
-  sectionKey: string;
+  sectionKey?: string;
+  debugKey?: string;
   sectionComponentName?: string;
   outputFilePath: string;
   startLine?: number;

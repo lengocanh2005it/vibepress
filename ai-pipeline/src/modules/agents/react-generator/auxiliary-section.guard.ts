@@ -151,6 +151,11 @@ function getSectionHeadingCandidates(section: SectionPlan): string[] {
       return [section.title, section.subtitle].filter(isNonEmptyString);
     case 'media-text':
       return [section.heading].filter(isNonEmptyString);
+    case 'prose-block':
+      return section.sourceSegments
+        .filter((segment) => segment.type === 'heading')
+        .map((segment) => segment.text)
+        .filter(isNonEmptyString);
     case 'newsletter':
       return [section.heading, section.subheading].filter(isNonEmptyString);
     case 'search':

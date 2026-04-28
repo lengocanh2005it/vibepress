@@ -24,6 +24,7 @@ app.get('/api', (_req, res) => {
       '/api/posts',
       '/api/pages',
       '/api/menus',
+      '/api/footer-links',
       '/api/taxonomies',
       '/api/comments',
     ],

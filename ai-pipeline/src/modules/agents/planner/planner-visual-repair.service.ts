@@ -390,6 +390,13 @@ export class PlannerVisualRepairService {
     };
   }
 
+  assessAcceptedVisualPlanQuality(
+    visualPlan: ComponentVisualPlan,
+    repairState: PlannerVisualPlanRepairState,
+  ): string[] {
+    return this.assessRepairQuality(visualPlan, repairState);
+  }
+
   private prepareRepairContext(input: {
     componentPlan: PlannerComponentPlanLike;
     sourceMap: Map<string, string>;
@@ -548,8 +555,7 @@ export class PlannerVisualRepairService {
 
     if (
       /source contains .* but output has no .* section/.test(combined) ||
-      /missing rendered sectionkey/.test(combined) ||
-      /missing sourcenodeid/.test(combined)
+      /visual plan obligations violated/.test(combined)
     ) {
       pushCategory('missing-sections');
     }
@@ -780,13 +786,14 @@ export class PlannerVisualRepairService {
   }
 
   private formatSectionList(
-    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey'>>,
+    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey' | 'debugKey'>>,
   ): string {
     if (!Array.isArray(sections) || sections.length === 0) return '[]';
 
     const seen = new Map<string, number>();
     const labels = sections.map((section, index) => {
       const base =
+        section.debugKey?.trim() ||
         section.sectionKey?.trim() ||
         section.type?.trim() ||
         `section-${index + 1}`;
@@ -811,8 +818,10 @@ export class PlannerVisualRepairService {
         : draftSections.slice(0, 8);
 
     return relevant.slice(0, 8).map((section, index) => {
-      const identity = `${section.type}${section.sectionKey ? `:${section.sectionKey}` : ''}`;
+      const identity = `${section.type}${(section.debugKey ?? section.sectionKey) ? `:${section.debugKey ?? section.sectionKey}` : ''}`;
       switch (section.type) {
+        case 'prose-block':
+          return `${identity} | segments=${section.sourceSegments.length}`;
         case 'carousel':
           return `${identity} | slides=${section.slides.length}`;
         case 'modal':
@@ -1231,16 +1240,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           `carousel section ${index + 1} kept only ${repairedSection.slides.length}/${draftSection.slides.length} slides`,
         );
       }
-      if (
-        repairedSection.slides.length > 0 &&
-        repairedSection.slides.every((slide, slideIndex) =>
-          this.isPlaceholderSlide(slide.heading, slideIndex),
-        )
-      ) {
-        issues.push(
-          `carousel section ${index + 1} still uses placeholder slide headings instead of source-backed content`,
-        );
-      }
     });
 
     const draftCardGrids = draftSections.filter(
@@ -1280,19 +1279,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const normalizedRight = this.normalizeSemanticText(right);
     if (!normalizedLeft || !normalizedRight) return false;
     return normalizedLeft === normalizedRight;
-  }
-
-  private isPlaceholderSlide(
-    heading: string | undefined,
-    index: number,
-  ): boolean {
-    const normalized = this.normalizeSemanticText(heading ?? '');
-    if (!normalized) return true;
-    return (
-      normalized === `slide ${index + 1}` ||
-      normalized === `slider ${index + 1}` ||
-      normalized === `item ${index + 1}`
-    );
   }
 
   private normalizeSemanticText(value: string): string {

@@ -20,7 +20,8 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^(Page404|NotFound)$/i,
     kind: 'not-found',
-    deterministicFirst: true,
+    // Prefer source-faithful generation from the theme template when available.
+    deterministicFirst: false,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
@@ -36,36 +37,42 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^Footer$/i,
     kind: 'footer',
-    // Same reason as header — allow AI to faithfully recreate the WP footer.
-    deterministicFirst: false,
+    // Footer is highly contract-sensitive (`footerLinks`, brandDescription,
+    // shared chrome ownership). Prefer the deterministic visual-plan renderer
+    // so reruns stay stable instead of drifting on prompt interpretation.
+    deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
   {
     match: /^Sidebar$/i,
     kind: 'sidebar',
-    deterministicFirst: true,
+    // Sidebar chrome/widgets should come from the actual source template, not
+    // from a generic canonical fallback.
+    deterministicFirst: false,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
   {
     match: /^Breadcrumb$/i,
     kind: 'breadcrumb',
-    deterministicFirst: true,
+    deterministicFirst: false,
     skipAiVisualPlan: false,
     allowFramePath: true,
   },
   {
     match: /^PostMeta$/i,
     kind: 'post-meta',
-    deterministicFirst: true,
-    skipAiVisualPlan: true,
+    // PostMeta layout/style often lives in theme patterns/template parts; let
+    // AI read that source instead of using the canonical deterministic row.
+    deterministicFirst: false,
+    skipAiVisualPlan: false,
     allowFramePath: true,
   },
   {
     match: /^(Comments|Comment)$/i,
     kind: 'comments',
-    deterministicFirst: true,
+    deterministicFirst: false,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
@@ -73,7 +80,7 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     match: /^(Widget|Pagination|Loop|ContentNone|NoResults)$/i,
     kind: 'meta-only',
     deterministicFirst: false,
-    skipAiVisualPlan: true,
+    skipAiVisualPlan: false,
     allowFramePath: true,
   },
 ];

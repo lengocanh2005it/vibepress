@@ -12,7 +12,10 @@ import {
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
-import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import {
+  mapWpNodesToDraftSections,
+  mapWpNodesToLosslessPageSections,
+} from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
 import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
@@ -52,6 +55,7 @@ import type {
   PageContentSection,
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
+import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
   type PlanningSourceCandidate,
@@ -792,6 +796,22 @@ export class PlannerService {
             },
             repoManifest,
           );
+          const qualityIssues =
+            this.visualRepair.assessAcceptedVisualPlanQuality(
+              visualPlan,
+              repairState,
+            );
+          if (qualityIssues.length > 0) {
+            lastReason = `visual plan quality gate failed: ${qualityIssues[0]}`;
+            lastDropped = ` | qualityIssues: ${qualityIssues.join('; ')}`;
+            if (attempt < 2) {
+              this.logger.warn(
+                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+              );
+            }
+            visualPlan = undefined;
+            continue;
+          }
           this.logger.log(
             `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
           );
@@ -977,10 +997,7 @@ export class PlannerService {
           ? [...richSections, fallbackSidebarSection]
           : richSections
         : hasSidebarTemplate
-          ? [
-              fallbackPageContent,
-              fallbackSidebarSection,
-            ]
+          ? [fallbackPageContent, fallbackSidebarSection]
           : [fallbackPageContent];
       return {
         ...base,
@@ -993,6 +1010,7 @@ export class PlannerService {
 
     switch (strategy.kind) {
       case 'not-found':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1042,6 +1060,7 @@ export class PlannerService {
           ],
         };
       case 'sidebar':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1056,11 +1075,13 @@ export class PlannerService {
           ],
         };
       case 'breadcrumb':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [{ type: 'breadcrumb' }],
         };
       case 'comments':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1073,6 +1094,7 @@ export class PlannerService {
           ],
         };
       case 'post-meta':
+        if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
           sections: [
@@ -1889,18 +1911,6 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     );
     lines.push('');
 
-    if (content.discovery.elementorWidgetTypes.length > 0) {
-      lines.push('## Elementor widget types in use');
-      lines.push(content.discovery.elementorWidgetTypes.join(', '));
-      lines.push(
-        'npm package hints: slides/carousel → swiper, form → react-hook-form, ' +
-          'popup → @radix-ui/react-dialog, accordion → @radix-ui/react-accordion, ' +
-          'tabs → @radix-ui/react-tabs, video → react-player, countdown → react-countdown, ' +
-          'google-maps → @react-google-maps/api',
-      );
-      lines.push('');
-    }
-
     if (content.discovery.topBlockTypes.length > 0) {
       lines.push('## Gutenberg block types in use');
       lines.push(content.discovery.topBlockTypes.join(', '));
@@ -1924,6 +1934,85 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     lines.push(`## Menus in database (${content.menus.length} total):`);
     for (const m of content.menus) {
       lines.push(`- "${m.name}" (slug: ${m.slug}) — ${m.items.length} items`);
+    }
+    lines.push('');
+
+    lines.push(`## DB navigations (${content.dbNavigations.length} total):`);
+    for (const nav of content.dbNavigations.slice(0, 12)) {
+      lines.push(
+        `- "${nav.title}" (slug: ${nav.slug}) status=${nav.status} location=${nav.location ?? '(none)'} items=${nav.items.length} blockTypes=${nav.blockTypes.join(', ') || '(none)'}`,
+      );
+    }
+    lines.push('');
+
+    lines.push(`## Taxonomies (${content.taxonomies.length} total):`);
+    for (const taxonomy of content.taxonomies.slice(0, 12)) {
+      const termPreview = taxonomy.terms
+        .slice(0, 8)
+        .map((term) => `${term.slug}(${term.count})`)
+        .join(', ');
+      lines.push(
+        `- ${taxonomy.taxonomy}: ${taxonomy.terms.length} terms${termPreview ? ` — ${termPreview}` : ''}`,
+      );
+    }
+    lines.push('');
+
+    lines.push('## Parsed global style tokens');
+    if (content.parsedGlobalStyles) {
+      lines.push(
+        `- palette=${content.parsedGlobalStyles.colorPalette.length} gradients=${content.parsedGlobalStyles.gradients.length} fontSizes=${content.parsedGlobalStyles.fontSizes.length} fontFamilies=${content.parsedGlobalStyles.fontFamilies.length} spacingSizes=${content.parsedGlobalStyles.spacingSizes.length} cssVariables=${Object.keys(content.parsedGlobalStyles.customCssVariables).length}`,
+      );
+      if (content.parsedGlobalStyles.globalColor) {
+        lines.push(`- globalColor: ${content.parsedGlobalStyles.globalColor}`);
+      }
+      if (content.parsedGlobalStyles.globalBackgroundColor) {
+        lines.push(
+          `- globalBackgroundColor: ${content.parsedGlobalStyles.globalBackgroundColor}`,
+        );
+      }
+      if (content.parsedGlobalStyles.globalFontFamily) {
+        lines.push(
+          `- globalFontFamily: ${content.parsedGlobalStyles.globalFontFamily}`,
+        );
+      }
+      if (content.parsedGlobalStyles.globalFontSize) {
+        lines.push(
+          `- globalFontSize: ${content.parsedGlobalStyles.globalFontSize}`,
+        );
+      }
+      const palettePreview = content.parsedGlobalStyles.colorPalette
+        .slice(0, 8)
+        .map((entry) => `${entry.slug}=${entry.color}`)
+        .join(', ');
+      if (palettePreview) {
+        lines.push(`- palette preview: ${palettePreview}`);
+      }
+    } else {
+      lines.push('- none');
+    }
+    lines.push('');
+
+    lines.push(
+      `## Media attachments (${content.mediaAttachments.length} total):`,
+    );
+    for (const media of content.mediaAttachments.slice(0, 20)) {
+      lines.push(
+        `- [${media.mimeType || 'unknown'}] "${media.title}" slug=${media.slug || '(none)'} alt="${media.altText || ''}" file=${media.filePath ?? media.guid}`,
+      );
+    }
+    lines.push('');
+
+    lines.push(
+      `## Custom CSS entries (${content.customCssEntries.length} total):`,
+    );
+    for (const customCss of content.customCssEntries.slice(0, 10)) {
+      const cssPreview = customCss.content
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180);
+      lines.push(
+        `- "${customCss.title}" (slug: ${customCss.slug}) status=${customCss.status}${cssPreview ? ` — ${cssPreview}` : ''}`,
+      );
     }
     lines.push('');
 
@@ -2195,7 +2284,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     draft?: SectionPlan,
   ): SectionPlan {
     if (!draft) return section;
-    // Always carry identity fields (sectionKey, sourceRef) regardless of type
+    // Always carry debug/source trace fields regardless of type
     // substitution — the AI may legitimately replace a layout hero with a
     // search, post-list, or comments section for the given component context.
     if (draft.type !== section.type) {
@@ -2381,9 +2470,11 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     repoManifest?: RepoThemeManifest,
   ): ComponentVisualPlan {
     const spectra = repoManifest?.interactiveContracts?.spectra;
-    if (!spectra?.detected) return visualPlan;
+    if (!spectra?.detected) {
+      return normalizeVisualPlanArchitecture(visualPlan);
+    }
 
-    return {
+    return normalizeVisualPlanArchitecture({
       ...visualPlan,
       sections: visualPlan.sections.map((section) => {
         switch (section.type) {
@@ -2547,7 +2638,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
             return section;
         }
       }),
-    };
+    });
   }
 
   private buildValidationFeedbackPrompt(
@@ -2689,6 +2780,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (sources.length === 0) return undefined;
 
       let mergedDraft: SectionPlan[] = [];
+      let expectedCoverageUnits = 0;
       for (const source of sources) {
         const parsedNodes = this.parsePlanningSourceNodes({
           source: source.source,
@@ -2704,6 +2796,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           mapWpNodesToDraftSections(nodes),
         );
         if (draft.length === 0) continue;
+        expectedCoverageUnits += this.countCoverageUnits(draft);
 
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
       }
@@ -2719,13 +2812,126 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         sourceBackedAuxiliaryLabels:
           planningSource?.sourceBackedAuxiliaryLabels ?? [],
       }).sections;
-      const filteredSections = this.filterDegenerateDraftSections(
-        sanitizedSections,
-      );
-      return filteredSections.length > 0 ? filteredSections : undefined;
+      const filteredSections =
+        this.filterDegenerateDraftSections(sanitizedSections);
+      if (filteredSections.length === 0) return undefined;
+
+      const coverageAudit = this.assessPlanningSourceDraftCoverage({
+        componentPlan,
+        sections: filteredSections,
+        expectedCoverageUnits,
+        planningSource,
+      });
+      if (!coverageAudit.ok) {
+        this.logger.warn(
+          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+        );
+        return undefined;
+      }
+
+      return filteredSections;
     } catch {
       return undefined;
     }
+  }
+
+  private countCoverageUnits(sections: SectionPlan[] | undefined): number {
+    if (!sections?.length) return 0;
+    return sections.reduce((count, section) => {
+      if (section.type !== 'prose-block') return count + 1;
+      return count + Math.max(1, section.sourceSegments.length);
+    }, 0);
+  }
+
+  private assessPlanningSourceDraftCoverage(input: {
+    componentPlan: PlanResult[number];
+    sections: SectionPlan[];
+    expectedCoverageUnits: number;
+    planningSource?: PlanningSourceContext;
+  }): { ok: boolean; reason?: string } {
+    const { componentPlan, sections, expectedCoverageUnits, planningSource } =
+      input;
+    if (expectedCoverageUnits <= 0) return { ok: true };
+
+    const actualCoverageUnits = this.countCoverageUnits(sections);
+    const auxiliaryOnlyTypes = new Set<SectionPlan['type']>([
+      'breadcrumb',
+      'search',
+      'card-grid',
+      'hero',
+      'cover',
+    ]);
+    const canonicalContentTypes = new Set<SectionPlan['type']>([
+      'page-content',
+      'post-content',
+      'prose-block',
+      'comments',
+      'sidebar',
+    ]);
+    const nonCanonical = sections.filter(
+      (section) => !canonicalContentTypes.has(section.type),
+    );
+    const hasOnlyAuxiliarySections =
+      nonCanonical.length > 0 &&
+      nonCanonical.every((section) => auxiliaryOnlyTypes.has(section.type));
+    const hasPageBody = sections.some(
+      (section) =>
+        section.type === 'page-content' || section.type === 'prose-block',
+    );
+    const hasPostBody = sections.some(
+      (section) => section.type === 'post-content',
+    );
+    const expectsPageBody = componentPlan.dataNeeds.includes('page-detail');
+    const expectsPostBody = componentPlan.dataNeeds.includes('post-detail');
+    const isDbBackedPageSource =
+      planningSource?.sourceLabel?.startsWith('db:') ||
+      planningSource?.sourceFile?.startsWith('db:');
+
+    if (expectsPageBody && !hasPageBody) {
+      return {
+        ok: false,
+        reason: 'page-detail source draft lost canonical page body section(s)',
+      };
+    }
+    if (expectsPostBody && !hasPostBody && hasOnlyAuxiliarySections) {
+      return {
+        ok: false,
+        reason:
+          'post-detail source draft collapsed into auxiliary sections only',
+      };
+    }
+
+    if (
+      expectedCoverageUnits >= 4 &&
+      actualCoverageUnits <= 2 &&
+      hasOnlyAuxiliarySections
+    ) {
+      return {
+        ok: false,
+        reason: `source-backed section coverage collapsed to ${actualCoverageUnits}/${expectedCoverageUnits} auxiliary units`,
+      };
+    }
+
+    const minimumCoverageRatio =
+      expectsPageBody || expectsPostBody || isDbBackedPageSource ? 0.55 : 0.4;
+    const minimumCoverageUnits =
+      expectedCoverageUnits >= 6
+        ? Math.max(3, Math.ceil(expectedCoverageUnits * minimumCoverageRatio))
+        : expectedCoverageUnits >= 4
+          ? 3
+          : 0;
+
+    if (
+      minimumCoverageUnits > 0 &&
+      actualCoverageUnits < minimumCoverageUnits
+    ) {
+      return {
+        ok: false,
+        reason: `source-backed section coverage too low (${actualCoverageUnits}/${expectedCoverageUnits}; expected at least ${minimumCoverageUnits})`,
+      };
+    }
+
+    return { ok: true };
   }
 
   /**
@@ -2742,7 +2948,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     postContent: string,
   ): 'rich_candidate' | 'simple_body' {
     // UAGB interactive blocks are strong rich signals
-    if (/<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(postContent)) {
+    if (
+      /<!--\s*wp:(uagb\/tabs|uagb\/slider|uagb\/accordion|uagb\/modal)\b/i.test(
+        postContent,
+      )
+    ) {
       return 'rich_candidate';
     }
 
@@ -2750,19 +2960,23 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (/<!--\s*wp:cover\b/i.test(postContent)) return 'rich_candidate';
 
     // 2+ full-width/wide group blocks containing columns = composite layout
-    const groupMatches = [...postContent.matchAll(/<!--\s*wp:group\b[^>]*?-->/gi)];
+    const groupMatches = [
+      ...postContent.matchAll(/<!--\s*wp:group\b[^>]*?-->/gi),
+    ];
     let compositeGroupCount = 0;
     for (const match of groupMatches) {
       const startIdx = match.index ?? 0;
       const nextClose = postContent.indexOf('<!-- /wp:group -->', startIdx);
-      const slice = nextClose > startIdx
-        ? postContent.slice(startIdx, nextClose)
-        : postContent.slice(startIdx);
+      const slice =
+        nextClose > startIdx
+          ? postContent.slice(startIdx, nextClose)
+          : postContent.slice(startIdx);
       const hasColumns = /<!--\s*wp:columns\b/i.test(slice);
       const hasImage = /<!--\s*wp:image\b/i.test(slice);
       const hasButtons = /<!--\s*wp:buttons?\b/i.test(slice);
       const isWideOrFull = /\"align\"\s*:\s*\"(?:full|wide)\"/i.test(match[0]);
-      if (hasColumns && (hasImage || hasButtons || isWideOrFull)) compositeGroupCount++;
+      if (hasColumns && (hasImage || hasButtons || isWideOrFull))
+        compositeGroupCount++;
     }
     if (compositeGroupCount >= 2) return 'rich_candidate';
 
@@ -2785,19 +2999,38 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   ): boolean {
     if (!sections?.length) return false;
 
-    const CHROME = new Set<SectionPlan['type']>(['page-content', 'post-content', 'sidebar', 'navbar', 'footer']);
+    const CHROME = new Set<SectionPlan['type']>([
+      'page-content',
+      'post-content',
+      'sidebar',
+      'navbar',
+      'footer',
+    ]);
     const meaningful = sections.filter((s) => !CHROME.has(s.type));
     if (!meaningful.length) return false;
 
     const STRONG_RICH = new Set<SectionPlan['type']>([
-      'hero', 'cover', 'media-text', 'card-grid', 'cta-strip',
-      'testimonial', 'carousel', 'tabs', 'accordion', 'newsletter',
+      'prose-block',
+      'hero',
+      'cover',
+      'media-text',
+      'card-grid',
+      'cta-strip',
+      'testimonial',
+      'carousel',
+      'tabs',
+      'accordion',
+      'newsletter',
     ]);
     const WEAK_RICH = new Set<SectionPlan['type']>([
-      'post-list', 'search', 'breadcrumb',
+      'post-list',
+      'search',
+      'breadcrumb',
     ]);
 
-    const strongCount = meaningful.filter((s) => STRONG_RICH.has(s.type)).length;
+    const strongCount = meaningful.filter((s) =>
+      STRONG_RICH.has(s.type),
+    ).length;
     const weakCount = meaningful.filter((s) => WEAK_RICH.has(s.type)).length;
 
     // Reject if everything collapsed into one weak section
@@ -2809,6 +3042,42 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (meaningful.length >= 2 && weakCount < meaningful.length) return true;
 
     return false;
+  }
+
+  private hasSufficientBoundPageDraftCoverage(
+    nodes: { block?: string }[],
+    sections: SectionPlan[] | undefined,
+  ): boolean {
+    if (!sections?.length) return false;
+
+    const meaningfulNodeCount = nodes.filter((node) => {
+      const block = String(node.block ?? '')
+        .trim()
+        .toLowerCase();
+      if (!block) return false;
+      return ![
+        'core/separator',
+        'separator',
+        'core/spacer',
+        'spacer',
+        'core/buttons',
+        'buttons',
+        'core/button',
+        'button',
+      ].includes(block);
+    }).length;
+
+    if (meaningfulNodeCount < 6) return true;
+
+    const minimumSectionCount = Math.max(
+      3,
+      Math.ceil(meaningfulNodeCount * 0.45),
+    );
+    const coveredUnits = sections.reduce((count, section) => {
+      if (section.type !== 'prose-block') return count + 1;
+      return count + Math.max(1, section.sourceSegments.length);
+    }, 0);
+    return coveredUnits >= minimumSectionCount;
   }
 
   private buildRichBoundPageDetailSections(
@@ -2824,11 +3093,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const source = String(boundPage?.content ?? '').trim();
     if (!source) return undefined;
 
-    // Fast exit for prose-only pages — no point running the mapper.
-    if (this.classifyBoundPageDetailContent(source) === 'simple_body') {
-      return undefined;
-    }
-
     try {
       const nodes = this.styleResolver.resolve(
         this.parsePlanningSourceNodes({
@@ -2843,7 +3107,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (nodes.length === 0) return undefined;
 
       const draftSections = sanitizeSectionsForContract(
-        mapWpNodesToDraftSections(nodes),
+        mapWpNodesToLosslessPageSections(nodes),
         {
           componentType: componentPlan.type,
           route: componentPlan.route,
@@ -2855,6 +3119,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       ).sections;
 
       // map-first → score-second → fallback-last
+      if (!this.hasSufficientBoundPageDraftCoverage(nodes, draftSections)) {
+        return undefined;
+      }
       if (!this.assessBoundPageDetailDraftQuality(draftSections)) {
         return undefined;
       }
@@ -2907,7 +3174,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       hasInteractiveBlocks,
     };
   }
-
 
   private parsePlanningSourceNodes(input: {
     source: string;
@@ -3035,7 +3301,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private filterDegenerateDraftSections(
     sections: SectionPlan[],
   ): SectionPlan[] {
-    return sections.filter((section) => !this.isDegenerateDraftSection(section));
+    return sections.filter(
+      (section) => !this.isDegenerateDraftSection(section),
+    );
   }
 
   private describeDegenerateSections(sections: SectionPlan[]): string[] {
@@ -3043,6 +3311,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .filter((section) => this.isDegenerateDraftSection(section))
       .map((section) => {
         const sectionId =
+          section.debugKey ||
           section.sectionKey ||
           section.sourceRef?.sourceNodeId ||
           `${section.type}-${section.sourceRef?.topLevelIndex ?? 'unknown'}`;
@@ -3056,10 +3325,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim().length > 0;
-    const hasCta = (cta: { text?: string; link?: string } | undefined): boolean =>
-      !!cta && (hasText(cta.text) || hasText(cta.link));
+    const hasCta = (
+      cta: { text?: string; link?: string } | undefined,
+    ): boolean => !!cta && (hasText(cta.text) || hasText(cta.link));
 
     switch (section.type) {
+      case 'prose-block':
+        return section.sourceSegments.length === 0;
       case 'hero':
         return (
           !hasText(section.heading) &&
@@ -3111,7 +3383,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number],
     label: string | undefined,
   ): boolean {
-    const normalized = String(label ?? '').trim().toLowerCase();
+    const normalized = String(label ?? '')
+      .trim()
+      .toLowerCase();
     if (!normalized.startsWith('db:')) return false;
 
     if (componentPlan.route === '/') {
@@ -3147,6 +3421,27 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         .toLowerCase();
 
     switch (section.type) {
+      case 'prose-block':
+        return [
+          section.type,
+          section.sourceSegments
+            .slice(0, 10)
+            .map((segment) => {
+              switch (segment.type) {
+                case 'heading':
+                  return normalize(segment.text);
+                case 'paragraph':
+                  return normalize(segment.text ?? segment.html);
+                case 'list':
+                  return segment.items.map((item) => normalize(item)).join('|');
+                case 'image':
+                  return normalize(segment.src);
+                case 'html':
+                  return normalize(segment.html);
+              }
+            })
+            .join('|'),
+        ].join('|');
       case 'hero':
         return [
           section.type,
@@ -3253,7 +3548,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           normalize(section.imageSrc),
         ].join('|');
       default:
-        return [section.type, normalize(section.sectionKey)].join('|');
+        return [
+          section.type,
+          normalize(section.debugKey ?? section.sectionKey),
+        ].join('|');
     }
   }
 
@@ -3978,7 +4276,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
                 candidate.templateName ?? componentPlan.templateName;
               const candidateSourceFile =
                 candidate.sourceFile ??
-                inferFseSourceFile(componentPlan.templateName, componentPlan.type);
+                inferFseSourceFile(
+                  componentPlan.templateName,
+                  componentPlan.type,
+                );
               return {
                 source: this.scopePlanningSourceMarkup(
                   componentPlan,
@@ -4165,8 +4466,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : draftSections.slice(0, 6);
 
     return relevant.slice(0, 6).map((section, index) => {
-      const identity = `${section.type}${section.sectionKey ? `:${section.sectionKey}` : ''}`;
+      const identity = `${section.type}${(section.debugKey ?? section.sectionKey) ? `:${section.debugKey ?? section.sectionKey}` : ''}`;
       switch (section.type) {
+        case 'prose-block':
+          return `${identity} | segments=${section.sourceSegments.length}`;
         case 'carousel':
           return `${identity} | slides=${section.slides.length}`;
         case 'modal':
@@ -4433,21 +4736,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const pageTemplateNames = [
         assignedTemplate || null,
         `page-${componentPlan.fixedSlug}`,
-        componentPlan.fixedPageId
-          ? `page-${componentPlan.fixedPageId}`
-          : null,
+        componentPlan.fixedPageId ? `page-${componentPlan.fixedPageId}` : null,
         'page',
         'singular',
       ].filter(
-        (t): t is string =>
-          Boolean(t) && t !== componentPlan.templateName,
+        (t): t is string => Boolean(t) && t !== componentPlan.templateName,
       );
 
       for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(
-          templateName,
-          repoManifest,
-        );
+        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
         pushCandidate({
           source: chain?.composedSource ?? sourceMap.get(templateName),
           label: `repo:${templateName}`,
@@ -4472,10 +4769,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
       // Also add the repo-chain for each page-specific template
       for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(
-          templateName,
-          repoManifest,
-        );
+        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
         if (chain?.composedSource) {
           pushCandidate({
             source: chain.composedSource,
@@ -5216,13 +5510,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   }
 
   private formatSectionList(
-    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey'>>,
+    sections: Array<Pick<SectionPlan, 'type' | 'sectionKey' | 'debugKey'>>,
   ): string {
     if (!Array.isArray(sections) || sections.length === 0) return '[]';
 
     const seen = new Map<string, number>();
     const labels = sections.map((section, index) => {
       const base =
+        section.debugKey?.trim() ||
         section.sectionKey?.trim() ||
         section.type?.trim() ||
         `section-${index + 1}`;

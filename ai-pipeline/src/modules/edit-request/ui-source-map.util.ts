@@ -17,25 +17,10 @@ export async function buildUiSourceMapForProject(input: {
   components: GeneratedComponent[];
   plan?: PlanResult;
 }): Promise<UiSourceMapEntry[]> {
-  const { srcDir, components, plan } = input;
+  const { plan } = input;
+  void input.srcDir;
+  void input.components;
   const entries = createUiSourceMapEntryAccumulator(plan);
-
-  for (const component of components) {
-    const outputFilePath = resolveComponentOutputFilePath(component);
-    const absoluteFilePath = join(
-      srcDir,
-      outputFilePath.replace(/^src[\\/]/, ''),
-    );
-    const extracted = await extractUiSourceMapEntriesFromFile(
-      absoluteFilePath,
-      toPosixPath(outputFilePath),
-    );
-
-    for (const entry of extracted) {
-      const existing = entries.get(entry.sourceNodeId);
-      entries.set(entry.sourceNodeId, mergeUiSourceMapEntry(existing, entry));
-    }
-  }
 
   return sortUiSourceMapEntries(entries);
 }
@@ -44,26 +29,9 @@ export async function buildUiSourceMapForGeneratedComponents(input: {
   components: GeneratedComponent[];
   plan?: PlanResult;
 }): Promise<UiSourceMapEntry[]> {
-  const { components, plan } = input;
+  const { plan } = input;
+  void input.components;
   const entries = createUiSourceMapEntryAccumulator(plan);
-
-  for (const component of components) {
-    const outputFilePath = resolveComponentOutputFilePath(component);
-    const absoluteFilePath = join(
-      'virtual-generated',
-      outputFilePath.replace(/^src[\\/]/, ''),
-    );
-    const extracted = extractUiSourceMapEntriesFromCode(
-      component.code,
-      absoluteFilePath,
-      toPosixPath(outputFilePath),
-    );
-
-    for (const entry of extracted) {
-      const existing = entries.get(entry.sourceNodeId);
-      entries.set(entry.sourceNodeId, mergeUiSourceMapEntry(existing, entry));
-    }
-  }
 
   return sortUiSourceMapEntries(entries);
 }
@@ -212,10 +180,16 @@ function buildFallbackUiSourceMapEntries(
         ...section.sourceRef!,
         componentName: componentPlan.componentName,
         sectionKey:
-          section.sectionKey ?? buildFallbackSectionKey(section.type, index),
+          section.debugKey ??
+          section.sectionKey ??
+          buildFallbackSectionKey(section.type, index),
+        debugKey:
+          section.debugKey ??
+          section.sectionKey ??
+          buildFallbackSectionKey(section.type, index),
         sectionComponentName: buildSectionComponentName(
           componentPlan.componentName,
-          section.sectionKey ?? section.type,
+          section.debugKey ?? section.sectionKey ?? section.type,
         ),
         outputFilePath,
       }));
@@ -226,18 +200,9 @@ async function extractUiSourceMapEntriesFromFile(
   absoluteFilePath: string,
   outputFilePath: string,
 ): Promise<UiSourceMapEntry[]> {
-  let code = '';
-  try {
-    code = await readFile(absoluteFilePath, 'utf-8');
-  } catch {
-    return [];
-  }
-
-  return extractUiSourceMapEntriesFromCode(
-    code,
-    absoluteFilePath,
-    outputFilePath,
-  );
+  void absoluteFilePath;
+  void outputFilePath;
+  return [];
 }
 
 function extractUiSourceMapEntriesFromCode(
@@ -245,27 +210,10 @@ function extractUiSourceMapEntriesFromCode(
   absoluteFilePath: string,
   outputFilePath: string,
 ): UiSourceMapEntry[] {
-  const sourceFile = ts.createSourceFile(
-    absoluteFilePath,
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
-  const entries: UiSourceMapEntry[] = [];
-
-  const visit = (node: ts.Node) => {
-    const tracked =
-      readTrackedEntryFromJsxElement(node, sourceFile, outputFilePath) ??
-      undefined;
-    if (tracked) {
-      entries.push(tracked);
-    }
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
-  return entries;
+  void code;
+  void absoluteFilePath;
+  void outputFilePath;
+  return [];
 }
 
 function extractUiMutationCandidatesFromCode(
@@ -296,65 +244,6 @@ function extractUiMutationCandidatesFromCode(
   return candidates;
 }
 
-function readTrackedEntryFromJsxElement(
-  node: ts.Node,
-  sourceFile: ts.SourceFile,
-  outputFilePath: string,
-): UiSourceMapEntry | null {
-  let attributes: ts.JsxAttributes | undefined;
-  let rangeNode: ts.Node = node;
-
-  if (ts.isJsxElement(node)) {
-    attributes = node.openingElement.attributes;
-    rangeNode = node;
-  } else if (ts.isJsxSelfClosingElement(node)) {
-    attributes = node.attributes;
-    rangeNode = node;
-  } else {
-    return null;
-  }
-
-  const sourceNodeId = readStringJsxAttribute(
-    attributes,
-    'data-vp-source-node',
-  );
-  if (!sourceNodeId) return null;
-
-  const componentName =
-    readStringJsxAttribute(attributes, 'data-vp-component') ??
-    deriveComponentNameFromOutputPath(outputFilePath);
-  const templateName =
-    readStringJsxAttribute(attributes, 'data-vp-template') ??
-    'unknown-template';
-  const sourceFilePath =
-    readStringJsxAttribute(attributes, 'data-vp-source-file') ??
-    'unknown-source';
-  const sectionKey =
-    readStringJsxAttribute(attributes, 'data-vp-section-key') ??
-    'unknown-section';
-  const sectionComponentName =
-    readStringJsxAttribute(attributes, 'data-vp-section-component') ??
-    undefined;
-
-  const start = sourceFile.getLineAndCharacterOfPosition(
-    rangeNode.getStart(sourceFile),
-  );
-  const end = sourceFile.getLineAndCharacterOfPosition(rangeNode.getEnd());
-
-  return {
-    sourceNodeId,
-    templateName,
-    sourceFile: sourceFilePath,
-    topLevelIndex: deriveTopLevelIndexFromSourceNodeId(sourceNodeId),
-    componentName,
-    sectionKey,
-    sectionComponentName,
-    outputFilePath,
-    startLine: start.line + 1,
-    endLine: end.line + 1,
-  };
-}
-
 function readUiMutationCandidateFromJsxNode(
   node: ts.Node,
   sourceFile: ts.SourceFile,
@@ -368,15 +257,9 @@ function readUiMutationCandidateFromJsxNode(
   const nodeRole = inferUiMutationNodeRole(jsxNode, attributes, elementTag);
   if (!nodeRole) return null;
 
-  const owner = findNearestTrackedOwner(jsxNode, outputFilePath);
-  const componentName =
-    readStringJsxAttribute(attributes, 'data-vp-component') ??
-    owner?.ownerComponentName ??
-    deriveComponentNameFromOutputPath(outputFilePath);
-  const sourceNodeId = readStringJsxAttribute(
-    attributes,
-    'data-vp-source-node',
-  );
+  const owner = findNearestSemanticOwner(jsxNode, sourceFile, outputFilePath);
+  const componentName = deriveComponentNameFromOutputPath(outputFilePath);
+  const sourceNodeId = undefined;
   const textPreview = extractJsxNodeTextPreview(jsxNode);
   const start = sourceFile.getLineAndCharacterOfPosition(
     jsxNode.getStart(sourceFile),
@@ -457,16 +340,7 @@ function inferUiMutationNodeRole(
   attributes: ts.JsxAttributes,
   elementTag: string,
 ): UiMutationNodeRole | null {
-  const explicitRole = normalizeUiMutationNodeRole(
-    readStringJsxAttribute(attributes, 'data-vp-node-role'),
-  );
-  if (explicitRole) return explicitRole;
-
   const normalizedTag = elementTag.toLowerCase();
-  const sourceNodeId = readStringJsxAttribute(
-    attributes,
-    'data-vp-source-node',
-  );
   const className =
     readStringJsxAttribute(attributes, 'className')?.toLowerCase() ?? '';
 
@@ -489,16 +363,14 @@ function inferUiMutationNodeRole(
       normalizedTag,
     )
   ) {
-    return sourceNodeId ? 'section' : 'container';
+    return 'section';
   }
 
   if (normalizedTag === 'div') {
     if (/\b(card|panel|tile|box|badge)\b/.test(className)) return 'card';
-    if (sourceNodeId) return 'container';
-    return null;
+    return 'container';
   }
 
-  if (sourceNodeId) return 'container';
   return null;
 }
 
@@ -528,8 +400,9 @@ function normalizeUiMutationNodeRole(
   return null;
 }
 
-function findNearestTrackedOwner(
+function findNearestSemanticOwner(
   node: ts.Node,
+  sourceFile: ts.SourceFile,
   outputFilePath: string,
 ): {
   ownerSourceNodeId?: string;
@@ -541,21 +414,26 @@ function findNearestTrackedOwner(
   while (current) {
     const jsxNode = asJsxNode(current);
     if (jsxNode) {
-      const attributes = getJsxAttributes(jsxNode);
-      const ownerSourceNodeId = readStringJsxAttribute(
-        attributes,
-        'data-vp-source-node',
-      );
-      if (ownerSourceNodeId) {
+      const elementTag = getJsxTagName(jsxNode).toLowerCase();
+      if (
+        [
+          'section',
+          'header',
+          'footer',
+          'main',
+          'article',
+          'aside',
+          'nav',
+          'div',
+        ].includes(elementTag)
+      ) {
+        const start = sourceFile.getLineAndCharacterOfPosition(
+          jsxNode.getStart(sourceFile),
+        );
         return {
-          ownerSourceNodeId,
-          ownerSectionKey: readStringJsxAttribute(
-            attributes,
-            'data-vp-section-key',
-          ),
-          ownerComponentName:
-            readStringJsxAttribute(attributes, 'data-vp-component') ??
-            deriveComponentNameFromOutputPath(outputFilePath),
+          ownerSourceNodeId: undefined,
+          ownerSectionKey: `${elementTag}:${start.line + 1}`,
+          ownerComponentName: deriveComponentNameFromOutputPath(outputFilePath),
         };
       }
     }
@@ -604,14 +482,66 @@ function mergeUiSourceMapEntry(
   if (!existing) return next;
 
   return {
-    ...existing,
-    ...next,
-    sectionComponentName:
-      next.sectionComponentName ?? existing.sectionComponentName,
+    sourceNodeId: next.sourceNodeId || existing.sourceNodeId,
+    templateName: preferKnownString(
+      next.templateName,
+      existing.templateName,
+      'unknown-template',
+      'unknown-template',
+    ),
+    sourceFile: preferKnownString(
+      next.sourceFile,
+      existing.sourceFile,
+      'unknown-source',
+      'unknown-source',
+    ),
+    topLevelIndex:
+      typeof next.topLevelIndex === 'number'
+        ? next.topLevelIndex
+        : existing.topLevelIndex,
+    parentSourceNodeId: next.parentSourceNodeId ?? existing.parentSourceNodeId,
+    blockName: next.blockName ?? existing.blockName,
+    componentName: preferKnownString(
+      next.componentName,
+      existing.componentName,
+      undefined,
+      deriveComponentNameFromOutputPath(next.outputFilePath),
+    ),
+    sectionKey: preferKnownString(
+      next.sectionKey,
+      existing.sectionKey,
+      'unknown-section',
+      existing.sectionKey,
+    ),
+    debugKey: preferKnownString(next.debugKey, existing.debugKey),
+    sectionComponentName: preferKnownString(
+      next.sectionComponentName,
+      existing.sectionComponentName,
+    ),
+    outputFilePath: preferKnownString(
+      next.outputFilePath,
+      existing.outputFilePath,
+      undefined,
+      existing.outputFilePath,
+    ),
     exportName: next.exportName ?? existing.exportName,
     startLine: next.startLine ?? existing.startLine,
     endLine: next.endLine ?? existing.endLine,
   };
+}
+
+function preferKnownString(
+  next: string | undefined,
+  existing: string | undefined,
+  placeholder?: string,
+  fallback = '',
+): string {
+  const normalizedNext = next?.trim();
+  if (normalizedNext && normalizedNext !== placeholder) return normalizedNext;
+  const normalizedExisting = existing?.trim();
+  if (normalizedExisting) return normalizedExisting;
+  if (normalizedNext) return normalizedNext;
+  return fallback;
 }
 
 function resolveComponentOutputFilePath(component: GeneratedComponent): string {
@@ -630,13 +560,6 @@ export function deriveComponentNameFromOutputPath(
 ): string {
   const fileName = outputFilePath.split('/').pop() ?? outputFilePath;
   return fileName.replace(/\.tsx$/i, '');
-}
-
-function deriveTopLevelIndexFromSourceNodeId(sourceNodeId: string): number {
-  const parts = sourceNodeId.split('::');
-  const pathToken = parts[2] ?? '0';
-  const topLevel = Number(pathToken.split('.')[0] ?? 0);
-  return Number.isFinite(topLevel) ? topLevel : 0;
 }
 
 function buildTemplateIndexKey(
@@ -661,6 +584,7 @@ function toResolvedCaptureTargetRecord(
     sourceFile: entry.sourceFile,
     componentName: entry.componentName,
     sectionKey: entry.sectionKey,
+    debugKey: entry.debugKey,
     sectionComponentName: entry.sectionComponentName,
     outputFilePath: entry.outputFilePath,
     startLine: entry.startLine,

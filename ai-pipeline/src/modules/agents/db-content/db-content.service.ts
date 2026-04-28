@@ -15,6 +15,8 @@ import {
   WpCustomCssEntry,
   WpReadingSettings,
   WpResolvedReadingPageRef,
+  WpMediaAttachment,
+  WpGlobalStyleTokens,
 } from '../../sql/wp-query.service.js';
 import type {
   DetectedPlugin,
@@ -46,10 +48,14 @@ export interface DbContentResult {
   dbNavigations: WpDbNavigation[];
   dbTemplates: WpDbTemplate[];
   dbGlobalStyles: WpDbGlobalStyle[];
+  /** Parsed design tokens extracted from the active wp_global_styles record */
+  parsedGlobalStyles: WpGlobalStyleTokens | null;
   customCssEntries: WpCustomCssEntry[];
   readingSettings: WpReadingSettings;
   /** All public taxonomies (categories, tags, custom) with their terms */
   taxonomies: WpTaxonomy[];
+  /** All media library attachments (images, PDFs, etc.) up to 500 most recent */
+  mediaAttachments: WpMediaAttachment[];
   plugins: WpPluginInfo[];
   /** Non-built-in post types registered by plugins, with counts and associated taxonomies */
   customPostTypes: WpCustomPostType[];
@@ -83,6 +89,7 @@ export class DbContentService {
       readingSettings,
       taxonomies,
       runtimeFeatures,
+      mediaAttachments,
     ] = await Promise.all([
       this.wpQuery.getSiteInfo(connectionString),
       this.wpQuery.getPosts(connectionString),
@@ -95,11 +102,13 @@ export class DbContentService {
       this.wpQuery.getReadingSettings(connectionString),
       this.wpQuery.getTaxonomies(connectionString),
       this.wpQuery.getRuntimeFeatures(connectionString),
+      this.wpQuery.getMediaAttachments(connectionString),
     ]);
     const enrichedReadingSettings = this.materializeReadingSettings(
       readingSettings,
       pages,
     );
+    const parsedGlobalStyles = this.resolveParsedGlobalStyles(dbGlobalStyles);
 
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
@@ -109,7 +118,8 @@ export class DbContentService {
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ${dbNavigations.length} db navigations, ` +
         `${dbTemplates.length} db templates, ${dbGlobalStyles.length} db global styles, ${customCssEntries.length} custom css entries, ` +
-        `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')})` +
+        `${taxonomies.length} taxonomies (${taxonomies.map((t) => `${t.taxonomy}:${t.terms.length}`).join(', ')}), ` +
+        `${mediaAttachments.length} media attachments` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
 
@@ -135,9 +145,11 @@ export class DbContentService {
       dbNavigations,
       dbTemplates,
       dbGlobalStyles,
+      parsedGlobalStyles,
       customCssEntries,
       readingSettings: enrichedReadingSettings,
       taxonomies,
+      mediaAttachments,
       plugins: runtimeFeatures.plugins,
       customPostTypes: runtimeFeatures.customPostTypes,
       capabilities: runtimeFeatures.capabilities,
@@ -169,5 +181,19 @@ export class DbContentService {
       pageOnFront: resolvePageRef(readingSettings.pageOnFrontId),
       pageForPosts: resolvePageRef(readingSettings.pageForPostsId),
     };
+  }
+
+  private resolveParsedGlobalStyles(
+    dbGlobalStyles: WpDbGlobalStyle[],
+  ): WpGlobalStyleTokens | null {
+    const preferred =
+      dbGlobalStyles.find((entry) =>
+        ['publish', 'private'].includes(entry.status),
+      ) ?? dbGlobalStyles[0];
+    if (!preferred?.content?.trim()) {
+      return null;
+    }
+
+    return WpQueryService.parseGlobalStylesContent(preferred.content);
   }
 }

@@ -1,4 +1,238 @@
-@layer components {
+export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
+  .wow {
+    will-change: opacity, transform;
+  }
+
+  .wow.animate__animated {
+    opacity: 0;
+  }
+
+  .wow.animate__animated.vp-wow-visible,
+  .wow.vp-wow-visible {
+    opacity: 1;
+  }
+
+  .wow.animate__fadeInUp {
+    transform: translateY(24px);
+    transition:
+      opacity 700ms ease,
+      transform 700ms ease;
+  }
+
+  .wow.animate__fadeInUp.vp-wow-visible {
+    transform: translateY(0);
+  }
+
+  .wow.animate__fadeInLeft {
+    transform: translateX(-24px);
+    transition:
+      opacity 700ms ease,
+      transform 700ms ease;
+  }
+
+  .wow.animate__fadeInLeft.vp-wow-visible {
+    transform: translateX(0);
+  }
+
+  .wow.animate__fadeInRight {
+    transform: translateX(24px);
+    transition:
+      opacity 700ms ease,
+      transform 700ms ease;
+  }
+
+  .wow.animate__fadeInRight.vp-wow-visible {
+    transform: translateX(0);
+  }
+
+  .wow.animate__zoomIn {
+    transform: scale(0.92);
+    transition:
+      opacity 700ms ease,
+      transform 700ms ease;
+  }
+
+  .wow.animate__zoomIn.vp-wow-visible {
+    transform: scale(1);
+  }
+
+  .wow.animate__delay-1s {
+    transition-delay: 1s;
+  }
+
+  .wow.animate__delay-2s {
+    transition-delay: 2s;
+  }
+
+  .wow.animate__delay-3s {
+    transition-delay: 3s;
+  }
+
+  .wow.animate__delay-4s {
+    transition-delay: 4s;
+  }
+
+  .wow.animate__delay-5s {
+    transition-delay: 5s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @layer components {
+    .wow,
+    .wow.animate__animated,
+    .wow.animate__fadeInUp,
+    .wow.animate__fadeInLeft,
+    .wow.animate__fadeInRight,
+    .wow.animate__zoomIn {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+}
+`;
+
+export const SOURCE_MOTION_BOOTSTRAP_TS = String.raw`const SOURCE_MOTION_SELECTOR =
+  '.wow.animate__animated, .wow[class*="animate__"]';
+
+function startSourceMotionBridge() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  const reduceMotion = window.matchMedia?.(
+    '(prefers-reduced-motion: reduce)',
+  ).matches;
+
+  const activate = (element: HTMLElement) => {
+    element.classList.add('vp-wow-visible');
+  };
+
+  const register = (
+    element: HTMLElement,
+    observer?: IntersectionObserver,
+  ) => {
+    if (
+      !element.classList.contains('wow') ||
+      element.dataset.vpWowObserved === '1'
+    ) {
+      return;
+    }
+
+    element.dataset.vpWowObserved = '1';
+
+    if (reduceMotion || !observer) {
+      activate(element);
+      return;
+    }
+
+    observer.observe(element);
+  };
+
+  const scan = (root: ParentNode, observer?: IntersectionObserver) => {
+    if (root instanceof HTMLElement) {
+      register(root, observer);
+    }
+    root
+      .querySelectorAll?.<HTMLElement>('.wow')
+      .forEach((element) => register(element, observer));
+  };
+
+  if (reduceMotion || typeof IntersectionObserver === 'undefined') {
+    scan(document, undefined);
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const element = entry.target;
+        if (element instanceof HTMLElement) {
+          activate(element);
+          observer.unobserve(element);
+        }
+      }
+    },
+    {
+      threshold: 0.16,
+      rootMargin: '0px 0px -8% 0px',
+    },
+  );
+
+  scan(document, observer);
+
+  const mutationObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        scan(node, observer);
+      }
+    }
+  });
+
+  mutationObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      mutationObserver.disconnect();
+      observer.disconnect();
+    },
+    { once: true },
+  );
+}
+
+export function watchForSourceMotionSignals() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  let started = false;
+  let signalObserver: MutationObserver | null = null;
+
+  const boot = () => {
+    if (started) return;
+    started = true;
+    signalObserver?.disconnect();
+    startSourceMotionBridge();
+  };
+
+  const hasSignal = () =>
+    !!document.querySelector<HTMLElement>(SOURCE_MOTION_SELECTOR);
+
+  const check = () => {
+    if (!hasSignal()) return;
+    boot();
+  };
+
+  check();
+  if (started) return;
+
+  signalObserver = new MutationObserver(() => {
+    check();
+  });
+
+  signalObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class'],
+  });
+
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      signalObserver?.disconnect();
+    },
+    { once: true },
+  );
+
+  window.requestAnimationFrame(check);
+}
+`;
+
+export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
   body.hide-scroll {
     overflow: hidden;
   }
@@ -285,3 +519,4 @@
     height: 100%;
   }
 }
+`;

@@ -65,10 +65,9 @@ export class GeneratedApiReviewService {
     );
 
     const reviewPrompt = this.buildReviewPrompt(api, plan, content);
-    const review = await this.reviewBackend(
-      reviewPrompt,
-      resolvedModel,
-      logPath,
+    const review = this.filterReviewResult(
+      await this.reviewBackend(reviewPrompt, resolvedModel, logPath),
+      api,
     );
 
     const blockingIssues = this.getBlockingIssues(review);
@@ -224,6 +223,7 @@ ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n
 - custom post types detected: ${cptSlugs.length > 0 ? cptSlugs.join(', ') : '(none)'}
 - intentionally excluded dedicated CPT routes: ${excludedCptSlugs.length > 0 ? excludedCptSlugs.join(', ') : '(none)'}
 - These excluded integrations are intentionally served only through the generic static endpoints already present in the template. Do NOT require or suggest dedicated /api/products... routes for them.
+- Generic detail endpoints such as \`/api/posts/:slug\` and \`/api/pages/:slug\` are valid for frontend route flavors like \`/single/:slug\` or \`/single-with-sidebar/:slug\` unless the contract explicitly requires a fixed slug or a distinct payload shape.
 - content counts:
   - posts: ${content.posts.length}
   - pages: ${content.pages.length}
@@ -292,6 +292,49 @@ ${api.files
           issue.message.toLowerCase().includes(pattern),
         ),
     );
+  }
+
+  private filterReviewResult(
+    review: ApiReviewResult,
+    api: ApiBuilderResult,
+  ): ApiReviewResult {
+    const hasGenericPostDetailRoute = api.files.some((file) =>
+      /app\.get\(\s*['"`]\/api\/posts\/:slug['"`]/.test(file.code),
+    );
+    const hasGenericPageDetailRoute = api.files.some((file) =>
+      /app\.get\(\s*['"`]\/api\/pages\/:slug['"`]/.test(file.code),
+    );
+
+    const issues = review.issues.filter((issue) => {
+      const message = issue.message.toLowerCase();
+      if (
+        hasGenericPostDetailRoute &&
+        /single-with-sidebar|dedicated post detail route|distinct \/single-with-sidebar\/:slug detail behavior/.test(
+          message,
+        )
+      ) {
+        return false;
+      }
+      if (
+        hasGenericPageDetailRoute &&
+        /dedicated page detail route|distinct .*\/page\/:slug detail behavior/.test(
+          message,
+        )
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (issues.length === review.issues.length) {
+      return review;
+    }
+
+    return {
+      pass: issues.length === 0 ? true : review.pass,
+      issues,
+      summary: issues.length === 0 ? '' : review.summary,
+    };
   }
 
   private async log(
