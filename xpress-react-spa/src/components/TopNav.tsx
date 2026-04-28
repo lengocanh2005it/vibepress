@@ -105,8 +105,7 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
               X-press
             </button>
             <div className="hidden md:flex gap-6 font-semibold text-sm">
-              <a href="#" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Product</a>
-              <a href="#" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Features</a>
+
               <a href="#" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Pricing</a>
               <a href="/template-store" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Template</a>
               {user && (
