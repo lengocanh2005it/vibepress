@@ -1348,11 +1348,12 @@ const SplitView: React.FC = () => {
   const [pushGitState, setPushGitState] = useState<{
     loading: boolean;
     githubUrl: string | null;
+    frontendUrl: string | null;
     error: string | null;
-  }>({ loading: false, githubUrl: null, error: null });
+  }>({ loading: false, githubUrl: null, frontendUrl: null, error: null });
 
   const handlePushToGit = async () => {
-    setPushGitState({ loading: true, githubUrl: null, error: null });
+    setPushGitState({ loading: true, githubUrl: null, frontendUrl: null, error: null });
     try {
       const res = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/deploy`,
@@ -1367,12 +1368,13 @@ const SplitView: React.FC = () => {
         throw new Error(data.error || "Push failed");
       setPushGitState({
         loading: false,
-        githubUrl: data.githubUrl,
+        githubUrl: data.githubUrl ?? null,
+        frontendUrl: data.frontendUrl ?? null,
         error: null,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      setPushGitState({ loading: false, githubUrl: null, error: message });
+      setPushGitState({ loading: false, githubUrl: null, frontendUrl: null, error: message });
     }
   };
 
@@ -1982,15 +1984,29 @@ const SplitView: React.FC = () => {
                   </button>
                 )}
                 {completionEvent &&
-                  (pushGitState.githubUrl ? (
-                    <button
-                      onClick={() =>
-                        window.open(pushGitState.githubUrl!, "_blank")
-                      }
-                      className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500`}
-                    >
-                      View on GitHub
-                    </button>
+                  (pushGitState.frontendUrl || pushGitState.githubUrl ? (
+                    <>
+                      {pushGitState.frontendUrl && (
+                        <button
+                          onClick={() =>
+                            window.open(pushGitState.frontendUrl!, "_blank")
+                          }
+                          className={`${actionButtonClass} border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700 focus-visible:ring-emerald-500`}
+                        >
+                          Visit Site
+                        </button>
+                      )}
+                      {pushGitState.githubUrl && (
+                        <button
+                          onClick={() =>
+                            window.open(pushGitState.githubUrl!, "_blank")
+                          }
+                          className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500`}
+                        >
+                          View on GitHub
+                        </button>
+                      )}
+                    </>
                   ) : (
                     <button
                       onClick={handlePushToGit}
