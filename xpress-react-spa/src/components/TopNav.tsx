@@ -105,9 +105,16 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
               X-press
             </button>
             <div className="hidden md:flex gap-6 font-semibold text-sm">
-
-              <a href="#" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Pricing</a>
+              <a href="/react-projects" className="text-stone-600 hover:text-[#4a7c59] transition-colors">React Project</a>
               <a href="/template-store" className="text-stone-600 hover:text-[#4a7c59] transition-colors">Template</a>
+              <a
+                href="/vibepress-db-info.zip"
+                download="vibepress-db-info.zip"
+                className="inline-flex items-center gap-1 text-stone-600 hover:text-[#4a7c59] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[15px]">download</span>
+                Plugin
+              </a>
               {user && (
                 <button
                   onClick={() => setShowApiKeyModal(true)}

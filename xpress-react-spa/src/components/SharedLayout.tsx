@@ -5,7 +5,6 @@ const SharedLayout = () => {
   const navigate = useNavigate();
 
   const stepItems = [
-    { label: 'Download Plugin', path: '/app/onboarding' },
     { label: 'Page setup', path: '/app/projects' },
     { label: 'Canvas edit', path: '/app/editor' },
     { label: 'AI generate', path: '/app/editor/split-view' },
@@ -15,11 +14,10 @@ const SharedLayout = () => {
 
   const currentPath = location.pathname;
   const currentStep =
-    currentPath.startsWith('/app/deploy') ? 5 :
-    currentPath.startsWith('/app/editor/visual') ? 4 :
-    currentPath.startsWith('/app/editor/split-view') ? 3 :
-    currentPath.startsWith('/app/editor') ? 2 :
-    currentPath.startsWith('/app/projects') ? 1 :
+    currentPath.startsWith('/app/deploy') ? 4 :
+    currentPath.startsWith('/app/editor/visual') ? 3 :
+    currentPath.startsWith('/app/editor/split-view') ? 2 :
+    currentPath.startsWith('/app/editor') ? 1 :
     0;
 
   return (

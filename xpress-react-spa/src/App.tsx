@@ -7,6 +7,7 @@ import SplitView from "./pages/SplitView";
 import VisualEditor from "./pages/VisualEditor";
 import DeployDashboard from "./pages/DeployDashboard";
 import TemplateStore from "./pages/TemplateStore";
+import ReactProjects from "./pages/ReactProjects";
 import SharedLayout from "./components/SharedLayout";
 import { UserProvider } from "./context/UserContext";
 
@@ -28,6 +29,7 @@ function App() {
           </Route>
 
           <Route path="template-store" element={<TemplateStore />} />
+          <Route path="react-projects" element={<ReactProjects />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

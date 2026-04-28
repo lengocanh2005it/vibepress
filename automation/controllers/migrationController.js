@@ -44,6 +44,16 @@ async function updateMigration(req, res) {
   return res.json(updated);
 }
 
+async function getAllMigrations(req, res) {
+  const migrations = await query(
+    `SELECT rm.*, s.site_name, s.site_url
+     FROM react_migrations rm
+     LEFT JOIN wp_sites s ON s.site_id = rm.site_id
+     ORDER BY rm.created_at DESC`,
+  );
+  return res.json(migrations);
+}
+
 async function getMigrationsBySite(req, res) {
   const { siteId } = req.params;
   const migrations = await query(
@@ -69,4 +79,4 @@ async function deleteMigration(req, res) {
   return res.json({ success: true });
 }
 
-module.exports = { createMigration, updateMigration, getMigrationsBySite, getMigrationById, deleteMigration };
+module.exports = { createMigration, updateMigration, getAllMigrations, getMigrationsBySite, getMigrationById, deleteMigration };
