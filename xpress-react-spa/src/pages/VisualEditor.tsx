@@ -61,6 +61,7 @@ interface LocationState {
   siteId?: string;
   previewUrl?: string;
   apiBaseUrl?: string;
+  routeEntries?: ReactVisualEditRouteEntry[];
 }
 
 interface RouteItem {
@@ -277,9 +278,9 @@ const VisualEditor: React.FC = () => {
       buildRouteItems(
         resolvedPreviewUrl,
         statusData?.result?.metrics?.pages,
-        statusData?.result?.routeEntries,
+        statusData?.result?.routeEntries ?? state.routeEntries,
       ),
-    [resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries],
+    [resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries, state.routeEntries],
   );
 
   const effectiveRouteId = routes.some((r) => r.id === selectedRouteId)
@@ -546,11 +547,6 @@ const VisualEditor: React.FC = () => {
                     <p className="text-sm font-semibold text-white drop-shadow">AI đang chỉnh sửa{selectedComponent?.component ? ` "${selectedComponent.component}"` : ""}…</p>
                   </div>
                 )}
-                <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/92 px-4 py-3 shadow-lg backdrop-blur">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8a7a62]">Trang đang xem</p>
-                  <p className="mt-1 text-sm font-semibold text-[#1f2a24]">{frameTitle || selectedRoute?.label || "React Preview"}</p>
-                  <p className="mt-1 text-xs text-[#6c7267]">{selectedPageUrl || "Đang khởi tạo..."}</p>
-                </div>
               </div>
             </div>
           </div>

@@ -45,13 +45,14 @@ export default function ReactProjects() {
         body: JSON.stringify({ jobId: active.job_id }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { previewUrl: string; apiBaseUrl: string };
+      const data = await res.json() as { previewUrl: string; apiBaseUrl: string; routeEntries?: { route: string; componentName: string }[] };
       navigate('/app/editor/visual', {
         state: {
           jobId: active.job_id,
           siteId: active.site_id,
           previewUrl: data.previewUrl,
           apiBaseUrl: data.apiBaseUrl,
+          routeEntries: data.routeEntries,
         },
       });
     } catch (err) {
