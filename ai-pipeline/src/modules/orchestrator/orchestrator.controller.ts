@@ -90,6 +90,12 @@ export class OrchestratorController {
     return this.orchestratorService.undoLastReactEdit({ jobId, siteId });
   }
 
+  @Post('start-preview')
+  async startPreview(@Body() body: { jobId: string }) {
+    if (!body?.jobId?.trim()) throw new BadRequestException('jobId is required');
+    return this.orchestratorService.startPreview(body.jobId.trim());
+  }
+
   @Get('status/:jobId')
   status(@Param('jobId') jobId: string) {
     return this.orchestratorService.getStatus(jobId);

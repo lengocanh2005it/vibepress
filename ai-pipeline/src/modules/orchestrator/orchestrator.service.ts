@@ -954,6 +954,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
   }
 
+  async startPreview(jobId: string) {
+    return this.previewBuilder.startPreviewForJob(jobId);
+  }
+
   async stop(jobId: string): Promise<PipelineStatus> {
     const state = this.jobs.get(jobId);
     if (!state) {

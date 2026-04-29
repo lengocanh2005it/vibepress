@@ -31,6 +31,35 @@ export default function ReactProjects() {
   const [items, setItems] = useState<Migration[]>([]);
   const [active, setActive] = useState<Migration | null>(null);
   const [loading, setLoading] = useState(true);
+  const [startingPreview, setStartingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const handleVisualEdit = async () => {
+    if (!active) return;
+    setStartingPreview(true);
+    setPreviewError(null);
+    try {
+      const res = await fetch('/ai-api/pipeline/start-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: active.job_id }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { previewUrl: string; apiBaseUrl: string };
+      navigate('/app/editor/visual', {
+        state: {
+          jobId: active.job_id,
+          siteId: active.site_id,
+          previewUrl: data.previewUrl,
+          apiBaseUrl: data.apiBaseUrl,
+        },
+      });
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Không thể khởi động preview');
+    } finally {
+      setStartingPreview(false);
+    }
+  };
 
   useEffect(() => {
     fetch("/api/migrations")
@@ -116,21 +145,18 @@ export default function ReactProjects() {
                       </a>
                     )}
                     <button
-                      onClick={() =>
-                        navigate("/app/editor/visual", {
-                          state: {
-                            jobId: active.job_id,
-                            siteId: active.site_id,
-                          },
-                        })
-                      }
-                      className="inline-flex items-center gap-2 border border-[#4a7c59]/30 text-[#4a7c59] bg-white/70 backdrop-blur-sm font-semibold text-sm px-5 py-2.5 rounded-xl hover:bg-[#4a7c59]/5 transition-colors"
+                      onClick={() => void handleVisualEdit()}
+                      disabled={startingPreview}
+                      className="inline-flex items-center gap-2 border border-[#4a7c59]/30 text-[#4a7c59] bg-white/70 backdrop-blur-sm font-semibold text-sm px-5 py-2.5 rounded-xl hover:bg-[#4a7c59]/5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <span className="material-symbols-outlined text-[15px]">
-                        edit
+                        {startingPreview ? 'progress_activity' : 'edit'}
                       </span>
-                      Visual Edit
+                      {startingPreview ? 'Đang khởi động...' : 'Visual Edit'}
                     </button>
+                    {previewError && (
+                      <p className="text-red-500 text-xs mt-1">{previewError}</p>
+                    )}
                   </div>
                 </div>
                 {/* end frosted panel */}

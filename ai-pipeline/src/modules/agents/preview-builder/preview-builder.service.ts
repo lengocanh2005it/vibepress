@@ -2387,6 +2387,68 @@ ${fontEntries}
     }
   }
 
+  async startPreviewForJob(jobId: string): Promise<{
+    previewUrl: string;
+    apiBaseUrl: string;
+    previewDir: string;
+    frontendDir: string;
+    routeEntries: PreviewRouteEntry[];
+    uiSourceMapPath: string;
+  }> {
+    const previewDir = join('./temp/generated', jobId);
+    const frontendDir = join(previewDir, 'frontend');
+    const serverDir = join(previewDir, 'server');
+
+    // Kiểm tra thư mục tồn tại
+    await access(frontendDir).catch(() => {
+      throw new Error(`Generated project not found for jobId: ${jobId}`);
+    });
+    await access(serverDir).catch(() => {
+      throw new Error(`Generated server not found for jobId: ${jobId}`);
+    });
+
+    const vitePort = await this.pickVitePort(jobId);
+    const apiPort = await this.pickApiPort(jobId);
+
+    this.spawnDevServer(frontendDir);
+    this.spawnDevServer(serverDir);
+
+    // Đọc routeEntries từ ui-source-map.json
+    const uiSourceMapPath = join(previewDir, 'ui-source-map.json');
+    let routeEntries: PreviewRouteEntry[] = [];
+    try {
+      const raw = JSON.parse(await readFile(uiSourceMapPath, 'utf8')) as Array<{
+        componentName?: string;
+        route?: string;
+      }>;
+      const seen = new Set<string>();
+      for (const entry of raw) {
+        if (entry.componentName && !seen.has(entry.componentName)) {
+          seen.add(entry.componentName);
+          routeEntries.push({
+            route: entry.route ?? '/',
+            componentName: entry.componentName,
+          });
+        }
+      }
+    } catch {
+      // ui-source-map absent — routeEntries stays empty
+    }
+
+    this.logger.log(
+      `[startPreviewForJob] jobId=${jobId} vitePort=${vitePort} apiPort=${apiPort} routes=${routeEntries.length}`,
+    );
+
+    return {
+      previewUrl: `/preview/${jobId}/`,
+      apiBaseUrl: `http://localhost:${apiPort}/api`,
+      previewDir,
+      frontendDir,
+      routeEntries,
+      uiSourceMapPath,
+    };
+  }
+
   private spawnDevServer(dir: string, ttlMs = 30 * 60 * 1000) {
     const proc = spawn('npm', ['run', 'dev'], {
       cwd: dir,
