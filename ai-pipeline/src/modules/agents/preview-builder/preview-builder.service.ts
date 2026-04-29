@@ -2407,11 +2407,19 @@ ${fontEntries}
       throw new Error(`Generated server not found for jobId: ${jobId}`);
     });
 
-    const vitePort = await this.pickVitePort(jobId);
-    const apiPort = await this.pickApiPort(jobId);
+    const vitePort = this.pickDeterministicPort(jobId, 'vite', 5300, 200);
+    const apiPort = this.pickDeterministicPort(jobId, 'api', 3700, 200);
 
-    this.spawnDevServer(frontendDir);
-    this.spawnDevServer(serverDir);
+    const viteRunning = !(await this.isPortFree(vitePort));
+    if (!viteRunning) {
+      this.spawnDevServer(frontendDir);
+      this.spawnDevServer(serverDir);
+      await this.waitForPort(vitePort);
+    } else {
+      this.logger.log(
+        `[startPreviewForJob] Servers already running on vitePort=${vitePort}`,
+      );
+    }
 
     // Đọc routeEntries từ ui-source-map.json
     const uiSourceMapPath = join(previewDir, 'ui-source-map.json');
@@ -2494,6 +2502,19 @@ ${fontEntries}
       server.once('listening', () => server.close(() => resolve(true)));
       server.listen(port, '127.0.0.1');
     });
+  }
+
+  private async waitForPort(
+    port: number,
+    timeoutMs = 40_000,
+    intervalMs = 600,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!(await this.isPortFree(port))) return;
+      await new Promise<void>((r) => setTimeout(r, intervalMs));
+    }
+    throw new Error(`Timeout waiting for port ${port} to become ready`);
   }
 
   private async findFreePort(
