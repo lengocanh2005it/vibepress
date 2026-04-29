@@ -911,7 +911,9 @@ function sanitizeSidebarLinks(
       if (!label) return null;
       return url ? { label, url } : { label };
     })
-    .filter((value): value is { label: string; url?: string } => Boolean(value));
+    .filter((value): value is { label: string; url?: string } =>
+      Boolean(value),
+    );
 }
 
 function sanitizeSidebarWidgets(rawWidgets: unknown): SidebarWidget[] {

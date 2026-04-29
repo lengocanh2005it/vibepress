@@ -129,7 +129,7 @@ export class GeneratedCodeReviewService {
 
     return {
       success: mode === 'blocking' ? failures.length === 0 : true,
-      failures: mode === 'blocking' ? failures : [],
+      failures,
     };
   }
 
@@ -287,20 +287,7 @@ ${component.code}
     fixedSlug?: string | null,
   ): string {
     const normalized = new Set(
-      dataNeeds.map((value) => {
-        switch (value) {
-          case 'siteInfo':
-            return 'site-info';
-          case 'footerLinks':
-            return 'footer-links';
-          case 'postDetail':
-            return 'post-detail';
-          case 'pageDetail':
-            return 'page-detail';
-          default:
-            return value;
-        }
-      }),
+      dataNeeds.map((value) => this.normalizeDataNeed(value)),
     );
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
@@ -434,6 +421,21 @@ ${component.code}
       .join('\n');
   }
 
+  private normalizeDataNeed(value: string): string {
+    switch (value) {
+      case 'siteInfo':
+        return 'site-info';
+      case 'footerLinks':
+        return 'footer-links';
+      case 'postDetail':
+        return 'post-detail';
+      case 'pageDetail':
+        return 'page-detail';
+      default:
+        return value;
+    }
+  }
+
   private applyDeterministicIssues(
     review: CodeReviewResult,
     component: GeneratedComponent,
@@ -462,7 +464,9 @@ ${component.code}
     const isPageComponent = (contract?.type ?? component.type) === 'page';
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const normalizedDataNeeds = new Set(
-      contract?.dataNeeds ?? component.dataNeeds ?? [],
+      (contract?.dataNeeds ?? component.dataNeeds ?? []).map((value) =>
+        this.normalizeDataNeed(value),
+      ),
     );
     const allowedSectionTypes = new Set(
       sections.map((section) => section.type),
@@ -473,6 +477,9 @@ ${component.code}
     const hasSourceBackedProseBlock = sections.some(
       (section) =>
         section.type === 'prose-block' && section.sourceSegments.length > 0,
+    );
+    const hasSourceBackedPageCompanionSections = sections.some((section) =>
+      this.isSourceBackedPageDetailCompanionSection(section),
     );
     const isFixedPageDetailComponent =
       !!fixedSlug &&
@@ -548,7 +555,7 @@ ${component.code}
       }
 
       if (
-        normalizedDataNeeds.has('pageDetail') &&
+        normalizedDataNeeds.has('page-detail') &&
         /\/api\/pages\/\$\{slug\}|\/api\/pages\/['"`]\s*\+\s*slug/.test(
           component.code,
         )
@@ -560,7 +567,7 @@ ${component.code}
       }
 
       if (
-        normalizedDataNeeds.has('postDetail') &&
+        normalizedDataNeeds.has('post-detail') &&
         /\/api\/posts\/\$\{slug\}|\/api\/posts\/['"`]\s*\+\s*slug/.test(
           component.code,
         )
@@ -573,6 +580,17 @@ ${component.code}
     }
 
     if (isFixedPageDetailComponent) {
+      if (
+        hasSourceBackedPageCompanionSections &&
+        this.hasCanonicalPageContentRender(component.code)
+      ) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Fixed page-detail component renders `page.content`/`item.content` via `dangerouslySetInnerHTML` while also rendering decomposed source-backed sections. Use exactly one mode: canonical page HTML OR the approved decomposed sections, never both.',
+        });
+      }
+
       if (
         hasPageContentSection &&
         !hasSourceBackedProseBlock &&
@@ -611,7 +629,7 @@ ${component.code}
 
     const expectsSidebarDetailShell =
       (contract?.isDetail ?? component.isDetail) === true &&
-      normalizedDataNeeds.has('postDetail') &&
+      normalizedDataNeeds.has('post-detail') &&
       allowedSectionTypes.has('sidebar');
     if (expectsSidebarDetailShell) {
       if (!this.hasSidebarArticleLayout(component.code)) {
@@ -684,13 +702,45 @@ ${component.code}
 
   private hasCanonicalPageContentRender(code: string): boolean {
     return (
-      /dangerouslySetInnerHTML/.test(code) &&
-      /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code)
+      /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code) &&
+      /dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code)
+    );
+  }
+
+  private isSourceBackedPageDetailCompanionSection(
+    section: SectionPlan,
+  ): boolean {
+    if (
+      ![
+        'prose-block',
+        'media-text',
+        'card-grid',
+        'tabs',
+        'accordion',
+        'carousel',
+        'modal',
+      ].includes(section.type)
+    ) {
+      return false;
+    }
+
+    const sourceFiles = [
+      section.sourceRef?.sourceFile,
+      ...(section.obligation?.sourceEvidence?.sourceFiles ?? []),
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    return sourceFiles.some(
+      (sourceFile) =>
+        sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/'),
     );
   }
 
   private hasUnexpectedNarrowCenteredPageShell(code: string): boolean {
-    if (!/dangerouslySetInnerHTML/.test(code)) return false;
+    if (!/dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code))
+      return false;
     const hasNarrowShell =
       /<(?:article|main|section|div)\b[^>]*className="[^"]*\bmax-w-\[(?:5\d{2}|6\d{2}|7\d{2})px\][^"]*\bmx-auto\b[^"]*"/.test(
         code,
@@ -1037,6 +1087,11 @@ ${component.code}
       'wrong endpoint',
       'clearly violates the route/data contract',
       'route/data contract',
+      'materially violates the page-detail contract',
+      'materially redesigns the approved page-detail layout',
+      'approved page-detail body is not the main preserved wordpress layout',
+      'main content should be rendered from `/api/pages/',
+      'approved fixed page detail',
       'jsx/tsx structure is likely broken',
       'jsx',
       'syntax',
@@ -1056,6 +1111,11 @@ ${component.code}
       'narrow centered article shell',
       'main article + sidebar structure',
       'invented placeholder copy',
+      'including post meta',
+      'footer-links data contract',
+      'comments submission is materially broken',
+      'fake hard-coded email',
+      'hardcodes `const post: postmetadata | null = null;`',
       'comment-filter search ui',
       'must preserve spectra/uagb-compatible markers',
       'must keep real interactive state wiring',

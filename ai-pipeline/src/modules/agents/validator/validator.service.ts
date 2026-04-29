@@ -672,8 +672,7 @@ export class ValidatorService {
     if (
       context.visualPlan?.sections.some((section) => section.type === 'modal')
     ) {
-      const modalStructureIssue =
-        this.findSpectraModalStructureViolation(code);
+      const modalStructureIssue = this.findSpectraModalStructureViolation(code);
       if (modalStructureIssue) {
         violations.push(
           `Modal Spectra structure violated: ${modalStructureIssue}. Keep the plugin-faithful modal hierarchy with \`uagb-spectra-button-wrapper\`, \`uagb-modal-trigger\`, \`uagb-modal-popup active\`, \`uagb-modal-popup-wrap\`, \`uagb-modal-popup-content\`, and \`uagb-modal-popup-close\`.`,
@@ -993,6 +992,24 @@ export class ValidatorService {
       }
     }
 
+    if (expectsPageDetail) {
+      const duplicatedPageSections = this.findDuplicatedPageDetailSections(
+        code,
+        context.visualPlan?.sections ?? [],
+      );
+      if (duplicatedPageSections.length > 0) {
+        violations.push(
+          `Page detail content duplication: component renders canonical page.content body and also renders additional source-backed section content (${duplicatedPageSections.join(', ')}). Use exactly one page-detail rendering mode: canonical page body OR decomposed approved sections, not both.`,
+        );
+      }
+    }
+
+    if (context.type === 'page' && /dangerouslySetInnerHTML/.test(code)) {
+      violations.push(
+        'Page components must not use `dangerouslySetInnerHTML`. Render page/body rich text through structured JSX or the rich-text node helper instead.',
+      );
+    }
+
     // 13. <img> without alt attribute — accessibility + common AI mistake
     if (/<img\b(?![^>]*\balt\s*=)[^>]*>/s.test(code)) {
       violations.push(
@@ -1081,6 +1098,34 @@ export class ValidatorService {
     });
     const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
     return `Visual section contract violated:\n${[sectionAuditLine, ...detailLines].join('\n')}`;
+  }
+
+  checkInlineSectionSyntax(rawCode: string): string | null {
+    const code = this.sanitizeGeneratedCode(rawCode).trim();
+    if (!code) return 'Empty section JSX output';
+
+    const jsxTagError = this.checkJsxTagBalance(code);
+    if (jsxTagError) return jsxTagError;
+
+    const tsxSyntaxError = this.checkTsxSyntax(code);
+    if (tsxSyntaxError) return tsxSyntaxError;
+
+    const braceDepth = this.balanceCount(code, '{', '}');
+    if (braceDepth !== 0) {
+      return `Unbalanced braces (depth: ${braceDepth})`;
+    }
+
+    const parenDepth = this.balanceCount(code, '(', ')');
+    if (parenDepth !== 0) {
+      return `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated inline JSX expression or handler.`;
+    }
+
+    const bracketDepth = this.balanceCount(code, '[', ']');
+    if (bracketDepth !== 0) {
+      return `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated inline array or expression.`;
+    }
+
+    return null;
   }
 
   private auditSectionContractFidelity(
@@ -2121,6 +2166,177 @@ export class ValidatorService {
     return [...new Set(issues)];
   }
 
+  private findDuplicatedPageDetailSections(
+    code: string,
+    sections: SectionPlan[],
+  ): string[] {
+    if (!this.hasCanonicalPageContentRender(code)) return [];
+
+    const duplicates: string[] = [];
+
+    for (const section of sections) {
+      if (!this.isSourceBackedPageDetailCompanionSection(section)) continue;
+      const anchors = this.extractPageDetailSectionAnchors(section);
+      if (!this.sectionAnchorsIndicateRendered(code, anchors)) continue;
+      duplicates.push(section.debugKey ?? section.sectionKey ?? section.type);
+    }
+
+    return duplicates;
+  }
+
+  private hasCanonicalPageContentRender(code: string): boolean {
+    return (
+      /\b(?:page|item)\.content\b/.test(code) &&
+      /dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code)
+    );
+  }
+
+  private isSourceBackedPageDetailCompanionSection(
+    section: SectionPlan,
+  ): boolean {
+    if (
+      ![
+        'prose-block',
+        'media-text',
+        'card-grid',
+        'tabs',
+        'accordion',
+        'carousel',
+        'modal',
+      ].includes(section.type)
+    ) {
+      return false;
+    }
+
+    const sourceFiles = [
+      section.sourceRef?.sourceFile,
+      ...(section.obligation?.sourceEvidence?.sourceFiles ?? []),
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    return sourceFiles.some(
+      (sourceFile) =>
+        sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/'),
+    );
+  }
+
+  private extractPageDetailSectionAnchors(section: SectionPlan): string[] {
+    const anchors: string[] = [];
+    const push = (value?: string | null) => {
+      const normalized = value?.trim();
+      if (!normalized) return;
+      if (normalized.length < 2) return;
+      anchors.push(normalized);
+    };
+
+    const pushCtas = (ctas?: Array<{ text?: string | null } | undefined>) => {
+      for (const cta of ctas ?? []) {
+        push(cta?.text);
+      }
+    };
+
+    switch (section.type) {
+      case 'prose-block':
+        for (const segment of section.sourceSegments ?? []) {
+          switch (segment.type) {
+            case 'heading':
+              push(segment.text);
+              push(segment.html);
+              break;
+            case 'paragraph':
+              push(segment.text);
+              push(segment.html);
+              break;
+            case 'list':
+              for (const item of segment.items) push(item);
+              break;
+            case 'image':
+              push(segment.src);
+              push(segment.caption);
+              break;
+            case 'html':
+              push(segment.html);
+              break;
+          }
+        }
+        break;
+      case 'media-text':
+        push(section.heading);
+        push(section.body);
+        push(section.imageSrc);
+        for (const item of section.listItems ?? []) push(item);
+        pushCtas(section.ctas ?? (section.cta ? [section.cta] : []));
+        break;
+      case 'card-grid':
+        push(section.title);
+        push(section.subtitle);
+        for (const card of section.cards) {
+          push(card.heading);
+          push(card.body);
+          push(card.imageSrc);
+        }
+        break;
+      case 'tabs':
+        push(section.title);
+        for (const tab of section.tabs) {
+          push(tab.label);
+          push(tab.heading);
+          push(tab.body);
+          push(tab.imageSrc);
+          pushCtas(tab.cta ? [tab.cta] : []);
+        }
+        break;
+      case 'accordion':
+        push(section.title);
+        for (const item of section.items) {
+          push(item.heading);
+          push(item.body);
+        }
+        break;
+      case 'carousel':
+        for (const slide of section.slides) {
+          push(slide.heading);
+          push(slide.subheading);
+          push(slide.imageSrc);
+          pushCtas(slide.cta ? [slide.cta] : []);
+        }
+        break;
+      case 'modal':
+        push(section.triggerText);
+        push(section.heading);
+        push(section.body);
+        push(section.imageSrc);
+        pushCtas(section.ctas ?? (section.cta ? [section.cta] : []));
+        break;
+    }
+
+    return [...new Set(anchors)];
+  }
+
+  private sectionAnchorsIndicateRendered(
+    code: string,
+    anchors: string[],
+  ): boolean {
+    const matches = anchors.filter((anchor) =>
+      this.codeContainsLiteral(code, anchor),
+    );
+    if (matches.length === 0) return false;
+    if (matches.some((anchor) => this.isStrongSectionAnchor(anchor)))
+      return true;
+    return matches.length >= Math.min(2, anchors.length);
+  }
+
+  private isStrongSectionAnchor(value: string): boolean {
+    const normalized = value.trim();
+    if (!normalized) return false;
+    if (/\/wp-content\/uploads\//i.test(normalized)) return true;
+    if (normalized.length >= 48) return true;
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+    return wordCount >= 6;
+  }
+
   private codeSatisfiesCollectionItem(
     code: string,
     item: SectionContractCollectionItem,
@@ -2217,6 +2433,7 @@ export class ValidatorService {
       case 'page-content':
         return this.codeMatchesAnyPattern(code, [
           /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
+          /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
           /\b[A-Za-z_$][\w$]*\.(?:content|title)\b/,
         ]);
     }
@@ -2341,8 +2558,13 @@ export class ValidatorService {
           case 'title':
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
-            return /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-              code,
+            return (
+              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
+                code,
+              ) ||
+              /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
+                code,
+              )
             );
           default:
             return true;
@@ -2503,13 +2725,22 @@ export class ValidatorService {
       if (normalized.includes('site info')) {
         kinds.add('site-info');
       }
-      if (normalized.includes('menus')) {
+      if (
+        normalized.includes('menus rendering') ||
+        normalized.includes('missing menus')
+      ) {
         kinds.add('menus');
       }
-      if (normalized.includes('pages')) {
+      if (
+        normalized.includes('pages collection') ||
+        normalized.includes('pages rendering')
+      ) {
         kinds.add('pages');
       }
-      if (normalized.includes('posts')) {
+      if (
+        normalized.includes('posts collection') ||
+        normalized.includes('from the posts')
+      ) {
         kinds.add('posts');
       }
       if (normalized.includes('quote')) {
@@ -3400,7 +3631,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       return 'missing shared carousel state usage (`activeCarousels` / `setActiveCarousels`)';
     }
     if (options?.requireArrows) {
-      if (!/\bswiper-button-prev\b/.test(code) || !/\bswiper-button-next\b/.test(code)) {
+      if (
+        !/\bswiper-button-prev\b/.test(code) ||
+        !/\bswiper-button-next\b/.test(code)
+      ) {
         return 'missing `swiper-button-prev` / `swiper-button-next` controls';
       }
     }

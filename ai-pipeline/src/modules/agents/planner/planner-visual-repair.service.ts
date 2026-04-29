@@ -1039,7 +1039,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const layout = input.delegate.deriveComponentLayout(
         input.tokens,
         input.componentPlan.componentName,
-        input.componentPlan.isDetail === true && input.componentPlan.route !== '/',
+        input.componentPlan.isDetail === true &&
+          input.componentPlan.route !== '/',
       );
       const mergedSections = input.delegate.mergeDraftSectionPresentation(
         parsedResult.plan.sections,

@@ -118,6 +118,7 @@ export class ReactVisualEditService {
       component,
       plan,
       feedback,
+      fixMode: 'edit-request-safe',
       visionImageUrls: imageUrls.length > 0 ? imageUrls : undefined,
       tokenScope: 'edit-request',
       logPath,

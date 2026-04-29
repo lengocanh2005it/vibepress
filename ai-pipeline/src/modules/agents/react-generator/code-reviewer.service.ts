@@ -103,9 +103,7 @@ export interface ReviewResult {
   rawResponse: string;
 }
 
-type FullFileGenerationPolicy =
-  | 'plan-guided-full-file'
-  | 'direct-ai-full-file';
+type FullFileGenerationPolicy = 'plan-guided-full-file' | 'direct-ai-full-file';
 
 const RICH_VISUAL_SECTION_TYPES = new Set([
   'prose-block',
@@ -198,7 +196,7 @@ export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
   private readonly tokenTracker = new TokenTracker();
   private readonly componentSystemPrompt =
-    'You are a senior React + TypeScript + Tailwind engineer. Generate a complete component from the provided migration context and return ONLY raw TSX code.';
+    'You are a senior React + TypeScript engineer focused on source-faithful WordPress migration. Generate a complete component from the provided migration context, preserve source-backed class/style semantics and DOM hierarchy, and return ONLY raw TSX code.';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
 
   constructor(
@@ -208,7 +206,7 @@ export class CodeReviewerService {
     private readonly codeGenerator: CodeGeneratorService,
     private readonly frameGenerator: FrameGeneratorService,
     private readonly aiLogger?: AiLoggerService,
-  ) { }
+  ) {}
 
   private readonly selfFixSystemPrompt =
     'You are a React/TypeScript expert. Fix the exact validation or targeted UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code, no explanation.';
@@ -268,7 +266,10 @@ export class CodeReviewerService {
       this.collectCustomClassNamesFromNodesJson(templateSource);
     const nodeCustomClassTargets =
       this.collectCustomClassTargetsFromNodesJson(templateSource);
-    if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
+    if (
+      nodeCustomClassNames.length > 0 ||
+      Object.keys(nodeCustomClassTargets).length > 0
+    ) {
       const merged = [
         ...new Set([
           ...(promptContext?.requiredCustomClassNames ?? []),
@@ -280,8 +281,15 @@ export class CodeReviewerService {
         ...nodeCustomClassTargets,
       };
       promptContext = promptContext
-        ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
-        : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
+        ? {
+            ...promptContext,
+            requiredCustomClassNames: merged,
+            requiredCustomClassTargets: mergedTargets,
+          }
+        : {
+            requiredCustomClassNames: merged,
+            requiredCustomClassTargets: mergedTargets,
+          };
     }
     let validationContext = this.buildValidationContext(
       promptContext,
@@ -371,7 +379,10 @@ export class CodeReviewerService {
           componentPlan,
           componentPlan.visualPlan,
         );
-        if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
+        if (
+          nodeCustomClassNames.length > 0 ||
+          Object.keys(nodeCustomClassTargets).length > 0
+        ) {
           const merged = [
             ...new Set([
               ...(promptContext?.requiredCustomClassNames ?? []),
@@ -383,8 +394,15 @@ export class CodeReviewerService {
             ...nodeCustomClassTargets,
           };
           promptContext = promptContext
-            ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
-            : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
+            ? {
+                ...promptContext,
+                requiredCustomClassNames: merged,
+                requiredCustomClassTargets: mergedTargets,
+              }
+            : {
+                requiredCustomClassNames: merged,
+                requiredCustomClassTargets: mergedTargets,
+              };
         }
         validationContext = this.buildValidationContext(
           promptContext,
@@ -570,14 +588,14 @@ export class CodeReviewerService {
           : undefined;
         const visualContract = componentPlan
           ? {
-            componentType: componentPlan.type,
-            route: componentPlan.route,
-            isDetail: componentPlan.isDetail,
-            dataNeeds: visualDataNeeds,
-            stripLayoutChrome: componentPlan.type === 'page',
-            sourceBackedAuxiliaryLabels:
-              componentPlan.sourceBackedAuxiliaryLabels,
-          }
+              componentType: componentPlan.type,
+              route: componentPlan.route,
+              isDetail: componentPlan.isDetail,
+              dataNeeds: visualDataNeeds,
+              stripLayoutChrome: componentPlan.type === 'page',
+              sourceBackedAuxiliaryLabels:
+                componentPlan.sourceBackedAuxiliaryLabels,
+            }
           : undefined;
 
         const { systemPrompt: s1System, userPrompt: s1User } =
@@ -612,23 +630,26 @@ export class CodeReviewerService {
           });
           const visualPlan = parsedPlan.plan
             ? {
-              ...parsedPlan.plan,
-              ...(componentPlan?.fixedSlug
-                ? {
-                  pageBinding: {
-                    id: componentPlan.fixedPageId,
-                    slug: componentPlan.fixedSlug,
-                    title: componentPlan.fixedTitle,
-                    route: componentPlan.route ?? undefined,
-                  },
-                }
-                : {}),
-            }
+                ...parsedPlan.plan,
+                ...(componentPlan?.fixedSlug
+                  ? {
+                      pageBinding: {
+                        id: componentPlan.fixedPageId,
+                        slug: componentPlan.fixedSlug,
+                        title: componentPlan.fixedTitle,
+                        route: componentPlan.route ?? undefined,
+                      },
+                    }
+                  : {}),
+              }
             : undefined;
 
           if (visualPlan) {
             promptContext = this.buildPromptContext(componentPlan, visualPlan);
-            if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
+            if (
+              nodeCustomClassNames.length > 0 ||
+              Object.keys(nodeCustomClassTargets).length > 0
+            ) {
               const merged = [
                 ...new Set([
                   ...(promptContext?.requiredCustomClassNames ?? []),
@@ -640,8 +661,15 @@ export class CodeReviewerService {
                 ...nodeCustomClassTargets,
               };
               promptContext = promptContext
-                ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
-                : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
+                ? {
+                    ...promptContext,
+                    requiredCustomClassNames: merged,
+                    requiredCustomClassTargets: mergedTargets,
+                  }
+                : {
+                    requiredCustomClassNames: merged,
+                    requiredCustomClassTargets: mergedTargets,
+                  };
             }
             validationContext = this.buildValidationContext(
               promptContext,
@@ -1227,15 +1255,15 @@ export class CodeReviewerService {
       options?.includeRequiredCustomClasses === false
         ? undefined
         : this.resolveRequiredCustomClassNames(
-          componentPlan,
-          resolvedVisualPlan,
-        );
+            componentPlan,
+            resolvedVisualPlan,
+          );
 
     return {
       templateName:
         'templateName' in (componentPlan ?? {})
           ? (componentPlan as PlanResult[number] | ComponentPromptContext)
-            ?.templateName
+              ?.templateName
           : undefined,
       description: componentPlan?.description,
       route: componentPlan?.route,
@@ -1421,15 +1449,17 @@ export class CodeReviewerService {
 
     if (
       componentPlan.isDetail &&
-      !richPageDetailCandidate &&
       !isSingleWithSidebar &&
-      !isCanonicalSinglePostDetail
+      !isCanonicalSinglePostDetail &&
+      !richPageDetailCandidate
     ) {
       return {
         enabled: false,
         reason: isPostDetail
           ? 'post-detail view blocked'
-          : 'detail view blocked',
+          : isPageDetail
+            ? 'page-detail prefers full-file AI'
+            : 'detail view blocked',
       };
     }
 
@@ -1488,12 +1518,9 @@ export class CodeReviewerService {
     if (componentPlan.fixedSlug) score += 1;
     if (normalizedNeeds.has('pageDetail') && !signals.hasPageContent)
       score += 1;
-    if (richPageDetailCandidate) score += 2;
-
     const enabled = Boolean(
       score >= 5 ||
       (signals.sections.length >= 4 && signals.richSectionCount >= 2) ||
-      richPageDetailCandidate ||
       isSingleWithSidebar ||
       isCanonicalSinglePostDetail,
     );
@@ -1663,13 +1690,13 @@ export class CodeReviewerService {
         editRequestContextNote,
         attempt > 1
           ? this.buildRetryAppendix({
-            componentName,
-            code,
-            lastError,
-            validationContext,
-            componentPlan,
-            repoManifest,
-          })
+              componentName,
+              code,
+              lastError,
+              validationContext,
+              componentPlan,
+              repoManifest,
+            })
           : undefined,
       );
       const {
@@ -2926,6 +2953,11 @@ export class CodeReviewerService {
       phaseLabel = 'initial',
     } = input;
 
+    let sectionCode = '';
+    let sectionError = initialRetryError;
+    let lastRawOutput = '';
+    const cotAttempts: AttemptLog[] = [];
+
     if (
       componentPlan?.visualPlan &&
       DETERMINISTIC_SECTION_ASSEMBLY_TYPES.has(section.type)
@@ -2947,15 +2979,20 @@ export class CodeReviewerService {
           ),
         );
         const basicError = this.validateInlineSectionOutput(deterministicCode);
-        const fidelityError = basicError
+        const syntaxError = basicError
           ? undefined
-          : this.validator.checkInlineSectionFidelity(
-            deterministicCode,
-            section,
-            componentName,
-            sectionIndex + 1,
-          );
-        const deterministicError = basicError ?? fidelityError ?? undefined;
+          : this.validator.checkInlineSectionSyntax(deterministicCode);
+        const fidelityError =
+          basicError || syntaxError
+            ? undefined
+            : this.validator.checkInlineSectionFidelity(
+                deterministicCode,
+                section,
+                componentName,
+                sectionIndex + 1,
+              );
+        const deterministicError =
+          basicError ?? syntaxError ?? fidelityError ?? undefined;
         if (!deterministicError) {
           this.logger.log(
             `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted via deterministic collection renderer`,
@@ -2977,16 +3014,11 @@ export class CodeReviewerService {
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer failed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer failed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError} — retrying with AI section generation`,
         );
-        return {
-          code: deterministicCode,
-          isValid: false,
-          attemptsUsed: 0,
-          lastError: deterministicError,
-          lastRawOutput: deterministicCode,
-          cotAttempts: [],
-        };
+        sectionError = [sectionError, deterministicError]
+          .filter(Boolean)
+          .join('\n\n');
       } catch (err: any) {
         const deterministicError =
           err instanceof Error ? err.message : String(err);
@@ -2995,22 +3027,13 @@ export class CodeReviewerService {
         );
         await this.log(
           logPath,
-          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer crashed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError}`,
+          `WARN [reviewer] "${componentName}" section-level (${phaseLabel}) deterministic collection renderer crashed for section ${sectionIndex + 1}/${totalSections} (${section.type}): ${deterministicError} — retrying with AI section generation`,
         );
-        return {
-          code: '',
-          isValid: false,
-          attemptsUsed: 0,
-          lastError: deterministicError,
-          cotAttempts: [],
-        };
+        sectionError = [sectionError, deterministicError]
+          .filter(Boolean)
+          .join('\n\n');
       }
     }
-
-    let sectionCode = '';
-    let sectionError = initialRetryError;
-    let lastRawOutput = '';
-    const cotAttempts: AttemptLog[] = [];
 
     this.logger.log(
       `[reviewer] "${componentName}" section-level (${phaseLabel}): generating section ${sectionIndex + 1}/${totalSections} (${section.type})`,
@@ -3053,15 +3076,20 @@ export class CodeReviewerService {
         this.postProcessCode(raw),
       );
       const basicError = this.validateInlineSectionOutput(sectionCode);
-      const fidelityError = basicError
+      const syntaxError = basicError
         ? undefined
-        : this.validator.checkInlineSectionFidelity(
-          sectionCode,
-          section,
-          componentName,
-          sectionIndex + 1,
-        );
-      const attemptError = basicError ?? fidelityError ?? undefined;
+        : this.validator.checkInlineSectionSyntax(sectionCode);
+      const fidelityError =
+        basicError || syntaxError
+          ? undefined
+          : this.validator.checkInlineSectionFidelity(
+              sectionCode,
+              section,
+              componentName,
+              sectionIndex + 1,
+            );
+      const attemptError =
+        basicError ?? syntaxError ?? fidelityError ?? undefined;
       cotAttempts.push({
         attemptNumber: cotAttempts.length + 1,
         promptSent: {
@@ -3132,15 +3160,20 @@ export class CodeReviewerService {
           this.postProcessCode(fixResult.code),
         );
         const fixBasicError = this.validateInlineSectionOutput(fixedCode);
-        const fixFidelityError = fixBasicError
+        const fixSyntaxError = fixBasicError
           ? undefined
-          : this.validator.checkInlineSectionFidelity(
-            fixedCode,
-            section,
-            componentName,
-            sectionIndex + 1,
-          );
-        const fixError = fixBasicError ?? fixFidelityError ?? undefined;
+          : this.validator.checkInlineSectionSyntax(fixedCode);
+        const fixFidelityError =
+          fixBasicError || fixSyntaxError
+            ? undefined
+            : this.validator.checkInlineSectionFidelity(
+                fixedCode,
+                section,
+                componentName,
+                sectionIndex + 1,
+              );
+        const fixError =
+          fixBasicError ?? fixSyntaxError ?? fixFidelityError ?? undefined;
         if (!fixError) {
           this.logger.log(
             `[reviewer:section-fix] "${componentName}" section ${sectionIndex + 1}/${totalSections} ✓ self-repair resolved`,
@@ -3752,15 +3785,15 @@ export class CodeReviewerService {
         (section) => section.type === 'cover',
       )
         ? [
-          'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
-        ]
+            'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
+          ]
         : []),
       ...(componentPlan.visualPlan.sections.some(
         (section) => section.type === 'carousel',
       )
         ? [
-          'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
-        ]
+            'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
+          ]
         : []),
       ...componentPlan.visualPlan.sections.map((section, index) => {
         const parts = [
@@ -3773,8 +3806,8 @@ export class CodeReviewerService {
             : null,
           this.extractCustomClassNamesFromSection(section).length > 0
             ? `customClassNames=${JSON.stringify(
-              this.extractCustomClassNamesFromSection(section),
-            )}`
+                this.extractCustomClassNamesFromSection(section),
+              )}`
             : null,
           section.presentation
             ? `presentation=${JSON.stringify(section.presentation)}`

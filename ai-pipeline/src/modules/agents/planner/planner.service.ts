@@ -1010,7 +1010,9 @@ export class PlannerService {
         widgets: [
           { kind: 'pages-list' as const, title: 'Pages' },
           ...(content.posts.length > 0
-            ? ([{ kind: 'recent-posts' as const, title: 'Recent Posts' }] as const)
+            ? ([
+                { kind: 'recent-posts' as const, title: 'Recent Posts' },
+              ] as const)
             : []),
         ],
         maxItems: 8,
@@ -1624,7 +1626,8 @@ export class PlannerService {
       }
       if (
         isSidebarLike &&
-        (source.includes('wp:latest-posts') || source.includes('"latest-posts"'))
+        (source.includes('wp:latest-posts') ||
+          source.includes('"latest-posts"'))
       ) {
         needs.add('posts');
       }
@@ -2922,6 +2925,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
       }
 
+      // Deduplicate listing sections that appear more than once due to multiple
+      // sources all containing the same query loop (e.g. archive.html + archive.php).
+      const listingTypes = new Set(['post-list', 'search']);
+      const seenListingTypes = new Set<string>();
+      mergedDraft = mergedDraft.filter((s) => {
+        if (!listingTypes.has(s.type)) return true;
+        if (seenListingTypes.has(s.type)) return false;
+        seenListingTypes.add(s.type);
+        return true;
+      });
+
       if (mergedDraft.length === 0) return undefined;
 
       const sanitizedSections = sanitizeSectionsForContract(mergedDraft, {
@@ -3099,15 +3113,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       widgets.push({
         kind: 'navigation',
         title:
-          headingTexts.find((heading) => /link|resource|menu|explore/i.test(heading)) ??
-          'Useful Links',
+          headingTexts.find((heading) =>
+            /link|resource|menu|explore/i.test(heading),
+          ) ?? 'Useful Links',
         ...(paragraphTexts.find((text) => !/search/i.test(text))
           ? {
               description: paragraphTexts.find((text) => !/search/i.test(text)),
             }
           : {}),
         menuSlug:
-          existingNavbar?.type === 'navbar' ? existingNavbar.menuSlug : 'primary',
+          existingNavbar?.type === 'navbar'
+            ? existingNavbar.menuSlug
+            : 'primary',
         ...(navigationLinks.length > 0 ? { links: navigationLinks } : {}),
       });
     }
@@ -3121,11 +3138,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       });
     }
 
-    if (widgets.length === 0 && !hasNavigation && !hasRecentPosts && hasCategories) {
+    if (
+      widgets.length === 0 &&
+      !hasNavigation &&
+      !hasRecentPosts &&
+      hasCategories
+    ) {
       widgets.push({
         kind: 'pages-list',
         title:
-          headingTexts.find((heading) => /page|explore/i.test(heading)) ?? 'Pages',
+          headingTexts.find((heading) => /page|explore/i.test(heading)) ??
+          'Pages',
       });
     }
 
@@ -3143,11 +3166,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (widget.kind === 'recent-posts') requiredCapabilities.add('posts');
     }
 
-    if (
-      widgets.length === 0 &&
-      !hasSearch &&
-      existingSearch == null
-    ) {
+    if (widgets.length === 0 && !hasSearch && existingSearch == null) {
       return undefined;
     }
 
@@ -3182,7 +3201,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
                 title: headingTexts.find((heading) => /search/i.test(heading)),
               }
             : {}),
-        ...(existingSearch?.sourceRef ? { sourceRef: existingSearch.sourceRef } : {}),
+        ...(existingSearch?.sourceRef
+          ? { sourceRef: existingSearch.sourceRef }
+          : {}),
         ...(existingSearch?.customClassNames?.length
           ? { customClassNames: existingSearch.customClassNames }
           : {}),
@@ -3754,11 +3775,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
     // WP dynamic-title blocks that survive into draft sections carry a
     // generic placeholder like "WordPress" that never reflects real content.
-    const WP_GENERIC_PLACEHOLDERS = new Set([
-      'WordPress',
-      'wordpress',
-      'by',
-    ]);
+    const WP_GENERIC_PLACEHOLDERS = new Set(['WordPress', 'wordpress', 'by']);
     const isPlaceholderOnly = (value: unknown): boolean => {
       const cleaned = String(value ?? '')
         .replace(/<[^>]+>/g, '')
@@ -5274,6 +5291,21 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       });
     }
 
+    for (const post of this.findRepresentativePostsForTemplate(
+      componentPlan,
+      content,
+    )) {
+      pushCandidate({
+        source: post.content,
+        label: `db:post:${post.slug || post.id}`,
+        templateName: componentPlan.templateName,
+        sourceFile: `db:posts/${post.slug || post.id}`,
+        // For generic single-post routes, keep repo-chain as the primary
+        // structural source and use real posts as supplemental body evidence.
+        priority: 5,
+      });
+    }
+
     const hasRichDbCandidate = candidates.some(
       (c) => c.label.startsWith('db:') && c.source.trim().length > 0,
     );
@@ -5307,7 +5339,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       }))
       .map((candidate) => ({
         ...candidate,
-        selectionScore: candidate.richness + candidate.priority * 20,
+        selectionScore:
+          candidate.richness +
+          candidate.priority * 20 -
+          (!componentPlan.fixedSlug &&
+          componentPlan.dataNeeds.includes('post-detail') &&
+          /^db:post:/i.test(candidate.label)
+            ? 10000
+            : 0),
       }))
       .sort((a, b) => {
         if (
@@ -5451,13 +5490,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      const normalizedUrl = typeof url === 'string' && url.trim() ? url.trim() : undefined;
+      const normalizedUrl =
+        typeof url === 'string' && url.trim() ? url.trim() : undefined;
       if (normalizedLabel.length < 2) return;
       const key = `${normalizedLabel}::${normalizedUrl ?? ''}`;
       if (seen.has(key)) return;
       seen.add(key);
       collected.push(
-        normalizedUrl ? { label: normalizedLabel, url: normalizedUrl } : { label: normalizedLabel },
+        normalizedUrl
+          ? { label: normalizedLabel, url: normalizedUrl }
+          : { label: normalizedLabel },
       );
     };
 
@@ -5467,7 +5509,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           const labelValue =
             typeof node.params?.label === 'string'
               ? node.params.label
-              : node.text ?? node.html;
+              : (node.text ?? node.html);
           const urlValue =
             typeof node.params?.url === 'string' ? node.params.url : undefined;
           pushItem(labelValue, urlValue);
@@ -5522,6 +5564,33 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
 
     return matches
+      .sort((a, b) => {
+        const byRichness =
+          this.scorePlanningSourceRichness(b.content) -
+          this.scorePlanningSourceRichness(a.content);
+        if (byRichness !== 0) return byRichness;
+        return b.content.length - a.content.length;
+      })
+      .slice(0, 2);
+  }
+
+  private findRepresentativePostsForTemplate(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ) {
+    if (componentPlan.type !== 'page') return [];
+    if (!componentPlan.dataNeeds.includes('post-detail')) return [];
+    if (componentPlan.fixedSlug) return [];
+
+    const templateName = this.normalizeTemplateIdentifier(
+      componentPlan.templateName,
+    );
+    if (!/^(single|single-with-sidebar)$/.test(templateName)) {
+      return [];
+    }
+
+    return content.posts
+      .filter((post) => String(post.content ?? '').trim().length > 0)
       .sort((a, b) => {
         const byRichness =
           this.scorePlanningSourceRichness(b.content) -
@@ -5751,6 +5820,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (
       preferredSource.label.startsWith('db:') &&
       /^repo[:-]/.test(candidate.label)
+    ) {
+      return false;
+    }
+
+    // For dynamic post-detail routes (no fixedSlug), actual DB post content must
+    // not supplement the template source. The post-content section renders the
+    // post body at runtime — merging real post blocks creates 30+ spurious sections.
+    if (
+      componentPlan.dataNeeds?.includes('post-detail') &&
+      !componentPlan.fixedSlug &&
+      candidate.label.startsWith('db:posts/')
     ) {
       return false;
     }

@@ -110,7 +110,10 @@ function compactPlanText(
   maxChars: number = MAX_PLAN_TEXT_CHARS,
 ): string | null {
   if (!value) return null;
-  const rich = value.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const rich = value
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
   const plain = stripTags(rich).replace(/\s+/g, ' ').trim();
   if (!plain) return null;
 
@@ -546,7 +549,7 @@ function buildForbiddenBehaviorNote(input: {
   );
   if (isPageDetail || isPostDetail) {
     lines.push(
-      `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside \`dangerouslySetInnerHTML\`.`,
+      `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside the approved content render path.`,
     );
     lines.push(
       '- Do NOT append footer-style link columns such as "About", "Privacy", "Social", "Resources", or "Useful Links" after the main content unless those exact blocks are already inside the HTML body being rendered.',
@@ -557,6 +560,9 @@ function buildForbiddenBehaviorNote(input: {
     if (isPageDetail && input.fixedSlug) {
       lines.push(
         '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.',
+      );
+      lines.push(
+        '- Page components must NOT use `dangerouslySetInnerHTML`. Convert approved page HTML/rich text into structured JSX nodes instead of dumping raw HTML strings.',
       );
       lines.push(
         '- Do NOT redesign a fixed page-detail into a centered feature article shell with classes such as `max-w-[620px]`, `max-w-2xl`, `max-w-3xl`, or broad `mx-auto` wrappers unless that exact narrow shell is clearly source-backed in the approved layout.',
@@ -783,7 +789,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     return '';
 
   const lines: string[] = [
-    '## Theme design tokens — use these Tailwind classes',
+    '## Theme design tokens — preserve WordPress semantics and use these resolved values',
   ];
 
   if (tokens.defaults) {
@@ -791,19 +797,38 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     lines.push(
       '**Default colors** — apply these when a block has NO explicit `bgColor`/`textColor` attribute:',
     );
-    if (d.bgColor) lines.push(`- Page/root background: \`bg-[${d.bgColor}]\``);
+    if (d.bgColor)
+      lines.push(
+        `- Page/root background: prefer inherited global/theme CSS or source-backed background classes first; only use \`style={{backgroundColor:"${d.bgColor}"}}\` when the source/plan explicitly overrides the default.`,
+      );
     if (d.textColor)
-      lines.push(`- Body text (default): \`text-[${d.textColor}]\``);
+      lines.push(
+        `- Body text (default): let \`.wp-site-blocks\` / inherited theme CSS carry this by default; use \`style={{color:"${d.textColor}"}}\` only for explicit overrides.`,
+      );
     if (d.headingColor)
-      lines.push(`- All headings (h1–h6): \`text-[${d.headingColor}]\``);
-    if (d.linkColor) lines.push(`- Links (\`<a>\`): \`text-[${d.linkColor}]\``);
+      lines.push(
+        `- All headings (h1–h6): preserve source heading classes first; otherwise \`style={{color:"${d.headingColor}"}}\` when an explicit heading override is needed.`,
+      );
+    if (d.linkColor)
+      lines.push(
+        `- Links (\`<a>\`): preserve source link classes first; otherwise \`style={{color:"${d.linkColor}"}}\` for explicit overrides.`,
+      );
     if (d.captionColor)
-      lines.push(`- Captions / secondary text: \`text-[${d.captionColor}]\``);
+      lines.push(
+        `- Captions / secondary text: \`style={{color:"${d.captionColor}"}}\` only when the source/plan explicitly calls for a secondary text override.`,
+      );
     if (d.buttonBgColor)
-      lines.push(`- Button background: \`bg-[${d.buttonBgColor}]\``);
+      lines.push(
+        `- Button background: prefer preserved source button classes first; otherwise \`style={{backgroundColor:"${d.buttonBgColor}"}}\` when the source/plan explicitly sets a button color.`,
+      );
     if (d.buttonTextColor)
-      lines.push(`- Button text: \`text-[${d.buttonTextColor}]\``);
-    if (d.fontSize) lines.push(`- Default font size: \`text-[${d.fontSize}]\``);
+      lines.push(
+        `- Button text: \`style={{color:"${d.buttonTextColor}"}}\` only when the source/plan explicitly sets button text color.`,
+      );
+    if (d.fontSize)
+      lines.push(
+        `- Default font size: let inherited theme CSS handle this by default; only use \`style={{fontSize:"${d.fontSize}"}}\` for explicit overrides.`,
+      );
     if (d.fontFamily)
       lines.push(
         `- Default font family: do NOT hardcode this inline on every wrapper. Let global theme CSS / \`.wp-site-blocks\` inherit it, and only add \`style={{fontFamily:"${d.fontFamily}"}}\` when a specific block explicitly overrides the default.`,
@@ -831,15 +856,15 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.contentWidth)
       lines.push(
-        `- Content max-width: \`max-w-[${d.contentWidth}]\` on long-form content wrappers only (article/page body, comments, prose). Do NOT use this as the full-page or full-section container by default.`,
+        `- Content max-width: preserve source width/alignment classes first; if an explicit content wrapper override is needed, use \`style={{maxWidth:"${d.contentWidth}"}}\` on long-form content wrappers only (article/page body, comments, prose). Do NOT use this as the full-page or full-section container by default.`,
       );
     if (d.wideWidth)
       lines.push(
-        `- Wide content max-width: \`max-w-[${d.wideWidth}]\` on wide/full-width blocks`,
+        `- Wide content max-width: preserve \`alignwide\` / source width semantics first; if an explicit override is needed, use \`style={{maxWidth:"${d.wideWidth}"}}\` on wide/full-width blocks.`,
       );
     if (d.buttonBorderRadius)
       lines.push(
-        `- Button border radius: \`rounded-[${d.buttonBorderRadius}]\``,
+        `- Button border radius: \`style={{borderRadius:"${d.buttonBorderRadius}"}}\` when the source/plan explicitly sets it.`,
       );
     if (d.buttonPadding)
       lines.push(
@@ -847,7 +872,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.blockGap)
       lines.push(
-        `- Default block gap: \`${d.blockGap}\` — apply \`flex flex-col gap-[${d.blockGap}]\` on the component root wrapper only. Inner section containers should use their own gap values from the visual plan; do NOT repeat this global default on every nested flex/grid.`,
+        `- Default block gap: \`${d.blockGap}\` — use inherited/global theme CSS first. Only apply \`style={{gap:"${d.blockGap}"}}\` on wrappers that truly need an explicit gap override. Do NOT repeat this global default on every nested flex/grid.`,
       );
     if (d.rootPadding)
       lines.push(
@@ -859,9 +884,10 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
       for (const [level, style] of Object.entries(d.headings)) {
         const parts: string[] = [];
-        if (style.fontSize) parts.push(`size: \`text-[${style.fontSize}]\``);
+        if (style.fontSize)
+          parts.push(`size: \`style={{fontSize:"${style.fontSize}"}}\``);
         if (style.fontWeight)
-          parts.push(`weight: \`font-[${style.fontWeight}]\``);
+          parts.push(`weight: \`style={{fontWeight:"${style.fontWeight}"}}\``);
         if (parts.length > 0)
           lines.push(`- \`<${level}>\`: ${parts.join(', ')}`);
       }
@@ -879,22 +905,22 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.fontSizes.length > 0) {
     lines.push(
-      '**Font sizes** — when a block has a `fontSize` slug, use Tailwind arbitrary value `text-[size]`:',
+      '**Font sizes** — when a block has a `fontSize` slug, preserve the source `has-[slug]-font-size` class if it already exists; otherwise use inline `style={{fontSize:"..."}}` on the explicit override node:',
     );
     for (const s of tokens.fontSizes) {
-      lines.push(`- slug \`${s.slug}\` → \`text-[${s.size}]\``);
+      lines.push(`- slug \`${s.slug}\` → \`${s.size}\``);
     }
   }
 
   if (tokens.colors.length > 0) {
     lines.push(
-      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Apply them directly:',
+      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Preserve source palette classes first; otherwise apply explicit overrides directly via inline `style`:',
     );
     lines.push(
-      '- `bgColor` → prefer `bg-[#hex]`; use `style={{backgroundColor:"#hex"}}` only when the value is dynamic',
+      '- `bgColor` → preserve source `has-[slug]-background-color` / other source-backed classes first; otherwise `style={{backgroundColor:"#hex"}}` for explicit overrides',
     );
     lines.push(
-      '- `textColor` → prefer `text-[#hex]`; use `style={{color:"#hex"}}` only when the value is dynamic',
+      '- `textColor` → preserve source `has-[slug]-color` / other source-backed classes first; otherwise `style={{color:"#hex"}}` for explicit overrides',
     );
     lines.push('- Palette values available from the theme tokens:');
     for (const c of tokens.colors) {
@@ -909,7 +935,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       '- When `page.content` / `post.content` HTML carries these classes, do NOT strip them — they resolve correctly in the preview.',
     );
     lines.push(
-      '- When `customClassNames` on a section/element applies a palette color, prefer `has-[slug]-color` or `has-[slug]-background-color` instead of an inline Tailwind arbitrary value when the source already uses that class.',
+      '- When `customClassNames` on a section/element applies a palette color, preserve `has-[slug]-color` or `has-[slug]-background-color` when the source already uses that class. Do not replace it with a Tailwind-only color utility.',
     );
   }
 
@@ -946,7 +972,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.spacing.length > 0) {
     lines.push(
-      '**Spacing** — when template uses `var:preset|spacing|N` or `var(--wp--preset--spacing--N)`, use Tailwind arbitrary value `p-[size]` / `py-[size]` / `px-[size]` / `gap-[size]`:',
+      '**Spacing** — when template uses `var:preset|spacing|N` or `var(--wp--preset--spacing--N)`, preserve the source class/style semantics first; otherwise use explicit inline `style` values on the relevant wrapper/node after resolving the token:',
     );
     for (const s of tokens.spacing) {
       lines.push(`- slug \`${s.slug}\` → \`${s.size}\``);
@@ -1551,14 +1577,16 @@ export function buildPlanContextNote(
     const classHints = plan.requiredCustomClassNames
       .map((cls) => {
         const target = targets[cls];
-        return target ? `\`${cls}\` (on ${targetLabels[target]})` : `\`${cls}\``;
+        return target
+          ? `\`${cls}\` (on ${targetLabels[target]})`
+          : `\`${cls}\``;
       })
       .join(', ');
     lines.push(
       `- Preserve these exact source custom classes in JSX \`className\` output on their source-backed elements: ${classHints}.`,
     );
     lines.push(
-      '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them alongside Tailwind utility classes.',
+      '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them intact, and only add minimal helper classes when the runtime truly needs them.',
     );
   }
 

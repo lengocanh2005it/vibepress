@@ -617,7 +617,11 @@ export class ReactGeneratorService {
     feedback: string;
     modelConfig?: { fixAgent?: string };
     logPath?: string;
-    fixMode?: 'full' | 'syntax-only';
+    fixMode?:
+      | 'full'
+      | 'syntax-only'
+      | 'visual-metrics-safe'
+      | 'edit-request-safe';
     visionImageUrls?: string[];
     visionContextNote?: string;
     tokenScope?: TokenScope;
@@ -654,14 +658,28 @@ export class ReactGeneratorService {
       fixMode === 'syntax-only'
         ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
-    const visualPlanRepairNote = this.buildVisualPlanRepairNote(componentPlan);
-    const hardRegenerationNote = this.buildHardRegenerationRepairNote(
-      feedback,
-      componentPlan,
-    );
+    const visualPlanRepairNote =
+      fixMode === 'full'
+        ? this.buildVisualPlanRepairNote(componentPlan)
+        : undefined;
+    const visualMetricsSafeRepairNote =
+      fixMode === 'visual-metrics-safe'
+        ? this.buildVisualMetricsSafeRepairNote(componentPlan)
+        : undefined;
+    const editRequestSafeRepairNote =
+      fixMode === 'edit-request-safe'
+        ? this.buildEditRequestSafeRepairNote(componentPlan)
+        : undefined;
+    const hardRegenerationNote =
+      fixMode === 'full'
+        ? this.buildHardRegenerationRepairNote(feedback, componentPlan)
+        : undefined;
     const repairFeedback = [
       effectiveFeedback,
+      visualMetricsSafeRepairNote,
+      editRequestSafeRepairNote,
       visualPlanRepairNote,
+      this.buildComponentContractRepairNote(componentPlan),
       hardRegenerationNote,
     ]
       .filter(Boolean)
@@ -670,13 +688,21 @@ export class ReactGeneratorService {
     this.logger.log(
       fixMode === 'syntax-only'
         ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}"`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+        : fixMode === 'visual-metrics-safe'
+          ? `[fixer] Auto-fixing visual metrics for component "${component.name}" with contract-safe mode`
+          : fixMode === 'edit-request-safe'
+            ? `[fixer] Auto-fixing approved user edit for component "${component.name}" with scoped safe mode`
+            : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
     );
     await this.logToFile(
       logPath,
       fixMode === 'syntax-only'
         ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${repairFeedback}`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${repairFeedback}`,
+        : fixMode === 'visual-metrics-safe'
+          ? `[fixer] Auto-fixing visual metrics for component "${component.name}" with contract-safe mode: ${repairFeedback}`
+          : fixMode === 'edit-request-safe'
+            ? `[fixer] Auto-fixing approved user edit for component "${component.name}" with scoped safe mode: ${repairFeedback}`
+            : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${repairFeedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
@@ -708,7 +734,9 @@ export class ReactGeneratorService {
       hasSharedHeader = false,
       hasSharedFooter = false,
     } = input;
-    const componentPlan = plan.find((item) => item.componentName === component.name);
+    const componentPlan = plan.find(
+      (item) => item.componentName === component.name,
+    );
     const effectivePlan = this.stripSharedLayoutSectionsFromPlan(
       componentPlan,
       hasSharedHeader,
@@ -980,6 +1008,90 @@ ${renders}
     return blocks.join('\n');
   }
 
+  private buildVisualMetricsSafeRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string {
+    const lines = [
+      'VISUAL METRICS SAFE MODE:',
+      'This repair is ONLY for visual/UI alignment after screenshot metric diagnosis.',
+      'You may adjust className, inline style, spacing, wrappers, DOM nesting for presentational fidelity, and approved interactive behavior wiring.',
+      'Do NOT rewrite the component architecture from scratch.',
+      'Do NOT change route binding, fetch endpoints, main data source selection, or the component data contract.',
+      'Do NOT add or remove `useParams()`.',
+      'Do NOT change a fixed-slug component into a dynamic-slug component, and do NOT change a dynamic-slug component into a fixed-slug component.',
+      'Do NOT replace exact detail fetches with collection fetch + lookup.',
+      'Do NOT add or remove primary state variables such as `page`, `post`, `pages`, `posts`, `comments`, `menus`, `footerColumns`, or `siteInfo` unless the validator feedback explicitly says one is missing.',
+      'Do NOT introduce or remove top-level shared chrome such as `<header>`, `<footer>`, or global navigation in page components.',
+      'Keep the existing approved data/rendering mode intact. Focus the repair on styling, layout fidelity, wrapper structure, and UI behavior only.',
+    ];
+    const normalizedNeeds = new Set(componentPlan?.dataNeeds ?? []);
+    const isDetailSourceBackedRoute =
+      normalizedNeeds.has('pageDetail') || normalizedNeeds.has('postDetail');
+
+    if (isDetailSourceBackedRoute) {
+      const approvedSectionCount =
+        componentPlan?.visualPlan?.sections?.length ??
+        componentPlan?.draftSections?.length ??
+        0;
+      lines.push(
+        'DETAIL ROUTE GUARDRAIL: this is a source-backed detail route. Preserve the approved/source-backed section structure instead of improvising new page composition.',
+      );
+      lines.push(
+        'Do NOT add, remove, merge, split, or reorder major sections unless the feedback explicitly identifies a missing approved/source-backed section that must be restored.',
+      );
+      lines.push(
+        'Do NOT rewrite source-backed body copy into new summaries, marketing prose, or synthetic filler. Keep section content bound to the approved source-backed content.',
+      );
+      if (approvedSectionCount > 0) {
+        lines.push(
+          `Expected section coverage remains locked to the approved plan (${approvedSectionCount} section(s)). Visual repair must refine the existing section shells rather than collapsing the page into a different structure.`,
+        );
+      }
+    }
+
+    if (componentPlan?.route) {
+      lines.push(`Locked route contract: ${componentPlan.route}`);
+    }
+    if (componentPlan?.fixedSlug) {
+      lines.push(`Locked fixed slug: ${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan?.dataNeeds?.length) {
+      lines.push(`Locked data needs: ${componentPlan.dataNeeds.join(', ')}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  private buildEditRequestSafeRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string {
+    const lines = [
+      'EDIT REQUEST SAFE MODE:',
+      'This repair is applying an approved user edit or a follow-up refinement for that approved edit.',
+      'The user-requested local change is PRIMARY. Modify the exact target region or matched local section first.',
+      'Preserve unrelated sections, sibling regions, and surrounding component structure unless the request explicitly says to expand the change.',
+      'Do NOT rewrite the entire component from scratch unless the feedback explicitly allows a broader rewrite.',
+      'Do NOT change route binding, fetch endpoints, main data source selection, or the component data contract.',
+      'Do NOT add or remove `useParams()` unless the validator feedback explicitly requires it.',
+      'Do NOT replace exact detail fetches with collection fetch + lookup.',
+      'Do NOT add or remove top-level shared chrome such as `<header>`, `<footer>`, or global navigation in page components.',
+      'Do NOT move a local style/content change up to the outer section/container when the target evidence points to a child element like a button, heading, paragraph, card, or media node.',
+      'Prefer targeted presentation/content edits over broad restructuring.',
+    ];
+
+    if (componentPlan?.route) {
+      lines.push(`Locked route contract: ${componentPlan.route}`);
+    }
+    if (componentPlan?.fixedSlug) {
+      lines.push(`Locked fixed slug: ${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan?.dataNeeds?.length) {
+      lines.push(`Locked data needs: ${componentPlan.dataNeeds.join(', ')}`);
+    }
+
+    return lines.join('\n');
+  }
+
   private buildHardRegenerationRepairNote(
     feedback: string,
     componentPlan?: PlanResult[number],
@@ -1016,8 +1128,83 @@ ${renders}
       normalized.includes('visual plan obligations violated') ||
       normalized.includes('required capability') ||
       normalized.includes('obligation "') ||
-      normalized.includes('sectionaudit:')
+      normalized.includes('sectionaudit:') ||
+      normalized.includes('rootcause=route-mapping-error') ||
+      normalized.includes('rootcause=data-binding-error') ||
+      normalized.includes('exact bound record via') ||
+      normalized.includes('must not include their own <header> tag')
     );
+  }
+
+  private buildComponentContractRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string | undefined {
+    if (!componentPlan) return undefined;
+
+    const lines: string[] = [
+      'Approved component contract — MUST remain true after the repair:',
+      `- componentType=${componentPlan.type}`,
+      `- route=${componentPlan.route ?? 'unknown'}`,
+      `- isDetail=${componentPlan.isDetail === true ? 'yes' : 'no'}`,
+    ];
+
+    if (componentPlan.fixedSlug) {
+      lines.push(`- fixedSlug=${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan.dataNeeds?.length) {
+      lines.push(`- dataNeeds=${componentPlan.dataNeeds.join(', ')}`);
+    }
+
+    if (componentPlan.type === 'page') {
+      lines.push(
+        '- This is a PAGE component. Do NOT render your own top-level `<header>`, `<footer>`, or site navigation chrome. The shared Layout wrapper already provides global navigation and footer.',
+      );
+    }
+
+    const normalizedNeeds = new Set(componentPlan.dataNeeds ?? []);
+    const fixedSlug = componentPlan.fixedSlug?.trim();
+
+    if (normalizedNeeds.has('pageDetail')) {
+      if (fixedSlug) {
+        lines.push(
+          `- Fetch the main record ONLY from \`/api/pages/${fixedSlug}\`. Do NOT use \`useParams()\` for the main record, do NOT use \`/api/pages/\${slug}\`, and do NOT fetch \`/api/pages\` for a lookup.`,
+        );
+      } else {
+        lines.push(
+          '- Fetch the main record from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
+        );
+      }
+    }
+
+    if (normalizedNeeds.has('postDetail')) {
+      if (fixedSlug) {
+        lines.push(
+          `- Fetch the main record ONLY from \`/api/posts/${fixedSlug}\`. Do NOT use \`useParams()\` for the main record, do NOT use \`/api/posts/\${slug}\`, and do NOT fetch \`/api/posts\` for a lookup.`,
+        );
+      } else {
+        lines.push(
+          '- Fetch the main record from `/api/posts/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/posts` + lookup.',
+        );
+      }
+    }
+
+    if (normalizedNeeds.has('comments')) {
+      if (fixedSlug) {
+        lines.push(
+          `- If comments are rendered for this fixed-bound detail view, use the bound slug \`${fixedSlug}\` consistently for comment fetch/submission endpoints as well.`,
+        );
+      } else if (componentPlan.isDetail) {
+        lines.push(
+          '- If comments are rendered for this detail view, keep the comments slug binding consistent with the main detail slug.',
+        );
+      }
+    }
+
+    lines.push(
+      '- If JSX references a collection/state variable such as `posts`, `pages`, `comments`, or `footerColumns`, ensure the matching `useState(...)` declaration and fetch assignment exist in the component before returning code.',
+    );
+
+    return lines.join('\n');
   }
 
   private restoreTrackedSectionMarkers(

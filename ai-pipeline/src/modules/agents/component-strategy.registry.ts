@@ -37,9 +37,9 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^Footer$/i,
     kind: 'footer',
-    // Footer now uses a source-backed visual plan plus a stable deterministic
-    // renderer, which is less noisy than letting AI invent fallback columns.
-    deterministicFirst: true,
+    // Footer needs to follow the actual WP footer/template-part structure.
+    // Deterministic rendering has proven too generic and drifts visually.
+    deterministicFirst: false,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },

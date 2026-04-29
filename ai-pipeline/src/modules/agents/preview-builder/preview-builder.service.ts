@@ -1448,6 +1448,27 @@ ${fontEntries}
     if (existing.includes(marker)) return;
 
     const lines: string[] = [marker];
+    const rootVars: string[] = [];
+
+    for (const { slug, value } of tokens.colors) {
+      rootVars.push(`  --wp--preset--color--${slug}: ${value};`);
+    }
+
+    for (const { slug, size } of tokens.fontSizes) {
+      rootVars.push(`  --wp--preset--font-size--${slug}: ${size};`);
+    }
+
+    for (const { slug, family } of tokens.fonts) {
+      rootVars.push(`  --wp--preset--font-family--${slug}: ${family};`);
+    }
+
+    for (const { slug, size } of tokens.spacing) {
+      rootVars.push(`  --wp--preset--spacing--${slug}: ${size};`);
+    }
+
+    if (rootVars.length > 0) {
+      lines.push(`:root {\n${rootVars.join('\n')}\n}`);
+    }
 
     for (const { slug, value } of tokens.colors) {
       lines.push(`.has-${slug}-color { color: ${value}; }`);
@@ -1458,6 +1479,10 @@ ${fontEntries}
 
     for (const { slug, size } of tokens.fontSizes) {
       lines.push(`.has-${slug}-font-size { font-size: ${size}; }`);
+    }
+
+    for (const { slug, family } of tokens.fonts) {
+      lines.push(`.has-${slug}-font-family { font-family: ${family}; }`);
     }
 
     const wideMax = tokens.defaults?.wideWidth ?? '1200px';

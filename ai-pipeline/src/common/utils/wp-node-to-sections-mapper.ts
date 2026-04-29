@@ -36,6 +36,7 @@ import type {
   AccordionSection,
   CarouselSection,
   SourceSegment,
+  SectionCardStyle,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -1717,15 +1718,40 @@ function mapUagbInfoBox(node: WpNode): CardGridSection | null {
     (node.params?.iconBoxDesc as string | undefined) ??
     '';
   if (!heading && !body) return null;
-  return { type: 'card-grid', columns: 3, cards: [{ heading, body }] };
+
+  const descFontSize = node.params?.descFontSize as number | undefined;
+  const descFontSizeType =
+    (node.params?.descFontSizeType as string | undefined) ?? 'px';
+  const pTop = node.params?.blockTopPadding as number | undefined;
+  const pRight = node.params?.blockRightPadding as number | undefined;
+  const pBottom = node.params?.blockBottomPadding as number | undefined;
+  const pLeft = node.params?.blockLeftPadding as number | undefined;
+  const pType =
+    (node.params?.blockTopPaddingType as string | undefined) ?? 'px';
+
+  const cardStyle: SectionCardStyle = {};
+  if (descFontSize != null) {
+    cardStyle.bodyStyle = { fontSize: `${descFontSize}${descFontSizeType}` };
+  }
+  if (pTop != null || pRight != null || pBottom != null || pLeft != null) {
+    cardStyle.padding = `${pTop ?? 0}${pType} ${pRight ?? 0}${pType} ${pBottom ?? 0}${pType} ${pLeft ?? 0}${pType}`;
+  }
+
+  return {
+    type: 'card-grid',
+    columns: 3,
+    cards: [{ heading, body }],
+    ...(Object.keys(cardStyle).length > 0 ? { cardStyle } : {}),
+  };
 }
 
 function mapUagbTabs(node: WpNode): TabsSection | null {
   const tabChildren = (node.children ?? []).filter(
     (c) => c.block === 'uagb/tabs-child',
   );
+  const fallbackTitles = extractUagbTabTitlesFromHtml(node.html);
   const tabs = tabChildren
-    .map((tab) => {
+    .map((tab, index) => {
       const flat = flattenChildren(tab);
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
@@ -1735,7 +1761,10 @@ function mapUagbTabs(node: WpNode): TabsSection | null {
       );
       const buttonNode = findBestButtonNode(flat);
       const tabTitle =
-        (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
+        (tab.params?.tabTitle as string | undefined) ??
+        fallbackTitles[index] ??
+        h?.text ??
+        '';
       const body = extractRichTextFromNodes(flat);
       const heading =
         h?.text && h.text.trim() && h.text.trim() !== tabTitle.trim()
@@ -1804,6 +1833,36 @@ function mapUagbTabs(node: WpNode): TabsSection | null {
   const tabAlign = normalizeHorizontalAlign(node.params?.tabAlign);
   if (tabAlign) section.tabAlign = tabAlign;
   return section;
+}
+
+function extractUagbTabTitlesFromHtml(html?: string): string[] {
+  if (!html) return [];
+  const titles: string[] = [];
+  const pattern =
+    /class="[^"]*\buagb-tabs-list\b[^"]*"[\s\S]*?<div>([\s\S]*?)<\/div>/gi;
+  for (const match of html.matchAll(pattern)) {
+    const label = normalizeInlineHtmlText(match[1]);
+    if (label) titles.push(label);
+  }
+  return titles;
+}
+
+function normalizeInlineHtmlText(value?: string | null): string {
+  if (!value) return '';
+  return decodeBasicHtmlEntities(value)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeBasicHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
 }
 
 function mapAccordionLike(node: WpNode): AccordionSection | null {

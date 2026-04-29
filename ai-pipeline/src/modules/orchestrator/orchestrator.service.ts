@@ -1447,6 +1447,33 @@ export class OrchestratorService implements BeforeApplicationShutdown {
 
   private async logToFile(logPath: string, message: string): Promise<void> {
     const targetPath = this.resolveTextLogPath(logPath);
+    await this.appendTimestampedLog(targetPath, message);
+  }
+
+  private resolveSiblingLogPath(
+    logPath: string,
+    filename: string,
+  ): string | null {
+    const targetPath = this.resolveTextLogPath(logPath);
+    if (!targetPath) return null;
+    return join(targetPath, '..', filename);
+  }
+
+  private async logVisualMetricsTrace(
+    logPath: string,
+    message: string,
+  ): Promise<void> {
+    const targetPath = this.resolveSiblingLogPath(
+      logPath,
+      'visual-metrics.trace.log',
+    );
+    await this.appendTimestampedLog(targetPath, message);
+  }
+
+  private async appendTimestampedLog(
+    targetPath: string | null,
+    message: string,
+  ): Promise<void> {
     if (!targetPath) return;
     const timestamp = new Date().toISOString();
     const payload = message
@@ -1571,7 +1598,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     components: ReactGenerateResult['components'],
   ): Map<string, ReactGenerateResult['components'][number]> {
     return new Map(
-      components.map((component) => [component.name, { ...component }] as const),
+      components.map(
+        (component) => [component.name, { ...component }] as const,
+      ),
     );
   }
 
@@ -2454,10 +2483,12 @@ export default function ${component.name}() {
         planSummary: this.buildPlanSummary(reviewResult.plan),
       });
       const hasSharedHeader = reviewResult.plan.some(
-        (item) => item.type === 'partial' && /^header/i.test(item.componentName),
+        (item) =>
+          item.type === 'partial' && /^header/i.test(item.componentName),
       );
       const hasSharedFooter = reviewResult.plan.some(
-        (item) => item.type === 'partial' && /^footer/i.test(item.componentName),
+        (item) =>
+          item.type === 'partial' && /^footer/i.test(item.componentName),
       );
       await stepDelay();
 
@@ -2723,14 +2754,13 @@ export default function ${component.name}() {
             });
             components = fallbackRecovery.components;
             validation = this.validator.collectValidationIssues(components);
-            const remainingFatalValidationFailures =
-              validation.failures.filter(
-                (failure) =>
-                  !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
-                    failure.component,
-                    failure.error,
-                  ),
-              );
+            const remainingFatalValidationFailures = validation.failures.filter(
+              (failure) =>
+                !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                  failure.component,
+                  failure.error,
+                ),
+            );
             if (remainingFatalValidationFailures.length > 0) {
               throw new Error(
                 `[validator] Generated component validation failed after auto-fix/fallback:\n${remainingFatalValidationFailures
@@ -2779,7 +2809,7 @@ export default function ${component.name}() {
               logPath,
             });
 
-            if (review.success || review.failures.length === 0) {
+            if (review.failures.length === 0) {
               break;
             }
 
@@ -4012,12 +4042,14 @@ export default function ${component.name}() {
 
                     activeTarget = nextTarget;
                     const nextComponentPlan = reviewResult.plan.find(
-                      (entry) => entry.componentName === activeTarget.componentName,
+                      (entry) =>
+                        entry.componentName === activeTarget.componentName,
                     );
-                    activeSourceEvidence = this.buildSourceEvidenceForComparePage(
-                      activeTarget.page,
-                      content,
-                    );
+                    activeSourceEvidence =
+                      this.buildSourceEvidenceForComparePage(
+                        activeTarget.page,
+                        content,
+                      );
                     activePlanEvidence =
                       this.buildPlanEvidenceForComponent(nextComponentPlan);
                     activeRequestContextLines =
@@ -4029,7 +4061,9 @@ export default function ${component.name}() {
                         baselineAccuracy,
                       });
                     const nextVisionImageUrls =
-                      await this.buildComparePageVisionInputs(activeTarget.page);
+                      await this.buildComparePageVisionInputs(
+                        activeTarget.page,
+                      );
 
                     validation =
                       await this.siteCompareVisualDiagnosis.validatePostEdit({
@@ -5284,19 +5318,16 @@ export default function ${component.name}() {
         score: number;
       }
     >();
+    let forcedHomeTarget: {
+      componentName: string;
+      page: AutomationComparePageResult;
+      score: number;
+    } | null = null;
 
     for (const page of pages) {
       const visualStatus = page.visual?.status;
       const contentStatus = page.content?.status;
       const diffPct = this.coerceFiniteNumber(page.visual?.diffPct) ?? 0;
-      const accuracy = this.coerceFiniteNumber(page.visual?.accuracy);
-      const isActionable =
-        visualStatus === '⚠️  FAIL' ||
-        contentStatus === 'FAIL' ||
-        contentStatus === 'MISSING' ||
-        diffPct >= 8;
-      if (!isActionable) continue;
-
       const componentName = this.resolveVisualRepairComponentName({
         page,
         preview,
@@ -5304,6 +5335,7 @@ export default function ${component.name}() {
       });
       if (!componentName) continue;
 
+      const accuracy = this.coerceFiniteNumber(page.visual?.accuracy);
       const priorityBoost =
         page.repairPriority === 'high'
           ? 80
@@ -5327,6 +5359,19 @@ export default function ${component.name}() {
         (accuracy === null ? diffPct : Math.max(0, 100 - accuracy)) +
         contentPenalty +
         regionPenalty;
+      const isActionable =
+        visualStatus === '⚠️  FAIL' ||
+        contentStatus === 'FAIL' ||
+        contentStatus === 'MISSING' ||
+        diffPct >= 8;
+
+      if (
+        componentName === 'Home' &&
+        (!forcedHomeTarget || score > forcedHomeTarget.score)
+      ) {
+        forcedHomeTarget = { componentName, page, score };
+      }
+      if (!isActionable) continue;
 
       const existing = bestByComponent.get(componentName);
       if (!existing || score > existing.score) {
@@ -5334,9 +5379,22 @@ export default function ${component.name}() {
       }
     }
 
-    return [...bestByComponent.values()]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
+    const rankedTargets = [...bestByComponent.values()].sort(
+      (a, b) => b.score - a.score,
+    );
+    if (
+      forcedHomeTarget &&
+      !rankedTargets.some((target) => target.componentName === 'Home')
+    ) {
+      const pinnedTargets = [
+        forcedHomeTarget,
+        ...rankedTargets
+          .filter((target) => target.componentName !== 'Home')
+          .slice(0, 2),
+      ];
+      return pinnedTargets.sort((a, b) => b.score - a.score);
+    }
+    return rankedTargets.slice(0, 3);
   }
 
   private selectPostEditValidationTarget(input: {
@@ -5619,7 +5677,9 @@ export default function ${component.name}() {
 
     const snapshot = components.map((component) => ({ ...component }));
     const originalComponent = components[componentIndex];
-    const visionImageUrls = await this.buildComparePageVisionInputs(target.page);
+    const visionImageUrls = await this.buildComparePageVisionInputs(
+      target.page,
+    );
     const visionContextNote = this.buildComparePageVisionContext(target.page);
     const baseFeedback = this.buildPostEditValidationRepairFeedback({
       componentName: target.componentName,
@@ -5647,6 +5707,7 @@ export default function ${component.name}() {
         feedback: retryFeedback,
         modelConfig: { fixAgent: fixAgentModel },
         logPath,
+        fixMode: 'edit-request-safe',
         visionImageUrls,
         visionContextNote,
         tokenScope: 'edit-request',
@@ -5698,8 +5759,7 @@ export default function ${component.name}() {
         );
         return { components, applied: true };
       } catch (error: any) {
-        const message =
-          error instanceof Error ? error.message : String(error);
+        const message = error instanceof Error ? error.message : String(error);
         await this.logToFile(
           logPath,
           `[Post Edit Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/2: ${message}`,
@@ -5799,7 +5859,9 @@ export default function ${component.name}() {
     if (validation.repairPlan.guardrails.length > 0) {
       lines.push('Validation guardrails:');
       lines.push(
-        ...validation.repairPlan.guardrails.map((guardrail) => `- ${guardrail}`),
+        ...validation.repairPlan.guardrails.map(
+          (guardrail) => `- ${guardrail}`,
+        ),
       );
     }
     if (sourceEvidence.length > 0) {
@@ -5943,42 +6005,88 @@ export default function ${component.name}() {
     return `${normalized.slice(0, maxChars).trimEnd()}\n...`;
   }
 
+  private summarizeSingleLine(
+    value: string | null | undefined,
+    maxChars = 180,
+  ): string {
+    const normalized = String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized) return '';
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+  }
+
+  private buildCompactVisualIssueSummary(
+    issues: Array<{
+      type?: string;
+      severity?: string;
+      sectionHint?: string;
+      location?: string;
+      suggestedFix?: string;
+    }>,
+    limit = 3,
+  ): string {
+    const compact = issues
+      .slice(0, limit)
+      .map((issue) => {
+        const locus = issue.sectionHint ?? issue.location ?? 'general';
+        const action = this.summarizeSingleLine(issue.suggestedFix, 90);
+        return `${issue.type ?? 'unknown'}:${issue.severity ?? 'unknown'}:${locus}${action ? ` -> ${action}` : ''}`;
+      })
+      .filter(Boolean);
+    if (compact.length === 0) return '';
+    return compact.join(' | ');
+  }
+
+  private buildCompactInstructionSummary(
+    instructions: string[],
+    limit = 2,
+  ): string {
+    const compact = instructions
+      .slice(0, limit)
+      .map((instruction) => this.summarizeSingleLine(instruction, 110))
+      .filter(Boolean);
+    if (compact.length === 0) return '';
+    return compact.join(' | ');
+  }
+
   private resolveVisualRepairComponentName(input: {
     page: AutomationComparePageResult;
     preview: PreviewBuilderResult;
     componentNames: Set<string>;
   }): string | null {
     const { page, preview, componentNames } = input;
-      const route =
-        this.normalizeComparableRoute(page.route) ??
-        this.normalizeComparableRoute(page.visual?.reactPath) ??
-        null;
-      if (route) {
-        const exactMatch = preview.routeEntries.find(
-          (entry) =>
-            !this.isCatchAllPreviewRoute(entry) &&
-            this.normalizeComparableRoute(entry.route) === route,
-        );
-        if (exactMatch) return exactMatch.componentName;
-
-        const patternMatch = preview.routeEntries.find(
-          (entry) =>
-            !this.isCatchAllPreviewRoute(entry) &&
-            this.previewRouteMatches(entry.route, route),
-        );
-        if (patternMatch) return patternMatch.componentName;
-      }
-
-      const hinted = page.componentHint?.trim();
-      if (hinted && componentNames.has(hinted)) return hinted;
-      const notFoundEntry = preview.routeEntries.find((entry) =>
-        this.isCatchAllPreviewRoute(entry),
+    const route =
+      this.normalizeComparableRoute(page.route) ??
+      this.normalizeComparableRoute(page.visual?.reactPath) ??
+      null;
+    if (route) {
+      const exactMatch = preview.routeEntries.find(
+        (entry) =>
+          !this.isCatchAllPreviewRoute(entry) &&
+          this.normalizeComparableRoute(entry.route) === route,
       );
-      if (notFoundEntry && hinted === notFoundEntry.componentName) {
-        return notFoundEntry.componentName;
-      }
-      return null;
+      if (exactMatch) return exactMatch.componentName;
+
+      const patternMatch = preview.routeEntries.find(
+        (entry) =>
+          !this.isCatchAllPreviewRoute(entry) &&
+          this.previewRouteMatches(entry.route, route),
+      );
+      if (patternMatch) return patternMatch.componentName;
     }
+
+    const hinted = page.componentHint?.trim();
+    if (hinted && componentNames.has(hinted)) return hinted;
+    const notFoundEntry = preview.routeEntries.find((entry) =>
+      this.isCatchAllPreviewRoute(entry),
+    );
+    if (notFoundEntry && hinted === notFoundEntry.componentName) {
+      return notFoundEntry.componentName;
+    }
+    return null;
+  }
 
   private normalizeComparableRoute(route?: string | null): string | null {
     if (!route) return null;
@@ -6010,9 +6118,14 @@ export default function ${component.name}() {
   }
 
   private isCatchAllPreviewRoute(
-    entry: Pick<PreviewBuilderResult['routeEntries'][number], 'route' | 'componentName'>,
+    entry: Pick<
+      PreviewBuilderResult['routeEntries'][number],
+      'route' | 'componentName'
+    >,
   ): boolean {
-    return entry.route.trim() === '*' || /^NotFound$/i.test(entry.componentName);
+    return (
+      entry.route.trim() === '*' || /^NotFound$/i.test(entry.componentName)
+    );
   }
 
   private buildRuntimeSmokeRoutes(
@@ -6025,8 +6138,8 @@ export default function ${component.name}() {
           const normalized = this.normalizeComparableRoute(route);
           return Boolean(
             normalized &&
-              (normalized === '/' ||
-                (!normalized.includes(':') && normalized !== '*')),
+            (normalized === '/' ||
+              (!normalized.includes(':') && normalized !== '*')),
           );
         }) ?? [];
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
@@ -6070,6 +6183,10 @@ export default function ${component.name}() {
         logPath,
         '[Visual Metrics Repair] No actionable compare mismatches were selected for AI diagnosis/fix.',
       );
+      await this.logVisualMetricsTrace(
+        logPath,
+        '[Visual Metrics Repair] No actionable compare mismatches were selected for AI diagnosis/fix.',
+      );
       return { components, applied: false, repairedCount: 0 };
     }
 
@@ -6088,7 +6205,25 @@ export default function ${component.name}() {
         )
         .join(', ')}`,
     );
+    await this.logVisualMetricsTrace(
+      logPath,
+      `[Visual Metrics Repair] Selected targets: ${repairTargets
+        .map(
+          (target) =>
+            `${target.componentName}:${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}`,
+        )
+        .join(', ')}`,
+    );
     await this.logToFile(
+      logPath,
+      repairTargets
+        .map(
+          (target) =>
+            `[Visual Metrics Repair] target=${target.componentName} score=${target.score.toFixed(1)} ${this.formatAutomationComparePageSummary(target.page)}`,
+        )
+        .join('\n'),
+    );
+    await this.logVisualMetricsTrace(
       logPath,
       repairTargets
         .map(
@@ -6144,6 +6279,25 @@ export default function ${component.name}() {
           ),
         ].join('\n'),
       );
+      await this.logVisualMetricsTrace(
+        logPath,
+        [
+          `[Visual Diagnose] component=${target.componentName} route=${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'} model=${diagnosisModel || 'default'} images=${visionImageUrls.length}`,
+          `[Visual Diagnose] incoming metrics: ${this.formatAutomationComparePageSummary(
+            target.page,
+          )}`,
+          this.summarizeLogLines(
+            sourceEvidence,
+            6,
+            '[Visual Diagnose] source evidence',
+          ),
+          this.summarizeLogLines(
+            planEvidence,
+            4,
+            '[Visual Diagnose] plan evidence',
+          ),
+        ].join('\n'),
+      );
       const diagnosis = await this.siteCompareVisualDiagnosis.diagnose({
         componentName: target.componentName,
         page: target.page,
@@ -6172,11 +6326,56 @@ export default function ${component.name}() {
           ),
         ].join('\n'),
       );
+      await this.logVisualMetricsTrace(
+        logPath,
+        [
+          `[Visual Diagnose] ${target.componentName} route=${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'} mode=${diagnosis.analysisMode ?? 'unknown'} rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)} score=${diagnosis.score}`,
+          `[Visual Diagnose] strategy=${diagnosis.repairPlan.strategy} shouldRepair=${diagnosis.shouldRepair}`,
+          this.summarizeLogLines(
+            diagnosis.issues.map(
+              (issue) =>
+                `${issue.type}|${issue.severity}|${issue.sectionHint ?? issue.location ?? 'general'}|${issue.suggestedFix}`,
+            ),
+            6,
+            '[Visual Diagnose] issues',
+          ),
+          this.summarizeLogLines(
+            diagnosis.repairPlan.instructions,
+            5,
+            '[Visual Diagnose] instructions',
+          ),
+        ].join('\n'),
+      );
+      this.logger.log(
+        `[Visual Diagnose] "${target.componentName}" mode=${diagnosis.analysisMode ?? 'unknown'} rootCause=${diagnosis.rootCause.primary} shouldRepair=${diagnosis.shouldRepair} confidence=${diagnosis.confidence.toFixed(2)} strategy=${this.summarizeSingleLine(diagnosis.repairPlan.strategy, 180)}`,
+      );
+      const compactDiagnosisIssues = this.buildCompactVisualIssueSummary(
+        diagnosis.issues,
+        3,
+      );
+      if (compactDiagnosisIssues) {
+        this.logger.log(
+          `[Visual Diagnose] "${target.componentName}" top issues: ${compactDiagnosisIssues}`,
+        );
+      }
+      const compactDiagnosisInstructions = this.buildCompactInstructionSummary(
+        diagnosis.repairPlan.instructions,
+        2,
+      );
+      if (compactDiagnosisInstructions) {
+        this.logger.log(
+          `[Visual Diagnose] "${target.componentName}" key instructions: ${compactDiagnosisInstructions}`,
+        );
+      }
       if (!diagnosis.shouldRepair || diagnosis.confidence < 0.55) {
         this.logger.warn(
           `[Visual Metrics Repair] Diagnosis confidence too low for "${target.componentName}". Skipping targeted fix. rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}`,
         );
         await this.logToFile(
+          logPath,
+          `[Visual Metrics Repair] Skipped "${target.componentName}" because diagnosis confidence was too low (${diagnosis.confidence.toFixed(2)}). rootCause=${diagnosis.rootCause.primary}`,
+        );
+        await this.logVisualMetricsTrace(
           logPath,
           `[Visual Metrics Repair] Skipped "${target.componentName}" because diagnosis confidence was too low (${diagnosis.confidence.toFixed(2)}). rootCause=${diagnosis.rootCause.primary}`,
         );
@@ -6191,14 +6390,28 @@ export default function ${component.name}() {
         plan,
         content,
       });
+      const metricsFixMode = this.selectVisualMetricsFixMode({
+        componentPlan,
+        diagnosis,
+      });
 
       this.logger.warn(
-        `[Visual Metrics Repair] Fixing component "${target.componentName}" from route "${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}" after diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}`,
+        `[Visual Metrics Repair] Fixing component "${target.componentName}" from route "${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'}" after diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)} fixMode=${metricsFixMode}`,
       );
       await this.logToFile(
         logPath,
         [
-          `[Visual Metrics Repair] Fixing "${target.componentName}" with diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}.`,
+          `[Visual Metrics Repair] Fixing "${target.componentName}" with diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)} fixMode=${metricsFixMode}.`,
+          `[Visual Metrics Repair] visionArtifacts=${visionImageUrls.length} visionContext=${JSON.stringify(visionContextNote || '')}`,
+          `[Visual Metrics Repair] fix feedback:\n${this.summarizeMultilineForLog(
+            feedback,
+          )}`,
+        ].join('\n'),
+      );
+      await this.logVisualMetricsTrace(
+        logPath,
+        [
+          `[Visual Metrics Repair] Fixing "${target.componentName}" with diagnosis rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)} fixMode=${metricsFixMode}.`,
           `[Visual Metrics Repair] visionArtifacts=${visionImageUrls.length} visionContext=${JSON.stringify(visionContextNote || '')}`,
           `[Visual Metrics Repair] fix feedback:\n${this.summarizeMultilineForLog(
             feedback,
@@ -6214,7 +6427,14 @@ export default function ${component.name}() {
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         if (attempt > 1) {
+          this.logger.warn(
+            `[Visual Metrics Repair] Retrying "${target.componentName}" attempt ${attempt}/3 with accumulated feedback. fixMode=${metricsFixMode}`,
+          );
           await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Retrying "${target.componentName}" attempt ${attempt}/3 with accumulated code/runtime feedback.`,
+          );
+          await this.logVisualMetricsTrace(
             logPath,
             `[Visual Metrics Repair] Retrying "${target.componentName}" attempt ${attempt}/3 with accumulated code/runtime feedback.`,
           );
@@ -6226,16 +6446,32 @@ export default function ${component.name}() {
           feedback: retryFeedback,
           modelConfig: { fixAgent: fixAgentModel },
           logPath,
+          fixMode: metricsFixMode,
           visionImageUrls,
           visionContextNote,
         });
+        const preserveVisualPlanForMetricsRepair =
+          this.shouldPreserveVisualPlanDuringMetricsRepair({
+            componentPlan,
+            diagnosis,
+            fixMode: metricsFixMode,
+          });
+        this.logger.log(
+          `[Visual Metrics Repair] "${target.componentName}" attempt ${attempt}/3 running fix agent. fixMode=${metricsFixMode} preserveVisualPlan=${preserveVisualPlanForMetricsRepair ? 'yes' : 'no'}`,
+        );
+        await this.logVisualMetricsTrace(
+          logPath,
+          `[Visual Metrics Repair] "${target.componentName}" attempt ${attempt}/3 running fix agent. fixMode=${metricsFixMode} preserveVisualPlan=${preserveVisualPlanForMetricsRepair ? 'yes' : 'no'}`,
+        );
         const metricsRevalidationCandidate = {
           ...fixed,
-          // Visual metrics repair is intentionally allowed to diverge from the
-          // original visual plan contract. Keep structural/build/runtime safety,
-          // but stop re-applying source-plan fidelity gates after metrics-driven
-          // edits have been accepted.
-          visualPlan: undefined,
+          // Pure presentation repairs may diverge from the original visual plan
+          // once code/runtime safety still holds. Structural or detail-route
+          // repairs must keep the approved/source-backed plan attached so the
+          // validator can reject section/content drift.
+          visualPlan: preserveVisualPlanForMetricsRepair
+            ? (fixed.visualPlan ?? componentPlan?.visualPlan)
+            : undefined,
         };
         const revalidated = this.validator.collectValidationIssues([
           metricsRevalidationCandidate,
@@ -6246,11 +6482,18 @@ export default function ${component.name}() {
           this.logger.warn(
             `[Visual Metrics Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/3. Error: ${error}`,
           );
+          this.logger.warn(
+            `[Visual Metrics Repair] "${target.componentName}" attempt ${attempt}/3 will retry after code/runtime validation failure. fixMode=${metricsFixMode}`,
+          );
           await this.logToFile(
             logPath,
             `[Visual Metrics Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/3: ${error}`,
           );
-          candidateComponent = metricsRevalidationCandidate;
+          await this.logVisualMetricsTrace(
+            logPath,
+            `[Visual Metrics Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/3: ${error}`,
+          );
+          candidateComponent = originalComponent;
           retryFeedback = this.buildVisualMetricsRetryFeedback({
             baseFeedback: feedback,
             attempt,
@@ -6279,9 +6522,16 @@ export default function ${component.name}() {
           acceptedComponent = candidateAfterValidation;
           components[componentIndex] = candidateAfterValidation;
           repairedCount += 1;
+          this.logger.log(
+            `[Visual Metrics Repair] Accepted "${target.componentName}" on attempt ${attempt}/3. fixMode=${metricsFixMode} preserveVisualPlan=${preserveVisualPlanForMetricsRepair ? 'yes' : 'no'}`,
+          );
           await this.logToFile(
             logPath,
-            `[Visual Metrics Repair] Accepted updated component "${target.componentName}" on attempt ${attempt}/3 after build/runtime re-check (metrics-mode, visual plan contract disabled).`,
+            `[Visual Metrics Repair] Accepted updated component "${target.componentName}" on attempt ${attempt}/3 after build/runtime re-check (fixMode=${metricsFixMode}, preserveVisualPlan=${preserveVisualPlanForMetricsRepair ? 'yes' : 'no'}).`,
+          );
+          await this.logVisualMetricsTrace(
+            logPath,
+            `[Visual Metrics Repair] Accepted updated component "${target.componentName}" on attempt ${attempt}/3 after build/runtime re-check (fixMode=${metricsFixMode}, preserveVisualPlan=${preserveVisualPlanForMetricsRepair ? 'yes' : 'no'}).`,
           );
           break;
         } catch (error: any) {
@@ -6290,7 +6540,14 @@ export default function ${component.name}() {
           this.logger.warn(
             `[Visual Metrics Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/3. Error: ${message}`,
           );
+          this.logger.warn(
+            `[Visual Metrics Repair] "${target.componentName}" attempt ${attempt}/3 failed preview build/runtime after AI fix. fixMode=${metricsFixMode}`,
+          );
           await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/3: ${message}`,
+          );
+          await this.logVisualMetricsTrace(
             logPath,
             `[Visual Metrics Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/3: ${message}`,
           );
@@ -6327,6 +6584,10 @@ export default function ${component.name}() {
           logPath,
           `[Visual Metrics Repair] Exhausted repair attempts for "${target.componentName}". Keeping the previous version.`,
         );
+        await this.logVisualMetricsTrace(
+          logPath,
+          `[Visual Metrics Repair] Exhausted repair attempts for "${target.componentName}". Keeping the previous version.`,
+        );
         components[componentIndex] = originalComponent;
         continue;
       }
@@ -6356,6 +6617,10 @@ export default function ${component.name}() {
         logPath,
         `[Visual Metrics Repair] Sync/build/runtime failed after targeted repair. Reverting.\n${message}`,
       );
+      await this.logVisualMetricsTrace(
+        logPath,
+        `[Visual Metrics Repair] Sync/build/runtime failed after targeted repair. Reverting.\n${message}`,
+      );
       await this.previewBuilder.syncGeneratedComponents(
         preview.previewDir,
         snapshot,
@@ -6372,6 +6637,62 @@ export default function ${component.name}() {
     );
 
     return { components, applied: true, repairedCount };
+  }
+
+  private selectVisualMetricsFixMode(input: {
+    componentPlan: PlanResult[number] | undefined;
+    diagnosis: VisualMismatchDiagnosis;
+  }): 'full' | 'visual-metrics-safe' {
+    const { componentPlan, diagnosis } = input;
+    const normalizedNeeds = new Set(componentPlan?.dataNeeds ?? []);
+    const isDetailRoute =
+      normalizedNeeds.has('pageDetail') || normalizedNeeds.has('postDetail');
+    const primaryRootCause = diagnosis.rootCause.primary;
+    const hasStructuralIssue =
+      diagnosis.evidence.sectionLikelyMissingFromPlan ||
+      diagnosis.issues.some(
+        (issue) =>
+          issue.type === 'missing_section' ||
+          issue.type === 'section_order' ||
+          issue.type === 'content_missing',
+      );
+    const requiresStructuralOrDataRepair =
+      hasStructuralIssue ||
+      primaryRootCause === 'plan-omission' ||
+      primaryRootCause === 'missing-section' ||
+      primaryRootCause === 'route-mapping-error' ||
+      primaryRootCause === 'data-binding-error' ||
+      primaryRootCause === 'content-drift' ||
+      primaryRootCause === 'missing-image';
+
+    if (requiresStructuralOrDataRepair) {
+      return 'full';
+    }
+    if (
+      isDetailRoute &&
+      primaryRootCause !== 'layout-drift' &&
+      primaryRootCause !== 'shared-layout-mismatch'
+    ) {
+      return 'full';
+    }
+    return 'visual-metrics-safe';
+  }
+
+  private shouldPreserveVisualPlanDuringMetricsRepair(input: {
+    componentPlan: PlanResult[number] | undefined;
+    diagnosis: VisualMismatchDiagnosis;
+    fixMode: 'full' | 'visual-metrics-safe';
+  }): boolean {
+    const { componentPlan, diagnosis, fixMode } = input;
+    if (fixMode === 'full') return true;
+    const normalizedNeeds = new Set(componentPlan?.dataNeeds ?? []);
+    if (
+      normalizedNeeds.has('pageDetail') ||
+      normalizedNeeds.has('postDetail')
+    ) {
+      return true;
+    }
+    return diagnosis.evidence.sectionLikelyMissingFromPlan;
   }
 
   private buildVisualMetricsRetryFeedback(input: {
@@ -6436,6 +6757,8 @@ export default function ${component.name}() {
     const componentPlan = plan.find(
       (entry) => entry.componentName === componentName,
     );
+    const fixedSlug = componentPlan?.fixedSlug?.trim();
+    const dataNeeds = new Set(componentPlan?.dataNeeds ?? []);
     const lines: string[] = [
       `Automation visual-compare reported a fidelity mismatch for component "${componentName}".`,
       `Repair the component so the rendered React preview matches the WordPress source more closely for route "${page.route ?? page.visual?.reactPath ?? 'unknown'}".`,
@@ -6444,6 +6767,31 @@ export default function ${component.name}() {
         ? `Diagnosis reasoning: ${diagnosis.rootCause.reasoning}`
         : '',
     ];
+
+    if (componentPlan) {
+      lines.push(
+        `Approved route/data contract: type=${componentPlan.type} | route=${componentPlan.route ?? 'unknown'} | isDetail=${componentPlan.isDetail === true ? 'yes' : 'no'} | fixedSlug=${fixedSlug ?? 'none'} | dataNeeds=${componentPlan.dataNeeds?.join(', ') || 'none'}`,
+      );
+    }
+    if (componentPlan?.type === 'page') {
+      lines.push(
+        'Layout contract: page components must NOT render their own global `<header>`, `<footer>`, or site navigation. Shared Layout wrapper owns that chrome.',
+      );
+    }
+    if (dataNeeds.has('pageDetail')) {
+      lines.push(
+        fixedSlug
+          ? `Main record binding is mandatory: fetch the exact page only from \`/api/pages/${fixedSlug}\`. Do NOT switch to \`/api/pages/\${slug}\`, \`useParams()\` for the main record, or \`/api/pages\` + lookup.`
+          : 'Main record binding is mandatory: fetch the page detail from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
+      );
+    }
+    if (dataNeeds.has('postDetail')) {
+      lines.push(
+        fixedSlug
+          ? `Main record binding is mandatory: fetch the exact post only from \`/api/posts/${fixedSlug}\`. Do NOT switch to \`/api/posts/\${slug}\`, \`useParams()\` for the main record, or \`/api/posts\` + lookup.`
+          : 'Main record binding is mandatory: fetch the post detail from `/api/posts/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/posts` + lookup.',
+      );
+    }
 
     if (page.visual) {
       const metricParts = [
@@ -6547,6 +6895,43 @@ export default function ${component.name}() {
       lines.push(
         ...diagnosis.repairPlan.guardrails.map((guardrail) => `- ${guardrail}`),
       );
+    }
+
+    if (componentPlan) {
+      lines.push('Approved route/data/layout contract:');
+      lines.push(`- componentType=${componentPlan.type}`);
+      lines.push(`- route=${componentPlan.route ?? 'unknown'}`);
+      lines.push(
+        `- isDetail=${componentPlan.isDetail === true ? 'yes' : 'no'}`,
+      );
+      if (componentPlan.fixedSlug) {
+        lines.push(`- fixedSlug=${componentPlan.fixedSlug}`);
+      }
+      if (componentPlan.dataNeeds?.length) {
+        lines.push(`- dataNeeds=${componentPlan.dataNeeds.join(', ')}`);
+      }
+
+      const normalizedNeeds = new Set(componentPlan.dataNeeds ?? []);
+      const fixedSlug = componentPlan.fixedSlug?.trim();
+      if (componentPlan.type === 'page') {
+        lines.push(
+          '- Do NOT add a page-level `<header>`, `<footer>`, or site navigation block. Shared Layout already renders site chrome.',
+        );
+      }
+      if (normalizedNeeds.has('pageDetail')) {
+        lines.push(
+          fixedSlug
+            ? `- Main page-detail binding is strict: fetch ONLY \`/api/pages/${fixedSlug}\` for the main record. Do NOT use \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/pages\` + lookup.`
+            : '- Main page-detail binding is strict: fetch the main record from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT use `/api/pages` + lookup.',
+        );
+      }
+      if (normalizedNeeds.has('postDetail')) {
+        lines.push(
+          fixedSlug
+            ? `- Main post-detail binding is strict: fetch ONLY \`/api/posts/${fixedSlug}\` for the main record. Do NOT use \`useParams()\`, \`/api/posts/\${slug}\`, or \`/api/posts\` + lookup.`
+            : '- Main post-detail binding is strict: fetch the main record from `/api/posts/${slug}` (or equivalent string concatenation with `slug`). Do NOT use `/api/posts` + lookup.',
+        );
+      }
     }
 
     lines.push(
