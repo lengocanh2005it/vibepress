@@ -345,12 +345,14 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   console.log(`[Deploy] Repo name: ${finalRepoName}`);
 
   // Resolve DB host — PM2 chạy trên host OS, không resolve Docker-internal hostnames
+  // MYSQL_PORT là host-mapped port (vd: 3307), khác với Docker-internal port (3306)
   const DOCKER_INTERNAL_HOSTS = ['localhost', '127.0.0.1', 'db', 'mysql'];
   const isLocalHost = !dbCreds.host || DOCKER_INTERNAL_HOSTS.includes(dbCreds.host.split(':')[0]);
+  const hostMappedPort = process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : (dbCreds.port ?? 3306);
   let finalDbCreds = dbCreds;
   if (isLocalHost) {
-    console.log(`[Deploy] DB host is Docker-internal — using 127.0.0.1:${dbCreds.port ?? 3306} for VPS PM2 process`);
-    finalDbCreds = { ...dbCreds, host: '127.0.0.1' };
+    console.log(`[Deploy] DB host is Docker-internal — using 127.0.0.1:${hostMappedPort} for VPS PM2 process`);
+    finalDbCreds = { ...dbCreds, host: '127.0.0.1', port: hostMappedPort };
   }
 
   console.log(`\n[Deploy] Step 1 — Create GitHub repo`);
