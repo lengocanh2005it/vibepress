@@ -2066,7 +2066,20 @@ const SplitView: React.FC = () => {
                 ) : null}
               </div>
             </div>
-            <div className="flex shrink-0 items-center justify-end">
+            <div className="flex shrink-0 items-center gap-3 justify-end">
+              {completionEvent && previewUrl && (
+                <button
+                  onClick={() =>
+                    navigate("/app/editor/visual", {
+                      state: { jobId, siteId, previewUrl },
+                    })
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#49704F] px-4 py-1.5 text-[12px] font-semibold text-white transition hover:bg-[#3f6246]"
+                >
+                  <span className="material-symbols-outlined text-[15px]">edit</span>
+                  Visual Edit
+                </button>
+              )}
               <span
                 className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${previewStatus.badgeClass}`}
               >
