@@ -61,7 +61,6 @@ interface LocationState {
   siteId?: string;
   previewUrl?: string;
   apiBaseUrl?: string;
-  routeEntries?: ReactVisualEditRouteEntry[];
 }
 
 interface RouteItem {
@@ -278,9 +277,9 @@ const VisualEditor: React.FC = () => {
       buildRouteItems(
         resolvedPreviewUrl,
         statusData?.result?.metrics?.pages,
-        statusData?.result?.routeEntries ?? state.routeEntries,
+        statusData?.result?.routeEntries,
       ),
-    [resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries, state.routeEntries],
+    [resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries],
   );
 
   const effectiveRouteId = routes.some((r) => r.id === selectedRouteId)

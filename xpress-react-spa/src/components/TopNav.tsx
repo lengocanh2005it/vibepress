@@ -68,6 +68,20 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
 
       setAuth(data.user, data.token);
       setShowModal(false);
+
+      try {
+        const migRes = await fetch('/api/migrations', {
+          headers: { Authorization: `Bearer ${data.token as string}` },
+        });
+        const migrations = await migRes.json();
+        if (Array.isArray(migrations) && migrations.length > 0) {
+          navigate('/react-projects');
+        } else {
+          navigate('/template-store');
+        }
+      } catch {
+        navigate('/template-store');
+      }
     } catch {
       setError('Không thể kết nối đến server');
     } finally {
