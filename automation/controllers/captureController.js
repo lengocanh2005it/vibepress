@@ -4,6 +4,7 @@ const { chromium } = require('playwright');
 const { UPLOAD_ROOT } = require('../config/constants');
 const { uploadCaptureAsset } = require('../services/imageUploadService');
 const { query } = require('../db/mysql');
+const { buildPublicUrl } = require('../utils/publicUrl');
 
 const CAPTURES_DIR = path.join(UPLOAD_ROOT, 'captures');
 fse.ensureDirSync(CAPTURES_DIR);
@@ -94,7 +95,7 @@ async function captureRegion(req, res) {
       },
     });
 
-    const localPublicUrl = `${req.protocol}://${req.get('host')}/captures/${filename}`;
+    const localPublicUrl = buildPublicUrl(req, `/captures/${filename}`);
     const asset = await uploadCaptureAsset(filePath, filename, localPublicUrl, {
       width: clipWidth,
       height: clipHeight,

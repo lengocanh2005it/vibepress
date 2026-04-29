@@ -22,6 +22,7 @@ import type {
   ProseBlockSection,
   CommentsSection,
   SearchSection,
+  SidebarWidget,
   SidebarSection,
   ModalSection,
   TabsSection,
@@ -499,10 +500,16 @@ export class CodeGeneratorService {
           break;
         case 'sidebar': {
           const sidebar = section as SidebarSection;
-          if (sidebar.showSiteInfo) needs.add('siteInfo');
-          if (sidebar.showPages) needs.add('pages');
-          if (sidebar.showPosts) needs.add('posts');
-          if (sidebar.menuSlug) needs.add('menus');
+          for (const widget of sidebar.widgets ?? []) {
+            if (widget.kind === 'author-bio') {
+              needs.add('siteInfo');
+              needs.add('posts');
+            }
+            if (widget.kind === 'categories') needs.add('posts');
+            if (widget.kind === 'navigation') needs.add('menus');
+            if (widget.kind === 'pages-list') needs.add('pages');
+            if (widget.kind === 'recent-posts') needs.add('posts');
+          }
           break;
         }
       }
@@ -905,6 +912,10 @@ export class CodeGeneratorService {
       lines.push(`  const [commentEmail, setCommentEmail] = useState('');`);
       lines.push(`  const [commentWebsite, setCommentWebsite] = useState('');`);
       lines.push(`  const [commentContent, setCommentContent] = useState('');`);
+      lines.push(`  const [commentParentId, setCommentParentId] = useState(0);`);
+      lines.push(
+        `  const [commentReplyTarget, setCommentReplyTarget] = useState<string | null>(null);`,
+      );
       lines.push(
         `  const [submittingComment, setSubmittingComment] = useState(false);`,
       );
@@ -1263,7 +1274,7 @@ export class CodeGeneratorService {
       lines.push(`          email: ${emailValue},`);
       lines.push(`          website: commentWebsite.trim(),`);
       lines.push(`          content: commentContent.trim(),`);
-      lines.push(`          parentId: 0,`);
+      lines.push(`          parentId: commentParentId,`);
       lines.push(`          clientToken: commentClientToken,`);
       lines.push(`        }),`);
       lines.push(`      });`);
@@ -1284,6 +1295,8 @@ export class CodeGeneratorService {
       );
       lines.push(`      });`);
       lines.push(`      setCommentContent('');`);
+      lines.push(`      setCommentParentId(0);`);
+      lines.push(`      setCommentReplyTarget(null);`);
       lines.push(
         `      setCommentSuccess('Comment submitted and awaiting moderation.');`,
       );
@@ -1299,6 +1312,20 @@ export class CodeGeneratorService {
       lines.push(`    } finally {`);
       lines.push(`      setSubmittingComment(false);`);
       lines.push(`    }`);
+      lines.push(`  };`);
+      lines.push(``);
+      lines.push(`  const beginCommentReply = (comment: Comment) => {`);
+      lines.push(`    setCommentParentId(comment.id);`);
+      lines.push(`    setCommentReplyTarget(comment.author);`);
+      lines.push(`    setCommentError(null);`);
+      lines.push(`    setCommentSuccess(null);`);
+      lines.push(`    if (typeof document !== 'undefined') {`);
+      lines.push(`      document.getElementById('respond')?.scrollIntoView({ behavior: 'smooth', block: 'start' });`);
+      lines.push(`    }`);
+      lines.push(`  };`);
+      lines.push(`  const cancelCommentReply = () => {`);
+      lines.push(`    setCommentParentId(0);`);
+      lines.push(`    setCommentReplyTarget(null);`);
       lines.push(`  };`);
       lines.push('');
     }
@@ -1341,8 +1368,67 @@ export default ${componentName};`;
     ctx: RenderCtx,
   ): string {
     const { componentName, palette, sections } = plan;
+    const sidebarSectionIndex =
+      plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
+        ? sections.findIndex((section) => section.type === 'sidebar')
+        : -1;
+    const mainContentSectionIndex = sections.findIndex(
+      (section) =>
+        section.type === 'page-content' ||
+        section.type === 'post-content' ||
+        section.type === 'prose-block',
+    );
+    const hasSidebarLayout =
+      sidebarSectionIndex >= 0 && mainContentSectionIndex >= 0;
+    const gridStyle = hasSidebarLayout
+      ? this.buildStyleAttr({
+          gridTemplateColumns:
+            plan.layout.contentLayout === 'sidebar-left'
+              ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
+              : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
+          gap:
+            sections[mainContentSectionIndex]?.gapStyle ??
+            sections[sidebarSectionIndex]?.gapStyle,
+        })
+      : '';
     const placeholders = sections
-      .map((_, index) => `      ${this.buildSectionAssemblyPlaceholder(index)}`)
+      .map((section, index) => {
+        if (hasSidebarLayout && index === sidebarSectionIndex) {
+          return '';
+        }
+        if (hasSidebarLayout && index === mainContentSectionIndex) {
+          const mainPlaceholder = this.buildSectionAssemblyPlaceholder(index);
+          const sidebarPlaceholder =
+            this.buildSectionAssemblyPlaceholder(sidebarSectionIndex);
+          return `      <section className="w-full">
+        <div className="${ctx.l.containerClass}">
+          <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
+            ${
+              plan.layout.contentLayout === 'sidebar-left'
+                ? `<aside className="min-w-0">
+              ${sidebarPlaceholder}
+            </aside>
+            <div className="min-w-0">
+              <div className="${this.contentContainerClass(ctx)}">
+                ${mainPlaceholder}
+              </div>
+            </div>`
+                : `<div className="min-w-0">
+              <div className="${this.contentContainerClass(ctx)}">
+                ${mainPlaceholder}
+              </div>
+            </div>
+            <aside className="min-w-0">
+              ${sidebarPlaceholder}
+            </aside>`
+            }
+          </div>
+        </div>
+      </section>`;
+        }
+        return `      ${this.buildSectionAssemblyPlaceholder(index)}`;
+      })
+      .filter(Boolean)
       .join('\n\n');
 
     return `  return (
@@ -2501,12 +2587,33 @@ export default ${componentName};`;
     ctx: RenderCtx,
     py: string,
   ): string {
+    const { t } = ctx;
     const bg = s.background ?? ctx.p.background;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const presentation = this.resolveSectionPresentation(s, {
       container: 'shell',
       contentAlign: s.align ?? 'left',
     });
+    const headingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? ctx.p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const subheadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? ctx.p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const headingClassName = this.appendStyledTextAlignClass(
+      `${t.h2} font-normal`,
+      undefined,
+      presentation.textAlign,
+    );
+    const subheadingClassName = this.appendStyledTextAlignClass(
+      'text-[1.05rem]',
+      undefined,
+      presentation.textAlign,
+    );
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
       align: this.presentationJustifyValue(presentation.justify),
       ctaStyle: s.ctaStyle,
@@ -2516,6 +2623,8 @@ export default ${componentName};`;
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
           <div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
+            ${s.heading ? `<h2 className="${headingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.subheading ? `<p className="${subheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
           </div>
         </div>
@@ -3510,18 +3619,20 @@ ${this.renderPostContentInner(s, ctx)}
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const commentCardStyle = this.buildMergedBlockStyleAttr(
+    const commentGroupStyle = this.buildMergedBlockStyleAttr(
       ctx,
       {
-        padding: '1rem',
-        borderRadius: '5px',
-        borderColor: 'rgb(0 0 0 / 0.08)',
-        borderWidth: '1px',
-        borderStyle: 'solid',
+        margin: '0 0 var(--wp--preset--spacing--30) 0',
       },
       false,
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
+    );
+    const replyLinkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'navigation'),
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const inputStyle = this.buildMergedBlockStyleAttr(
       ctx,
@@ -3546,33 +3657,56 @@ ${this.renderPostContentInner(s, ctx)}
     );
     const renderCommentCard = (
       commentVar: string,
-    ) => `                      <article className="comment-body wp-block-group has-base-background-color has-background"${commentCardStyle}>
-                        <footer className="comment-meta">
-                          <div className="comment-author vcard flex items-start gap-3">
-                            <span className="avatar avatar-44 photo inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]" aria-hidden="true">
-                              {${commentVar}.author.charAt(0).toUpperCase()}
-                            </span>
-                            <div className="wp-block-group flex flex-col gap-0.5">
-                              <b className="fn text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</b>
-                              <a href={'#comment-' + ${commentVar}.id} className="comment-date text-xs text-[${p.textMuted}]"${metaStyle}>
-                                <time dateTime={${commentVar}.date}>{${commentVar}.date}</time>
-                              </a>
+    ) => `                      <div className="wp-block-group"${commentGroupStyle}>
+                         <div className="wp-block-group flex items-start gap-2">
+                           <span className="avatar avatar-40 photo inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]" aria-hidden="true">
+                               {${commentVar}.author.charAt(0).toUpperCase()}
+                             </span>
+                             <div className="wp-block-group flex flex-col gap-0.5">
+                               <div className="wp-block-comment-author-name text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</div>
+                               <a href={'#comment-' + ${commentVar}.id} className="wp-block-comment-date comment-date text-xs text-[${p.textMuted}] hover:underline underline-offset-4"${metaStyle}>
+                                 <time dateTime={${commentVar}.date}>{new Date(${commentVar}.date).toLocaleDateString()}</time>
+                               </a>
+                             </div>
                             </div>
-                          </div>
-                        </footer>
-                        <div className="comment-content wp-block-comment-content">
-                          <p className="mt-3 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
-                        </div>
-                      </article>`;
+                          <div className="comment-content wp-block-comment-content">
+                           <p className="mt-3 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
+                         </div>
+                         <div className="wp-block-group flex items-center gap-4">
+                           <button
+                             type="button"
+                             className="comment-edit-link text-sm text-[${p.textMuted}] hover:underline underline-offset-4"
+${replyLinkStyle}
+                           >
+                             Edit
+                           </button>
+                           <button
+                             type="button"
+                             className="comment-reply-link text-sm text-[${p.textMuted}] hover:underline underline-offset-4"
+                             onClick={() => beginCommentReply(${commentVar})}
+${replyLinkStyle}
+                           >
+                             Reply
+                           </button>
+                         </div>
+                       </div>`;
     const formBlock = s.showForm
       ? `
               <div id="respond" className="comment-respond">
                 <h3 id="reply-title" className="comment-reply-title ${t.h3} font-normal text-[${tc}]"${headingStyle}>
-                  Leave a Reply
+                  {commentReplyTarget ? \`Leave a Reply to \${commentReplyTarget}\` : 'Leave a Reply'}
                 </h3>
                 <p className="comment-notes text-sm text-[${p.textMuted}]"${bodyStyle}>
                   Your email address will not be published. Required fields are marked *
                 </p>
+                {commentReplyTarget ? (
+                  <p className="mb-3 text-sm text-[${p.textMuted}]">
+                    Replying to <strong className="text-[${tc}]">{commentReplyTarget}</strong>{' '}
+                    <button type="button" className="hover:underline underline-offset-4" onClick={cancelCommentReply}>
+                      Cancel reply
+                    </button>
+                  </p>
+                ) : null}
                 <form id="commentform" className="comment-form" onSubmit={handleCommentSubmit}>
                   ${
                     s.requireName
@@ -3637,17 +3771,17 @@ ${this.renderPostContentInner(s, ctx)}
                 <h2 className="wp-block-heading ${t.h2} font-normal text-[${tc}]"${headingStyle}>
                   Comments
                 </h2>
-                <p className="wp-block-comments-title text-sm text-[${p.textMuted}]"${metaStyle}>
-                  {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
-                </p>
+                <h3 className="wp-block-comments-title ${t.h3} font-normal text-[${tc}]"${headingStyle}>
+                  {comments.length === 1 ? \`One response to "\${item.title}"\` : \`\${comments.length} responses to "\${item.title}"\`}
+                </h3>
               </div>
               {topLevelComments.length > 0 ? (
-                <ol className="comment-list wp-block-comment-template">
+                <ol className="comment-list wp-block-comment-template list-none pl-0">
                   {topLevelComments.map((comment) => (
                     <li key={comment.id} id={\`comment-\${comment.id}\`} className="comment depth-1">
 ${renderCommentCard('comment')}
                       {repliesFor(comment.id).length > 0 ? (
-                        <ol className="children">
+                        <ol className="children ml-6 list-none pl-0">
                             {repliesFor(comment.id).map((reply) => (
                               <li key={reply.id} id={\`comment-\${reply.id}\`} className="comment depth-2">
 ${renderCommentCard('reply')}
@@ -3660,7 +3794,11 @@ ${renderCommentCard('reply')}
                 </ol>
               ) : (
                 <p className="no-comments text-sm text-[${p.textMuted}]"${bodyStyle}>No comments yet.</p>
-              )}${pendingBlock}${formBlock}
+              )}
+              <div className="wp-block-comments-pagination flex items-center justify-between text-sm text-[${p.textMuted}]"${metaStyle}>
+                <span className="wp-block-comments-pagination-previous opacity-60">Previous</span>
+                <span className="wp-block-comments-pagination-next opacity-60">Next</span>
+              </div>${pendingBlock}${formBlock}
             </div>
           )}
         </div>
@@ -3739,21 +3877,27 @@ ${this.renderProseBlockInner(s, ctx)}
       this.pickBlockStyle(ctx, 'search'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
+    const shouldRenderResults =
+      s.obligation?.required?.includes('posts') === true;
     return `      {/* Search */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6"${titleStyle}>${s.title}</h2>` : ''}
-          <div className="flex gap-2">
+          <form className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
             <input type="search" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
-            <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
-          </div>
-          <div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
+            <button type="submit" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
+          </form>
+          ${
+            shouldRenderResults
+              ? `<div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}"${resultLinkStyle}>{post.title}</Link>
             ))}
-          </div>
+          </div>`
+              : ''
+          }
           ${
-            ctx.supportsPostsPagination
+            shouldRenderResults && ctx.supportsPostsPagination
               ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]"${metaStyle}>
               <button
@@ -4041,15 +4185,32 @@ ${segments}
       { baseColor: p.text },
       this.pickBlockStyle(ctx, 'heading'),
     );
-    const brandStyle = this.buildTextTokenStyleAttr(
+    const titleBlock = s.title
+      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>${s.title}</h3>\n`
+      : '';
+    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
+    const widgetBlocks = (s.widgets ?? [])
+      .map((widget) => this.renderSidebarWidget(widget, ctx, maxItems))
+      .join('\n');
+
+    return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
+${titleBlock}${widgetBlocks}          </div>`;
+  }
+
+  private renderSidebarWidget(
+    widget: SidebarWidget,
+    ctx: RenderCtx,
+    maxItems: number,
+  ): string {
+    const { p, t } = ctx;
+    const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.text },
-      this.pickBlockStyle(ctx, 'site-title', 'heading'),
+      this.pickBlockStyle(ctx, 'heading'),
     );
-    const metaStyle = this.buildTextTokenStyleAttr(
+    const bodyStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'site-tagline'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
     const navLinkStyle = this.buildTextTokenStyleAttr(
@@ -4058,75 +4219,123 @@ ${segments}
       this.pickBlockStyle(ctx, 'navigation'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const titleBlock = s.title
-      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>${s.title}</h3>\n`
-      : '';
-    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
-    const menuSlug = s.menuSlug ? `'${s.menuSlug}'` : 'undefined';
+    const linkClass = this.textLinkClass(p.text, p.accent, 'text-sm');
 
-    const siteInfoBlock = s.showSiteInfo
-      ? `            <div className="flex flex-col gap-2">
-              <div className="font-semibold text-[${p.text}]"${brandStyle}>{siteInfo?.siteName}</div>
-              {siteInfo?.blogDescription && (
-                <p className="text-sm text-[${p.textMuted}]"${metaStyle}>{siteInfo.blogDescription}</p>
-              )}
-            </div>
-`
-      : '';
-
-    const menuBlock = s.menuSlug
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Navigation</div>
-              <nav className="flex flex-col gap-2">
-                {(menus.find(m => m.slug === ${menuSlug}) ?? menus[0])?.items
-                  ?.filter(item => item.parentId === 0)
-                  ?.slice(0, ${maxItems})
-                  ?.map(item => (
-                    isInternalPath(item.url) ? (
-                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
-                        {item.title}
-                      </Link>
-                    ) : (
-                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
-                        {item.title}
+    switch (widget.kind) {
+      case 'author-bio': {
+        const descriptionExpr = widget.description
+          ? JSON.stringify(widget.description)
+          : 'siteInfo?.blogDescription';
+        const authorNameExpr =
+          'posts.find((post) => post.author)?.author ?? siteInfo?.siteName ?? ""';
+        return `            <section className="flex flex-col gap-[16px]">
+${widget.showAvatar === false ? '' : `              <div className="inline-flex h-20 w-20 items-center justify-center rounded-[16px] bg-white text-xl font-semibold text-[${p.text}]">
+                 {(${authorNameExpr} || '?').charAt(0).toUpperCase()}
+               </div>
+`}
+${widget.title ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+` : ''}              <div className="flex flex-col gap-2">
+                 <p className="text-sm font-medium text-[${p.text}]">
+                   {${authorNameExpr}}
+                 </p>
+                 {${descriptionExpr} ? (
+                   <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${descriptionExpr}}</p>
+                 ) : null}
+              </div>
+            </section>`;
+      }
+      case 'categories':
+        return `            <section className="flex flex-col gap-[16px]">
+${widget.title ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+` : ''}              <ul className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">
+                {(() => {
+                  const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+                  posts.forEach((post) => {
+                    (post.categories ?? []).forEach((name, index) => {
+                      const slug = post.categorySlugs?.[index] ?? '';
+                      const key = name + '::' + slug;
+                      const existing = categoryMap.get(key);
+                      if (existing) existing.count += 1;
+                      else categoryMap.set(key, { name, slug, count: 1 });
+                    });
+                  });
+                  return Array.from(categoryMap.values())
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, ${maxItems})
+                    .map((category) => (
+                      <li key={category.slug || category.name}>
+                        {category.slug ? (
+                          <Link to={'/category/' + category.slug} className="${linkClass}"${navLinkStyle}>
+                            {category.name}${widget.showCounts ? ` ({category.count})` : ''}
+                          </Link>
+                        ) : (
+                          <span>{category.name}${widget.showCounts ? ` ({category.count})` : ''}</span>
+                        )}
+                      </li>
+                    ));
+                })()}
+              </ul>
+            </section>`;
+      case 'navigation': {
+        const menuSlug = widget.menuSlug ? JSON.stringify(widget.menuSlug) : 'undefined';
+        const fallbackLinks = JSON.stringify(widget.links ?? []);
+        const description = widget.description
+          ? `              <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${JSON.stringify(widget.description)}}</p>\n`
+          : '';
+        return `            <section className="flex flex-col gap-[16px]">
+${widget.title ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+` : ''}${description}              <nav className="flex flex-col gap-2">
+                {(() => {
+                  const menuItems = ((menus.find((menu) => menu.slug === ${menuSlug}) ?? menus[0])?.items ?? [])
+                    .filter((item) => item.parentId === 0)
+                    .slice(0, ${maxItems});
+                  if (menuItems.length > 0) {
+                    return menuItems.map((item) =>
+                      isInternalPath(item.url) ? (
+                        <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
+                          {item.title}
+                        </Link>
+                      ) : (
+                        <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
+                          {item.title}
+                        </a>
+                      ),
+                    );
+                  }
+                  return (${fallbackLinks} as Array<{ label: string; url?: string }>)
+                    .slice(0, ${maxItems})
+                    .map((link, index) => (
+                      <a key={link.label + '-' + index} href={link.url ?? '#'} className="${linkClass}"${navLinkStyle}>
+                        {link.label}
                       </a>
-                    )
-                  ))}
+                    ));
+                })()}
               </nav>
-            </div>
-`
-      : '';
-
-    const pagesBlock = s.showPages
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Pages</div>
-              <nav className="flex flex-col gap-2">
-                {pages.slice(0, ${maxItems}).map(page => (
-                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
+            </section>`;
+      }
+      case 'pages-list':
+        return `            <section className="flex flex-col gap-[16px]">
+${widget.title ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+` : ''}              <nav className="flex flex-col gap-2">
+                {pages.slice(0, ${maxItems}).map((page) => (
+                  <Link key={page.id} to={'/page/' + page.slug} className="${linkClass}"${navLinkStyle}>
                     {page.title}
                   </Link>
                 ))}
               </nav>
-            </div>
-`
-      : '';
-
-    const postsBlock = s.showPosts
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Latest Posts</div>
-              <div className="flex flex-col gap-3">
-                {posts.slice(0, ${maxItems}).map(post => (
-                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
+            </section>`;
+      case 'recent-posts':
+        return `            <section className="flex flex-col gap-[16px]">
+${widget.title ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+` : ''}              <div className="flex flex-col gap-2">
+                {posts.slice(0, ${maxItems}).map((post) => (
+                  <Link key={post.id} to={'/post/' + post.slug} className="${linkClass}"${navLinkStyle}>
                     {post.title}
                   </Link>
                 ))}
               </div>
-            </div>
-`
-      : '';
-
-    return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
-${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </div>`;
+            </section>`;
+    }
   }
 
   private extractSectionStyleBase(
@@ -4735,7 +4944,7 @@ ${indent}</ul>`;
       : '-right-5 sm:-right-6';
     const modalWidth =
       this.normalizeCssLength(s.width) ??
-      (s.layout === 'split' && s.imageSrc ? '880px' : '700px');
+      (s.layout === 'split' && s.imageSrc ? '880px' : '600px');
     const modalHeight = this.normalizeCssLength(s.height);
     const modalShellStyle = this.buildStyleAttr({
       width: '100%',
@@ -4747,7 +4956,7 @@ ${indent}</ul>`;
     });
     const dialogBodyStyle = this.buildMergedBlockStyleAttr(
       ctx,
-      { padding: s.layout === 'split' && s.imageSrc ? '1.5rem' : '1.25rem' },
+      { padding: '35px' },
       true,
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
@@ -4802,6 +5011,7 @@ ${indent}</ul>`;
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${ctx.l.containerClass} px-4 sm:px-6">
         <div className="uagb-modal-wrapper flex flex-col items-start gap-4"${gapStyle}>${triggerHeadingPart}
+          <div className="uagb-spectra-button-wrapper">
           <button
             type="button"
             onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: true }))}
@@ -4810,6 +5020,7 @@ ${indent}</ul>`;
           >
             {${JSON.stringify(triggerText)}}
           </button>
+          </div>
           {openModals[${stateKey}] ? (
             <div
               className="uagb-modal-popup active uagb-effect-default fixed inset-0 z-[90] flex items-center justify-center px-4 py-4 sm:py-8"
@@ -4821,7 +5032,7 @@ ${indent}</ul>`;
               }}
             >
               <div
-                className="uagb-modal-popup-wrap relative overflow-y-auto rounded-[30px] bg-white shadow-[0_30px_80px_rgba(15,23,42,0.28)]"
+                className="uagb-modal-popup-wrap relative overflow-y-auto bg-white"
                 onClick={(event) => event.stopPropagation()}
                 role="dialog"
                 aria-modal="true"
@@ -4831,7 +5042,8 @@ ${indent}</ul>`;
                 <button
                   type="button"
                   onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }))}
-                  className="uagb-modal-popup-close absolute -top-5 z-10 inline-flex h-10 w-10 items-center justify-center text-white transition-opacity hover:opacity-75 sm:-top-6 ${closeButtonSide}"
+                  className="uagb-modal-popup-close absolute z-10 inline-flex h-[25px] w-[25px] items-center justify-center text-white transition-opacity hover:opacity-75 ${closeButtonSide}"
+                  style={{ top: '-25px' }}
                   aria-label="Close modal"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5221,7 +5433,7 @@ ${items}
       : 'rgba(17,17,17,0.24)';
     const arrowBg =
       s.arrowBackground ??
-      (hasSlideImages ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.95)');
+      (hasSlideImages ? 'rgba(0,0,0,0.35)' : '#efefef');
     const arrowFg = s.arrowColor ?? (hasSlideImages ? '#ffffff' : '#111111');
     const slideSurfaceStyle = this.buildBlockStyleAttr(
       this.mergeBlockStyleTokens(
@@ -5399,12 +5611,12 @@ ${slideSurface}
     <section className="w-full ${py} overflow-hidden bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${this.sectionContainerClass(s, ctx, hasSlideImages ? 'shell' : 'content')} px-4 sm:px-6">
         <div
-          className="uagb-slider-container uagb-swiper relative"
+          className="uagb-slider-container relative overflow-hidden"
           onMouseEnter={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }))` : 'undefined'}}
           onMouseLeave={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: false }))` : 'undefined'}}
         >
           <div
-            className="${hasSlideImages ? `swiper relative overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]` : `swiper relative overflow-visible`}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
+            className="${hasSlideImages ? `uagb-swiper swiper relative overflow-hidden bg-slate-900` : `uagb-swiper swiper relative overflow-visible`}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
             ${this.buildStyleAttr({
               minHeight: slideMinHeight,
               touchAction: enableSwipe ? 'pan-y' : undefined,
@@ -5416,7 +5628,11 @@ ${slideSurface}
           >
             ${
               useStackedSlides
-                ? slides
+                ? `<div
+              className="swiper-wrapper relative h-full"
+            >
+${slides}
+            </div>`
                 : `<div
               className="swiper-wrapper flex h-full transition-transform ease-out"
               style={{

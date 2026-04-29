@@ -8,7 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { mkdir, writeFile } from 'fs/promises';
+import { appendFile, mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -75,6 +75,11 @@ import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { SiteCompareService } from '../site-compare/site-compare.service.js';
 import type { SiteCompareMetrics } from '../site-compare/site-compare.types.js';
+import { SiteCompareVisualDiagnosisService } from '../site-compare/visual-diagnosis.service.js';
+import type {
+  PostEditVisualValidationResult,
+  VisualMismatchDiagnosis,
+} from '../site-compare/visual-diagnosis.types.js';
 import { ThemeDetectorService } from '../theme/theme-detector.service.js';
 import type {
   ApplyPendingEditRequestDto,
@@ -211,16 +216,24 @@ const STEP_META: Record<
     label: 'Apply User Edit Request',
     weight: 6,
     activeMessage:
-      'Applying the submitted edit request to the generated React output and syncing the changes into the running preview.',
+      'Waiting for approval, then applying the submitted edit request after baseline compare has finished.',
     doneMessage:
       'The requested user edits have been applied to the generated React preview.',
   },
-  '9_visual_compare': {
-    label: 'Evaluate Final Compare Metrics',
+  '9b_post_edit_visual_validation': {
+    label: 'Validate Edited Preview',
     weight: 2,
     activeMessage:
-      'Running site compare across the WordPress site and the React preview.',
-    doneMessage: 'Final site-compare metrics have been collected.',
+      'Re-running compare artifacts for the edited preview and validating that the approved user edit landed without causing unrelated regressions.',
+    doneMessage:
+      'Edited preview validation has finished and the post-edit diagnostics are ready.',
+  },
+  '9_visual_compare': {
+    label: 'Evaluate Baseline Compare Metrics',
+    weight: 2,
+    activeMessage:
+      'Running site compare across the WordPress site and the baseline React preview before any user edit request is applied.',
+    doneMessage: 'Baseline site-compare metrics have been collected.',
   },
   '10_cleanup': {
     label: 'Clean Temporary Workspace',
@@ -410,6 +423,24 @@ interface PipelineUiAssessment {
   basis: string[];
 }
 
+interface DegradedComponentRecord {
+  componentName: string;
+  route?: string | null;
+  stage:
+    | 'stage4-validator'
+    | 'stage5-review'
+    | 'stage8-build'
+    | 'stage9-visual-repair'
+    | 'stage9b-post-edit-repair';
+  fallbackType:
+    | 'last-known-safe'
+    | 'canonical-deterministic'
+    | 'degraded-placeholder';
+  reason: string;
+  critical: boolean;
+  timestamp: string;
+}
+
 interface AutomationCompareRegion {
   id?: string;
   kind?: string;
@@ -481,43 +512,6 @@ interface AutomationComparePageResult {
   content?: AutomationComparePageContent | null;
 }
 
-interface VisualMismatchDiagnosis {
-  componentName: string;
-  routeKey?: string | null;
-  route?: string | null;
-  shouldRepair: boolean;
-  confidence: number;
-  rootCause: {
-    primary:
-      | 'plan-omission'
-      | 'missing-section'
-      | 'missing-image'
-      | 'content-drift'
-      | 'layout-drift'
-      | 'route-mapping-error'
-      | 'data-binding-error'
-      | 'shared-layout-mismatch'
-      | 'unknown';
-    secondary: string[];
-    reasoning: string;
-  };
-  evidence: {
-    sourceHints: string[];
-    missingLabels: string[];
-    sectionLikelyMissingFromPlan: boolean;
-  };
-  repairPlan: {
-    strategy: string;
-    instructions: string[];
-    targetAreas: Array<{
-      type: string;
-      sectionHint?: string;
-      headingHint?: string;
-    }>;
-    guardrails: string[];
-  };
-}
-
 interface PipelineRunSummaryFile {
   jobId: string;
   status: 'success' | 'failed' | 'stopped' | 'deleted';
@@ -548,6 +542,7 @@ interface PipelineRunSummaryFile {
   uiAssessment: PipelineUiAssessment;
   repoAnalysisSummary: string[];
   fullComponentRegenerations: FullComponentRegenerationSummaryEntry[];
+  degradedComponents?: DegradedComponentRecord[];
 }
 
 class PipelineControlError extends Error {
@@ -603,6 +598,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     private readonly siteCompareService: SiteCompareService,
+    private readonly siteCompareVisualDiagnosis: SiteCompareVisualDiagnosisService,
   ) {}
 
   async beforeApplicationShutdown(signal?: string): Promise<void> {
@@ -647,9 +643,15 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         { name: '7_api_builder', status: 'pending' },
         { name: '8_preview_builder', status: 'pending' },
         ...(dto.editRequest
-          ? [{ name: '8b_edit_request', status: 'pending' as const }]
-          : []),
-        { name: '9_visual_compare', status: 'pending' },
+          ? [
+              { name: '9_visual_compare', status: 'pending' as const },
+              { name: '8b_edit_request', status: 'pending' as const },
+              {
+                name: '9b_post_edit_visual_validation',
+                status: 'pending' as const,
+              },
+            ]
+          : [{ name: '9_visual_compare', status: 'pending' as const }]),
         // Stage 7: Cleanup + completion
         { name: '10_cleanup', status: 'pending' },
         { name: '11_done', status: 'pending' },
@@ -1118,20 +1120,24 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
 
     if (name === '9_visual_compare') {
-      const editApplied = jobId
-        ? Boolean(this.controls.get(jobId)?.editApplied)
-        : false;
       return {
         ...baseMeta,
-        label: editApplied
-          ? 'Evaluate Edited Preview Metrics'
-          : 'Evaluate Baseline Preview Metrics',
-        activeMessage: editApplied
-          ? 'Running site compare for the edited preview against WordPress.'
-          : 'Running site compare for the baseline React preview against WordPress before any pending edit is approved.',
-        doneMessage: editApplied
-          ? 'Final compare metrics for the edited preview have been collected.'
-          : 'Final compare metrics for the baseline React preview have been collected.',
+        label: 'Evaluate Baseline Preview Metrics',
+        activeMessage:
+          'Running site compare for the baseline React preview against WordPress before any pending edit request is applied.',
+        doneMessage:
+          'Baseline compare metrics for the React preview have been collected.',
+      };
+    }
+
+    if (name === '9b_post_edit_visual_validation') {
+      return {
+        ...baseMeta,
+        label: 'Validate Edited Preview',
+        activeMessage:
+          'Re-checking the edited preview after the approved user request, with the edit intent treated as primary and WordPress as secondary reference.',
+        doneMessage:
+          'Edited preview validation is complete and any post-edit issues have been summarized.',
       };
     }
 
@@ -1432,9 +1438,342 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     this.clearStepEventData(jobId);
   }
 
+  private resolveTextLogPath(logPath: string): string | null {
+    if (!logPath) return null;
+    return logPath.endsWith('.json')
+      ? logPath.replace(/\.json$/i, '.log')
+      : logPath;
+  }
+
   private async logToFile(logPath: string, message: string): Promise<void> {
-    void message;
-    if (!logPath || logPath.endsWith('.json')) return;
+    const targetPath = this.resolveTextLogPath(logPath);
+    if (!targetPath) return;
+    const timestamp = new Date().toISOString();
+    const payload = message
+      .split(/\r?\n/)
+      .map((line) => `[${timestamp}] ${line}`)
+      .join('\n');
+
+    try {
+      await appendFile(targetPath, `${payload}\n`, 'utf-8');
+    } catch (error) {
+      this.logger.warn(
+        `[logToFile] Failed to append pipeline log "${targetPath}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private updateStateResult(
+    state: PipelineStatus,
+    patch: Record<string, unknown>,
+  ): void {
+    state.result = {
+      ...(state.result ?? {}),
+      ...patch,
+    };
+  }
+
+  private buildRepoSummary(
+    repoResult: RepoAnalyzeResult,
+  ): Record<string, unknown> {
+    return {
+      themeDir: repoResult.themeDir,
+      totalFiles: repoResult.totalFiles,
+      themeCount: repoResult.themeCount,
+      pluginCount: repoResult.pluginCount,
+      themeInventoryFiles: repoResult.themeInventoryFiles,
+      pluginFiles: repoResult.pluginFiles,
+      themeSlug: repoResult.themeManifest.themeTypeHints.themeSlug,
+      detectedThemeKind:
+        repoResult.themeManifest.themeTypeHints.detectedThemeKind,
+      sourceOfTruth: repoResult.themeManifest.sourceOfTruth,
+    };
+  }
+
+  private buildThemeSummary(
+    theme: PhpParseResult | BlockParseResult,
+  ): Record<string, unknown> {
+    return {
+      type: theme.type,
+      themeName: theme.themeName ?? null,
+      templateCount: theme.templates.length,
+      partCount: theme.type === 'fse' ? theme.parts.length : 0,
+      tokenSummary:
+        'tokens' in theme
+          ? {
+              colors: theme.tokens?.colors?.length ?? 0,
+              fonts: theme.tokens?.fonts?.length ?? 0,
+              fontSizes: theme.tokens?.fontSizes?.length ?? 0,
+              spacing: theme.tokens?.spacing?.length ?? 0,
+            }
+          : undefined,
+    };
+  }
+
+  private buildContentSummary(
+    content: DbContentResult,
+  ): Record<string, unknown> {
+    return {
+      siteName: content.siteInfo.siteName,
+      siteUrl: content.siteInfo.siteUrl,
+      postCount: content.posts.length,
+      pageCount: content.pages.length,
+      menuCount: content.menus.length,
+      dbNavigationCount: content.dbNavigations.length,
+      dbTemplateCount: content.dbTemplates.length,
+      dbGlobalStyleCount: content.dbGlobalStyles.length,
+      customCssEntryCount: content.customCssEntries.length,
+      taxonomyCount: content.taxonomies.length,
+      mediaAttachmentCount: content.mediaAttachments.length,
+      pluginCount: content.plugins.length,
+      detectedPluginCount: content.detectedPlugins.length,
+      customPostTypeCount: content.customPostTypes.length,
+      frontPageId: content.readingSettings.pageOnFront?.id ?? null,
+      postsPageId: content.readingSettings.pageForPosts?.id ?? null,
+    };
+  }
+
+  private buildPlanSummary(plan: PlanResult): Record<string, unknown> {
+    return {
+      componentCount: plan.length,
+      pageCount: plan.filter((item) => item.type === 'page').length,
+      partialCount: plan.filter((item) => item.type === 'partial').length,
+      routeCount: plan.filter((item) => Boolean(item.route)).length,
+      detailCount: plan.filter((item) => item.isDetail).length,
+      visualPlanCount: plan.filter((item) => Boolean(item.visualPlan)).length,
+      componentNames: plan.map((item) => item.componentName),
+    };
+  }
+
+  private buildGeneratedComponentSummary(
+    components: ReactGenerateResult['components'],
+  ): Record<string, unknown> {
+    return {
+      componentCount: components.length,
+      pageComponentCount: components.filter((item) => item.type === 'page')
+        .length,
+      partialComponentCount: components.filter(
+        (item) => item.type === 'partial',
+      ).length,
+      routeComponentCount: components.filter((item) => Boolean(item.route))
+        .length,
+      deterministicComponentCount: components.filter(
+        (item) => item.generationMode === 'deterministic',
+      ).length,
+      aiComponentCount: components.filter(
+        (item) => item.generationMode !== 'deterministic',
+      ).length,
+      componentNames: components.map((item) => item.name),
+    };
+  }
+
+  private snapshotComponentsByName(
+    components: ReactGenerateResult['components'],
+  ): Map<string, ReactGenerateResult['components'][number]> {
+    return new Map(
+      components.map((component) => [component.name, { ...component }] as const),
+    );
+  }
+
+  private isCriticalComponentForFallback(
+    componentPlan?: PlanResult[number],
+    component?: ReactGenerateResult['components'][number],
+  ): boolean {
+    const route = componentPlan?.route ?? component?.route ?? null;
+    if (route) return true;
+    if ((componentPlan?.type ?? component?.type) === 'page') return true;
+    const dataNeeds = [
+      ...(componentPlan?.dataNeeds ?? []),
+      ...(component?.dataNeeds ?? []),
+    ];
+    if (
+      dataNeeds.includes('postDetail') ||
+      dataNeeds.includes('pageDetail') ||
+      dataNeeds.includes('post-detail') ||
+      dataNeeds.includes('page-detail')
+    ) {
+      return true;
+    }
+    const sectionTypes = new Set(
+      componentPlan?.visualPlan?.sections.map((section) => section.type) ?? [],
+    );
+    if (
+      sectionTypes.has('post-content') ||
+      sectionTypes.has('page-content') ||
+      sectionTypes.has('prose-block')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private recordDegradedComponent(
+    state: PipelineStatus,
+    degradedComponents: DegradedComponentRecord[],
+    record: DegradedComponentRecord,
+  ): void {
+    degradedComponents.push(record);
+    this.updateStateResult(state, {
+      degradedComponents: degradedComponents.map((item) => ({ ...item })),
+    });
+  }
+
+  private buildDegradedPlaceholderComponent(
+    component: ReactGenerateResult['components'][number],
+  ): ReactGenerateResult['components'][number] {
+    const code = `import React from 'react';
+
+export default function ${component.name}() {
+  return null;
+}
+`;
+
+    return {
+      ...component,
+      code,
+      generationMode: 'deterministic',
+      visualPlan: undefined,
+    };
+  }
+
+  private async applyComponentFallbacks(input: {
+    state: PipelineStatus;
+    components: ReactGenerateResult['components'];
+    failures: Array<{
+      component: ReactGenerateResult['components'][number];
+      error: string;
+    }>;
+    plan: PlanResult;
+    logPath: string;
+    stage: DegradedComponentRecord['stage'];
+    degradedComponents: DegradedComponentRecord[];
+    lastKnownSafeComponents: Map<
+      string,
+      ReactGenerateResult['components'][number]
+    >;
+    hasSharedHeader?: boolean;
+    hasSharedFooter?: boolean;
+  }): Promise<{
+    components: ReactGenerateResult['components'];
+    appliedCount: number;
+  }> {
+    const {
+      state,
+      plan,
+      logPath,
+      stage,
+      degradedComponents,
+      lastKnownSafeComponents,
+      hasSharedHeader = false,
+      hasSharedFooter = false,
+    } = input;
+    const components = [...input.components];
+    let appliedCount = 0;
+
+    for (const failure of input.failures) {
+      const componentName = failure.component.name;
+      const componentPlan = plan.find(
+        (entry) => entry.componentName === componentName,
+      );
+      const critical = this.isCriticalComponentForFallback(
+        componentPlan,
+        failure.component,
+      );
+      const componentIndex = components.findIndex(
+        (component) => component.name === componentName,
+      );
+      if (componentIndex === -1) continue;
+
+      const safeSnapshot = lastKnownSafeComponents.get(componentName);
+      if (safeSnapshot) {
+        components[componentIndex] = { ...safeSnapshot };
+        appliedCount += 1;
+        this.recordDegradedComponent(state, degradedComponents, {
+          componentName,
+          route: componentPlan?.route ?? failure.component.route ?? null,
+          stage,
+          fallbackType: 'last-known-safe',
+          reason: failure.error,
+          critical,
+          timestamp: new Date().toISOString(),
+        });
+        await this.logToFile(
+          logPath,
+          `[Fallback] ${stage} restored last-known-safe snapshot for "${componentName}" (critical=${critical ? 'yes' : 'no'}). Reason: ${failure.error}`,
+        );
+        continue;
+      }
+
+      const deterministicFallback =
+        this.reactGenerator.generateDeterministicFallbackComponent({
+          component: failure.component,
+          plan,
+          hasSharedHeader,
+          hasSharedFooter,
+        });
+      if (deterministicFallback) {
+        const fallbackValidation = this.validator.collectValidationIssues([
+          deterministicFallback,
+        ]);
+        if (fallbackValidation.failures.length === 0) {
+          components[componentIndex] = fallbackValidation.components[0];
+          appliedCount += 1;
+          this.recordDegradedComponent(state, degradedComponents, {
+            componentName,
+            route: componentPlan?.route ?? failure.component.route ?? null,
+            stage,
+            fallbackType: 'canonical-deterministic',
+            reason: failure.error,
+            critical,
+            timestamp: new Date().toISOString(),
+          });
+          await this.logToFile(
+            logPath,
+            `[Fallback] ${stage} replaced "${componentName}" with canonical deterministic fallback (critical=${critical ? 'yes' : 'no'}). Reason: ${failure.error}`,
+          );
+          continue;
+        }
+
+        await this.logToFile(
+          logPath,
+          `[Fallback] ${stage} deterministic fallback for "${componentName}" still failed validation: ${fallbackValidation.failures[0]?.error ?? 'unknown'}`,
+        );
+      }
+
+      if (!critical) {
+        const placeholder = this.buildDegradedPlaceholderComponent(
+          failure.component,
+        );
+        const placeholderValidation = this.validator.collectValidationIssues([
+          placeholder,
+        ]);
+        if (placeholderValidation.failures.length === 0) {
+          components[componentIndex] = placeholderValidation.components[0];
+          appliedCount += 1;
+          this.recordDegradedComponent(state, degradedComponents, {
+            componentName,
+            route: componentPlan?.route ?? failure.component.route ?? null,
+            stage,
+            fallbackType: 'degraded-placeholder',
+            reason: failure.error,
+            critical: false,
+            timestamp: new Date().toISOString(),
+          });
+          await this.logToFile(
+            logPath,
+            `[Fallback] ${stage} downgraded non-critical component "${componentName}" to a safe placeholder after all richer fallbacks failed.`,
+          );
+          continue;
+        }
+
+        await this.logToFile(
+          logPath,
+          `[Fallback] ${stage} placeholder degrade for non-critical component "${componentName}" still failed validation: ${placeholderValidation.failures[0]?.error ?? 'unknown'}`,
+        );
+      }
+    }
+
+    return { components, appliedCount };
   }
 
   private async executePipelineLegacy(
@@ -1448,6 +1787,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     const jobLogDir = join('./temp/logs', jobId);
     await mkdir(jobLogDir, { recursive: true });
     const logPath = join(jobLogDir, 'run-summary.json');
+    const runLogPath = this.resolveTextLogPath(logPath) ?? undefined;
     const pipelineStart = Date.now();
     const summaryDraft: PipelineRuntimeSummaryDraft = {
       startedAt: new Date().toISOString(),
@@ -1468,9 +1808,18 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       control.logPath = logPath;
       control.runtimeSummary = summaryDraft;
     }
+    this.updateStateResult(state, {
+      runSummaryPath: logPath,
+      runLogPath,
+    });
     await this.tokenTracker.init(logPath);
     let metrics: SiteCompareMetrics | null = null;
     let visualRouteResults: any[] = [];
+    const degradedComponents: DegradedComponentRecord[] = [];
+    let lastKnownSafeComponents = new Map<
+      string,
+      ReactGenerateResult['components'][number]
+    >();
     try {
       const cfgPlanning = this.configService.get<string>(
         'pipeline.planningModel',
@@ -1586,6 +1935,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         },
       );
       const themeDir = repoResult.themeDir;
+      this.updateStateResult(state, {
+        repoSummary: this.buildRepoSummary(repoResult),
+      });
       await stepDelay();
 
       // Bước 2: Parse theme (classic PHP vs FSE block)
@@ -1643,6 +1995,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           return result;
         },
       );
+      this.updateStateResult(state, {
+        themeSummary: this.buildThemeSummary(normalizedTheme),
+      });
       await stepDelay();
 
       // ── Stage 2: WordPress Content Graph (B1) ─────────────────────────────
@@ -1687,14 +2042,6 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         logPath,
         repoResult,
       );
-      const enrichResult = await this.enrichThemeWithPluginTemplates({
-        theme: normalizedTheme,
-        themeDir,
-        manifest: repoResult.themeManifest,
-        resolvedSource,
-        logPath,
-      });
-      normalizedTheme = enrichResult.theme;
       const overlaidTheme = this.dbTemplateOverlay.apply(
         normalizedTheme,
         content,
@@ -1706,6 +2053,11 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           `[Stage 2] Applied DB template overlay from wp_template/wp_template_part before planner.`,
         );
       }
+      this.updateStateResult(state, {
+        contentSummary: this.buildContentSummary(content),
+        themeSummary: this.buildThemeSummary(normalizedTheme),
+        repoAnalysisSummary: summaryDraft.repoAnalysisSummary,
+      });
 
       // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
       // All 4 phases + plan review + retry loop are ONE atomic step.
@@ -2097,6 +2449,16 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           return review;
         },
       );
+      this.updateStateResult(state, {
+        plan: reviewResult.plan,
+        planSummary: this.buildPlanSummary(reviewResult.plan),
+      });
+      const hasSharedHeader = reviewResult.plan.some(
+        (item) => item.type === 'partial' && /^header/i.test(item.componentName),
+      );
+      const hasSharedFooter = reviewResult.plan.some(
+        (item) => item.type === 'partial' && /^footer/i.test(item.componentName),
+      );
       await stepDelay();
 
       // ── Stage 4: React Generator + Stage 5: Review Loop ────────────────────────
@@ -2113,7 +2475,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             state,
             '6_generator',
             0.08,
-            'Generating React components from the approved visual plans.',
+            '[D1] Generating React components from the approved visual plans.',
           );
           // Stage 4+5 core: generate + code review per component
           const result = await this.reactGenerator.generate({
@@ -2137,7 +2499,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             state,
             '6_generator',
             0.45,
-            `Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
+            `[D4] Generated ${result.components.length} component file(s). Running validator cleanup and contract checks.`,
           );
           const MAX_VALIDATION_FIX_ATTEMPTS = 2;
           let validation = this.validator.collectValidationIssues(
@@ -2159,7 +2521,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               state,
               '6_generator',
               0.55,
-              `Validator fix ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS}: repairing ${validation.failures.length} component contract issue(s).`,
+              `[D4] Validator fix ${attempt}/${MAX_VALIDATION_FIX_ATTEMPTS}: repairing ${validation.failures.length} component contract issue(s).`,
             );
             await this.logToFile(
               logPath,
@@ -2347,15 +2709,40 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               ),
           );
           if (fatalValidationFailures.length > 0) {
-            throw new Error(
-              `[validator] Generated component validation failed after auto-fix:\n${fatalValidationFailures
-                .map(
-                  (failure) =>
-                    `Component "${failure.component.name}": ${failure.error}`,
-                )
-                .join('\n')}`,
-            );
+            const fallbackRecovery = await this.applyComponentFallbacks({
+              state,
+              components,
+              failures: fatalValidationFailures,
+              plan: reviewResult.plan,
+              logPath,
+              stage: 'stage4-validator',
+              degradedComponents,
+              lastKnownSafeComponents,
+              hasSharedHeader,
+              hasSharedFooter,
+            });
+            components = fallbackRecovery.components;
+            validation = this.validator.collectValidationIssues(components);
+            const remainingFatalValidationFailures =
+              validation.failures.filter(
+                (failure) =>
+                  !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                    failure.component,
+                    failure.error,
+                  ),
+              );
+            if (remainingFatalValidationFailures.length > 0) {
+              throw new Error(
+                `[validator] Generated component validation failed after auto-fix/fallback:\n${remainingFatalValidationFailures
+                  .map(
+                    (failure) =>
+                      `Component "${failure.component.name}": ${failure.error}`,
+                  )
+                  .join('\n')}`,
+              );
+            }
           }
+          lastKnownSafeComponents = this.snapshotComponentsByName(components);
 
           // Deterministic components (Header, Footer, Sidebar, Page404, etc.) were
           // generated entirely by CodeGeneratorService — no LLM TSX gen involved.
@@ -2379,7 +2766,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               state,
               '6_generator',
               0.82,
-              `AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking the generated baseline components against the approved contract.`,
+              `[R1] AI review pass ${attempt}/${MAX_FIX_ATTEMPTS}: checking the generated baseline components against the approved contract.`,
             );
             this.logger.log(
               `[Stage 5: AI Generated Code Review] Reviewing ${aiComponents.length} baseline generated component(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
@@ -2404,7 +2791,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               state,
               '6_generator',
               0.9,
-              `Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
+              `[R3] Auto-fixing ${review.failures.length} component(s) that failed AI review.`,
             );
             await this.logToFile(
               logPath,
@@ -2532,120 +2919,163 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               ),
           );
           if (fatalPostReviewFailures.length > 0) {
-            throw new Error(
-              `[validator] Generated component validation failed after AI review/fix:\n${fatalPostReviewFailures
-                .map(
-                  (failure) =>
-                    `Component "${failure.component.name}": ${failure.error}`,
-                )
-                .join('\n')}`,
+            const fallbackRecovery = await this.applyComponentFallbacks({
+              state,
+              components: postReviewValidation.components,
+              failures: fatalPostReviewFailures,
+              plan: reviewResult.plan,
+              logPath,
+              stage: 'stage5-review',
+              degradedComponents,
+              lastKnownSafeComponents,
+              hasSharedHeader,
+              hasSharedFooter,
+            });
+            const recoveredValidation = this.validator.collectValidationIssues(
+              fallbackRecovery.components,
             );
+            const remainingFatalPostReviewFailures =
+              recoveredValidation.failures.filter(
+                (failure) =>
+                  !this.shouldTolerateProtectedDeterministicSharedPartialFailure(
+                    failure.component,
+                    failure.error,
+                  ),
+              );
+            if (remainingFatalPostReviewFailures.length > 0) {
+              throw new Error(
+                `[validator] Generated component validation failed after AI review/fix/fallback:\n${remainingFatalPostReviewFailures
+                  .map(
+                    (failure) =>
+                      `Component "${failure.component.name}": ${failure.error}`,
+                  )
+                  .join('\n')}`,
+              );
+            }
+            components = recoveredValidation.components;
+          } else {
+            components = postReviewValidation.components;
           }
-          components = postReviewValidation.components;
+          lastKnownSafeComponents = this.snapshotComponentsByName(components);
 
           this.emitStepProgress(
             state,
             '6_generator',
             0.94,
-            'React generation, validation, and repair loops have finished successfully.',
+            '[D1→R3] React generation, validation, and repair loops have finished successfully.',
           );
           return { ...result, components };
         },
       );
+      this.updateStateResult(state, {
+        generationSummary: this.buildGeneratedComponentSummary(
+          generationResult.components,
+        ),
+      });
       await stepDelay();
 
       // ── Stage 6: Build & Preview (E1 → E2 → E3 → E4) ──────────────────────
-      await this.runStep(state, '7_api_builder', logPath, async () => {
-        this.emitStepProgress(
-          state,
-          '7_api_builder',
-          0.15,
-          'Building the Express preview API template and injecting required routes.',
-        );
-        let api = await this.apiBuilder.build({
-          jobId,
-          dbName: dbCreds.dbName,
-          logPath,
-          content,
-        });
-        this.emitStepProgress(
-          state,
-          '7_api_builder',
-          0.55,
-          'Running backend review to verify API coverage matches the generated frontend contracts.',
-        );
-
-        const MAX_FIX_ATTEMPTS = 2;
-        for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-          this.logger.log(
-            `[Stage 6: AI Generated Backend Review] Reviewing ${api.files.length} backend file(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
-          );
-          const review = await this.generatedApiReview.review({
-            api,
-            plan: reviewResult.plan,
-            content,
-            modelName: resolvedModels.backendReview,
-            mode: resolvedModels.backendAiReviewMode,
-            logPath,
-          });
-
-          if (review.success || !review.blockingMessage) {
-            break;
-          }
-
-          this.logger.warn(
-            `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
-          );
-          summaryDraft.retries.backendFix += 1;
+      const apiResult = await this.runStep(
+        state,
+        '7_api_builder',
+        logPath,
+        async () => {
           this.emitStepProgress(
             state,
             '7_api_builder',
-            0.78,
-            `Backend auto-fix ${attempt}/${MAX_FIX_ATTEMPTS}: repairing generated API code from review feedback.`,
+            0.15,
+            'Building the Express preview API template and injecting required routes.',
           );
-          await this.logToFile(
+          let api = await this.apiBuilder.build({
+            jobId,
+            dbName: dbCreds.dbName,
             logPath,
-            `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
-          );
-
-          api = await this.apiBuilder.fixApi({
-            result: api,
-            feedback: review.blockingMessage,
-            modelName: resolvedModels.fixAgent,
-            logPath,
+            content,
           });
-        }
-
-        this.emitStepProgress(
-          state,
-          '7_api_builder',
-          0.93,
-          'Preview API layer is ready for the runtime preview environment.',
-        );
-
-        const auditWarnings = this.contractAudit.audit({
-          components: generationResult.components,
-          plan: reviewResult.plan,
-          api,
-        });
-        this.contractAudit.logWarnings(
-          auditWarnings,
-          'Stage 7: Deterministic Contract Audit',
-        );
-        if (auditWarnings.length > 0) {
-          await this.logToFile(
-            logPath,
-            `[Stage 7: Deterministic Contract Audit] ${auditWarnings.length} warning(s)\n${auditWarnings
-              .map((warning) => {
-                const target = warning.componentName
-                  ? `"${warning.componentName}" `
-                  : '';
-                return `- [${warning.scope}] ${target}${warning.message}`;
-              })
-              .join('\n')}`,
+          this.emitStepProgress(
+            state,
+            '7_api_builder',
+            0.55,
+            'Running backend review to verify API coverage matches the generated frontend contracts.',
           );
-        }
-        return api;
+
+          const MAX_FIX_ATTEMPTS = 2;
+          for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+            this.logger.log(
+              `[Stage 6: AI Generated Backend Review] Reviewing ${api.files.length} backend file(s) (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            );
+            const review = await this.generatedApiReview.review({
+              api,
+              plan: reviewResult.plan,
+              content,
+              modelName: resolvedModels.backendReview,
+              mode: resolvedModels.backendAiReviewMode,
+              logPath,
+            });
+
+            if (review.success || !review.blockingMessage) {
+              break;
+            }
+
+            this.logger.warn(
+              `[Stage 6: AI Generated Backend Review] Backend failed review: ${review.blockingMessage}. Attempting auto-fix.`,
+            );
+            summaryDraft.retries.backendFix += 1;
+            this.emitStepProgress(
+              state,
+              '7_api_builder',
+              0.78,
+              `Backend auto-fix ${attempt}/${MAX_FIX_ATTEMPTS}: repairing generated API code from review feedback.`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Stage 6] Backend failed review: ${review.blockingMessage}. Attempting auto-fix loop (attempt ${attempt}/${MAX_FIX_ATTEMPTS})`,
+            );
+
+            api = await this.apiBuilder.fixApi({
+              result: api,
+              feedback: review.blockingMessage,
+              modelName: resolvedModels.fixAgent,
+              logPath,
+            });
+          }
+
+          this.emitStepProgress(
+            state,
+            '7_api_builder',
+            0.93,
+            'Preview API layer is ready for the runtime preview environment.',
+          );
+
+          const auditWarnings = this.contractAudit.audit({
+            components: generationResult.components,
+            plan: reviewResult.plan,
+            api,
+          });
+          this.contractAudit.logWarnings(
+            auditWarnings,
+            'Stage 7: Deterministic Contract Audit',
+          );
+          if (auditWarnings.length > 0) {
+            await this.logToFile(
+              logPath,
+              `[Stage 7: Deterministic Contract Audit] ${auditWarnings.length} warning(s)\n${auditWarnings
+                .map((warning) => {
+                  const target = warning.componentName
+                    ? `"${warning.componentName}" `
+                    : '';
+                  return `- [${warning.scope}] ${target}${warning.message}`;
+                })
+                .join('\n')}`,
+            );
+          }
+          return api;
+        },
+      );
+      this.updateStateResult(state, {
+        apiSummary: {
+          fileCount: apiResult.files.length,
+        },
       });
       await stepDelay();
 
@@ -2704,10 +3134,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               const isBuildFail = errMsg.includes(
                 '[validator] Preview build failed:',
               );
-              if (!isBuildFail || attempt > MAX_BUILD_FIX_ATTEMPTS) throw err;
-
               const tsErrors = this.parseTsBuildErrors(errMsg);
+              if (!isBuildFail) throw err;
               if (tsErrors.length === 0) throw err;
+              if (attempt > MAX_BUILD_FIX_ATTEMPTS) throw err;
               summaryDraft.retries.buildFix += 1;
 
               this.logger.warn(
@@ -2754,6 +3184,46 @@ export class OrchestratorService implements BeforeApplicationShutdown {
               for (const r of buildFixes) {
                 if (r) buildComponents[r.idx] = r.fixed;
               }
+
+              if (attempt === MAX_BUILD_FIX_ATTEMPTS) {
+                const fallbackFailures = tsErrors
+                  .map(({ componentName, error }) => {
+                    const component = buildComponents.find(
+                      (item) => item.name === componentName,
+                    );
+                    if (!component) return null;
+                    return { component, error };
+                  })
+                  .filter(
+                    (
+                      entry,
+                    ): entry is {
+                      component: ReactGenerateResult['components'][number];
+                      error: string;
+                    } => Boolean(entry),
+                  );
+                if (fallbackFailures.length > 0) {
+                  const fallbackRecovery = await this.applyComponentFallbacks({
+                    state,
+                    components: buildComponents,
+                    failures: fallbackFailures,
+                    plan: reviewResult.plan,
+                    logPath,
+                    stage: 'stage8-build',
+                    degradedComponents,
+                    lastKnownSafeComponents,
+                    hasSharedHeader,
+                    hasSharedFooter,
+                  });
+                  if (fallbackRecovery.appliedCount > 0) {
+                    buildComponents = fallbackRecovery.components;
+                    await this.logToFile(
+                      logPath,
+                      `[Stage 8: Build Fix] Applied ${fallbackRecovery.appliedCount} fallback component replacement(s) after exhausting direct build fixes. Retrying preview build one last time.`,
+                    );
+                  }
+                }
+              }
             }
           }
           throw new Error('[Stage 8] Build fix-loop exhausted all attempts');
@@ -2771,8 +3241,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             : undefined;
         runtimeControl.fixAgentModel = resolvedModels.fixAgent;
       }
-      state.result = {
-        ...(state.result ?? {}),
+      this.updateStateResult(state, {
         previewDir: preview.previewDir,
         frontendDir: preview.frontendDir,
         previewUrl: preview.previewUrl,
@@ -2783,7 +3252,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         editApplied: false,
         uiSourceMapPath: preview.uiSourceMapPath,
         routeEntries: preview.routeEntries,
-      };
+      });
       {
         const subject = this.progress.get(jobId);
         const meta = this.getStepMeta('8_preview_builder', jobId);
@@ -2793,7 +3262,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           status: 'done',
           percent: this.calcPercentThrough('8_preview_builder', jobId),
           message: hasEditRequest
-            ? 'Baseline preview is live. The requested edit has been stored and is now waiting for explicit user approval.'
+            ? 'Baseline preview is live. Baseline compare metrics will run before any requested edit is presented for approval.'
             : 'Preview is live and ready for inspection.',
           data: this.buildPreviewEventData({
             preview,
@@ -2804,6 +3273,264 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           }),
         });
       }
+      await stepDelay();
+
+      await this.runStep(state, '9_visual_compare', logPath, async () => {
+        const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
+        const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
+        const compareMode = 'baseline';
+        const targetAccuracyPercent = 70;
+        const maxMetricRepairRounds = 4;
+        const previewTokens =
+          'tokens' in normalizedTheme
+            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
+              undefined)
+            : undefined;
+        const cloneGeneratedComponents = (
+          source: ReactGenerateResult['components'],
+        ): ReactGenerateResult['components'] =>
+          source.map((component) => ({ ...component }));
+        const formatAccuracyLabel = (value: number | null) =>
+          value === null ? 'unknown' : `${value.toFixed(2)}%`;
+        const runCompareRound = async (label: string) => {
+          const compareResult = await this.compareSite({
+            siteId,
+            wpBaseUrl,
+            reactFeUrl: preview.previewUrl,
+            reactBeUrl,
+            jobId,
+            mode: compareMode,
+            routeEntries: preview.routeEntries,
+          });
+          if (compareResult.warnings?.length) {
+            for (const warning of compareResult.warnings) {
+              await this.logToFile(logPath, `[site-compare] ${warning}`);
+            }
+          }
+          const nextMetrics = compareResult.metrics ?? null;
+          if (nextMetrics) {
+            await this.logAutomationCompareMetrics(logPath, label, nextMetrics);
+          }
+          return nextMetrics;
+        };
+
+        this.emitStepProgress(
+          state,
+          '9_visual_compare',
+          0.2,
+          `Running site compare metrics across WordPress and the React preview (target >= ${targetAccuracyPercent}%, max ${maxMetricRepairRounds} repair rounds).`,
+        );
+
+        try {
+          metrics = await runCompareRound('initial');
+        } catch (err: any) {
+          this.logger.error(
+            `[site-compare] failed — ${err?.message ?? err}`,
+            err?.response?.data ?? err?.stack,
+          );
+        }
+
+        if (metrics) {
+          let currentAccuracy = this.extractAccuracySummary(metrics).percent;
+          let bestAccuracy = currentAccuracy ?? -1;
+          let bestMetrics = metrics;
+          let bestComponents = cloneGeneratedComponents(buildComponents);
+
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Loop] Initial accuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}% maxRounds=${maxMetricRepairRounds}`,
+          );
+
+          for (
+            let round = 1;
+            round <= maxMetricRepairRounds && metrics;
+            round++
+          ) {
+            if (
+              currentAccuracy !== null &&
+              currentAccuracy >= targetAccuracyPercent
+            ) {
+              await this.logToFile(
+                logPath,
+                `[Visual Metrics Loop] Target reached before round ${round}: accuracy=${formatAccuracyLabel(currentAccuracy)} >= ${targetAccuracyPercent}%. Stopping metric repair loop.`,
+              );
+              break;
+            }
+
+            this.emitStepProgress(
+              state,
+              '9_visual_compare',
+              Math.min(0.3 + round * 0.12, 0.82),
+              `Metric repair round ${round}/${maxMetricRepairRounds}: current accuracy ${formatAccuracyLabel(currentAccuracy)}, target ${targetAccuracyPercent}%`,
+            );
+            await this.logToFile(
+              logPath,
+              `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} starting from accuracy=${formatAccuracyLabel(currentAccuracy)} (target>=${targetAccuracyPercent}%).`,
+            );
+
+            const visualRepairResult = await this.applyVisualMetricsRepairPass({
+              state,
+              stepName: '9_visual_compare',
+              metrics,
+              preview,
+              components: buildComponents,
+              plan: reviewResult.plan,
+              content,
+              tokens: previewTokens,
+              fixAgentModel: resolvedModels.fixAgent,
+              logPath,
+            });
+            buildComponents = visualRepairResult.components;
+
+            if (!visualRepairResult.applied) {
+              await this.logToFile(
+                logPath,
+                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} produced no accepted repairs. Stopping metric repair loop.`,
+              );
+              break;
+            }
+
+            try {
+              const roundMetrics = await runCompareRound(`round-${round}`);
+              if (!roundMetrics) {
+                await this.logToFile(
+                  logPath,
+                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} compare returned no metrics after repair. Stopping metric repair loop and keeping the latest valid preview snapshot.`,
+                );
+                metrics = bestMetrics;
+                break;
+              }
+
+              const nextAccuracy =
+                this.extractAccuracySummary(roundMetrics).percent;
+              await this.logToFile(
+                logPath,
+                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} result: accuracy=${formatAccuracyLabel(nextAccuracy)} previous=${formatAccuracyLabel(currentAccuracy)} best=${formatAccuracyLabel(bestAccuracy)} target>=${targetAccuracyPercent}%.`,
+              );
+
+              if (nextAccuracy !== null && nextAccuracy > bestAccuracy) {
+                bestAccuracy = nextAccuracy;
+                bestMetrics = roundMetrics;
+                bestComponents = cloneGeneratedComponents(buildComponents);
+                await this.logToFile(
+                  logPath,
+                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} established a new best snapshot at accuracy=${formatAccuracyLabel(bestAccuracy)}.`,
+                );
+              } else {
+                await this.logToFile(
+                  logPath,
+                  `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} did not beat the best snapshot. Restoring best-known preview at accuracy=${formatAccuracyLabel(bestAccuracy)} before continuing.`,
+                );
+                buildComponents = cloneGeneratedComponents(bestComponents);
+                await this.previewBuilder.syncGeneratedComponents(
+                  preview.previewDir,
+                  buildComponents,
+                  previewTokens,
+                );
+              }
+
+              metrics = bestMetrics;
+              currentAccuracy = bestAccuracy;
+
+              if (
+                currentAccuracy !== null &&
+                currentAccuracy >= targetAccuracyPercent
+              ) {
+                await this.logToFile(
+                  logPath,
+                  `[Visual Metrics Loop] Target reached after round ${round}: accuracy=${formatAccuracyLabel(currentAccuracy)} >= ${targetAccuracyPercent}%. Stopping metric repair loop.`,
+                );
+                break;
+              }
+            } catch (err: any) {
+              this.logger.error(
+                `[site-compare] re-run after visual repair failed — ${err?.message ?? err}`,
+                err?.response?.data ?? err?.stack,
+              );
+              await this.logToFile(
+                logPath,
+                `[Visual Metrics Loop] Round ${round}/${maxMetricRepairRounds} compare failed after repair: ${err?.message ?? err}. Restoring best-known snapshot and stopping metric repair loop.`,
+              );
+              buildComponents = cloneGeneratedComponents(bestComponents);
+              metrics = bestMetrics;
+              try {
+                await this.previewBuilder.syncGeneratedComponents(
+                  preview.previewDir,
+                  buildComponents,
+                  previewTokens,
+                );
+              } catch (restoreError: any) {
+                await this.logToFile(
+                  logPath,
+                  `[Visual Metrics Loop] Failed to restore best-known snapshot after compare error: ${restoreError?.message ?? restoreError}`,
+                );
+              }
+              break;
+            }
+          }
+
+          if (
+            currentAccuracy !== null &&
+            currentAccuracy < targetAccuracyPercent
+          ) {
+            await this.logToFile(
+              logPath,
+              `[Visual Metrics Loop] Finished below target after up to ${maxMetricRepairRounds} round(s). bestAccuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}%.`,
+            );
+          } else if (currentAccuracy !== null) {
+            await this.logToFile(
+              logPath,
+              `[Visual Metrics Loop] Finished with target met. bestAccuracy=${formatAccuracyLabel(currentAccuracy)} target>=${targetAccuracyPercent}%.`,
+            );
+          }
+        }
+
+        this.emitStepProgress(
+          state,
+          '9_visual_compare',
+          0.9,
+          metrics
+            ? 'Final site-compare metrics are attached.'
+            : 'Site compare did not return metrics; pipeline will continue.',
+          metrics
+            ? this.buildPreviewEventData({
+                preview,
+                previewStage: 'baseline',
+                hasEditRequest,
+                editApprovalRequired: Boolean(
+                  this.controls.get(jobId)?.pendingEditApproval,
+                ),
+                editApplied: Boolean(this.controls.get(jobId)?.editApplied),
+                metrics,
+              })
+            : undefined,
+        );
+
+        this.updateStateResult(state, {
+          previewDir: preview.previewDir,
+          frontendDir: preview.frontendDir,
+          previewUrl: preview.previewUrl,
+          apiBaseUrl: preview.apiBaseUrl,
+          previewStage: 'baseline',
+          hasEditRequest,
+          editApprovalRequired: Boolean(
+            this.controls.get(jobId)?.pendingEditApproval,
+          ),
+          editApplied: Boolean(this.controls.get(jobId)?.editApplied),
+          uiSourceMapPath: preview.uiSourceMapPath,
+          routeEntries: preview.routeEntries,
+          baselineMetrics: metrics,
+          metrics,
+        });
+        const compareControl = this.controls.get(jobId);
+        if (compareControl) {
+          compareControl.buildComponents = buildComponents;
+        }
+
+        return { metrics };
+      });
+      await stepDelay();
+
       if (hasEditRequest) {
         const runtimeControl = this.controls.get(jobId);
         const approvalGate = this.createPendingEditApprovalGate();
@@ -2818,12 +3545,13 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             hasEditRequest,
             editApprovalRequired: true,
             editApplied: false,
+            metrics: metrics ?? undefined,
           }),
           ...(this.buildEditRequestProgressData({
             request: dto.editRequest,
-            title: 'Baseline preview is waiting for edit approval',
+            title: 'Baseline compare is done and edit is waiting for approval',
             summary:
-              'The baseline React preview is ready. The requested edit has been stored, but it will only be applied after the user explicitly approves it from the frontend.',
+              'The baseline React preview has already been compared against WordPress. The requested edit is stored and will only be applied after the user explicitly approves it from the frontend.',
           }) ?? {}),
         };
         this.rememberStepEventData(jobId, '8b_edit_request', editApprovalData);
@@ -2833,7 +3561,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           status: 'pending',
           percent: this.calcPercentThrough('8b_edit_request', jobId),
           message:
-            'Requested edit is pending user approval. The pipeline is paused until the user chooses Apply or Skip.',
+            'Baseline compare is complete. The requested edit is now pending user approval.',
           data: editApprovalData,
         });
 
@@ -2842,117 +3570,142 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           runtimeControl.confirmationGate = undefined;
         }
         state.status = 'running';
+        let approvedEditApplied = false;
 
         if (decision.action === 'apply') {
-          await this.runStep(state, '8b_edit_request', logPath, async () => {
-            this.emitStepProgress(
-              state,
-              '8b_edit_request',
-              0.12,
-              'Reviewing the approved edit request against the generated React baseline.',
-              this.buildEditRequestProgressData({
+          const editOutcome = await this.runStep(
+            state,
+            '8b_edit_request',
+            logPath,
+            async () => {
+              this.emitStepProgress(
+                state,
+                '8b_edit_request',
+                0.12,
+                'Reviewing the approved edit request against the already-compared React baseline.',
+                this.buildEditRequestProgressData({
+                  request: dto.editRequest,
+                  title: 'Applying the approved user edit request',
+                  summary:
+                    'The baseline visual compare has finished. The pipeline is now applying the approved user edit request to the React preview.',
+                }),
+              );
+              const editPassResult = await this.applyPostMigrationEditPass({
+                jobId,
+                state,
+                stepName: '8b_edit_request',
                 request: dto.editRequest,
-                title: 'Applying the approved user edit request',
-                summary:
-                  'The user approved the pending edit request. The pipeline is now applying those visual changes to the React preview.',
-              }),
-            );
-            const editPassResult = await this.applyPostMigrationEditPass({
-              jobId,
-              state,
-              stepName: '8b_edit_request',
-              request: dto.editRequest,
-              editRequestContext,
-              plan: reviewResult.plan,
-              components: buildComponents,
-              fixAgentModel: resolvedModels.fixAgent,
-              logPath,
-              applyProgress: 0.38,
-              reviewProgress: 0.58,
-              refixProgress: 0.72,
-            });
-            // After edit-request the original visual plan is no longer
-            // authoritative — user may have added/removed/changed sections.
-            // Strip it so downstream validation doesn't reject intentional changes.
-            buildComponents = editPassResult.components.map((comp) => ({
-              ...comp,
-              visualPlan: undefined,
-            }));
+                editRequestContext,
+                plan: reviewResult.plan,
+                components: buildComponents,
+                fixAgentModel: resolvedModels.fixAgent,
+                logPath,
+                applyProgress: 0.38,
+                reviewProgress: 0.58,
+                refixProgress: 0.72,
+              });
+              // After edit-request the original visual plan is no longer
+              // authoritative — user may have added/removed/changed sections.
+              // Strip it so downstream validation doesn't reject intentional changes.
+              buildComponents = editPassResult.components.map((comp) => ({
+                ...comp,
+                visualPlan: undefined,
+              }));
 
-            if (!editPassResult.applied) {
+              if (!editPassResult.applied) {
+                const approvalControl = this.controls.get(jobId);
+                if (approvalControl) {
+                  approvalControl.pendingEditApproval = false;
+                  approvalControl.editApplied = false;
+                }
+                this.emitStepProgress(
+                  state,
+                  '8b_edit_request',
+                  0.92,
+                  'No targeted edit mutations were required after reviewing the approved edit request.',
+                );
+                return { applied: false, taskCount: 0 };
+              }
+
+              this.emitStepProgress(
+                state,
+                '8b_edit_request',
+                0.82,
+                `Syncing ${editPassResult.taskCount} approved edit update(s) into the running preview.`,
+              );
+              await this.previewBuilder.syncGeneratedComponents(
+                preview.previewDir,
+                buildComponents,
+                'tokens' in normalizedTheme
+                  ? (normalizedTheme as any).tokens
+                  : undefined,
+              );
+              await this.validator.assertPreviewBuild(preview.frontendDir);
+              await this.validator.assertPreviewRuntime(
+                preview.previewUrl,
+                this.buildRuntimeSmokeRoutes(preview.routeEntries),
+              );
               const approvalControl = this.controls.get(jobId);
               if (approvalControl) {
                 approvalControl.pendingEditApproval = false;
-                approvalControl.editApplied = false;
+                approvalControl.editApplied = true;
               }
               this.emitStepProgress(
                 state,
                 '8b_edit_request',
-                0.92,
-                'No targeted edit mutations were required after reviewing the approved edit request.',
+                0.94,
+                'Approved edits are now visible in the running preview.',
+                {
+                  ...this.buildPreviewEventData({
+                    preview,
+                    previewStage: 'edited',
+                    hasEditRequest,
+                    editApprovalRequired: false,
+                    editApplied: true,
+                    metrics: metrics ?? undefined,
+                  }),
+                  ...(this.buildEditRequestProgressData({
+                    request: dto.editRequest,
+                    title: 'Approved edits are now visible in preview',
+                    summary:
+                      'The approved edit request has been applied and synced into the live React preview.',
+                  }) ?? {}),
+                },
               );
-              return { applied: false, taskCount: 0 };
-            }
-
-            this.emitStepProgress(
-              state,
-              '8b_edit_request',
-              0.82,
-              `Syncing ${editPassResult.taskCount} approved edit update(s) into the running preview.`,
-            );
-            await this.previewBuilder.syncGeneratedComponents(
-              preview.previewDir,
-              buildComponents,
-              'tokens' in normalizedTheme
-                ? (normalizedTheme as any).tokens
-                : undefined,
-            );
-            await this.validator.assertPreviewBuild(preview.frontendDir);
-            await this.validator.assertPreviewRuntime(
-              preview.previewUrl,
-              preview.routeEntries.map((entry) => entry.route),
-            );
-            const approvalControl = this.controls.get(jobId);
-            if (approvalControl) {
-              approvalControl.pendingEditApproval = false;
-              approvalControl.editApplied = true;
-            }
-            this.emitStepProgress(
-              state,
-              '8b_edit_request',
-              0.94,
-              'Approved edits are now visible in the running preview.',
-              {
+              this.updateStateResult(state, {
+                previewDir: preview.previewDir,
+                frontendDir: preview.frontendDir,
+                previewUrl: preview.previewUrl,
+                apiBaseUrl: preview.apiBaseUrl,
+                previewStage: 'edited',
+                hasEditRequest,
+                editApprovalRequired: false,
+                editApplied: true,
+                uiSourceMapPath: preview.uiSourceMapPath,
+                routeEntries: preview.routeEntries,
+                baselineMetrics: metrics,
+                metrics,
+              });
+              this.rememberStepEventData(jobId, '8b_edit_request', {
                 ...this.buildPreviewEventData({
                   preview,
                   previewStage: 'edited',
                   hasEditRequest,
                   editApprovalRequired: false,
                   editApplied: true,
+                  metrics: metrics ?? undefined,
                 }),
                 ...(this.buildEditRequestProgressData({
                   request: dto.editRequest,
-                  title: 'Approved edits are now visible in preview',
+                  title: 'Approved edits have been applied',
                   summary:
                     'The approved edit request has been applied and synced into the live React preview.',
                 }) ?? {}),
-              },
-            );
-            state.result = {
-              ...(state.result ?? {}),
-              previewDir: preview.previewDir,
-              frontendDir: preview.frontendDir,
-              previewUrl: preview.previewUrl,
-              apiBaseUrl: preview.apiBaseUrl,
-              previewStage: 'edited',
-              hasEditRequest,
-              editApprovalRequired: false,
-              editApplied: true,
-              uiSourceMapPath: preview.uiSourceMapPath,
-              routeEntries: preview.routeEntries,
-            };
-            return { applied: true, taskCount: editPassResult.taskCount };
-          });
+              });
+              return { applied: true, taskCount: editPassResult.taskCount };
+            },
+          );
+          approvedEditApplied = Boolean(editOutcome?.applied);
         } else {
           const editStep = state.steps.find(
             (step) => step.name === '8b_edit_request',
@@ -2971,15 +3724,14 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             status: 'skipped',
             percent: this.calcPercentThrough('8b_edit_request', jobId),
             message:
-              'The user skipped the pending edit request. The pipeline will continue with baseline metrics and completion.',
+              'The user skipped the pending edit request. The pipeline will continue from the already-evaluated baseline preview.',
             data: {
               ...editApprovalData,
               editApprovalRequired: false,
               editApplied: false,
             },
           });
-          state.result = {
-            ...(state.result ?? {}),
+          this.updateStateResult(state, {
             previewDir: preview.previewDir,
             frontendDir: preview.frontendDir,
             previewUrl: preview.previewUrl,
@@ -2990,156 +3742,459 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             editApplied: false,
             uiSourceMapPath: preview.uiSourceMapPath,
             routeEntries: preview.routeEntries,
-          };
-        }
-      }
-      await stepDelay();
-
-      await this.runStep(state, '9_visual_compare', logPath, async () => {
-        const wpBaseUrl = content.siteInfo.siteUrl || 'http://localhost:8000/';
-        const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
-        const compareMode =
-          hasEditRequest && this.controls.get(jobId)?.editApplied
-            ? 'edited'
-            : 'baseline';
-        const previewTokens =
-          'tokens' in normalizedTheme
-            ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
-              undefined)
-            : undefined;
-
-        this.emitStepProgress(
-          state,
-          '9_visual_compare',
-          0.2,
-          'Running final site compare metrics across WordPress and the React preview.',
-        );
-
-        try {
-          const compareResult = await this.compareSite({
-            siteId,
-            wpBaseUrl,
-            reactFeUrl: preview.previewUrl,
-            reactBeUrl,
-            jobId,
-            mode: compareMode,
-            routeEntries: preview.routeEntries,
-          });
-          metrics = compareResult.metrics ?? null;
-          if (compareResult.warnings?.length) {
-            for (const warning of compareResult.warnings) {
-              await this.logToFile(logPath, `[site-compare] ${warning}`);
-            }
-          }
-          if (metrics) {
-            await this.logAutomationCompareMetrics(logPath, 'initial', metrics);
-          }
-        } catch (err: any) {
-          this.logger.error(
-            `[site-compare] failed — ${err?.message ?? err}`,
-            err?.response?.data ?? err?.stack,
-          );
-        }
-
-        if (metrics) {
-          const visualRepairResult = await this.applyVisualMetricsRepairPass({
-            state,
-            stepName: '9_visual_compare',
+            baselineMetrics: metrics,
             metrics,
-            preview,
-            components: buildComponents,
-            plan: reviewResult.plan,
-            content,
-            tokens: previewTokens,
-            fixAgentModel: resolvedModels.fixAgent,
-            logPath,
           });
-          buildComponents = visualRepairResult.components;
+        }
 
-          if (visualRepairResult.applied) {
-            try {
-              const compareResult = await this.compareSite({
-                siteId,
-                wpBaseUrl,
-                reactFeUrl: preview.previewUrl,
-                reactBeUrl,
-                jobId,
-                mode: compareMode,
-                routeEntries: preview.routeEntries,
-              });
-              metrics = compareResult.metrics ?? null;
-              if (compareResult.warnings?.length) {
-                for (const warning of compareResult.warnings) {
-                  await this.logToFile(logPath, `[site-compare] ${warning}`);
+        if (approvedEditApplied) {
+          await this.runStep(
+            state,
+            '9b_post_edit_visual_validation',
+            logPath,
+            async () => {
+              const wpBaseUrl =
+                content.siteInfo.siteUrl || 'http://localhost:8000/';
+              const reactBeUrl = preview.apiBaseUrl.replace(/\/api\/?$/, '');
+              const baselineAccuracy =
+                this.extractAccuracySummary(metrics).percent;
+              let editedMetrics: SiteCompareMetrics | null = null;
+              let validation: PostEditVisualValidationResult | null = null;
+
+              this.emitStepProgress(
+                state,
+                '9b_post_edit_visual_validation',
+                0.16,
+                'Capturing fresh compare artifacts for the edited preview and validating that the approved user request landed cleanly.',
+                {
+                  ...this.buildPreviewEventData({
+                    preview,
+                    previewStage: 'edited',
+                    hasEditRequest,
+                    editApprovalRequired: false,
+                    editApplied: true,
+                    metrics: metrics ?? undefined,
+                  }),
+                  ...(this.buildEditRequestProgressData({
+                    request: dto.editRequest,
+                    title: 'Validating the edited preview',
+                    summary:
+                      'The approved edit is now live. This pass checks whether the requested change is visible and whether unrelated regressions were introduced.',
+                  }) ?? {}),
+                },
+              );
+
+              try {
+                const compareResult = await this.compareSite({
+                  siteId,
+                  wpBaseUrl,
+                  reactFeUrl: preview.previewUrl,
+                  reactBeUrl,
+                  jobId,
+                  mode: 'edited',
+                  routeEntries: preview.routeEntries,
+                });
+                if (compareResult.warnings?.length) {
+                  for (const warning of compareResult.warnings) {
+                    await this.logToFile(
+                      logPath,
+                      `[post-edit-compare] ${warning}`,
+                    );
+                  }
                 }
-              }
-              if (metrics) {
-                await this.logAutomationCompareMetrics(
+                editedMetrics = compareResult.metrics ?? null;
+                if (editedMetrics) {
+                  await this.logAutomationCompareMetrics(
+                    logPath,
+                    'post-edit-validation',
+                    editedMetrics,
+                  );
+                }
+              } catch (err: any) {
+                this.logger.error(
+                  `[post-edit-compare] failed — ${err?.message ?? err}`,
+                  err?.response?.data ?? err?.stack,
+                );
+                await this.logToFile(
                   logPath,
-                  'after-repair',
-                  metrics,
+                  `[Post Edit Validation] Compare execution failed: ${err?.message ?? err}`,
                 );
               }
-            } catch (err: any) {
-              this.logger.error(
-                `[site-compare] re-run after visual repair failed — ${err?.message ?? err}`,
-                err?.response?.data ?? err?.stack,
-              );
-            }
-          }
-        }
 
-        this.emitStepProgress(
-          state,
-          '9_visual_compare',
-          0.9,
-          metrics
-            ? 'Final site-compare metrics are attached.'
-            : 'Site compare did not return metrics; pipeline will continue.',
-          metrics
-            ? this.buildPreviewEventData({
+              const validationTarget = this.selectPostEditValidationTarget({
+                metrics: editedMetrics,
+                preview,
+                components: buildComponents,
+                request: dto.editRequest,
+                context: editRequestContext,
+              });
+
+              if (validationTarget) {
+                const componentPlan = reviewResult.plan.find(
+                  (entry) =>
+                    entry.componentName === validationTarget.componentName,
+                );
+                const sourceEvidence = this.buildSourceEvidenceForComparePage(
+                  validationTarget.page,
+                  content,
+                );
+                const planEvidence =
+                  this.buildPlanEvidenceForComponent(componentPlan);
+                const requestContextLines =
+                  this.buildPostEditValidationRequestContext({
+                    request: dto.editRequest,
+                    context: editRequestContext,
+                    componentName: validationTarget.componentName,
+                    page: validationTarget.page,
+                    baselineAccuracy,
+                  });
+                const visionImageUrls = await this.buildComparePageVisionInputs(
+                  validationTarget.page,
+                );
+                const diagnosisModel =
+                  this.configService.get<string>('pipeline.reviewCodeModel') ??
+                  resolvedModels.fixAgent;
+
+                await this.logToFile(
+                  logPath,
+                  [
+                    `[Post Edit Validation] component=${validationTarget.componentName} route=${validationTarget.page.route ?? validationTarget.page.visual?.reactPath ?? 'unknown'} model=${diagnosisModel || 'default'} images=${visionImageUrls.length}`,
+                    `[Post Edit Validation] edited metrics: ${this.formatAutomationComparePageSummary(
+                      validationTarget.page,
+                    )}`,
+                    this.summarizeLogLines(
+                      requestContextLines,
+                      8,
+                      '[Post Edit Validation] request context',
+                    ),
+                    this.summarizeLogLines(
+                      sourceEvidence,
+                      6,
+                      '[Post Edit Validation] source evidence',
+                    ),
+                    this.summarizeLogLines(
+                      planEvidence,
+                      4,
+                      '[Post Edit Validation] plan evidence',
+                    ),
+                  ].join('\n'),
+                );
+
+                validation =
+                  await this.siteCompareVisualDiagnosis.validatePostEdit({
+                    componentName: validationTarget.componentName,
+                    page: validationTarget.page,
+                    requestContextLines,
+                    sourceEvidence,
+                    planEvidence,
+                    modelName: diagnosisModel,
+                    visionImageUrls,
+                    baselineAccuracy,
+                  });
+
+                await this.logToFile(
+                  logPath,
+                  [
+                    `[Post Edit Validation] ${validation.componentName} route=${validation.route ?? validationTarget.page.route ?? 'unknown'} mode=${validation.analysisMode ?? 'unknown'} passed=${validation.passed} shouldRepair=${validation.shouldRepair} editIntentSatisfied=${validation.editIntentSatisfied} outOfScopeRegression=${validation.outOfScopeRegression} confidence=${validation.confidence.toFixed(2)} score=${validation.score}`,
+                    `[Post Edit Validation] summary=${validation.summary}`,
+                    this.summarizeLogLines(
+                      validation.issues.map(
+                        (issue) =>
+                          `${issue.type}|${issue.severity}|${issue.target ?? 'general'}|${issue.suggestedAction}`,
+                      ),
+                      6,
+                      '[Post Edit Validation] issues',
+                    ),
+                    this.summarizeLogLines(
+                      validation.repairPlan.instructions,
+                      6,
+                      '[Post Edit Validation] instructions',
+                    ),
+                  ].join('\n'),
+                );
+
+                let activeTarget = validationTarget;
+                let activeSourceEvidence = sourceEvidence;
+                let activePlanEvidence = planEvidence;
+                let activeRequestContextLines = requestContextLines;
+                const postEditTokens =
+                  'tokens' in normalizedTheme
+                    ? ((normalizedTheme as { tokens?: ThemeTokens }).tokens ??
+                      undefined)
+                    : undefined;
+                const maxPostEditRepairRounds = 2;
+
+                for (
+                  let round = 1;
+                  round <= maxPostEditRepairRounds &&
+                  validation.shouldRepair &&
+                  validation.confidence >= 0.55;
+                  round++
+                ) {
+                  this.emitStepProgress(
+                    state,
+                    '9b_post_edit_visual_validation',
+                    Math.min(0.44 + round * 0.18, 0.82),
+                    `Post-edit repair round ${round}/${maxPostEditRepairRounds}: fixing "${activeTarget.componentName}" after validation reported remaining issues.`,
+                  );
+                  await this.logToFile(
+                    logPath,
+                    `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} starting for component="${activeTarget.componentName}" route="${activeTarget.page.route ?? activeTarget.page.visual?.reactPath ?? 'unknown'}" score=${validation.score} confidence=${validation.confidence.toFixed(2)}.`,
+                  );
+
+                  const repairResult =
+                    await this.applyPostEditValidationRepairPass({
+                      preview,
+                      components: buildComponents,
+                      plan: reviewResult.plan,
+                      target: activeTarget,
+                      validation,
+                      request: dto.editRequest,
+                      requestContextLines: activeRequestContextLines,
+                      sourceEvidence: activeSourceEvidence,
+                      planEvidence: activePlanEvidence,
+                      fixAgentModel: resolvedModels.fixAgent,
+                      tokens: postEditTokens,
+                      logPath,
+                    });
+                  buildComponents = repairResult.components;
+
+                  if (!repairResult.applied) {
+                    await this.logToFile(
+                      logPath,
+                      `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} produced no accepted repair. Stopping post-edit repair loop.`,
+                    );
+                    break;
+                  }
+
+                  try {
+                    const roundCompareResult = await this.compareSite({
+                      siteId,
+                      wpBaseUrl,
+                      reactFeUrl: preview.previewUrl,
+                      reactBeUrl,
+                      jobId,
+                      mode: 'edited',
+                      routeEntries: preview.routeEntries,
+                    });
+                    if (roundCompareResult.warnings?.length) {
+                      for (const warning of roundCompareResult.warnings) {
+                        await this.logToFile(
+                          logPath,
+                          `[post-edit-compare] ${warning}`,
+                        );
+                      }
+                    }
+                    editedMetrics = roundCompareResult.metrics ?? editedMetrics;
+                    if (editedMetrics) {
+                      await this.logAutomationCompareMetrics(
+                        logPath,
+                        `post-edit-validation-round-${round}`,
+                        editedMetrics,
+                      );
+                      metrics = editedMetrics;
+                    }
+
+                    const nextTarget = this.selectPostEditValidationTarget({
+                      metrics: editedMetrics,
+                      preview,
+                      components: buildComponents,
+                      request: dto.editRequest,
+                      context: editRequestContext,
+                    });
+                    if (!nextTarget) {
+                      await this.logToFile(
+                        logPath,
+                        `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} could not resolve a compare target after repair. Stopping post-edit repair loop.`,
+                      );
+                      break;
+                    }
+
+                    activeTarget = nextTarget;
+                    const nextComponentPlan = reviewResult.plan.find(
+                      (entry) => entry.componentName === activeTarget.componentName,
+                    );
+                    activeSourceEvidence = this.buildSourceEvidenceForComparePage(
+                      activeTarget.page,
+                      content,
+                    );
+                    activePlanEvidence =
+                      this.buildPlanEvidenceForComponent(nextComponentPlan);
+                    activeRequestContextLines =
+                      this.buildPostEditValidationRequestContext({
+                        request: dto.editRequest,
+                        context: editRequestContext,
+                        componentName: activeTarget.componentName,
+                        page: activeTarget.page,
+                        baselineAccuracy,
+                      });
+                    const nextVisionImageUrls =
+                      await this.buildComparePageVisionInputs(activeTarget.page);
+
+                    validation =
+                      await this.siteCompareVisualDiagnosis.validatePostEdit({
+                        componentName: activeTarget.componentName,
+                        page: activeTarget.page,
+                        requestContextLines: activeRequestContextLines,
+                        sourceEvidence: activeSourceEvidence,
+                        planEvidence: activePlanEvidence,
+                        modelName: diagnosisModel,
+                        visionImageUrls: nextVisionImageUrls,
+                        baselineAccuracy,
+                      });
+                    await this.logToFile(
+                      logPath,
+                      [
+                        `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} re-validation component=${validation.componentName} route=${validation.route ?? activeTarget.page.route ?? 'unknown'} passed=${validation.passed} shouldRepair=${validation.shouldRepair} editIntentSatisfied=${validation.editIntentSatisfied} outOfScopeRegression=${validation.outOfScopeRegression} confidence=${validation.confidence.toFixed(2)} score=${validation.score}`,
+                        `[Post Edit Repair] summary=${validation.summary}`,
+                        this.summarizeLogLines(
+                          validation.issues.map(
+                            (issue) =>
+                              `${issue.type}|${issue.severity}|${issue.target ?? 'general'}|${issue.suggestedAction}`,
+                          ),
+                          6,
+                          '[Post Edit Repair] issues',
+                        ),
+                      ].join('\n'),
+                    );
+
+                    if (!validation.shouldRepair || validation.passed) {
+                      await this.logToFile(
+                        logPath,
+                        `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} resolved the remaining post-edit validation issues.`,
+                      );
+                      break;
+                    }
+                    if (validation.confidence < 0.55) {
+                      await this.logToFile(
+                        logPath,
+                        `[Post Edit Repair] Round ${round}/${maxPostEditRepairRounds} produced low-confidence follow-up diagnosis (${validation.confidence.toFixed(2)}). Stopping post-edit repair loop.`,
+                      );
+                      break;
+                    }
+                  } catch (err: any) {
+                    this.logger.error(
+                      `[Post Edit Repair] re-compare/re-validate failed — ${err?.message ?? err}`,
+                      err?.response?.data ?? err?.stack,
+                    );
+                    await this.logToFile(
+                      logPath,
+                      `[Post Edit Repair] Re-compare/re-validate failed after round ${round}/${maxPostEditRepairRounds}: ${err?.message ?? err}`,
+                    );
+                    break;
+                  }
+                }
+
+                if (!validation.passed) {
+                  this.logger.warn(
+                    `[Post Edit Validation] "${validation.componentName}" still needs review after the approved edit. score=${validation.score} confidence=${validation.confidence.toFixed(2)} shouldRepair=${validation.shouldRepair}`,
+                  );
+                }
+              } else {
+                await this.logToFile(
+                  logPath,
+                  '[Post Edit Validation] No matching route/component could be selected from compare metrics for the approved edit request. Skipping AI validation.',
+                );
+              }
+
+              if (editedMetrics) {
+                metrics = editedMetrics;
+              }
+
+              this.emitStepProgress(
+                state,
+                '9b_post_edit_visual_validation',
+                0.92,
+                validation
+                  ? validation.passed
+                    ? 'Edited preview validation passed. Updated compare artifacts are attached.'
+                    : 'Edited preview validation found remaining issues. Updated compare artifacts are attached for review.'
+                  : editedMetrics
+                    ? 'Edited preview compare artifacts are attached, but no targeted post-edit diagnosis was produced.'
+                    : 'Edited preview validation could not collect compare metrics; the pipeline will continue with the current preview.',
+                {
+                  ...this.buildPreviewEventData({
+                    preview,
+                    previewStage: 'edited',
+                    hasEditRequest,
+                    editApprovalRequired: false,
+                    editApplied: true,
+                    metrics: editedMetrics ?? metrics ?? undefined,
+                  }),
+                  ...(this.buildEditRequestProgressData({
+                    request: dto.editRequest,
+                    title: 'Post-edit visual validation finished',
+                    summary: validation?.summary,
+                  }) ?? {}),
+                },
+              );
+
+              this.updateStateResult(state, {
+                previewDir: preview.previewDir,
+                frontendDir: preview.frontendDir,
+                previewUrl: preview.previewUrl,
+                apiBaseUrl: preview.apiBaseUrl,
+                previewStage: 'edited',
+                hasEditRequest,
+                editApprovalRequired: false,
+                editApplied: true,
+                uiSourceMapPath: preview.uiSourceMapPath,
+                routeEntries: preview.routeEntries,
+                baselineMetrics: state.result?.baselineMetrics ?? metrics,
+                editedMetrics: editedMetrics ?? metrics,
+                postEditVisualValidation: validation,
+                metrics,
+              });
+
+              return {
+                metrics: editedMetrics,
+                validation,
+              };
+            },
+          );
+        } else {
+          const postEditValidationStep = state.steps.find(
+            (step) => step.name === '9b_post_edit_visual_validation',
+          );
+          if (postEditValidationStep) {
+            postEditValidationStep.status = 'skipped';
+          }
+          this.progress.get(jobId)?.next({
+            step: '9b_post_edit_visual_validation',
+            label: this.getStepMeta('9b_post_edit_visual_validation', jobId)
+              .label,
+            status: 'skipped',
+            percent: this.calcPercentThrough(
+              '9b_post_edit_visual_validation',
+              jobId,
+            ),
+            message:
+              decision.action === 'skip'
+                ? 'Post-edit visual validation was skipped because the user chose not to apply the pending edit request.'
+                : 'Post-edit visual validation was skipped because the approved request did not require any preview mutations.',
+            data: {
+              ...this.buildPreviewEventData({
                 preview,
                 previewStage:
-                  hasEditRequest && this.controls.get(jobId)?.editApplied
-                    ? 'edited'
-                    : 'baseline',
+                  decision.action === 'skip' ? 'baseline' : 'edited',
                 hasEditRequest,
-                editApprovalRequired: Boolean(
-                  this.controls.get(jobId)?.pendingEditApproval,
-                ),
-                editApplied: Boolean(this.controls.get(jobId)?.editApplied),
-                metrics,
-              })
-            : undefined,
-        );
-
-        state.result = {
-          ...(state.result ?? {}),
-          previewDir: preview.previewDir,
-          frontendDir: preview.frontendDir,
-          previewUrl: preview.previewUrl,
-          apiBaseUrl: preview.apiBaseUrl,
-          previewStage:
-            hasEditRequest && this.controls.get(jobId)?.editApplied
-              ? 'edited'
-              : 'baseline',
-          hasEditRequest,
-          editApprovalRequired: Boolean(
-            this.controls.get(jobId)?.pendingEditApproval,
-          ),
-          editApplied: Boolean(this.controls.get(jobId)?.editApplied),
-          uiSourceMapPath: preview.uiSourceMapPath,
-          routeEntries: preview.routeEntries,
-          metrics,
-        };
-        const compareControl = this.controls.get(jobId);
-        if (compareControl) {
-          compareControl.buildComponents = buildComponents;
+                editApprovalRequired: false,
+                editApplied: false,
+                metrics: metrics ?? undefined,
+              }),
+              ...(this.buildEditRequestProgressData({
+                request: dto.editRequest,
+                title: 'Post-edit validation skipped',
+                summary:
+                  decision.action === 'skip'
+                    ? 'The user skipped the pending edit request, so there is no edited preview to validate.'
+                    : 'The approved edit request did not produce any targeted mutations, so there was no edited preview delta to validate.',
+              }) ?? {}),
+            },
+          });
         }
-
-        return { metrics };
-      });
-      await stepDelay();
+        await stepDelay();
+      }
 
       // Bước 8: Xoá temp/repos và temp/uploads của job này
       await this.runStep(state, '10_cleanup', logPath, () =>
@@ -3191,8 +4246,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           completedControl.buildComponents = buildComponents;
           completedControl.approvedPlan = reviewResult.plan;
         }
-        state.result = {
+        this.updateStateResult(state, {
           runSummaryPath: logPath,
+          runLogPath,
           previewDir: preview.previewDir,
           frontendDir: preview.frontendDir,
           previewUrl: preview.previewUrl,
@@ -3210,7 +4266,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
           dbCreds,
           metrics,
           plan: reviewResult.plan,
-        };
+        });
         const migrationNotification =
           await this.notifyAutomationMigrationCompleted({
             siteId,
@@ -3218,10 +4274,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             logPath,
           });
         if (migrationNotification) {
-          state.result = {
-            ...(state.result ?? {}),
+          this.updateStateResult(state, {
             migrationNotification,
-          };
+          });
         }
         // Emit final event with previewUrl from within runStep
         const subject = this.progress.get(jobId);
@@ -3307,19 +4362,6 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       repoRoot,
       activeSlug,
     });
-  }
-
-  private async enrichThemeWithPluginTemplates(input: {
-    theme: PhpParseResult | BlockParseResult;
-    themeDir: string;
-    manifest: RepoThemeManifest;
-    resolvedSource: RepoResolvedSourceSummary;
-    logPath?: string;
-  }): Promise<{
-    theme: PhpParseResult | BlockParseResult;
-  }> {
-    const { theme } = input;
-    return { theme };
   }
 
   private async cloneThemeRepo(
@@ -3882,6 +4924,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       uiAssessment: this.buildUiAssessment(accuracy, visualRouteResults),
       repoAnalysisSummary: summaryDraft.repoAnalysisSummary,
       fullComponentRegenerations: summaryDraft.fullComponentRegenerations,
+      degradedComponents: Array.isArray(state.result?.degradedComponents)
+        ? state.result.degradedComponents
+        : undefined,
     };
 
     await writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf-8');
@@ -4126,8 +5171,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
   }): Promise<{
     metrics?: SiteCompareMetrics;
     warnings?: string[];
-    provider: 'automation' | 'openclaw';
-    fallbackUsed?: boolean;
+    provider: 'automation';
   }> {
     return this.siteCompareService.compare(input);
   }
@@ -4295,9 +5339,506 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       .slice(0, 3);
   }
 
+  private selectPostEditValidationTarget(input: {
+    metrics: unknown;
+    preview: PreviewBuilderResult;
+    components: ReactGenerateResult['components'];
+    request?: RunPipelineDto['editRequest'];
+    context?: ResolvedEditRequestContext;
+  }): {
+    componentName: string;
+    page: AutomationComparePageResult;
+  } | null {
+    const { metrics, preview, components, request, context } = input;
+    const pages = this.collectAutomationComparePages(metrics);
+    if (pages.length === 0) return null;
+
+    const componentNames = new Set(
+      components.map((component) => component.name),
+    );
+    const desiredRoutes = new Set<string>();
+    const desiredComponents = new Set<string>();
+
+    const addRoute = (value?: string | null) => {
+      const normalized = this.normalizeComparableRoute(value);
+      if (normalized) desiredRoutes.add(normalized);
+    };
+    const addComponent = (value?: string | null) => {
+      const normalized = String(value ?? '').trim();
+      if (normalized) desiredComponents.add(normalized);
+    };
+
+    addRoute(request?.pageContext?.reactRoute);
+    addRoute(request?.pageContext?.wordpressRoute);
+    addRoute(request?.targetHint?.route);
+    addComponent(request?.targetHint?.componentName);
+    for (const attachment of request?.attachments ?? []) {
+      addRoute(attachment.captureContext?.page?.route);
+      addRoute(attachment.targetNode?.route);
+    }
+    for (const candidate of context?.targetCandidates ?? []) {
+      addRoute(candidate.route);
+      addComponent(candidate.componentName);
+    }
+    const hasExplicitHints =
+      desiredRoutes.size > 0 || desiredComponents.size > 0;
+
+    const scored = pages
+      .map((page) => {
+        const route =
+          this.normalizeComparableRoute(page.route) ??
+          this.normalizeComparableRoute(page.visual?.reactPath) ??
+          null;
+        const resolvedComponentName = this.resolveVisualRepairComponentName({
+          page,
+          preview,
+          componentNames,
+        });
+
+        let score = 0;
+        const routeMatched = Boolean(route && desiredRoutes.has(route));
+        const routePatternMatched = Boolean(
+          route &&
+          [...desiredRoutes].some((desiredRoute) =>
+            this.previewRouteMatches(desiredRoute, route),
+          ),
+        );
+        const componentMatched = Boolean(
+          resolvedComponentName && desiredComponents.has(resolvedComponentName),
+        );
+        const componentHintMatched = Boolean(
+          page.componentHint && desiredComponents.has(page.componentHint),
+        );
+
+        if (routeMatched) score += 100;
+        if (routePatternMatched) {
+          score += 60;
+        }
+        if (componentMatched) {
+          score += 100;
+        }
+        if (componentHintMatched) {
+          score += 70;
+        }
+        if (
+          hasExplicitHints &&
+          !routeMatched &&
+          !routePatternMatched &&
+          !componentMatched &&
+          !componentHintMatched
+        ) {
+          return {
+            page,
+            componentName: resolvedComponentName,
+            score: -1,
+          };
+        }
+        if (request?.targetHint?.sectionType) score += 5;
+        score +=
+          this.coerceFiniteNumber(page.visual?.diffPct) ??
+          Math.max(
+            0,
+            100 - (this.coerceFiniteNumber(page.visual?.accuracy) ?? 100),
+          );
+
+        return {
+          page,
+          componentName: resolvedComponentName,
+          score,
+        };
+      })
+      .filter(
+        (
+          entry,
+        ): entry is {
+          page: AutomationComparePageResult;
+          componentName: string;
+          score: number;
+        } => Boolean(entry.componentName) && entry.score >= 0,
+      )
+      .sort((a, b) => b.score - a.score);
+
+    if (scored.length > 0) {
+      return {
+        componentName: scored[0].componentName,
+        page: scored[0].page,
+      };
+    }
+
+    if (hasExplicitHints) {
+      return null;
+    }
+
+    const fallbackPage = pages[0];
+    const fallbackComponent = this.resolveVisualRepairComponentName({
+      page: fallbackPage,
+      preview,
+      componentNames,
+    });
+    if (!fallbackComponent) return null;
+    return {
+      componentName: fallbackComponent,
+      page: fallbackPage,
+    };
+  }
+
+  private buildPostEditValidationRequestContext(input: {
+    request?: RunPipelineDto['editRequest'];
+    context?: ResolvedEditRequestContext;
+    componentName: string;
+    page: AutomationComparePageResult;
+    baselineAccuracy?: number | null;
+  }): string[] {
+    const { request, context, componentName, page, baselineAccuracy } = input;
+    const lines: string[] = [
+      `Target component: ${componentName}`,
+      `Target route: ${page.route ?? page.visual?.reactPath ?? request?.targetHint?.route ?? 'unknown'}`,
+    ];
+
+    if (typeof baselineAccuracy === 'number') {
+      lines.push(`Baseline accuracy before edit: ${baselineAccuracy}%`);
+    }
+    if (request?.prompt?.trim()) {
+      lines.push(`Primary request: ${request.prompt.trim()}`);
+    }
+    if (request?.language?.trim()) {
+      lines.push(`Preferred language: ${request.language.trim()}`);
+    }
+    if (request?.pageContext?.pageTitle?.trim()) {
+      lines.push(`Target page title: ${request.pageContext.pageTitle.trim()}`);
+    }
+    if (request?.targetHint?.componentName?.trim()) {
+      lines.push(
+        `Requested component hint: ${request.targetHint.componentName.trim()}`,
+      );
+    }
+    if (request?.targetHint?.sectionType?.trim()) {
+      lines.push(
+        `Requested section type hint: ${request.targetHint.sectionType.trim()}`,
+      );
+    }
+    if (typeof request?.targetHint?.sectionIndex === 'number') {
+      lines.push(
+        `Requested section index hint: ${request.targetHint.sectionIndex}`,
+      );
+    }
+    if (request?.constraints?.preserveOutsideSelection === true) {
+      lines.push(
+        'Constraint: preserve content and layout outside the selected edit scope.',
+      );
+    }
+    if (request?.constraints?.preserveDataContract === true) {
+      lines.push('Constraint: preserve existing data contracts and bindings.');
+    }
+    if (context?.recommendedStrategy) {
+      lines.push(`Resolved edit strategy: ${context.recommendedStrategy}`);
+    }
+    if (context?.editOperation) {
+      lines.push(`Resolved edit operation: ${context.editOperation}`);
+    }
+    if (context?.targetScope) {
+      lines.push(`Resolved target scope: ${context.targetScope}`);
+    }
+    if (context?.targetCandidates?.length) {
+      lines.push(
+        `Resolved candidates: ${context.targetCandidates
+          .slice(0, 3)
+          .map(
+            (candidate) =>
+              `${candidate.componentName ?? 'unknown'}@${candidate.route ?? 'unknown'} (${candidate.confidence.toFixed(2)})`,
+          )
+          .join(' | ')}`,
+      );
+    }
+    if ((request?.attachments?.length ?? 0) > 0) {
+      lines.push(
+        `Attached captures: ${(request?.attachments ?? [])
+          .slice(0, 4)
+          .map((attachment) =>
+            [
+              attachment.id,
+              attachment.note?.trim(),
+              attachment.captureContext?.page?.route,
+              attachment.domTarget?.nearestHeading?.trim(),
+            ]
+              .filter(Boolean)
+              .join(' / '),
+          )
+          .join(' || ')}`,
+      );
+    }
+
+    return lines;
+  }
+
+  private async applyPostEditValidationRepairPass(input: {
+    preview: PreviewBuilderResult;
+    components: ReactGenerateResult['components'];
+    plan: PlanResult;
+    target: {
+      componentName: string;
+      page: AutomationComparePageResult;
+    };
+    validation: PostEditVisualValidationResult;
+    request?: RunPipelineDto['editRequest'];
+    requestContextLines: string[];
+    sourceEvidence: string[];
+    planEvidence: string[];
+    fixAgentModel?: string;
+    tokens?: ThemeTokens;
+    logPath: string;
+  }): Promise<{
+    components: ReactGenerateResult['components'];
+    applied: boolean;
+  }> {
+    const {
+      preview,
+      components,
+      plan,
+      target,
+      validation,
+      request,
+      requestContextLines,
+      sourceEvidence,
+      planEvidence,
+      fixAgentModel,
+      tokens,
+      logPath,
+    } = input;
+
+    const componentIndex = components.findIndex(
+      (component) => component.name === target.componentName,
+    );
+    if (componentIndex === -1) {
+      await this.logToFile(
+        logPath,
+        `[Post Edit Repair] Could not find component "${target.componentName}" in the current preview snapshot.`,
+      );
+      return { components, applied: false };
+    }
+
+    const snapshot = components.map((component) => ({ ...component }));
+    const originalComponent = components[componentIndex];
+    const visionImageUrls = await this.buildComparePageVisionInputs(target.page);
+    const visionContextNote = this.buildComparePageVisionContext(target.page);
+    const baseFeedback = this.buildPostEditValidationRepairFeedback({
+      componentName: target.componentName,
+      page: target.page,
+      validation,
+      request,
+      requestContextLines,
+      sourceEvidence,
+      planEvidence,
+    });
+    let candidateComponent = originalComponent;
+    let retryFeedback = baseFeedback;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt > 1) {
+        await this.logToFile(
+          logPath,
+          `[Post Edit Repair] Retrying "${target.componentName}" attempt ${attempt}/2 with accumulated code/runtime feedback.`,
+        );
+      }
+
+      const fixed = await this.reactGenerator.fixComponent({
+        component: candidateComponent,
+        plan,
+        feedback: retryFeedback,
+        modelConfig: { fixAgent: fixAgentModel },
+        logPath,
+        visionImageUrls,
+        visionContextNote,
+        tokenScope: 'edit-request',
+      });
+      const repairedCandidate = {
+        ...fixed,
+        visualPlan: undefined,
+      };
+      const revalidated = this.validator.collectValidationIssues([
+        repairedCandidate,
+      ]);
+      if (revalidated.failures.length > 0) {
+        const error =
+          revalidated.failures[0]?.error ?? 'Unknown validation error';
+        await this.logToFile(
+          logPath,
+          `[Post Edit Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/2: ${error}`,
+        );
+        candidateComponent = repairedCandidate;
+        retryFeedback = this.buildPostEditValidationRetryFeedback({
+          baseFeedback,
+          attempt,
+          phase: 'code/runtime validation',
+          error,
+        });
+        continue;
+      }
+
+      const candidateAfterValidation = revalidated.components[0];
+      const trialComponents = components.map((component, index) =>
+        index === componentIndex ? candidateAfterValidation : component,
+      );
+
+      try {
+        await this.previewBuilder.syncGeneratedComponents(
+          preview.previewDir,
+          trialComponents,
+          tokens,
+        );
+        await this.validator.assertPreviewBuild(preview.frontendDir);
+        await this.validator.assertPreviewRuntime(
+          preview.previewUrl,
+          this.buildRuntimeSmokeRoutes(preview.routeEntries),
+        );
+        components[componentIndex] = candidateAfterValidation;
+        await this.logToFile(
+          logPath,
+          `[Post Edit Repair] Accepted updated component "${target.componentName}" on attempt ${attempt}/2 after build/runtime re-check.`,
+        );
+        return { components, applied: true };
+      } catch (error: any) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        await this.logToFile(
+          logPath,
+          `[Post Edit Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/2: ${message}`,
+        );
+        try {
+          await this.previewBuilder.syncGeneratedComponents(
+            preview.previewDir,
+            components,
+            tokens,
+          );
+        } catch (restoreError: any) {
+          const restoreMessage =
+            restoreError instanceof Error
+              ? restoreError.message
+              : String(restoreError);
+          throw new Error(
+            `Failed to restore preview after rejected post-edit repair for "${target.componentName}": ${restoreMessage}`,
+          );
+        }
+        candidateComponent = candidateAfterValidation;
+        retryFeedback = this.buildPostEditValidationRetryFeedback({
+          baseFeedback,
+          attempt,
+          phase: 'preview build/runtime',
+          error: message,
+        });
+      }
+    }
+
+    await this.previewBuilder.syncGeneratedComponents(
+      preview.previewDir,
+      snapshot,
+      tokens,
+    );
+    await this.logToFile(
+      logPath,
+      `[Post Edit Repair] Exhausted repair attempts for "${target.componentName}". Keeping the previous edited version.`,
+    );
+    return { components: snapshot, applied: false };
+  }
+
+  private buildPostEditValidationRepairFeedback(input: {
+    componentName: string;
+    page: AutomationComparePageResult;
+    validation: PostEditVisualValidationResult;
+    request?: RunPipelineDto['editRequest'];
+    requestContextLines: string[];
+    sourceEvidence: string[];
+    planEvidence: string[];
+  }): string {
+    const {
+      componentName,
+      page,
+      validation,
+      request,
+      requestContextLines,
+      sourceEvidence,
+      planEvidence,
+    } = input;
+    const lines: string[] = [
+      `An approved user edit request was already applied to component "${componentName}", but post-edit validation says the result still needs follow-up.`,
+      `Route: ${page.route ?? page.visual?.reactPath ?? 'unknown'}`,
+      `Post-edit validation summary: ${validation.summary}`,
+      `Validation status: passed=${validation.passed} shouldRepair=${validation.shouldRepair} editIntentSatisfied=${validation.editIntentSatisfied} outOfScopeRegression=${validation.outOfScopeRegression} wpParityAdvisoryOnly=${validation.wpParityAdvisoryOnly} confidence=${validation.confidence.toFixed(2)} score=${validation.score}`,
+      'Repair priority rules:',
+      '- The approved user edit intent is PRIMARY.',
+      '- WordPress is only a secondary reference after edit approval.',
+      '- Do NOT revert the component back toward the original WordPress version unless the user request explicitly asked for that.',
+      '- Make the requested change clearly visible if it is still too weak or missing.',
+      '- If nearby/unrelated sections regressed, restore those areas while preserving the approved edit.',
+    ];
+
+    if (request?.prompt?.trim()) {
+      lines.push(`Approved user request: ${request.prompt.trim()}`);
+    }
+    if (requestContextLines.length > 0) {
+      lines.push('Resolved edit request context:');
+      lines.push(...requestContextLines.map((line) => `- ${line}`));
+    }
+    if (validation.issues.length > 0) {
+      lines.push('Post-edit validation issues:');
+      lines.push(
+        ...validation.issues.map(
+          (issue) =>
+            `- type=${issue.type} severity=${issue.severity} target=${issue.target ?? 'general'} inEditScope=${issue.inEditScope === true ? 'yes' : 'no'} evidence=${issue.evidence} action=${issue.suggestedAction}`,
+        ),
+      );
+    }
+    if (validation.repairPlan.instructions.length > 0) {
+      lines.push('Validation repair instructions:');
+      lines.push(
+        ...validation.repairPlan.instructions.map(
+          (instruction) => `- ${instruction}`,
+        ),
+      );
+    }
+    if (validation.repairPlan.guardrails.length > 0) {
+      lines.push('Validation guardrails:');
+      lines.push(
+        ...validation.repairPlan.guardrails.map((guardrail) => `- ${guardrail}`),
+      );
+    }
+    if (sourceEvidence.length > 0) {
+      lines.push('Secondary WordPress / DB source evidence:');
+      lines.push(...sourceEvidence.map((line) => `- ${line}`));
+    }
+    if (planEvidence.length > 0) {
+      lines.push('Current planner evidence:');
+      lines.push(...planEvidence.map((line) => `- ${line}`));
+    }
+
+    lines.push(
+      'Return a complete corrected component. Keep build/runtime safety, keep valid data bindings, and preserve unrelated sections.',
+    );
+    return lines.join('\n');
+  }
+
+  private buildPostEditValidationRetryFeedback(input: {
+    baseFeedback: string;
+    attempt: number;
+    phase: 'code/runtime validation' | 'preview build/runtime';
+    error: string;
+  }): string {
+    const { baseFeedback, attempt, phase, error } = input;
+    return [
+      baseFeedback,
+      '',
+      `Additional correction feedback after post-edit repair attempt ${attempt}:`,
+      `- The previous post-edit repair failed ${phase} safety checks.`,
+      '- Preserve the already-approved user edit direction.',
+      '- Do NOT fall back to the pre-edit WordPress version.',
+      '- Fix the concrete issue below and return valid, runnable code.',
+      `- Failure detail: ${error}`,
+    ].join('\n');
+  }
+
   private async logAutomationCompareMetrics(
     logPath: string,
-    stage: 'initial' | 'after-repair',
+    stage: string,
     metrics: unknown,
   ): Promise<void> {
     const pages = this.collectAutomationComparePages(metrics);
@@ -4408,31 +5949,50 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     componentNames: Set<string>;
   }): string | null {
     const { page, preview, componentNames } = input;
-    const route =
-      this.normalizeComparableRoute(page.route) ??
-      this.normalizeComparableRoute(page.visual?.reactPath) ??
-      null;
-    if (route) {
-      const exactMatch = preview.routeEntries.find(
-        (entry) => this.normalizeComparableRoute(entry.route) === route,
-      );
-      if (exactMatch) return exactMatch.componentName;
+      const route =
+        this.normalizeComparableRoute(page.route) ??
+        this.normalizeComparableRoute(page.visual?.reactPath) ??
+        null;
+      if (route) {
+        const exactMatch = preview.routeEntries.find(
+          (entry) =>
+            !this.isCatchAllPreviewRoute(entry) &&
+            this.normalizeComparableRoute(entry.route) === route,
+        );
+        if (exactMatch) return exactMatch.componentName;
 
-      const patternMatch = preview.routeEntries.find((entry) =>
-        this.previewRouteMatches(entry.route, route),
+        const patternMatch = preview.routeEntries.find(
+          (entry) =>
+            !this.isCatchAllPreviewRoute(entry) &&
+            this.previewRouteMatches(entry.route, route),
+        );
+        if (patternMatch) return patternMatch.componentName;
+      }
+
+      const hinted = page.componentHint?.trim();
+      if (hinted && componentNames.has(hinted)) return hinted;
+      const notFoundEntry = preview.routeEntries.find((entry) =>
+        this.isCatchAllPreviewRoute(entry),
       );
-      if (patternMatch) return patternMatch.componentName;
+      if (notFoundEntry && hinted === notFoundEntry.componentName) {
+        return notFoundEntry.componentName;
+      }
+      return null;
     }
-
-    const hinted = page.componentHint?.trim();
-    if (hinted && componentNames.has(hinted)) return hinted;
-    return null;
-  }
 
   private normalizeComparableRoute(route?: string | null): string | null {
     if (!route) return null;
-    const value = route.trim();
+    let value = route.trim();
     if (!value) return null;
+    if (/^https?:\/\//i.test(value)) {
+      try {
+        const parsed = new URL(value);
+        value = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+      } catch {
+        // Fall through with the raw value if URL parsing fails.
+      }
+    }
+    value = value.replace(/^\/preview\/[^/]+(?=\/|$)/i, '');
     return value.replace(/\/+$/, '') || '/';
   }
 
@@ -4447,6 +6007,29 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       .replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, '[^/]+')
       .replace(/\\\*/g, '.*');
     return new RegExp(`^${regexSource}$`).test(normalizedActual);
+  }
+
+  private isCatchAllPreviewRoute(
+    entry: Pick<PreviewBuilderResult['routeEntries'][number], 'route' | 'componentName'>,
+  ): boolean {
+    return entry.route.trim() === '*' || /^NotFound$/i.test(entry.componentName);
+  }
+
+  private buildRuntimeSmokeRoutes(
+    routeEntries: PreviewBuilderResult['routeEntries'] | undefined,
+  ): string[] {
+    const staticRoutes =
+      routeEntries
+        ?.map((entry) => entry.route)
+        .filter((route) => {
+          const normalized = this.normalizeComparableRoute(route);
+          return Boolean(
+            normalized &&
+              (normalized === '/' ||
+                (!normalized.includes(':') && normalized !== '*')),
+          );
+        }) ?? [];
+    return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
   }
 
   private async applyVisualMetricsRepairPass(input: {
@@ -4528,14 +6111,67 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       );
       if (componentIndex === -1) continue;
 
-      const diagnosis = await this.diagnoseVisualMismatch({
+      const componentPlan = plan.find(
+        (entry) => entry.componentName === target.componentName,
+      );
+      const sourceEvidence = this.buildSourceEvidenceForComparePage(
+        target.page,
+        content,
+      );
+      const planEvidence = this.buildPlanEvidenceForComponent(componentPlan);
+      const visionImageUrls = await this.buildComparePageVisionInputs(
+        target.page,
+      );
+      const diagnosisModel =
+        this.configService.get<string>('pipeline.reviewCodeModel') ??
+        fixAgentModel;
+      await this.logToFile(
+        logPath,
+        [
+          `[Visual Diagnose] component=${target.componentName} route=${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'} model=${diagnosisModel || 'default'} images=${visionImageUrls.length}`,
+          `[Visual Diagnose] incoming metrics: ${this.formatAutomationComparePageSummary(
+            target.page,
+          )}`,
+          this.summarizeLogLines(
+            sourceEvidence,
+            6,
+            '[Visual Diagnose] source evidence',
+          ),
+          this.summarizeLogLines(
+            planEvidence,
+            4,
+            '[Visual Diagnose] plan evidence',
+          ),
+        ].join('\n'),
+      );
+      const diagnosis = await this.siteCompareVisualDiagnosis.diagnose({
         componentName: target.componentName,
         page: target.page,
-        plan,
-        content,
-        modelName: fixAgentModel,
-        logPath,
+        sourceEvidence,
+        planEvidence,
+        modelName: diagnosisModel,
+        visionImageUrls,
       });
+      await this.logToFile(
+        logPath,
+        [
+          `[Visual Diagnose] ${target.componentName} route=${target.page.route ?? target.page.visual?.reactPath ?? 'unknown'} mode=${diagnosis.analysisMode ?? 'unknown'} rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)} score=${diagnosis.score}`,
+          `[Visual Diagnose] strategy=${diagnosis.repairPlan.strategy} shouldRepair=${diagnosis.shouldRepair}`,
+          this.summarizeLogLines(
+            diagnosis.issues.map(
+              (issue) =>
+                `${issue.type}|${issue.severity}|${issue.sectionHint ?? issue.location ?? 'general'}|${issue.suggestedFix}`,
+            ),
+            6,
+            '[Visual Diagnose] issues',
+          ),
+          this.summarizeLogLines(
+            diagnosis.repairPlan.instructions,
+            5,
+            '[Visual Diagnose] instructions',
+          ),
+        ].join('\n'),
+      );
       if (!diagnosis.shouldRepair || diagnosis.confidence < 0.55) {
         this.logger.warn(
           `[Visual Metrics Repair] Diagnosis confidence too low for "${target.componentName}". Skipping targeted fix. rootCause=${diagnosis.rootCause.primary} confidence=${diagnosis.confidence.toFixed(2)}`,
@@ -4547,9 +6183,6 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         continue;
       }
 
-      const visionImageUrls = await this.buildComparePageVisionInputs(
-        target.page,
-      );
       const visionContextNote = this.buildComparePageVisionContext(target.page);
       const feedback = this.buildVisualRepairFeedback({
         componentName: target.componentName,
@@ -4573,35 +6206,130 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         ].join('\n'),
       );
 
-      const fixed = await this.reactGenerator.fixComponent({
-        component: components[componentIndex],
-        plan,
-        feedback,
-        modelConfig: { fixAgent: fixAgentModel },
-        logPath,
-        visionImageUrls,
-        visionContextNote,
-      });
-      const revalidated = this.validator.collectValidationIssues([fixed]);
-      if (revalidated.failures.length > 0) {
-        const error =
-          revalidated.failures[0]?.error ?? 'Unknown validation error';
+      const originalComponent = components[componentIndex];
+      let candidateComponent = originalComponent;
+      let retryFeedback = feedback;
+      let acceptedComponent: ReactGenerateResult['components'][number] | null =
+        null;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (attempt > 1) {
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Retrying "${target.componentName}" attempt ${attempt}/3 with accumulated code/runtime feedback.`,
+          );
+        }
+
+        const fixed = await this.reactGenerator.fixComponent({
+          component: candidateComponent,
+          plan,
+          feedback: retryFeedback,
+          modelConfig: { fixAgent: fixAgentModel },
+          logPath,
+          visionImageUrls,
+          visionContextNote,
+        });
+        const metricsRevalidationCandidate = {
+          ...fixed,
+          // Visual metrics repair is intentionally allowed to diverge from the
+          // original visual plan contract. Keep structural/build/runtime safety,
+          // but stop re-applying source-plan fidelity gates after metrics-driven
+          // edits have been accepted.
+          visualPlan: undefined,
+        };
+        const revalidated = this.validator.collectValidationIssues([
+          metricsRevalidationCandidate,
+        ]);
+        if (revalidated.failures.length > 0) {
+          const error =
+            revalidated.failures[0]?.error ?? 'Unknown validation error';
+          this.logger.warn(
+            `[Visual Metrics Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/3. Error: ${error}`,
+          );
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Re-validation failed for "${target.componentName}" attempt ${attempt}/3: ${error}`,
+          );
+          candidateComponent = metricsRevalidationCandidate;
+          retryFeedback = this.buildVisualMetricsRetryFeedback({
+            baseFeedback: feedback,
+            attempt,
+            phase: 'code/runtime validation',
+            error,
+          });
+          continue;
+        }
+
+        const candidateAfterValidation = revalidated.components[0];
+        const trialComponents = components.map((component, index) =>
+          index === componentIndex ? candidateAfterValidation : component,
+        );
+
+        try {
+          await this.previewBuilder.syncGeneratedComponents(
+            preview.previewDir,
+            trialComponents,
+            tokens,
+          );
+          await this.validator.assertPreviewBuild(preview.frontendDir);
+          await this.validator.assertPreviewRuntime(
+            preview.previewUrl,
+            this.buildRuntimeSmokeRoutes(preview.routeEntries),
+          );
+          acceptedComponent = candidateAfterValidation;
+          components[componentIndex] = candidateAfterValidation;
+          repairedCount += 1;
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Accepted updated component "${target.componentName}" on attempt ${attempt}/3 after build/runtime re-check (metrics-mode, visual plan contract disabled).`,
+          );
+          break;
+        } catch (error: any) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `[Visual Metrics Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/3. Error: ${message}`,
+          );
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Repair] Build/runtime failed for "${target.componentName}" attempt ${attempt}/3: ${message}`,
+          );
+          try {
+            await this.previewBuilder.syncGeneratedComponents(
+              preview.previewDir,
+              components,
+              tokens,
+            );
+          } catch (restoreError: any) {
+            const restoreMessage =
+              restoreError instanceof Error
+                ? restoreError.message
+                : String(restoreError);
+            throw new Error(
+              `Failed to restore preview after rejected metrics repair for "${target.componentName}": ${restoreMessage}`,
+            );
+          }
+          candidateComponent = candidateAfterValidation;
+          retryFeedback = this.buildVisualMetricsRetryFeedback({
+            baseFeedback: feedback,
+            attempt,
+            phase: 'preview build/runtime',
+            error: message,
+          });
+        }
+      }
+
+      if (!acceptedComponent) {
         this.logger.warn(
-          `[Visual Metrics Repair] Re-validation failed for "${target.componentName}". Keeping the previous version. Error: ${error}`,
+          `[Visual Metrics Repair] Exhausted repair attempts for "${target.componentName}". Keeping the previous version.`,
         );
         await this.logToFile(
           logPath,
-          `[Visual Metrics Repair] Re-validation failed for "${target.componentName}": ${error}`,
+          `[Visual Metrics Repair] Exhausted repair attempts for "${target.componentName}". Keeping the previous version.`,
         );
+        components[componentIndex] = originalComponent;
         continue;
       }
-
-      components[componentIndex] = revalidated.components[0];
-      repairedCount += 1;
-      await this.logToFile(
-        logPath,
-        `[Visual Metrics Repair] Accepted updated component "${target.componentName}" after validator re-check.`,
-      );
     }
 
     if (repairedCount === 0) {
@@ -4617,7 +6345,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       await this.validator.assertPreviewBuild(preview.frontendDir);
       await this.validator.assertPreviewRuntime(
         preview.previewUrl,
-        preview.routeEntries.map((entry) => entry.route),
+        this.buildRuntimeSmokeRoutes(preview.routeEntries),
       );
     } catch (error: any) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4646,473 +6374,23 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     return { components, applied: true, repairedCount };
   }
 
-  private async diagnoseVisualMismatch(input: {
-    componentName: string;
-    page: AutomationComparePageResult;
-    plan: PlanResult;
-    content: DbContentResult;
-    modelName?: string;
-    logPath: string;
-  }): Promise<VisualMismatchDiagnosis> {
-    const { componentName, page, plan, content, modelName, logPath } = input;
-    const componentPlan = plan.find(
-      (entry) => entry.componentName === componentName,
-    );
-    const sourceEvidence = this.buildSourceEvidenceForComparePage(
-      page,
-      content,
-    );
-    const planEvidence = this.buildPlanEvidenceForComponent(componentPlan);
-    const heuristic = this.buildHeuristicVisualDiagnosis({
-      componentName,
-      page,
-      sourceEvidence,
-      planEvidence,
-    });
-    const prompt = this.buildVisualDiagnosisPrompt({
-      componentName,
-      page,
-      sourceEvidence,
-      planEvidence,
-      heuristic,
-    });
-    const resolvedModel = modelName ?? this.llmFactory.getModel();
-
-    await this.logToFile(
-      logPath,
-      [
-        `[Visual Diagnose] component=${componentName} route=${page.route ?? page.visual?.reactPath ?? 'unknown'} model=${resolvedModel}`,
-        `[Visual Diagnose] incoming metrics: ${this.formatAutomationComparePageSummary(
-          page,
-        )}`,
-        this.summarizeLogLines(
-          sourceEvidence,
-          6,
-          '[Visual Diagnose] source evidence',
-        ),
-        this.summarizeLogLines(
-          planEvidence,
-          4,
-          '[Visual Diagnose] plan evidence',
-        ),
-        `[Visual Diagnose] heuristic rootCause=${heuristic.rootCause.primary} confidence=${heuristic.confidence.toFixed(2)} strategy=${heuristic.repairPlan.strategy}`,
-      ].join('\n'),
-    );
-
-    try {
-      const response = await this.llmFactory.chat({
-        model: resolvedModel,
-        systemPrompt:
-          'You diagnose WordPress-to-React visual mismatches. Return ONLY valid JSON. Do not include markdown fences or commentary.',
-        userPrompt: prompt,
-        maxTokens: 1200,
-        temperature: 0,
-      });
-      const parsed = this.parseVisualDiagnosisResponse(
-        response.text,
-        componentName,
-        page,
-      );
-      if (parsed) {
-        await this.logToFile(
-          logPath,
-          [
-            `[Visual Diagnose] ${componentName} route=${page.route ?? page.visual?.reactPath ?? 'unknown'} rootCause=${parsed.rootCause.primary} confidence=${parsed.confidence.toFixed(2)}`,
-            `[Visual Diagnose] AI diagnosis strategy=${parsed.repairPlan.strategy} shouldRepair=${parsed.shouldRepair}`,
-            this.summarizeLogLines(
-              parsed.repairPlan.instructions,
-              5,
-              '[Visual Diagnose] AI instructions',
-            ),
-            this.summarizeLogLines(
-              parsed.repairPlan.guardrails,
-              5,
-              '[Visual Diagnose] AI guardrails',
-            ),
-          ].join('\n'),
-        );
-        return this.mergeDiagnosisWithHeuristic(parsed, heuristic);
-      }
-    } catch (error) {
-      await this.logToFile(
-        logPath,
-        `[Visual Diagnose] LLM diagnosis failed for "${componentName}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    await this.logToFile(
-      logPath,
-      `[Visual Diagnose] Falling back to heuristic diagnosis for "${componentName}" rootCause=${heuristic.rootCause.primary} confidence=${heuristic.confidence.toFixed(2)}`,
-    );
-    return heuristic;
-  }
-
-  private buildVisualDiagnosisPrompt(input: {
-    componentName: string;
-    page: AutomationComparePageResult;
-    sourceEvidence: string[];
-    planEvidence: string[];
-    heuristic: VisualMismatchDiagnosis;
+  private buildVisualMetricsRetryFeedback(input: {
+    baseFeedback: string;
+    attempt: number;
+    phase: 'code/runtime validation' | 'preview build/runtime';
+    error: string;
   }): string {
-    const { componentName, page, sourceEvidence, planEvidence, heuristic } =
-      input;
-    const lines: string[] = [
-      `Component: ${componentName}`,
-      `Route key: ${page.routeKey ?? 'unknown'}`,
-      `Route: ${page.route ?? page.visual?.reactPath ?? 'unknown'}`,
-      `Suggested component hint from automation: ${page.componentHint ?? 'unknown'}`,
+    const { baseFeedback, attempt, phase, error } = input;
+    return [
+      baseFeedback,
       '',
-      'Automation metrics:',
-      `- visual status: ${page.visual?.status ?? 'unknown'}`,
-      `- content status: ${page.content?.status ?? 'unknown'}`,
-      `- visual accuracy: ${page.visual?.accuracy ?? 'unknown'}`,
-      `- diffPct: ${page.visual?.diffPct ?? 'unknown'}`,
-      `- overlapDiffPct: ${page.visual?.overlapDiffPct ?? 'unknown'}`,
-      `- extraDiffPct: ${page.visual?.extraDiffPct ?? 'unknown'}`,
-      `- domSimilarity: ${page.visual?.domComparison?.similarityScore ?? 'unknown'}`,
-      `- region count: ${(page.visual?.regions ?? []).length}`,
-    ];
-
-    if ((page.visual?.regions?.length ?? 0) > 0) {
-      lines.push('Top diff regions:');
-      for (const region of page.visual?.regions ?? []) {
-        const bbox = region.bbox;
-        lines.push(
-          `- ${region.id ?? 'region'} | severity=${region.severity ?? 'unknown'} | kind=${region.kind ?? 'diff'} | diffPixels=${region.diffPixels ?? 'unknown'} | bbox=${bbox ? `(${bbox.x},${bbox.y},${bbox.width},${bbox.height})` : 'unknown'}`,
-        );
-      }
-    }
-
-    if ((page.content?.issues?.length ?? 0) > 0) {
-      lines.push('Content issues:');
-      for (const issue of page.content?.issues ?? []) {
-        lines.push(`- ${issue}`);
-      }
-    }
-
-    if (sourceEvidence.length > 0) {
-      lines.push('WordPress / DB source evidence:');
-      for (const evidence of sourceEvidence) {
-        lines.push(`- ${evidence}`);
-      }
-    }
-
-    if (planEvidence.length > 0) {
-      lines.push('Current plan evidence:');
-      for (const evidence of planEvidence) {
-        lines.push(`- ${evidence}`);
-      }
-    }
-
-    lines.push(
-      `Heuristic baseline diagnosis: rootCause=${heuristic.rootCause.primary}, confidence=${heuristic.confidence.toFixed(2)}, missingLabels=${heuristic.evidence.missingLabels.join(' | ') || 'none'}`,
-    );
-    lines.push('');
-    lines.push(
-      'Decide the most likely root cause and return JSON with this exact shape:',
-    );
-    lines.push(
-      '{"componentName":"string","routeKey":"string|null","route":"string|null","shouldRepair":true,"confidence":0.0,"rootCause":{"primary":"plan-omission|missing-section|missing-image|content-drift|layout-drift|route-mapping-error|data-binding-error|shared-layout-mismatch|unknown","secondary":["string"],"reasoning":"string"},"evidence":{"sourceHints":["string"],"missingLabels":["string"],"sectionLikelyMissingFromPlan":true},"repairPlan":{"strategy":"string","instructions":["string"],"targetAreas":[{"type":"section","sectionHint":"string","headingHint":"string"}],"guardrails":["string"]}}',
-    );
-    lines.push(
-      'Rules: prefer "plan-omission" when WordPress/DB source clearly shows a prominent section or heading that is absent from the current plan evidence. Keep confidence between 0 and 1. Return only JSON.',
-    );
-
-    return lines.join('\n');
-  }
-
-  private parseVisualDiagnosisResponse(
-    raw: string,
-    componentName: string,
-    page: AutomationComparePageResult,
-  ): VisualMismatchDiagnosis | null {
-    const candidate = this.extractJsonObject(raw);
-    if (!candidate) return null;
-
-    try {
-      const parsed = JSON.parse(candidate) as Partial<VisualMismatchDiagnosis>;
-      const confidence = Math.max(
-        0,
-        Math.min(1, this.coerceFiniteNumber(parsed.confidence) ?? 0),
-      );
-      const rootPrimary = parsed.rootCause?.primary ?? 'unknown';
-      const allowedRootCauses = new Set([
-        'plan-omission',
-        'missing-section',
-        'missing-image',
-        'content-drift',
-        'layout-drift',
-        'route-mapping-error',
-        'data-binding-error',
-        'shared-layout-mismatch',
-        'unknown',
-      ]);
-      return {
-        componentName:
-          typeof parsed.componentName === 'string' &&
-          parsed.componentName.trim().length > 0
-            ? parsed.componentName.trim()
-            : componentName,
-        routeKey:
-          typeof parsed.routeKey === 'string'
-            ? parsed.routeKey
-            : (page.routeKey ?? null),
-        route:
-          typeof parsed.route === 'string'
-            ? parsed.route
-            : (page.route ?? page.visual?.reactPath ?? null),
-        shouldRepair:
-          typeof parsed.shouldRepair === 'boolean' ? parsed.shouldRepair : true,
-        confidence,
-        rootCause: {
-          primary: allowedRootCauses.has(rootPrimary)
-            ? (rootPrimary as VisualMismatchDiagnosis['rootCause']['primary'])
-            : 'unknown',
-          secondary: Array.isArray(parsed.rootCause?.secondary)
-            ? parsed.rootCause.secondary
-                .map((value) => String(value).trim())
-                .filter(Boolean)
-                .slice(0, 5)
-            : [],
-          reasoning:
-            typeof parsed.rootCause?.reasoning === 'string'
-              ? parsed.rootCause.reasoning.trim()
-              : '',
-        },
-        evidence: {
-          sourceHints: Array.isArray(parsed.evidence?.sourceHints)
-            ? parsed.evidence.sourceHints
-                .map((value) => String(value).trim())
-                .filter(Boolean)
-                .slice(0, 8)
-            : [],
-          missingLabels: Array.isArray(parsed.evidence?.missingLabels)
-            ? parsed.evidence.missingLabels
-                .map((value) => String(value).trim())
-                .filter(Boolean)
-                .slice(0, 6)
-            : [],
-          sectionLikelyMissingFromPlan:
-            parsed.evidence?.sectionLikelyMissingFromPlan === true,
-        },
-        repairPlan: {
-          strategy:
-            typeof parsed.repairPlan?.strategy === 'string'
-              ? parsed.repairPlan.strategy.trim()
-              : 'targeted-visual-repair',
-          instructions: Array.isArray(parsed.repairPlan?.instructions)
-            ? parsed.repairPlan.instructions
-                .map((value) => String(value).trim())
-                .filter(Boolean)
-                .slice(0, 8)
-            : [],
-          targetAreas: Array.isArray(parsed.repairPlan?.targetAreas)
-            ? parsed.repairPlan.targetAreas
-                .map((target) => ({
-                  type: String(target?.type ?? 'section').trim() || 'section',
-                  sectionHint:
-                    typeof target?.sectionHint === 'string'
-                      ? target.sectionHint.trim()
-                      : undefined,
-                  headingHint:
-                    typeof target?.headingHint === 'string'
-                      ? target.headingHint.trim()
-                      : undefined,
-                }))
-                .slice(0, 5)
-            : [],
-          guardrails: Array.isArray(parsed.repairPlan?.guardrails)
-            ? parsed.repairPlan.guardrails
-                .map((value) => String(value).trim())
-                .filter(Boolean)
-                .slice(0, 8)
-            : [],
-        },
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  private extractJsonObject(raw: string): string | null {
-    const trimmed = raw.trim();
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
-    const start = trimmed.indexOf('{');
-    const end = trimmed.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) return null;
-    return trimmed.slice(start, end + 1);
-  }
-
-  private mergeDiagnosisWithHeuristic(
-    diagnosis: VisualMismatchDiagnosis,
-    heuristic: VisualMismatchDiagnosis,
-  ): VisualMismatchDiagnosis {
-    return {
-      ...diagnosis,
-      shouldRepair: diagnosis.shouldRepair ?? heuristic.shouldRepair,
-      confidence:
-        diagnosis.confidence > 0 ? diagnosis.confidence : heuristic.confidence,
-      rootCause: {
-        primary: diagnosis.rootCause.primary ?? heuristic.rootCause.primary,
-        secondary:
-          diagnosis.rootCause.secondary.length > 0
-            ? diagnosis.rootCause.secondary
-            : heuristic.rootCause.secondary,
-        reasoning:
-          diagnosis.rootCause.reasoning || heuristic.rootCause.reasoning,
-      },
-      evidence: {
-        sourceHints:
-          diagnosis.evidence.sourceHints.length > 0
-            ? diagnosis.evidence.sourceHints
-            : heuristic.evidence.sourceHints,
-        missingLabels:
-          diagnosis.evidence.missingLabels.length > 0
-            ? diagnosis.evidence.missingLabels
-            : heuristic.evidence.missingLabels,
-        sectionLikelyMissingFromPlan:
-          diagnosis.evidence.sectionLikelyMissingFromPlan ||
-          heuristic.evidence.sectionLikelyMissingFromPlan,
-      },
-      repairPlan: {
-        strategy:
-          diagnosis.repairPlan.strategy || heuristic.repairPlan.strategy,
-        instructions:
-          diagnosis.repairPlan.instructions.length > 0
-            ? diagnosis.repairPlan.instructions
-            : heuristic.repairPlan.instructions,
-        targetAreas:
-          diagnosis.repairPlan.targetAreas.length > 0
-            ? diagnosis.repairPlan.targetAreas
-            : heuristic.repairPlan.targetAreas,
-        guardrails:
-          diagnosis.repairPlan.guardrails.length > 0
-            ? diagnosis.repairPlan.guardrails
-            : heuristic.repairPlan.guardrails,
-      },
-    };
-  }
-
-  private buildHeuristicVisualDiagnosis(input: {
-    componentName: string;
-    page: AutomationComparePageResult;
-    sourceEvidence: string[];
-    planEvidence: string[];
-  }): VisualMismatchDiagnosis {
-    const { componentName, page, sourceEvidence, planEvidence } = input;
-    const missingLabels = sourceEvidence
-      .filter((entry) => entry.startsWith('Heading/text hint: "'))
-      .map((entry) =>
-        entry.replace(/^Heading\/text hint: "/, '').replace(/"$/, ''),
-      )
-      .filter(
-        (entry) => !planEvidence.some((planLine) => planLine.includes(entry)),
-      )
-      .slice(0, 4);
-    const overlapDiffPct =
-      this.coerceFiniteNumber(page.visual?.overlapDiffPct) ?? 0;
-    const extraDiffPct =
-      this.coerceFiniteNumber(page.visual?.extraDiffPct) ?? 0;
-    const diffPct = this.coerceFiniteNumber(page.visual?.diffPct) ?? 0;
-    const domSimilarity =
-      this.coerceFiniteNumber(page.visual?.domComparison?.similarityScore) ??
-      100;
-    const hasHighRegion = (page.visual?.regions ?? []).some(
-      (region) => region.severity === 'high',
-    );
-    const contentStatus = page.content?.status ?? 'PASS';
-    const sectionLikelyMissingFromPlan =
-      missingLabels.length > 0 && contentStatus !== 'PASS';
-
-    let primary: VisualMismatchDiagnosis['rootCause']['primary'] =
-      'layout-drift';
-    let confidence = 0.68;
-    let strategy = 'targeted-visual-repair';
-    const secondary: string[] = [];
-
-    if (sectionLikelyMissingFromPlan) {
-      primary = 'plan-omission';
-      confidence = 0.9;
-      strategy = 'restore-missing-section-from-source';
-      secondary.push('missing-section', 'content-drift');
-    } else if (contentStatus === 'MISSING') {
-      primary = 'data-binding-error';
-      confidence = 0.88;
-      strategy = 'restore-missing-content-binding';
-      secondary.push('content-drift');
-    } else if (extraDiffPct >= 8 && overlapDiffPct < extraDiffPct + 4) {
-      primary = 'missing-section';
-      confidence = 0.8;
-      strategy = 'restore-vertical-missing-block';
-      secondary.push('layout-drift');
-    } else if (domSimilarity < 75) {
-      primary = 'layout-drift';
-      confidence = 0.76;
-      strategy = 'repair-structure-to-match-source';
-      secondary.push('content-drift');
-    } else if (hasHighRegion && contentStatus === 'FAIL') {
-      primary = 'content-drift';
-      confidence = 0.74;
-      strategy = 'restore-source-backed-content';
-      secondary.push('layout-drift');
-    } else if (diffPct < 8) {
-      primary = 'unknown';
-      confidence = 0.45;
-      strategy = 'review-before-repair';
-    }
-
-    return {
-      componentName,
-      routeKey: page.routeKey ?? null,
-      route: page.route ?? page.visual?.reactPath ?? null,
-      shouldRepair: confidence >= 0.5,
-      confidence,
-      rootCause: {
-        primary,
-        secondary,
-        reasoning:
-          primary === 'plan-omission'
-            ? 'WordPress/DB source hints show headings or sections that are not represented in the current plan evidence while compare metrics also report strong content/visual drift.'
-            : primary === 'data-binding-error'
-              ? 'Content compare reports missing data while the route/component still exists, which suggests the React output is not binding or rendering source data correctly.'
-              : primary === 'missing-section'
-                ? 'Visual diff indicates a large missing vertical band or extra-height mismatch, suggesting an omitted section rather than only cosmetic drift.'
-                : primary === 'layout-drift'
-                  ? 'The overall DOM structure and visual diff suggest the component layout diverged from WordPress even if content is partially present.'
-                  : 'Signal quality is weak, so the root cause is uncertain.',
-      },
-      evidence: {
-        sourceHints: sourceEvidence.slice(0, 8),
-        missingLabels,
-        sectionLikelyMissingFromPlan,
-      },
-      repairPlan: {
-        strategy,
-        instructions:
-          primary === 'plan-omission'
-            ? [
-                'Restore the source-backed missing section even if it is absent from the current plan.',
-                'Preserve neighboring sections and current correct layout.',
-              ]
-            : primary === 'data-binding-error'
-              ? [
-                  'Repair the component so it renders the expected source-backed content again.',
-                  'Do not remove existing sections to hide the mismatch.',
-                ]
-              : [
-                  'Repair the mismatched layout in the highest-diff region first.',
-                  'Preserve already-correct sections and avoid unnecessary rewrites.',
-                ],
-        targetAreas: missingLabels.slice(0, 3).map((label) => ({
-          type: 'section',
-          headingHint: label,
-        })),
-        guardrails: [
-          'Do not simplify the component to reduce diff.',
-          'Preserve validated sections, CTAs, and images unless source evidence says they are wrong.',
-        ],
-      },
-    };
+      `Additional correction feedback after metrics-repair attempt ${attempt}:`,
+      `- The previous metrics-driven edit failed ${phase} safety checks.`,
+      '- Keep the intended metrics-driven visual correction.',
+      '- Do NOT revert just to match the old visual plan.',
+      '- Fix the concrete issue below and return valid, runnable code.',
+      `- Failure detail: ${error}`,
+    ].join('\n');
   }
 
   private buildPlanEvidenceForComponent(
@@ -5161,7 +6439,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     const lines: string[] = [
       `Automation visual-compare reported a fidelity mismatch for component "${componentName}".`,
       `Repair the component so the rendered React preview matches the WordPress source more closely for route "${page.route ?? page.visual?.reactPath ?? 'unknown'}".`,
-      `Diagnosis: rootCause=${diagnosis.rootCause.primary} | confidence=${diagnosis.confidence.toFixed(2)} | strategy=${diagnosis.repairPlan.strategy}`,
+      `Diagnosis: mode=${diagnosis.analysisMode ?? 'unknown'} | rootCause=${diagnosis.rootCause.primary} | confidence=${diagnosis.confidence.toFixed(2)} | score=${diagnosis.score} | strategy=${diagnosis.repairPlan.strategy}`,
       diagnosis.rootCause.reasoning
         ? `Diagnosis reasoning: ${diagnosis.rootCause.reasoning}`
         : '',
@@ -5236,6 +6514,15 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         `Diagnosis missing labels: ${diagnosis.evidence.missingLabels
           .map((label) => `"${label}"`)
           .join(', ')}`,
+      );
+    }
+    if (diagnosis.issues.length > 0) {
+      lines.push('Diagnosis issues:');
+      lines.push(
+        ...diagnosis.issues.map(
+          (issue) =>
+            `- type=${issue.type} severity=${issue.severity} sectionHint=${issue.sectionHint ?? 'unknown'} location=${issue.location ?? 'unknown'} sourceBacked=${issue.sourceBacked === true ? 'yes' : 'no'} evidence=${issue.evidence} fix=${issue.suggestedFix}`,
+        ),
       );
     }
     if (diagnosis.repairPlan.instructions.length > 0) {

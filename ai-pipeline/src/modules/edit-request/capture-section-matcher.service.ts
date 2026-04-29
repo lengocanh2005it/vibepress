@@ -220,7 +220,18 @@ function buildSectionCorpus(section: SectionPlan): string {
       );
       break;
     case 'sidebar':
-      values.push(section.title, section.menuSlug);
+      values.push(
+        section.title,
+        ...(section.widgets ?? []).flatMap((widget) => [
+          widget.title,
+          widget.kind,
+          'description' in widget ? widget.description : undefined,
+          'menuSlug' in widget ? widget.menuSlug : undefined,
+          'links' in widget
+            ? widget.links?.map((link) => link.label).join(' ')
+            : undefined,
+        ]),
+      );
       break;
     case 'search':
       values.push(section.title);

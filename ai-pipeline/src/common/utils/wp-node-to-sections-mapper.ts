@@ -498,6 +498,38 @@ function mergeAdjacentCardGridRows(
 function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   const block = node.block;
 
+  // Dynamic title blocks — text is a runtime placeholder ("WordPress", archive name,
+  // search term) that is never meaningful at parse time. Skip entirely.
+  if (
+    block === 'core/query-title' ||
+    block === 'query-title' ||
+    block === 'core/archive-title' ||
+    block === 'archive-title' ||
+    block === 'core/post-title' ||
+    block === 'post-title'
+  ) {
+    return [];
+  }
+
+  // query-no-results — fallback shown when query has no results; not a real page section.
+  if (block === 'core/query-no-results' || block === 'query-no-results') {
+    return [];
+  }
+
+  // query-pagination — navigation chrome, not a content section.
+  if (
+    block === 'core/query-pagination' ||
+    block === 'query-pagination' ||
+    block === 'core/query-pagination-previous' ||
+    block === 'query-pagination-previous' ||
+    block === 'core/query-pagination-next' ||
+    block === 'query-pagination-next' ||
+    block === 'core/query-pagination-numbers' ||
+    block === 'query-pagination-numbers'
+  ) {
+    return [];
+  }
+
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
     return toMappedSections(mapTemplatePart(node), node);
@@ -685,9 +717,10 @@ function mapTemplatePart(node: WpNode): SectionPlan | null {
   if (slugL.includes('sidebar')) {
     const s: SidebarSection = {
       type: 'sidebar',
-      showSiteInfo: false,
-      showPages: true,
-      showPosts: true,
+      widgets: [
+        { kind: 'pages-list', title: 'Pages' },
+        { kind: 'recent-posts', title: 'Recent Posts' },
+      ],
     };
     return s;
   }
@@ -1427,8 +1460,14 @@ function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
 
 // ── standalone heading / quote ──────────────────────────────────────────────
 
+function isDecorativeText(text: string): boolean {
+  // Pure dash / separator characters used as visual dividers (e.g. "—", "–", "-", "---")
+  return /^[\s—–\-_·•|\/\\]+$/.test(text.trim());
+}
+
 function mapStandaloneHeading(node: WpNode): HeroSection | null {
   if (!node.text?.trim()) return null;
+  if (isDecorativeText(node.text)) return null;
   const hero: HeroSection = {
     type: 'hero',
     layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
@@ -1450,15 +1489,18 @@ function mapStandaloneHeading(node: WpNode): HeroSection | null {
 }
 
 function mapStandaloneParagraph(node: WpNode): HeroSection | null {
-  const text = extractNodeText(node);
-  if (!text) return null;
+  const plainText = extractNodeText(node);
+  if (!plainText) return null;
+  if (isDecorativeText(plainText)) return null;
 
-  const preferHeading = isHeadingLikeStandaloneText(node, text);
+  const richText = extractNodeRichText(node);
+
+  const preferHeading = isHeadingLikeStandaloneText(node, plainText);
   const hero: HeroSection = {
     type: 'hero',
     layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
-    heading: preferHeading ? text : '',
-    ...(!preferHeading ? { subheading: text } : {}),
+    heading: preferHeading ? plainText : '',
+    ...(!preferHeading ? { subheading: richText } : {}),
   };
   const classNames = extractStyleVariantClassNames(node.customClassNames);
   if (classNames.length > 0) {
@@ -2024,6 +2066,12 @@ function applyNodePresentation<T extends SectionPlan>(
       typeof node.gap === 'string'
         ? node.gap
         : (normalizeGapStyleValue(node.gap) ?? next.gapStyle);
+  }
+  if (node.borderRadius && !next.border?.radius) {
+    next.border = {
+      ...(next.border ?? {}),
+      radius: node.borderRadius,
+    };
   }
   let mergedClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
@@ -3218,11 +3266,19 @@ function buildCtaBannerSection(
   node: WpNode,
   children: WpNode[],
 ): CtaStripSection {
+  const flat = flattenChildren({ children } as WpNode);
   const ctas = buildSectionCtas(children);
   const align = inferSectionAlignment(node, children);
+  const headingNode = flat.find(
+    (child) => child.block === 'core/heading' || child.block === 'heading',
+  );
+  const heading = headingNode ? extractNodeText(headingNode) : '';
+  const subheading = extractRichTextFromNodes(flat);
   const s: CtaStripSection = {
     type: 'cta-strip',
     ...(align ? { align } : {}),
+    ...(heading ? { heading } : {}),
+    ...(subheading ? { subheading } : {}),
   };
   if (ctas[0]) s.cta = ctas[0];
   if (ctas.length > 1) s.ctas = ctas;
@@ -3324,6 +3380,20 @@ function extractNodeText(node: WpNode): string {
   return '';
 }
 
+function extractNodeRichText(node: WpNode): string {
+  const html = String(node.html ?? '').trim();
+  if (html) {
+    return html
+      .replace(/^<(?:p|li)[^>]*>/i, '')
+      .replace(/<\/(?:p|li)>$/i, '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  return extractNodeText(node);
+}
+
 function extractRichTextFromNodes(nodes: WpNode[]): string {
   const texts = nodes
     .filter(
@@ -3333,7 +3403,7 @@ function extractRichTextFromNodes(nodes: WpNode[]): string {
         node.block === 'core/list-item' ||
         node.block === 'list-item',
     )
-    .map((node) => extractNodeText(node))
+    .map((node) => extractNodeRichText(node))
     .filter(Boolean);
   return texts.join('\n');
 }

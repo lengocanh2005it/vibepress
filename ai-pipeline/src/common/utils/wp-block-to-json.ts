@@ -1041,3 +1041,30 @@ function extractUsefulCustomClassNames(tokens: string[]): string[] {
     ),
   );
 }
+
+/**
+ * Maps a WordPress block name to a ThemeInteractionTarget used by the
+ * validator's repair/detection logic. Returns undefined for blocks that do
+ * not map to a specific interactive element type.
+ */
+export function inferTargetFromBlockName(
+  blockName: string,
+): 'button' | 'link' | 'image' | 'card' | undefined {
+  const lower = (blockName ?? '').toLowerCase();
+  if (lower === 'core/button') return 'button';
+  if (
+    lower === 'core/image' ||
+    lower === 'core/post-featured-image' ||
+    lower === 'core/site-logo'
+  )
+    return 'image';
+  if (
+    lower === 'core/navigation-link' ||
+    lower === 'core/navigation-submenu' ||
+    lower === 'core/social-link' ||
+    lower === 'core/loginout' ||
+    lower === 'core/read-more'
+  )
+    return 'link';
+  return undefined;
+}

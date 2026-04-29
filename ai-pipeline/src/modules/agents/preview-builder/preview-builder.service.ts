@@ -528,23 +528,28 @@ ${routesBlock}
     const frontendProc = this.spawnDevServer(frontendDir);
     const serverProc = this.spawnDevServer(serverDir);
 
-    const previewUrl = `http://localhost:${vitePort}`;
+    const internalPreviewUrl = `http://localhost:${vitePort}`;
     const apiBaseUrl = `http://localhost:${apiPort}/api`;
-    await this.validator.assertPreviewRuntime(previewUrl, smokeRoutes);
-    this.logger.log(`Preview ready at: ${previewUrl}`);
+    await this.validator.assertPreviewRuntime(internalPreviewUrl, smokeRoutes);
     const publicBase = this.configService.get<string>(
       'automation.previewPublicBaseUrl',
       '',
     );
-    const publicPreviewUrl = publicBase
-      ? `${publicBase}/preview/${jobId}/`
-      : null;
+    const localBackendPort = String(
+      this.configService.get<string>('port', '3001'),
+    ).trim();
+    const canonicalPreviewBase =
+      publicBase || `http://localhost:${localBackendPort}`;
+    const publicPreviewUrl = `${canonicalPreviewBase}/preview/${jobId}/`;
+    this.logger.log(
+      `Preview ready at: ${internalPreviewUrl} (public: ${publicPreviewUrl})`,
+    );
     return {
       jobId,
       previewDir: rootDir,
       frontendDir,
       entryPath: join(srcDir, 'main.tsx'),
-      previewUrl: publicPreviewUrl ?? previewUrl,
+      previewUrl: publicPreviewUrl,
       apiBaseUrl,
       routeEntries,
       uiSourceMapPath,

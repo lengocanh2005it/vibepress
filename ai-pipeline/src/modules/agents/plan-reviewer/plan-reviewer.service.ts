@@ -1013,9 +1013,10 @@ export class PlanReviewerService {
       canonicalSections.splice(1, 0, {
         type: 'sidebar',
         title: 'Explore',
-        showSiteInfo: false,
-        showPages: true,
-        showPosts: true,
+        widgets: [
+          { kind: 'pages-list', title: 'Pages' },
+          { kind: 'recent-posts', title: 'Recent Posts' },
+        ],
         maxItems: 8,
       });
     }
@@ -1054,9 +1055,10 @@ export class PlanReviewerService {
       nextSections.push({
         type: 'sidebar',
         title: 'Explore',
-        showSiteInfo: false,
-        showPages: true,
-        showPosts: true,
+        widgets: [
+          { kind: 'pages-list', title: 'Pages' },
+          { kind: 'recent-posts', title: 'Recent Posts' },
+        ],
         maxItems: 8,
       });
       adjustments?.push(

@@ -6,8 +6,8 @@ Plugin scaffold to expose `POST /site/compare` for the Vibepress `ai-pipeline`.
 
 - Registers `POST /site/compare` inside OpenClaw.
 - Protects the route with a shared secret header when `OPENCLAW_SITE_COMPARE_SECRET` is set.
-- Returns a mock compare payload that already matches the metrics shape expected by `ai-pipeline`.
-- Optionally forwards the incoming payload to another compare worker when `SITE_COMPARE_FORWARD_URL` is configured.
+- Requires `SITE_COMPARE_FORWARD_URL` and forwards the incoming payload to a real compare worker.
+- Fails fast if the worker is not configured instead of silently returning mock metrics.
 
 ## Files
 
@@ -31,13 +31,14 @@ openclaw gateway restart
 
 ```bash
 export OPENCLAW_SITE_COMPARE_SECRET=replace-me
+export SITE_COMPARE_FORWARD_URL=http://127.0.0.1:5000/api/site/compare
 ```
+This forward target should point at the real Vibepress compare worker. In this
+workspace that worker already exists in `automation` and exposes
+`POST /api/site/compare`.
 
-Optional forward mode:
-
-```bash
-export SITE_COMPARE_FORWARD_URL=http://127.0.0.1:3009/site/compare
-```
+Without `SITE_COMPARE_FORWARD_URL`, `POST /site/compare` now returns `500`
+instead of a fake success payload.
 
 ## Test the route
 
@@ -72,6 +73,25 @@ OPENCLAW_API_KEY_HEADER=x-site-compare-secret
 OPENCLAW_API_KEY_PREFIX=
 ```
 
+Important:
+
+- `OPENCLAW_URL` must point to the OpenClaw gateway base, not the interactive
+  chat page URL. Use `http://localhost:18789`, not
+  `http://localhost:18789/chat?session=main`.
+- If you accidentally pass the chat URL, the updated `ai-pipeline` provider now
+  normalizes it back to the gateway origin automatically.
+
 ## Next step
 
-Replace the mock response in `index.js` with real browser capture logic or point `SITE_COMPARE_FORWARD_URL` at a worker that performs the actual compare.
+The shortest path to a real integration is:
+
+1. `ai-pipeline` calls OpenClaw `POST /site/compare`
+2. OpenClaw plugin authenticates the request
+3. Plugin forwards the payload to `automation` at
+   `http://127.0.0.1:5000/api/site/compare`
+4. `automation` opens WordPress + React, compares them, and returns metrics
+5. Plugin returns that metrics payload back to `ai-pipeline`
+
+That means the `site_compare` step is already integrated at the pipeline layer;
+the OpenClaw plugin is now just a secured gateway that hands work to the real
+compare worker.

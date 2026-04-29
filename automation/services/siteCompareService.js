@@ -37,6 +37,7 @@ async function compareSite({
   wpSiteId,
   reactFeUrl,
   reactBeUrl,
+  artifactBaseUrl,
   postTypes,
   fullPage = true,
   viewportWidth = 1440,
@@ -51,6 +52,7 @@ async function compareSite({
     compareMultiplePages({
       wpBaseUrl,
       reactBaseUrl: reactFeUrl,
+      artifactBaseUrl,
       fullPage,
       viewportWidth,
       viewportHeight,

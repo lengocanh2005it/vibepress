@@ -1,6 +1,7 @@
 "use strict";
 
 const { compareSite } = require("../services/siteCompareService");
+const { resolvePublicBaseUrl } = require("../utils/publicUrl");
 
 async function compareSiteHandler(req, res) {
   const {
@@ -37,6 +38,7 @@ async function compareSiteHandler(req, res) {
       wpSiteId,
       reactFeUrl,
       reactBeUrl,
+      artifactBaseUrl: resolvePublicBaseUrl(req),
       postTypes:      Array.isArray(postTypes) ? postTypes : undefined,
       fullPage:       fullPage !== false,
       viewportWidth:  viewportWidth  ? Number(viewportWidth)  : 1440,

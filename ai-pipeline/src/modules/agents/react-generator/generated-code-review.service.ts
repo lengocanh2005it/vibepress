@@ -716,8 +716,8 @@ ${component.code}
   ): string[] {
     const snippets: string[] = [];
     const patterns = [
-      /Links I found useful and wanted to share\./gi,
-      /<h[1-6]\b[^>]*>\s*About the author\s*<\/h[1-6]>/gi,
+      /\[button\]\s*Latest inflation report/gi,
+      /\[button\]\s*Financial apps for families/gi,
     ];
 
     for (const pattern of patterns) {

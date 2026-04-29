@@ -1,7 +1,3 @@
-export type SiteCompareProviderKind = 'automation' | 'openclaw' | 'hybrid';
-
-export type SiteCompareFallbackProviderKind = 'automation' | 'none';
-
 export interface SiteCompareMetrics {
   urlA?: string;
   urlB?: string;
@@ -41,8 +37,7 @@ export interface SiteCompareInput {
 }
 
 export interface SiteCompareExecutionResult {
-  provider: Exclude<SiteCompareProviderKind, 'hybrid'>;
+  provider: 'automation';
   metrics?: SiteCompareMetrics;
   warnings?: string[];
-  fallbackUsed?: boolean;
 }

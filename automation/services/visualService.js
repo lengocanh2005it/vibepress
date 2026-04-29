@@ -7,8 +7,8 @@ const PNG = require("pngjs").PNG;
 const axios = require("axios");
 const xml2js = require("xml2js");
 
-const { PORT } = require("../config/constants");
 const { normalizeBaseUrl } = require("./textUtils");
+const { buildPublicUrlFromBase } = require("../utils/publicUrl");
 
 const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
@@ -374,6 +374,7 @@ function detectDiffRegions(diffImage, width, height) {
 
 function writeRegionArtifacts({
   runId,
+  artifactBaseUrl,
   baseImageA,
   baseImageB,
   diffImage,
@@ -392,9 +393,18 @@ function writeRegionArtifacts({
     return {
       ...region,
       cropArtifacts: {
-        imageA: `http://localhost:${PORT}/artifacts/${path.basename(cropAPath)}`,
-        imageB: `http://localhost:${PORT}/artifacts/${path.basename(cropBPath)}`,
-        diff: `http://localhost:${PORT}/artifacts/${path.basename(cropDiffPath)}`,
+        imageA: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropAPath)}`,
+        ),
+        imageB: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropBPath)}`,
+        ),
+        diff: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropDiffPath)}`,
+        ),
       },
     };
   });
@@ -633,6 +643,7 @@ function smartSample(allUrls, limits = SAMPLE_LIMITS) {
 async function compareWebVisuals({
   urlA,
   urlB,
+  artifactBaseUrl,
   fullPage = true,
   viewportWidth = 1440,
   viewportHeight = 900,
@@ -718,6 +729,7 @@ async function compareWebVisuals({
   const domComparison = compareDomStructure(domFreqA, domFreqB);
   const diffRegions = writeRegionArtifacts({
     runId,
+    artifactBaseUrl,
     baseImageA: normA,
     baseImageB: normB,
     diffImage,
@@ -737,9 +749,18 @@ async function compareWebVisuals({
     resolutionUsed: { width, height, maxWidth, maxHeight },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
     artifacts: {
-      imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
-      imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
-      diff: `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
+      imageA: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(imageAPath)}`,
+      ),
+      imageB: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(imageBPath)}`,
+      ),
+      diff: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(diffPath)}`,
+      ),
     },
     regions: diffRegions,
     domComparison,
@@ -766,6 +787,7 @@ async function compareWebVisuals({
 async function compareMultiplePages({
   wpBaseUrl,
   reactBaseUrl,
+  artifactBaseUrl,
   sampleLimits = SAMPLE_LIMITS,
   fullPage = true,
   viewportWidth = 1440,
@@ -820,6 +842,7 @@ async function compareMultiplePages({
       const result = await compareWebVisuals({
         urlA: wpUrl,
         urlB: reactUrl,
+        artifactBaseUrl,
         fullPage,
         viewportWidth,
         viewportHeight,

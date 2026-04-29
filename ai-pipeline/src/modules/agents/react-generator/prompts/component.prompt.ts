@@ -7,6 +7,7 @@ import type {
   ThemeInteractionState,
   ThemeInteractionStyle,
   ThemeInteractionTokens,
+  ThemeInteractionTarget,
 } from '../../../agents/block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
@@ -99,6 +100,7 @@ export interface ComponentPromptContext {
   fixedTitle?: string;
   fixedPageId?: number | string;
   requiredCustomClassNames?: string[];
+  requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
 }
@@ -108,10 +110,16 @@ function compactPlanText(
   maxChars: number = MAX_PLAN_TEXT_CHARS,
 ): string | null {
   if (!value) return null;
-  const cleaned = stripTags(value).replace(/\s+/g, ' ').trim();
-  if (!cleaned) return null;
-  if (cleaned.length <= maxChars) return cleaned;
-  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  const rich = value.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const plain = stripTags(rich).replace(/\s+/g, ' ').trim();
+  if (!plain) return null;
+
+  const hasHtmlTags = /<[^>]+>/.test(rich);
+  if (hasHtmlTags && plain.length <= maxChars) {
+    return rich;
+  }
+  if (plain.length <= maxChars) return plain;
+  return `${plain.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function pushPlanTextPart(
@@ -375,6 +383,9 @@ export function buildSpectraContractPromptNote(
   lines.push(
     'Preserve these plugin markers/classes when rendering interactive sections. Do not replace them with generic Tailwind-only markup if the approved plan/source expects Spectra semantics.',
   );
+  lines.push(
+    'Prefer the plugin-faithful DOM hierarchy, especially `uagb-spectra-button-wrapper > uagb-modal-trigger/uagb-modal-button-link > uagb-modal-popup.active > uagb-modal-popup-wrap > uagb-modal-popup-content` for modal, and `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide` for slider/carousel.',
+  );
   return lines.join('\n');
 }
 
@@ -447,10 +458,16 @@ function buildAllowedEndpointsNote(input: {
     (section) => section.type === 'sidebar',
   );
   if (sidebarSection?.type === 'sidebar') {
-    if (sidebarSection.showPages) allowed.add('GET /api/pages');
-    if (sidebarSection.showPosts) allowed.add('GET /api/posts');
-    if (sidebarSection.showSiteInfo) allowed.add('GET /api/site-info');
-    if (sidebarSection.menuSlug) allowed.add('GET /api/menus');
+    for (const widget of sidebarSection.widgets ?? []) {
+      if (widget.kind === 'author-bio') {
+        allowed.add('GET /api/posts');
+        allowed.add('GET /api/site-info');
+      }
+      if (widget.kind === 'categories') allowed.add('GET /api/posts');
+      if (widget.kind === 'navigation') allowed.add('GET /api/menus');
+      if (widget.kind === 'pages-list') allowed.add('GET /api/pages');
+      if (widget.kind === 'recent-posts') allowed.add('GET /api/posts');
+    }
   }
 
   if (allowed.size === 0) {
@@ -1350,6 +1367,7 @@ export function buildPlanContextNote(
     fixedTitle?: string;
     fixedPageId?: number | string;
     requiredCustomClassNames?: string[];
+    requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
     sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
   },
@@ -1523,8 +1541,21 @@ export function buildPlanContextNote(
     '- Use semantic HTML that matches the role of the original content (`<main>`, `<section>`, `<article>`, `<aside>`, `<nav>`).',
   );
   if (plan.requiredCustomClassNames?.length) {
+    const targetLabels: Record<ThemeInteractionTarget, string> = {
+      button: '<button> or button-styled <Link>/<a>',
+      link: '<a> or <Link>',
+      image: '<img>',
+      card: 'card wrapper element',
+    };
+    const targets = plan.requiredCustomClassTargets ?? {};
+    const classHints = plan.requiredCustomClassNames
+      .map((cls) => {
+        const target = targets[cls];
+        return target ? `\`${cls}\` (on ${targetLabels[target]})` : `\`${cls}\``;
+      })
+      .join(', ');
     lines.push(
-      `- Preserve these exact source custom classes in JSX \`className\` output whenever you render the corresponding source-backed elements: ${formatClassList(plan.requiredCustomClassNames)}.`,
+      `- Preserve these exact source custom classes in JSX \`className\` output on their source-backed elements: ${classHints}.`,
     );
     lines.push(
       '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them alongside Tailwind utility classes.',
@@ -1601,6 +1632,9 @@ function buildImageSourcesNote(templateSource: string): string {
   );
   lines.push(
     'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), render it with `dangerouslySetInnerHTML={{ __html: item }}` on the `<li>` element instead of outputting the string as plain text. Example: `<li dangerouslySetInnerHTML={{ __html: "Trạng thái <strong>Đã thanh toán</strong>" }} />`.',
+  );
+  lines.push(
+    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. For non-form text containers, prefer `dangerouslySetInnerHTML` on the final text node.',
   );
 
   return lines.join('\n');
@@ -1721,10 +1755,18 @@ function buildCompactSectionSummary(
         break;
       case 'sidebar':
         pushPlanTextPart(parts, 'title', section.title);
-        parts.push(`showPages=${section.showPages}`);
-        parts.push(`showPosts=${section.showPosts}`);
-        parts.push(`showSiteInfo=${section.showSiteInfo}`);
-        if (section.menuSlug) parts.push(`menuSlug=${section.menuSlug}`);
+        if (section.widgets?.length) {
+          parts.push(
+            `widgets=${section.widgets
+              .map((widget) => {
+                if (widget.kind === 'navigation') {
+                  return `${widget.kind}:${widget.title ?? 'untitled'}:${widget.menuSlug ?? 'none'}`;
+                }
+                return `${widget.kind}:${widget.title ?? 'untitled'}`;
+              })
+              .join(' | ')}`,
+          );
+        }
         if (section.maxItems) parts.push(`maxItems=${section.maxItems}`);
         break;
       case 'post-list':
@@ -2218,13 +2260,23 @@ export function buildVisualPlanContextNote(
     lines.push('');
     lines.push('## Sidebar contract — MANDATORY');
     lines.push(
-      'Treat the `sidebar` section as a constrained data widget area, not a free-design area.',
+      'Treat the `sidebar` section as an ordered, source-backed widget column. Preserve each approved widget instead of collapsing them into a generic pages/posts/menu box.',
     );
     lines.push(
-      `Allowed sidebar sources from the approved plan: showPages=${sidebarSection.showPages}, showPosts=${sidebarSection.showPosts}, showSiteInfo=${sidebarSection.showSiteInfo}, menuSlug=${sidebarSection.menuSlug ?? 'none'}.`,
+      `Approved sidebar widgets: ${
+        sidebarSection.widgets?.length
+          ? sidebarSection.widgets
+              .map((widget) =>
+                widget.kind === 'navigation'
+                  ? `${widget.kind}(${widget.title ?? 'untitled'}, menuSlug=${widget.menuSlug ?? 'none'})`
+                  : `${widget.kind}(${widget.title ?? 'untitled'})`,
+              )
+              .join(' | ')
+          : 'none'
+      }.`,
     );
     lines.push(
-      '⛔ Do NOT invent extra sidebar widgets such as "Useful Links", "Resources", "Quick Links", social links, footer-style columns, or author bio blocks unless they are explicitly present in the template source or directly supported by approved API data above.',
+      '⛔ Do NOT replace approved sidebar widgets with generic "Pages", "Latest Posts", site-brand blocks, or arbitrary utility boxes unless those exact widgets are in the approved plan.',
     );
     lines.push(
       'If a URL is not present in the template source or API data, prefer a temporary `href="#"` placeholder over inventing a fake internal route path.',
@@ -2257,6 +2309,9 @@ export function buildVisualPlanContextNote(
     lines.push(
       '⛔ `testimonial`, `cta-strip`, `cover`, `media-text`, `carousel`, `modal`, `tabs`, `accordion`, `post-list`, and major CTA/blog wrappers should keep the wide section shell. Use the narrow prose container only for long-form content bodies such as `page-content`, `post-content`, and comments.',
     );
+    lines.push(
+      `⛔ SHELL CONTAINER PATTERN: When a section uses the wide container, always structure it as \`<section className="w-full"><div className="${visualPlan.layout.containerClass} px-4">\` — the container class goes on an INNER div, NOT directly on the \`<section>\` element. This ensures ALL shell sections share the same horizontal alignment regardless of their background width.`,
+    );
   }
   if (visualPlan.layout?.contentContainerClass) {
     lines.push(
@@ -2274,13 +2329,16 @@ export function buildVisualPlanContextNote(
       '- Footer partials must fetch `/api/footer-links` and render footer columns from that API data. Do NOT rebuild footer columns from `/api/menus`.',
     );
     lines.push(
-      '- If the approved footer plan includes `brandDescription`, render that exact approved text. Do NOT silently replace it with `siteInfo.blogDescription` or omit it.',
+      '- For footer brand copy, prefer `siteInfo.blogDescription` whenever `showTagline` is true. Only render a literal `brandDescription` when the approved plan explicitly requires custom footer copy distinct from the site tagline.',
     );
     lines.push(
       '- Do NOT declare hardcoded fallback arrays such as `staticSections`, `fallbackSections`, `defaultFooterColumns`, or placeholder footer link groups when the approved contract already provides `footerLinks`.',
     );
     lines.push(
       '- If `/api/footer-links` returns an empty array, keep the footer column area structurally empty or minimal. Do NOT fabricate About/Privacy/Social columns or placeholder links.',
+    );
+    lines.push(
+      '- Always render siteInfo brand elements (logo when `logoUrl` exists, site title when `showSiteTitle` is true, tagline/description when `showTagline` is true). These must appear in the footer even when `footerLinks` is empty — do NOT make them conditional on `footerLinks.length > 0`.',
     );
     lines.push(
       '- Render the footer column area by iterating the fetched footer-links collection directly. Do NOT create helper functions like `getColumnLinks(...)` that inject hardcoded fallback link labels per column.',
@@ -2509,10 +2567,16 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- Modal trigger/button output must include `uagb-modal-trigger` and `uagb-modal-button-link`.',
     );
     lines.push(
+      '- Wrap the trigger button in `uagb-spectra-button-wrapper` instead of emitting a bare standalone button.',
+    );
+    lines.push(
       '- Modal popup output must include `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
     );
     lines.push(
       '- When the modal popup is rendered open, the popup overlay className must also include `active` so Spectra/UAGB compat CSS actually makes it visible.',
+    );
+    lines.push(
+      '- Keep a real close button with class `uagb-modal-popup-close`; do not replace the popup with inline text or a bare card.',
     );
   }
 
@@ -2525,7 +2589,13 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- If you render a `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` with `translateX(...)` so prev/next/dots move the active slide.',
     );
     lines.push(
+      '- Keep the Spectra slider hierarchy `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide`; do not flatten it into arbitrary cards or a generic marquee shell.',
+    );
+    lines.push(
       '- `swiper-button-prev` and `swiper-button-next` must render a visible SVG or text child. Do NOT leave control buttons empty.',
+    );
+    lines.push(
+      '- If dots are rendered, keep a `swiper-pagination` wrapper with clickable bullets that update `setActiveCarousels(...)`.',
     );
     lines.push(
       '- If you declare drag/swipe helpers such as `beginCarouselDrag`, `updateCarouselDrag`, `finishCarouselDrag`, `cancelCarouselDrag`, or `isCarouselInteractiveTarget`, you must attach them to the rendered slider shell via pointer handlers. Do NOT leave these helpers unused.',
@@ -2541,6 +2611,9 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- Tabs sections must use shared tabs state such as `const [activeTabs, setActiveTabs] = useState<Record<string, number>>({});`. Do NOT render all tab panels permanently visible.',
     );
     lines.push(
+      '- Use the Spectra-compatible DOM structure for tabs: the outer wrapper must have className `uagb-tabs__wrap`, tab panels must use className `uagb-tabs__panel`, and the panels container must use className `uagb-tabs__body-wrap`.',
+    );
+    lines.push(
       '- Preserve approved tabs blueprint fields such as `activeTab`, `variant`, and `tabAlign`. If the plan carries a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same visual family instead of replacing it with generic pills or underlines.',
     );
     lines.push(
@@ -2552,6 +2625,9 @@ function buildFullFileVisualPlanBehaviorChecklist(
     if (lines.length === 0) lines.push('## Required interactive behavior');
     lines.push(
       '- Accordion sections must use shared accordion state such as `const [openAccordions, setOpenAccordions] = useState<Record<string, number[]>>({});`.',
+    );
+    lines.push(
+      '- Use the Spectra-compatible DOM structure for accordion: the outer wrapper must have className `uagb-faq__wrap`, each item must use className `uagb-faq-item`, the trigger button must use className `uagb-faq-questions-button`, and the answer panel must use className `uagb-faq-content`.',
     );
     lines.push(
       '- Preserve approved accordion blueprint fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into always-open static content.',
@@ -2979,7 +3055,9 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           : '- Reuse one exact carousel state key consistently for autoplay, track transform, prev/next buttons, and pagination dots.',
         `- If you render a \`.swiper-wrapper\`, it must bind its transform to the existing page-shell carousel state, for example \`transform: 'translateX(-' + ((activeCarousels[${stateKeyHint ?? '"approved-carousel-key"'}] ?? 0) * 100) + '%)'\`.`,
         '- Use the existing page-shell carousel state (`activeCarousels` / `setActiveCarousels`) for prev/next/dot navigation. Do NOT add local hooks or helper functions in this JSX fragment.',
+        '- Keep the Spectra slider hierarchy `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide`.',
         '- Prev/next controls must have className markers `swiper-button-prev` and `swiper-button-next` and must render a visible child such as SVG arrows or text. Do NOT leave these buttons empty.',
+        '- If dots are rendered, keep a `swiper-pagination` wrapper with clickable bullets; do not render decorative dots only.',
         '- Pagination dots must update `setActiveCarousels(...)` so clicking a dot moves to the selected slide.',
         '- Preserve approved carousel fields such as `slideHeight`, `dotsColor`, `arrowColor`, `arrowBackground`, `autoplay`, `autoplaySpeed`, `loop`, `effect`, `showDots`, `showArrows`, `vertical`, `transitionSpeed`, and `pauseOn` when they are present in the plan.',
       ].join('\n');
@@ -2991,6 +3069,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           : '- Use one stable existing tabs state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell tabs state (`activeTabs` / `setActiveTabs`) for tab selection. Do NOT use `activeCarousels` for tabs.',
         '- Tab buttons must update `setActiveTabs(...)`, and the active panel visibility must read from `activeTabs[...]`.',
+        '- Use the Spectra-compatible DOM structure: outer wrapper must have className `uagb-tabs__wrap`, panels container must have className `uagb-tabs__body-wrap`, and each panel must have className `uagb-tabs__panel`.',
         '- Preserve approved tabs fields such as `activeTab`, `variant`, and `tabAlign`. If the plan uses a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same variant family instead of redesigning the tabs.',
       ].join('\n');
     case 'accordion':
@@ -3000,6 +3079,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           ? `- Use the exact approved accordion state key ${stateKeyHint} everywhere in this section.`
           : '- Use one stable existing accordion state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell accordion state (`openAccordions` / `setOpenAccordions`) for open/close behavior.',
+        '- Use the Spectra-compatible DOM structure: outer wrapper must have className `uagb-faq__wrap`, each item must have className `uagb-faq-item`, the trigger button must have className `uagb-faq-questions-button`, and the answer panel must have className `uagb-faq-content`.',
         '- Preserve approved accordion fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into static always-open content.',
       ].join('\n');
     case 'modal':
@@ -3012,10 +3092,10 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         stateKeyHint
           ? `- The same key ${stateKeyHint} must be reused for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.`
           : '- Reuse one exact modal state key for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.',
-        '- Keep a visible trigger button whose className includes `uagb-modal-trigger uagb-modal-button-link`.',
+        '- Keep a visible trigger button whose className includes `uagb-modal-trigger uagb-modal-button-link`, wrapped by `uagb-spectra-button-wrapper`.',
         '- Use the existing page-shell modal state (`openModals` / `setOpenModals`) to open and close the popup. Do NOT add local hooks or helper functions in this JSX fragment.',
         `- Render the popup conditionally, for example \`{openModals[${stateKeyHint ?? '"approved-modal-key"'}] ? (...) : null}\`.`,
-        '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, and the dialog body must include `uagb-modal-popup-content`.',
+        '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, the dialog body must include `uagb-modal-popup-content`, and the close button must include `uagb-modal-popup-close`.',
         '- Because Spectra compat CSS reveals the popup via `.uagb-modal-popup.active`, the rendered open overlay className must include both `uagb-modal-popup` and `active`.',
         '- The trigger must call `setOpenModals(... true)`, and the close button or overlay-close handler must call `setOpenModals(... false)`.',
         '- Preserve approved modal fields such as `triggerStyle`, `width`, `height`, `overlayColor`, `ctaStyle`, and `secondaryCtaStyle` instead of falling back to generic dialog defaults.',
@@ -3385,13 +3465,16 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         }
       });
       lines.push(
-        '- Keep the carousel structure markers: `swiper-wrapper`, `swiper-slide`, `swiper-button-prev`, and `swiper-button-next`.',
+        '- Keep the carousel structure markers: `uagb-slider-container`, `uagb-swiper`, `swiper-wrapper`, `swiper-slide`, `swiper-button-prev`, and `swiper-button-next`.',
       );
       lines.push(
         '- The `.swiper-wrapper` must use a state-driven `translateX(...)` transform instead of staying static.',
       );
       lines.push(
         '- Prev/next buttons must include visible SVG or text children.',
+      );
+      lines.push(
+        '- If dots are rendered, keep the `swiper-pagination` wrapper instead of free-floating bullets.',
       );
       lines.push(
         '- Preserve the approved carousel interaction/settings contract instead of falling back to a generic slider implementation.',
@@ -3442,7 +3525,7 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
         );
       lines.push(
-        '- Keep the Spectra modal structure markers: `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+        '- Keep the Spectra modal structure markers: `uagb-spectra-button-wrapper`, `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, `uagb-modal-popup-content`, and `uagb-modal-popup-close`.',
       );
       lines.push(
         '- If the popup overlay is open/rendered, its className must also include `active` so Spectra compat CSS does not keep it hidden.',

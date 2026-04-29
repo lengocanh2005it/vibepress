@@ -53,7 +53,10 @@ import type {
   TypographyTokens,
   LayoutTokens,
   PageContentSection,
+  PostMetaSection,
+  SearchSection,
   SectionPlan,
+  SidebarSection,
 } from '../react-generator/visual-plan.schema.js';
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
@@ -86,6 +89,17 @@ export interface ComponentPlan {
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
 }
+
+const PLANNER_INVENTED_AUXILIARY_LABEL_SET = new Set<string>([
+  'about',
+  'privacy',
+  'resources',
+  'useful links',
+  'navigation',
+  'pages',
+  'latest posts',
+  'social',
+]);
 
 export type PlanResult = ComponentPlan[];
 
@@ -769,6 +783,7 @@ export class PlannerService {
           const layout = this.deriveComponentLayout(
             tokens,
             componentPlan.componentName,
+            componentPlan.isDetail === true && componentPlan.route !== '/',
           );
           visualPlan = this.applyRepoInteractiveDefaults(
             {
@@ -788,10 +803,15 @@ export class PlannerService {
               typography: globalTypography,
               layout,
               blockStyles: tokens?.blockStyles,
-              sections: this.mergeDraftSectionPresentation(
-                parsed.sections,
+              sections: this.injectMissingDraftSections(
+                this.mergeDraftSectionPresentation(
+                  parsed.sections,
+                  draftSections,
+                  visualContract,
+                ),
                 draftSections,
                 visualContract,
+                componentPlan.componentName,
               ),
             },
             repoManifest,
@@ -948,6 +968,7 @@ export class PlannerService {
     const layout = this.deriveComponentLayout(
       tokens,
       componentPlan.componentName,
+      componentPlan.isDetail === true && componentPlan.route !== '/',
     );
     const dataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
     const base = {
@@ -986,9 +1007,12 @@ export class PlannerService {
       const fallbackSidebarSection = {
         type: 'sidebar' as const,
         title: 'Explore',
-        showSiteInfo: false,
-        showPages: true,
-        showPosts: content.posts.length > 0,
+        widgets: [
+          { kind: 'pages-list' as const, title: 'Pages' },
+          ...(content.posts.length > 0
+            ? ([{ kind: 'recent-posts' as const, title: 'Recent Posts' }] as const)
+            : []),
+        ],
         maxItems: 8,
       };
       const sections = richSections?.length
@@ -1049,10 +1073,23 @@ export class PlannerService {
           sections: [
             {
               type: 'footer',
-              menuColumns: content.menus.slice(0, 3).map((menu) => ({
-                title: menu.name,
-                menuSlug: menu.slug,
-              })),
+              // Filter out menus whose name matches invented auxiliary labels
+              // (e.g. "Navigation") to avoid the footer section being pruned by
+              // pruneTrailingInventedAuxiliarySections when its only column is a
+              // generic "Navigation" menu. The auxiliary guard now also skips
+              // footer/navbar sections entirely, but keep this filter as defense-in-depth.
+              menuColumns: content.menus
+                .slice(0, 3)
+                .filter(
+                  (menu) =>
+                    !PLANNER_INVENTED_AUXILIARY_LABEL_SET.has(
+                      menu.name.trim().toLowerCase(),
+                    ),
+                )
+                .map((menu) => ({
+                  title: menu.name,
+                  menuSlug: menu.slug,
+                })),
               showSiteLogo: true,
               showSiteTitle: true,
               showTagline: true,
@@ -1067,9 +1104,12 @@ export class PlannerService {
             {
               type: 'sidebar',
               title: 'Explore',
-              showSiteInfo: false,
-              showPages: true,
-              showPosts: content.posts.length > 0,
+              widgets: [
+                { kind: 'pages-list', title: 'Pages' },
+                ...(content.posts.length > 0
+                  ? ([{ kind: 'recent-posts', title: 'Recent Posts' }] as const)
+                  : []),
+              ],
               maxItems: 6,
             },
           ],
@@ -1326,6 +1366,7 @@ export class PlannerService {
   private deriveComponentLayout(
     tokens: ThemeTokens | undefined,
     componentName: string,
+    isDetailPage: boolean = false,
   ): LayoutTokens {
     const d: ThemeDefaults = tokens?.defaults ?? {};
     const imageRadius =
@@ -1349,7 +1390,11 @@ export class PlannerService {
     // Likewise, rootPadding from theme defaults is a site-shell concern and is
     // intentionally NOT propagated into per-component layout tokens, because it
     // causes generated pages to double-pad and look unnaturally narrow.
-    const sectionMaxW = d.wideWidth ?? d.contentWidth ?? '1280px';
+    // Inner (non-home) pages: WP renders most blocks at contentSize, not wideSize.
+    // Only the home/landing page regularly uses wide-aligned sections at wideSize.
+    const sectionMaxW = isDetailPage
+      ? (d.contentWidth ?? d.wideWidth ?? '1280px')
+      : (d.wideWidth ?? d.contentWidth ?? '1280px');
     const contentMaxW = d.contentWidth ?? '800px';
     // Clamp wide width to a sane upper bound — some themes set wideSize to
     // e.g. "100vw" or "100%" which breaks arbitrary Tailwind values.
@@ -1531,6 +1576,9 @@ export class PlannerService {
       const templateBase = item.templateName
         .replace(/\.(php|html)$/i, '')
         .toLowerCase();
+      const isSidebarLike =
+        /(^|[\s/_-])sidebar(?:$|[\s/_-])/.test(componentKey) ||
+        templateBase.includes('sidebar');
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'frontend-page';
       const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
@@ -1558,6 +1606,28 @@ export class PlannerService {
         source.includes('wp:site-tagline')
       )
         if (ownsSharedChromeData) needs.add('site-info');
+      if (
+        isSidebarLike &&
+        (source.includes('wp:post-author-biography') ||
+          source.includes('"post-author-biography"') ||
+          source.includes('wp:avatar') ||
+          source.includes('"avatar"'))
+      ) {
+        needs.add('posts');
+        needs.add('site-info');
+      }
+      if (
+        isSidebarLike &&
+        (source.includes('wp:categories') || source.includes('"categories"'))
+      ) {
+        needs.add('posts');
+      }
+      if (
+        isSidebarLike &&
+        (source.includes('wp:latest-posts') || source.includes('"latest-posts"'))
+      ) {
+        needs.add('posts');
+      }
 
       // Classic PHP theme
       if (
@@ -2258,8 +2328,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           },
         );
       },
-      deriveComponentLayout: (tokens, componentName) =>
-        this.deriveComponentLayout(tokens, componentName),
+      deriveComponentLayout: (tokens, componentName, isDetailPage) =>
+        this.deriveComponentLayout(tokens, componentName, isDetailPage),
       mergeDraftSectionPresentation: (sections, draftSections, contract) =>
         this.mergeDraftSectionPresentation(sections, draftSections, contract),
     };
@@ -2359,9 +2429,6 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
             : {}),
           ...(footerDraft.logoWidth
             ? { logoWidth: footerDraft.logoWidth }
-            : {}),
-          ...(footerDraft.brandDescription
-            ? { brandDescription: footerDraft.brandDescription }
             : {}),
         } as SectionPlan;
       }
@@ -2463,6 +2530,50 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       default:
         return mergedBase as SectionPlan;
     }
+  }
+
+  private injectMissingDraftSections(
+    sections: SectionPlan[],
+    draftSections: SectionPlan[] | undefined,
+    contract: VisualPlanContract | undefined,
+    componentName: string,
+  ): SectionPlan[] {
+    if (!draftSections?.length) return sections;
+
+    const effectiveDraft = contract
+      ? sanitizeSectionsForContract(draftSections, contract).sections
+      : draftSections;
+
+    if (!effectiveDraft.length) return sections;
+
+    // AI-generated sections never carry debugKey/sectionKey (those come from the
+    // draft mapper). Using key-based matching would always see an empty coveredKeys
+    // set and inject every draft section on top of the AI output, doubling content.
+    // Type-count comparison is the correct signal: if AI produced N sections of a
+    // given type and the draft has M > N, inject the remaining M-N from the draft.
+    const planTypeCounts = new Map<string, number>();
+    for (const s of sections) {
+      planTypeCounts.set(s.type, (planTypeCounts.get(s.type) ?? 0) + 1);
+    }
+
+    const draftTypeConsumed = new Map<string, number>();
+    const toInject: SectionPlan[] = [];
+
+    for (const draft of effectiveDraft) {
+      const consumed = draftTypeConsumed.get(draft.type) ?? 0;
+      const planCount = planTypeCounts.get(draft.type) ?? 0;
+      if (consumed >= planCount) {
+        toInject.push(draft);
+      }
+      draftTypeConsumed.set(draft.type, consumed + 1);
+    }
+
+    if (!toInject.length) return sections;
+
+    this.logger.warn(
+      `[Visual Plan] "${componentName}": injecting ${toInject.length} missing draft section(s) not generated by AI: ${toInject.map((s) => s.debugKey ?? s.sectionKey ?? s.type).join(', ')}`,
+    );
+    return [...sections, ...toInject];
   }
 
   private applyRepoInteractiveDefaults(
@@ -2792,8 +2903,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         if (parsedNodes.length === 0) continue;
 
         const nodes = this.styleResolver.resolve(parsedNodes, tokens);
+        // For fixed page-detail routes, use the lossless mapper so that the
+        // full block structure of the actual DB page is preserved in the draft.
+        // The standard mapper is too aggressive at collapsing prose into single
+        // hero sections, losing heading hierarchy and layout fidelity.
+        const isPageDetail =
+          componentPlan.isDetail === true &&
+          componentPlan.fixedSlug != null &&
+          source.label?.startsWith('db:bound-page:');
         const draft = this.filterDegenerateDraftSections(
-          mapWpNodesToDraftSections(nodes),
+          isPageDetail
+            ? mapWpNodesToLosslessPageSections(nodes)
+            : mapWpNodesToDraftSections(nodes),
         );
         if (draft.length === 0) continue;
         expectedCoverageUnits += this.countCoverageUnits(draft);
@@ -2815,6 +2936,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const filteredSections =
         this.filterDegenerateDraftSections(sanitizedSections);
       if (filteredSections.length === 0) return undefined;
+
+      const semanticPartialDraft = this.buildSemanticPartialDraftSections({
+        componentPlan,
+        source: sources.map((entry) => entry.source).join('\n\n'),
+        sections: filteredSections,
+      });
+      if (semanticPartialDraft?.length) {
+        return semanticPartialDraft;
+      }
 
       const coverageAudit = this.assessPlanningSourceDraftCoverage({
         componentPlan,
@@ -2841,6 +2971,299 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (section.type !== 'prose-block') return count + 1;
       return count + Math.max(1, section.sourceSegments.length);
     }, 0);
+  }
+
+  private buildSemanticPartialDraftSections(input: {
+    componentPlan: PlanResult[number];
+    source: string;
+    sections: SectionPlan[];
+  }): SectionPlan[] | undefined {
+    const { componentPlan, source, sections } = input;
+    if (componentPlan.type !== 'partial' || sections.length === 0) {
+      return undefined;
+    }
+
+    const strategy = getComponentStrategy(componentPlan.componentName);
+    switch (strategy.kind) {
+      case 'post-meta':
+        return this.buildCanonicalPostMetaDraftSections(source, sections);
+      case 'sidebar':
+        return this.buildCanonicalSidebarDraftSections(source, sections);
+      default:
+        return undefined;
+    }
+  }
+
+  private buildCanonicalPostMetaDraftSections(
+    source: string,
+    sections: SectionPlan[],
+  ): SectionPlan[] | undefined {
+    const hasDate = this.sourceContainsBlock(source, 'post-date');
+    const hasAuthor = this.sourceContainsBlock(source, 'post-author-name');
+    const hasCategories = this.sourceContainsBlock(source, 'post-terms');
+    if (!hasDate && !hasAuthor && !hasCategories) {
+      return undefined;
+    }
+
+    const textColor =
+      sections.find((section) => typeof section.textColor === 'string')
+        ?.textColor ?? undefined;
+    const sourceRef =
+      sections.find((section) => section.sourceRef)?.sourceRef ?? undefined;
+    const customClassNames = this.collectSectionCustomClassNames(sections);
+    const sourceEvidence = this.collectSectionSourceEvidence(sections);
+    const showSeparator = sections.some(
+      (section) =>
+        section.type === 'hero' &&
+        ['—', '–', '-'].includes(section.heading.trim()),
+    );
+
+    const canonicalSection: PostMetaSection = {
+      type: 'post-meta',
+      layout: 'inline',
+      showDate: hasDate,
+      showAuthor: hasAuthor,
+      showCategories: hasCategories,
+      ...(showSeparator ? { showSeparator: true } : {}),
+      ...(textColor ? { textColor } : {}),
+      ...(sourceRef ? { sourceRef } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(sourceEvidence
+        ? {
+            obligation: {
+              role: 'post-meta',
+              required: [],
+              sourceEvidence,
+            },
+          }
+        : {}),
+      debugKey: 'post-meta-0',
+      sectionKey: 'post-meta-0',
+    };
+
+    return [canonicalSection];
+  }
+
+  private buildCanonicalSidebarDraftSections(
+    source: string,
+    sections: SectionPlan[],
+  ): SectionPlan[] | undefined {
+    const hasNavigation = this.sourceContainsBlock(source, 'navigation');
+    const hasSearch = this.sourceContainsBlock(source, 'search');
+    const hasAuthorBio =
+      this.sourceContainsBlock(source, 'post-author-biography') ||
+      this.sourceContainsBlock(source, 'avatar');
+    const hasCategories = this.sourceContainsBlock(source, 'categories');
+    const hasRecentPosts =
+      this.sourceContainsBlock(source, 'query') ||
+      this.sourceContainsBlock(source, 'latest-posts');
+
+    const headingTexts = this.extractHeadingTextsFromSource(source);
+    const paragraphTexts = this.extractParagraphTextsFromSource(source);
+    const navigationLinks = this.extractNavigationLinkItemsFromSource(source);
+    const existingNavbar = sections.find(
+      (section) => section.type === 'navbar',
+    );
+    const existingSearch = sections.find(
+      (section): section is SearchSection => section.type === 'search',
+    );
+    const sourceRef =
+      sections.find((section) => section.sourceRef)?.sourceRef ?? undefined;
+    const customClassNames = this.collectSectionCustomClassNames(
+      sections.filter((section) => section.type !== 'search'),
+    );
+    const sourceEvidence = this.collectSectionSourceEvidence(sections);
+    const widgets: SidebarSection['widgets'] = [];
+
+    if (hasAuthorBio) {
+      widgets.push({
+        kind: 'author-bio',
+        title:
+          headingTexts.find((heading) => /author/i.test(heading)) ??
+          'About the author',
+        showAvatar: this.sourceContainsBlock(source, 'avatar'),
+      });
+    }
+
+    if (hasCategories) {
+      widgets.push({
+        kind: 'categories',
+        title:
+          headingTexts.find((heading) => /categor/i.test(heading)) ??
+          'Popular Categories',
+        showCounts: /"showPostCounts"\s*:\s*true/i.test(source),
+      });
+    }
+
+    if (hasNavigation) {
+      widgets.push({
+        kind: 'navigation',
+        title:
+          headingTexts.find((heading) => /link|resource|menu|explore/i.test(heading)) ??
+          'Useful Links',
+        ...(paragraphTexts.find((text) => !/search/i.test(text))
+          ? {
+              description: paragraphTexts.find((text) => !/search/i.test(text)),
+            }
+          : {}),
+        menuSlug:
+          existingNavbar?.type === 'navbar' ? existingNavbar.menuSlug : 'primary',
+        ...(navigationLinks.length > 0 ? { links: navigationLinks } : {}),
+      });
+    }
+
+    if (!hasNavigation && hasRecentPosts) {
+      widgets.push({
+        kind: 'recent-posts',
+        title:
+          headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
+          'Recent Posts',
+      });
+    }
+
+    if (widgets.length === 0 && !hasNavigation && !hasRecentPosts && hasCategories) {
+      widgets.push({
+        kind: 'pages-list',
+        title:
+          headingTexts.find((heading) => /page|explore/i.test(heading)) ?? 'Pages',
+      });
+    }
+
+    const requiredCapabilities = new Set<
+      'menus' | 'pages' | 'posts' | 'site-info'
+    >();
+    for (const widget of widgets) {
+      if (widget.kind === 'author-bio') {
+        requiredCapabilities.add('posts');
+        requiredCapabilities.add('site-info');
+      }
+      if (widget.kind === 'categories') requiredCapabilities.add('posts');
+      if (widget.kind === 'navigation') requiredCapabilities.add('menus');
+      if (widget.kind === 'pages-list') requiredCapabilities.add('pages');
+      if (widget.kind === 'recent-posts') requiredCapabilities.add('posts');
+    }
+
+    if (
+      widgets.length === 0 &&
+      !hasSearch &&
+      existingSearch == null
+    ) {
+      return undefined;
+    }
+
+    const sidebarSection: SidebarSection = {
+      type: 'sidebar',
+      widgets,
+      ...(widgets.length > 0 ? { maxItems: 6 } : {}),
+      ...(sourceRef ? { sourceRef } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(sourceEvidence
+        ? {
+            obligation: {
+              role: 'sidebar',
+              required: Array.from(requiredCapabilities),
+              sourceEvidence,
+            },
+          }
+        : {}),
+      debugKey: 'sidebar-0',
+      sectionKey: 'sidebar-0',
+    };
+
+    const canonicalSections: SectionPlan[] = [sidebarSection];
+
+    if (hasSearch || existingSearch) {
+      const searchSection: SearchSection = {
+        type: 'search',
+        ...(existingSearch?.title
+          ? { title: existingSearch.title }
+          : headingTexts.find((heading) => /search/i.test(heading))
+            ? {
+                title: headingTexts.find((heading) => /search/i.test(heading)),
+              }
+            : {}),
+        ...(existingSearch?.sourceRef ? { sourceRef: existingSearch.sourceRef } : {}),
+        ...(existingSearch?.customClassNames?.length
+          ? { customClassNames: existingSearch.customClassNames }
+          : {}),
+        ...(existingSearch?.obligation
+          ? { obligation: existingSearch.obligation }
+          : sourceEvidence
+            ? {
+                obligation: {
+                  role: 'search',
+                  required: ['search-input'],
+                  sourceEvidence,
+                },
+              }
+            : {}),
+        debugKey: 'search-0',
+        sectionKey: 'search-0',
+      };
+      canonicalSections.push(searchSection);
+    }
+
+    return canonicalSections;
+  }
+
+  private sourceContainsBlock(source: string, blockName: string): boolean {
+    const escaped = blockName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b(?:core\\/)?${escaped}\\b`, 'i').test(source);
+  }
+
+  private collectSectionCustomClassNames(sections: SectionPlan[]): string[] {
+    return this.uniqueStrings(
+      sections.flatMap((section) => section.customClassNames ?? []),
+    );
+  }
+
+  private collectSectionSourceEvidence(sections: SectionPlan[]) {
+    const sourceNodeIds = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.sourceNodeIds ?? [],
+      ),
+    );
+    const sourceFiles = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.sourceFiles ?? [],
+      ),
+    );
+    const blockNames = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.blockNames ?? [],
+      ),
+    );
+    const templateNames = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.templateNames ?? [],
+      ),
+    );
+
+    if (
+      sourceNodeIds.length === 0 &&
+      sourceFiles.length === 0 &&
+      blockNames.length === 0 &&
+      templateNames.length === 0
+    ) {
+      return undefined;
+    }
+
+    return {
+      ...(sourceNodeIds.length > 0 ? { sourceNodeIds } : {}),
+      ...(sourceFiles.length > 0 ? { sourceFiles } : {}),
+      ...(blockNames.length > 0 ? { blockNames } : {}),
+      ...(templateNames.length > 0 ? { templateNames } : {}),
+    };
+  }
+
+  private uniqueStrings(values: Array<string | undefined | null>): string[] {
+    const seen = new Set<string>();
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (!normalized) continue;
+      seen.add(normalized);
+    }
+    return [...seen];
   }
 
   private assessPlanningSourceDraftCoverage(input: {
@@ -3329,12 +3752,37 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       cta: { text?: string; link?: string } | undefined,
     ): boolean => !!cta && (hasText(cta.text) || hasText(cta.link));
 
+    // WP dynamic-title blocks that survive into draft sections carry a
+    // generic placeholder like "WordPress" that never reflects real content.
+    const WP_GENERIC_PLACEHOLDERS = new Set([
+      'WordPress',
+      'wordpress',
+      'by',
+    ]);
+    const isPlaceholderOnly = (value: unknown): boolean => {
+      const cleaned = String(value ?? '')
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      return WP_GENERIC_PLACEHOLDERS.has(cleaned);
+    };
+
     switch (section.type) {
       case 'prose-block':
         return section.sourceSegments.length === 0;
       case 'hero':
-        return (
+        // Empty hero
+        if (
           !hasText(section.heading) &&
+          !hasText(section.subheading) &&
+          !section.image?.src &&
+          !hasCta(section.cta) &&
+          !(section.ctas ?? []).some(hasCta)
+        ) {
+          return true;
+        }
+        // Heading-only hero whose heading is a generic WP placeholder
+        return (
+          isPlaceholderOnly(section.heading) &&
           !hasText(section.subheading) &&
           !section.image?.src &&
           !hasCta(section.cta) &&
@@ -3844,6 +4292,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const layout = this.deriveComponentLayout(
         tokens,
         componentPlan.componentName,
+        componentPlan.isDetail === true && componentPlan.route !== '/',
       );
       const visualPlan = this.applyRepoInteractiveDefaults(
         {
@@ -3863,10 +4312,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           typography: globalTypography,
           layout,
           blockStyles: tokens?.blockStyles,
-          sections: this.mergeDraftSectionPresentation(
-            parsedResult.plan.sections,
+          sections: this.injectMissingDraftSections(
+            this.mergeDraftSectionPresentation(
+              parsedResult.plan.sections,
+              draftSections,
+              visualContract,
+            ),
             draftSections,
             visualContract,
+            componentPlan.componentName,
           ),
         },
         repoManifest,
@@ -4951,6 +5405,86 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return [...collected].slice(0, 12);
+  }
+
+  private extractParagraphTextsFromSource(source: string): string[] {
+    const collected = new Set<string>();
+    const pushText = (value: string | undefined) => {
+      const normalized = String(value ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (normalized.length >= 3) collected.add(normalized);
+    };
+
+    try {
+      const visit = (node: WpNode) => {
+        if (/paragraph/i.test(node.block)) {
+          pushText(node.text);
+          pushText(node.html);
+          const contentValue =
+            typeof node.params?.content === 'string'
+              ? node.params.content
+              : undefined;
+          pushText(contentValue);
+        }
+        for (const child of node.children ?? []) visit(child);
+      };
+      for (const node of wpBlocksToJson(source)) visit(node);
+    } catch {
+      const matches = source.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi);
+      for (const match of matches) {
+        pushText(match[1]);
+      }
+    }
+
+    return [...collected].slice(0, 12);
+  }
+
+  private extractNavigationLinkItemsFromSource(
+    source: string,
+  ): Array<{ label: string; url?: string }> {
+    const collected: Array<{ label: string; url?: string }> = [];
+    const seen = new Set<string>();
+    const pushItem = (label?: string, url?: string) => {
+      const normalizedLabel = String(label ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const normalizedUrl = typeof url === 'string' && url.trim() ? url.trim() : undefined;
+      if (normalizedLabel.length < 2) return;
+      const key = `${normalizedLabel}::${normalizedUrl ?? ''}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      collected.push(
+        normalizedUrl ? { label: normalizedLabel, url: normalizedUrl } : { label: normalizedLabel },
+      );
+    };
+
+    try {
+      const visit = (node: WpNode) => {
+        if (/navigation-link/i.test(node.block)) {
+          const labelValue =
+            typeof node.params?.label === 'string'
+              ? node.params.label
+              : node.text ?? node.html;
+          const urlValue =
+            typeof node.params?.url === 'string' ? node.params.url : undefined;
+          pushItem(labelValue, urlValue);
+        }
+        for (const child of node.children ?? []) visit(child);
+      };
+      for (const node of wpBlocksToJson(source)) visit(node);
+    } catch {
+      const matches = source.matchAll(
+        /navigation-link[^]*?"label":"([^"]+)"[^]*?(?:"url":"([^"]*)")?/gi,
+      );
+      for (const match of matches) {
+        pushItem(match[1], match[2]);
+      }
+    }
+
+    return collected.slice(0, 12);
   }
 
   private findRepresentativePagesForTemplate(

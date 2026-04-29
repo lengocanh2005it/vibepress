@@ -37,9 +37,8 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^Footer$/i,
     kind: 'footer',
-    // Footer is highly contract-sensitive (`footerLinks`, brandDescription,
-    // shared chrome ownership). Prefer the deterministic visual-plan renderer
-    // so reruns stay stable instead of drifting on prompt interpretation.
+    // Footer now uses a source-backed visual plan plus a stable deterministic
+    // renderer, which is less noisy than letting AI invent fallback columns.
     deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
@@ -47,9 +46,9 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^Sidebar$/i,
     kind: 'sidebar',
-    // Sidebar chrome/widgets should come from the actual source template, not
-    // from a generic canonical fallback.
-    deterministicFirst: false,
+    // Sidebar widgets are now modeled explicitly in the visual plan, so the
+    // deterministic renderer is more stable than free-form AI codegen here.
+    deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },

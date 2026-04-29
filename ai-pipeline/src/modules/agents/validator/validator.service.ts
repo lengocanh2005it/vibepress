@@ -624,6 +624,30 @@ export class ValidatorService {
         (section) => section.type === 'carousel',
       )
     ) {
+      const requireCarouselArrows = context.visualPlan.sections.some(
+        (section) =>
+          section.type === 'carousel' &&
+          section.showArrows !== false &&
+          section.slides.length > 1,
+      );
+      const requireCarouselDots = context.visualPlan.sections.some(
+        (section) =>
+          section.type === 'carousel' &&
+          section.showDots !== false &&
+          section.slides.length > 1,
+      );
+      const carouselStructureIssue = this.findSpectraCarouselStructureViolation(
+        code,
+        {
+          requireArrows: requireCarouselArrows,
+          requireDots: requireCarouselDots,
+        },
+      );
+      if (carouselStructureIssue) {
+        violations.push(
+          `Carousel Spectra structure violated: ${carouselStructureIssue}. Preserve the plugin-faithful hierarchy \`uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide\` instead of replacing it with a generic slider shell.`,
+        );
+      }
       if (this.rendersStaticCarouselTrack(code)) {
         violations.push(
           'Carousel section renders a static `.swiper-wrapper` without any active-slide transform. Bind the track to `activeCarousels[...]` (or equivalent state) so prev/next/dots move the carousel instead of stacking all slides.',
@@ -648,6 +672,13 @@ export class ValidatorService {
     if (
       context.visualPlan?.sections.some((section) => section.type === 'modal')
     ) {
+      const modalStructureIssue =
+        this.findSpectraModalStructureViolation(code);
+      if (modalStructureIssue) {
+        violations.push(
+          `Modal Spectra structure violated: ${modalStructureIssue}. Keep the plugin-faithful modal hierarchy with \`uagb-spectra-button-wrapper\`, \`uagb-modal-trigger\`, \`uagb-modal-popup active\`, \`uagb-modal-popup-wrap\`, \`uagb-modal-popup-content\`, and \`uagb-modal-popup-close\`.`,
+        );
+      }
       const modalStateIssue = this.findInteractiveStateKeyMismatch(
         code,
         'openModals',
@@ -1059,6 +1090,23 @@ export class ValidatorService {
     isInlineSection = false,
   ): string[] {
     const contract = this.buildSectionRenderContract(section, label);
+
+    // Sections sourced from a WordPress page or post content block (sourceRef.sourceFile
+    // starting with "db:pages/" or "db:posts/") must not require hardcoded content
+    // literals when the component renders them dynamically via page-content or
+    // post-content binding. prose-block already has this escape via
+    // satisfiesCanonicalPageContentBinding — extend it to all section types here so
+    // that card-grid columns blocks from page content don't block the metrics repair pass.
+    const sourceFile = section.sourceRef?.sourceFile ?? '';
+    if (
+      (sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/')) &&
+      (this.codeSatisfiesBindingRequirement(code, 'page-content') ||
+        this.codeSatisfiesBindingRequirement(code, 'post-content'))
+    ) {
+      return [];
+    }
+
     return this.auditRenderedSectionAgainstContract(
       code,
       contract,
@@ -1778,35 +1826,86 @@ export class ValidatorService {
     ) => void,
   ): void {
     addLiteral(section.title, `${label} lost sidebar title`);
-    if (section.showSiteInfo) {
-      addBinding(
-        'site-info',
-        `${label} sidebar is missing site info rendering`,
-      );
-    }
-    if (section.menuSlug) {
-      addBinding('menus', `${label} sidebar is missing menus rendering`, [
-        {
-          name: 'items',
-          message: `${label} sidebar is missing menu item rendering`,
-        },
-      ]);
-    }
-    if (section.showPages) {
-      addBinding('pages', `${label} sidebar is missing pages rendering`, [
-        {
-          name: 'title',
-          message: `${label} sidebar is missing page title rendering`,
-        },
-      ]);
-    }
-    if (section.showPosts) {
-      addBinding('posts', `${label} sidebar is missing posts rendering`, [
-        {
-          name: 'title',
-          message: `${label} sidebar is missing post title rendering`,
-        },
-      ]);
+    for (const widget of section.widgets ?? []) {
+      switch (widget.kind) {
+        case 'author-bio':
+          addLiteral(widget.title, `${label} author-bio widget lost title`);
+          addLiteral(
+            widget.description,
+            `${label} author-bio widget lost description`,
+          );
+          addBinding(
+            'posts',
+            `${label} author-bio widget is missing author rendering`,
+            [
+              {
+                name: 'author',
+                message: `${label} author-bio widget is missing author name rendering`,
+              },
+            ],
+          );
+          addBinding(
+            'site-info',
+            `${label} author-bio widget is missing supporting site info rendering`,
+          );
+          break;
+        case 'categories':
+          addLiteral(widget.title, `${label} categories widget lost title`);
+          addBinding(
+            'posts',
+            `${label} categories widget is missing category rendering`,
+            [
+              {
+                name: 'categories',
+                message: `${label} categories widget is missing category labels`,
+              },
+            ],
+          );
+          break;
+        case 'navigation':
+          addLiteral(widget.title, `${label} navigation widget lost title`);
+          addLiteral(
+            widget.description,
+            `${label} navigation widget lost description`,
+          );
+          addBinding(
+            'menus',
+            `${label} navigation widget is missing menus rendering`,
+            [
+              {
+                name: 'items',
+                message: `${label} navigation widget is missing menu item rendering`,
+              },
+            ],
+          );
+          break;
+        case 'pages-list':
+          addLiteral(widget.title, `${label} pages-list widget lost title`);
+          addBinding(
+            'pages',
+            `${label} pages-list widget is missing pages rendering`,
+            [
+              {
+                name: 'title',
+                message: `${label} pages-list widget is missing page title rendering`,
+              },
+            ],
+          );
+          break;
+        case 'recent-posts':
+          addLiteral(widget.title, `${label} recent-posts widget lost title`);
+          addBinding(
+            'posts',
+            `${label} recent-posts widget is missing posts rendering`,
+            [
+              {
+                name: 'title',
+                message: `${label} recent-posts widget is missing post title rendering`,
+              },
+            ],
+          );
+          break;
+      }
     }
   }
 
@@ -2138,7 +2237,9 @@ export class ValidatorService {
           case 'excerpt':
             return /\b(?:post|item)\.excerpt\b|excerpt/i.test(code);
           case 'author':
-            return /\b(?:post|item)\.author(?:Name)?\b/i.test(code);
+            return /\b(?!(?:page|pageDetail)\b)[A-Za-z_$][\w$]*\.author(?:Name)?\b/i.test(
+              code,
+            );
           case 'date':
             return /\b(?:post|item)\.date\b|<time\b/i.test(code);
           case 'categories':
@@ -2256,21 +2357,12 @@ export class ValidatorService {
   ): boolean {
     switch (interaction.kind) {
       case 'modal': {
-        const hasTrigger = /\buagb-modal-trigger\b|<(?:button|a|Link)\b/i.test(
-          code,
-        );
-        const hasDialog =
-          /\buagb-modal-popup\b|\buagb-modal-popup-content\b|\brole\s*=\s*["']dialog["']|\baria-modal\s*=\s*(?:{?true}?|["']true["'])/i.test(
-            code,
-          );
-        const hasState =
-          /\bopenModal\b|\bopenModals\b|\bsetOpenModal\b|\bsetOpenModals\b|\bisModalOpen\b|\bsetIsModalOpen\b/.test(
-            code,
-          );
+        const structureIssue = this.findSpectraModalStructureViolation(code);
+        if (structureIssue) return false;
         if (isInlineSection) {
-          return hasTrigger && hasDialog;
+          return /\bopenModals\b|\bsetOpenModals\b/.test(code);
         }
-        return hasTrigger && hasDialog && hasState;
+        return true;
       }
       case 'tabs':
         return /(activeTab|setActiveTab|role=["']tab["']|tablist|tabs?\.map)/i.test(
@@ -2283,9 +2375,7 @@ export class ValidatorService {
       case 'carousel': {
         const minItems = Number(interaction.options?.minItems ?? 0);
         if (minItems <= 1) return true;
-        return /(activeCarousels|setActiveCarousels|swiper-slide|keen-slider|embla|currentSlide|setCurrentSlide)/i.test(
-          code,
-        );
+        return this.findSpectraCarouselStructureViolation(code) === null;
       }
       case 'comment-form':
         return /\bcomment-form\b/i.test(code) && /<textarea\b/i.test(code);
@@ -3234,7 +3324,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private rendersStaticCarouselTrack(code: string): boolean {
-    return /\bswiper-wrapper\b/.test(code) && !/translateX\(/.test(code);
+    if (!/\bswiper-wrapper\b/.test(code) || /translateX\(/.test(code)) {
+      return false;
+    }
+    const hasStackedActiveSlides =
+      /\bswiper-slide\b[\s\S]{0,240}\babsolute inset-0\b/i.test(code) &&
+      /\bopacity:\s*\([^)]*activeCarousels\[/.test(code);
+    return !hasStackedActiveSlides;
   }
 
   private hasEmptySwiperControlButton(code: string): boolean {
@@ -3244,6 +3340,74 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         code,
       )
     );
+  }
+
+  private findSpectraModalStructureViolation(code: string): string | null {
+    if (!/\buagb-spectra-button-wrapper\b/.test(code)) {
+      return 'missing `uagb-spectra-button-wrapper` around the trigger';
+    }
+    if (
+      !/\buagb-modal-trigger\b/.test(code) ||
+      !/\buagb-modal-button-link\b/.test(code)
+    ) {
+      return 'missing Spectra trigger classes `uagb-modal-trigger uagb-modal-button-link`';
+    }
+    if (
+      !/\buagb-modal-popup\b[\s\S]{0,120}\bactive\b|\bactive\b[\s\S]{0,120}\buagb-modal-popup\b/.test(
+        code,
+      )
+    ) {
+      return 'open popup overlay is missing the combined `uagb-modal-popup active` class';
+    }
+    if (!/\buagb-modal-popup-wrap\b/.test(code)) {
+      return 'missing `uagb-modal-popup-wrap` dialog shell';
+    }
+    if (!/\buagb-modal-popup-content\b/.test(code)) {
+      return 'missing `uagb-modal-popup-content` dialog body';
+    }
+    if (!/\buagb-modal-popup-close\b/.test(code)) {
+      return 'missing `uagb-modal-popup-close` close button';
+    }
+    if (!/\bsetOpenModals\b[\s\S]{0,240}\[[^\]]+\]\s*:\s*true/s.test(code)) {
+      return 'trigger does not clearly call `setOpenModals(... true)`';
+    }
+    if (!/\bsetOpenModals\b[\s\S]{0,240}\[[^\]]+\]\s*:\s*false/s.test(code)) {
+      return 'close path does not clearly call `setOpenModals(... false)`';
+    }
+    return null;
+  }
+
+  private findSpectraCarouselStructureViolation(
+    code: string,
+    options?: {
+      requireArrows?: boolean;
+      requireDots?: boolean;
+    },
+  ): string | null {
+    if (!/\buagb-slider-container\b/.test(code)) {
+      return 'missing `uagb-slider-container` wrapper';
+    }
+    if (!/\buagb-swiper\b/.test(code)) {
+      return 'missing `uagb-swiper` wrapper';
+    }
+    if (!/\bswiper-wrapper\b/.test(code)) {
+      return 'missing `swiper-wrapper` track container';
+    }
+    if (!/\bswiper-slide\b/.test(code)) {
+      return 'missing `swiper-slide` slide items';
+    }
+    if (!/\bactiveCarousels\b|\bsetActiveCarousels\b/.test(code)) {
+      return 'missing shared carousel state usage (`activeCarousels` / `setActiveCarousels`)';
+    }
+    if (options?.requireArrows) {
+      if (!/\bswiper-button-prev\b/.test(code) || !/\bswiper-button-next\b/.test(code)) {
+        return 'missing `swiper-button-prev` / `swiper-button-next` controls';
+      }
+    }
+    if (options?.requireDots && !/\bswiper-pagination\b/.test(code)) {
+      return 'missing `swiper-pagination` dot container';
+    }
+    return null;
   }
 
   private findInteractiveStateKeyMismatch(

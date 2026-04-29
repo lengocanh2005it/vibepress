@@ -143,6 +143,7 @@ export interface PlannerVisualRepairDelegate {
   deriveComponentLayout(
     tokens: ThemeTokens | undefined,
     componentName: string,
+    isDetailPage?: boolean,
   ): LayoutTokens;
   mergeDraftSectionPresentation(
     sections: SectionPlan[],
@@ -1038,6 +1039,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const layout = input.delegate.deriveComponentLayout(
         input.tokens,
         input.componentPlan.componentName,
+        input.componentPlan.isDetail === true && input.componentPlan.route !== '/',
       );
       const mergedSections = input.delegate.mergeDraftSectionPresentation(
         parsedResult.plan.sections,
@@ -1162,14 +1164,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const draftSections = repairState.draftSections ?? [];
     const finalSections = visualPlan.sections;
 
-    if (draftSections.length >= 6) {
+    if (draftSections.length >= 2) {
       const minimumSectionCount = Math.max(
-        4,
-        Math.ceil(draftSections.length * 0.7),
+        1,
+        Math.ceil(draftSections.length * 0.85),
       );
       if (finalSections.length < minimumSectionCount) {
         issues.push(
-          `section coverage too low (${finalSections.length}/${draftSections.length}); expected at least ${minimumSectionCount} source-backed sections to survive repair`,
+          `section coverage too low (${finalSections.length}/${draftSections.length}); expected at least ${minimumSectionCount} source-backed sections to survive`,
         );
       }
     }

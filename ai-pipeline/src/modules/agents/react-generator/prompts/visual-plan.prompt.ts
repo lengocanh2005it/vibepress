@@ -7,6 +7,7 @@ import type {
   ComponentVisualPlan,
   DataNeed,
   SectionPlan,
+  SidebarWidget,
   SourceSegment,
 } from '../visual-plan.schema.js';
 import {
@@ -199,7 +200,7 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 |---|---|
 | \`navbar\` | header/navigation bar |
 | \`hero\` | large heading + optional CTA + optional image; \`centered\` / \`left\` heroes keep image BELOW text, only \`split\` may place image beside text |
-| \`cta-strip\` | standalone button/CTA row without a hero heading |
+| \`cta-strip\` | CTA banner or button row, optionally with brief heading/subheading above the CTA |
 | \`cover\` | full-width image with overlay text |
 | \`post-list\` | list or grid of blog posts from API |
 | \`card-grid\` | static grid of feature cards |
@@ -225,7 +226,7 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 \`\`\`
 navbar:       { sticky, menuSlug, cta? }
 hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, image? } // centered|left => vertical stack (text first, image below)
-cta-strip:    { align?: left|center|right, cta?, ctas? }
+cta-strip:    { align?: left|center|right, heading?, subheading?, cta?, ctas? }
 cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage, itemLayout?: title-meta-inline|stacked, metaLayout?: inline|stacked, metaAlign?: start|end, metaSeparator?: none|dot|dash|slash|pipe, itemGap?, metaGap? }
 card-grid:    { title?, titleStyle?, subtitle?, columns: 2|3|4, columnWidths?, cardStyle?, cards: [{heading,body}] }
@@ -240,7 +241,7 @@ prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|pa
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
-sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
+sidebar:      { title?, widgets: [{ kind: author-bio|categories|navigation|pages-list|recent-posts, ... }], maxItems? }
 modal:        { triggerText?, triggerStyle?, heading?, headingStyle?, body?, bodyStyle?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
 tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
@@ -281,7 +282,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
 - The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
 - If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
-- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must be content-only: use \`showPages\` and/or \`showPosts\`, but NEVER set \`menuSlug\` or \`showSiteInfo\`.
+- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must stay content-only. Use only widget kinds like \`pages-list\`, \`recent-posts\`, or \`categories\`. Do NOT use \`author-bio\` or \`navigation\` for page sidebars.
 - For page/listing/body components, do NOT add trailing utility/footer/sidebar-like sections or headings such as ${formatInventedAuxiliarySectionLabels()} unless that EXACT label is already source-backed in the scoped template source or deterministic draft sections supplied in the user prompt.
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
@@ -892,6 +893,97 @@ function normalizeSourceSegment(raw: unknown): SourceSegment | null {
   }
 }
 
+function sanitizeSidebarLinks(
+  rawLinks: unknown,
+): Array<{ label: string; url?: string }> {
+  if (!Array.isArray(rawLinks)) return [];
+  return rawLinks
+    .map((rawLink) => {
+      if (!rawLink || typeof rawLink !== 'object') return null;
+      const label =
+        typeof (rawLink as { label?: unknown }).label === 'string'
+          ? (rawLink as { label: string }).label.trim()
+          : '';
+      const url =
+        typeof (rawLink as { url?: unknown }).url === 'string'
+          ? (rawLink as { url: string }).url.trim()
+          : undefined;
+      if (!label) return null;
+      return url ? { label, url } : { label };
+    })
+    .filter((value): value is { label: string; url?: string } => Boolean(value));
+}
+
+function sanitizeSidebarWidgets(rawWidgets: unknown): SidebarWidget[] {
+  if (!Array.isArray(rawWidgets)) return [];
+  const widgets: SidebarWidget[] = [];
+  for (const rawWidget of rawWidgets) {
+    if (!rawWidget || typeof rawWidget !== 'object') continue;
+    const kind =
+      typeof (rawWidget as { kind?: unknown }).kind === 'string'
+        ? (rawWidget as { kind: string }).kind
+        : '';
+    const title =
+      typeof (rawWidget as { title?: unknown }).title === 'string'
+        ? (rawWidget as { title: string }).title.trim()
+        : undefined;
+    const description =
+      typeof (rawWidget as { description?: unknown }).description === 'string'
+        ? (rawWidget as { description: string }).description.trim()
+        : undefined;
+    switch (kind) {
+      case 'author-bio':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(description ? { description } : {}),
+          ...(typeof (rawWidget as { showAvatar?: unknown }).showAvatar ===
+          'boolean'
+            ? { showAvatar: (rawWidget as { showAvatar: boolean }).showAvatar }
+            : {}),
+        });
+        break;
+      case 'categories':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(typeof (rawWidget as { showCounts?: unknown }).showCounts ===
+          'boolean'
+            ? { showCounts: (rawWidget as { showCounts: boolean }).showCounts }
+            : {}),
+        });
+        break;
+      case 'navigation': {
+        const menuSlug =
+          typeof (rawWidget as { menuSlug?: unknown }).menuSlug === 'string'
+            ? (rawWidget as { menuSlug: string }).menuSlug.trim()
+            : undefined;
+        const links = sanitizeSidebarLinks(
+          (rawWidget as { links?: unknown }).links,
+        );
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(description ? { description } : {}),
+          ...(menuSlug ? { menuSlug } : {}),
+          ...(links.length > 0 ? { links } : {}),
+        });
+        break;
+      }
+      case 'pages-list':
+      case 'recent-posts':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+        });
+        break;
+      default:
+        break;
+    }
+  }
+  return widgets;
+}
+
 /**
  * Validate one section object. Returns the (potentially auto-repaired) section
  * or null if the section is structurally broken and cannot be used.
@@ -1002,8 +1094,8 @@ function validateSectionDetailed(
 
     case 'cta-strip':
       if (!['left', 'center', 'right'].includes(raw.align)) delete raw.align;
-      delete raw.heading;
-      delete raw.subheading;
+      if (typeof raw.heading !== 'string') delete raw.heading;
+      if (typeof raw.subheading !== 'string') delete raw.subheading;
       delete raw.image;
       if (!raw.cta && !raw.ctas?.length) {
         return {
@@ -1209,12 +1301,10 @@ function validateSectionDetailed(
 
     case 'sidebar':
       if (typeof raw.title !== 'string') delete raw.title;
-      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug.trim()) {
-        delete raw.menuSlug;
+      raw.widgets = sanitizeSidebarWidgets(raw.widgets);
+      if (raw.widgets.length === 0) {
+        raw.widgets = [{ kind: 'pages-list', title: 'Pages' }];
       }
-      if (typeof raw.showSiteInfo !== 'boolean') raw.showSiteInfo = false;
-      if (typeof raw.showPages !== 'boolean') raw.showPages = true;
-      if (typeof raw.showPosts !== 'boolean') raw.showPosts = false;
       if (typeof raw.maxItems !== 'number' || raw.maxItems <= 0)
         raw.maxItems = 6;
       break;
@@ -1659,21 +1749,23 @@ export function sanitizeSectionsForContract(
       if (section.type === 'sidebar' && contract.componentType === 'page') {
         const next = { ...section };
         let changed = false;
-        if (next.menuSlug) {
-          delete next.menuSlug;
+        const allowedWidgets = (next.widgets ?? []).filter(
+          (widget) =>
+            widget.kind === 'pages-list' ||
+            widget.kind === 'recent-posts' ||
+            widget.kind === 'categories',
+        );
+        if (allowedWidgets.length !== (next.widgets ?? []).length) {
+          next.widgets = allowedWidgets;
           changed = true;
         }
-        if (next.showSiteInfo) {
-          next.showSiteInfo = false;
-          changed = true;
-        }
-        if (!next.showPages && !next.showPosts) {
-          next.showPages = true;
+        if ((next.widgets ?? []).length === 0) {
+          next.widgets = [{ kind: 'pages-list', title: 'Pages' }];
           changed = true;
         }
         if (changed) {
           adjustments.push(
-            'sanitized sidebar to remove shared chrome and keep only content widgets',
+            'sanitized sidebar to remove shared chrome widgets and keep only content widgets',
           );
         }
         return next;

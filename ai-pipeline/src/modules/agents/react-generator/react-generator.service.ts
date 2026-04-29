@@ -18,6 +18,7 @@ import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.j
 import {
   wpBlocksToJsonWithSourceRefs,
   wpJsonToString,
+  inferTargetFromBlockName,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
@@ -386,9 +387,13 @@ export class ReactGeneratorService {
       const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
         filteredNodes ?? [],
       );
+      const nodeTargets = this.collectCustomClassTargetsFromNodes(
+        filteredNodes ?? [],
+      );
       const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
         requiredCustomClassNames,
         tokens,
+        nodeTargets,
       );
       const code = this.codeGenerator.generateBlockFaithfulPartial({
         componentName,
@@ -465,6 +470,7 @@ export class ReactGeneratorService {
           requiredCustomClassTargets: this.resolveRequiredCustomClassTargets(
             result.component.requiredCustomClassNames,
             tokens,
+            this.collectCustomClassTargetsFromNodes(filteredNodes ?? []),
           ),
         }),
       ];
@@ -690,6 +696,41 @@ export class ReactGeneratorService {
     );
   }
 
+  generateDeterministicFallbackComponent(input: {
+    component: GeneratedComponent;
+    plan: PlanResult;
+    hasSharedHeader?: boolean;
+    hasSharedFooter?: boolean;
+  }): GeneratedComponent | null {
+    const {
+      component,
+      plan,
+      hasSharedHeader = false,
+      hasSharedFooter = false,
+    } = input;
+    const componentPlan = plan.find((item) => item.componentName === component.name);
+    const effectivePlan = this.stripSharedLayoutSectionsFromPlan(
+      componentPlan,
+      hasSharedHeader,
+      hasSharedFooter,
+    );
+    if (!effectivePlan?.visualPlan) {
+      return null;
+    }
+
+    const code = this.codeGenerator.generate(effectivePlan.visualPlan);
+    return this.attachPlanContext(
+      {
+        ...component,
+        code,
+      },
+      effectivePlan,
+      {
+        generationMode: 'deterministic',
+      },
+    );
+  }
+
   // ── Section splitting ──────────────────────────────────────────────────────
 
   /**
@@ -785,6 +826,26 @@ ${renders}
     };
     for (const node of nodes) visit(node);
     return [...result];
+  }
+
+  private collectCustomClassTargetsFromNodes(
+    nodes: WpNode[],
+  ): Record<string, ThemeInteractionTarget> {
+    const targets: Record<string, ThemeInteractionTarget> = {};
+    const visit = (node: WpNode) => {
+      const target = inferTargetFromBlockName(node.block);
+      if (target) {
+        for (const className of node.customClassNames ?? []) {
+          const normalized = className.trim();
+          if (normalized && !targets[normalized]) {
+            targets[normalized] = target;
+          }
+        }
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return targets;
   }
 
   private buildVisualPlanRepairNote(
@@ -1094,14 +1155,14 @@ ${renders}
   private resolveRequiredCustomClassTargets(
     requiredCustomClassNames: string[] | undefined,
     tokens?: ThemeTokens,
+    nodeInferredTargets?: Record<string, ThemeInteractionTarget>,
   ): Record<string, ThemeInteractionTarget> | undefined {
-    const precise = tokens?.interactions?.precise ?? [];
-    if (!requiredCustomClassNames?.length || precise.length === 0) {
-      return undefined;
-    }
+    const targetMap: Record<string, ThemeInteractionTarget> = {
+      ...(nodeInferredTargets ?? {}),
+    };
 
-    const targetMap: Record<string, ThemeInteractionTarget> = {};
-    for (const className of requiredCustomClassNames) {
+    const precise = tokens?.interactions?.precise ?? [];
+    for (const className of requiredCustomClassNames ?? []) {
       const normalized = className.trim();
       if (!normalized) continue;
       const match = precise.find((entry) => entry.className === normalized);

@@ -326,6 +326,42 @@ export function useSse(
     [],
   );
 
+  const pushSyntheticErrorEvent = useCallback(
+    (status: PipelineStatusResponse) => {
+      setState((prev) => {
+        const errorEvent: PipelineProgressEvent = {
+          step: "system",
+          label: "Pipeline Failed",
+          status: "error",
+          percent: prev.progress,
+          message:
+            status.error ||
+            "The pipeline crashed before it could complete successfully.",
+        };
+
+        const alreadyHasErrorEvent = prev.allEvents.some(
+          (event) =>
+            event.step === errorEvent.step &&
+            event.status === errorEvent.status &&
+            event.message === errorEvent.message,
+        );
+
+        return {
+          ...prev,
+          isConnected: false,
+          isLoading: false,
+          error: new Error(errorEvent.message),
+          currentEvent: errorEvent,
+          allEvents: alreadyHasErrorEvent
+            ? prev.allEvents
+            : [...prev.allEvents, errorEvent],
+          connectionState: "error",
+        };
+      });
+    },
+    [],
+  );
+
   const scheduleReconnect = useCallback(() => {
     if (disposedRef.current || manuallyDisconnectedRef.current) return;
     clearReconnectTimeout();
@@ -402,11 +438,10 @@ export function useSse(
         try {
           // ServerSentEvent data là JSON string
           const data = JSON.parse(event.data) as PipelineProgressEvent;
-          console.log(data);
           if (data.step === "11_done" && data.status === "done") {
             pipelineCompletedRef.current = true;
           }
-          if (data.status === "stopped") {
+          if (data.status === "stopped" || data.status === "error") {
             pipelineCompletedRef.current = false;
             eventSource.close();
             if (eventSourceRef.current === eventSource) {
@@ -417,11 +452,15 @@ export function useSse(
               ...prev,
               isConnected: false,
               isLoading: false,
-              error: null,
+              error:
+                data.status === "error" && data.message
+                  ? new Error(data.message)
+                  : null,
               currentEvent: data,
               allEvents: [...prev.allEvents, data],
               progress: data.percent,
-              connectionState: "stopped",
+              connectionState:
+                data.status === "error" ? "error" : "stopped",
             }));
             return;
           }
@@ -481,6 +520,11 @@ export function useSse(
               return;
             }
 
+            if (status.status === "error") {
+              pushSyntheticErrorEvent(status);
+              return;
+            }
+
             if (
               status.status === "running" ||
               status.status === "awaiting_confirmation" ||
@@ -522,6 +566,7 @@ export function useSse(
     clearReconnectTimeout,
     fetchPipelineStatus,
     jobId,
+    pushSyntheticErrorEvent,
     pushSyntheticCompletionEvent,
     pushSyntheticStoppedEvent,
     scheduleReconnect,

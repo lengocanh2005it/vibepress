@@ -38,6 +38,7 @@ import {
   parseVisualPlanDetailed,
 } from './prompts/visual-plan.prompt.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
+import { inferTargetFromBlockName } from '../../../common/utils/wp-block-to-json.js';
 import type {
   ThemeInteractionTarget,
   ThemeTokens,
@@ -102,6 +103,10 @@ export interface ReviewResult {
   rawResponse: string;
 }
 
+type FullFileGenerationPolicy =
+  | 'plan-guided-full-file'
+  | 'direct-ai-full-file';
+
 const RICH_VISUAL_SECTION_TYPES = new Set([
   'prose-block',
   'hero',
@@ -163,9 +168,15 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
 ]);
 
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
+  'post-content',
+  'post-meta',
+  'page-content',
+  'comments',
+  'sidebar',
   'prose-block',
   'card-grid',
   'carousel',
+  'modal',
   'tabs',
   'accordion',
 ]);
@@ -197,7 +208,7 @@ export class CodeReviewerService {
     private readonly codeGenerator: CodeGeneratorService,
     private readonly frameGenerator: FrameGeneratorService,
     private readonly aiLogger?: AiLoggerService,
-  ) {}
+  ) { }
 
   private readonly selfFixSystemPrompt =
     'You are a React/TypeScript expert. Fix the exact validation or targeted UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code, no explanation.';
@@ -255,16 +266,22 @@ export class CodeReviewerService {
     // when the AI-generated visual plan omits them at the section level.
     const nodeCustomClassNames =
       this.collectCustomClassNamesFromNodesJson(templateSource);
-    if (nodeCustomClassNames.length > 0) {
+    const nodeCustomClassTargets =
+      this.collectCustomClassTargetsFromNodesJson(templateSource);
+    if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
       const merged = [
         ...new Set([
           ...(promptContext?.requiredCustomClassNames ?? []),
           ...nodeCustomClassNames,
         ]),
       ];
+      const mergedTargets = {
+        ...(promptContext?.requiredCustomClassTargets ?? {}),
+        ...nodeCustomClassTargets,
+      };
       promptContext = promptContext
-        ? { ...promptContext, requiredCustomClassNames: merged }
-        : { requiredCustomClassNames: merged };
+        ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
+        : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
     }
     let validationContext = this.buildValidationContext(
       promptContext,
@@ -274,6 +291,7 @@ export class CodeReviewerService {
       this.resolveRequiredCustomClassTargets(
         promptContext?.requiredCustomClassNames,
         tokens,
+        nodeCustomClassTargets,
       ),
     );
 
@@ -353,16 +371,20 @@ export class CodeReviewerService {
           componentPlan,
           componentPlan.visualPlan,
         );
-        if (nodeCustomClassNames.length > 0) {
+        if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
           const merged = [
             ...new Set([
               ...(promptContext?.requiredCustomClassNames ?? []),
               ...nodeCustomClassNames,
             ]),
           ];
+          const mergedTargets = {
+            ...(promptContext?.requiredCustomClassTargets ?? {}),
+            ...nodeCustomClassTargets,
+          };
           promptContext = promptContext
-            ? { ...promptContext, requiredCustomClassNames: merged }
-            : { requiredCustomClassNames: merged };
+            ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
+            : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
         }
         validationContext = this.buildValidationContext(
           promptContext,
@@ -372,6 +394,7 @@ export class CodeReviewerService {
           this.resolveRequiredCustomClassTargets(
             promptContext?.requiredCustomClassNames,
             tokens,
+            nodeCustomClassTargets,
           ),
         );
         await this.log(
@@ -428,6 +451,7 @@ export class CodeReviewerService {
           logPath,
           logLabel: 'precomputed-plan',
           systemPrompt: componentSystemPrompt,
+          fullFilePolicy: 'plan-guided-full-file',
         });
         attempts += planned.attemptsUsed;
         code = planned.code;
@@ -546,14 +570,14 @@ export class CodeReviewerService {
           : undefined;
         const visualContract = componentPlan
           ? {
-              componentType: componentPlan.type,
-              route: componentPlan.route,
-              isDetail: componentPlan.isDetail,
-              dataNeeds: visualDataNeeds,
-              stripLayoutChrome: componentPlan.type === 'page',
-              sourceBackedAuxiliaryLabels:
-                componentPlan.sourceBackedAuxiliaryLabels,
-            }
+            componentType: componentPlan.type,
+            route: componentPlan.route,
+            isDetail: componentPlan.isDetail,
+            dataNeeds: visualDataNeeds,
+            stripLayoutChrome: componentPlan.type === 'page',
+            sourceBackedAuxiliaryLabels:
+              componentPlan.sourceBackedAuxiliaryLabels,
+          }
           : undefined;
 
         const { systemPrompt: s1System, userPrompt: s1User } =
@@ -588,32 +612,36 @@ export class CodeReviewerService {
           });
           const visualPlan = parsedPlan.plan
             ? {
-                ...parsedPlan.plan,
-                ...(componentPlan?.fixedSlug
-                  ? {
-                      pageBinding: {
-                        id: componentPlan.fixedPageId,
-                        slug: componentPlan.fixedSlug,
-                        title: componentPlan.fixedTitle,
-                        route: componentPlan.route ?? undefined,
-                      },
-                    }
-                  : {}),
-              }
+              ...parsedPlan.plan,
+              ...(componentPlan?.fixedSlug
+                ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+                : {}),
+            }
             : undefined;
 
           if (visualPlan) {
             promptContext = this.buildPromptContext(componentPlan, visualPlan);
-            if (nodeCustomClassNames.length > 0) {
+            if (nodeCustomClassNames.length > 0 || Object.keys(nodeCustomClassTargets).length > 0) {
               const merged = [
                 ...new Set([
                   ...(promptContext?.requiredCustomClassNames ?? []),
                   ...nodeCustomClassNames,
                 ]),
               ];
+              const mergedTargets = {
+                ...(promptContext?.requiredCustomClassTargets ?? {}),
+                ...nodeCustomClassTargets,
+              };
               promptContext = promptContext
-                ? { ...promptContext, requiredCustomClassNames: merged }
-                : { requiredCustomClassNames: merged };
+                ? { ...promptContext, requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets }
+                : { requiredCustomClassNames: merged, requiredCustomClassTargets: mergedTargets };
             }
             validationContext = this.buildValidationContext(
               promptContext,
@@ -623,6 +651,7 @@ export class CodeReviewerService {
               this.resolveRequiredCustomClassTargets(
                 promptContext?.requiredCustomClassNames,
                 tokens,
+                nodeCustomClassTargets,
               ),
             );
             await this.log(
@@ -667,6 +696,7 @@ export class CodeReviewerService {
               logPath,
               logLabel: 'visual-plan',
               systemPrompt: componentSystemPrompt,
+              fullFilePolicy: 'plan-guided-full-file',
             });
             attempts += planned.attemptsUsed;
             code = planned.code;
@@ -777,6 +807,7 @@ export class CodeReviewerService {
         logPath,
         logLabel: 'direct-ai',
         systemPrompt: componentSystemPrompt,
+        fullFilePolicy: 'direct-ai-full-file',
       });
       attempts += direct.attemptsUsed;
       code = direct.code;
@@ -1196,15 +1227,15 @@ export class CodeReviewerService {
       options?.includeRequiredCustomClasses === false
         ? undefined
         : this.resolveRequiredCustomClassNames(
-            componentPlan,
-            resolvedVisualPlan,
-          );
+          componentPlan,
+          resolvedVisualPlan,
+        );
 
     return {
       templateName:
         'templateName' in (componentPlan ?? {})
           ? (componentPlan as PlanResult[number] | ComponentPromptContext)
-              ?.templateName
+            ?.templateName
           : undefined,
       description: componentPlan?.description,
       route: componentPlan?.route,
@@ -1251,14 +1282,14 @@ export class CodeReviewerService {
   private resolveRequiredCustomClassTargets(
     requiredCustomClassNames: string[] | undefined,
     tokens?: ThemeTokens,
+    nodeInferredTargets?: Record<string, ThemeInteractionTarget>,
   ): Record<string, ThemeInteractionTarget> | undefined {
-    const precise = tokens?.interactions?.precise ?? [];
-    if (!requiredCustomClassNames?.length || precise.length === 0) {
-      return undefined;
-    }
+    const targetMap: Record<string, ThemeInteractionTarget> = {
+      ...(nodeInferredTargets ?? {}),
+    };
 
-    const targetMap: Record<string, ThemeInteractionTarget> = {};
-    for (const className of requiredCustomClassNames) {
+    const precise = tokens?.interactions?.precise ?? [];
+    for (const className of requiredCustomClassNames ?? []) {
       const normalized = className.trim();
       if (!normalized) continue;
       const match = precise.find((entry) => entry.className === normalized);
@@ -1312,16 +1343,45 @@ export class CodeReviewerService {
     }
   }
 
+  private collectCustomClassTargetsFromNodesJson(
+    nodesJson: string,
+  ): Record<string, ThemeInteractionTarget> {
+    try {
+      const parsed = JSON.parse(nodesJson) as unknown[];
+      const targets: Record<string, ThemeInteractionTarget> = {};
+      const visit = (value: unknown) => {
+        if (!value || typeof value !== 'object') return;
+        const node = value as {
+          block?: string;
+          customClassNames?: string[];
+          children?: unknown[];
+        };
+        const target = inferTargetFromBlockName(node.block ?? '');
+        if (target) {
+          for (const className of node.customClassNames ?? []) {
+            const normalized = className.trim();
+            if (normalized && !targets[normalized]) {
+              targets[normalized] = target;
+            }
+          }
+        }
+        for (const child of node.children ?? []) visit(child);
+      };
+      if (Array.isArray(parsed)) {
+        for (const node of parsed) visit(node);
+      }
+      return targets;
+    } catch {
+      return {};
+    }
+  }
+
   private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
-    _componentName: string,
+    componentName: string,
   ): { enabled: boolean; reason: string } {
     if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
-    }
-
-    if (componentPlan.isDetail) {
-      return { enabled: false, reason: 'detail view blocked' };
     }
 
     const normalizedNeeds = new Set(
@@ -1330,6 +1390,47 @@ export class CodeReviewerService {
     const signals = this.getVisualPlanSectionSignals(componentPlan);
     if (signals.sections.length < 2) {
       return { enabled: false, reason: 'too few sections' };
+    }
+
+    const isPageDetail =
+      componentPlan.isDetail && normalizedNeeds.has('pageDetail');
+    const isPostDetail =
+      componentPlan.isDetail &&
+      (normalizedNeeds.has('postDetail') || signals.hasPostContent);
+    const isCanonicalSinglePostDetail =
+      /^Single$/i.test(componentName) &&
+      isPostDetail &&
+      signals.sections.length >= 2 &&
+      signals.sections.every((section) =>
+        DETERMINISTIC_SECTION_ASSEMBLY_TYPES.has(section.type),
+      );
+    const isSingleWithSidebar =
+      /^SingleWithSidebar$/i.test(componentName) &&
+      isPostDetail &&
+      componentPlan.visualPlan.layout.contentLayout !== 'single-column' &&
+      signals.sections.some((section) => section.type === 'sidebar') &&
+      signals.sections.some((section) => section.type === 'comments');
+    const richPageDetailCandidate = Boolean(
+      isPageDetail &&
+      !isPostDetail &&
+      signals.sections.length >= 4 &&
+      (signals.richSectionCount >= 2 ||
+        signals.interactiveSectionCount >= 1 ||
+        signals.mediaHeavySectionCount >= 2),
+    );
+
+    if (
+      componentPlan.isDetail &&
+      !richPageDetailCandidate &&
+      !isSingleWithSidebar &&
+      !isCanonicalSinglePostDetail
+    ) {
+      return {
+        enabled: false,
+        reason: isPostDetail
+          ? 'post-detail view blocked'
+          : 'detail view blocked',
+      };
     }
 
     const hasOnlyContentWrapper =
@@ -1344,6 +1445,14 @@ export class CodeReviewerService {
       );
 
     if (signals.lowComplexityOnly) {
+      if (isSingleWithSidebar || isCanonicalSinglePostDetail) {
+        return {
+          enabled: true,
+          reason: isSingleWithSidebar
+            ? 'single-with-sidebar deterministic section assembly'
+            : 'single deterministic section assembly',
+        };
+      }
       return { enabled: false, reason: 'low-complexity data/content template' };
     }
 
@@ -1379,10 +1488,15 @@ export class CodeReviewerService {
     if (componentPlan.fixedSlug) score += 1;
     if (normalizedNeeds.has('pageDetail') && !signals.hasPageContent)
       score += 1;
+    if (richPageDetailCandidate) score += 2;
 
-    const enabled =
+    const enabled = Boolean(
       score >= 5 ||
-      (signals.sections.length >= 4 && signals.richSectionCount >= 2);
+      (signals.sections.length >= 4 && signals.richSectionCount >= 2) ||
+      richPageDetailCandidate ||
+      isSingleWithSidebar ||
+      isCanonicalSinglePostDetail,
+    );
     const reason = [
       `score=${score}`,
       `rich=${signals.richSectionCount}`,
@@ -1390,6 +1504,9 @@ export class CodeReviewerService {
       `media=${signals.mediaHeavySectionCount}`,
       `types=${signals.distinctTypes.size}`,
       `sourceBacked=${signals.sourceBackedSectionCount}`,
+      `pageDetailRich=${richPageDetailCandidate ? 1 : 0}`,
+      `single=${isCanonicalSinglePostDetail ? 1 : 0}`,
+      `singleWithSidebar=${isSingleWithSidebar ? 1 : 0}`,
     ].join(', ');
 
     return { enabled, reason };
@@ -1491,6 +1608,7 @@ export class CodeReviewerService {
     logPath?: string;
     logLabel: string;
     systemPrompt: string;
+    fullFilePolicy: FullFileGenerationPolicy;
     maxAttempts?: number;
   }): Promise<{
     code: string;
@@ -1513,6 +1631,7 @@ export class CodeReviewerService {
       logPath,
       logLabel,
       systemPrompt,
+      fullFilePolicy,
       maxAttempts = 3,
     } = input;
 
@@ -1544,13 +1663,13 @@ export class CodeReviewerService {
         editRequestContextNote,
         attempt > 1
           ? this.buildRetryAppendix({
-              componentName,
-              code,
-              lastError,
-              validationContext,
-              componentPlan,
-              repoManifest,
-            })
+            componentName,
+            code,
+            lastError,
+            validationContext,
+            componentPlan,
+            repoManifest,
+          })
           : undefined,
       );
       const {
@@ -1569,9 +1688,10 @@ export class CodeReviewerService {
       );
 
       lastRawOutput = raw;
-      code = this.stripSpuriousHardcodedSections(
-        this.postProcessCode(raw),
+      code = this.postProcessFullFileCandidate(
+        raw,
         componentName,
+        fullFilePolicy,
       );
 
       const check = this.validator.checkCodeStructure(code, validationContext);
@@ -1653,7 +1773,11 @@ export class CodeReviewerService {
               logPath,
               `${componentName}:${logLabel}:autofix`,
             );
-            code = fixedResult.code;
+            code = this.postProcessFullFileCandidate(
+              fixedResult.code,
+              componentName,
+              fullFilePolicy,
+            );
 
             const finalCheck = this.validator.checkCodeStructure(
               code,
@@ -2331,7 +2455,7 @@ export class CodeReviewerService {
         'Do not create fallback per-column arrays or helper functions that synthesize About/Privacy/Social links. Iterate the fetched footer-links data directly.',
       );
       instructions.push(
-        'If the approved footer plan includes `brandDescription`, render that exact text and do not replace it with `siteInfo.blogDescription`.',
+        'For footer brand copy, prefer `siteInfo.blogDescription` when the footer is showing the site tagline. Do not invent alternate About/Privacy/Social-style copy.',
       );
     }
 
@@ -2572,13 +2696,8 @@ export class CodeReviewerService {
       assembledSections.push(sectionResult.code);
     }
 
-    let code = this.codeGenerator.assembleSectionedComponent(
-      frame,
-      assembledSections,
-    );
-    code = this.stripSpuriousHardcodedSections(
-      this.postProcessCode(code),
-      componentName,
+    let code = this.postProcessCode(
+      this.codeGenerator.assembleSectionedComponent(frame, assembledSections),
     );
     const check = this.validator.checkCodeStructure(code, validationContext);
     if (check.fixedCode) code = check.fixedCode;
@@ -2650,13 +2769,8 @@ export class CodeReviewerService {
         }
       }
 
-      code = this.codeGenerator.assembleSectionedComponent(
-        frame,
-        assembledSections,
-      );
-      code = this.stripSpuriousHardcodedSections(
-        this.postProcessCode(code),
-        componentName,
+      code = this.postProcessCode(
+        this.codeGenerator.assembleSectionedComponent(frame, assembledSections),
       );
       const retriedCheck = this.validator.checkCodeStructure(
         code,
@@ -2836,11 +2950,11 @@ export class CodeReviewerService {
         const fidelityError = basicError
           ? undefined
           : this.validator.checkInlineSectionFidelity(
-              deterministicCode,
-              section,
-              componentName,
-              sectionIndex + 1,
-            );
+            deterministicCode,
+            section,
+            componentName,
+            sectionIndex + 1,
+          );
         const deterministicError = basicError ?? fidelityError ?? undefined;
         if (!deterministicError) {
           this.logger.log(
@@ -2942,11 +3056,11 @@ export class CodeReviewerService {
       const fidelityError = basicError
         ? undefined
         : this.validator.checkInlineSectionFidelity(
-            sectionCode,
-            section,
-            componentName,
-            sectionIndex + 1,
-          );
+          sectionCode,
+          section,
+          componentName,
+          sectionIndex + 1,
+        );
       const attemptError = basicError ?? fidelityError ?? undefined;
       cotAttempts.push({
         attemptNumber: cotAttempts.length + 1,
@@ -3021,11 +3135,11 @@ export class CodeReviewerService {
         const fixFidelityError = fixBasicError
           ? undefined
           : this.validator.checkInlineSectionFidelity(
-              fixedCode,
-              section,
-              componentName,
-              sectionIndex + 1,
-            );
+            fixedCode,
+            section,
+            componentName,
+            sectionIndex + 1,
+          );
         const fixError = fixBasicError ?? fixFidelityError ?? undefined;
         if (!fixError) {
           this.logger.log(
@@ -3075,7 +3189,14 @@ export class CodeReviewerService {
     error: string | undefined,
     totalSections: number,
   ): number[] {
-    if (!error || !/Visual plan obligations violated/i.test(error)) return [];
+    if (
+      !error ||
+      !/Visual plan obligations violated|Visual section contracts violated/i.test(
+        error,
+      )
+    ) {
+      return [];
+    }
     const matches = [...error.matchAll(/section\s+(\d+)/gi)];
     const indexes = matches
       .map((match) => Number(match[1]) - 1)
@@ -3377,7 +3498,13 @@ export class CodeReviewerService {
           '- If the section renders `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` so only the active slide is shown.',
         );
         lines.push(
+          '- Keep the Spectra slider hierarchy `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide`; do not collapse it into a generic carousel shell.',
+        );
+        lines.push(
           '- Prev/next controls must use `swiper-button-prev` and `swiper-button-next` and each button must contain a visible SVG or text child.',
+        );
+        lines.push(
+          '- If dots are rendered, keep the `swiper-pagination` wrapper with clickable bullets that update `setActiveCarousels(...)`.',
         );
         lines.push(
           '- Dots and arrow buttons must update `setActiveCarousels(...)`; do not leave carousel controls decorative only.',
@@ -3433,13 +3560,16 @@ export class CodeReviewerService {
           );
         }
         lines.push(
+          '- Wrap the trigger button in `uagb-spectra-button-wrapper` and keep the trigger button class `uagb-modal-trigger uagb-modal-button-link`.',
+        );
+        lines.push(
+          '- Keep the open popup hierarchy `uagb-modal-popup active > uagb-modal-popup-wrap > uagb-modal-popup-content` and include `uagb-modal-popup-close` for the close button.',
+        );
+        lines.push(
           '- Render a trigger button with class `uagb-modal-trigger` and `uagb-modal-button-link`.',
         );
         lines.push(
           '- Render the popup conditionally with `openModals[...] ? (...) : null`; do not inline the popup content.',
-        );
-        lines.push(
-          '- Keep the popup structure markers: `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
         );
         lines.push(
           '- The rendered open popup overlay must include the `active` class together with `uagb-modal-popup`; Spectra compat CSS keeps `.uagb-modal-popup` hidden until `.active` is present.',
@@ -3622,15 +3752,15 @@ export class CodeReviewerService {
         (section) => section.type === 'cover',
       )
         ? [
-            'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
-          ]
+          'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
+        ]
         : []),
       ...(componentPlan.visualPlan.sections.some(
         (section) => section.type === 'carousel',
       )
         ? [
-            'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
-          ]
+          'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
+        ]
         : []),
       ...componentPlan.visualPlan.sections.map((section, index) => {
         const parts = [
@@ -3643,8 +3773,8 @@ export class CodeReviewerService {
             : null,
           this.extractCustomClassNamesFromSection(section).length > 0
             ? `customClassNames=${JSON.stringify(
-                this.extractCustomClassNamesFromSection(section),
-              )}`
+              this.extractCustomClassNamesFromSection(section),
+            )}`
             : null,
           section.presentation
             ? `presentation=${JSON.stringify(section.presentation)}`
@@ -4337,6 +4467,18 @@ export class CodeReviewerService {
     );
   }
 
+  private postProcessFullFileCandidate(
+    code: string,
+    componentName: string,
+    policy: FullFileGenerationPolicy,
+  ): string {
+    const processed = this.postProcessCode(code);
+    if (policy !== 'direct-ai-full-file') {
+      return processed;
+    }
+    return this.stripSpuriousHardcodedSections(processed, componentName);
+  }
+
   private formatRawOutput(raw: string): string {
     return `${this.rawOutputDivider}${raw || '(empty)'}\n----- RAW OUTPUT END -----`;
   }
@@ -4429,37 +4571,13 @@ export class CodeReviewerService {
       .trim();
   }
 
-  private isWithinHeadingTitleContext(code: string, offset: number): boolean {
-    const start = Math.max(0, offset - 220);
-    const end = Math.min(code.length, offset + 220);
-    const window = code.slice(start, end);
-    const before = code.slice(start, offset);
-    const openHeading = before.match(/<h[1-6]\b[^>]*>/gi);
-    const closeHeading = before.match(/<\/h[1-6]>/gi);
-    if ((openHeading?.length ?? 0) > (closeHeading?.length ?? 0)) {
-      return true;
-    }
-
-    return /\b(?:title|heading)\b/i.test(window);
-  }
-
-  private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
-    const before = code.slice(Math.max(0, offset - 600), offset);
-    return (
-      /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
-      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
-      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
-        before,
-      )
-    );
-  }
-
   /**
+   * Direct-AI full-file cleanup only:
    * Remove JSX `<section>` blocks that contain only hardcoded static text with
    * no references to dynamic data (item/page/post/data state variables).
-   * Only applied to detail-type components (Page, Single and their variants)
-   * where the only valid content source is `item.content` via dangerouslySetInnerHTML.
+   * Do NOT use this on section-assembly or plan-guided generation paths because
+   * source-backed sections may legitimately be static JSX after deterministic or
+   * visual-plan-driven reconstruction.
    */
   private stripSpuriousHardcodedSections(
     code: string,

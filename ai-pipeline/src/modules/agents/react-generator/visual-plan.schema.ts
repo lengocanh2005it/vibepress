@@ -240,6 +240,8 @@ export interface HeroSection extends BaseSection {
 export interface CtaStripSection extends BaseSection {
   type: 'cta-strip';
   align?: 'left' | 'center' | 'right';
+  heading?: string;
+  subheading?: string;
   cta?: SectionCta;
   ctas?: SectionCta[];
 }
@@ -416,6 +418,39 @@ export interface SearchSection extends BaseSection {
   title?: string;
 }
 
+export interface SidebarLinkItem {
+  label: string;
+  url?: string;
+}
+
+export type SidebarWidget =
+  | {
+      kind: 'author-bio';
+      title?: string;
+      description?: string;
+      showAvatar?: boolean;
+    }
+  | {
+      kind: 'categories';
+      title?: string;
+      showCounts?: boolean;
+    }
+  | {
+      kind: 'navigation';
+      title?: string;
+      description?: string;
+      menuSlug?: string;
+      links?: SidebarLinkItem[];
+    }
+  | {
+      kind: 'pages-list';
+      title?: string;
+    }
+  | {
+      kind: 'recent-posts';
+      title?: string;
+    };
+
 export interface BreadcrumbSection extends BaseSection {
   type: 'breadcrumb';
 }
@@ -423,10 +458,7 @@ export interface BreadcrumbSection extends BaseSection {
 export interface SidebarSection extends BaseSection {
   type: 'sidebar';
   title?: string;
-  menuSlug?: string;
-  showSiteInfo: boolean;
-  showPages: boolean;
-  showPosts: boolean;
+  widgets: SidebarWidget[];
   maxItems?: number;
 }
 
@@ -806,16 +838,20 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
         sourceEvidence,
       };
     case 'sidebar':
+      const sidebarRequired = new Set<SectionCapability>();
+      for (const widget of section.widgets) {
+        if (widget.kind === 'author-bio') {
+          sidebarRequired.add('posts');
+          sidebarRequired.add('site-info');
+        }
+        if (widget.kind === 'categories') sidebarRequired.add('posts');
+        if (widget.kind === 'navigation') sidebarRequired.add('menus');
+        if (widget.kind === 'pages-list') sidebarRequired.add('pages');
+        if (widget.kind === 'recent-posts') sidebarRequired.add('posts');
+      }
       return {
         role: 'sidebar',
-        required: [
-          ...(section.menuSlug ? (['menus'] as SectionCapability[]) : []),
-          ...(section.showPages ? (['pages'] as SectionCapability[]) : []),
-          ...(section.showPosts ? (['posts'] as SectionCapability[]) : []),
-          ...(section.showSiteInfo
-            ? (['site-info'] as SectionCapability[])
-            : []),
-        ],
+        required: Array.from(sidebarRequired),
         sourceEvidence,
       };
     case 'modal':
