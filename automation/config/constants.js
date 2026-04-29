@@ -9,13 +9,6 @@ const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'MVP Bot';
 const GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'mvp-bot@example.com';
 const AI_PIPELINE_PORT = process.env.AI_PIPELINE_PORT || '3001';
 const AI_PIPELINE_URL = `http://localhost:${AI_PIPELINE_PORT}`;
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN || null;
-const RENDER_API_KEY = process.env.RENDER_API_KEY || null;
-const RENDER_OWNER_ID = process.env.RENDER_OWNER_ID || null;
-const PUBLIC_DB_HOST = process.env.PUBLIC_DB_HOST || null;
-const PUBLIC_DB_PORT = process.env.PUBLIC_DB_PORT ? Number(process.env.PUBLIC_DB_PORT) : null;
-const RENDER_DB_USER = process.env.RENDER_DB_USER || null;
-const RENDER_DB_PASSWORD = process.env.RENDER_DB_PASSWORD ?? null;
 // VPS deploy
 const VPS_HOST = process.env.VPS_HOST || null;
 const VPS_USER = process.env.VPS_USER || null;
@@ -57,13 +50,6 @@ module.exports = {
 	GIT_AUTHOR_NAME,
 	GIT_AUTHOR_EMAIL,
 	AI_PIPELINE_URL,
-	VERCEL_TOKEN,
-	RENDER_API_KEY,
-	RENDER_OWNER_ID,
-	PUBLIC_DB_HOST,
-	PUBLIC_DB_PORT,
-	RENDER_DB_USER,
-	RENDER_DB_PASSWORD,
 	VPS_HOST,
 	VPS_USER,
 	VPS_SSH_KEY_PATH,

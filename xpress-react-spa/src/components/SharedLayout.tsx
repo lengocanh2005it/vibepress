@@ -9,12 +9,10 @@ const SharedLayout = () => {
     { label: 'Canvas edit', path: '/app/editor' },
     { label: 'AI generate', path: '/app/editor/split-view' },
     { label: 'Visual edit', path: '/app/editor/visual' },
-    { label: 'Go live', path: '/app/deploy' },
   ];
 
   const currentPath = location.pathname;
   const currentStep =
-    currentPath.startsWith('/app/deploy') ? 4 :
     currentPath.startsWith('/app/editor/visual') ? 3 :
     currentPath.startsWith('/app/editor/split-view') ? 2 :
     currentPath.startsWith('/app/editor') ? 1 :
@@ -75,7 +73,7 @@ const SharedLayout = () => {
             />
           </div>
 
-          <div className="grid grid-cols-6 gap-2 text-[11px] text-[#5c6a5e] font-semibold">
+          <div className="grid grid-cols-4 gap-2 text-[11px] text-[#5c6a5e] font-semibold">
               {stepItems.map((step, idx) => (
                 <button
                   key={step.label}
