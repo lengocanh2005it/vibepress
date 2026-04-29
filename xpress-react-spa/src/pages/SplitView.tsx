@@ -1996,16 +1996,6 @@ const SplitView: React.FC = () => {
                           Visit Site
                         </button>
                       )}
-                      {pushGitState.githubUrl && (
-                        <button
-                          onClick={() =>
-                            window.open(pushGitState.githubUrl!, "_blank")
-                          }
-                          className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500`}
-                        >
-                          View on GitHub
-                        </button>
-                      )}
                     </>
                   ) : (
                     <button

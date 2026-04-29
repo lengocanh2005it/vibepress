@@ -1,4 +1,4 @@
-const { queryOne } = require('../db/mysql');
+const { query, queryOne } = require('../db/mysql');
 const { deployFullStack, pushToGit } = require('../services/deployService');
 
 async function deployJob(req, res) {
@@ -26,6 +26,18 @@ async function deployJob(req, res) {
 
   try {
     const result = await deployFullStack({ jobId, repoName, branch, dbCreds });
+
+    const migration = await queryOne('SELECT id FROM react_migrations WHERE job_id = ?', [jobId]);
+    if (migration) {
+      await query(
+        'UPDATE react_migrations SET github_repo_url = ?, deployed_url = ? WHERE id = ?',
+        [result.githubUrl, result.frontendUrl, migration.id],
+      );
+      console.log(`[Deploy] Migration id=${migration.id} updated with urls`);
+    } else {
+      console.warn(`[Deploy] Không tìm thấy migration cho job_id=${jobId}, bỏ qua update`);
+    }
+
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

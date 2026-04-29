@@ -12,7 +12,7 @@ const LandingPage: React.FC = () => {
 
   const startNow = () => {
     if (user) {
-      navigate('/app/onboarding');
+      navigate('/app/projects');
     } else {
       openAuthRef.current?.();
     }
