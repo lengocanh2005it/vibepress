@@ -61,6 +61,7 @@ interface LocationState {
   siteId?: string;
   previewUrl?: string;
   apiBaseUrl?: string;
+  deployedUrl?: string | null;
 }
 
 interface RouteItem {
@@ -208,6 +209,28 @@ const VisualEditor: React.FC = () => {
   ]);
   const [canUndo, setCanUndo] = useState(false);
   const [isUndoing, setIsUndoing] = useState(false);
+
+  const [publishState, setPublishState] = useState<{
+    loading: boolean;
+    frontendUrl: string | null;
+    error: string | null;
+  }>({ loading: false, frontendUrl: null, error: null });
+
+  const handlePublish = async () => {
+    setPublishState({ loading: true, frontendUrl: null, error: null });
+    try {
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/deploy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, siteId }),
+      });
+      const data = await res.json() as { success: boolean; frontendUrl?: string; githubUrl?: string; error?: string };
+      if (!res.ok || !data.success) throw new Error(data.error || 'Publish failed');
+      setPublishState({ loading: false, frontendUrl: data.frontendUrl ?? null, error: null });
+    } catch (err) {
+      setPublishState({ loading: false, frontendUrl: null, error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  };
   const [annotationComment, setAnnotationComment] = useState("");
   const [savedAnnotations, setSavedAnnotations] = useState<Array<{
     id: string;
@@ -502,6 +525,34 @@ const VisualEditor: React.FC = () => {
               </div>
               {/* Actions */}
               <div className="flex shrink-0 items-center gap-2">
+                {/* Publish button — ẩn nếu đã deploy hoặc vừa publish thành công */}
+                {!state.deployedUrl && (
+                  publishState.frontendUrl ? (
+                    <a
+                      href={publishState.frontendUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">language</span>
+                      Visit Site
+                    </a>
+                  ) : (
+                    <div className="flex flex-col items-end gap-0.5">
+                      <button
+                        onClick={() => void handlePublish()}
+                        disabled={publishState.loading}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-[#d8cfbf] bg-white px-4 py-1.5 text-sm font-semibold text-[#30483d] transition hover:bg-[#f6f2eb] disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">language</span>
+                        {publishState.loading ? "Đang publish…" : "Publish"}
+                      </button>
+                      {publishState.error && (
+                        <p className="text-[10px] text-red-500">{publishState.error}</p>
+                      )}
+                    </div>
+                  )
+                )}
                 <button
                   onClick={toggleInspector}
                   className={`rounded-full px-4 py-1.5 text-sm font-semibold transition ${

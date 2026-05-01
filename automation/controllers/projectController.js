@@ -438,6 +438,33 @@ async function triggerDbSync(siteId, siteUrl, apiKey, delayMs = 5000) {
 }
 
 // -------------------------------------------------------
+// POST /api/wp/trigger-db-sync
+// Plugin gọi sau khi đổi theme để backend re-dump toàn bộ DB
+// Trả 202 ngay, sync chạy background
+// -------------------------------------------------------
+async function triggerDbSyncEndpoint(req, res) {
+  const apiKey = req.headers["x-vibepress-key"];
+  if (!apiKey) {
+    return res.status(401).json({ success: false, error: "Missing X-Vibepress-Key header" });
+  }
+
+  const site = await findSiteByApiKey(apiKey);
+  if (!site) {
+    console.warn(`[DbSync] trigger-db-sync REJECTED — invalid API key ${apiKey.slice(0, 8)}…`);
+    return res.status(401).json({ success: false, error: "Invalid API key" });
+  }
+
+  console.log(`[DbSync] theme-switch re-sync triggered — site=${site.siteUrl} siteId=${site.siteId}`);
+
+  // Fire-and-forget: không delay vì theme files đã xong trước khi plugin gọi endpoint này
+  triggerDbSync(site.siteId, site.siteUrl, site.apiKey, 0).catch((e) => {
+    console.error(`[DbSync] theme-switch re-sync FAILED — siteId=${site.siteId}:`, e?.message || String(e));
+  });
+
+  return res.status(202).json({ success: true, message: "DB sync triggered" });
+}
+
+// -------------------------------------------------------
 // POST /api/wp/register
 // Header: X-Vibepress-Key (user's API key từ Vibepress platform)
 // Body: { siteUrl, siteName, wpVersion, adminEmail }
@@ -583,8 +610,11 @@ async function getToken(req, res) {
 // Body: { siteUrl, repoName, themeName, synced, failed, success, syncedAt }
 // -------------------------------------------------------
 async function syncComplete(req, res) {
+  console.log(`[WP] sync-complete received — body=${JSON.stringify(req.body ?? {})}`);
+
   const apiKey = req.headers["x-vibepress-key"];
   if (!apiKey) {
+    console.warn("[WP] sync-complete REJECTED — missing X-Vibepress-Key header");
     return res
       .status(401)
       .json({ success: false, error: "Missing X-Vibepress-Key header" });
@@ -593,21 +623,26 @@ async function syncComplete(req, res) {
   const site = await findSiteByApiKey(apiKey);
   if (!site) {
     console.warn(
-      `[WP] sync-complete FAILED — invalid API key ${apiKey.slice(0, 8)}…`,
+      `[WP] sync-complete REJECTED — invalid API key ${apiKey.slice(0, 8)}…`,
     );
     return res.status(401).json({ success: false, error: "Invalid API key" });
   }
 
   const {
-    themeName,
+    activeTheme,
     synced,
     failed,
     success: syncSuccess,
     syncedAt,
+    repoName,
   } = req.body ?? {};
 
+  console.log(
+    `[WP] sync-complete — site=${site.siteUrl} theme=${activeTheme ?? "(none)"} repo=${repoName ?? "(none)"} synced=${synced ?? 0} success=${syncSuccess ?? false}`,
+  );
+
   const lastSync = {
-    themeName: themeName ?? null,
+    themeName: activeTheme ?? null,
     synced: synced ?? 0,
     failed: failed ?? 0,
     success: syncSuccess ?? false,
@@ -619,9 +654,7 @@ async function syncComplete(req, res) {
     site.siteId,
   ]);
 
-  console.log(
-    `[WP] sync-complete OK — site=${site.siteUrl} synced=${synced} failed=${failed}`,
-  );
+  console.log(`[WP] sync-complete OK — db updated for site_id=${site.siteId}`);
   return res.status(200).json({ success: true });
 }
 
@@ -1319,6 +1352,7 @@ module.exports = {
   registerWpSite,
   getToken,
   syncComplete,
+  triggerDbSyncEndpoint,
   getReposByEmail,
   getCommitsByRepo,
   getWpSitePages,

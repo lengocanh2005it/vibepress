@@ -52,6 +52,7 @@ export default function ReactProjects() {
           siteId: active.site_id,
           previewUrl: data.previewUrl,
           apiBaseUrl: data.apiBaseUrl,
+          deployedUrl: active.deployed_url,
         },
       });
     } catch (err) {
