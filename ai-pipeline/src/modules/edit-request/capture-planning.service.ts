@@ -99,16 +99,13 @@ export class CapturePlanningService {
     let score = 0;
     if (attachment.note) score += 5;
     if (attachment.selection || attachment.geometry?.documentRect) score += 3;
-    if (attachment.targetNode) score += 4;
-    if (attachment.domTarget) score += 2;
     if (attachment.asset?.publicUrl) score += 2;
     if (attachment.captureContext?.page?.route) score += 2;
 
     if (hintedRoute) {
       const pageRoute =
         normalizeRoute(attachment.captureContext?.page?.route) ??
-        normalizeRoute(attachment.sourcePageUrl) ??
-        normalizeRoute(attachment.targetNode?.route);
+        normalizeRoute(attachment.sourcePageUrl);
       if (pageRoute && routeMatchesPath(hintedRoute, pageRoute)) score += 8;
     }
 
@@ -123,34 +120,16 @@ export class CapturePlanningService {
     let score = 0;
     if (attachment.note) score += 1;
     if (attachment.selection || attachment.geometry?.documentRect) score += 1;
-    if (attachment.domTarget) score += 1;
-    if (attachment.targetNode) score += 2;
 
     if (route) {
-      if (routeMatchesPath(route, attachment.targetNode?.route)) score += 12;
-
       const pageRoute =
         normalizeRoute(attachment.captureContext?.page?.route) ??
         normalizeRoute(attachment.sourcePageUrl);
       if (pageRoute && routeMatchesPath(route, pageRoute)) score += 10;
     }
 
-    if (componentName) {
-      const tokens = [
-        attachment.targetNode?.templateName,
-        attachment.targetNode?.blockName,
-        attachment.targetNode?.nearestHeading,
-        attachment.targetNode?.nearestLandmark,
-        attachment.targetNode?.domPath,
-        attachment.domTarget?.blockName,
-        attachment.domTarget?.nearestHeading,
-        attachment.domTarget?.nearestLandmark,
-        attachment.domTarget?.domPath,
-        attachment.note,
-      ]
-        .filter(Boolean)
-        .join(' ');
-      if (fuzzyMatch(componentName, tokens)) score += 8;
+    if (componentName && attachment.note) {
+      if (fuzzyMatch(componentName, attachment.note)) score += 8;
     }
 
     return score;
@@ -191,7 +170,7 @@ function routeMatchesPath(
   if (!left || !right) return false;
   if (left === right) return true;
   if (left === '/') return right === '/';
-  return right.startsWith(`${left}/`);
+  return right.startsWith(`${left}/`) || left.startsWith(`${right}/`);
 }
 
 function fuzzyMatch(a?: string | null, b?: string | null): boolean {

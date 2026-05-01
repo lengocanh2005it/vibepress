@@ -209,7 +209,11 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 | \`newsletter\` | email signup section |
 | \`footer\` | page footer with nav columns |
 | \`post-content\` | single post detail (uses :slug param) |
+| \`post-title\` | current post title block |
+| \`post-featured-image\` | current post featured image block |
 | \`post-meta\` | reusable byline/meta row for one current post item |
+| \`post-terms\` | taxonomy terms row for the current post, such as tags below the content |
+| \`post-navigation\` | previous/next post links for the current post |
 | \`page-content\` | single page detail (uses :slug param) |
 | \`prose-block\` | source-backed ordered prose/image/list segments for lossless fixed page detail rendering |
 | \`comments\`     | WordPress comments list + leave a reply form |
@@ -235,7 +239,11 @@ testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign?, q
 newsletter:   { heading, headingStyle?, subheading?, buttonText, layout: centered|card, inputStyle?, cardStyle? }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
+post-title:   { level?, titleStyle? }
+post-featured-image: { imageRadius?, imageAspectRatio? }
 post-meta:    { layout?: inline|stacked, showAuthor, showDate, showCategories, showSeparator? }
+post-terms:   { taxonomy?: category|post_tag|tag, prefix?, separator?, layout?: inline|stacked }
+post-navigation: { showPrevious?, showNext?, previousLabel?, nextLabel? }
 page-content: { showTitle }
 prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|paragraph|image|list|html, ... }] }
 comments:     { showForm, requireName, requireEmail }
@@ -686,7 +694,11 @@ const VALID_SECTION_TYPES = new Set<string>([
   'newsletter',
   'footer',
   'post-content',
+  'post-title',
+  'post-featured-image',
   'post-meta',
+  'post-terms',
+  'post-navigation',
   'page-content',
   'prose-block',
   'comments',
@@ -1274,6 +1286,39 @@ function validateSectionDetailed(
       if (typeof raw.showSeparator !== 'boolean') raw.showSeparator = true;
       break;
 
+    case 'post-title':
+      if (
+        typeof raw.level !== 'number' ||
+        !Number.isFinite(raw.level) ||
+        raw.level < 1 ||
+        raw.level > 6
+      ) {
+        raw.level = 1;
+      }
+      break;
+
+    case 'post-featured-image':
+      if (typeof raw.imageRadius !== 'string') delete raw.imageRadius;
+      if (typeof raw.imageAspectRatio !== 'string') delete raw.imageAspectRatio;
+      break;
+
+    case 'post-terms':
+      if (!['category', 'post_tag', 'tag'].includes(raw.taxonomy)) {
+        delete raw.taxonomy;
+      }
+      if (!['inline', 'stacked'].includes(raw.layout)) raw.layout = 'inline';
+      if (typeof raw.prefix !== 'string') delete raw.prefix;
+      if (typeof raw.separator !== 'string') delete raw.separator;
+      break;
+
+    case 'post-navigation':
+      if (typeof raw.showPrevious !== 'boolean') raw.showPrevious = true;
+      if (typeof raw.showNext !== 'boolean') raw.showNext = true;
+      if (typeof raw.previousLabel !== 'string')
+        raw.previousLabel = 'Previous:';
+      if (typeof raw.nextLabel !== 'string') raw.nextLabel = 'Next:';
+      break;
+
     case 'page-content':
       if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
       break;
@@ -1744,6 +1789,19 @@ export function sanitizeSectionsForContract(
       if (section.type === 'comments' && !allowComments) {
         adjustments.push(
           'removed comments section because contract does not allow comments',
+        );
+        return null;
+      }
+
+      if (
+        (section.type === 'post-title' ||
+          section.type === 'post-featured-image' ||
+          section.type === 'post-terms' ||
+          section.type === 'post-navigation') &&
+        !allowPostDetail
+      ) {
+        adjustments.push(
+          `removed ${section.type} section because contract does not allow postDetail`,
         );
         return null;
       }

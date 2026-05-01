@@ -22,6 +22,7 @@ import type {
   SectionPlan,
   TypographyTokens,
 } from '../react-generator/visual-plan.schema.js';
+import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
 
 export interface PlannerComponentPlanLike {
   templateName: string;
@@ -76,6 +77,7 @@ export interface PlannerPageEvidence {
 export interface PlannerVisualPlanRepairState {
   planningSource: PlanningSourceContext;
   draftSections?: SectionPlan[];
+  draftBlockTree?: BlockNode[];
   detectedCustomClassNames: string[];
   sourceBackedAuxiliaryLabels: string[];
   sourceWidgetHints: string[];
@@ -109,6 +111,11 @@ export interface PlannerVisualRepairDelegate {
     componentPlan: PlannerComponentPlanLike,
     tokens: ThemeTokens | undefined,
   ): SectionPlan[] | undefined;
+  buildDraftBlockTreeForPlanningSource(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlannerComponentPlanLike,
+    tokens: ThemeTokens | undefined,
+  ): BlockNode[] | undefined;
   collectDraftCustomClassNames(draftSections?: SectionPlan[]): string[];
   detectInteractiveWidgetsFromSource(source: string): string[];
   extractHeadingTextsFromSource(source: string): string[];
@@ -506,6 +513,11 @@ export class PlannerVisualRepairService {
       input.componentPlan,
       input.tokens,
     );
+    const draftBlockTree = input.delegate.buildDraftBlockTreeForPlanningSource(
+      input.planningSource,
+      input.componentPlan,
+      input.tokens,
+    );
     const detectedCustomClassNames =
       input.delegate.collectDraftCustomClassNames(draftSections);
     const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
@@ -531,6 +543,7 @@ export class PlannerVisualRepairService {
     return {
       planningSource: input.planningSource,
       draftSections,
+      draftBlockTree,
       detectedCustomClassNames,
       sourceBackedAuxiliaryLabels,
       sourceWidgetHints,

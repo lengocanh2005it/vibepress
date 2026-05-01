@@ -106,8 +106,6 @@ export class EditRequestService {
           },
           selection: capture.bbox,
           geometry: capture.geometry,
-          domTarget: capture.domTarget,
-          targetNode: capture.targetNode,
         });
       }
     } else if (legacy.capture?.croppedScreenshot?.url) {
@@ -134,8 +132,6 @@ export class EditRequestService {
           document: legacy.pageContext?.document,
         },
         selection: legacy.capture.bbox,
-        domTarget: legacy.capture.domTarget,
-        targetNode: legacy.capture.targetNode,
       });
     }
 
@@ -253,12 +249,6 @@ export class EditRequestService {
         fileName: attachment.asset.fileName?.trim() || attachment.id,
         publicUrl: attachment.asset.publicUrl.trim(),
       },
-      domTarget: normalizeDomTarget(attachment.domTarget),
-      targetNode: normalizeTargetNode(
-        attachment.targetNode,
-        sourcePageUrl,
-        captureContext.page?.route,
-      ),
     });
   }
 
@@ -287,9 +277,7 @@ export class EditRequestService {
           attachment.captureContext?.iframeSrc ||
           attachment.captureContext?.document ||
           attachment.selection ||
-          attachment.geometry ||
-          attachment.domTarget ||
-          attachment.targetNode,
+          attachment.geometry,
       ),
     );
 
@@ -538,93 +526,6 @@ function deriveNormalizedRect(
   });
 }
 
-function normalizeDomTarget(
-  domTarget?: PipelineCaptureAttachmentDto['domTarget'],
-) {
-  if (!domTarget) return undefined;
-
-  return compactObject({
-    ...domTarget,
-    cssSelector: domTarget.cssSelector?.trim() || undefined,
-    xpath: domTarget.xpath?.trim() || undefined,
-    tagName: domTarget.tagName?.trim() || undefined,
-    elementId: domTarget.elementId?.trim() || undefined,
-    classNames:
-      domTarget.classNames
-        ?.map((className) => className.trim())
-        .filter(Boolean) || undefined,
-    htmlSnippet: domTarget.htmlSnippet?.trim() || undefined,
-    textSnippet: domTarget.textSnippet?.trim() || undefined,
-    blockName: domTarget.blockName?.trim() || undefined,
-    blockClientId: domTarget.blockClientId?.trim() || undefined,
-    domPath: domTarget.domPath?.trim() || undefined,
-    role: domTarget.role?.trim() || undefined,
-    ariaLabel: domTarget.ariaLabel?.trim() || undefined,
-    nearestHeading: domTarget.nearestHeading?.trim() || undefined,
-    nearestLandmark: domTarget.nearestLandmark?.trim() || undefined,
-  });
-}
-
-function normalizeTargetNode(
-  targetNode?: PipelineCaptureAttachmentDto['targetNode'],
-  sourcePageUrl?: string,
-  pageRoute?: string | null,
-) {
-  if (!targetNode) return undefined;
-
-  const ownerSourceNodeId = targetNode.ownerSourceNodeId?.trim() || undefined;
-  const ownerSourceFile = targetNode.ownerSourceFile?.trim() || undefined;
-  const ownerTemplateName = targetNode.ownerTemplateName?.trim() || undefined;
-  const ownerTopLevelIndex = normalizeOptionalNumber(
-    targetNode.ownerTopLevelIndex,
-  );
-  const editSourceNodeId = targetNode.editSourceNodeId?.trim() || undefined;
-  const editSourceFile = targetNode.editSourceFile?.trim() || undefined;
-  const editTemplateName = targetNode.editTemplateName?.trim() || undefined;
-  const editTopLevelIndex = normalizeOptionalNumber(
-    targetNode.editTopLevelIndex,
-  );
-
-  return compactObject({
-    nodeId:
-      targetNode.nodeId?.trim() || targetNode.ownerNodeId?.trim() || undefined,
-    sourceNodeId:
-      targetNode.sourceNodeId?.trim() || ownerSourceNodeId || undefined,
-    sourceFile: targetNode.sourceFile?.trim() || ownerSourceFile || undefined,
-    topLevelIndex:
-      normalizeOptionalNumber(targetNode.topLevelIndex) ?? ownerTopLevelIndex,
-    templateName:
-      targetNode.templateName?.trim() || ownerTemplateName || undefined,
-    ownerNodeId: targetNode.ownerNodeId?.trim() || undefined,
-    ownerSourceNodeId,
-    ownerSourceFile,
-    ownerTopLevelIndex,
-    ownerTemplateName,
-    editNodeId: targetNode.editNodeId?.trim() || undefined,
-    editSourceNodeId,
-    editSourceFile,
-    editTopLevelIndex,
-    editTemplateName,
-    editNodeRole: targetNode.editNodeRole?.trim() || undefined,
-    editTagName: targetNode.editTagName?.trim() || undefined,
-    ancestorSourceNodeIds: normalizeStringArray(
-      targetNode.ancestorSourceNodeIds,
-    ),
-    route:
-      targetNode.route?.trim() ||
-      pageRoute ||
-      toComparablePath(sourcePageUrl) ||
-      undefined,
-    blockName: targetNode.blockName?.trim() || undefined,
-    blockClientId: targetNode.blockClientId?.trim() || undefined,
-    tagName:
-      targetNode.tagName?.trim() || targetNode.editTagName?.trim() || undefined,
-    domPath: targetNode.domPath?.trim() || undefined,
-    nearestHeading: targetNode.nearestHeading?.trim() || undefined,
-    nearestLandmark: targetNode.nearestLandmark?.trim() || undefined,
-  });
-}
-
 function toComparablePath(value?: string | null): string | null {
   if (!value) return null;
   try {
@@ -642,22 +543,6 @@ function roundMetric(value: number): number {
 
 function clampRatio(value: number): number {
   return Math.min(Math.max(roundMetric(value), 0), 1);
-}
-
-function normalizeOptionalNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? value
-    : undefined;
-}
-
-function normalizeStringArray(values?: string[]): string[] | undefined {
-  const normalized = values
-    ?.map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value));
-
-  return normalized && normalized.length > 0
-    ? Array.from(new Set(normalized))
-    : undefined;
 }
 
 function compactObject<T>(value: T): T {

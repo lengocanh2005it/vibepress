@@ -14,6 +14,7 @@ import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type {
+  BlockNode,
   ComponentVisualPlan,
   SectionPlan,
 } from '../visual-plan.schema.js';
@@ -31,6 +32,12 @@ import {
   POST_FIELDS,
   SITE_INFO_FIELDS,
 } from '../api-contract.js';
+import {
+  buildBlockTreeStructuralPromptLines,
+  buildClassicDetailContentHint,
+  buildFixedPageDetailPromptLines,
+  PAGE_COMPONENT_RICH_TEXT_RULE,
+} from '../prompt-policy.util.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
   const result: string[] = [];
@@ -457,6 +464,14 @@ function buildAllowedEndpointsNote(input: {
     );
   }
 
+  // post-navigation sections need the posts collection to find prev/next entries
+  const hasPostNavigation = input.visualPlan?.sections?.some(
+    (section) => section.type === 'post-navigation',
+  );
+  if (hasPostNavigation) {
+    allowed.add('GET /api/posts');
+  }
+
   const sidebarSection = input.visualPlan?.sections?.find(
     (section) => section.type === 'sidebar',
   );
@@ -492,6 +507,7 @@ function buildForbiddenBehaviorNote(input: {
   dataNeeds: string[];
   route?: string | null;
   fixedSlug?: string;
+  visualPlan?: { sections?: Array<{ type: string }> } | null;
 }): string {
   const lines = ['## Forbidden behavior'];
   const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
@@ -548,9 +564,18 @@ function buildForbiddenBehaviorNote(input: {
     '- Do NOT invent hero sections, widgets, promos, author bios, utility links, or filler content not present in the source template or approved visual plan.',
   );
   if (isPageDetail || isPostDetail) {
-    lines.push(
-      `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside the approved content render path.`,
+    const hasPageContentSection = input.visualPlan?.sections?.some(
+      (s) => s.type === 'page-content',
     );
+    if (isPageDetail && !hasPageContentSection) {
+      lines.push(
+        '⛔ MANDATORY: This visual plan has NO `page-content` section. Do NOT access `page.content` or `item.content` as a rendered body anywhere in this component. Render ONLY the decomposed sections from the approved visual plan (prose-block, card-grid, media-text, etc.). Using `page.content` here will fail validation.',
+      );
+    } else {
+      lines.push(
+        `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside the approved content render path.`,
+      );
+    }
     lines.push(
       '- Do NOT append footer-style link columns such as "About", "Privacy", "Social", "Resources", or "Useful Links" after the main content unless those exact blocks are already inside the HTML body being rendered.',
     );
@@ -558,18 +583,7 @@ function buildForbiddenBehaviorNote(input: {
       '- Do NOT duplicate content that already appears in the fetched HTML body. If the body contains columns/cards/lists/images, render the body once and stop; do not recreate those blocks as separate React sections.',
     );
     if (isPageDetail && input.fixedSlug) {
-      lines.push(
-        '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.',
-      );
-      lines.push(
-        '- Page components must NOT use `dangerouslySetInnerHTML`. Convert approved page HTML/rich text into structured JSX nodes instead of dumping raw HTML strings.',
-      );
-      lines.push(
-        '- Do NOT redesign a fixed page-detail into a centered feature article shell with classes such as `max-w-[620px]`, `max-w-2xl`, `max-w-3xl`, or broad `mx-auto` wrappers unless that exact narrow shell is clearly source-backed in the approved layout.',
-      );
-      lines.push(
-        '- Preserve the surrounding template shell/layout rhythm from the approved source. Replace the long-form body with `page.content`, but do NOT invent a new hero-centered article wrapper, oversized centered title block, or optional featured-image treatment unless the source layout already proves those elements.',
-      );
+      lines.push(...buildFixedPageDetailPromptLines());
     }
   }
   lines.push(
@@ -711,9 +725,7 @@ function buildScopedApiContractNote(input: {
   lines.push(
     '- Pages must NOT use post-only fields such as `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`.',
   );
-  lines.push(
-    '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
-  );
+  lines.push(PAGE_COMPONENT_RICH_TEXT_RULE);
   lines.push(
     '- In ordinary post meta/listings, author names should link to `/author/${post.authorSlug}` when that route is approved and `post.authorSlug` exists. Plain-text `post.author` is only acceptable when it is the actual page/article/archive title or heading (for example an `h1`).',
   );
@@ -1179,10 +1191,10 @@ function buildClassicThemeNote(
 ): string {
   if (!templateSource.includes('{/* WP:')) return '';
 
-  const contentHint =
-    isSingle || isPage
-      ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
-      : `- \`{/* WP: post.content (HTML) */}\` → render content ONLY from the endpoint(s) explicitly approved in the component plan. ⛔ NEVER fetch a full list and pick \`pages[0]\` or \`posts[0]\`.`;
+  const contentHint = buildClassicDetailContentHint({
+    isSingle,
+    isPage,
+  });
 
   const loopHint =
     isSingle || isPage
@@ -1434,6 +1446,7 @@ export function buildPlanContextNote(
       dataNeeds: normalizedDataNeeds,
       route: plan.route,
       fixedSlug: plan.fixedSlug,
+      visualPlan: plan.visualPlan,
     }),
   );
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
@@ -1836,12 +1849,34 @@ function buildCompactSectionSummary(
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showCategories=${section.showCategories}`);
         break;
+      case 'post-title':
+        parts.push(`level=${section.level ?? 1}`);
+        break;
+      case 'post-featured-image':
+        if (section.imageRadius)
+          parts.push(`imageRadius=${section.imageRadius}`);
+        if (section.imageAspectRatio)
+          parts.push(`imageAspectRatio=${section.imageAspectRatio}`);
+        break;
       case 'post-meta':
         parts.push(`layout=${section.layout ?? 'inline'}`);
         parts.push(`showAuthor=${section.showAuthor}`);
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showCategories=${section.showCategories}`);
         parts.push(`showSeparator=${section.showSeparator !== false}`);
+        break;
+      case 'post-terms':
+        if (section.taxonomy) parts.push(`taxonomy=${section.taxonomy}`);
+        if (section.prefix) parts.push(`prefix=${section.prefix}`);
+        if (section.separator) parts.push(`separator=${section.separator}`);
+        parts.push(`layout=${section.layout ?? 'inline'}`);
+        break;
+      case 'post-navigation':
+        parts.push(`showPrevious=${section.showPrevious !== false}`);
+        parts.push(`showNext=${section.showNext !== false}`);
+        if (section.previousLabel)
+          parts.push(`previousLabel=${section.previousLabel}`);
+        if (section.nextLabel) parts.push(`nextLabel=${section.nextLabel}`);
         break;
       case 'page-content':
         parts.push(`showTitle=${section.showTitle}`);
@@ -2186,9 +2221,12 @@ export function buildVisualPlanContextNote(
   }
   const requiredCustomClassNames = [
     ...new Set(
-      visualPlan.sections.flatMap((section) =>
-        extractCustomClassNamesFromSection(section),
-      ),
+      [
+        ...visualPlan.sections.flatMap((section) =>
+          extractCustomClassNamesFromSection(section),
+        ),
+        ...extractCustomClassNamesFromBlockTree(visualPlan.blockTree),
+      ].filter(Boolean),
     ),
   ];
   if (requiredCustomClassNames.length > 0) {
@@ -2200,14 +2238,23 @@ export function buildVisualPlanContextNote(
     );
   }
 
+  if (visualPlan.blockTree?.length) {
+    lines.push(...buildBlockTreeStructuralPromptLines(visualPlan));
+    lines.push('Block-tree outline:');
+    lines.push(...summarizeVisualPlanBlockTree(visualPlan.blockTree));
+  }
+
   // Strict section whitelist — prevents AI from inventing extra sections
   if (visualPlan.sections?.length > 0) {
+    const hasBlockTree = (visualPlan.blockTree?.length ?? 0) > 0;
     const sectionTypes = visualPlan.sections
       .map((s) => `"${s.type}"`)
       .join(', ');
     lines.push('');
     lines.push(
-      `⛔ STRICT SECTION CONTRACT: Generate ONLY these section types in this exact order: ${sectionTypes}.`,
+      hasBlockTree
+        ? `⛔ STRICT SECTION CONTRACT: Use ONLY these approved section behaviors/contracts while preserving the blockTree structure: ${sectionTypes}. Do NOT reinterpret them into a new top-level section stack.`
+        : `⛔ STRICT SECTION CONTRACT: Generate ONLY these section types in this exact order: ${sectionTypes}.`,
     );
     lines.push(
       '⛔ Do NOT add newsletter, testimonial, hero, cover, card-grid, pricing, features, call-to-action, or ANY other section type not listed above — even if you think it would improve the design.',
@@ -3049,6 +3096,14 @@ When this section renders post-list/archive/search/recent-post meta:
 function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
   const stateKeyHint = resolveInteractiveSectionPromptStateKey(section);
   switch (section.type) {
+    case 'page-content':
+      return [
+        '## Section behavior contract',
+        '- This is the ONLY place that should render `page.content` or `item.content`.',
+        '- Render the page body using `dangerouslySetInnerHTML={{ __html: page.content }}` or `renderRichTextChildren(page.content, ...)` inside this section ONLY.',
+        '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
+        '- Do NOT render `page.content` outside of this section element.',
+      ].join('\n');
     case 'prose-block':
       return [
         '## Section behavior contract',
@@ -3056,12 +3111,42 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- Preserve inline HTML inside paragraph/list/html segments instead of flattening it to plain text.',
         '- Preserve image visibility for image segments; do not replace source-backed images with placeholders.',
       ].join('\n');
+    case 'post-title':
+      return [
+        '## Section behavior contract',
+        '- Render the current post title from the existing `item` object only.',
+        '- Do not fetch inside this JSX fragment and do not duplicate meta/date/author here.',
+      ].join('\n');
+    case 'post-featured-image':
+      return [
+        '## Section behavior contract',
+        '- Render the current post featured image from `item.featuredImage` only.',
+        '- Preserve the approved spacing/radius classes; do not replace the image with placeholder artwork.',
+      ].join('\n');
     case 'post-meta':
       return [
         '## Section behavior contract',
         '- Render metadata for the current post item only; do not fetch inside this JSX fragment.',
         '- Prefer the existing `post` prop first, then fall back to `item` when it is a post-detail object.',
         '- Author/category labels must use canonical archive links when `authorSlug` or `categorySlugs[0]` exists.',
+      ].join('\n');
+    case 'post-terms':
+      return [
+        '## Section behavior contract',
+        '- Render only the current post taxonomy terms approved in the section JSON.',
+        '- Do not fetch inside this JSX fragment; use the existing `item` post-detail object.',
+        '- Preserve the approved prefix/separator text literally when present.',
+      ].join('\n');
+    case 'post-navigation':
+      return [
+        '## Section behavior contract',
+        '- The page shell MUST fetch `GET /api/posts` and store the result as `posts` state.',
+        '- Find adjacent posts with: `const idx = posts.findIndex(p => p.slug === item.slug);`',
+        '- `previousPost` = `idx > 0 ? posts[idx - 1] : null` (older post in WP reading direction).',
+        '- `nextPost` = `idx < posts.length - 1 ? posts[idx + 1] : null` (newer post).',
+        '- Render each as `<Link to={\\`/posts/${post.slug}\\`}>{post.title}</Link>` — NEVER hardcode URLs.',
+        "- Both `item.slug` and each rendered post's `post.slug` MUST appear in the component code.",
+        '- Do not add local hooks or new fetches inside this JSX fragment.',
       ].join('\n');
     case 'post-list':
       return [
@@ -3188,6 +3273,43 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       lines.push(
         `- showSeparator: ${JSON.stringify(section.showSeparator !== false)}`,
       );
+      break;
+    case 'post-title':
+      lines.push(`- level: ${JSON.stringify(section.level ?? 1)}`);
+      break;
+    case 'post-featured-image':
+      if (section.imageRadius) {
+        lines.push(`- imageRadius: ${JSON.stringify(section.imageRadius)}`);
+      }
+      if (section.imageAspectRatio) {
+        lines.push(
+          `- imageAspectRatio: ${JSON.stringify(section.imageAspectRatio)}`,
+        );
+      }
+      break;
+    case 'post-terms':
+      if (section.taxonomy) {
+        lines.push(`- taxonomy: ${JSON.stringify(section.taxonomy)}`);
+      }
+      if (section.prefix) {
+        lines.push(`- prefix: ${JSON.stringify(section.prefix)}`);
+      }
+      if (section.separator) {
+        lines.push(`- separator: ${JSON.stringify(section.separator)}`);
+      }
+      lines.push(`- layout: ${JSON.stringify(section.layout ?? 'inline')}`);
+      break;
+    case 'post-navigation':
+      lines.push(
+        `- showPrevious: ${JSON.stringify(section.showPrevious !== false)}`,
+      );
+      lines.push(`- showNext: ${JSON.stringify(section.showNext !== false)}`);
+      if (section.previousLabel) {
+        lines.push(`- previousLabel: ${JSON.stringify(section.previousLabel)}`);
+      }
+      if (section.nextLabel) {
+        lines.push(`- nextLabel: ${JSON.stringify(section.nextLabel)}`);
+      }
       break;
     case 'media-text':
       if (section.imageSrc) {
@@ -3785,6 +3907,52 @@ function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
   }
 
   return [...result];
+}
+
+function extractCustomClassNamesFromBlockTree(
+  nodes?: readonly BlockNode[],
+): string[] {
+  if (!nodes?.length) return [];
+  const result = new Set<string>();
+  const visit = (node: BlockNode) => {
+    for (const className of node.customClassNames ?? []) {
+      const normalized = className.trim();
+      if (normalized) result.add(normalized);
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of nodes) visit(node);
+  return [...result];
+}
+
+function summarizeVisualPlanBlockTree(
+  nodes: readonly BlockNode[],
+  depth = 0,
+  lines: string[] = [],
+  limit = 14,
+): string[] {
+  for (const node of nodes) {
+    if (lines.length >= limit) break;
+    const parts = [
+      `${'  '.repeat(depth)}- ${node.kind}`,
+      node.sourceRef?.sourceNodeId
+        ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+        : null,
+      node.templatePartSlug ? `templatePart=${node.templatePartSlug}` : null,
+      node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+      node.customClassNames?.length
+        ? `classes=${JSON.stringify(node.customClassNames.slice(0, 4))}`
+        : null,
+    ].filter(Boolean);
+    lines.push(parts.join(' | '));
+    if (node.children?.length && lines.length < limit) {
+      summarizeVisualPlanBlockTree(node.children, depth + 1, lines, limit);
+    }
+  }
+  if (depth === 0 && lines.length >= limit) {
+    lines.push('- ...');
+  }
+  return lines;
 }
 
 function extractInnerCustomClassNamesFromSection(

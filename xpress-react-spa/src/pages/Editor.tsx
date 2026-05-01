@@ -18,8 +18,6 @@ import type {
   ViewportCaptureRect,
   DocumentCaptureRect,
   CaptureNormalizedRect,
-  CaptureDomTarget,
-  CaptureTargetNode,
   Capture,
 } from "../types/capture";
 
@@ -91,17 +89,50 @@ const hasConcreteEditAction = (value: string) =>
     value,
   );
 
-const hasFeatureSignal = (value: string) =>
-  /\b(feature|functionality|widget|module|popup|modal|form|signup|newsletter|chatbot|chat|calculator|booking|spin|lucky wheel|wheel|carousel|faq|search|filter|mini game|game|voucher|coupon|quiz|survey|tinh nang|chuc nang|dang ky|vong quay|quay thuong|tim kiem|bo loc|ma giam gia|khao sat)\b/.test(
-    value,
-  );
+const detectUnsupportedEditRequestReason = (value: string) => {
+  const normalized = normalizeLanguageInput(value) || "";
+  if (!normalized) return undefined;
 
-const hasScopeOrTargetHint = (value: string) => {
-  const scopeSignal =
-    /\b(site|website|wordpress|theme|all pages|full site|whole site|entire site|toan bo|ca trang|toan site|toan website)\b/.test(
-      value,
-    );
-  return scopeSignal || mentionsFocusTarget(value);
+  if (
+    /\b(add|insert|create|introduce|implement|them|chen|tao moi|bo sung)\b/.test(
+      normalized,
+    ) &&
+    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(
+      normalized,
+    )
+  ) {
+    return "add-section-or-component";
+  }
+
+  if (
+    /\b(replace|convert|switch|swap|thay the|doi thanh|chuyen thanh)\b/.test(
+      normalized,
+    ) &&
+    /\b(section|component|widget|layout block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(
+      normalized,
+    )
+  ) {
+    return "replace-section-or-component";
+  }
+
+  if (
+    /\b(remove|delete|drop|xoa|bo)\b/.test(normalized) &&
+    /\b(section|component|widget|block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(
+      normalized,
+    )
+  ) {
+    return "remove-section-or-component";
+  }
+
+  if (
+    /\b(font|typography|font-size|text size|line-height|letter-spacing|font weight|chu|co chu)\b/.test(
+      normalized,
+    )
+  ) {
+    return "typography-change";
+  }
+
+  return undefined;
 };
 
 const isGenericCapturePhrase = (value: string) =>
@@ -128,11 +159,6 @@ const isGenericCapturePhrase = (value: string) =>
     "same here",
   ].includes(value);
 
-const truncateText = (value: string, maxLength: number) => {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-};
-
 const clampNumber = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
@@ -140,11 +166,6 @@ const roundNumber = (value: number, digits = 4) => {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 };
-
-const compactObject = <T extends Record<string, unknown>>(value: T) =>
-  Object.fromEntries(
-    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
-  ) as T;
 
 const toRoutePath = (value?: string | null): string | null => {
   if (!value) return null;
@@ -190,556 +211,6 @@ const buildPreviewProxyUrl = (
   return `/api/wp/proxy?${params.toString()}`;
 };
 
-const escapeCssToken = (value: string) =>
-  value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-
-const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
-
-const CAPTURE_CANDIDATE_SELECTOR = [
-  "[data-vp-source-node]",
-  "[data-vp-node-role]",
-  "[data-vp-node-id]",
-  "[data-block]",
-  "[data-type]",
-  "[data-block-name]",
-  '[class*="wp-block-"]',
-  HEADING_SELECTOR,
-  "p",
-  "span",
-  "li",
-  "label",
-  "a",
-  "button",
-  "img",
-  "section",
-  "article",
-  "figure",
-  "form",
-  "input",
-  "textarea",
-  "select",
-].join(", ");
-
-const getElementTextSnippet = (element: Element) =>
-  truncateText(element.textContent?.trim().replace(/\s+/g, " ") || "", 140);
-
-const getElementHtmlSnippet = (element: Element) =>
-  truncateText(element.outerHTML.replace(/\s+/g, " "), 240);
-
-const buildCssSelector = (element: Element): string | undefined => {
-  const segments: string[] = [];
-  let current: Element | null = element;
-  let depth = 0;
-
-  while (current && depth < 6) {
-    const tagName = current.tagName.toLowerCase();
-    if (current.id) {
-      segments.unshift(`#${escapeCssToken(current.id)}`);
-      break;
-    }
-
-    let segment = tagName;
-    const classNames = Array.from(current.classList)
-      .filter(Boolean)
-      .slice(0, 2);
-    if (classNames.length > 0) {
-      segment += `.${classNames.map(escapeCssToken).join(".")}`;
-    } else if (current.parentElement) {
-      const siblings = (
-        Array.from(current.parentElement.children) as Element[]
-      ).filter((sibling) => sibling.tagName === current?.tagName);
-      if (siblings.length > 1) {
-        const index = siblings.indexOf(current) + 1;
-        segment += `:nth-of-type(${index})`;
-      }
-    }
-
-    segments.unshift(segment);
-    current = current.parentElement;
-    if (tagName === "body") break;
-    depth += 1;
-  }
-
-  return segments.length > 0 ? segments.join(" > ") : undefined;
-};
-
-const buildDomPath = (element: Element): string | undefined => {
-  const segments: string[] = [];
-  let current: Element | null = element;
-  let depth = 0;
-
-  while (current && depth < 8) {
-    const tagName = current.tagName.toLowerCase();
-    const parent: Element | null = current.parentElement;
-    let segment = tagName;
-
-    if (parent) {
-      const siblings = (Array.from(parent.children) as Element[]).filter(
-        (sibling) => sibling.tagName === current?.tagName,
-      );
-      if (siblings.length > 1) {
-        segment += `:nth-of-type(${siblings.indexOf(current) + 1})`;
-      }
-    }
-
-    segments.unshift(segment);
-    current = parent;
-    if (tagName === "body") break;
-    depth += 1;
-  }
-
-  return segments.length > 0 ? segments.join(" > ") : undefined;
-};
-
-const buildXPath = (element: Element): string | undefined => {
-  const segments: string[] = [];
-  let current: Element | null = element;
-
-  while (current && current.nodeType === Node.ELEMENT_NODE) {
-    let index = 1;
-    let sibling = current.previousElementSibling;
-    while (sibling) {
-      if (sibling.tagName === current.tagName) index += 1;
-      sibling = sibling.previousElementSibling;
-    }
-    segments.unshift(`${current.tagName.toLowerCase()}[${index}]`);
-    current = current.parentElement;
-  }
-
-  return segments.length > 0 ? `/${segments.join("/")}` : undefined;
-};
-
-const findHeadingWithin = (
-  element: Element | null | undefined,
-  fromEnd = false,
-): string | undefined => {
-  if (!element) return undefined;
-
-  if (element.matches(HEADING_SELECTOR)) {
-    const text = element.textContent?.trim().replace(/\s+/g, " ");
-    return text ? truncateText(text, 120) : undefined;
-  }
-
-  const headings = Array.from(element.querySelectorAll(HEADING_SELECTOR));
-  const heading = fromEnd ? headings[headings.length - 1] : headings[0];
-  const text = heading?.textContent?.trim().replace(/\s+/g, " ");
-  return text ? truncateText(text, 120) : undefined;
-};
-
-const getNearestHeading = (element: Element): string | undefined => {
-  const selfHeading = findHeadingWithin(element);
-  if (selfHeading) return selfHeading;
-
-  let current: Element | null = element;
-  while (current && current.tagName.toLowerCase() !== "body") {
-    let sibling: Element | null = current.previousElementSibling;
-    while (sibling) {
-      const siblingHeading = findHeadingWithin(sibling, true);
-      if (siblingHeading) return siblingHeading;
-      sibling = sibling.previousElementSibling;
-    }
-    current = current.parentElement;
-  }
-
-  const localContainers: Array<Element | null> = [
-    element.closest(
-      '[data-block], [data-type], [data-block-name], [class*="wp-block-"]',
-    ),
-    element.closest("section, article, header, aside, footer, nav, form"),
-    element.parentElement,
-    element.parentElement?.parentElement || null,
-    element.closest("main"),
-  ];
-
-  for (const container of localContainers) {
-    const heading = findHeadingWithin(container);
-    if (heading) return heading;
-  }
-
-  return undefined;
-};
-
-const getNearestLandmark = (element: Element): string | undefined =>
-  element
-    .closest("header, nav, main, section, article, aside, footer, form")
-    ?.tagName.toLowerCase();
-
-const getBlockMetadata = (element: Element) => {
-  const blockHost = element.closest(
-    '[data-block], [data-type], [data-block-name], [class*="wp-block-"]',
-  );
-  if (!blockHost) {
-    return {
-      blockName: undefined,
-      blockClientId: undefined,
-    };
-  }
-
-  const blockClass = Array.from(blockHost.classList).find((className) =>
-    className.startsWith("wp-block-"),
-  );
-
-  return {
-    blockName:
-      blockHost.getAttribute("data-type") ||
-      blockHost.getAttribute("data-block-name") ||
-      blockClass ||
-      undefined,
-    blockClientId:
-      blockHost.getAttribute("data-block") ||
-      blockHost.getAttribute("data-id") ||
-      undefined,
-  };
-};
-
-const resolveOwnerElement = (element: Element): HTMLElement | null => {
-  const closestSourceNode = element.closest("[data-vp-source-node]");
-  return closestSourceNode instanceof HTMLElement ? closestSourceNode : null;
-};
-
-const resolveEditableElement = (element: Element): HTMLElement | null => {
-  if (element instanceof HTMLElement && element.dataset.vpNodeId) {
-    return element;
-  }
-
-  const closestInstrumented = element.closest("[data-vp-node-id]");
-  return closestInstrumented instanceof HTMLElement
-    ? closestInstrumented
-    : null;
-};
-
-const deriveTopLevelIndexFromSourceNodeId = (
-  sourceNodeId?: string,
-): number | undefined => {
-  if (!sourceNodeId) return undefined;
-
-  const pathToken = sourceNodeId.split("::")[2];
-  if (!pathToken) return undefined;
-
-  const topLevelIndex = Number(pathToken.split(".")[0]);
-  return Number.isFinite(topLevelIndex) ? topLevelIndex : undefined;
-};
-
-const parseOptionalInteger = (value?: string): number | undefined => {
-  if (!value) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-};
-
-const getViewportIntersectionArea = (
-  rect: DOMRect,
-  selection: ViewportCaptureRect,
-) => {
-  const left = Math.max(rect.left, selection.x);
-  const top = Math.max(rect.top, selection.y);
-  const right = Math.min(rect.right, selection.x + selection.width);
-  const bottom = Math.min(rect.bottom, selection.y + selection.height);
-
-  if (right <= left || bottom <= top) return 0;
-  return (right - left) * (bottom - top);
-};
-
-type CaptureSelectionMode = "owner" | "edit";
-
-const inferCaptureNodeRole = (
-  element: Element | null | undefined,
-): string | undefined => {
-  if (!element) return undefined;
-
-  if (element instanceof HTMLElement && element.dataset.vpNodeRole) {
-    return element.dataset.vpNodeRole;
-  }
-
-  const explicitRole = element.getAttribute("role")?.trim().toLowerCase();
-  if (explicitRole === "button") return "button";
-  if (explicitRole === "link") return "link";
-
-  const tagName = element.tagName.toLowerCase();
-  if (tagName === "button") return "button";
-  if (tagName === "a") {
-    const className =
-      element instanceof HTMLElement ? String(element.className || "") : "";
-    return /btn|button|cta|chip|pill/i.test(className) ? "button" : "link";
-  }
-  if (/^h[1-6]$/.test(tagName)) return "heading";
-  if (["img", "picture", "video", "figure", "svg", "canvas"].includes(tagName)) {
-    return "media";
-  }
-  if (tagName === "form") return "form";
-  if (["input", "textarea", "select", "option"].includes(tagName)) return "input";
-  if (["ul", "ol", "li", "dl"].includes(tagName)) return "list";
-  if (
-    ["header", "nav", "main", "section", "article", "aside", "footer"].includes(
-      tagName,
-    )
-  ) {
-    return "section";
-  }
-
-  const className =
-    element instanceof HTMLElement ? String(element.className || "") : "";
-  if (/card|panel|tile|badge|banner|feature/i.test(className)) {
-    return "card";
-  }
-  if (["p", "span", "label", "small", "strong", "em"].includes(tagName)) {
-    return "text";
-  }
-
-  return getElementTextSnippet(element) ? "text" : "container";
-};
-
-const getSourceNodeIdsFromAncestors = (element: Element): string[] => {
-  const collected = new Set<string>();
-  let current: Element | null = element;
-
-  while (current) {
-    if (current instanceof HTMLElement) {
-      const sourceNodeId = current.dataset.vpSourceNode?.trim();
-      const ownerSourceNodeId = current.dataset.vpOwnerSourceNode?.trim();
-      if (sourceNodeId) collected.add(sourceNodeId);
-      if (ownerSourceNodeId) collected.add(ownerSourceNodeId);
-    }
-    current = current.parentElement;
-  }
-
-  return Array.from(collected);
-};
-
-const readOwnerContext = (
-  editElement: HTMLElement,
-  frameDocument: Document,
-  fallbackRoute?: string | null,
-) => {
-  const ownerElement = resolveOwnerElement(editElement);
-  const documentRoute =
-    frameDocument.documentElement.dataset.vpRoute || fallbackRoute || null;
-  const documentTemplate =
-    frameDocument.documentElement.dataset.vpTemplate || undefined;
-  const documentSourceFile =
-    frameDocument.documentElement.dataset.vpSourceFile || undefined;
-
-  return {
-    ownerElement,
-    ownerNodeId:
-      ownerElement?.dataset.vpNodeId ||
-      editElement.dataset.vpOwnerNodeId ||
-      undefined,
-    ownerSourceNodeId:
-      editElement.dataset.vpOwnerSourceNode ||
-      ownerElement?.dataset.vpSourceNode ||
-      undefined,
-    ownerSourceFile:
-      editElement.dataset.vpOwnerSourceFile ||
-      ownerElement?.dataset.vpSourceFile ||
-      documentSourceFile,
-    ownerTemplateName:
-      editElement.dataset.vpOwnerTemplate ||
-      ownerElement?.dataset.vpTemplate ||
-      documentTemplate,
-    ownerTopLevelIndex: parseOptionalInteger(
-      editElement.dataset.vpOwnerTopLevelIndex ||
-        ownerElement?.dataset.vpTopLevelIndex,
-    ),
-    route:
-      ownerElement?.dataset.vpRoute ||
-      editElement.dataset.vpRoute ||
-      documentRoute,
-  };
-};
-
-const selectBestElementForCapture = (
-  frameDocument: Document,
-  viewportRect: ViewportCaptureRect,
-  mode: CaptureSelectionMode = "edit",
-): Element | null => {
-  const centerX = viewportRect.x + viewportRect.width / 2;
-  const centerY = viewportRect.y + viewportRect.height / 2;
-  const selectionArea = Math.max(1, viewportRect.width * viewportRect.height);
-  const centerElement = frameDocument.elementFromPoint(centerX, centerY);
-
-  const candidates = Array.from(
-    frameDocument.querySelectorAll(CAPTURE_CANDIDATE_SELECTOR),
-  ).filter((element): element is Element => element instanceof Element);
-
-  let bestElement: Element | null = null;
-  let bestScore = -Infinity;
-
-  for (const candidate of candidates) {
-    const rect = candidate.getBoundingClientRect();
-    const overlapArea = getViewportIntersectionArea(rect, viewportRect);
-    if (overlapArea <= 0) continue;
-
-    const overlapRatio = overlapArea / selectionArea;
-    const candidateArea = Math.max(1, rect.width * rect.height);
-    const coverageRatio = overlapArea / candidateArea;
-    const containsCenter =
-      centerX >= rect.left &&
-      centerX <= rect.right &&
-      centerY >= rect.top &&
-      centerY <= rect.bottom;
-    const isHeading = candidate.matches(HEADING_SELECTOR);
-    const isInstrumented =
-      candidate instanceof HTMLElement && Boolean(candidate.dataset.vpNodeId);
-    const nodeRole = inferCaptureNodeRole(candidate);
-    const textLength = candidate.textContent?.trim().length ?? 0;
-    const isLocalRole = ["button", "link", "heading", "text", "media", "input"].includes(
-      nodeRole || "",
-    );
-    const isBroadRole = ["section", "container"].includes(nodeRole || "");
-
-    let score =
-      overlapRatio * 100 +
-      coverageRatio * 25 +
-      (containsCenter ? 20 : 0) +
-      (isHeading ? 18 : 0) +
-      (isInstrumented ? 10 : 0) +
-      Math.min(textLength, 160) / 40 -
-      candidateArea / 50000;
-
-    if (mode === "edit") {
-      score += isLocalRole ? 18 : 0;
-      score += isBroadRole ? -12 : 0;
-      score += containsCenter && candidateArea < selectionArea * 0.7 ? 12 : 0;
-      score += candidateArea > selectionArea * 0.9 ? -10 : 0;
-    } else {
-      score += isBroadRole ? 14 : 0;
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestElement = candidate;
-    }
-  }
-
-  if (bestElement) return bestElement;
-
-  if (
-    centerElement instanceof HTMLElement &&
-    ["html", "body"].includes(centerElement.tagName.toLowerCase())
-  ) {
-    return centerElement.querySelector("*");
-  }
-
-  return centerElement;
-};
-
-const resolveDomTargetSnapshot = (
-  frameDocument: Document | undefined,
-  viewportRect: ViewportCaptureRect,
-  fallbackRoute?: string | null,
-): {
-  domTarget?: CaptureDomTarget;
-  targetNode?: CaptureTargetNode;
-} => {
-  if (!frameDocument) return {};
-
-  const selectedElement = selectBestElementForCapture(
-    frameDocument,
-    viewportRect,
-    "edit",
-  );
-
-  if (!selectedElement) return {};
-
-  const editElement = resolveEditableElement(selectedElement) || (
-    selectedElement instanceof HTMLElement ? selectedElement : null
-  );
-  if (!editElement) return {};
-
-  const classNames = Array.from(editElement.classList).filter(Boolean);
-  const textSnippet = getElementTextSnippet(editElement);
-  const htmlSnippet = getElementHtmlSnippet(editElement);
-  const blockMetadata = getBlockMetadata(editElement);
-  const nearestHeading = getNearestHeading(editElement);
-  const nearestLandmark = getNearestLandmark(editElement);
-  const ownerContext = readOwnerContext(
-    editElement,
-    frameDocument,
-    fallbackRoute,
-  );
-  const ownerSourceNodeId = ownerContext.ownerSourceNodeId;
-  const ownerTopLevelIndex =
-    ownerContext.ownerTopLevelIndex ??
-    deriveTopLevelIndexFromSourceNodeId(ownerSourceNodeId);
-  const editSourceNodeId =
-    editElement.dataset.vpSourceNode ||
-    (editElement === ownerContext.ownerElement ? ownerSourceNodeId : undefined);
-  const editTopLevelIndex =
-    parseOptionalInteger(editElement.dataset.vpTopLevelIndex) ??
-    (editSourceNodeId
-      ? deriveTopLevelIndexFromSourceNodeId(editSourceNodeId)
-      : undefined);
-  const editNodeRole = inferCaptureNodeRole(editElement);
-  const ancestorSourceNodeIds = getSourceNodeIdsFromAncestors(editElement);
-  const targetNode = compactObject({
-    nodeId: ownerContext.ownerNodeId || editElement.dataset.vpNodeId,
-    sourceNodeId: ownerSourceNodeId,
-    sourceFile: ownerContext.ownerSourceFile,
-    topLevelIndex: ownerTopLevelIndex,
-    templateName: ownerContext.ownerTemplateName,
-    ownerNodeId: ownerContext.ownerNodeId,
-    ownerSourceNodeId,
-    ownerSourceFile: ownerContext.ownerSourceFile,
-    ownerTopLevelIndex,
-    ownerTemplateName: ownerContext.ownerTemplateName,
-    editNodeId: editElement.dataset.vpNodeId,
-    editSourceNodeId,
-    editSourceFile:
-      editElement.dataset.vpSourceFile ||
-      (editSourceNodeId ? ownerContext.ownerSourceFile : undefined),
-    editTopLevelIndex,
-    editTemplateName:
-      editElement.dataset.vpTemplate ||
-      (editSourceNodeId ? ownerContext.ownerTemplateName : undefined),
-    editNodeRole,
-    editTagName: editElement.tagName.toLowerCase(),
-    ancestorSourceNodeIds:
-      ancestorSourceNodeIds.length > 0 ? ancestorSourceNodeIds : undefined,
-    route: ownerContext.route,
-    blockName:
-      editElement.dataset.vpBlockName || blockMetadata.blockName,
-    blockClientId:
-      editElement.dataset.vpBlockClientId || blockMetadata.blockClientId,
-    tagName: editElement.dataset.vpTag || editElement.tagName.toLowerCase(),
-    domPath: editElement.dataset.vpDomPath || buildDomPath(editElement),
-    nearestHeading: editElement.dataset.vpHeading || nearestHeading,
-    nearestLandmark: editElement.dataset.vpLandmark || nearestLandmark,
-  });
-
-  console.info("[capture-target]", {
-    ownerSourceNodeId,
-    ownerTemplateName: ownerContext.ownerTemplateName,
-    ownerTopLevelIndex,
-    editNodeId: editElement.dataset.vpNodeId,
-    editSourceNodeId,
-    editNodeRole,
-    editTagName: editElement.tagName.toLowerCase(),
-    route: ownerContext.route,
-    domPath: targetNode.domPath,
-  });
-
-  return {
-    domTarget: {
-      cssSelector: buildCssSelector(editElement),
-      xpath: buildXPath(editElement),
-      tagName: editElement.tagName.toLowerCase(),
-      elementId: editElement.id || undefined,
-      classNames: classNames.length > 0 ? classNames : undefined,
-      htmlSnippet: htmlSnippet || undefined,
-      textSnippet: textSnippet || undefined,
-      blockName:
-        editElement.dataset.vpBlockName || blockMetadata.blockName,
-      blockClientId:
-        editElement.dataset.vpBlockClientId || blockMetadata.blockClientId,
-      domPath: editElement.dataset.vpDomPath || buildDomPath(editElement),
-      role: editNodeRole || editElement.getAttribute("role") || undefined,
-      ariaLabel: editElement.getAttribute("aria-label") || undefined,
-      nearestHeading: editElement.dataset.vpHeading || nearestHeading,
-      nearestLandmark: editElement.dataset.vpLandmark || nearestLandmark,
-    },
-    targetNode: Object.keys(targetNode).length > 0 ? targetNode : undefined,
-  };
-};
 
 const EDITOR_MESSAGES: Record<
   | "mainPromptNotAllowedWithCaptures"
@@ -757,6 +228,7 @@ const EDITOR_MESSAGES: Record<
   | "captureWillUseInferenceOnSave"
   | "selectedCapturesWillUseInference"
   | "pipelineStartFailed"
+  | "unsupportedEditOperation"
   | "outOfScope"
   | "invalidEditRequest",
   Record<SupportedLanguage, string>
@@ -782,20 +254,20 @@ const EDITOR_MESSAGES: Record<
     en: 'When captures are attached, the main prompt must still be a clear additional instruction. Inputs like "hello" or "test" are rejected.',
   },
   supplementalPromptTargetRequired: {
-    vi: "Nếu bạn muốn thêm chức năng mới khi đã có capture, hãy nói rõ nó cần nằm ở page hoặc khu vực nào.",
-    en: "When requesting a new feature with captures attached, also describe which page or area it should go into.",
+    vi: "Khi đã có capture, prompt chính chỉ nên bổ sung ngữ cảnh cho đúng page hoặc khu vực và vẫn phải nằm trong 4 nhóm: nội dung, background, color, layout.",
+    en: "When captures are attached, keep the main prompt tied to a specific page or area and limit it to content, background, color, or layout changes.",
   },
   mainPromptRequired: {
-    vi: "Hãy nhập một yêu cầu migrate rõ ràng khi chưa đính kèm capture.",
-    en: "Add a migration prompt when no captures are attached.",
+    vi: "Hãy nhập một yêu cầu migrate rõ ràng. Nếu kèm chỉnh sửa, chỉ dùng 4 nhóm: nội dung, background, color hoặc layout.",
+    en: "Add a clear migration prompt. Any requested edit must stay within content, background, color, or layout changes.",
   },
   focusTargetActionRequired: {
-    vi: "Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào trên đó cần thay đổi.",
-    en: "When you mention a page like Home, also describe what should change there.",
+    vi: "Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào trên đó cần thay đổi và thay đổi đó phải thuộc content, background, color hoặc layout.",
+    en: "When you mention a page like Home, also describe what should change there, limited to content, background, color, or layout.",
   },
   unclearIntent: {
-    vi: "Hãy mô tả yêu cầu migrate toàn site hoặc migrate toàn site kèm focus vào một page/khu vực cụ thể trước khi gửi.",
-    en: "Describe either a full-site migration or a page-focused migration request before sending.",
+    vi: "Hãy mô tả yêu cầu migrate toàn site, hoặc một chỉnh sửa rõ ràng trên page/khu vực cụ thể thuộc 4 nhóm: nội dung, background, color, layout.",
+    en: "Describe either the full-site migration or a clear page-level edit limited to content, background, color, or layout.",
   },
   saveCaptureNoteRequired: {
     vi: "Hãy thêm một yêu cầu chỉnh sửa rõ ràng trước khi lưu capture này.",
@@ -821,13 +293,17 @@ const EDITOR_MESSAGES: Record<
     vi: "Không thể khởi chạy AI pipeline.",
     en: "Failed to start AI pipeline.",
   },
+  unsupportedEditOperation: {
+    vi: "Luồng edit hiện chỉ hỗ trợ 4 nhóm thay đổi: đổi nội dung, đổi background, đổi color, hoặc đổi layout. Các yêu cầu thêm/xóa/thay section, thêm feature mới, hoặc đổi typography hiện chưa được hỗ trợ.",
+    en: "The current edit flow only supports content, background, color, or layout changes. Adding/removing/replacing sections, adding new features, or typography-only edits are not supported.",
+  },
   outOfScope: {
-    vi: "Yêu cầu này không giống một tác vụ migrate site hoặc chỉnh sửa UI trong quá trình migrate.",
-    en: "This prompt does not look like a site migration or UI-focused request.",
+    vi: "Yêu cầu này không giống một tác vụ migrate site hoặc một chỉnh sửa UI thuộc 4 nhóm được hỗ trợ.",
+    en: "This prompt does not look like a site migration or a supported UI edit.",
   },
   invalidEditRequest: {
-    vi: "Không thể hiểu yêu cầu này như một chỉ dẫn migrate hợp lệ.",
-    en: "The request could not be understood as a valid migration instruction.",
+    vi: "Không thể hiểu yêu cầu này như một chỉ dẫn migrate hoặc chỉnh sửa hợp lệ trong 4 nhóm được hỗ trợ.",
+    en: "The request could not be understood as a valid migration instruction or a supported edit request.",
   },
 };
 
@@ -848,6 +324,7 @@ const getAiErrorMessage = (
     CAPTURE_NOTE_REQUIRED: "captureNoteRequired",
     CAPTURE_NOTE_TOO_VAGUE: "captureNoteTooVague",
     FOCUS_TARGET_ACTION_REQUIRED: "focusTargetActionRequired",
+    UNSUPPORTED_EDIT_OPERATION: "unsupportedEditOperation",
     UNCLEAR_INTENT: "unclearIntent",
     OUT_OF_SCOPE: "outOfScope",
     INVALID_EDIT_REQUEST: "invalidEditRequest",
@@ -868,30 +345,30 @@ const getChatHelperContent = (
   if (isCaptureMode) {
     return language === "vi"
       ? {
-          title: "Captures + optional prompt",
-          body: 'Bạn nên thêm note cụ thể cho từng capture, nhưng vẫn có thể gửi yêu cầu chưa hoàn hảo. AI sẽ cố suy luận thêm từ vùng chọn, DOM context và prompt chính.',
+          title: "Supported edit scope",
+          body: 'Mỗi capture nên mô tả một thay đổi cụ thể thuộc 1 trong 4 nhóm: nội dung, background, color hoặc layout. Ví dụ: "Đổi nền section này sang xanh nhạt" hoặc "Giảm khoảng cách giữa 2 cột".',
         }
       : {
-          title: "Captures + optional prompt",
-          body: 'Specific notes on each capture are recommended, but you can still send an imperfect request. AI will infer more from the selected area, DOM context, and main prompt.',
+          title: "Supported edit scope",
+          body: 'Each capture should describe one concrete change within the 4 supported groups: content, background, color, or layout. Example: "Change this section background to light green" or "Reduce the gap between these two columns".',
         };
   }
 
   return language === "vi"
     ? {
         title: "Main prompt",
-        body: 'Hãy mô tả migrate toàn site, hoặc migrate toàn site kèm focus cụ thể. Ví dụ: "Migrate toàn bộ site sang React và giảm chiều cao hero ở trang Home".',
+        body: 'Hãy mô tả migrate toàn site. Nếu muốn kèm chỉnh sửa, chỉ yêu cầu content/background/color/layout. Ví dụ: "Migrate toàn bộ site sang React và đổi nền hero ở trang Home sang xanh nhạt".',
       }
     : {
         title: "Main prompt",
-        body: 'Describe a full-site migration, or a full-site migration with a clear focus. Example: "Migrate the full site to React and reduce the hero height on the Home page".',
+        body: 'Describe the full-site migration. If you also want edits, keep them limited to content, background, color, or layout. Example: "Migrate the full site to React and change the hero background on the Home page to light green".',
       };
 };
 
 const getChatInputPlaceholder = (language: SupportedLanguage) =>
   language === "vi"
-    ? "Mô tả yêu cầu migrate hoặc chỉ dẫn bổ sung cho các captures..."
-    : "Describe the migration or any extra instruction for the attached captures...";
+    ? "Mô tả migrate hoặc chỉnh sửa thuộc content/background/color/layout..."
+    : "Describe the migration or any content/background/color/layout edit...";
 
 const Editor: React.FC = () => {
   const navigate = useNavigate();
@@ -932,7 +409,7 @@ const Editor: React.FC = () => {
       author: "John Doe",
       time: "10 minutes ago",
       content:
-        "Make this header sticky so it follows the user down the page. Also increase the top padding slightly.",
+        "Reduce the top padding in this header and center the navigation items a bit more cleanly.",
       initials: "JD",
       colorClasses: "bg-[#d2dacb] text-[#49704F]",
     },
@@ -942,7 +419,7 @@ const Editor: React.FC = () => {
       author: "Sarah Miller",
       time: "2 hours ago",
       content:
-        "Adjust font-weight of the subheaders. They feel a bit too thin compared to the primary headline.",
+        "Change the subheader color to a darker green and add a little more spacing below each one.",
       initials: "SM",
       colorClasses: "bg-[#e8d5a1]/40 text-[#7a5e18]",
     },
@@ -952,7 +429,7 @@ const Editor: React.FC = () => {
       author: "Alex Kim",
       time: "Yesterday",
       content:
-        "Should we add a newsletter signup widget here? It's a key conversion point for the client.",
+        "This area feels too heavy. Lighten the background and tighten the spacing so it matches the rest of the page.",
       initials: "AK",
       colorClasses: "bg-[#f0eede] text-[#8e9892]",
     },
@@ -1090,10 +567,6 @@ const Editor: React.FC = () => {
       /\b(improve|update|adjust|refine|redesign|restyle|focus|preserve|change|make|toi uu|dieu chinh|chinh sua|giu nguyen|doi mau|tap trung)\b/.test(
         normalizedAscii,
       );
-    const featureSignal =
-      /\b(add|insert|create|build|integrate|enable|introduce|implement|feature|functionality|widget|module|popup|modal|form|signup|newsletter|chatbot|chat|calculator|booking|spin|lucky wheel|wheel|carousel|faq|search|filter|them|chen|tao|xay dung|tich hop|bat|bo sung|tinh nang|chuc nang|dang ky|vong quay|quay thuong|tim kiem|bo loc)\b/.test(
-        normalizedAscii,
-      );
     const scopeSignal =
       /\b(site|website|wordpress|theme|all pages|full site|whole site|entire site|toan bo|ca trang|toan site|toan website)\b/.test(
         normalizedAscii,
@@ -1105,7 +578,7 @@ const Editor: React.FC = () => {
 
     return (
       migrationSignal ||
-      ((uiSignal || featureSignal) && (scopeSignal || focusSignal))
+      (uiSignal && (scopeSignal || focusSignal))
     );
   };
 
@@ -1138,14 +611,8 @@ const Editor: React.FC = () => {
 
     return (
       hasConcreteEditAction(normalizedAscii) ||
-      mentionsFocusTarget(normalizedAscii) ||
-      hasFeatureSignal(normalizedAscii)
+      mentionsFocusTarget(normalizedAscii)
     );
-  };
-
-  const isFeaturePromptWithoutTarget = (value: string) => {
-    const normalized = normalizeLanguageInput(value) || "";
-    return hasFeatureSignal(normalized) && !hasScopeOrTargetHint(normalized);
   };
 
   const collectInferenceWarnings = (
@@ -1159,11 +626,6 @@ const Editor: React.FC = () => {
       if (prompt && !isMeaningfulSupplementalPrompt(prompt)) {
         warnings.push(
           getEditorMessage(language, "supplementalPromptTooVague"),
-        );
-      }
-      if (prompt && isFeaturePromptWithoutTarget(prompt)) {
-        warnings.push(
-          getEditorMessage(language, "supplementalPromptTargetRequired"),
         );
       }
       if (capturesForAi.some((capture) => !capture.comment.trim())) {
@@ -1209,8 +671,6 @@ const Editor: React.FC = () => {
     },
     selection: capture.selection,
     geometry: capture.geometry,
-    ...(capture.domTarget ? { domTarget: capture.domTarget } : {}),
-    ...(capture.targetNode ? { targetNode: capture.targetNode } : {}),
     asset: {
       provider: capture.asset?.provider || "local",
       fileName:
@@ -1264,6 +724,16 @@ const Editor: React.FC = () => {
     };
   };
 
+  const hasUnsupportedEditRequest = (
+    prompt: string,
+    capturesForAi: Capture[],
+  ) =>
+    detectUnsupportedEditRequestReason(
+      [prompt, ...capturesForAi.map((capture) => capture.comment || "")]
+        .filter(Boolean)
+        .join("\n"),
+    );
+
   const sendChatMessage = async () => {
     const trimmedPrompt = chatInput.trim();
     const hasCaptureInstructions = chatCaptures.length > 0;
@@ -1276,6 +746,11 @@ const Editor: React.FC = () => {
 
     if (!hasCaptureInstructions && !trimmedPrompt) {
       showToast(getEditorMessage(requestLanguage, "mainPromptRequired"));
+      return;
+    }
+
+    if (hasUnsupportedEditRequest(trimmedPrompt, chatCaptures)) {
+      showToast(getEditorMessage(requestLanguage, "unsupportedEditOperation"));
       return;
     }
 
@@ -1632,12 +1107,6 @@ const Editor: React.FC = () => {
       coordinateSpace: "iframe-document-normalized",
     };
 
-    const domSnapshot = resolveDomTargetSnapshot(
-      metrics.frameDocument,
-      normalizedViewportRect,
-      metrics.page.route,
-    );
-
     return {
       viewport: metrics.viewport,
       page: metrics.page,
@@ -1647,14 +1116,16 @@ const Editor: React.FC = () => {
         documentRect,
         normalizedRect,
       },
-      domTarget: domSnapshot.domTarget,
-      targetNode: domSnapshot.targetNode,
     };
   };
 
   const handleSaveCapture = async () => {
     if (!selection) return;
     const captureLanguage = detectRequestLanguage("", [captureComment]);
+    if (detectUnsupportedEditRequestReason(captureComment)) {
+      showToast(getEditorMessage(captureLanguage, "unsupportedEditOperation"));
+      return;
+    }
     if (!captureComment.trim() || !isSpecificCaptureNote(captureComment)) {
       showToast(
         getEditorMessage(captureLanguage, "captureWillUseInferenceOnSave"),
@@ -1690,8 +1161,6 @@ const Editor: React.FC = () => {
         page: captureSnapshot.page,
         selection: captureSnapshot.selection,
         geometry: captureSnapshot.geometry,
-        domTarget: captureSnapshot.domTarget,
-        targetNode: captureSnapshot.targetNode,
       };
       await saveCapture(siteId,captureObject);
       setCaptures((prev) => [captureObject, ...prev]);
@@ -1735,6 +1204,16 @@ const Editor: React.FC = () => {
       "",
       capturesToSave.map((capture) => capture.comment),
     );
+    if (
+      capturesToSave.some((capture) =>
+        detectUnsupportedEditRequestReason(capture.comment),
+      )
+    ) {
+      showToast(
+        getEditorMessage(selectionLanguage, "unsupportedEditOperation"),
+      );
+      return;
+    }
     if (
       capturesToSave.some(
         (capture) =>
@@ -1828,7 +1307,7 @@ const Editor: React.FC = () => {
                       Site Pages
                     </h2>
                     <p className="text-[#5c6860] text-[13px]">
-                      Select a page to edit layout.
+                      Select a page to edit content, background, color, or layout.
                     </p>
                   </div>
                   <button
@@ -1934,12 +1413,10 @@ const Editor: React.FC = () => {
                   </>
                 )}
 
-                <button className="w-full mt-4 bg-transparent border-2 border-dashed border-[#dcd9ce] rounded-full py-3 flex items-center justify-center gap-2 text-[#233227] font-bold text-[13px] hover:bg-[#e8e6df]/30 transition-colors">
-                  <span className="material-symbols-outlined text-[18px]">
-                    add_circle
-                  </span>{" "}
-                  Add new page
-                </button>
+                <div className="mt-4 rounded-2xl border border-dashed border-[#dcd9ce] bg-white/60 px-4 py-3 text-[12px] leading-relaxed text-[#5c6860]">
+                  Pages sync from WordPress. Use captures or the chat prompt to
+                  request content, background, color, or layout changes.
+                </div>
               </div>
             </div>
           ) : (
@@ -2022,11 +1499,15 @@ const Editor: React.FC = () => {
                     <p className="text-[13px] font-bold text-[#233227] mb-2">
                       Describe the change for this area
                     </p>
+                    <p className="mb-2 text-[12px] leading-relaxed text-[#667062]">
+                      Supported scope: content, background, color, or layout
+                      only.
+                    </p>
                     <textarea
                       autoFocus
                       value={captureComment}
                       onChange={(e) => setCaptureComment(e.target.value)}
-                      placeholder="Describe the edit request for this area..."
+                      placeholder="Example: Change this section background to light green"
                       className="w-full border border-[#e8e6df] rounded-xl p-2 text-[13px] outline-none focus:border-[#49704F] resize-none h-20 mb-3"
                     />
                     <div className="flex gap-2 justify-end">
@@ -2132,7 +1613,8 @@ const Editor: React.FC = () => {
                     <div className="shrink-0 border-t border-[#e5e8df] bg-[#fcfbf7] px-3 py-3">
                       <p className="text-[12px] leading-relaxed text-[#6b7568]">
                         No captures attached yet. Save a selection from the
-                        preview to send visual context.
+                        preview to send visual context for content, background,
+                        color, or layout edits.
                       </p>
                     </div>
                   )}
@@ -2367,7 +1849,8 @@ const Editor: React.FC = () => {
                       </p>
                       <p className="mt-2 text-[12px] leading-relaxed text-[#667062]">
                         Select an area in the preview and save it. Captures will
-                        appear here for AI context and later review.
+                        appear here for AI context and later review of content,
+                        background, color, or layout edits.
                       </p>
                     </div>
                   )}

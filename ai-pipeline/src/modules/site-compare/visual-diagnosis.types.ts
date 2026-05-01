@@ -127,6 +127,14 @@ export interface VisualMismatchDiagnosis {
     }>;
     guardrails: string[];
   };
+  debugTrace?: {
+    source: 'vision' | 'text' | 'heuristic';
+    rawModelResponse?: string;
+    extractedJson?: string;
+    parsedDiagnosisJson?: string;
+    mergedDiagnosisJson?: string;
+    parseFailed?: boolean;
+  };
 }
 
 export interface PostEditVisualValidationIssue {

@@ -3,7 +3,6 @@ import type { GeneratedComponent } from '../agents/react-generator/react-generat
 import type { PlanResult } from '../agents/planner/planner.service.js';
 import type { PipelineEditRequestDto } from '../orchestrator/orchestrator.dto.js';
 import type { PostMigrationEditTask } from './edit-request-phase.service.js';
-import type { CaptureSectionMatch } from './capture-section-matcher.service.js';
 
 export type CaptureReviewStatus = 'matched' | 'partial' | 'failed';
 
@@ -16,11 +15,9 @@ export interface CaptureAttachmentReviewResult {
   attachmentId: string;
   componentName: string;
   editedComponentName: string;
-  scope: 'component' | 'section';
+  scope: 'component' | 'region';
   status: CaptureReviewStatus;
   confidence: number;
-  matchedSectionIndex?: number;
-  matchedSectionType?: string;
   summary: string;
   issues: CaptureReviewIssue[];
   suggestedFixFeedback?: string;
@@ -84,9 +81,8 @@ export class CaptureReviewService {
     );
 
     return task.attachments.map((attachment) => {
-      const sectionMatch = pickAttachmentMatch(
-        task.sectionMatches,
-        attachment.id,
+      const exactTarget = task.exactTargets.find(
+        (target) => target.captureId === attachment.id,
       );
       const issues: CaptureReviewIssue[] = [];
       const reasons: string[] = [];
@@ -103,7 +99,6 @@ export class CaptureReviewService {
       }
 
       const attachmentRoute =
-        attachment.targetNode?.route ??
         attachment.captureContext?.page?.route ??
         attachment.sourcePageUrl ??
         null;
@@ -121,21 +116,15 @@ export class CaptureReviewService {
         });
       }
 
-      if (sectionMatch) {
-        score += Math.min(20, Math.max(6, sectionMatch.score));
-        reasons.push(`section-${sectionMatch.sectionType}`);
-      } else if ((task.sectionMatches?.length ?? 0) > 0) {
-        issues.push({
-          severity: 'medium',
-          message:
-            'No section match was retained for this attachment during post-edit review.',
-        });
+      if (exactTarget) {
+        score += 12;
+        reasons.push(`exact-target:${exactTarget.targetNodeRole ?? 'component'}`);
       }
 
       const scope = resolveScope(task.planComponentName, reviewedComponentName);
-      if (scope === 'section') {
+      if (scope === 'region') {
         score += 8;
-        reasons.push('section-scope');
+        reasons.push('region-scope');
       } else {
         score += 4;
         reasons.push('component-scope');
@@ -182,7 +171,6 @@ export class CaptureReviewService {
         attachmentId: attachment.id,
         reviewedComponentName,
         scope,
-        sectionMatch,
         reasons,
         status,
       });
@@ -194,8 +182,6 @@ export class CaptureReviewService {
         scope,
         status,
         confidence: normalizedScore,
-        matchedSectionIndex: sectionMatch?.sectionIndex,
-        matchedSectionType: sectionMatch?.sectionType,
         summary,
         issues,
         suggestedFixFeedback:
@@ -206,7 +192,6 @@ export class CaptureReviewService {
                 attachmentNote: attachment.note,
                 reviewedComponentName,
                 scope,
-                sectionMatch,
                 issues,
               }),
         debugSummary: [
@@ -217,9 +202,9 @@ export class CaptureReviewService {
             : null,
           `edited=${reviewedComponentName}`,
           `scope=${scope}`,
-          sectionMatch
-            ? `section[${sectionMatch.sectionIndex}]=${sectionMatch.sectionType}`
-            : 'section=none',
+          exactTarget
+            ? `targetRole=${exactTarget.targetNodeRole ?? 'section'}`
+            : 'targetRole=component',
           `score=${normalizedScore.toFixed(2)}`,
           `status=${status}`,
         ]
@@ -246,8 +231,11 @@ export class CaptureReviewService {
       return task.componentName;
     }
 
-    for (const match of task.sectionMatches) {
-      const candidateName = `${task.planComponentName}Section${match.sectionIndex + 1}`;
+    for (const exactTarget of task.exactTargets) {
+      const candidateName =
+        exactTarget.targetComponentName ??
+        exactTarget.sectionComponentName ??
+        exactTarget.componentName;
       if (components.some((component) => component.name === candidateName)) {
         return candidateName;
       }
@@ -268,20 +256,11 @@ interface IntentSignal {
   pattern: RegExp;
 }
 
-function pickAttachmentMatch(
-  matches: CaptureSectionMatch[],
-  attachmentId: string,
-): CaptureSectionMatch | undefined {
-  return matches
-    .filter((match) => match.attachmentId === attachmentId)
-    .sort((left, right) => right.score - left.score)[0];
-}
-
 function resolveScope(
   componentName: string,
   reviewedComponentName: string,
-): 'component' | 'section' {
-  return reviewedComponentName !== componentName ? 'section' : 'component';
+): 'component' | 'region' {
+  return reviewedComponentName !== componentName ? 'region' : 'component';
 }
 
 function collectIntentSignals(note?: string): IntentSignal[] {
@@ -338,26 +317,15 @@ function deriveStatus(
 function buildResultSummary(input: {
   attachmentId: string;
   reviewedComponentName: string;
-  scope: 'component' | 'section';
-  sectionMatch?: CaptureSectionMatch;
+  scope: 'component' | 'region';
   reasons: string[];
   status: CaptureReviewStatus;
 }): string {
-  const {
-    attachmentId,
-    reviewedComponentName,
-    scope,
-    sectionMatch,
-    reasons,
-    status,
-  } = input;
+  const { attachmentId, reviewedComponentName, scope, reasons, status } = input;
   return [
     `attachment=${attachmentId}`,
     `edited=${reviewedComponentName}`,
     `scope=${scope}`,
-    sectionMatch
-      ? `section[${sectionMatch.sectionIndex}]=${sectionMatch.sectionType}`
-      : 'section=none',
     `status=${status}`,
     reasons.length > 0 ? `via ${reasons.join(', ')}` : null,
   ]
@@ -369,29 +337,15 @@ function buildSuggestedFixFeedback(input: {
   task: PostMigrationEditTask;
   attachmentNote?: string;
   reviewedComponentName: string;
-  scope: 'component' | 'section';
-  sectionMatch?: CaptureSectionMatch;
+  scope: 'component' | 'region';
   issues: CaptureReviewIssue[];
 }): string {
-  const {
-    task,
-    attachmentNote,
-    reviewedComponentName,
-    scope,
-    sectionMatch,
-    issues,
-  } = input;
+  const { task, attachmentNote, reviewedComponentName, scope, issues } = input;
   const lines = [
     `Capture review follow-up for "${reviewedComponentName}".`,
     `Original focused request: ${attachmentNote ?? task.feedback}`,
-    `Scope restriction: stay within ${scope === 'section' ? 'the matched section/subcomponent' : 'this component'} and avoid unrelated page-wide changes.`,
+    `Scope restriction: stay within ${scope === 'region' ? 'the matched subcomponent or exact target region' : 'this component'} and avoid unrelated page-wide changes.`,
   ];
-
-  if (sectionMatch) {
-    lines.push(
-      `Prioritize section[${sectionMatch.sectionIndex}] ${sectionMatch.sectionType} for this correction.`,
-    );
-  }
 
   if (issues.length > 0) {
     lines.push('Fix the following capture-review issues:');
@@ -415,7 +369,7 @@ function routeMatchesPath(
   if (!left || !right) return false;
   if (left === right) return true;
   if (left === '/') return right === '/';
-  return right.startsWith(`${left}/`);
+  return right.startsWith(`${left}/`) || left.startsWith(`${right}/`);
 }
 
 function normalizeRoute(value?: string | null): string | null {

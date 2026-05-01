@@ -5,6 +5,7 @@ import {
   applyPendingEditRequest,
   runAiProcess,
   skipPendingEditRequest,
+  skipVisualCompare,
   type AiEditRequestPayload,
 } from "../services/AiService";
 import type {
@@ -29,6 +30,12 @@ interface DeferredEditUiState {
   previewStage?: "baseline" | "edited" | "final";
   editApprovalRequired?: boolean;
   editApplied?: boolean;
+}
+
+interface VisualCompareSkipUiState {
+  loading: boolean;
+  requested: boolean;
+  error: string | null;
 }
 
 interface CapturePreviewState {
@@ -810,6 +817,8 @@ const SplitView: React.FC = () => {
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [showSkipVisualCompareConfirm, setShowSkipVisualCompareConfirm] =
+    useState(false);
   const [selectedStepEvent, setSelectedStepEvent] =
     useState<PipelineProgressEvent | null>(null);
   const [activeCapturePreview, setActiveCapturePreview] =
@@ -832,6 +841,12 @@ const SplitView: React.FC = () => {
     loading: boolean;
     error: string | null;
   }>({ loading: false, error: null });
+  const [skipVisualCompareState, setSkipVisualCompareState] =
+    useState<VisualCompareSkipUiState>({
+      loading: false,
+      requested: false,
+      error: null,
+    });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -1332,6 +1347,17 @@ const SplitView: React.FC = () => {
     setShowStopConfirm(false);
   };
 
+  const openSkipVisualCompareConfirm = () => {
+    if (skipVisualCompareState.loading) return;
+    setSkipVisualCompareState((prev) => ({ ...prev, error: null }));
+    setShowSkipVisualCompareConfirm(true);
+  };
+
+  const closeSkipVisualCompareConfirm = () => {
+    if (skipVisualCompareState.loading) return;
+    setShowSkipVisualCompareConfirm(false);
+  };
+
   const handleDeletePipeline = async () => {
     setDeleteState({ loading: true, done: false });
     try {
@@ -1341,6 +1367,49 @@ const SplitView: React.FC = () => {
       setShowStopConfirm(false);
     } catch {
       setDeleteState({ loading: false, done: false });
+    }
+  };
+
+  const handleSkipVisualCompare = async () => {
+    if (!jobId || !siteId || skipVisualCompareState.loading) return;
+
+    setSkipVisualCompareState({
+      loading: true,
+      requested: false,
+      error: null,
+    });
+
+    try {
+      const response = await skipVisualCompare(siteId, jobId);
+      if (!response.accepted) {
+        setSkipVisualCompareState({
+          loading: false,
+          requested: false,
+          error:
+            response.error ||
+            "The baseline visual compare could not be skipped.",
+        });
+        return;
+      }
+
+      setSkipVisualCompareState({
+        loading: false,
+        requested: true,
+        error: null,
+      });
+      setShowSkipVisualCompareConfirm(false);
+    } catch (error) {
+      const message =
+        error instanceof AiProcessError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Failed to skip the baseline visual compare.";
+      setSkipVisualCompareState({
+        loading: false,
+        requested: false,
+        error: message,
+      });
     }
   };
 
@@ -1559,6 +1628,28 @@ const SplitView: React.FC = () => {
     sse.allEvents,
     terminalStopMessage,
   ]);
+  const visualCompareStep = useMemo(
+    () =>
+      stepStatuses.find((event) => event.step === "9_visual_compare") ?? null,
+    [stepStatuses],
+  );
+  const isVisualCompareRunning = visualCompareStep?.status === "running";
+  const canSkipVisualCompare =
+    Boolean(jobId) &&
+    Boolean(siteId) &&
+    isVisualCompareRunning &&
+    !deleteState.done &&
+    !hasTerminalWorkflowFailure;
+
+  useEffect(() => {
+    if (isVisualCompareRunning) return;
+    setShowSkipVisualCompareConfirm(false);
+    setSkipVisualCompareState((prev) => ({
+      ...prev,
+      loading: false,
+      requested: false,
+    }));
+  }, [isVisualCompareRunning]);
 
   const latestEvent = useMemo(() => {
     const activeStep =
@@ -1660,19 +1751,38 @@ const SplitView: React.FC = () => {
                 </button>
               )}
               {sse.isConnected && !deleteState.done && !hasTerminalWorkflowFailure && (
-                <button
-                  onClick={openStopConfirm}
-                  disabled={deleteState.loading}
-                  className="text-xs font-mono px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                >
-                  <span
-                    className="material-symbols-outlined text-xs"
-                    style={{ fontSize: 13 }}
+                <>
+                  {canSkipVisualCompare && (
+                    <button
+                      onClick={openSkipVisualCompareConfirm}
+                      disabled={skipVisualCompareState.loading}
+                      className="text-xs font-mono px-2.5 py-1.5 rounded bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <span
+                        className="material-symbols-outlined text-xs"
+                        style={{ fontSize: 13 }}
+                      >
+                        skip_next
+                      </span>
+                      {skipVisualCompareState.loading
+                        ? "Skipping compare..."
+                        : "Skip compare"}
+                    </button>
+                  )}
+                  <button
+                    onClick={openStopConfirm}
+                    disabled={deleteState.loading}
+                    className="text-xs font-mono px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                   >
-                    stop_circle
-                  </span>
-                  {deleteState.loading ? "Stopping..." : "Stop"}
-                </button>
+                    <span
+                      className="material-symbols-outlined text-xs"
+                      style={{ fontSize: 13 }}
+                    >
+                      stop_circle
+                    </span>
+                    {deleteState.loading ? "Stopping..." : "Stop"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -1724,6 +1834,18 @@ const SplitView: React.FC = () => {
           {sse.error && (
             <div className="p-3 bg-red-500/20 border border-red-500/50 rounded text-red-400 text-xs">
               Workflow error: {sse.error.message}
+            </div>
+          )}
+          {skipVisualCompareState.error && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+              Skip compare failed: {skipVisualCompareState.error}
+            </div>
+          )}
+          {skipVisualCompareState.requested && isVisualCompareRunning && (
+            <div className="rounded-xl border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900">
+              Skip compare has been requested. The backend will leave the
+              current metric task at the next safe checkpoint and continue to
+              the next pipeline stage.
             </div>
           )}
           {hasTerminalWorkflowFailure && (
@@ -2393,6 +2515,75 @@ const SplitView: React.FC = () => {
                   stop_circle
                 </span>
                 {deleteState.loading ? "Đang dừng..." : "Dừng pipeline"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSkipVisualCompareConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={closeSkipVisualCompareConfirm}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 border-b border-outline-variant/30 px-6 py-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-700">
+                <span
+                  className="material-symbols-outlined"
+                  style={{ fontVariationSettings: "'FILL' 1" }}
+                >
+                  skip_next
+                </span>
+              </div>
+              <div className="min-w-0">
+                <h2 className="font-headline text-lg font-semibold text-on-surface">
+                  Bỏ qua bước so sánh metric?
+                </h2>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  Pipeline sẽ dừng bước baseline visual compare và metric-based
+                  repair, rồi chuyển thẳng sang bước tiếp theo với preview hiện
+                  tại.
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                Dùng khi bước compare đang chạy quá lâu. Preview hiện tại sẽ
+                được giữ nguyên; chỉ phần so sánh và sửa theo metric bị bỏ qua.
+              </div>
+              {skipVisualCompareState.error && (
+                <p className="mt-3 text-sm text-red-700">
+                  {skipVisualCompareState.error}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 pb-6">
+              <button
+                onClick={closeSkipVisualCompareConfirm}
+                disabled={skipVisualCompareState.loading}
+                className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={() => void handleSkipVisualCompare()}
+                disabled={skipVisualCompareState.loading}
+                className="inline-flex items-center gap-2 rounded-xl border border-amber-700 bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span
+                  className={`material-symbols-outlined text-[18px] ${
+                    skipVisualCompareState.loading ? "animate-spin" : ""
+                  }`}
+                >
+                  {skipVisualCompareState.loading ? "progress_activity" : "skip_next"}
+                </span>
+                {skipVisualCompareState.loading
+                  ? "Đang bỏ qua..."
+                  : "Xác nhận bỏ qua"}
               </button>
             </div>
           </div>

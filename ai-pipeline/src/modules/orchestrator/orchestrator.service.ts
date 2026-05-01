@@ -8,7 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { appendFile, mkdir, writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -43,6 +43,7 @@ import type { PlanResult } from '../agents/planner/planner.service.js';
 import { PlannerService } from '../agents/planner/planner.service.js';
 import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
+import { SectionManifestService } from '../agents/preview-builder/section-manifest.service.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
@@ -66,9 +67,6 @@ import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.
 import { ThemeRepoLayoutResolverService } from '../theme/theme-repo-layout-resolver.service.js';
 import {
   buildUiMutationCandidatesForGeneratedComponents,
-  buildUiSourceMapForGeneratedComponents,
-  readUiSourceMapEntries,
-  resolveCaptureTargetsFromUiSourceMap,
 } from '../edit-request/ui-source-map.util.js';
 import { getComponentStrategy } from '../agents/component-strategy.registry.js';
 import { SqlService } from '../sql/sql.service.js';
@@ -86,208 +84,30 @@ import type {
   PipelineCaptureAttachmentDto,
   RunPipelineDto,
   SkipPendingEditRequestDto,
+  SkipVisualCompareDto,
   SubmitReactVisualEditDto,
 } from './orchestrator.dto.js';
-
-// ── Vietnamese step labels + progress weights ─────────────────────────────────
-
-export interface ProgressEvent {
-  step: string; // internal step name
-  label: string; // display label
-  status: PipelineStepStatus;
-  percent: number; // 0-100
-  message?: string; // optional log message
-  data?: ProgressEventData;
-}
-
-interface ProgressEventData {
-  previewUrl?: string;
-  apiBaseUrl?: string;
-  previewStage?: 'baseline' | 'edited' | 'final';
-  hasEditRequest?: boolean;
-  editApprovalRequired?: boolean;
-  editApplied?: boolean;
-  stepDetails?: ProgressStepDetails;
-  metrics?: SiteCompareMetrics;
-}
-
-interface ProgressStepCapturePreview {
-  id: string;
-  note?: string;
-  imageUrl?: string;
-  sourcePageUrl?: string;
-  pageRoute?: string | null;
-  pageTitle?: string;
-  capturedAt?: string;
-  selector?: string;
-  nearestHeading?: string;
-  tagName?: string;
-}
-
-interface ProgressStepDetails {
-  kind: 'edit-request';
-  title: string;
-  summary?: string;
-  prompt?: string;
-  language?: string;
-  targetRoute?: string | null;
-  targetPageTitle?: string;
-  captureCount: number;
-  captures: ProgressStepCapturePreview[];
-}
-
-const STEP_META: Record<
-  string,
-  {
-    label: string;
-    weight: number;
-    activeMessage: string;
-    doneMessage: string;
-  }
-> = {
-  // Stage 1: Repository Analysis
-  '1_repo_analyzer': {
-    label: 'Analyze Theme Source',
-    weight: 8,
-    activeMessage:
-      'Resolving the theme source, cloning the repository when needed, and inspecting the theme file structure.',
-    doneMessage:
-      'Theme source has been resolved and the repository structure is understood.',
-  },
-  '2_theme_parser': {
-    label: 'Parse Theme Templates',
-    weight: 10,
-    activeMessage:
-      'Detecting the theme type and converting templates, parts, and block markup into a machine-readable template graph.',
-    doneMessage:
-      'Theme templates and reusable parts have been parsed into structured source.',
-  },
-  '3_normalizer': {
-    label: 'Normalize Template Source',
-    weight: 5,
-    activeMessage:
-      'Cleaning and normalizing parsed template source so downstream planning works on consistent markup.',
-    doneMessage:
-      'Template source has been normalized for planning and generation.',
-  },
-  // Stage 2: WordPress Content Graph
-  '4_content_graph': {
-    label: 'Extract WordPress Content Model',
-    weight: 10,
-    activeMessage:
-      'Querying WordPress for posts, pages, menus, taxonomies, plugins, and runtime capabilities.',
-    doneMessage:
-      'WordPress content model and runtime capability graph are ready.',
-  },
-  // Stage 3: Planner — Phase A→B→C→D with retry
-  '5_planner': {
-    label: 'Plan Routes, Data, And Visual Sections',
-    weight: 40,
-    activeMessage:
-      'Building the component graph, route map, data contracts, and approved visual sections for each template.',
-    doneMessage: 'Component architecture, routes, and visual plans are ready.',
-  },
-  // Stage 4+5: React Generator + Code Review Loop (includes D4 AST Validator)
-  '6_generator': {
-    label: 'Generate And Repair React Components',
-    weight: 30,
-    activeMessage:
-      'Generating React components, validating contracts, reviewing output, and repairing invalid code when needed.',
-    doneMessage:
-      'React components have been generated, reviewed, and validated.',
-  },
-  // Stage 6: Build & Preview
-  '7_api_builder': {
-    label: 'Build Preview API Layer',
-    weight: 5,
-    activeMessage:
-      'Preparing the Express preview API, injecting extra routes, and reviewing backend coverage against the frontend contract.',
-    doneMessage: 'Preview API layer has been built and reviewed.',
-  },
-  '8_preview_builder': {
-    label: 'Assemble Preview And Run Checks',
-    weight: 8,
-    activeMessage:
-      'Assembling the preview app, wiring environment files, verifying the build, and smoke-testing runtime behavior.',
-    doneMessage:
-      'Preview app assembly, build checks, and runtime smoke tests have passed.',
-  },
-  '8b_edit_request': {
-    label: 'Apply User Edit Request',
-    weight: 6,
-    activeMessage:
-      'Waiting for approval, then applying the submitted edit request after baseline compare has finished.',
-    doneMessage:
-      'The requested user edits have been applied to the generated React preview.',
-  },
-  '9b_post_edit_visual_validation': {
-    label: 'Validate Edited Preview',
-    weight: 2,
-    activeMessage:
-      'Re-running compare artifacts for the edited preview and validating that the approved user edit landed without causing unrelated regressions.',
-    doneMessage:
-      'Edited preview validation has finished and the post-edit diagnostics are ready.',
-  },
-  '9_visual_compare': {
-    label: 'Evaluate Baseline Compare Metrics',
-    weight: 2,
-    activeMessage:
-      'Running site compare across the WordPress site and the baseline React preview before any user edit request is applied.',
-    doneMessage: 'Baseline site-compare metrics have been collected.',
-  },
-  '10_cleanup': {
-    label: 'Clean Temporary Workspace',
-    weight: 1,
-    activeMessage:
-      'Cleaning temporary repositories, uploads, and generated artifacts from this migration run.',
-    doneMessage: 'Temporary workspace cleanup has finished.',
-  },
-  '11_done': {
-    label: 'Preview Ready',
-    weight: 0,
-    activeMessage: 'Finalizing preview metadata and completion state.',
-    doneMessage: 'Migration workflow is complete and the preview is ready.',
-  },
-};
-
-export type PipelineStepStatus =
-  | 'pending'
-  | 'running'
-  | 'done'
-  | 'error'
-  | 'skipped'
-  | 'stopped';
-
-export interface PipelineStep {
-  name: string;
-  status: PipelineStepStatus;
-  error?: string;
-}
-
-export interface PipelineStatus {
-  jobId: string;
-  status:
-    | 'running'
-    | 'awaiting_confirmation'
-    | 'stopping'
-    | 'stopped'
-    | 'done'
-    | 'error'
-    | 'deleted';
-  steps: PipelineStep[];
-  result?: any;
-  error?: string;
-}
-
-interface PendingEditDecision {
-  action: 'apply' | 'skip';
-}
-
-interface PendingEditApprovalGate {
-  promise: Promise<PendingEditDecision>;
-  resolve: (decision: PendingEditDecision) => void;
-  reject: (reason?: unknown) => void;
-}
+import { OrchestratorRuntimeSupportService } from './orchestrator-runtime-support.service.js';
+import type {
+  AutomationComparePageResult,
+  DegradedComponentRecord,
+  JobRuntimeControl,
+  OrchestratorRuntimeStores,
+  PipelineAccuracySummary,
+  PipelineRetryCounters,
+  PipelineRunSummaryFile,
+  PipelineRuntimeSummaryDraft,
+  PipelineUiAssessment,
+  FullComponentRegenerationSummaryEntry,
+} from './orchestrator.service.types.js';
+import {
+  PendingEditApprovalGate,
+  PipelineControlError,
+  PipelineStatus,
+  PipelineStepSkipError,
+  type ProgressEvent,
+  type ProgressEventData,
+} from './orchestrator.runtime.types.js';
 
 function collectPlanReviewBlockingIssues(
   review: {
@@ -362,198 +182,6 @@ function collectPlanReviewBlockingIssues(
     : [...review.errors];
 }
 
-interface JobRuntimeControl {
-  stopRequested: boolean;
-  deleteRequested: boolean;
-  finalized: boolean;
-  hasEditRequest?: boolean;
-  pendingEditRequest?: RunPipelineDto['editRequest'];
-  pendingEditRequestContext?: ResolvedEditRequestContext;
-  pendingEditApproval?: boolean;
-  editApplied?: boolean;
-  siteId?: string;
-  logPath?: string;
-  preview?: PreviewBuilderResult;
-  buildComponents?: ReactGenerateResult['components'];
-  approvedPlan?: PlanResult;
-  previewTokens?: ThemeTokens;
-  fixAgentModel?: string;
-  confirmationGate?: PendingEditApprovalGate;
-  runtimeSummary?: PipelineRuntimeSummaryDraft;
-}
-
-interface PipelineRetryCounters {
-  plannerReview: number;
-  visualPlanReview: number;
-  validatorFix: number;
-  generatedCodeFix: number;
-  backendFix: number;
-  buildFix: number;
-}
-
-interface FullComponentRegenerationSummaryEntry {
-  timestamp: string;
-  stage: 'stage4-validator-fix' | 'stage5-review-fix';
-  componentName: string;
-  reasons: string[];
-  missingTargets: string[];
-  outcome: 'succeeded' | 'failed';
-  triggerErrorPreview: string;
-  finalError?: string;
-}
-
-interface PipelineRuntimeSummaryDraft {
-  startedAt: string;
-  repoAnalysisSummary: string[];
-  stepDurationsMs: Partial<Record<string, number>>;
-  retries: PipelineRetryCounters;
-  fullComponentRegenerations: FullComponentRegenerationSummaryEntry[];
-}
-
-interface PipelineAccuracySummary {
-  percent: number | null;
-  diffPercentage: number | null;
-  differentPixels: number | null;
-  totalPixels: number | null;
-}
-
-interface PipelineUiAssessment {
-  score: number | null;
-  verdict: string;
-  basis: string[];
-}
-
-interface DegradedComponentRecord {
-  componentName: string;
-  route?: string | null;
-  stage:
-    | 'stage4-validator'
-    | 'stage5-review'
-    | 'stage8-build'
-    | 'stage9-visual-repair'
-    | 'stage9b-post-edit-repair';
-  fallbackType:
-    | 'last-known-safe'
-    | 'canonical-deterministic'
-    | 'degraded-placeholder';
-  reason: string;
-  critical: boolean;
-  timestamp: string;
-}
-
-interface AutomationCompareRegion {
-  id?: string;
-  kind?: string;
-  severity?: 'low' | 'medium' | 'high' | string;
-  diffPixels?: number | null;
-  diffDensity?: number | null;
-  bbox?: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
-  cropArtifacts?: {
-    imageA?: string;
-    imageB?: string;
-    diff?: string;
-  };
-}
-
-interface AutomationComparePageVisual {
-  status?: string | null;
-  accuracy?: number | null;
-  diffPct?: number | null;
-  overlapDiffPct?: number | null;
-  extraDiffPct?: number | null;
-  overlapDiffPixels?: number | null;
-  extraPixels?: number | null;
-  artifacts?: {
-    imageA?: string;
-    imageB?: string;
-    diff?: string;
-  } | null;
-  regions?: AutomationCompareRegion[];
-  domComparison?: {
-    similarityScore?: number | null;
-  } | null;
-  wpPath?: string | null;
-  reactPath?: string | null;
-  error?: string | null;
-}
-
-interface AutomationComparePageContent {
-  status?: string | null;
-  scores?: {
-    title?: number | null;
-    content?: number | null;
-    overall?: number | null;
-  } | null;
-  issues?: string[];
-  wp?: {
-    title?: string;
-    contentPreview?: string;
-  } | null;
-  react?: {
-    title?: string;
-    contentPreview?: string;
-  } | null;
-}
-
-interface AutomationComparePageResult {
-  routeKey?: string | null;
-  route?: string | null;
-  url?: string | null;
-  slug?: string | null;
-  type?: string | null;
-  componentHint?: string | null;
-  repairPriority?: string | null;
-  visual?: AutomationComparePageVisual | null;
-  content?: AutomationComparePageContent | null;
-}
-
-interface PipelineRunSummaryFile {
-  jobId: string;
-  status: 'success' | 'failed' | 'stopped' | 'deleted';
-  success: boolean;
-  startedAt: string;
-  finishedAt: string;
-  totalDurationMs: number;
-  totalDurationSeconds: number;
-  failureMessage?: string;
-  retries: {
-    total: number;
-    orchestrator: PipelineRetryCounters;
-    aiAgents: {
-      total: number;
-      planning: number;
-      codeGeneration: number;
-      sectionGeneration: number;
-    };
-  };
-  timing: {
-    planningMs: number | null;
-    generationMs: number | null;
-    stepDurationsMs: Partial<Record<string, number>>;
-  };
-  accuracy: PipelineAccuracySummary;
-  tokenUsage: ReturnType<TokenTracker['getSummary']>;
-  editRequestTokenUsage: TokenUsagePhaseSummary | null;
-  uiAssessment: PipelineUiAssessment;
-  repoAnalysisSummary: string[];
-  fullComponentRegenerations: FullComponentRegenerationSummaryEntry[];
-  degradedComponents?: DegradedComponentRecord[];
-}
-
-class PipelineControlError extends Error {
-  constructor(
-    public readonly kind: 'stopped' | 'deleted',
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 @Injectable()
 export class OrchestratorService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(OrchestratorService.name);
@@ -565,7 +193,6 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     string,
     Map<string, ProgressEventData>
   >();
-  private shutdownBroadcasted = false;
 
   constructor(
     private readonly sqlService: SqlService,
@@ -586,6 +213,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly apiBuilder: ApiBuilderService,
     private readonly generatedApiReview: GeneratedApiReviewService,
     private readonly previewBuilder: PreviewBuilderService,
+    private readonly sectionManifest: SectionManifestService,
     private readonly validator: ValidatorService,
     private readonly contractAudit: GenerationContractAuditService,
     private readonly sourceResolver: SourceResolverService,
@@ -593,6 +221,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly cleanup: CleanupService,
     private readonly captureReview: CaptureReviewService,
     private readonly editRequestPhase: EditRequestPhaseService,
+    private readonly runtimeSupport: OrchestratorRuntimeSupportService,
     private readonly aiLogger: AiLoggerService,
     private readonly llmFactory: LlmFactoryService,
     private readonly configService: ConfigService,
@@ -601,8 +230,20 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly siteCompareVisualDiagnosis: SiteCompareVisualDiagnosisService,
   ) {}
 
+  private getRuntimeStores(): OrchestratorRuntimeStores {
+    return {
+      jobs: this.jobs,
+      progress: this.progress,
+      controls: this.controls,
+      stepEventData: this.stepEventData,
+    };
+  }
+
   async beforeApplicationShutdown(signal?: string): Promise<void> {
-    await this.broadcastUnexpectedShutdown(signal);
+    await this.runtimeSupport.broadcastUnexpectedShutdown(
+      signal,
+      this.getRuntimeStores(),
+    );
   }
 
   async run(
@@ -658,10 +299,11 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       ],
     };
     this.jobs.set(jobId, state);
-    this.progress.set(jobId, this.createProgressStream());
+    this.runtimeSupport.getProgressStream(jobId, this.progress);
     this.controls.set(jobId, {
       stopRequested: false,
       deleteRequested: false,
+      skipVisualCompareRequested: false,
       finalized: false,
       hasEditRequest: Boolean(dto.editRequest),
       pendingEditRequest: dto.editRequest,
@@ -790,13 +432,49 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       };
     }
 
+    // Resolve component + section from section-manifest.json when targetHint
+    // has no componentName yet (new capture-region flow — no DOM metadata needed).
+    let editRequest = body.editRequest;
+    if (previewDir && !editRequest.targetHint?.componentName) {
+      const manifest = await this.sectionManifest.readManifest(previewDir);
+      if (manifest) {
+        const route =
+          editRequest.pageContext?.reactRoute?.trim() ||
+          editRequest.targetHint?.route?.trim() ||
+          null;
+        const normalizedRect = (editRequest.attachments ?? [])[0]?.geometry
+          ?.normalizedRect;
+        if (route && normalizedRect) {
+          const resolved = this.sectionManifest.resolveSection(
+            manifest,
+            route,
+            normalizedRect,
+          );
+          if (resolved) {
+            this.logger.log(
+              `[visual-edit] manifest resolved: component=${resolved.componentName} section[${resolved.sectionIndex}] ${resolved.sectionType} (${resolved.debugKey})`,
+            );
+            editRequest = {
+              ...editRequest,
+              targetHint: {
+                ...editRequest.targetHint,
+                componentName: resolved.componentName,
+                sectionIndex: resolved.sectionIndex,
+                sectionType: resolved.sectionType,
+              },
+            };
+          }
+        }
+      }
+    }
+
     try {
       const editResult = await this.reactVisualEdit.applyEdit({
         jobId: body.jobId,
         frontendDir,
         plan: jobResult.plan,
         routeEntries,
-        editRequest: body.editRequest,
+        editRequest,
         logPath,
       });
 
@@ -908,6 +586,118 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       jobId: body.jobId,
       siteId: body.siteId,
       action: 'skip',
+    };
+  }
+
+  async skipVisualCompare(body: SkipVisualCompareDto): Promise<{
+    accepted: boolean;
+    jobId: string;
+    siteId: string;
+    step: '9_visual_compare';
+    error?: string;
+  }> {
+    const state = this.jobs.get(body.jobId);
+    if (!state) {
+      throw new BadRequestException(`Job "${body.jobId}" not found`);
+    }
+
+    const control = this.controls.get(body.jobId);
+    const visualCompareStep = state.steps.find(
+      (step) => step.name === '9_visual_compare',
+    );
+
+    if (!visualCompareStep || !control) {
+      await this.logVisualCompareControlTrace(control?.logPath, {
+        event: 'skip_visual_compare_rejected',
+        reason: 'visual_compare_step_missing',
+        jobId: body.jobId,
+        siteId: body.siteId,
+        stateStatus: state.status,
+      });
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        step: '9_visual_compare',
+        error: 'This job does not expose a visual compare stage.',
+      };
+    }
+
+    if (
+      visualCompareStep.status === 'done' ||
+      visualCompareStep.status === 'skipped'
+    ) {
+      await this.logVisualCompareControlTrace(control.logPath, {
+        event: 'skip_visual_compare_rejected',
+        reason: 'visual_compare_already_finished',
+        jobId: body.jobId,
+        siteId: body.siteId,
+        stateStatus: state.status,
+        stepStatus: visualCompareStep.status,
+      });
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        step: '9_visual_compare',
+        error: 'Visual compare has already completed for this job.',
+      };
+    }
+
+    if (state.status !== 'running') {
+      await this.logVisualCompareControlTrace(control.logPath, {
+        event: 'skip_visual_compare_rejected',
+        reason: 'job_not_running',
+        jobId: body.jobId,
+        siteId: body.siteId,
+        stateStatus: state.status,
+        stepStatus: visualCompareStep.status,
+      });
+      return {
+        accepted: false,
+        jobId: body.jobId,
+        siteId: body.siteId,
+        step: '9_visual_compare',
+        error: `Visual compare cannot be skipped while the job is "${state.status}".`,
+      };
+    }
+
+    control.skipVisualCompareRequested = true;
+
+    const requestMessage =
+      'User requested to stop baseline visual compare and metric-driven repair. The pipeline will continue from the current preview at the next safe checkpoint.';
+
+    if (control.logPath) {
+      await this.logToFile(
+        control.logPath,
+        `[Visual Metrics Control] ${requestMessage}`,
+      );
+      await this.logVisualCompareControlTrace(control.logPath, {
+        event: 'skip_visual_compare_requested',
+        jobId: body.jobId,
+        siteId: body.siteId,
+        stateStatus: state.status,
+        stepStatus: visualCompareStep.status,
+        hasMetricsSnapshot: Boolean(state.result?.metrics),
+      });
+    }
+
+    if (visualCompareStep.status === 'running') {
+      this.progress.get(body.jobId)?.next({
+        step: '9_visual_compare',
+        label: this.getStepMeta('9_visual_compare', body.jobId).label,
+        status: 'running',
+        percent: this.calcPercentBefore('9_visual_compare', body.jobId),
+        message: requestMessage,
+        data: this.getStepEventData(body.jobId, '9_visual_compare'),
+      });
+    }
+
+    return {
+      accepted: true,
+      jobId: body.jobId,
+      siteId: body.siteId,
+      step: '9_visual_compare',
     };
   }
 
@@ -1043,153 +833,40 @@ export class OrchestratorService implements BeforeApplicationShutdown {
   }
 
   getProgressStream(jobId: string): ReplaySubject<ProgressEvent> {
-    if (!this.progress.has(jobId)) {
-      this.progress.set(jobId, this.createProgressStream());
-    }
-    return this.progress.get(jobId)!;
-  }
-
-  private createProgressStream(): ReplaySubject<ProgressEvent> {
-    return new ReplaySubject<ProgressEvent>(100);
+    return this.runtimeSupport.getProgressStream(jobId, this.progress);
   }
 
   private createPendingEditApprovalGate(): PendingEditApprovalGate {
-    let resolve!: (decision: PendingEditDecision) => void;
-    let reject!: (reason?: unknown) => void;
-    const promise = new Promise<PendingEditDecision>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    return { promise, resolve, reject };
+    return this.runtimeSupport.createPendingEditApprovalGate();
   }
 
   private getStepMeta(name: string, jobId?: string) {
-    const baseMeta = STEP_META[name] ?? {
-      label: name,
-      weight: 1,
-      activeMessage: `AI agent is working on ${name}.`,
-      doneMessage: `${name} has completed.`,
-    };
-
-    const hasEditRequest = jobId
-      ? Boolean(this.controls.get(jobId)?.hasEditRequest)
-      : false;
-    if (!hasEditRequest) return baseMeta;
-
-    if (name === '5_planner') {
-      return {
-        ...baseMeta,
-        label: 'Plan Routes, Data, And Requested Changes',
-        activeMessage:
-          'Building the component graph, route map, data contracts, and the edit-request-aware visual plan.',
-        doneMessage:
-          'Planning is complete and the requested change scope has been attached to the migration plan.',
-      };
-    }
-
-    if (name === '6_generator') {
-      return {
-        ...baseMeta,
-        label: 'Generate React Baseline',
-        activeMessage:
-          'Generating the baseline React components before the focused edit-request pass is applied in preview.',
-        doneMessage:
-          'Baseline React components are ready for live preview and focused follow-up edits.',
-      };
-    }
-
-    if (name === '8_preview_builder') {
-      return {
-        ...baseMeta,
-        label: 'Launch Preview Baseline',
-        activeMessage:
-          'Starting preview servers so the generated baseline can be inspected before any requested edit pass runs.',
-        doneMessage:
-          'Preview servers are live and the baseline React app is ready for inspection.',
-      };
-    }
-
-    if (name === '8b_edit_request') {
-      return {
-        ...baseMeta,
-        label: 'Await Or Apply Requested Edits',
-        activeMessage:
-          'Waiting for user approval or applying the approved edit request to the running preview.',
-        doneMessage: 'Requested edit handling is complete for this preview.',
-      };
-    }
-
-    if (name === '9_visual_compare') {
-      return {
-        ...baseMeta,
-        label: 'Evaluate Baseline Preview Metrics',
-        activeMessage:
-          'Running site compare for the baseline React preview against WordPress before any pending edit request is applied.',
-        doneMessage:
-          'Baseline compare metrics for the React preview have been collected.',
-      };
-    }
-
-    if (name === '9b_post_edit_visual_validation') {
-      return {
-        ...baseMeta,
-        label: 'Validate Edited Preview',
-        activeMessage:
-          'Re-checking the edited preview after the approved user request, with the edit intent treated as primary and WordPress as secondary reference.',
-        doneMessage:
-          'Edited preview validation is complete and any post-edit issues have been summarized.',
-      };
-    }
-
-    if (name === '11_done') {
-      return {
-        ...baseMeta,
-        label: 'Edited Preview Ready',
-        activeMessage:
-          'Finalizing the edited preview, compare metrics, and completion metadata.',
-        doneMessage:
-          'Migration workflow is complete and the edited preview is ready.',
-      };
-    }
-
-    return baseMeta;
+    return this.runtimeSupport.getStepMeta(name, jobId, this.controls);
   }
 
   private getStepOrder(jobId?: string): string[] {
-    const state = jobId ? this.jobs.get(jobId) : undefined;
-    if (state?.steps?.length) {
-      return state.steps.map((step) => step.name);
-    }
-    return Object.keys(STEP_META);
+    return this.runtimeSupport.getStepOrder(jobId, this.jobs);
   }
 
   private getTotalWeight(jobId?: string): number {
-    return this.getStepOrder(jobId).reduce(
-      (sum, stepName) => sum + (this.getStepMeta(stepName, jobId).weight ?? 0),
-      0,
-    );
+    return this.runtimeSupport.getTotalWeight(jobId, {
+      jobs: this.jobs,
+      controls: this.controls,
+    });
   }
 
   private calcPercentBefore(name: string, jobId?: string): number {
-    const stepOrder = this.getStepOrder(jobId);
-    const totalWeight = this.getTotalWeight(jobId);
-    let done = 0;
-    for (const stepName of stepOrder) {
-      if (stepName === name) break;
-      done += this.getStepMeta(stepName, jobId).weight ?? 0;
-    }
-    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
+    return this.runtimeSupport.calcPercentBefore(name, jobId, {
+      jobs: this.jobs,
+      controls: this.controls,
+    });
   }
 
   private calcPercentThrough(name: string, jobId?: string): number {
-    const stepOrder = this.getStepOrder(jobId);
-    const totalWeight = this.getTotalWeight(jobId);
-    let done = 0;
-    for (const stepName of stepOrder) {
-      done += this.getStepMeta(stepName, jobId).weight ?? 0;
-      if (stepName === name) break;
-    }
-    return totalWeight > 0 ? Math.round((done / totalWeight) * 100) : 0;
+    return this.runtimeSupport.calcPercentThrough(name, jobId, {
+      jobs: this.jobs,
+      controls: this.controls,
+    });
   }
 
   private emitStepProgress(
@@ -1199,52 +876,18 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     message: string,
     data?: ProgressEventData,
   ): void {
-    this.assertJobActive(state.jobId);
-    this.rememberStepEventData(state.jobId, name, data);
-
-    const meta = this.getStepMeta(name, state.jobId);
-    const subject = this.progress.get(state.jobId);
-    const bounded = Math.min(Math.max(progressWithinStep, 0), 0.99);
-    const stepOrder = this.getStepOrder(state.jobId);
-    const totalWeight = this.getTotalWeight(state.jobId);
-    const beforeWeight = stepOrder
-      .slice(0, Math.max(stepOrder.indexOf(name), 0))
-      .reduce(
-        (sum, stepName) =>
-          sum + (this.getStepMeta(stepName, state.jobId).weight ?? 0),
-        0,
-      );
-    const percent = Math.round(
-      totalWeight > 0
-        ? ((beforeWeight + meta.weight * bounded) / totalWeight) * 100
-        : 0,
-    );
-
-    subject?.next({
-      step: name,
-      label: meta.label,
-      status: 'running',
-      percent,
+    this.runtimeSupport.emitStepProgress({
+      state,
+      name,
+      progressWithinStep,
       message,
       data,
+      stores: this.getRuntimeStores(),
     });
   }
 
   private assertJobActive(jobId: string): void {
-    const control = this.controls.get(jobId);
-    if (!control) return;
-    if (control.deleteRequested) {
-      throw new PipelineControlError(
-        'deleted',
-        'Pipeline was deleted by the user',
-      );
-    }
-    if (control.stopRequested) {
-      throw new PipelineControlError(
-        'stopped',
-        'Pipeline was stopped by the user',
-      );
-    }
+    this.runtimeSupport.assertJobActive(jobId, this.controls);
   }
 
   private rememberStepEventData(
@@ -1252,139 +895,44 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     stepName: string,
     data?: ProgressEventData,
   ): void {
-    if (!data) return;
-    const existing =
-      this.stepEventData.get(jobId) ?? new Map<string, ProgressEventData>();
-    const previous = existing.get(stepName);
-    existing.set(stepName, previous ? { ...previous, ...data } : data);
-    this.stepEventData.set(jobId, existing);
+    this.runtimeSupport.rememberStepEventData(
+      jobId,
+      stepName,
+      data,
+      this.stepEventData,
+    );
   }
 
   private getStepEventData(
     jobId: string,
     stepName: string,
   ): ProgressEventData | undefined {
-    return this.stepEventData.get(jobId)?.get(stepName);
+    return this.runtimeSupport.getStepEventData(
+      jobId,
+      stepName,
+      this.stepEventData,
+    );
   }
 
   private clearStepEventData(jobId: string): void {
-    this.stepEventData.delete(jobId);
+    this.runtimeSupport.clearStepEventData(jobId, this.stepEventData);
   }
 
   private async delayWithControl(jobId: string, ms: number): Promise<void> {
-    const intervalMs = 100;
-    let remaining = ms;
-    while (remaining > 0) {
-      this.assertJobActive(jobId);
-      const slice = Math.min(intervalMs, remaining);
-      await new Promise((resolve) => setTimeout(resolve, slice));
-      remaining -= slice;
-    }
+    await this.runtimeSupport.delayWithControl(jobId, ms, this.controls);
   }
 
   private async stopPreviewProcesses(
     preview?: Pick<PreviewBuilderResult, 'frontendPid' | 'serverPid'>,
   ): Promise<void> {
-    if (!preview) return;
-    await Promise.all([
-      this.cleanup.terminateProcessTree(preview.frontendPid),
-      this.cleanup.terminateProcessTree(preview.serverPid),
-    ]);
+    await this.runtimeSupport.stopPreviewProcesses(preview);
   }
 
   private async broadcastUnexpectedShutdown(signal?: string): Promise<void> {
-    if (this.shutdownBroadcasted) return;
-
-    const activeJobs = [...this.jobs.entries()].filter(([, state]) =>
-      this.isActivePipelineStatus(state.status),
+    await this.runtimeSupport.broadcastUnexpectedShutdown(
+      signal,
+      this.getRuntimeStores(),
     );
-    if (activeJobs.length === 0) {
-      this.shutdownBroadcasted = true;
-      return;
-    }
-
-    this.shutdownBroadcasted = true;
-    const shutdownSource = signal?.trim() || 'server shutdown';
-    const message = `AI pipeline server was interrupted (${shutdownSource}). The running workflow was stopped.`;
-
-    this.logger.warn(
-      `[shutdown] Interrupting ${activeJobs.length} active pipeline job(s) because of ${shutdownSource}.`,
-    );
-
-    await Promise.allSettled(
-      activeJobs.map(([jobId, state]) =>
-        this.interruptJobForShutdown(jobId, state, message),
-      ),
-    );
-
-    // Allow a brief flush window so connected SSE clients can receive the
-    // terminal interruption event before the HTTP server closes.
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-
-  private isActivePipelineStatus(status: PipelineStatus['status']): boolean {
-    return (
-      status === 'running' ||
-      status === 'awaiting_confirmation' ||
-      status === 'stopping'
-    );
-  }
-
-  private async interruptJobForShutdown(
-    jobId: string,
-    state: PipelineStatus,
-    message: string,
-  ): Promise<void> {
-    const control = this.controls.get(jobId);
-    if (control?.finalized) return;
-
-    if (control) {
-      control.stopRequested = true;
-      control.confirmationGate?.reject(
-        new PipelineControlError('stopped', message),
-      );
-      control.confirmationGate = undefined;
-      control.finalized = true;
-    }
-
-    state.status = 'stopped';
-    state.error = message;
-    for (const step of state.steps) {
-      if (step.status === 'running') {
-        step.status = 'stopped';
-        step.error = message;
-      }
-    }
-
-    const subject = this.progress.get(jobId);
-    subject?.next({
-      step: 'system',
-      label: 'Pipeline Interrupted',
-      status: 'stopped',
-      percent: this.calcInterruptedPercent(state),
-      message,
-    });
-    subject?.complete();
-
-    await this.stopPreviewProcesses(control?.preview);
-    this.clearStepEventData(jobId);
-  }
-
-  private calcInterruptedPercent(state: PipelineStatus): number {
-    const interruptedStep = state.steps.find(
-      (step) => step.status === 'running' || step.status === 'stopped',
-    );
-    if (interruptedStep) {
-      return this.calcPercentBefore(interruptedStep.name, state.jobId);
-    }
-
-    const completedSteps = state.steps.filter((step) => step.status === 'done');
-    const lastCompletedStep = completedSteps[completedSteps.length - 1];
-    if (lastCompletedStep) {
-      return this.calcPercentThrough(lastCompletedStep.name, state.jobId);
-    }
-
-    return 0;
   }
 
   private async finalizeControlledTermination(
@@ -1392,102 +940,46 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     state: PipelineStatus,
     err: PipelineControlError,
   ): Promise<void> {
-    const control = this.controls.get(jobId);
-    if (control?.finalized) return;
-    if (control) control.finalized = true;
-
-    await this.stopPreviewProcesses(control?.preview);
-
-    const subject = this.progress.get(jobId);
-    if (err.kind === 'deleted') {
-      state.status = 'deleted';
-      state.error = err.message;
-      subject?.next({
-        step: 'system',
-        label: 'Pipeline Deleted',
-        status: 'done',
-        percent: 100,
-        message:
-          'Pipeline execution was deleted. Temporary artifacts are being removed.',
-      });
-      await this.cleanup.cleanupAll(jobId);
-      subject?.complete();
-      this.jobs.delete(jobId);
-      this.controls.delete(jobId);
-      this.progress.delete(jobId);
-      this.clearStepEventData(jobId);
-      return;
-    }
-
-    state.status = 'stopped';
-    state.error = err.message;
-    for (const step of state.steps) {
-      if (step.status === 'running') {
-        step.status = 'stopped';
-        step.error = err.message;
-      }
-    }
-    subject?.next({
-      step: 'system',
-      label: 'Pipeline Stopped',
-      status: 'done',
-      percent: 100,
-      message: 'Pipeline execution was stopped by the user.',
-    });
-    subject?.complete();
-    this.clearStepEventData(jobId);
+    await this.runtimeSupport.finalizeControlledTermination(
+      jobId,
+      state,
+      err,
+      this.getRuntimeStores(),
+    );
   }
 
   private resolveTextLogPath(logPath: string): string | null {
-    if (!logPath) return null;
-    return logPath.endsWith('.json')
-      ? logPath.replace(/\.json$/i, '.log')
-      : logPath;
+    return this.runtimeSupport.resolveTextLogPath(logPath);
   }
 
   private async logToFile(logPath: string, message: string): Promise<void> {
-    const targetPath = this.resolveTextLogPath(logPath);
-    await this.appendTimestampedLog(targetPath, message);
-  }
-
-  private resolveSiblingLogPath(
-    logPath: string,
-    filename: string,
-  ): string | null {
-    const targetPath = this.resolveTextLogPath(logPath);
-    if (!targetPath) return null;
-    return join(targetPath, '..', filename);
+    await this.runtimeSupport.logToFile(logPath, message);
   }
 
   private async logVisualMetricsTrace(
     logPath: string,
     message: string,
   ): Promise<void> {
-    const targetPath = this.resolveSiblingLogPath(
-      logPath,
-      'visual-metrics.trace.log',
-    );
-    await this.appendTimestampedLog(targetPath, message);
+    await this.runtimeSupport.logVisualMetricsTrace(logPath, message);
   }
 
-  private async appendTimestampedLog(
-    targetPath: string | null,
-    message: string,
+  private async logVisualCompareControlTrace(
+    logPath: string | undefined,
+    payload: Record<string, unknown>,
   ): Promise<void> {
-    if (!targetPath) return;
-    const timestamp = new Date().toISOString();
-    const payload = message
-      .split(/\r?\n/)
-      .map((line) => `[${timestamp}] ${line}`)
-      .join('\n');
+    await this.runtimeSupport.logVisualCompareControlTrace(logPath, payload);
+  }
 
-    try {
-      await appendFile(targetPath, `${payload}\n`, 'utf-8');
-    } catch (error) {
-      this.logger.warn(
-        `[logToFile] Failed to append pipeline log "${targetPath}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  private async writeVisualDiagnosisArtifacts(
+    logPath: string,
+    componentName: string,
+    diagnosis: VisualMismatchDiagnosis,
+  ): Promise<void> {
+    await this.runtimeSupport.writeVisualDiagnosisArtifacts(
+      logPath,
+      componentName,
+      diagnosis,
+    );
   }
 
   private updateStateResult(
@@ -1843,6 +1335,7 @@ export default function ${component.name}() {
     });
     await this.tokenTracker.init(logPath);
     let metrics: SiteCompareMetrics | null = null;
+    let baselineMetrics: SiteCompareMetrics | null = null;
     let visualRouteResults: any[] = [];
     const degradedComponents: DegradedComponentRecord[] = [];
     let lastKnownSafeComponents = new Map<
@@ -2087,6 +1580,15 @@ export default function ${component.name}() {
         themeSummary: this.buildThemeSummary(normalizedTheme),
         repoAnalysisSummary: summaryDraft.repoAnalysisSummary,
       });
+      await this.planner.writeArtifact(
+        logPath,
+        'layout-analysis.json',
+        this.planner.buildLayoutAnalysisArtifact(
+          normalizedTheme,
+          content,
+          repoResult.themeManifest,
+        ),
+      );
 
       // ── Stage 3: Planner (C1 → C2 → C3 → C4 → C5 → C6 retry) ────────────
       // All 4 phases + plan review + retry loop are ONE atomic step.
@@ -2456,6 +1958,11 @@ export default function ${component.name}() {
             plan: review.plan,
             warnings: review.warnings,
           });
+          await this.planner.writeArtifact(
+            logPath,
+            'deterministic-render-contract.json',
+            this.planner.buildDeterministicRenderContractArtifact(review.plan),
+          );
           await this.planner.writeSplitComponentPlanArtifacts(logPath, 'plan', {
             stage: 'planner-final',
             generatedAt: new Date().toISOString(),
@@ -3322,6 +2829,61 @@ export default function ${component.name}() {
           source.map((component) => ({ ...component }));
         const formatAccuracyLabel = (value: number | null) =>
           value === null ? 'unknown' : `${value.toFixed(2)}%`;
+        const skipVisualCompareIfRequested = async (
+          reason: string,
+        ): Promise<void> => {
+          const compareControl = this.controls.get(jobId);
+          if (!compareControl?.skipVisualCompareRequested) {
+            return;
+          }
+
+          compareControl.skipVisualCompareRequested = false;
+          compareControl.buildComponents = buildComponents;
+
+          const stepEventData = this.buildPreviewEventData({
+            preview,
+            previewStage: 'baseline',
+            hasEditRequest,
+            editApprovalRequired: Boolean(compareControl.pendingEditApproval),
+            editApplied: Boolean(compareControl.editApplied),
+            metrics: metrics ?? undefined,
+          });
+
+          const skipMessage = `${reason} The pipeline will continue with the current baseline preview snapshot.`;
+          this.rememberStepEventData(jobId, '9_visual_compare', stepEventData);
+          this.updateStateResult(state, {
+            previewDir: preview.previewDir,
+            frontendDir: preview.frontendDir,
+            previewUrl: preview.previewUrl,
+            apiBaseUrl: preview.apiBaseUrl,
+            previewStage: 'baseline',
+            hasEditRequest,
+            editApprovalRequired: Boolean(compareControl.pendingEditApproval),
+            editApplied: Boolean(compareControl.editApplied),
+            uiSourceMapPath: preview.uiSourceMapPath,
+            routeEntries: preview.routeEntries,
+            baselineMetrics: metrics,
+            metrics,
+          });
+          await this.logToFile(
+            logPath,
+            `[Visual Metrics Control] ${skipMessage}`,
+          );
+          await this.logVisualCompareControlTrace(logPath, {
+            event: 'skip_visual_compare_consumed',
+            jobId,
+            step: '9_visual_compare',
+            checkpointReason: reason,
+            hasMetricsSnapshot: Boolean(metrics),
+            accuracyPercent: this.extractAccuracySummary(metrics).percent,
+            previewStage: 'baseline',
+            hasEditRequest,
+            editApprovalRequired: Boolean(compareControl.pendingEditApproval),
+            editApplied: Boolean(compareControl.editApplied),
+          });
+
+          throw new PipelineStepSkipError(skipMessage, stepEventData);
+        };
         const runCompareRound = async (label: string) => {
           const compareResult = await this.compareSite({
             siteId,
@@ -3350,6 +2912,9 @@ export default function ${component.name}() {
           0.2,
           `Running site compare metrics across WordPress and the React preview (target >= ${targetAccuracyPercent}%, max ${maxMetricRepairRounds} repair rounds).`,
         );
+        await skipVisualCompareIfRequested(
+          'Visual compare was skipped before baseline comparison started.',
+        );
 
         try {
           metrics = await runCompareRound('initial');
@@ -3359,6 +2924,9 @@ export default function ${component.name}() {
             err?.response?.data ?? err?.stack,
           );
         }
+        await skipVisualCompareIfRequested(
+          'Visual compare was skipped after the current baseline compare task finished.',
+        );
 
         if (metrics) {
           let currentAccuracy = this.extractAccuracySummary(metrics).percent;
@@ -3386,6 +2954,9 @@ export default function ${component.name}() {
               );
               break;
             }
+            await skipVisualCompareIfRequested(
+              `Visual compare was skipped before metric repair round ${round} started.`,
+            );
 
             this.emitStepProgress(
               state,
@@ -3411,6 +2982,9 @@ export default function ${component.name}() {
               logPath,
             });
             buildComponents = visualRepairResult.components;
+            await skipVisualCompareIfRequested(
+              `Visual compare was skipped after metric repair round ${round} finished applying changes.`,
+            );
 
             if (!visualRepairResult.applied) {
               await this.logToFile(
@@ -3422,6 +2996,9 @@ export default function ${component.name}() {
 
             try {
               const roundMetrics = await runCompareRound(`round-${round}`);
+              await skipVisualCompareIfRequested(
+                `Visual compare was skipped after re-checking preview metrics for round ${round}.`,
+              );
               if (!roundMetrics) {
                 await this.logToFile(
                   logPath,
@@ -3559,6 +3136,7 @@ export default function ${component.name}() {
 
         return { metrics };
       });
+      baselineMetrics = metrics;
       await stepDelay();
 
       if (hasEditRequest) {
@@ -3713,7 +3291,7 @@ export default function ${component.name}() {
                 editApplied: true,
                 uiSourceMapPath: preview.uiSourceMapPath,
                 routeEntries: preview.routeEntries,
-                baselineMetrics: metrics,
+                baselineMetrics,
                 metrics,
               });
               this.rememberStepEventData(jobId, '8b_edit_request', {
@@ -3772,7 +3350,7 @@ export default function ${component.name}() {
             editApplied: false,
             uiSourceMapPath: preview.uiSourceMapPath,
             routeEntries: preview.routeEntries,
-            baselineMetrics: metrics,
+            baselineMetrics,
             metrics,
           });
         }
@@ -4174,7 +3752,7 @@ export default function ${component.name}() {
                 editApplied: true,
                 uiSourceMapPath: preview.uiSourceMapPath,
                 routeEntries: preview.routeEntries,
-                baselineMetrics: state.result?.baselineMetrics ?? metrics,
+                baselineMetrics,
                 editedMetrics: editedMetrics ?? metrics,
                 postEditVisualValidation: validation,
                 metrics,
@@ -4240,37 +3818,28 @@ export default function ${component.name}() {
 
       // Step 9: Migration completion
       await this.runStep(state, '11_done', logPath, async () => {
-        const uiSourceMapEntries = await readUiSourceMapEntries(
-          preview.uiSourceMapPath,
-        );
-        const ownerCaptureTargets = resolveCaptureTargetsFromUiSourceMap({
-          attachments: dto.editRequest?.attachments,
-          uiSourceMap: uiSourceMapEntries,
-        });
         const finalMutationCandidates =
           await buildUiMutationCandidatesForGeneratedComponents({
             components: buildComponents,
           });
-        const exactCaptureTargets =
-          this.editRequestPhase.resolveIntentAwareCaptureTargets({
+        const finalPostEditTasks = this.editRequestPhase.buildPostMigrationEditTasks(
+          {
             request: dto.editRequest,
-            exactCaptureTargets: ownerCaptureTargets,
+            context: editRequestContext,
+            plan: reviewResult.plan,
+            components: buildComponents,
             mutationCandidates: finalMutationCandidates,
-          });
+          },
+        );
+        const exactCaptureTargets = dedupeCaptureTargets(
+          finalPostEditTasks.flatMap((task) => task.exactTargets),
+        );
         await this.logExactCaptureResolution({
           jobId,
           logPath,
           attachments: dto.editRequest?.attachments,
-          uiSourceMapPath: preview.uiSourceMapPath,
-          uiSourceMapEntryCount: uiSourceMapEntries.length,
-          exactCaptureTargets: ownerCaptureTargets,
-        });
-        await this.logExactCaptureResolution({
-          jobId,
-          logPath,
-          attachments: dto.editRequest?.attachments,
-          uiSourceMapPath: 'final:intent-aware-mutation-targets',
-          uiSourceMapEntryCount: finalMutationCandidates.length,
+          resolutionSource: 'final:component-mutation-targets',
+          candidateCount: finalMutationCandidates.length,
           exactCaptureTargets,
         });
 
@@ -4293,11 +3862,10 @@ export default function ${component.name}() {
             this.controls.get(jobId)?.pendingEditApproval,
           ),
           editApplied: Boolean(this.controls.get(jobId)?.editApplied),
-          uiSourceMapPath: preview.uiSourceMapPath,
           routeEntries: preview.routeEntries,
-          ownerCaptureTargets,
           exactCaptureTargets,
           dbCreds,
+          baselineMetrics,
           metrics,
           plan: reviewResult.plan,
         });
@@ -4312,16 +3880,10 @@ export default function ${component.name}() {
             migrationNotification,
           });
         }
-        // Emit final event with previewUrl from within runStep
-        const subject = this.progress.get(jobId);
-        const doneMeta = this.getStepMeta('11_done', jobId);
-        subject?.next({
-          step: '11_done',
-          label: doneMeta.label,
-          status: 'done',
-          percent: 100,
-          message: `${doneMeta.doneMessage} (${totalElapsed}s)`,
-          data: this.buildPreviewEventData({
+        this.rememberStepEventData(
+          jobId,
+          '11_done',
+          this.buildPreviewEventData({
             preview,
             previewStage: 'final',
             hasEditRequest,
@@ -4331,7 +3893,7 @@ export default function ${component.name}() {
             editApplied: Boolean(this.controls.get(jobId)?.editApplied),
             metrics: metrics ?? undefined,
           }),
-        });
+        );
         return {
           success: true,
           previewUrl: preview.previewUrl,
@@ -4367,7 +3929,7 @@ export default function ${component.name}() {
       }
       throw err;
     } finally {
-      await this.tokenTracker.writeSummary();
+      await this.tokenTracker.writeSummary(logPath);
       await this.writeRunSummary(
         logPath,
         state,
@@ -4500,6 +4062,41 @@ export default function ${component.name}() {
           `Step ${name} STOPPED (${elapsed}s): ${err.message}`,
         );
         throw err;
+      }
+      if (err instanceof PipelineStepSkipError) {
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+        this.recordStepDuration(state.jobId, name, Date.now() - t0);
+        step.status = 'skipped';
+        step.error = undefined;
+        if (err.data !== undefined) {
+          this.rememberStepEventData(
+            state.jobId,
+            name,
+            err.data as ProgressEventData,
+          );
+        }
+        subject?.next({
+          step: name,
+          label: meta.label,
+          status: 'skipped',
+          percent: this.calcPercentThrough(name, state.jobId),
+          message: err.message,
+          data: this.getStepEventData(state.jobId, name),
+        });
+        await this.logToFile(
+          logPath,
+          `Step ${name} SKIPPED (${elapsed}s): ${err.message}`,
+        );
+        if (name === '9_visual_compare') {
+          await this.logVisualCompareControlTrace(logPath, {
+            event: 'skip_visual_compare_step_finalized',
+            jobId: state.jobId,
+            step: name,
+            elapsedSeconds: Number(elapsed),
+            message: err.message,
+          });
+        }
+        return undefined as T;
       }
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       this.recordStepDuration(state.jobId, name, Date.now() - t0);
@@ -5432,7 +5029,6 @@ export default function ${component.name}() {
     addComponent(request?.targetHint?.componentName);
     for (const attachment of request?.attachments ?? []) {
       addRoute(attachment.captureContext?.page?.route);
-      addRoute(attachment.targetNode?.route);
     }
     for (const candidate of context?.targetCandidates ?? []) {
       addRoute(candidate.route);
@@ -5617,7 +5213,6 @@ export default function ${component.name}() {
               attachment.id,
               attachment.note?.trim(),
               attachment.captureContext?.page?.route,
-              attachment.domTarget?.nearestHeading?.trim(),
             ]
               .filter(Boolean)
               .join(' / '),
@@ -6345,6 +5940,47 @@ export default function ${component.name}() {
             '[Visual Diagnose] instructions',
           ),
         ].join('\n'),
+      );
+      if (diagnosis.debugTrace) {
+        await this.logVisualMetricsTrace(
+          logPath,
+          [
+            `[Visual Diagnose Debug] source=${diagnosis.debugTrace.source} parseFailed=${diagnosis.debugTrace.parseFailed === true ? 'yes' : 'no'}`,
+            diagnosis.debugTrace.rawModelResponse
+              ? `[Visual Diagnose Debug] raw response:\n${this.summarizeMultilineForLog(
+                  diagnosis.debugTrace.rawModelResponse,
+                  40,
+                  12000,
+                )}`
+              : '[Visual Diagnose Debug] raw response: none',
+            diagnosis.debugTrace.extractedJson
+              ? `[Visual Diagnose Debug] extracted json:\n${this.summarizeMultilineForLog(
+                  diagnosis.debugTrace.extractedJson,
+                  40,
+                  12000,
+                )}`
+              : '[Visual Diagnose Debug] extracted json: none',
+            diagnosis.debugTrace.parsedDiagnosisJson
+              ? `[Visual Diagnose Debug] parsed diagnosis:\n${this.summarizeMultilineForLog(
+                  diagnosis.debugTrace.parsedDiagnosisJson,
+                  60,
+                  16000,
+                )}`
+              : '[Visual Diagnose Debug] parsed diagnosis: none',
+            diagnosis.debugTrace.mergedDiagnosisJson
+              ? `[Visual Diagnose Debug] merged diagnosis:\n${this.summarizeMultilineForLog(
+                  diagnosis.debugTrace.mergedDiagnosisJson,
+                  60,
+                  16000,
+                )}`
+              : '[Visual Diagnose Debug] merged diagnosis: none',
+          ].join('\n'),
+        );
+      }
+      await this.writeVisualDiagnosisArtifacts(
+        logPath,
+        target.componentName,
+        diagnosis,
       );
       this.logger.log(
         `[Visual Diagnose] "${target.componentName}" mode=${diagnosis.analysisMode ?? 'unknown'} rootCause=${diagnosis.rootCause.primary} shouldRepair=${diagnosis.shouldRepair} confidence=${diagnosis.confidence.toFixed(2)} strategy=${this.summarizeSingleLine(diagnosis.repairPlan.strategy, 180)}`,
@@ -7192,19 +6828,9 @@ export default function ${component.name}() {
       pageRoute: attachment.captureContext?.page?.route,
       pageTitle: attachment.captureContext?.page?.title?.trim() || undefined,
       capturedAt: attachment.captureContext?.capturedAt,
-      selector:
-        attachment.domTarget?.cssSelector?.trim() ||
-        attachment.targetNode?.domPath?.trim() ||
-        attachment.domTarget?.xpath?.trim() ||
-        undefined,
-      nearestHeading:
-        attachment.domTarget?.nearestHeading?.trim() ||
-        attachment.targetNode?.nearestHeading?.trim() ||
-        undefined,
-      tagName:
-        attachment.domTarget?.tagName?.trim() ||
-        attachment.targetNode?.tagName?.trim() ||
-        undefined,
+      selector: undefined,
+      nearestHeading: undefined,
+      tagName: undefined,
     }));
 
     return {
@@ -7262,53 +6888,29 @@ export default function ${component.name}() {
       return { components, applied: false, taskCount: 0 };
     }
 
-    const inMemoryUiSourceMapEntries =
-      await buildUiSourceMapForGeneratedComponents({
-        components,
-        plan,
-      });
     const inMemoryMutationCandidates =
       await buildUiMutationCandidatesForGeneratedComponents({
         components,
       });
-    const exactCaptureTargetsForEditPass = resolveCaptureTargetsFromUiSourceMap(
-      {
-        attachments: request.attachments,
-        uiSourceMap: inMemoryUiSourceMapEntries,
-      },
-    );
-    await this.logExactCaptureResolution({
-      jobId,
-      logPath,
-      attachments: request.attachments,
-      uiSourceMapPath: 'in-memory:baseline-generated-components',
-      uiSourceMapEntryCount: inMemoryUiSourceMapEntries.length,
-      exactCaptureTargets: exactCaptureTargetsForEditPass,
-    });
-    const intentAwareCaptureTargetsForEditPass =
-      this.editRequestPhase.resolveIntentAwareCaptureTargets({
-        request,
-        exactCaptureTargets: exactCaptureTargetsForEditPass,
-        mutationCandidates: inMemoryMutationCandidates,
-      });
-    await this.logExactCaptureResolution({
-      jobId,
-      logPath,
-      attachments: request.attachments,
-      uiSourceMapPath: 'in-memory:intent-aware-mutation-targets',
-      uiSourceMapEntryCount: inMemoryMutationCandidates.length,
-      exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
-    });
-
     const postMigrationEditTasks =
       this.editRequestPhase.buildPostMigrationEditTasks({
         request,
         context: editRequestContext,
         plan,
         components,
-        exactCaptureTargets: intentAwareCaptureTargetsForEditPass,
         mutationCandidates: inMemoryMutationCandidates,
       });
+    const exactCaptureTargetsForEditPass = dedupeCaptureTargets(
+      postMigrationEditTasks.flatMap((task) => task.exactTargets),
+    );
+    await this.logExactCaptureResolution({
+      jobId,
+      logPath,
+      attachments: request.attachments,
+      resolutionSource: 'in-memory:component-mutation-targets',
+      candidateCount: inMemoryMutationCandidates.length,
+      exactCaptureTargets: exactCaptureTargetsForEditPass,
+    });
 
     if (postMigrationEditTasks.length === 0) {
       return { components, applied: false, taskCount: 0 };
@@ -7585,23 +7187,23 @@ export default function ${component.name}() {
     jobId: string;
     logPath: string;
     attachments?: PipelineCaptureAttachmentDto[];
-    uiSourceMapPath?: string | null;
-    uiSourceMapEntryCount: number;
+    resolutionSource: string;
+    candidateCount: number;
     exactCaptureTargets: ResolvedCaptureTargetRecord[];
   }): Promise<void> {
     const {
       jobId,
       logPath,
       attachments,
-      uiSourceMapPath,
-      uiSourceMapEntryCount,
+      resolutionSource,
+      candidateCount,
       exactCaptureTargets,
     } = input;
 
     const summaryMessage = [
       `[${jobId}] [capture-resolve]`,
-      `uiSourceMapPath=${uiSourceMapPath ?? 'none'}`,
-      `uiSourceMapEntries=${uiSourceMapEntryCount}`,
+      `source=${resolutionSource}`,
+      `candidates=${candidateCount}`,
       `captures=${attachments?.length ?? 0}`,
       `resolved=${exactCaptureTargets.length}`,
     ].join(' ');
@@ -7975,44 +7577,15 @@ function formatAttachmentForLog(
       : undefined);
   const normalizedRect = attachment.geometry?.normalizedRect;
   const pageRoute =
-    attachment.targetNode?.route ??
-    attachment.captureContext?.page?.route ??
-    attachment.sourcePageUrl;
+    attachment.captureContext?.page?.route ?? attachment.sourcePageUrl;
   const sectionType = inferSectionTypeForLog(attachment);
   const sectionIndex = inferSectionIndexForLog(attachment);
 
   return [
     `id=${attachment.id}`,
     pageRoute ? `route=${pageRoute}` : null,
-    attachment.targetNode?.templateName
-      ? `template=${attachment.targetNode.templateName}`
-      : null,
-    attachment.targetNode?.ownerSourceNodeId ||
-    attachment.targetNode?.sourceNodeId
-      ? `ownerSourceNodeId=${attachment.targetNode?.ownerSourceNodeId ?? attachment.targetNode?.sourceNodeId}`
-      : null,
-    attachment.targetNode?.editSourceNodeId
-      ? `editSourceNodeId=${attachment.targetNode.editSourceNodeId}`
-      : null,
-    attachment.targetNode?.editNodeRole
-      ? `editRole=${attachment.targetNode.editNodeRole}`
-      : null,
-    attachment.targetNode?.editTagName
-      ? `editTag=${attachment.targetNode.editTagName}`
-      : null,
-    attachment.targetNode?.blockName || attachment.domTarget?.blockName
-      ? `block=${attachment.targetNode?.blockName ?? attachment.domTarget?.blockName}`
-      : null,
     sectionType ? `sectionType=${sectionType}` : null,
     typeof sectionIndex === 'number' ? `sectionIndex≈${sectionIndex}` : null,
-    attachment.targetNode?.nearestHeading ||
-    attachment.domTarget?.nearestHeading
-      ? `heading="${truncateForLog(attachment.targetNode?.nearestHeading ?? attachment.domTarget?.nearestHeading ?? '', 80)}"`
-      : null,
-    attachment.targetNode?.nearestLandmark ||
-    attachment.domTarget?.nearestLandmark
-      ? `landmark=${attachment.targetNode?.nearestLandmark ?? attachment.domTarget?.nearestLandmark}`
-      : null,
     documentRect
       ? `documentRect=(${documentRect.x},${documentRect.y},${documentRect.width},${documentRect.height})`
       : null,
@@ -8066,23 +7639,7 @@ function formatDocumentForLog(
 function inferSectionTypeForLog(
   attachment: PipelineCaptureAttachmentDto,
 ): string | undefined {
-  const signal = normalizeLogToken(
-    [
-      attachment.targetNode?.blockName,
-      attachment.targetNode?.tagName,
-      attachment.targetNode?.domPath,
-      attachment.targetNode?.nearestHeading,
-      attachment.targetNode?.nearestLandmark,
-      attachment.domTarget?.blockName,
-      attachment.domTarget?.tagName,
-      attachment.domTarget?.domPath,
-      attachment.domTarget?.nearestHeading,
-      attachment.domTarget?.nearestLandmark,
-      attachment.note,
-    ]
-      .filter(Boolean)
-      .join(' '),
-  );
+  const signal = normalizeLogToken(attachment.note ?? '');
 
   if (!signal) return undefined;
   if (/\b(hero|banner|cover)\b/.test(signal)) return 'hero';
@@ -8162,14 +7719,9 @@ function formatResolvedCaptureTargetForLog(
 ): string {
   return [
     `capture=${target.captureId}`,
-    `sourceNodeId=${target.sourceNodeId}`,
     `template=${target.templateName}`,
     `sourceFile=${target.sourceFile}`,
     `component=${target.componentName}`,
-    `debugKey=${target.debugKey ?? target.sectionKey ?? 'unknown'}`,
-    target.sectionComponentName
-      ? `sectionComponent=${target.sectionComponentName}`
-      : null,
     `outputFile=${target.outputFilePath}`,
     formatResolvedCaptureLinesForLog(
       'ownerLines',
@@ -8205,36 +7757,10 @@ function formatUnresolvedCaptureAttachmentForLog(
   return [
     `capture=${attachment.id}`,
     'status=unresolved',
-    attachment.targetNode?.sourceNodeId
-      ? `sourceNodeId=${attachment.targetNode.sourceNodeId}`
+    attachment.captureContext?.page?.route
+      ? `route=${attachment.captureContext.page.route}`
       : null,
-    attachment.targetNode?.ownerSourceNodeId
-      ? `ownerSourceNodeId=${attachment.targetNode.ownerSourceNodeId}`
-      : null,
-    attachment.targetNode?.editSourceNodeId
-      ? `editSourceNodeId=${attachment.targetNode.editSourceNodeId}`
-      : null,
-    attachment.targetNode?.editNodeRole
-      ? `editRole=${attachment.targetNode.editNodeRole}`
-      : null,
-    attachment.targetNode?.editTagName
-      ? `editTag=${attachment.targetNode.editTagName}`
-      : null,
-    attachment.targetNode?.templateName
-      ? `template=${attachment.targetNode.templateName}`
-      : null,
-    attachment.targetNode?.sourceFile
-      ? `sourceFile=${attachment.targetNode.sourceFile}`
-      : null,
-    typeof attachment.targetNode?.topLevelIndex === 'number'
-      ? `topLevelIndex=${attachment.targetNode.topLevelIndex}`
-      : null,
-    attachment.targetNode?.blockName
-      ? `block=${attachment.targetNode.blockName}`
-      : null,
-    attachment.targetNode?.domPath
-      ? `domPath=${truncateForLog(attachment.targetNode.domPath, 120)}`
-      : null,
+    attachment.note ? `note="${truncateForLog(attachment.note, 120)}"` : null,
   ]
     .filter(Boolean)
     .join(' | ');
@@ -8250,4 +7776,14 @@ function formatResolvedCaptureLinesForLog(
   }
 
   return `${label}=${startLine}-${endLine}`;
+}
+
+function dedupeCaptureTargets(
+  targets: ResolvedCaptureTargetRecord[],
+): ResolvedCaptureTargetRecord[] {
+  const deduped = new Map<string, ResolvedCaptureTargetRecord>();
+  for (const target of targets) {
+    deduped.set(target.captureId, target);
+  }
+  return Array.from(deduped.values());
 }

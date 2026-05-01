@@ -6,6 +6,7 @@ import type {
   EditRequestPreparationResult,
   ValidatedEditRequest,
 } from './edit-request.types.js';
+import { detectUnsupportedEditRequestReason } from './edit-operation.util.js';
 
 export interface EditRequestValidationFailure {
   code: EditRequestRejectionCode;
@@ -33,6 +34,16 @@ export class EditRequestValidatorService {
     }
 
     if (mode === 'capture') {
+      const unsupportedReason = detectUnsupportedEditRequestReason(
+        buildInstructionText(request),
+      );
+      if (unsupportedReason) {
+        return {
+          code: 'UNSUPPORTED_EDIT_OPERATION',
+          message: this.buildUnsupportedOperationMessage(unsupportedReason),
+        };
+      }
+
       if (
         request?.prompt &&
         !this.isMeaningfulSupplementalPrompt(request.prompt)
@@ -81,6 +92,16 @@ export class EditRequestValidatorService {
         summary: prepared.summary,
         warnings,
         needsInference,
+      };
+    }
+
+    const unsupportedReason = detectUnsupportedEditRequestReason(
+      buildInstructionText(request),
+    );
+    if (unsupportedReason) {
+      return {
+        code: 'UNSUPPORTED_EDIT_OPERATION',
+        message: this.buildUnsupportedOperationMessage(unsupportedReason),
       };
     }
 
@@ -168,6 +189,21 @@ export class EditRequestValidatorService {
   private isFeaturePromptWithoutTarget(prompt: string): boolean {
     const normalized = stripVietnameseMarks(normalizeText(prompt));
     return hasFeatureSignal(normalized) && !hasScopeOrTargetHint(normalized);
+  }
+
+  private buildUnsupportedOperationMessage(reason: string): string {
+    switch (reason) {
+      case 'add-section-or-component':
+        return 'The current edit flow only supports content, background, color, and layout changes. Adding new sections/components/features is not supported.';
+      case 'replace-section-or-component':
+        return 'The current edit flow only supports content, background, color, and layout changes. Replacing sections/components is not supported.';
+      case 'remove-section-or-component':
+        return 'The current edit flow only supports content, background, color, and layout changes. Removing sections/components is not supported.';
+      case 'typography-change':
+        return 'The current edit flow only supports content, background, color, and layout changes. Typography-only edits are not supported.';
+      default:
+        return 'The current edit flow only supports content, background, color, and layout changes.';
+    }
   }
 
   private isMeaningfulCaptureNote(note?: string): boolean {
@@ -286,4 +322,15 @@ function isGenericCapturePhrase(value: string): boolean {
     'improve this',
     'same here',
   ].includes(value);
+}
+
+function buildInstructionText(request?: PipelineEditRequestDto): string {
+  return [
+    request?.prompt?.trim(),
+    ...(request?.attachments ?? []).map((attachment) =>
+      attachment.note?.trim(),
+    ),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ');
 }

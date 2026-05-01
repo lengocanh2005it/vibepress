@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import { Logger } from '@nestjs/common';
 import { dirname, join } from 'path';
 
@@ -51,6 +52,7 @@ const TOKEN_PHASES: TokenPhase[] = ['plan', 'gen', 'review', 'fix'];
 
 export class TokenTracker {
   private static readonly sessions = new Map<string, TokenSession>();
+  private static readonly logContext = new AsyncLocalStorage<string>();
   private readonly logger = new Logger('TokenTracker');
   private baseLogFile: string | undefined;
 
@@ -71,18 +73,25 @@ export class TokenTracker {
     return session;
   }
 
-  private buildPhaseLogFile(phase: TokenPhase): string | undefined {
-    if (!this.baseLogFile) return undefined;
-    return join(dirname(this.baseLogFile), `${phase}.tokens.log`);
+  private getActiveLogFile(fallback?: string): string | undefined {
+    return TokenTracker.logContext.getStore() ?? fallback ?? this.baseLogFile;
   }
 
-  private getAllLogFiles(): string[] {
-    if (!this.baseLogFile) return [];
+  private buildPhaseLogFile(
+    phase: TokenPhase,
+    baseLogFile = this.getActiveLogFile(),
+  ): string | undefined {
+    if (!baseLogFile) return undefined;
+    return join(dirname(baseLogFile), `${phase}.tokens.log`);
+  }
+
+  private getAllLogFiles(baseLogFile = this.getActiveLogFile()): string[] {
+    if (!baseLogFile) return [];
     return [
-      this.baseLogFile,
-      ...TOKEN_PHASES.map((phase) => this.buildPhaseLogFile(phase)).filter(
-        Boolean,
-      ),
+      baseLogFile,
+      ...TOKEN_PHASES.map((phase) =>
+        this.buildPhaseLogFile(phase, baseLogFile),
+      ).filter(Boolean),
     ] as string[];
   }
 
@@ -175,9 +184,10 @@ export class TokenTracker {
   /** Gọi đầu mỗi job để reset bộ đếm và set file log riêng */
   async init(logFile: string): Promise<void> {
     this.baseLogFile = logFile;
+    TokenTracker.logContext.enterWith(logFile);
     this.ensureLogInitialized(logFile);
     for (const phase of TOKEN_PHASES) {
-      const phaseFile = this.buildPhaseLogFile(phase);
+      const phaseFile = this.buildPhaseLogFile(phase, logFile);
       if (!phaseFile) continue;
       this.ensureLogInitialized(phaseFile);
     }
@@ -191,12 +201,13 @@ export class TokenTracker {
     options?: { scope?: TokenScope },
   ): Promise<void> {
     const tag = label || model;
-    if (!this.baseLogFile) return;
+    const activeLogFile = this.getActiveLogFile();
+    if (!activeLogFile) return;
     const phase = this.classifyPhase(tag) ?? 'unclassified';
     const scope = options?.scope ?? 'base';
 
     const costUsd = await this.appendEntry(
-      this.baseLogFile,
+      activeLogFile,
       model,
       inputTokens,
       outputTokens,
@@ -206,7 +217,9 @@ export class TokenTracker {
     );
 
     const phaseFile =
-      phase === 'unclassified' ? undefined : this.buildPhaseLogFile(phase);
+      phase === 'unclassified'
+        ? undefined
+        : this.buildPhaseLogFile(phase, activeLogFile);
     if (phaseFile) {
       await this.appendEntry(
         phaseFile,
@@ -224,16 +237,20 @@ export class TokenTracker {
     );
   }
 
-  async writeSummary(): Promise<void> {
-    for (const logFile of this.getAllLogFiles()) {
-      const session = this.getSession(logFile);
+  async writeSummary(logFile = this.getActiveLogFile()): Promise<void> {
+    const activeLogFile = this.getActiveLogFile(logFile);
+    if (!activeLogFile) return;
+
+    for (const phaseLogFile of this.getAllLogFiles(activeLogFile)) {
+      const session = this.getSession(phaseLogFile);
       if (!session || session.summaryWritten) continue;
 
       const phaseName =
-        logFile === this.baseLogFile
+        phaseLogFile === activeLogFile
           ? 'Total'
-          : (logFile.match(/\.([a-z]+)\.tokens\.log$/)?.[1]?.toUpperCase() ??
-            'UNKNOWN');
+          : (phaseLogFile
+              .match(/\.([a-z]+)\.tokens\.log$/)?.[1]
+              ?.toUpperCase() ?? 'UNKNOWN');
       this.logger.log(
         `[${phaseName}] in=${session.totalInput} out=${session.totalOutput} cost=$${session.totalCost.toFixed(4)}`,
       );
@@ -241,25 +258,26 @@ export class TokenTracker {
     }
   }
 
-  getTotalCost(): number {
-    return this.getSession(this.baseLogFile)?.totalCost ?? 0;
+  getTotalCost(logFile = this.getActiveLogFile()): number {
+    return this.getSession(this.getActiveLogFile(logFile))?.totalCost ?? 0;
   }
 
-  getSummary(logFile = this.baseLogFile): TokenUsageSummary | null {
-    const session = this.getSession(logFile);
+  getSummary(logFile = this.getActiveLogFile()): TokenUsageSummary | null {
+    const session = this.getSession(this.getActiveLogFile(logFile));
     if (!session) return null;
     return this.buildJsonSummary(session);
   }
 
-  clear(logFile = this.baseLogFile): void {
-    if (!logFile) return;
-    TokenTracker.sessions.delete(logFile);
+  clear(logFile = this.getActiveLogFile()): void {
+    const activeLogFile = this.getActiveLogFile(logFile);
+    if (!activeLogFile) return;
+    TokenTracker.sessions.delete(activeLogFile);
     for (const phase of TOKEN_PHASES) {
       TokenTracker.sessions.delete(
-        join(dirname(logFile), `${phase}.tokens.log`),
+        join(dirname(activeLogFile), `${phase}.tokens.log`),
       );
     }
-    if (this.baseLogFile === logFile) {
+    if (this.baseLogFile === activeLogFile) {
       this.baseLogFile = undefined;
     }
   }

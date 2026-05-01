@@ -13,6 +13,7 @@ import type {
   ApplyPendingEditRequestDto,
   RunPipelineRequestDto,
   SkipPendingEditRequestDto,
+  SkipVisualCompareDto,
   SubmitReactVisualEditDto,
   UndoReactVisualEditDto,
 } from './orchestrator.dto.js';
@@ -79,6 +80,19 @@ export class OrchestratorController {
       throw new BadRequestException('jobId is required');
     }
     return this.orchestratorService.skipPendingEditRequest(body);
+  }
+
+  @Post('skip-visual-compare')
+  async skipVisualCompare(@Body() body: SkipVisualCompareDto) {
+    const siteId = body?.siteId?.trim();
+    const jobId = body?.jobId?.trim();
+    if (!siteId) {
+      throw new BadRequestException('siteId is required');
+    }
+    if (!jobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    return this.orchestratorService.skipVisualCompare(body);
   }
 
   @Post('react-visual-edit/undo')

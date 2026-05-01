@@ -28,18 +28,19 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
   {
     match: /^(Header|Navigation|Nav)$/i,
     kind: 'header',
-    // AI reads the actual WP template — deterministic renderer is too generic
-    // and produces layouts that diverge significantly from the original site.
-    deterministicFirst: false,
+    // Shared chrome should now preserve the real WordPress block/source tree
+    // end-to-end. Treat header/navigation as deterministic-first and only fall
+    // back to AI when source parsing cannot provide a usable structure.
+    deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
   {
     match: /^Footer$/i,
     kind: 'footer',
-    // Footer needs to follow the actual WP footer/template-part structure.
-    // Deterministic rendering has proven too generic and drifts visually.
-    deterministicFirst: false,
+    // Same policy as Header: prefer deterministic block-faithful rendering from
+    // the resolved footer template/pattern tree for all themes.
+    deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },
@@ -72,6 +73,15 @@ const COMPONENT_STRATEGY_RULES: ComponentStrategyRule[] = [
     match: /^(Comments|Comment)$/i,
     kind: 'comments',
     deterministicFirst: false,
+    skipAiVisualPlan: false,
+    allowFramePath: false,
+  },
+  {
+    match: /^SingleWithSidebar$/i,
+    kind: 'meta-only',
+    // This template is now contract-heavy and source-backed enough that the
+    // deterministic renderer is more reliable than full-file AI generation.
+    deterministicFirst: true,
     skipAiVisualPlan: false,
     allowFramePath: false,
   },

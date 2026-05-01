@@ -26,7 +26,12 @@ import type {
   ThemeInteractionTarget,
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
-import type { ComponentVisualPlan, SectionPlan } from './visual-plan.schema.js';
+import type {
+  BlockNode,
+  ComponentVisualPlan,
+  SectionPlan,
+} from './visual-plan.schema.js';
+import { shouldBypassAiGenerationForVisualPlan } from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
@@ -261,7 +266,7 @@ export class ReactGeneratorService {
             `${counter} Generating "${componentName}.tsx" → ${folder}/`,
           );
 
-          const t0 = Date.now();
+          const t0 = process.hrtime.bigint();
           const produced = await this.generateForTemplate({
             componentName,
             rawSource,
@@ -277,18 +282,19 @@ export class ReactGeneratorService {
             logPath,
             jobId,
           });
-          const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
           const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
-          this.logger.log(
-            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-          );
-          await this.logToFile(
-            logPath,
-            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-          );
           if (jobId) {
             await this.persistDraftComponents(jobId, produced);
           }
+          const elapsedMs = Number(process.hrtime.bigint() - t0) / 1_000_000;
+          const elapsed = this.formatElapsedMs(elapsedMs);
+          this.logger.log(
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}`,
+          );
+          await this.logToFile(
+            logPath,
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}`,
+          );
 
           return { i, produced };
         }),
@@ -310,6 +316,14 @@ export class ReactGeneratorService {
     await this.logToFile(logPath, summary);
 
     return { jobId, components, outDir: '' };
+  }
+
+  private formatElapsedMs(ms: number): string {
+    if (ms < 1000) {
+      return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)}ms`;
+    }
+    const seconds = ms / 1000;
+    return `${seconds < 10 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
   }
 
   // ── Per-template routing: single vs chunked ────────────────────────────────
@@ -639,24 +653,24 @@ export class ReactGeneratorService {
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
-    const isProtectedDeterministicSharedPartial =
+    const isProtectedDeterministicAuthority =
       component.generationMode === 'deterministic' &&
-      /^(Header|Footer|Navigation|Nav)$/i.test(component.name);
+      shouldBypassAiGenerationForVisualPlan(component.visualPlan);
 
-    if (isProtectedDeterministicSharedPartial && fixMode !== 'syntax-only') {
+    if (isProtectedDeterministicAuthority && fixMode !== 'syntax-only') {
       this.logger.log(
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure`,
+        `[fixer] Skipping AI auto-fix for deterministic-authority component "${component.name}" to preserve planner-owned structure`,
       );
       await this.logToFile(
         logPath,
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure. Feedback: ${feedback}`,
+        `[fixer] Skipping AI auto-fix for deterministic-authority component "${component.name}" to preserve planner-owned structure. Feedback: ${feedback}`,
       );
       return this.attachPlanContext(component, componentPlan);
     }
 
     const effectiveFeedback =
       fixMode === 'syntax-only'
-        ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
+        ? `Syntax-only repair for deterministic-authority component "${component.name}". Preserve the existing planner-owned structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
     const visualPlanRepairNote =
       fixMode === 'full'
@@ -697,7 +711,7 @@ export class ReactGeneratorService {
     await this.logToFile(
       logPath,
       fixMode === 'syntax-only'
-        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${repairFeedback}`
+        ? `[fixer] Auto-fixing syntax for protected deterministic-authority component "${component.name}": ${repairFeedback}`
         : fixMode === 'visual-metrics-safe'
           ? `[fixer] Auto-fixing visual metrics for component "${component.name}" with contract-safe mode: ${repairFeedback}`
           : fixMode === 'edit-request-safe'
@@ -880,9 +894,16 @@ ${renders}
     componentPlan?: PlanResult[number],
   ): string | undefined {
     const sections = componentPlan?.visualPlan?.sections ?? [];
+    const blockTree = componentPlan?.visualPlan?.blockTree ?? [];
     const palette = componentPlan?.visualPlan?.palette;
     const typography = componentPlan?.visualPlan?.typography;
-    if (sections.length === 0 && !palette && !typography) return undefined;
+    if (
+      sections.length === 0 &&
+      blockTree.length === 0 &&
+      !palette &&
+      !typography
+    )
+      return undefined;
 
     const lines = sections.map((section, index) => {
       const parts = [
@@ -977,6 +998,16 @@ ${renders}
       }
     }
 
+    if (blockTree.length > 0) {
+      blocks.push(
+        '',
+        'Preserved WordPress block tree — structural contract:',
+        'Treat this block tree as the source of truth for wrapper order, group nesting, column ownership, sidebar shell placement, and template-part boundaries.',
+        'Do NOT flatten it into a simpler section stack during repair.',
+        ...this.summarizeBlockTreeForRepair(blockTree),
+      );
+    }
+
     if (palette) {
       const paletteLines = Object.entries(palette)
         .map(([k, v]) => `  ${k}: ${v}`)
@@ -1042,6 +1073,11 @@ ${renders}
       lines.push(
         'Do NOT rewrite source-backed body copy into new summaries, marketing prose, or synthetic filler. Keep section content bound to the approved source-backed content.',
       );
+      if (componentPlan?.visualPlan?.blockTree?.length) {
+        lines.push(
+          'Do NOT alter preserved block-tree shell hierarchy on this detail route. Metrics repair may adjust spacing, sizing, and styling, but must not rewrite wrapper order, columns, or sidebar ownership.',
+        );
+      }
       if (approvedSectionCount > 0) {
         lines.push(
           `Expected section coverage remains locked to the approved plan (${approvedSectionCount} section(s)). Visual repair must refine the existing section shells rather than collapsing the page into a different structure.`,
@@ -1060,6 +1096,43 @@ ${renders}
     }
 
     return lines.join('\n');
+  }
+
+  private summarizeBlockTreeForRepair(
+    nodes: ReadonlyArray<BlockNode>,
+    depth = 0,
+    lines: string[] = [],
+    limit = 12,
+  ): string[] {
+    for (const node of nodes) {
+      if (lines.length >= limit) break;
+      lines.push(
+        [
+          `${'  '.repeat(depth)}- ${node.kind}`,
+          node.sourceRef?.sourceNodeId
+            ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+            : null,
+          node.templatePartSlug
+            ? `templatePart=${node.templatePartSlug}`
+            : null,
+          node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+        ]
+          .filter(Boolean)
+          .join(' | '),
+      );
+      if (node.children?.length && lines.length < limit) {
+        this.summarizeBlockTreeForRepair(
+          node.children,
+          depth + 1,
+          lines,
+          limit,
+        );
+      }
+    }
+    if (depth === 0 && lines.length >= limit) {
+      lines.push('- ...');
+    }
+    return lines;
   }
 
   private buildEditRequestSafeRepairNote(
@@ -1364,13 +1437,11 @@ ${renders}
     componentPlan: PlanResult[number] | undefined,
     nodes: WpNode[] | undefined,
   ): boolean {
-    // Header/Footer are visually sensitive shared chrome. Let them go through
-    // the AI-assisted reviewer path so layout can stay closer to the original
-    // WordPress site, while validator rules still enforce the hard data contract.
-    if (/^(header|footer)$/i.test(componentName)) {
+    if (componentPlan?.visualPlan?.deterministicAuthority) {
       return false;
     }
-
+    // Shared chrome is more stable when we preserve the original WordPress
+    // wrapper/column/navigation tree directly instead of letting AI restyle it.
     return !!(
       componentPlan?.type === 'partial' &&
       /^(header|footer)/i.test(componentName) &&

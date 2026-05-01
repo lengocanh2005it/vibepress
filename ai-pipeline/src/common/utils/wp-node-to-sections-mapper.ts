@@ -25,11 +25,17 @@ import type {
   MediaTextSection,
   FooterSection,
   PostContentSection,
+  PostTitleSection,
+  PostFeaturedImageSection,
   PageContentSection,
   ProseBlockSection,
+  PostMetaSection,
+  PostTermsSection,
+  PostNavigationSection,
   SearchSection,
   BreadcrumbSection,
   SidebarSection,
+  CommentsSection,
   ModalSection,
   TestimonialSection,
   TabsSection,
@@ -47,13 +53,13 @@ import type {
  * AI-only planning).
  */
 export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
-  return mapNodes(nodes, nodes);
+  return deduplicateSectionKeys(mapNodes(nodes, nodes));
 }
 
 export function mapWpNodesToLosslessPageSections(
   nodes: WpNode[],
 ): SectionPlan[] {
-  return mapNodesLosslessPage(nodes, nodes);
+  return deduplicateSectionKeys(mapNodesLosslessPage(nodes, nodes));
 }
 
 // ── Per-node dispatch ───────────────────────────────────────────────────────
@@ -505,11 +511,13 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
     block === 'core/query-title' ||
     block === 'query-title' ||
     block === 'core/archive-title' ||
-    block === 'archive-title' ||
-    block === 'core/post-title' ||
-    block === 'post-title'
+    block === 'archive-title'
   ) {
     return [];
+  }
+
+  if (block === 'core/post-title' || block === 'post-title') {
+    return toMappedSections(mapPostTitle(node), node);
   }
 
   // query-no-results — fallback shown when query has no results; not a real page section.
@@ -534,6 +542,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
     return toMappedSections(mapTemplatePart(node), node);
+  }
+
+  if (block === 'core/pattern' || block === 'pattern') {
+    return toMappedSections(mapPattern(node), node);
   }
 
   // Navigation / site header chrome
@@ -593,6 +605,18 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/post-content' || block === 'post-content') {
     return toMappedSections(mapPostContent(node), node);
   }
+  if (block === 'core/post-featured-image' || block === 'post-featured-image') {
+    return toMappedSections(mapPostFeaturedImage(node), node);
+  }
+  if (block === 'core/post-terms' || block === 'post-terms') {
+    return toMappedSections(mapPostTerms(node), node);
+  }
+  if (
+    block === 'core/post-navigation-link' ||
+    block === 'post-navigation-link'
+  ) {
+    return [];
+  }
   if (
     block === 'core/page-list' ||
     block === 'core/pages' ||
@@ -607,6 +631,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/search' || block === 'search') {
     const s: SearchSection = { type: 'search' };
     return toMappedSections(s, node);
+  }
+
+  if (block === 'core/comments' || block === 'comments') {
+    return toMappedSections(mapComments(node), node);
   }
 
   // Separator / spacer — skip, not a section
@@ -725,9 +753,30 @@ function mapTemplatePart(node: WpNode): SectionPlan | null {
     };
     return s;
   }
+  if (slugL.includes('post-meta')) {
+    const s: PostMetaSection = {
+      type: 'post-meta',
+      padding: 'none',
+      layout: 'inline',
+      showAuthor: true,
+      showDate: true,
+      showCategories: true,
+      showSeparator: true,
+    };
+    return s;
+  }
   if (slugL.includes('breadcrumb')) {
     const s: BreadcrumbSection = { type: 'breadcrumb' };
     return s;
+  }
+  return null;
+}
+
+function mapPattern(node: WpNode): SectionPlan | null {
+  const slug = String(node.params?.slug ?? '').toLowerCase();
+  if (!slug) return null;
+  if (slug.includes('post-navigation')) {
+    return buildPostNavigationSection();
   }
   return null;
 }
@@ -1019,6 +1068,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     ]);
     if (headingChild?.text) s.title = headingChild.text;
     return toMappedSections(s, node);
+  }
+
+  const postNavigationSection = mapPostNavigationGroup(node);
+  if (postNavigationSection) {
+    return toMappedSections(postNavigationSection, node);
   }
 
   // Nested group that contains further sub-sections — recurse and keep them all.
@@ -1446,17 +1500,133 @@ function collectFooterMenuColumns(
 // ── post-content ────────────────────────────────────────────────────────────
 
 function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
-  // If it's inside a post/single template context it's a post-content; the
-  // caller decides dataNeeds. We default to post-content and let AI/reviewer
-  // correct it when the component contract says pageDetail instead.
   const s: PostContentSection = {
     type: 'post-content',
-    showTitle: true,
-    showAuthor: true,
-    showDate: true,
-    showCategories: true,
+    padding: 'none',
+    showTitle: false,
+    showAuthor: false,
+    showDate: false,
+    showCategories: false,
   };
   return s;
+}
+
+function mapPostTitle(node: WpNode): PostTitleSection {
+  return {
+    type: 'post-title',
+    padding: 'none',
+    ...(typeof node.params?.level === 'number'
+      ? {
+          level: Math.min(Math.max(Number(node.params.level), 1), 6) as
+            | 1
+            | 2
+            | 3
+            | 4
+            | 5
+            | 6,
+        }
+      : { level: 1 }),
+    ...(node.typography || node.fontFamily
+      ? { titleStyle: toTypographyStyle(node) }
+      : {}),
+    ...(extractStyleVariantClassNames(node.customClassNames).length > 0
+      ? {
+          titleCustomClassNames: extractStyleVariantClassNames(
+            node.customClassNames,
+          ),
+        }
+      : {}),
+  };
+}
+
+function mapPostFeaturedImage(node: WpNode): PostFeaturedImageSection {
+  return {
+    type: 'post-featured-image',
+    padding: 'none',
+    ...(node.borderRadius ? { imageRadius: node.borderRadius } : {}),
+    ...(node.customClassNames?.length
+      ? { imageCustomClassNames: uniqueClassNames(node.customClassNames) }
+      : {}),
+  };
+}
+
+function mapPostTerms(node: WpNode): PostTermsSection {
+  const term = String(node.params?.term ?? '').toLowerCase();
+  const taxonomy: PostTermsSection['taxonomy'] =
+    term === 'category'
+      ? 'category'
+      : term === 'post_tag' || term === 'tag'
+        ? 'post_tag'
+        : undefined;
+
+  return {
+    type: 'post-terms',
+    padding: 'none',
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(typeof node.params?.prefix === 'string' && node.params.prefix.trim()
+      ? { prefix: node.params.prefix.trim() }
+      : {}),
+    ...(typeof node.params?.separator === 'string' && node.params.separator
+      ? { separator: node.params.separator }
+      : {}),
+    layout: 'inline',
+  };
+}
+
+function mapComments(node: WpNode): CommentsSection {
+  const flat = flattenChildren(node);
+  const hasCommentForm = flat.some((child) =>
+    ['core/post-comments-form', 'post-comments-form'].includes(child.block),
+  );
+
+  return {
+    type: 'comments',
+    padding: 'none',
+    showForm: hasCommentForm,
+    requireName: true,
+    requireEmail: true,
+  };
+}
+
+function mapPostNavigationGroup(node: WpNode): PostNavigationSection | null {
+  const flat = flattenChildren(node);
+  const navLinks = flat.filter((child) =>
+    ['core/post-navigation-link', 'post-navigation-link'].includes(child.block),
+  );
+  if (navLinks.length === 0) return null;
+
+  const previousLink = navLinks.find(
+    (child) => String(child.params?.type ?? '').toLowerCase() === 'previous',
+  );
+  const nextLink = navLinks.find(
+    (child) => String(child.params?.type ?? '').toLowerCase() !== 'previous',
+  );
+
+  return buildPostNavigationSection({
+    showPrevious: !!previousLink,
+    showNext: !!nextLink,
+    previousLabel:
+      typeof previousLink?.params?.label === 'string'
+        ? previousLink.params.label
+        : undefined,
+    nextLabel:
+      typeof nextLink?.params?.label === 'string'
+        ? nextLink.params.label
+        : undefined,
+  });
+}
+
+function buildPostNavigationSection(
+  overrides: Partial<PostNavigationSection> = {},
+): PostNavigationSection {
+  return {
+    type: 'post-navigation',
+    padding: 'none',
+    showPrevious: overrides.showPrevious ?? true,
+    showNext: overrides.showNext ?? true,
+    previousLabel: overrides.previousLabel ?? 'Previous:',
+    nextLabel: overrides.nextLabel ?? 'Next:',
+  };
 }
 
 // ── standalone heading / quote ──────────────────────────────────────────────
@@ -2357,6 +2527,18 @@ function buildSectionKey(
   return `${type}-${topLevelIndex}`;
 }
 
+function deduplicateSectionKeys<T extends SectionPlan>(sections: T[]): T[] {
+  const counts = new Map<string, number>();
+  return sections.map((section) => {
+    const key = section.sectionKey;
+    if (!key) return section;
+    const seen = counts.get(key) ?? 0;
+    counts.set(key, seen + 1);
+    if (seen === 0) return section;
+    return { ...section, sectionKey: `${key}_${seen}` };
+  });
+}
+
 // ── helpers: recognise group intent ────────────────────────────────────────
 
 function isHeroGroup(children: WpNode[]): boolean {
@@ -2976,6 +3158,8 @@ const POST_DETAIL_LAYOUT_BLOCKS = new Set<string>([
   'post-author-biography',
   'core/post-terms',
   'post-terms',
+  'core/post-navigation-link',
+  'post-navigation-link',
   'core/comments',
   'comments',
   'core/comment-template',

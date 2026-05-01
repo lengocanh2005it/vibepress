@@ -133,10 +133,8 @@ async function saveCapture(req, res) {
         comment, page_url, iframe_src, captured_at,
         viewport,
         page,
-        selection, geometry,
-        dom_target,
-        target_node
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        selection, geometry
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         captureData.id,
         siteId,
@@ -151,8 +149,6 @@ async function saveCapture(req, res) {
         captureData.page       ? JSON.stringify(captureData.page)       : null,
         captureData.selection  ? JSON.stringify(captureData.selection)  : null,
         captureData.geometry   ? JSON.stringify(captureData.geometry)   : null,
-        captureData.domTarget  ? JSON.stringify(captureData.domTarget)  : null,
-        captureData.targetNode ? JSON.stringify(captureData.targetNode) : null,
       ],
     );
 

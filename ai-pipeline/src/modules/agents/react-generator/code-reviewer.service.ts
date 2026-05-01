@@ -8,10 +8,6 @@ import {
   type TokenScope,
 } from '../../../common/utils/token-tracker.js';
 import {
-  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
-  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
-} from '../../../common/utils/post-meta-link.util.js';
-import {
   AiLoggerService,
   type AttemptLog,
 } from '../../ai-logger/ai-logger.service.js';
@@ -32,6 +28,9 @@ import {
 } from './prompts/component.prompt.js';
 import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import { FLAT_REST_SAFETY_RULE } from './api-contract.js';
+import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
+import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
+import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
@@ -47,9 +46,13 @@ import type { PlanResult } from '../planner/planner.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type {
+  BlockNode,
   ComponentVisualPlan,
-  DataNeed,
   SectionPlan,
+} from './visual-plan.schema.js';
+import {
+  shouldBypassAiGenerationForVisualPlan,
+  shouldProtectDeterministicStructureFromAi,
 } from './visual-plan.schema.js';
 
 export interface ReviewInput {
@@ -118,6 +121,7 @@ const RICH_VISUAL_SECTION_TYPES = new Set([
   'carousel',
   'modal',
   'newsletter',
+  'post-featured-image',
 ]);
 
 const INTERACTIVE_VISUAL_SECTION_TYPES = new Set([
@@ -130,6 +134,10 @@ const INTERACTIVE_VISUAL_SECTION_TYPES = new Set([
 const LOW_COMPLEXITY_VISUAL_SECTION_TYPES = new Set([
   'page-content',
   'post-content',
+  'post-title',
+  'post-featured-image',
+  'post-terms',
+  'post-navigation',
   'comments',
   'search',
   'breadcrumb',
@@ -137,6 +145,8 @@ const LOW_COMPLEXITY_VISUAL_SECTION_TYPES = new Set([
   'post-list',
   'navbar',
   'footer',
+  'post-terms',
+  'post-navigation',
 ]);
 
 const MEDIA_HEAVY_VISUAL_SECTION_TYPES = new Set([
@@ -163,11 +173,18 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
   'post-list',
   'breadcrumb',
   'sidebar',
+  'post-navigation',
+  'post-title',
+  'post-featured-image',
 ]);
 
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'post-content',
+  'post-title',
+  'post-featured-image',
   'post-meta',
+  'post-terms',
+  'post-navigation',
   'page-content',
   'comments',
   'sidebar',
@@ -240,6 +257,8 @@ export class CodeReviewerService {
     const forceDirectAi =
       preferDirectAi || process.env.REACT_GEN_FORCE_DIRECT_AI === 'true';
     const strategy = getComponentStrategy(componentName);
+    const strictDeterministicAuthority =
+      this.isStrictDeterministicAuthority(componentPlan);
     const startTime = new Date().toISOString();
 
     let code = '';
@@ -314,7 +333,11 @@ export class CodeReviewerService {
       componentPlan,
       componentName,
     );
-    if (!forceDirectAi && sectionAssemblyDecision.enabled) {
+    if (
+      !strictDeterministicAuthority &&
+      !forceDirectAi &&
+      sectionAssemblyDecision.enabled
+    ) {
       this.logger.log(
         `[reviewer] "${componentName}": using section-level one-file assembly (${componentPlan?.visualPlan?.sections.length ?? 0} sections; ${sectionAssemblyDecision.reason})`,
       );
@@ -370,6 +393,33 @@ export class CodeReviewerService {
       }
     }
 
+    if (strictDeterministicAuthority && componentPlan?.visualPlan) {
+      await this.log(
+        logPath,
+        `[reviewer] "${componentName}": deterministic-authority plan locked; skipping AI visual plan/codegen and using deterministic generation only`,
+      );
+      const deterministicOnly = await this.tryDeterministicPlan(
+        componentName,
+        componentPlan.visualPlan,
+        validationContext,
+        logPath,
+        'locked deterministic-authority plan',
+      );
+      return {
+        component: {
+          name: componentName,
+          filePath: '',
+          code: deterministicOnly.code,
+          requiredCustomClassNames: promptContext?.requiredCustomClassNames,
+          visualPlan: promptContext?.visualPlan,
+        },
+        fromVisualPlan: true,
+        generationMode: 'deterministic',
+        attempts: 0,
+        rawResponse: '',
+      };
+    }
+
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const isRetry = round > 1;
 
@@ -420,7 +470,10 @@ export class CodeReviewerService {
           `[reviewer] "${componentName}": using reviewed pre-computed visual plan for AI codegen (${componentPlan.visualPlan.sections.length} sections)`,
         );
 
-        if (strategy.deterministicFirst) {
+        const prefersDeterministicPlan =
+          strategy.deterministicFirst ||
+          this.shouldPreferDeterministicPlan(componentPlan);
+        if (prefersDeterministicPlan) {
           const deterministicFirst = await this.tryDeterministicPlan(
             componentName,
             componentPlan.visualPlan,
@@ -512,60 +565,65 @@ export class CodeReviewerService {
           `WARN [reviewer] "${componentName}" AI reviewed-plan codegen failed: ${planned.lastError} — deterministic fallback`,
         );
 
-        const deterministic = await this.tryDeterministicPlan(
-          componentName,
-          componentPlan.visualPlan,
-          validationContext,
-          logPath,
-          'reviewed plan',
-        );
-        if (deterministic.isValid) {
-          cotAttempts.push({
-            attemptNumber: cotAttempts.length + 1,
-            promptSent: {
-              system: 'deterministic-fallback',
-              user: 'rule-based generation fallback',
-            },
-            response: 'Deterministic fallback (rule-based generation)',
-            tokensUsed: { input: 0, output: 0, total: 0 },
-            timestamp: new Date().toISOString(),
-            success: true,
-            validationFeedback:
-              'Deterministic reviewed-plan fallback succeeded',
-          });
-          await this.logCotProcessIfEnabled({
-            jobId,
-            step: 'code-generation',
+        if (this.canUseDeterministicGeneration(componentPlan)) {
+          const deterministic = await this.tryDeterministicPlan(
             componentName,
-            model: modelName,
-            startTime,
-            attempts: cotAttempts,
-            finalSuccess: true,
-          });
+            componentPlan.visualPlan,
+            validationContext,
+            logPath,
+            'reviewed plan',
+          );
+          if (deterministic.isValid) {
+            cotAttempts.push({
+              attemptNumber: cotAttempts.length + 1,
+              promptSent: {
+                system: 'deterministic-fallback',
+                user: 'rule-based generation fallback',
+              },
+              response: 'Deterministic fallback (rule-based generation)',
+              tokensUsed: { input: 0, output: 0, total: 0 },
+              timestamp: new Date().toISOString(),
+              success: true,
+              validationFeedback:
+                'Deterministic reviewed-plan fallback succeeded',
+            });
+            await this.logCotProcessIfEnabled({
+              jobId,
+              step: 'code-generation',
+              componentName,
+              model: modelName,
+              startTime,
+              attempts: cotAttempts,
+              finalSuccess: true,
+            });
 
-          return {
-            component: {
-              name: componentName,
-              filePath: '',
-              code: deterministic.code,
-              requiredCustomClassNames: promptContext?.requiredCustomClassNames,
-              visualPlan: promptContext?.visualPlan,
-            },
-            fromVisualPlan: true,
-            generationMode: 'deterministic',
-            attempts,
-            rawResponse: '',
-          };
+            return {
+              component: {
+                name: componentName,
+                filePath: '',
+                code: deterministic.code,
+                requiredCustomClassNames:
+                  promptContext?.requiredCustomClassNames,
+                visualPlan: promptContext?.visualPlan,
+              },
+              fromVisualPlan: true,
+              generationMode: 'deterministic',
+              attempts,
+              rawResponse: '',
+            };
+          }
+          lastError = deterministic.error ?? lastError;
+          precomputedPlanAllFailed = true;
+          this.logger.warn(
+            `[reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
+          );
+          await this.log(
+            logPath,
+            `WARN [reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
+          );
+        } else {
+          precomputedPlanAllFailed = true;
         }
-        lastError = deterministic.error ?? lastError;
-        precomputedPlanAllFailed = true;
-        this.logger.warn(
-          `[reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
-        );
-        await this.log(
-          logPath,
-          `WARN [reviewer] "${componentName}" deterministic reviewed-plan fallback failed: ${deterministic.error} — requesting fresh AI visual plan`,
-        );
       }
 
       // ── D2: AI visual plan → AI codegen ─────────────────────────────────────
@@ -584,7 +642,7 @@ export class CodeReviewerService {
               : `[reviewer] Stage 1: requesting AI visual plan for "${componentName}"`,
         );
         const visualDataNeeds = componentPlan
-          ? this.toVisualDataNeeds(componentPlan.dataNeeds)
+          ? toVisualDataNeeds(componentPlan.dataNeeds)
           : undefined;
         const visualContract = componentPlan
           ? {
@@ -686,7 +744,10 @@ export class CodeReviewerService {
               logPath,
               `[reviewer] Stage 2: generating TSX with AI from visual plan (${visualPlan.sections.length} sections)`,
             );
-            if (strategy.deterministicFirst) {
+            const prefersDeterministicPlan =
+              strategy.deterministicFirst ||
+              this.shouldPreferDeterministicPlan(componentPlan);
+            if (prefersDeterministicPlan) {
               const deterministicFirst = await this.tryDeterministicPlan(
                 componentName,
                 visualPlan,
@@ -768,30 +829,32 @@ export class CodeReviewerService {
               `WARN [reviewer] "${componentName}" AI plan-guided codegen failed: ${planned.lastError} — deterministic fallback`,
             );
 
-            const deterministic = await this.tryDeterministicPlan(
-              componentName,
-              visualPlan,
-              validationContext,
-              logPath,
-              'AI visual plan',
-            );
-            if (deterministic.isValid) {
-              return {
-                component: {
-                  name: componentName,
-                  filePath: '',
-                  code: deterministic.code,
-                  requiredCustomClassNames:
-                    promptContext?.requiredCustomClassNames,
-                  visualPlan: promptContext?.visualPlan,
-                },
-                fromVisualPlan: true,
-                generationMode: 'deterministic',
-                attempts,
-                rawResponse: '',
-              };
+            if (this.canUseDeterministicGeneration(componentPlan)) {
+              const deterministic = await this.tryDeterministicPlan(
+                componentName,
+                visualPlan,
+                validationContext,
+                logPath,
+                'AI visual plan',
+              );
+              if (deterministic.isValid) {
+                return {
+                  component: {
+                    name: componentName,
+                    filePath: '',
+                    code: deterministic.code,
+                    requiredCustomClassNames:
+                      promptContext?.requiredCustomClassNames,
+                    visualPlan: promptContext?.visualPlan,
+                  },
+                  fromVisualPlan: true,
+                  generationMode: 'deterministic',
+                  attempts,
+                  rawResponse: '',
+                };
+              }
+              lastError = deterministic.error ?? lastError;
             }
-            lastError = deterministic.error ?? lastError;
           } else {
             const reason =
               parsedPlan.diagnostic?.reason ??
@@ -1331,13 +1394,15 @@ export class CodeReviewerService {
     componentPlan?: PlanResult[number] | ComponentPromptContext,
     visualPlan?: ComponentVisualPlan,
   ): string[] | undefined {
+    const resolvedPlan = visualPlan ?? componentPlan?.visualPlan;
     const classNames = [
       ...(componentPlan && 'customClassNames' in componentPlan
         ? (componentPlan.customClassNames ?? [])
         : []),
-      ...((visualPlan ?? componentPlan?.visualPlan)?.sections.flatMap(
-        (section) => this.extractCustomClassNamesFromSection(section),
+      ...(resolvedPlan?.sections.flatMap((section) =>
+        this.extractCustomClassNamesFromSection(section),
       ) ?? []),
+      ...this.extractCustomClassNamesFromBlockTree(resolvedPlan?.blockTree),
     ]
       .map((className) => className.trim())
       .filter(Boolean);
@@ -1411,11 +1476,35 @@ export class CodeReviewerService {
     if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
     }
-
-    const normalizedNeeds = new Set(
-      this.toVisualDataNeeds(componentPlan.dataNeeds),
-    );
+    const normalizedNeeds = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
     const signals = this.getVisualPlanSectionSignals(componentPlan);
+
+    if (
+      componentPlan.visualPlan.blockTree?.length &&
+      componentPlan.visualPlan.renderMode !== 'section-centric'
+    ) {
+      const allowHybridSectionAssembly =
+        componentPlan.visualPlan.renderMode === 'hybrid' &&
+        !componentPlan.isDetail &&
+        !signals.hasPageContent &&
+        !signals.hasPostContent &&
+        !signals.lowComplexityOnly &&
+        signals.sections.length >= 6 &&
+        signals.richSectionCount >= 3 &&
+        signals.sourceBackedSectionCount >= 3;
+      if (allowHybridSectionAssembly) {
+        return {
+          enabled: true,
+          reason:
+            'hybrid block-tree landing page prefers section assembly for content retention',
+        };
+      }
+      return {
+        enabled: false,
+        reason:
+          'block-tree plans preserve hierarchy via hybrid/full-file render',
+      };
+    }
     if (signals.sections.length < 2) {
       return { enabled: false, reason: 'too few sections' };
     }
@@ -1438,6 +1527,13 @@ export class CodeReviewerService {
       componentPlan.visualPlan.layout.contentLayout !== 'single-column' &&
       signals.sections.some((section) => section.type === 'sidebar') &&
       signals.sections.some((section) => section.type === 'comments');
+    if (componentPlan.visualPlan.layout.sidebarScope === 'all-content') {
+      return {
+        enabled: false,
+        reason:
+          'all-content sidebar layout prefers full-file deterministic shell',
+      };
+    }
     const richPageDetailCandidate = Boolean(
       isPageDetail &&
       !isPostDetail &&
@@ -1539,6 +1635,45 @@ export class CodeReviewerService {
     return { enabled, reason };
   }
 
+  private shouldPreferDeterministicPlan(
+    componentPlan: ComponentPromptContext | undefined,
+  ): boolean {
+    if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (!componentPlan?.visualPlan) return false;
+    if (shouldProtectDeterministicStructureFromAi(componentPlan.visualPlan)) {
+      return true;
+    }
+    return isHybridDetailPlanWithoutCanonicalBody({
+      visualPlan: componentPlan.visualPlan,
+      dataNeeds: componentPlan.dataNeeds,
+      isDetail: componentPlan.isDetail,
+    });
+  }
+
+  private isStrictDeterministicAuthority(
+    componentPlan: ReviewInput['componentPlan'] | undefined,
+  ): boolean {
+    if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (!componentPlan?.visualPlan) return false;
+    if (shouldBypassAiGenerationForVisualPlan(componentPlan.visualPlan)) {
+      return true;
+    }
+    return (
+      componentPlan.visualPlan.renderMode === 'block-centric' &&
+      componentPlan.planningSourceReason ===
+        'block-tree deterministic visual plan path'
+    );
+  }
+
+  private canUseDeterministicGeneration(
+    componentPlan:
+      | ComponentPromptContext
+      | ReviewInput['componentPlan']
+      | undefined,
+  ): boolean {
+    return componentPlan?.type === 'partial';
+  }
+
   private getVisualPlanSectionSignals(
     componentPlan: ComponentPromptContext | undefined,
   ): {
@@ -1583,46 +1718,6 @@ export class CodeReviewerService {
     };
   }
 
-  private toVisualDataNeeds(dataNeeds?: string[]): DataNeed[] {
-    const ordered: DataNeed[] = [
-      'postDetail',
-      'pageDetail',
-      'comments',
-      'posts',
-      'pages',
-      'menus',
-      'siteInfo',
-      'footerLinks',
-    ];
-    const mapped = new Set<DataNeed>();
-
-    for (const need of dataNeeds ?? []) {
-      switch (need) {
-        case 'site-info':
-          mapped.add('siteInfo');
-          break;
-        case 'footer-links':
-          mapped.add('footerLinks');
-          break;
-        case 'post-detail':
-          mapped.add('postDetail');
-          break;
-        case 'page-detail':
-          mapped.add('pageDetail');
-          break;
-        case 'comments':
-          mapped.add('comments');
-          break;
-        case 'posts':
-        case 'pages':
-        case 'menus':
-          mapped.add(need);
-          break;
-      }
-    }
-
-    return ordered.filter((need) => mapped.has(need));
-  }
   private async generateComponentWithPlan(input: {
     componentName: string;
     templateSource: string;
@@ -3596,6 +3691,9 @@ export class CodeReviewerService {
           '- Wrap the trigger button in `uagb-spectra-button-wrapper` and keep the trigger button class `uagb-modal-trigger uagb-modal-button-link`.',
         );
         lines.push(
+          '- The trigger must remain visibly rendered in normal document flow before the popup opens. Do not hide it with `hidden`, `sr-only`, `invisible`, `opacity-0`, `display:none`, zero-sized wrappers, or by moving the label text off-screen.',
+        );
+        lines.push(
           '- Keep the open popup hierarchy `uagb-modal-popup active > uagb-modal-popup-wrap > uagb-modal-popup-content` and include `uagb-modal-popup-close` for the close button.',
         );
         lines.push(
@@ -3610,8 +3708,23 @@ export class CodeReviewerService {
         lines.push(
           '- Use `setOpenModals` to open and close the popup; do not introduce local hooks inside the section JSX.',
         );
+        if (!section.overlayColor) {
+          lines.push(
+            '- No source-backed overlayColor was approved for this modal. Use a soft translucent backdrop, not an opaque or near-black fullscreen overlay.',
+          );
+        }
         break;
       case 'media-text':
+        if (section.background) {
+          lines.push(
+            `- Preserve section background exactly: ${JSON.stringify(section.background)}.`,
+          );
+        }
+        if (section.textColor) {
+          lines.push(
+            `- Preserve section textColor exactly: ${JSON.stringify(section.textColor)}.`,
+          );
+        }
         if (section.imageSrc) {
           lines.push(
             `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
@@ -3781,6 +3894,12 @@ export class CodeReviewerService {
       'If a section below includes blueprint style or layout fields such as presentation, ctaStyle, secondaryCtaStyle, cardStyle, quoteStyle, authorStyle, imageRadius, imageAspectRatio, triggerStyle, slideHeight, dotsColor, arrowColor, arrowBackground, width, height, activeTab, variant, tabAlign, allowMultiple, enableToggle, defaultOpenItems, itemLayout, metaLayout, metaAlign, metaSeparator, itemGap, or metaGap, preserve and re-apply those exact values.',
       'Do not replace approved blueprint styles with prettier defaults, palette fallbacks, or generic token-based classes when the plan already provides exact visual values.',
       'If the approved plan includes source `customClassNames` on the section itself, CTA/link elements, images, card wrappers, avatar elements, or nested text nodes such as headings, quotes, subtitles, tab panels, accordion bodies, and modal copy, preserve those exact class tokens on the corresponding rendered JSX elements. Do not collapse them onto the wrong wrapper or delete them during fixes.',
+      ...(componentPlan.visualPlan.blockTree?.length
+        ? [
+            'The approved plan also includes a preserved WordPress `blockTree`. Treat it as the structural source of truth for wrapper order, columns/column ownership, template-part boundaries, and sidebar shell placement.',
+            'Do NOT flatten block wrappers into a simpler section stack during repair. Keep group nesting, main/aside ownership, and source-backed shell spacing intact while repairing the JSX.',
+          ]
+        : []),
       ...(componentPlan.visualPlan.sections.some(
         (section) => section.type === 'cover',
       )
@@ -4324,6 +4443,22 @@ export class CodeReviewerService {
     return lines.join('\n');
   }
 
+  private extractCustomClassNamesFromBlockTree(
+    nodes?: readonly BlockNode[],
+  ): string[] {
+    if (!nodes?.length) return [];
+    const result = new Set<string>();
+    const visit = (node: BlockNode) => {
+      for (const className of node.customClassNames ?? []) {
+        const normalized = className.trim();
+        if (normalized) result.add(normalized);
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return [...result];
+  }
+
   private extractCustomClassNamesFromSection(section: SectionPlan): string[] {
     const result = new Set<string>();
     const add = (values?: string[]) => {
@@ -4487,14 +4622,10 @@ export class CodeReviewerService {
   // ── Code post-processors ──────────────────────────────────────────────────
 
   private postProcessCode(code: string): string {
-    return this.promotePlainTextPostMetaLinks(
-      this.ensureHoverUnderlineOnCanonicalTextLinks(
-        this.normalizePlainTextPostMetaArchiveLinks(
-          this.normalizeTailwindFunctionSpacing(
-            this.fixDoublebraces(
-              this.mergeClassNames(this.stripMarkdownFences(code)),
-            ),
-          ),
+    return normalizeCanonicalPostMetaAndTextLinks(
+      this.normalizeTailwindFunctionSpacing(
+        this.fixDoublebraces(
+          this.mergeClassNames(this.stripMarkdownFences(code)),
         ),
       ),
     );
@@ -4557,51 +4688,6 @@ export class CodeReviewerService {
       (_match, fnName: string, inner: string) =>
         `[${fnName}(${inner.replace(/,\s+/g, ',')})]`,
     );
-  }
-
-  private ensureHoverUnderlineOnCanonicalTextLinks(code: string): string {
-    return code.replace(/<(Link|a)\b[\s\S]{0,400}?>/g, (rawTag) => {
-      if (!/\bclassName="[^"]*"/.test(rawTag)) return rawTag;
-      if (/hover:underline/.test(rawTag) || /\bno-underline\b/.test(rawTag)) {
-        return rawTag;
-      }
-
-      const looksLikeButton =
-        /\bbg-\[/.test(rawTag) ||
-        (/\bpx-/.test(rawTag) && /\bpy-/.test(rawTag)) ||
-        /\bjustify-center\b/.test(rawTag);
-      if (looksLikeButton) return rawTag;
-
-      const isCanonicalTextLink =
-        /\/(?:post|page|author|category|tag)\//.test(rawTag) ||
-        /\bitem\.url\b/.test(rawTag) ||
-        /\btoAppPath\(item\.url\)\b/.test(rawTag) ||
-        /\bhref=["']https?:\/\//.test(rawTag);
-      if (!isCanonicalTextLink) return rawTag;
-
-      return rawTag.replace(
-        /\bclassName="([^"]*)"/,
-        (_match, classes: string) =>
-          `className="${this.appendUniqueClasses(
-            classes,
-            'hover:underline underline-offset-4',
-          )}"`,
-      );
-    });
-  }
-
-  private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
-  }
-
-  private promotePlainTextPostMetaLinks(code: string): string {
-    return promoteSharedPlainTextPostMetaLinks(code);
-  }
-
-  private appendUniqueClasses(existing: string, addition: string): string {
-    return [...new Set(`${existing} ${addition}`.split(/\s+/).filter(Boolean))]
-      .join(' ')
-      .trim();
   }
 
   /**

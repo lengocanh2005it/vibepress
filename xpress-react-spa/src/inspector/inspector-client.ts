@@ -65,22 +65,6 @@ function shortenPath(filePath: string): string {
   return idx !== -1 ? filePath.slice(idx + 1) : filePath;
 }
 
-// Walk up DOM để tìm nearest ancestor có minimal tracking markers
-function getVpSection(el: Element) {
-  let node: Element | null = el;
-  while (node) {
-    if (node.hasAttribute("data-vp-source-node")) {
-      return {
-        vpSourceNode: node.getAttribute("data-vp-source-node") ?? undefined,
-        vpSectionKey: node.getAttribute("data-vp-section-key") ?? undefined,
-        vpComponent: node.getAttribute("data-vp-component") ?? undefined,
-      };
-    }
-    node = node.parentElement;
-  }
-  return {};
-}
-
 // Suy ra semantic role từ HTML tag
 function inferNodeRole(tag: string): string {
   const t = tag.toLowerCase();
@@ -93,6 +77,15 @@ function inferNodeRole(tag: string): string {
   if (["ul", "ol", "li"].includes(t)) return "list";
   if (["nav", "header", "footer", "main", "section", "article", "aside"].includes(t)) return "section";
   return "container";
+}
+
+function roundMetric(value: number, digits = 4): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function clampRatio(value: number): number {
+  return Math.min(Math.max(roundMetric(value), 0), 1);
 }
 
 // ─── Overlay UI ─────────────────────────────────────────────────────────────
@@ -201,6 +194,58 @@ function onClick(e: MouseEvent) {
   const src = getDebugSource(fiber);
   const rect = el.getBoundingClientRect();
   const textContent = (el.textContent ?? "").trim().slice(0, 100);
+  const docEl = document.documentElement;
+  const body = document.body;
+  const viewport = {
+    width: Math.max(1, Math.round(window.innerWidth || docEl.clientWidth || 1)),
+    height: Math.max(1, Math.round(window.innerHeight || docEl.clientHeight || 1)),
+    scrollX: Math.max(0, Math.round(window.scrollX || 0)),
+    scrollY: Math.max(0, Math.round(window.scrollY || 0)),
+    dpr: Math.max(1, window.devicePixelRatio || 1),
+  };
+  const documentMetrics = {
+    width: Math.max(
+      viewport.width,
+      Math.round(
+        docEl.scrollWidth ||
+          body.scrollWidth ||
+          docEl.clientWidth ||
+          body.clientWidth ||
+          viewport.width,
+      ),
+    ),
+    height: Math.max(
+      viewport.height,
+      Math.round(
+        docEl.scrollHeight ||
+          body.scrollHeight ||
+          docEl.clientHeight ||
+          body.clientHeight ||
+          viewport.height,
+      ),
+    ),
+  };
+  const viewportRect = {
+    x: Math.max(0, roundMetric(rect.left)),
+    y: Math.max(0, roundMetric(rect.top)),
+    width: Math.max(1, roundMetric(rect.width)),
+    height: Math.max(1, roundMetric(rect.height)),
+    coordinateSpace: "iframe-viewport" as const,
+  };
+  const documentRect = {
+    x: roundMetric(viewportRect.x + viewport.scrollX),
+    y: roundMetric(viewportRect.y + viewport.scrollY),
+    width: viewportRect.width,
+    height: viewportRect.height,
+    coordinateSpace: "iframe-document" as const,
+  };
+  const normalizedRect = {
+    x: clampRatio(documentRect.x / Math.max(1, documentMetrics.width)),
+    y: clampRatio(documentRect.y / Math.max(1, documentMetrics.height)),
+    width: clampRatio(documentRect.width / Math.max(1, documentMetrics.width)),
+    height: clampRatio(documentRect.height / Math.max(1, documentMetrics.height)),
+    coordinateSpace: "iframe-document-normalized" as const,
+  };
 
   window.parent.postMessage(
     {
@@ -211,6 +256,11 @@ function onClick(e: MouseEvent) {
         text: textContent,
         classes: Array.from(el.classList),
         rect: { w: Math.round(rect.width), h: Math.round(rect.height) },
+        viewport,
+        document: documentMetrics,
+        viewportRect,
+        documentRect,
+        normalizedRect,
         source: src
           ? {
               file: shortenPath(src.fileName),
@@ -218,9 +268,7 @@ function onClick(e: MouseEvent) {
               column: src.columnNumber,
             }
           : undefined,
-        // Layer 2: section identity từ data-vp-* trên nearest ancestor
-        ...getVpSection(el),
-        // Layer 3: child node targeting
+        // Soft element-level signals for exact mutation routing
         targetNodeRole: inferNodeRole(el.tagName),
         targetElementTag: el.tagName.toLowerCase(),
         targetTextPreview: textContent,

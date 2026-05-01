@@ -44,6 +44,7 @@ import {
   SOURCE_MOTION_BRIDGE_CSS,
   SPECTRA_COMPAT_CSS,
 } from './preview-bridge-assets.js';
+import { SectionManifestService } from './section-manifest.service.js';
 
 export interface PreviewRouteEntry {
   route: string;
@@ -75,6 +76,7 @@ export class PreviewBuilderService {
     private readonly configService: ConfigService,
     private assetDownloader: AssetDownloaderService,
     private readonly validator: ValidatorService,
+    private readonly sectionManifest: SectionManifestService,
   ) {}
 
   async build(input: {
@@ -284,17 +286,6 @@ export class PreviewBuilderService {
       const headerJsx = headerComp ? `      <${headerComp.name} />` : '';
       const footerJsx = footerComp ? `      <${footerComp.name} />` : '';
 
-      // Apply theme root background/text color so Layout wrapper matches the WP site
-      const rootStyleParts: string[] = [];
-      if (tokens?.defaults?.bgColor)
-        rootStyleParts.push(`backgroundColor: '${tokens.defaults.bgColor}'`);
-      if (tokens?.defaults?.textColor)
-        rootStyleParts.push(`color: '${tokens.defaults.textColor}'`);
-      const rootStyle =
-        rootStyleParts.length > 0
-          ? ` style={{${rootStyleParts.join(', ')}}}`
-          : '';
-
       const layoutLines = [
         `import React from 'react';`,
         headerImport,
@@ -302,9 +293,9 @@ export class PreviewBuilderService {
         ``,
         `export default function Layout({ children }: { children: React.ReactNode }) {`,
         `  return (`,
-        `    <div className="min-h-screen flex flex-col"${rootStyle}>`,
+        `    <div className="wp-site-blocks min-h-screen flex flex-col">`,
         headerJsx,
-        `      <main className="flex-1">{children}</main>`,
+        `      <main className="flex-1 min-w-0">{children}</main>`,
         footerJsx,
         `    </div>`,
         `  );`,
@@ -477,6 +468,18 @@ ${routesBlock}
 }
 `,
     );
+
+    // 4a. Write section-manifest.json for post-build capture-to-component routing
+    if (plan) {
+      const manifest = this.sectionManifest.generateManifest(
+        plan,
+        routeEntries,
+      );
+      await this.sectionManifest.writeManifest(rootDir, manifest);
+      this.logger.log(
+        `Generated section-manifest.json with ${manifest.length} component entries`,
+      );
+    }
 
     // 4. Generate tailwind.config.js + inject Google Fonts từ theme tokens
     if (tokens) {
@@ -738,6 +741,210 @@ ${fontEntries}
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
     await this.injectWordPressBridgeClasses(frontendDir, tokens);
+    if (themeDir) {
+      await this.applyThemeJsonGlobalStyles(frontendDir, themeDir);
+    }
+  }
+
+  private async applyThemeJsonGlobalStyles(
+    frontendDir: string,
+    themeDir: string,
+  ): Promise<void> {
+    const marker = '/* Vibepress theme.json global styles */';
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existing = await readFile(cssPath, 'utf-8');
+    if (existing.includes(marker)) return;
+
+    let themeJson: any;
+    try {
+      themeJson = JSON.parse(
+        await readFile(join(themeDir, 'theme.json'), 'utf-8'),
+      );
+    } catch {
+      return;
+    }
+
+    const styles = themeJson.styles ?? {};
+    const lines: string[] = [marker];
+
+    const toCssDecls = (s: any): string => {
+      const p: string[] = [];
+      if (s?.color?.background)
+        p.push(`background-color: ${s.color.background};`);
+      if (s?.color?.text) p.push(`color: ${s.color.text};`);
+      if (s?.color?.gradient) p.push(`background: ${s.color.gradient};`);
+      if (s?.typography?.fontFamily)
+        p.push(`font-family: ${s.typography.fontFamily};`);
+      if (s?.typography?.fontSize)
+        p.push(`font-size: ${s.typography.fontSize};`);
+      if (s?.typography?.fontWeight)
+        p.push(`font-weight: ${s.typography.fontWeight};`);
+      if (s?.typography?.fontStyle)
+        p.push(`font-style: ${s.typography.fontStyle};`);
+      if (s?.typography?.lineHeight)
+        p.push(`line-height: ${s.typography.lineHeight};`);
+      if (s?.typography?.letterSpacing)
+        p.push(`letter-spacing: ${s.typography.letterSpacing};`);
+      if (s?.typography?.textDecoration)
+        p.push(`text-decoration: ${s.typography.textDecoration};`);
+      if (s?.typography?.textTransform)
+        p.push(`text-transform: ${s.typography.textTransform};`);
+      const pad = s?.spacing?.padding;
+      if (pad && typeof pad === 'object') {
+        if (pad.top) p.push(`padding-top: ${pad.top};`);
+        if (pad.right) p.push(`padding-right: ${pad.right};`);
+        if (pad.bottom) p.push(`padding-bottom: ${pad.bottom};`);
+        if (pad.left) p.push(`padding-left: ${pad.left};`);
+      } else if (typeof pad === 'string') {
+        p.push(`padding: ${pad};`);
+      }
+      const mar = s?.spacing?.margin;
+      if (mar && typeof mar === 'object') {
+        if (mar.top) p.push(`margin-top: ${mar.top};`);
+        if (mar.right) p.push(`margin-right: ${mar.right};`);
+        if (mar.bottom) p.push(`margin-bottom: ${mar.bottom};`);
+        if (mar.left) p.push(`margin-left: ${mar.left};`);
+      } else if (typeof mar === 'string') {
+        p.push(`margin: ${mar};`);
+      }
+      if (s?.border?.radius) p.push(`border-radius: ${s.border.radius};`);
+      if (s?.border?.color) p.push(`border-color: ${s.border.color};`);
+      if (s?.border?.width) p.push(`border-width: ${s.border.width};`);
+      if (s?.border?.style) p.push(`border-style: ${s.border.style};`);
+      if (s?.outline?.color) p.push(`outline-color: ${s.outline.color};`);
+      if (s?.outline?.offset) p.push(`outline-offset: ${s.outline.offset};`);
+      if (s?.outline?.width) p.push(`outline-width: ${s.outline.width};`);
+      return p.join(' ');
+    };
+
+    const rule = (selector: string, s: any): void => {
+      const decls = toCssDecls(s);
+      if (decls.trim()) lines.push(`${selector} { ${decls} }`);
+    };
+
+    const pseudoStates = [':hover', ':focus', ':active', ':visited'] as const;
+
+    const applyElementStyle = (selector: string, s: any): void => {
+      rule(selector, s);
+      for (const pseudo of pseudoStates) {
+        if (s?.[pseudo]) rule(`${selector}${pseudo}`, s[pseudo]);
+      }
+      if (s?.elements?.link) {
+        rule(`${selector} a`, s.elements.link);
+        for (const pseudo of pseudoStates) {
+          if (s.elements.link[pseudo])
+            rule(`${selector} a${pseudo}`, s.elements.link[pseudo]);
+        }
+      }
+    };
+
+    // Body / global styles
+    rule('body', styles);
+
+    // Element styles
+    const elementSelectors: Record<string, string> = {
+      link: 'a',
+      caption: 'figcaption, caption',
+      heading: 'h1, h2, h3, h4, h5, h6',
+      h1: 'h1',
+      h2: 'h2',
+      h3: 'h3',
+      h4: 'h4',
+      h5: 'h5',
+      h6: 'h6',
+      button: '.wp-block-button__link, .wp-element-button',
+    };
+    for (const [elemKey, selector] of Object.entries(elementSelectors)) {
+      const s = styles.elements?.[elemKey];
+      if (s) applyElementStyle(selector, s);
+    }
+
+    // Block styles
+    const blockSelectors: Record<string, string> = {
+      'core/button': '.wp-block-button .wp-block-button__link',
+      'core/buttons': '.wp-block-buttons',
+      'core/code': '.wp-block-code',
+      'core/gallery': '.wp-block-gallery',
+      'core/image': '.wp-block-image',
+      'core/list': '.wp-block-list',
+      'core/navigation': '.wp-block-navigation',
+      'core/pullquote': '.wp-block-pullquote',
+      'core/quote': '.wp-block-quote',
+      'core/separator': '.wp-block-separator',
+      'core/post-title': '.wp-block-post-title',
+      'core/post-excerpt': '.wp-block-post-excerpt',
+      'core/post-date': '.wp-block-post-date',
+      'core/site-title': '.wp-block-site-title',
+      'core/site-tagline': '.wp-block-site-tagline',
+      'core/search': '.wp-block-search',
+      'core/footnotes': '.wp-block-footnotes',
+    };
+
+    for (const [blockKey, selector] of Object.entries(blockSelectors)) {
+      const bs = styles.blocks?.[blockKey];
+      if (!bs) continue;
+
+      rule(selector, bs);
+
+      if (bs.elements?.link) {
+        applyElementStyle(`${selector} a`, bs.elements.link);
+      }
+      if (bs.elements?.heading) {
+        applyElementStyle(
+          `${selector} h1, ${selector} h2, ${selector} h3`,
+          bs.elements.heading,
+        );
+      }
+
+      // Raw CSS — & refers to the block selector
+      if (bs.css) {
+        lines.push(bs.css.replace(/&/g, selector));
+      }
+
+      // Block style variations (is-style-*)
+      if (bs.variations) {
+        for (const [varKey, varStyle] of Object.entries(
+          bs.variations as Record<string, any>,
+        )) {
+          let varSel: string;
+          if (blockKey === 'core/button') {
+            varSel = `.wp-block-button.is-style-${varKey} .wp-block-button__link`;
+          } else if (blockKey === 'core/image') {
+            varSel = `.wp-block-image.is-style-${varKey} img`;
+          } else {
+            varSel = `${selector}.is-style-${varKey}`;
+          }
+          rule(varSel, varStyle);
+          if ((varStyle as any).css) {
+            lines.push((varStyle as any).css.replace(/&/g, varSel));
+          }
+        }
+      }
+    }
+
+    // Raw CSS from top-level styles.css
+    if (styles.css) {
+      lines.push(styles.css);
+    }
+
+    // Inject CSS files from theme assets/css/
+    try {
+      const assetsCssDir = join(themeDir, 'assets', 'css');
+      const cssFiles = await readdir(assetsCssDir).catch(() => []);
+      for (const cssFile of cssFiles.filter((f) => f.endsWith('.css'))) {
+        const content = await readFile(join(assetsCssDir, cssFile), 'utf-8');
+        lines.push(`/* theme ${cssFile} */\n${content}`);
+      }
+    } catch {
+      // assets/css may not exist for all themes
+    }
+
+    if (lines.length > 1) {
+      await writeFile(
+        cssPath,
+        `${existing.trimEnd()}\n\n${lines.join('\n')}\n`,
+      );
+    }
   }
 
   private async buildLocalThemeFontFaceCss(
@@ -1819,11 +2026,19 @@ ${fontEntries}
     componentName?: string,
   ): string {
     let normalized = this.decorateGeneratedInteractionClasses(code, tokens);
+    normalized = this.stripLegacyVpDataAttributes(normalized);
     normalized = this.normalizeCanonicalTextLinkHoverClasses(normalized);
     normalized = this.normalizeCanonicalPostMetaLinks(normalized);
     normalized = this.normalizeSinglePostHeroLayout(normalized, componentName);
     normalized = this.ensureReactRouterLinkImport(normalized);
     return normalized;
+  }
+
+  private stripLegacyVpDataAttributes(code: string): string {
+    return code.replace(
+      /\sdata-vp-[a-z0-9-]+=(?:"[^"]*"|'[^']*'|\{[\s\S]*?\})/gi,
+      '',
+    );
   }
 
   private decorateGeneratedInteractionClasses(

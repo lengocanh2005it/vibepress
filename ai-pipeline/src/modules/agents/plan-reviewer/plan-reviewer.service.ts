@@ -2,12 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { ComponentPlan, PlanResult } from '../planner/planner.service.js';
 import type {
   ComponentVisualPlan,
-  DataNeed as VisualDataNeed,
   SectionPlan,
 } from '../react-generator/visual-plan.schema.js';
 import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-plan.prompt.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -476,7 +476,7 @@ export class PlanReviewerService {
         stripLayoutSections,
       ),
     );
-    const nextDataNeeds = this.toVisualDataNeeds(item.dataNeeds);
+    const nextDataNeeds = toVisualDataNeeds(item.dataNeeds);
     const sanitizedSections = sanitizeSectionsForContract(filteredSections, {
       componentType: item.type,
       route: item.route,
@@ -572,35 +572,6 @@ export class PlanReviewerService {
       return false;
     }
     return true;
-  }
-
-  private toVisualDataNeeds(dataNeeds: string[]): VisualDataNeed[] {
-    const mapped = new Set<VisualDataNeed>();
-    for (const need of dataNeeds) {
-      switch (need) {
-        case 'site-info':
-          mapped.add('siteInfo');
-          break;
-        case 'footer-links':
-          mapped.add('footerLinks');
-          break;
-        case 'post-detail':
-          mapped.add('postDetail');
-          break;
-        case 'page-detail':
-          mapped.add('pageDetail');
-          break;
-        case 'comments':
-          mapped.add('comments');
-          break;
-        case 'posts':
-        case 'pages':
-        case 'menus':
-          mapped.add(need);
-          break;
-      }
-    }
-    return this.orderVisualDataNeeds([...mapped]);
   }
 
   private fixDuplicateRoutes(
@@ -921,7 +892,7 @@ export class PlanReviewerService {
       componentType: item.type,
       route: item.route,
       isDetail: item.isDetail,
-      dataNeeds: this.toVisualDataNeeds(item.dataNeeds),
+      dataNeeds: toVisualDataNeeds(item.dataNeeds),
       stripLayoutChrome: item.type === 'page',
       sourceBackedAuxiliaryLabels: item.sourceBackedAuxiliaryLabels,
     });
@@ -1473,20 +1444,6 @@ export class PlanReviewerService {
       'menus',
       'site-info',
       'footer-links',
-    ];
-    return order.filter((need) => dataNeeds.includes(need));
-  }
-
-  private orderVisualDataNeeds(dataNeeds: VisualDataNeed[]): VisualDataNeed[] {
-    const order: VisualDataNeed[] = [
-      'postDetail',
-      'pageDetail',
-      'comments',
-      'posts',
-      'pages',
-      'menus',
-      'siteInfo',
-      'footerLinks',
     ];
     return order.filter((need) => dataNeeds.includes(need));
   }

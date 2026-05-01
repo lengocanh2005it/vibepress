@@ -1,4 +1,6 @@
 import type { SourceRef } from '../../../common/utils/source-node-id.util.js';
+import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
+export type { BlockNode };
 
 // ── Visual Plan Schema ─────────────────────────────────────────────────────
 // Planner builds ComponentVisualPlan and injects it into ComponentPlan.
@@ -376,6 +378,20 @@ export interface PostContentSection extends BaseSection {
   showCategories: boolean;
 }
 
+export interface PostTitleSection extends BaseSection {
+  type: 'post-title';
+  level?: 1 | 2 | 3 | 4 | 5 | 6;
+  titleCustomClassNames?: string[];
+  titleStyle?: TypographyStyle;
+}
+
+export interface PostFeaturedImageSection extends BaseSection {
+  type: 'post-featured-image';
+  imageRadius?: string;
+  imageAspectRatio?: string;
+  imageCustomClassNames?: string[];
+}
+
 export interface PostMetaSection extends BaseSection {
   type: 'post-meta';
   layout?: 'inline' | 'stacked';
@@ -383,6 +399,22 @@ export interface PostMetaSection extends BaseSection {
   showDate: boolean;
   showCategories: boolean;
   showSeparator?: boolean;
+}
+
+export interface PostTermsSection extends BaseSection {
+  type: 'post-terms';
+  taxonomy?: 'category' | 'post_tag' | 'tag';
+  prefix?: string;
+  separator?: string;
+  layout?: 'inline' | 'stacked';
+}
+
+export interface PostNavigationSection extends BaseSection {
+  type: 'post-navigation';
+  showPrevious?: boolean;
+  showNext?: boolean;
+  previousLabel?: string;
+  nextLabel?: string;
 }
 
 export interface CommentsSection extends BaseSection {
@@ -565,7 +597,11 @@ export type SectionPlan =
   | NewsletterSection
   | FooterSection
   | PostContentSection
+  | PostTitleSection
+  | PostFeaturedImageSection
   | PostMetaSection
+  | PostTermsSection
+  | PostNavigationSection
   | PageContentSection
   | ProseBlockSection
   | SearchSection
@@ -602,12 +638,34 @@ export interface LayoutTokens {
   blockGap: string; // Tailwind gap class between sections, e.g. "gap-16"
   contentLayout?: 'single-column' | 'sidebar-right' | 'sidebar-left';
   sidebarWidth?: string; // exact CSS width for sidebar column, e.g. "320px"
+  sidebarScope?: 'main-only' | 'all-content';
   buttonPadding?: string; // exact CSS padding shorthand from theme defaults
   imageRadius?: string; // exact border radius for image-like blocks
   cardRadius?: string; // exact border radius for cards/groups
   cardPadding?: string; // exact CSS padding shorthand for group/card-like surfaces
   /** Partial component names this page should import, e.g. ["Header", "Footer"] */
   includes: string[];
+}
+
+export type VisualPlanRenderMode =
+  | 'section-centric'
+  | 'hybrid'
+  | 'block-centric';
+
+export type VisualPlanRenderAuthority =
+  | 'ai'
+  | 'deterministic-structure'
+  | 'deterministic-pixel';
+
+export interface VisualPlanLockPolicy {
+  /** When true, downstream must not hand this component back to AI codegen. */
+  bypassAiGeneration?: boolean;
+  /** When true, reviewer/fixer must not allow AI structural rewrites. */
+  bypassAiReviewRewrite?: boolean;
+  /** Narrow exception list for AI repair modes that are still allowed. */
+  allowAiFixModes?: Array<'syntax-only' | 'import-only'>;
+  /** Human-readable explanation for logs/artifacts. */
+  reason?: string;
 }
 
 export interface ComponentVisualPlan {
@@ -628,8 +686,25 @@ export interface ComponentVisualPlan {
   layout: LayoutTokens;
   /** Block-level style presets derived from theme tokens/style.css */
   blockStyles?: Record<string, BlockStyleToken>;
+  /**
+   * Render authority for this plan:
+   * - section-centric: sections own both structure and behavior
+   * - hybrid: blockTree owns structure, sections own behavior/data contracts
+   * - block-centric: blockTree is authoritative for both structure and rendering
+   */
+  renderMode?: VisualPlanRenderMode;
+  /** When true, downstream generation/repair must stay on the deterministic path
+   *  and must not hand structural rendering back to AI. */
+  deterministicAuthority?: boolean;
+  /** Granular render authority level for deterministic contracts. */
+  renderAuthority?: VisualPlanRenderAuthority;
+  /** Downstream lock policy derived by planner for deterministic-safe components. */
+  lockPolicy?: VisualPlanLockPolicy;
   /** Section layout — the only thing AI contributes */
   sections: SectionPlan[];
+  /** Preserved WordPress block tree for block-centric rendering. When present,
+   *  codegen uses this as the primary render source instead of sections[]. */
+  blockTree?: BlockNode[];
 }
 
 export function normalizeVisualPlanArchitecture(
@@ -649,6 +724,65 @@ export function normalizeVisualPlanArchitecture(
       };
     }),
   };
+}
+
+export function getVisualPlanRenderAuthority(
+  visualPlan:
+    | Pick<
+        ComponentVisualPlan,
+        'renderAuthority' | 'deterministicAuthority' | 'renderMode'
+      >
+    | undefined,
+): VisualPlanRenderAuthority {
+  if (visualPlan?.renderAuthority) return visualPlan.renderAuthority;
+  if (
+    visualPlan?.deterministicAuthority === true &&
+    visualPlan.renderMode === 'block-centric'
+  ) {
+    return 'deterministic-structure';
+  }
+  return 'ai';
+}
+
+export function isDeterministicVisualPlan(
+  visualPlan:
+    | Pick<
+        ComponentVisualPlan,
+        'renderAuthority' | 'deterministicAuthority' | 'renderMode'
+      >
+    | undefined,
+): boolean {
+  return getVisualPlanRenderAuthority(visualPlan) !== 'ai';
+}
+
+export function shouldBypassAiGenerationForVisualPlan(
+  visualPlan:
+    | Pick<
+        ComponentVisualPlan,
+        | 'renderAuthority'
+        | 'deterministicAuthority'
+        | 'renderMode'
+        | 'lockPolicy'
+      >
+    | undefined,
+): boolean {
+  if (visualPlan?.lockPolicy?.bypassAiGeneration === true) return true;
+  return getVisualPlanRenderAuthority(visualPlan) === 'deterministic-pixel';
+}
+
+export function shouldProtectDeterministicStructureFromAi(
+  visualPlan:
+    | Pick<
+        ComponentVisualPlan,
+        | 'renderAuthority'
+        | 'deterministicAuthority'
+        | 'renderMode'
+        | 'lockPolicy'
+      >
+    | undefined,
+): boolean {
+  if (visualPlan?.lockPolicy?.bypassAiReviewRewrite === true) return true;
+  return isDeterministicVisualPlan(visualPlan);
 }
 
 function deriveSectionObligation(section: SectionPlan): SectionObligation {
@@ -791,6 +925,18 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
         required: ['post-content'],
         sourceEvidence,
       };
+    case 'post-title':
+      return {
+        role: 'post-title',
+        required: ['heading'],
+        sourceEvidence,
+      };
+    case 'post-featured-image':
+      return {
+        role: 'post-featured-image',
+        required: ['image'],
+        sourceEvidence,
+      };
     case 'page-content':
       return {
         role: 'page-content',
@@ -835,6 +981,18 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
             ? []
             : (['comment-form'] as SectionCapability[])),
         ],
+        sourceEvidence,
+      };
+    case 'post-terms':
+      return {
+        role: 'post-terms',
+        required: [],
+        sourceEvidence,
+      };
+    case 'post-navigation':
+      return {
+        role: 'post-navigation',
+        required: ['posts'],
         sourceEvidence,
       };
     case 'sidebar':

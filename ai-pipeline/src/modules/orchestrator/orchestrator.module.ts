@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OrchestratorController } from './orchestrator.controller.js';
+import { OrchestratorRuntimeSupportService } from './orchestrator-runtime-support.service.js';
 import { OrchestratorService } from './orchestrator.service.js';
 import { SqlModule } from '../sql/sql.module.js';
 import { RepoAnalyzerModule } from '../agents/repo-analyzer/repo-analyzer.module.js';
@@ -45,6 +46,10 @@ import { SiteCompareModule } from '../site-compare/site-compare.module.js';
     SiteCompareModule,
   ],
   controllers: [OrchestratorController],
-  providers: [OrchestratorService, DbTemplateOverlayService],
+  providers: [
+    OrchestratorService,
+    OrchestratorRuntimeSupportService,
+    DbTemplateOverlayService,
+  ],
 })
 export class OrchestratorModule {}

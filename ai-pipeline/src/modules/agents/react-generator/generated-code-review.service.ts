@@ -5,12 +5,21 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { CardGridSection, SectionPlan } from './visual-plan.schema.js';
+import type {
+  BlockNode,
+  CardGridSection,
+  SectionPlan,
+} from './visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   getExactInventedAuxiliaryLabel,
   mergeAuxiliaryLabels,
 } from './auxiliary-section.guard.js';
+import {
+  FIXED_PAGE_DETAIL_CANONICAL_BODY_REQUIRED_REVIEW_MESSAGE,
+  FIXED_PAGE_DETAIL_DUPLICATE_MODE_REVIEW_MESSAGE,
+  FIXED_PAGE_DETAIL_NARROW_SHELL_REVIEW_MESSAGE,
+} from './prompt-policy.util.js';
 
 interface CodeReviewIssue {
   severity: 'high' | 'medium' | 'low';
@@ -209,6 +218,7 @@ export class GeneratedCodeReviewService {
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
     const visualSections =
       visualSectionTypes.length > 0 ? visualSectionTypes.join(', ') : '(none)';
+    const blockTreeSummary = this.buildBlockTreeDetailLines(contract);
     const knownRoutes = this.buildKnownRoutesLines(plan);
     const isArchive = component.name === 'Archive';
 
@@ -262,6 +272,8 @@ Approved contract:
 - approved visual sections: ${visualSections}
 - approved visual section details:
 ${this.buildVisualSectionDetailLines(contract)}
+- approved block hierarchy:
+${blockTreeSummary}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
@@ -419,6 +431,41 @@ ${component.code}
         return `- ${section.type}`;
       })
       .join('\n');
+  }
+
+  private buildBlockTreeDetailLines(
+    contract: PlanResult[number] | null,
+  ): string {
+    const nodes = contract?.visualPlan?.blockTree ?? [];
+    if (nodes.length === 0) return '- (none)';
+
+    const lines: string[] = [];
+    const visit = (items: readonly BlockNode[], depth = 0) => {
+      for (const node of items) {
+        if (lines.length >= 12) return;
+        lines.push(
+          [
+            `${'  '.repeat(depth)}- ${node.kind}`,
+            node.sourceRef?.sourceNodeId
+              ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+              : null,
+            node.templatePartSlug
+              ? `templatePart=${node.templatePartSlug}`
+              : null,
+            node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+          ]
+            .filter(Boolean)
+            .join(' | '),
+        );
+        if (node.children?.length && lines.length < 12) {
+          visit(node.children, depth + 1);
+        }
+      }
+    };
+
+    visit(nodes);
+    if (lines.length >= 12) lines.push('- ...');
+    return lines.join('\n');
   }
 
   private normalizeDataNeed(value: string): string {
@@ -586,8 +633,7 @@ ${component.code}
       ) {
         issues.push({
           severity: 'high',
-          message:
-            'Fixed page-detail component renders `page.content`/`item.content` via `dangerouslySetInnerHTML` while also rendering decomposed source-backed sections. Use exactly one mode: canonical page HTML OR the approved decomposed sections, never both.',
+          message: FIXED_PAGE_DETAIL_DUPLICATE_MODE_REVIEW_MESSAGE,
         });
       }
 
@@ -598,8 +644,7 @@ ${component.code}
       ) {
         issues.push({
           severity: 'high',
-          message:
-            'Fixed page-detail component does not render the fetched `page.content`/`item.content` body via `dangerouslySetInnerHTML`. The canonical page body must be rendered instead of replacing the page with bespoke static sections.',
+          message: FIXED_PAGE_DETAIL_CANONICAL_BODY_REQUIRED_REVIEW_MESSAGE,
         });
       }
 
@@ -621,8 +666,7 @@ ${component.code}
       ) {
         issues.push({
           severity: 'high',
-          message:
-            'Fixed page-detail component wraps the canonical page body in a narrow centered article shell (for example `max-w-[620px] mx-auto` with hero-like centered title treatment) instead of preserving the approved source/template layout shell.',
+          message: FIXED_PAGE_DETAIL_NARROW_SHELL_REVIEW_MESSAGE,
         });
       }
     }
@@ -901,6 +945,20 @@ ${component.code}
           severity: 'high',
           message:
             'Approved modal section renders a Spectra/UAGB popup without an `active` class on the open `.uagb-modal-popup` overlay. The compat CSS keeps `.uagb-modal-popup` hidden until `.active` is present, so the modal opens invisibly.',
+        });
+      }
+      const hasHiddenModalTrigger =
+        /className\s*=\s*\{?["'`][^"'`]*\buagb-modal-trigger\b[^"'`]*\b(?:hidden|sr-only|invisible|opacity-0|pointer-events-none)\b/.test(
+          rawCode,
+        ) ||
+        /\buagb-modal-trigger\b[\s\S]{0,220}style=\{\{[\s\S]{0,120}display\s*:\s*['"`]none['"`]/.test(
+          rawCode,
+        );
+      if (hasHiddenModalTrigger) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Approved modal trigger exists structurally but is hidden or visually suppressed. Keep the trigger visibly rendered in normal document flow before the popup opens.',
         });
       }
     }

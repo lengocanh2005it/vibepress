@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type {
   ComponentVisualPlan,
+  BlockNode,
   ColorPalette,
   TypographyTokens,
   LayoutTokens,
@@ -17,7 +18,11 @@ import type {
   NewsletterSection,
   FooterSection,
   PostContentSection,
+  PostTitleSection,
+  PostFeaturedImageSection,
   PostMetaSection,
+  PostTermsSection,
+  PostNavigationSection,
   PageContentSection,
   ProseBlockSection,
   CommentsSection,
@@ -430,28 +435,68 @@ export class CodeGeneratorService {
       lines.push('      });');
     }
 
-    lines.push('');
-    lines.push('  const toAppPath = (url?: string) => {');
-    lines.push("    if (!url) return '/';");
-    lines.push('    try {');
-    lines.push('      if (!siteInfo?.siteUrl) return url;');
-    lines.push('      const site = new URL(siteInfo.siteUrl);');
-    lines.push('      const resolved = new URL(url, siteInfo.siteUrl);');
-    lines.push('      if (resolved.origin === site.origin) {');
-    lines.push(
-      "        return `${resolved.pathname}${resolved.search}${resolved.hash}` || '/';",
-    );
-    lines.push('      }');
-    lines.push('      return url;');
-    lines.push('    } catch {');
-    lines.push('      return url;');
-    lines.push('    }');
-    lines.push('  };');
-    lines.push('');
-    lines.push('  const isInternalPath = (url?: string) => {');
-    lines.push('    const next = toAppPath(url);');
-    lines.push("    return next.startsWith('/');");
-    lines.push('  };');
+    if (needsFooterLinks && renderState.componentKind === 'footer') {
+      lines.push('');
+      lines.push(
+        "  const normalizeFooterLabel = (value: string) => value.toLowerCase().replace(/\\s+/g, ' ').trim();",
+      );
+      lines.push(
+        '  const scoreFooterColumnByHints = (column: FooterColumn, hintTitles: string[]) => {',
+      );
+      lines.push('    if (hintTitles.length === 0) return 0;');
+      lines.push(
+        '    const labels = (column.links ?? []).map((link) => normalizeFooterLabel(link.label));',
+      );
+      lines.push('    return hintTitles.reduce((score, title) => {');
+      lines.push(
+        '      return score + (labels.includes(normalizeFooterLabel(title)) ? 1 : 0);',
+      );
+      lines.push('    }, 0);');
+      lines.push('  };');
+      lines.push(
+        '  const resolveFooterColumn = (hintTitles: string[] = [], index = 0) => {',
+      );
+      lines.push(
+        '    const pool = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);',
+      );
+      lines.push('    if (pool.length === 0) return null;');
+      lines.push('    const hintedTitles = hintTitles.filter(Boolean);');
+      lines.push('    const scored = pool');
+      lines.push(
+        '      .map((column) => ({ column, score: scoreFooterColumnByHints(column, hintedTitles) }))',
+      );
+      lines.push('      .sort((a, b) => b.score - a.score);');
+      lines.push(
+        '    if ((scored[0]?.score ?? 0) > 0) return scored[0]?.column ?? null;',
+      );
+      lines.push('    return pool[index] ?? pool[0] ?? null;');
+      lines.push('  };');
+    }
+
+    if (needsMenus || needsFooterLinks) {
+      lines.push('');
+      lines.push('  const toAppPath = (url?: string) => {');
+      lines.push("    if (!url) return '/';");
+      lines.push('    try {');
+      lines.push('      if (!siteInfo?.siteUrl) return url;');
+      lines.push('      const site = new URL(siteInfo.siteUrl);');
+      lines.push('      const resolved = new URL(url, siteInfo.siteUrl);');
+      lines.push('      if (resolved.origin === site.origin) {');
+      lines.push(
+        "        return `${resolved.pathname}${resolved.search}${resolved.hash}` || '/';",
+      );
+      lines.push('      }');
+      lines.push('      return url;');
+      lines.push('    } catch {');
+      lines.push('      return url;');
+      lines.push('    }');
+      lines.push('  };');
+      lines.push('');
+      lines.push('  const isInternalPath = (url?: string) => {');
+      lines.push('    const next = toAppPath(url);');
+      lines.push("    return next.startsWith('/');");
+      lines.push('  };');
+    }
 
     if (needsSiteInfo) {
       lines.push('');
@@ -497,9 +542,16 @@ export class CodeGeneratorService {
           break;
         case 'post-content':
         case 'comments':
+        case 'post-title':
+        case 'post-featured-image':
           needs.add('postDetail');
           break;
         case 'post-meta':
+        case 'post-terms':
+          break;
+        case 'post-navigation':
+          needs.add('postDetail');
+          needs.add('posts');
           break;
         case 'page-content':
         case 'prose-block':
@@ -617,6 +669,8 @@ export class CodeGeneratorService {
         'post-list',
         'post-content',
         'post-meta',
+        'post-terms',
+        'post-navigation',
         'search',
         'sidebar',
         'hero',
@@ -642,7 +696,7 @@ export class CodeGeneratorService {
     plan: ComponentVisualPlan,
   ): boolean {
     if (isPartialComponentName(plan.componentName)) return false;
-    return !plan.dataNeeds.includes('postDetail');
+    return true;
   }
 
   private planUsesResolveAsset(plan: ComponentVisualPlan): boolean {
@@ -1486,6 +1540,20 @@ export default ${componentName};`;
     );
     const hasSidebarLayout =
       sidebarSectionIndex >= 0 && mainContentSectionIndex >= 0;
+    const wrapperSection =
+      hasSidebarLayout && sidebarSectionIndex >= 0
+        ? sections[sidebarSectionIndex]
+        : null;
+    const wrapperBg =
+      hasSidebarLayout && mainContentSectionIndex >= 0
+        ? (sections[mainContentSectionIndex]?.background ?? palette.background)
+        : palette.background;
+    const wrapperPy = wrapperSection
+      ? this.explicitSectionPaddingClass(wrapperSection)
+      : '';
+    const wrapperSectionStyle = wrapperSection
+      ? this.buildSectionStyleAttr(wrapperSection)
+      : '';
     const gridStyle = hasSidebarLayout
       ? this.buildStyleAttr({
           gridTemplateColumns:
@@ -1493,8 +1561,8 @@ export default ${componentName};`;
               ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
               : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
           gap:
-            sections[mainContentSectionIndex]?.gapStyle ??
-            sections[sidebarSectionIndex]?.gapStyle,
+            sections[sidebarSectionIndex]?.gapStyle ??
+            sections[mainContentSectionIndex]?.gapStyle,
         })
       : '';
     const placeholders = sections
@@ -1506,7 +1574,7 @@ export default ${componentName};`;
           const mainPlaceholder = this.buildSectionAssemblyPlaceholder(index);
           const sidebarPlaceholder =
             this.buildSectionAssemblyPlaceholder(sidebarSectionIndex);
-          return `      <section className="w-full">
+          return `      <section className="bg-[${wrapperBg}] ${wrapperPy} w-full"${wrapperSectionStyle}>
         <div className="${ctx.l.containerClass}">
           <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
             ${
@@ -1752,20 +1820,759 @@ export default ${componentName};`;
       : '';
   }
 
+  // ── Block-tree renderer ───────────────────────────────────────────────────
+
+  private renderBlockTree(
+    nodes: BlockNode[],
+    ctx: RenderCtx,
+    componentName: string,
+    depth = 0,
+  ): string {
+    return nodes
+      .map((node) => this.renderBlockNode(node, ctx, componentName, depth))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private normalizeBlockTreeText(
+    value: string | undefined,
+  ): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const phpTranslationMatch = trimmed.match(
+      /esc_html_e\(\s*['"]([^'"]+)['"]\s*,/i,
+    );
+    if (phpTranslationMatch?.[1]) {
+      return phpTranslationMatch[1];
+    }
+    return trimmed.replace(/<\?php|\?>/g, '').trim() || trimmed;
+  }
+
+  private blockTreeTextLiteral(
+    value: string | undefined,
+    fallback = '',
+  ): string {
+    return `{${JSON.stringify(
+      this.normalizeBlockTreeText(value) ?? fallback,
+    )}}`;
+  }
+
+  private renderBlockNode(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    depth: number,
+  ): string {
+    const tagName = this.blockNodeTagName(node, 'div');
+    const indent = '  '.repeat(depth + 3);
+    const children = node.children?.length
+      ? `\n${this.renderBlockTree(node.children, ctx, componentName, depth + 1)}\n${indent}`
+      : '';
+    const styleAttr = this.blockNodeStyleAttr(node);
+
+    switch (node.kind) {
+      case 'group':
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${styleAttr}>${children}</${tagName}>`;
+
+      case 'columns': {
+        const columnsStyle = this.blockNodeStyleAttr(node, {
+          display: 'grid',
+          gridTemplateColumns: this.buildColumnTemplate(node),
+        });
+        return `${indent}<div${this.blockNodeClassAttr(node)}${columnsStyle}>${children}</div>`;
+      }
+
+      case 'column': {
+        const columnStyle = this.blockNodeStyleAttr(node, {
+          flex: node.columnWidth ? `0 0 ${node.columnWidth}` : '1 1 0',
+          minWidth: '0',
+        });
+        return `${indent}<div${this.blockNodeClassAttr(node)}${columnStyle}>${children}</div>`;
+      }
+
+      case 'heading': {
+        const tag = `h${node.level ?? 2}`;
+        return `${indent}<${tag}${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</${tag}>`;
+      }
+
+      case 'query-title':
+        return `${indent}<h1${this.blockNodeClassAttr(node)}${styleAttr}>${this.queryTitleMarkup(componentName)}</h1>`;
+
+      case 'paragraph':
+        if (node.html) {
+          return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'p'}")}</p>`;
+        }
+        return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</p>`;
+
+      case 'image':
+        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}"${this.blockNodeClassAttr(node)}${styleAttr} />`;
+
+      case 'navigation':
+        return this.renderBlockTreeNavigation(node, ctx, componentName, depth);
+
+      case 'navigation-link':
+        return this.renderBlockTreeNavigationLink(node, depth);
+
+      case 'button':
+        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, ['btn'])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</a>`;
+
+      case 'search':
+        return this.renderBlockTreeSearch(node, depth);
+
+      case 'avatar':
+        return this.renderBlockTreeAvatar(node, depth);
+
+      case 'post-author-biography':
+        return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{siteInfo?.blogDescription}</p>`;
+
+      case 'categories':
+        return this.renderBlockTreeCategories(node, depth);
+
+      case 'query':
+      case 'latest-posts':
+        return this.renderBlockTreeRecentPosts(node, depth);
+
+      case 'spacer':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${styleAttr} aria-hidden="true" />`;
+
+      case 'separator':
+        return `${indent}<hr${this.blockNodeClassAttr(node)}${styleAttr} />`;
+
+      case 'post-title':
+        return `${indent}<h1 className="post-title"{styleAttr}>{item?.title}</h1>`;
+
+      case 'post-featured-image':
+        return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''} className="post-featured-image"${styleAttr} />`;
+
+      case 'post-content':
+        return `${indent}<div className="post-content"{styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
+
+      case 'post-excerpt':
+        return `${indent}<p className="post-excerpt"{styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
+
+      case 'post-date':
+        return this.renderBlockTreePostDate(node, depth);
+
+      case 'post-author-name':
+        return this.renderBlockTreePostAuthorName(node, depth);
+
+      case 'post-terms':
+        return this.renderBlockTreePostTerms(node, depth);
+
+      case 'post-meta':
+        return `${indent}<div className="post-meta"${styleAttr}>
+${indent}  {metaSource ? (
+${indent}    <>
+${indent}      <time dateTime={metaSource.date}>{new Date(metaSource.date).toLocaleDateString()}</time>
+${indent}      {metaSource.author ? <span>by {metaSource.author}</span> : null}
+${indent}    </>
+${indent}  ) : null}
+${indent}</div>`;
+
+      case 'post-navigation':
+        return `${indent}<nav className="post-navigation">{/* prev/next */}</nav>`;
+
+      case 'comments':
+        return `${indent}<div className="comments-area">{/* comments */}</div>`;
+
+      case 'template-part':
+        if (node.templatePartSlug) {
+          const name = node.templatePartSlug
+            .split(/[-/]/)
+            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+            .join('');
+          return `${indent}<${name} />`;
+        }
+        return '';
+
+      default:
+        if (children) {
+          return `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${children}</div>`;
+        }
+        return node.text
+          ? `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</div>`
+          : '';
+    }
+  }
+
+  private renderBlockTreeNavigation(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const orientation =
+      node.menuOrientation ??
+      (
+        node.attrs?.layout as
+          | { orientation?: 'horizontal' | 'vertical' }
+          | undefined
+      )?.orientation ??
+      'vertical';
+    const isVertical =
+      orientation === 'vertical' || /^sidebar$/i.test(componentName);
+    const listClass = isVertical
+      ? 'flex flex-col gap-2'
+      : 'flex flex-wrap items-center gap-4';
+    const items = (node.children ?? [])
+      .map((child) =>
+        this.renderBlockNode(child, ctx, componentName, depth + 2),
+      )
+      .filter(Boolean)
+      .join('\n');
+    return `${indent}<nav${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="${listClass}">
+${items}
+${indent}  </ul>
+${indent}</nav>`;
+  }
+
+  private renderBlockTreeNavigationLink(
+    node: BlockNode,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const href = node.href?.trim() ?? '';
+    const usableHref = href.length > 0 ? href : '#';
+    const label = this.blockTreeTextLiteral(node.text, usableHref);
+    return `${indent}<li>
+${indent}  {isInternalPath(${JSON.stringify(usableHref)}) ? (
+${indent}    <Link to={toAppPath(${JSON.stringify(usableHref)})}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      ${label}
+${indent}    </Link>
+${indent}  ) : (
+${indent}    <a href="${usableHref}"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      ${label}
+${indent}    </a>
+${indent}  )}
+${indent}</li>`;
+  }
+
+  private renderBlockTreeSearch(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const placeholder =
+      this.blockNodeStringAttr(node, 'placeholder') ?? 'Search...';
+    const buttonText = this.blockNodeStringAttr(node, 'buttonText') ?? 'Search';
+    const width = this.normalizeCssLength(
+      this.blockNodeStringAttr(node, 'widthUnit') === '%'
+        ? `${String(node.attrs?.width ?? '')}%`
+        : this.blockNodeStringAttr(node, 'width'),
+    );
+    return `${indent}<form role="search"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+      node,
+      {
+        display: 'flex',
+        alignItems: 'center',
+        gap: node.gap ?? '0.5rem',
+        width,
+      },
+    )}>
+${indent}  <input type="search" placeholder=${JSON.stringify(placeholder)} className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
+${indent}  <button type="submit" className="border border-black/20 px-4 py-2">${buttonText}</button>
+${indent}</form>`;
+  }
+
+  private renderBlockTreeAvatar(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const sizeValue = node.attrs?.size;
+    const size =
+      typeof sizeValue === 'number'
+        ? `${sizeValue}px`
+        : typeof sizeValue === 'string'
+          ? this.normalizeCssLength(sizeValue)
+          : '80px';
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+      node,
+      {
+        width: size,
+        height: size,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        backgroundColor: 'rgba(0,0,0,0.05)',
+      },
+    )}>
+${indent}  {((posts.find((post) => post.author)?.author ?? siteInfo?.siteName ?? '?').charAt(0) || '?').toUpperCase()}
+${indent}</div>`;
+  }
+
+  private renderBlockTreeCategories(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const showPostCounts = this.blockNodeBooleanAttr(node, 'showPostCounts');
+    const showPostCountsLiteral = showPostCounts ? 'true' : 'false';
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="flex flex-col gap-2">
+${indent}    {(() => {
+${indent}      const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+${indent}      posts.forEach((post) => {
+${indent}        (post.categories ?? []).forEach((name, index) => {
+${indent}          const slug = post.categorySlugs?.[index] ?? '';
+${indent}          const key = name + '::' + slug;
+${indent}          const existing = categoryMap.get(key);
+${indent}          if (existing) existing.count += 1;
+${indent}          else categoryMap.set(key, { name, slug, count: 1 });
+${indent}        });
+${indent}      });
+${indent}      return Array.from(categoryMap.values()).map((category) => (
+${indent}        <li key={category.slug || category.name}>
+${indent}          {category.slug ? (
+${indent}            <Link to={'/category/' + category.slug} className="hover:underline underline-offset-4">
+${indent}              {category.name}{${showPostCountsLiteral} ? \` (\${category.count})\` : ''}
+${indent}            </Link>
+${indent}          ) : (
+${indent}            <span>{category.name}{${showPostCountsLiteral} ? \` (\${category.count})\` : ''}</span>
+${indent}          )}
+${indent}        </li>
+${indent}      ));
+${indent}    })()}
+${indent}  </ul>
+${indent}</div>`;
+  }
+
+  private renderBlockTreeRecentPosts(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="flex flex-col gap-2">
+${indent}    {posts.slice(0, 5).map((post) => (
+${indent}      <li key={post.id}>
+${indent}        <Link to={'/post/' + post.slug} className="hover:underline underline-offset-4">
+${indent}          {post.title}
+${indent}        </Link>
+${indent}      </li>
+${indent}    ))}
+${indent}  </ul>
+${indent}</div>`;
+  }
+
+  private renderBlockTreePostDate(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const isLink = this.blockNodeBooleanAttr(node, 'isLink');
+    return isLink
+      ? `${indent}{metaSource?.date ? (
+${indent}  <Link to={'/post/' + metaSource.slug}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}    <time dateTime={metaSource.date}>{new Date(metaSource.date).toLocaleDateString()}</time>
+${indent}  </Link>
+${indent}) : null}`
+      : `${indent}{metaSource?.date ? (
+${indent}  <time dateTime={metaSource.date}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}    {new Date(metaSource.date).toLocaleDateString()}
+${indent}  </time>
+${indent}) : null}`;
+  }
+
+  private renderBlockTreePostAuthorName(
+    node: BlockNode,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const isLink = this.blockNodeBooleanAttr(node, 'isLink');
+    if (isLink) {
+      return `${indent}{metaSource?.author ? (
+${indent}  metaSource.authorSlug ? (
+${indent}    <Link to={'/author/' + metaSource.authorSlug}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      {metaSource.author}
+${indent}    </Link>
+${indent}  ) : (
+${indent}    <span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>{metaSource.author}</span>
+${indent}  )
+${indent}) : null}`;
+    }
+    return `${indent}<span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>{metaSource?.author}</span>`;
+  }
+
+  private renderBlockTreePostTerms(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const taxonomy = (
+      this.blockNodeStringAttr(node, 'term') ?? 'category'
+    ).toLowerCase();
+    const isCategory = taxonomy === 'category';
+    const prefix = this.blockNodeStringAttr(node, 'prefix');
+    const separator = this.blockNodeStringAttr(node, 'separator') ?? ', ';
+    const termsExpr = isCategory
+      ? 'metaSource?.categories'
+      : 'metaSource?.tags';
+    const slugsExpr = isCategory ? 'metaSource?.categorySlugs' : '[]';
+    return `${indent}{Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+${indent}  <span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${prefix ? `${indent}    <span>{${JSON.stringify(prefix)}}</span>\n` : ''}${indent}    {${termsExpr}.map((term, index) => (
+${indent}      <React.Fragment key={term + '-' + index}>
+${indent}        {index > 0 ? <span aria-hidden="true">{${JSON.stringify(separator)}}</span> : null}
+${indent}        {${isCategory ? `(Array.isArray(${slugsExpr}) && ${slugsExpr}[index])` : 'false'} ? (
+${indent}          <Link to={'/category/' + ${slugsExpr}[index]} className="hover:underline underline-offset-4">
+${indent}            {term}
+${indent}          </Link>
+${indent}        ) : (
+${indent}          <span>{term}</span>
+${indent}        )}
+${indent}      </React.Fragment>
+${indent}    ))}
+${indent}  </span>
+${indent}) : null}`;
+  }
+
+  private blockNodeStringAttr(
+    node: BlockNode,
+    key: string,
+  ): string | undefined {
+    const value = node.attrs?.[key];
+    return typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined;
+  }
+
+  private blockNodeBooleanAttr(node: BlockNode, key: string): boolean {
+    return node.attrs?.[key] === true;
+  }
+
+  private queryTitleMarkup(componentName: string): string {
+    if (/^search$/i.test(componentName)) {
+      return `{(() => {
+        const term = searchParams.get('q') ?? searchParams.get('s') ?? '';
+        return term ? \`Search results for "\${term}"\` : 'Search Results';
+      })()}`;
+    }
+    if (/^archive$/i.test(componentName)) {
+      return 'Archive';
+    }
+    return 'Posts';
+  }
+
+  private renderHybridSections(
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+  ): string {
+    const state = {
+      usedSectionIndexes: new Set<number>(),
+    };
+    const treeMarkup = this.renderHybridBlockTree(
+      plan.blockTree ?? [],
+      plan,
+      ctx,
+      state,
+    );
+    const trailingSections = plan.sections
+      .map((section, index) =>
+        state.usedSectionIndexes.has(index)
+          ? ''
+          : this.renderSection(section, ctx, plan.componentName, index),
+      )
+      .filter(Boolean)
+      .join('\n');
+
+    return [treeMarkup, trailingSections].filter(Boolean).join('\n');
+  }
+
+  private renderHybridBlockTree(
+    nodes: BlockNode[],
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+    state: { usedSectionIndexes: Set<number> },
+    depth = 0,
+  ): string {
+    return nodes
+      .map((node) => this.renderHybridBlockNode(node, plan, ctx, state, depth))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private renderHybridBlockNode(
+    node: BlockNode,
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+    state: { usedSectionIndexes: Set<number> },
+    depth: number,
+  ): string {
+    const matchedSection = this.findMatchingSectionForBlockNode(
+      node,
+      plan,
+      state.usedSectionIndexes,
+    );
+    if (matchedSection) {
+      state.usedSectionIndexes.add(matchedSection.index);
+      return this.renderSection(
+        matchedSection.section,
+        ctx,
+        plan.componentName,
+        matchedSection.index,
+      );
+    }
+
+    const tagName = this.blockNodeTagName(node, 'div');
+    const indent = '  '.repeat(depth + 3);
+    const children = node.children?.length
+      ? `\n${this.renderHybridBlockTree(node.children, plan, ctx, state, depth + 1)}\n${indent}`
+      : '';
+
+    switch (node.kind) {
+      case 'group':
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>${children}</${tagName}>`;
+      case 'columns':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+          node,
+          {
+            display: 'grid',
+            gridTemplateColumns: this.buildColumnTemplate(node),
+          },
+        )}>${children}</div>`;
+      case 'column':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+          node,
+          {
+            flex: node.columnWidth ? `0 0 ${node.columnWidth}` : '1 1 0',
+            minWidth: '0',
+          },
+        )}>${children}</div>`;
+      default:
+        return this.renderBlockNode(node, ctx, plan.componentName, depth);
+    }
+  }
+
+  private findMatchingSectionForBlockNode(
+    node: BlockNode,
+    plan: ComponentVisualPlan,
+    usedSectionIndexes: Set<number>,
+  ): { section: SectionPlan; index: number } | null {
+    const exactSourceNodeId = node.sourceRef?.sourceNodeId?.trim();
+    if (exactSourceNodeId) {
+      const exactIndex = plan.sections.findIndex(
+        (section, index) =>
+          !usedSectionIndexes.has(index) &&
+          section.sourceRef?.sourceNodeId?.trim() === exactSourceNodeId,
+      );
+      if (exactIndex >= 0) {
+        return {
+          section: plan.sections[exactIndex]!,
+          index: exactIndex,
+        };
+      }
+    }
+
+    const findUnusedSectionIndex = (
+      matcher: (section: SectionPlan) => boolean,
+    ) =>
+      plan.sections.findIndex(
+        (section, index) => !usedSectionIndexes.has(index) && matcher(section),
+      );
+
+    const kindMappedIndex = (() => {
+      switch (node.kind) {
+        case 'post-title':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-title',
+          );
+        case 'post-featured-image':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-featured-image',
+          );
+        case 'post-content':
+          return findUnusedSectionIndex((section) =>
+            ['post-content', 'page-content', 'prose-block'].includes(
+              section.type,
+            ),
+          );
+        case 'query':
+        case 'latest-posts':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-list',
+          );
+        case 'post-terms':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-terms',
+          );
+        case 'post-navigation':
+        case 'post-navigation-link':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-navigation',
+          );
+        case 'comments':
+        case 'comment-template':
+        case 'comments-title':
+        case 'post-comments-form':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'comments',
+          );
+        case 'search':
+          return findUnusedSectionIndex((section) => section.type === 'search');
+        case 'post-date':
+        case 'post-author-name':
+        case 'post-author-biography':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-meta',
+          );
+        default:
+          if (this.isSidebarBlockNode(node)) {
+            return findUnusedSectionIndex(
+              (section) => section.type === 'sidebar',
+            );
+          }
+          return -1;
+      }
+    })();
+
+    if (kindMappedIndex >= 0) {
+      return {
+        section: plan.sections[kindMappedIndex]!,
+        index: kindMappedIndex,
+      };
+    }
+
+    return null;
+  }
+
+  private isSidebarBlockNode(node: BlockNode): boolean {
+    if (
+      [
+        'search',
+        'categories',
+        'avatar',
+        'navigation',
+        'query',
+        'latest-posts',
+      ].includes(node.kind)
+    ) {
+      return true;
+    }
+    if (
+      node.kind === 'template-part' &&
+      typeof node.templatePartSlug === 'string' &&
+      /sidebar/i.test(node.templatePartSlug)
+    ) {
+      return true;
+    }
+    return (node.children ?? []).some((child) =>
+      this.isSidebarBlockNode(child),
+    );
+  }
+
+  private blockNodeClassAttr(
+    node: BlockNode,
+    extraClassNames: string[] = [],
+  ): string {
+    const classNames = [
+      ...(node.customClassNames ?? []),
+      ...(node.align ? [`align${node.align}`] : []),
+      ...extraClassNames,
+    ].filter(Boolean);
+    return classNames.length > 0
+      ? ` className="${[...new Set(classNames)].join(' ')}"`
+      : '';
+  }
+
+  private blockNodeTagName(node: BlockNode, fallback: string): string {
+    const tagName = node.tagName?.trim().toLowerCase();
+    return tagName && /^[a-z][a-z0-9-]*$/.test(tagName) ? tagName : fallback;
+  }
+
+  private buildColumnTemplate(node: BlockNode): string | undefined {
+    const widths = (node.children ?? [])
+      .map((child) => child.columnWidth?.trim())
+      .filter((value): value is string => Boolean(value));
+    if (widths.length === 0 || widths.length !== (node.children ?? []).length) {
+      return undefined;
+    }
+    return widths.join(' ');
+  }
+
+  private blockNodeStyleAttr(
+    node: BlockNode,
+    extra: Record<string, string | number | undefined> = {},
+  ): string {
+    const typography = node.typography as
+      | Record<string, string | number | undefined>
+      | undefined;
+    return this.buildStyleAttr({
+      padding: node.padding ? this.boxSpacingToCss(node.padding) : undefined,
+      margin: node.margin ? this.boxSpacingToCss(node.margin) : undefined,
+      gap: node.gap,
+      minHeight: node.minHeight,
+      backgroundColor: node.bgColor,
+      color: node.textColor,
+      borderRadius: node.borderRadius,
+      textAlign: node.textAlign,
+      justifyContent: node.justifyContent,
+      fontFamily: node.fontFamily,
+      fontSize:
+        typeof typography?.fontSize === 'string'
+          ? typography.fontSize
+          : undefined,
+      fontStyle:
+        typeof typography?.fontStyle === 'string'
+          ? typography.fontStyle
+          : undefined,
+      fontWeight:
+        typeof typography?.fontWeight === 'string' ||
+        typeof typography?.fontWeight === 'number'
+          ? typography.fontWeight
+          : undefined,
+      lineHeight:
+        typeof typography?.lineHeight === 'string'
+          ? typography.lineHeight
+          : undefined,
+      letterSpacing:
+        typeof typography?.letterSpacing === 'string'
+          ? typography.letterSpacing
+          : undefined,
+      textDecoration:
+        typeof typography?.textDecoration === 'string'
+          ? typography.textDecoration
+          : undefined,
+      textTransform:
+        typeof typography?.textTransform === 'string'
+          ? typography.textTransform
+          : undefined,
+      ...extra,
+    });
+  }
+
   private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
     const parts: string[] = [];
+    const preferSemanticDeterministicPartial =
+      this.shouldPreferSemanticDeterministicPartial(plan);
+
+    if (
+      !preferSemanticDeterministicPartial &&
+      plan.renderMode === 'block-centric' &&
+      plan.blockTree?.length
+    ) {
+      return this.renderBlockTree(plan.blockTree, ctx, plan.componentName);
+    }
+    if (!preferSemanticDeterministicPartial && plan.blockTree?.length) {
+      return this.renderHybridSections(plan, ctx);
+    }
+
     const sidebarSection =
       plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
         ? (plan.sections.find(
             (s): s is SidebarSection => s.type === 'sidebar',
           ) ?? null)
         : null;
+    const allContentSidebarLayout =
+      !!sidebarSection &&
+      plan.layout.sidebarScope === 'all-content' &&
+      plan.sections
+        .filter((section) => section !== sidebarSection)
+        .every((section) => this.canRenderInSidebarMainColumn(section));
     const mainContentSection = plan.sections.find(
       (s): s is PostContentSection | PageContentSection | ProseBlockSection =>
         s.type === 'page-content' ||
         s.type === 'post-content' ||
         s.type === 'prose-block',
     );
+
+    if (sidebarSection && allContentSidebarLayout) {
+      return this.renderAllContentWithSidebar(
+        plan.sections.filter((section) => section !== sidebarSection),
+        sidebarSection,
+        ctx,
+        plan.layout.contentLayout === 'sidebar-left',
+        plan.componentName,
+      );
+    }
 
     for (let index = 0; index < plan.sections.length; index++) {
       const section = plan.sections[index];
@@ -1792,6 +2599,21 @@ export default ${componentName};`;
     }
 
     return parts.join('\n\n');
+  }
+
+  private shouldPreferSemanticDeterministicPartial(
+    plan: ComponentVisualPlan,
+  ): boolean {
+    if (plan.renderMode !== 'block-centric') return false;
+    const normalizedName = plan.componentName.trim().toLowerCase();
+    return [
+      'header',
+      'navigation',
+      'nav',
+      'footer',
+      'sidebar',
+      'postmeta',
+    ].includes(normalizedName);
   }
 
   // ── Section dispatcher ────────────────────────────────────────────────────
@@ -1841,8 +2663,20 @@ export default ${componentName};`;
       case 'post-content':
         markup = this.renderPostContent(section, ctx, py);
         break;
+      case 'post-title':
+        markup = this.renderPostTitle(section, ctx, py);
+        break;
+      case 'post-featured-image':
+        markup = this.renderPostFeaturedImage(section, ctx, py);
+        break;
       case 'post-meta':
         markup = this.renderPostMeta(section, ctx, bg, py);
+        break;
+      case 'post-terms':
+        markup = this.renderPostTerms(section, ctx, bg, py);
+        break;
+      case 'post-navigation':
+        markup = this.renderPostNavigation(section, ctx, bg, py);
         break;
       case 'page-content':
         markup = this.renderPageContent(section, ctx, py);
@@ -1920,6 +2754,12 @@ export default ${componentName};`;
   private sectionPaddingClass(section: SectionPlan): string {
     if (section.paddingStyle) return '';
     return PADDING_MAP[section.padding ?? 'lg'];
+  }
+
+  private explicitSectionPaddingClass(section?: SectionPlan | null): string {
+    if (!section) return '';
+    if (section.paddingStyle) return '';
+    return section.padding ? PADDING_MAP[section.padding] : '';
   }
 
   private buildSectionGapStyleAttr(section: SectionPlan): string {
@@ -3177,15 +4017,330 @@ ${postCard}
       );
     }
 
-    return `      {metaSource ? (
-        <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
-          <div className="${l.containerClass}">
+    return `      <React.Fragment>
+        {metaSource ? (
+          <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
+            <div className="${l.containerClass}">
+              <div className="text-sm text-[${p.textMuted}] ${flex}"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+                ${parts.join('\n              ')}
+              </div>
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTitle(
+    s: PostTitleSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const { p, t } = ctx;
+    const level = Math.min(Math.max(s.level ?? 1, 1), 6);
+    const tag = `h${level}`;
+    const baseClass =
+      level <= 1
+        ? `${t.h1} font-normal`
+        : level === 2
+          ? `${t.h2} font-normal`
+          : `${t.h3} font-normal`;
+    const titleClassName = this.appendStyledTextAlignClass(
+      baseClass,
+      s.titleCustomClassNames,
+      s.presentation?.textAlign,
+    );
+    const styleAttr = s.titleStyle
+      ? this.blueprintTypographyStyleAttr(s.titleStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: s.textColor ?? p.text },
+          this.pickBlockStyle(ctx, 'post-title', 'heading'),
+        );
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    return `      <React.Fragment>
+        {item ? (
+          <section className="${py} w-full"${sectionStyle}>
+            <${tag} className="${titleClassName}"${styleAttr}>{item.title}</${tag}>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostFeaturedImage(
+    s: PostFeaturedImageSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'post-featured-image');
+    const radiusClass =
+      this.exactRadiusClass(s.imageRadius) ||
+      this.imageRadiusClass(ctx) ||
+      this.cardRadiusClass(ctx);
+    const imageClassName = this.appendOptionalCustomClasses(
+      `w-full h-auto ${this.inlineImageFitClass()} ${radiusClass}`.trim(),
+      s.imageCustomClassNames,
+    );
+    const imageStyleAttr = this.buildStyleAttr({
+      ...this.buildBlockStyleMap(imageStyle, {}, false, ctx),
+      borderRadius: s.imageRadius,
+      aspectRatio: s.imageAspectRatio,
+    });
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    return `      <React.Fragment>
+        {item?.featuredImage ? (
+          <section className="${py} w-full"${sectionStyle}>
+            <figure className="wp-block-post-featured-image">
+              <img src={item.featuredImage} alt={item.title} className="${imageClassName}" loading="eager"${imageStyleAttr} />
+            </figure>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTerms(
+    s: PostTermsSection,
+    ctx: RenderCtx,
+    bg: string,
+    py: string,
+  ): string {
+    const { p, l } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const termsExpr =
+      s.taxonomy === 'category' ? 'item.categories' : 'item.tags';
+    const prefixLiteral = s.prefix ? JSON.stringify(s.prefix) : null;
+    const separatorLiteral = JSON.stringify(
+      s.separator === undefined ? ' · ' : s.separator,
+    );
+    const layoutClass =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+
+    return `      <React.Fragment>
+        {item && Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+          <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+            <div className="${l.containerClass}">
+              <div className="${layoutClass} text-sm text-[${p.textMuted}]"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+                ${prefixLiteral ? `<span>{${prefixLiteral}}</span>` : ''}
+                {${termsExpr}.map((term, index) => (
+                  <React.Fragment key={term + '-' + index}>
+                    {index > 0 ? <span aria-hidden="true">{${separatorLiteral}}</span> : null}
+                    <span>{term}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostNavigation(
+    s: PostNavigationSection,
+    ctx: RenderCtx,
+    bg: string,
+    py: string,
+  ): string {
+    const { p, t, l } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const linkBaseClass = `group flex flex-col gap-1 hover:underline underline-offset-4`;
+    const previousLabelLiteral = JSON.stringify(s.previousLabel ?? 'Previous:');
+    const nextLabelLiteral = JSON.stringify(s.nextLabel ?? 'Next:');
+    const labelStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+
+    return `      <React.Fragment>
+        {item ? (() => {
+          const currentIndex = posts.findIndex((post) => post.slug === item.slug);
+          const previousPost = currentIndex >= 0 ? posts[currentIndex + 1] ?? null : null;
+          const nextPost = currentIndex >= 0 ? posts[currentIndex - 1] ?? null : null;
+          if (!previousPost && !nextPost) return null;
+          return (
+            <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+              <nav className="wp-block-group" aria-label="Posts">
+                <div className="${l.containerClass}">
+                  <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between"${this.buildSectionGapStyleAttr(s)}>
+                    ${
+                      s.showPrevious === false
+                        ? ''
+                        : `{previousPost ? (
+                      <Link to={'/post/' + previousPost.slug} className="${linkBaseClass} md:max-w-[48%]">
+                        <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${previousLabelLiteral}}</span>
+                        <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{previousPost.title}</span>
+                      </Link>
+                    ) : <span />}`
+                    }
+                    ${
+                      s.showNext === false
+                        ? ''
+                        : `{nextPost ? (
+                      <Link to={'/post/' + nextPost.slug} className="${linkBaseClass} md:ml-auto md:max-w-[48%] md:text-right md:items-end">
+                        <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${nextLabelLiteral}}</span>
+                        <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{nextPost.title}</span>
+                      </Link>
+                    ) : <span />}`
+                    }
+                  </div>
+                </div>
+              </nav>
+            </section>
+          );
+        })() : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostMetaInline(s: PostMetaSection, ctx: RenderCtx): string {
+    const { p } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
+    const flex =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+    const separator =
+      s.showSeparator === false ? '' : '<span aria-hidden="true">-</span>';
+    const parts: string[] = [];
+    if (s.showDate) {
+      parts.push(
+        `<time dateTime={item.date} className="whitespace-nowrap">{new Date(item.date).toLocaleDateString()}</time>`,
+      );
+    }
+    if (s.showAuthor) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{item.author && (item.authorSlug ? <Link to={\`/author/\${item.authorSlug}\`} className="${metaLinkClass}">by {item.author}</Link> : <span>by {item.author}</span>)}`,
+      );
+    }
+    if (s.showCategories) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{item.categories?.[0] && (item.categorySlugs?.[0] ? <Link to={\`/category/\${item.categorySlugs[0]}\`} className="${metaLinkClass}">{item.categories[0]}</Link> : <span>{item.categories[0]}</span>)}`,
+      );
+    }
+    return `      <React.Fragment>
+        {item ? (
+          <section className="w-full"${sectionStyle}>
             <div className="text-sm text-[${p.textMuted}] ${flex}"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
               ${parts.join('\n              ')}
             </div>
-          </div>
-        </section>
-      ) : null}`;
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTermsInline(s: PostTermsSection, ctx: RenderCtx): string {
+    const { p } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const termsExpr =
+      s.taxonomy === 'category' ? 'item.categories' : 'item.tags';
+    const prefixLiteral = s.prefix ? JSON.stringify(s.prefix) : null;
+    const separatorLiteral = JSON.stringify(
+      s.separator === undefined ? ' · ' : s.separator,
+    );
+    const layoutClass =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+    return `      <React.Fragment>
+        {item && Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+          <section className="w-full"${sectionStyle}>
+            <div className="${layoutClass} text-sm text-[${p.textMuted}]"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+              ${prefixLiteral ? `<span>{${prefixLiteral}}</span>` : ''}
+              {${termsExpr}.map((term, index) => (
+                <React.Fragment key={term + '-' + index}>
+                  {index > 0 ? <span aria-hidden="true">{${separatorLiteral}}</span> : null}
+                  <span>{term}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostNavigationInline(
+    s: PostNavigationSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const linkBaseClass = `group flex flex-col gap-1 hover:underline underline-offset-4`;
+    const previousLabelLiteral = JSON.stringify(s.previousLabel ?? 'Previous:');
+    const nextLabelLiteral = JSON.stringify(s.nextLabel ?? 'Next:');
+    const labelStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    return `      <React.Fragment>
+        {item ? (() => {
+          const currentIndex = posts.findIndex((post) => post.slug === item.slug);
+          const previousPost = currentIndex >= 0 ? posts[currentIndex + 1] ?? null : null;
+          const nextPost = currentIndex >= 0 ? posts[currentIndex - 1] ?? null : null;
+          if (!previousPost && !nextPost) return null;
+          return (
+            <section className="w-full"${sectionStyle}>
+              <nav className="wp-block-group" aria-label="Posts">
+                <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between"${this.buildSectionGapStyleAttr(s)}>
+                  ${
+                    s.showPrevious === false
+                      ? ''
+                      : `{previousPost ? (
+                    <Link to={'/post/' + previousPost.slug} className="${linkBaseClass} md:max-w-[48%]">
+                      <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${previousLabelLiteral}}</span>
+                      <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{previousPost.title}</span>
+                    </Link>
+                  ) : <span />}`
+                  }
+                  ${
+                    s.showNext === false
+                      ? ''
+                      : `{nextPost ? (
+                    <Link to={'/post/' + nextPost.slug} className="${linkBaseClass} md:ml-auto md:max-w-[48%] md:text-right md:items-end">
+                      <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${nextLabelLiteral}}</span>
+                      <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{nextPost.title}</span>
+                    </Link>
+                  ) : <span />}`
+                  }
+                </div>
+              </nav>
+            </section>
+          );
+        })() : null}
+      </React.Fragment>`;
   }
 
   private renderCardGrid(
@@ -3601,9 +4756,6 @@ ${cards}
     const brandDescriptionExpr = s.brandDescription
       ? JSON.stringify(s.brandDescription)
       : 'siteInfo?.blogDescription';
-    const fallbackColumns = JSON.stringify(
-      s.menuColumns.map((col) => ({ heading: col.title, links: [] })),
-    );
     const outerTracks =
       s.columnWidths
         ?.map((value) => value.trim().replace(/\s+/g, ''))
@@ -3639,20 +4791,8 @@ ${cards}
             <div className="min-w-0">
               <div className="grid ${menuGridClass} items-start gap-8">
                 {(() => {
-                  const approvedFooterColumns = ${fallbackColumns};
                   const displayFooterColumns = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);
-                  const orderedFooterColumns = approvedFooterColumns
-                    .map((approvedColumn) =>
-                      displayFooterColumns.find(
-                        (column) =>
-                          String(column.heading ?? '').trim().toLowerCase() ===
-                          String(approvedColumn.heading ?? '').trim().toLowerCase(),
-                      ),
-                    )
-                    .filter((column): column is FooterColumn => Boolean(column));
-                  const columnsToRender =
-                    orderedFooterColumns.length > 0 ? orderedFooterColumns : displayFooterColumns;
-                  return columnsToRender.map((column, columnIndex) => (
+                  return displayFooterColumns.map((column, columnIndex) => (
                     <div key={column.heading ?? columnIndex} className="flex min-w-0 flex-col gap-3">
                       <h3 className="font-semibold text-[${tc}]"${columnHeadingStyle}>{column.heading}</h3>
                       <nav className="flex flex-col gap-2">
@@ -4063,9 +5203,19 @@ ${this.renderSidebarCard(s, ctx, 10)}
     componentName: string,
   ): string {
     const { p } = ctx;
-    const bg = mainSection.background ?? p.background;
-    const py = this.sectionPaddingClass(mainSection);
-    const sectionStyle = this.buildSectionStyleAttr(mainSection);
+    const shellHasExplicitSpacing = Boolean(
+      sidebarSection.paddingStyle ||
+      sidebarSection.marginStyle ||
+      sidebarSection.padding,
+    );
+    const bg =
+      sidebarSection.background ?? mainSection.background ?? p.background;
+    const py = shellHasExplicitSpacing
+      ? this.explicitSectionPaddingClass(sidebarSection)
+      : this.sectionPaddingClass(mainSection);
+    const sectionStyle = shellHasExplicitSpacing
+      ? this.buildSectionStyleAttr(sidebarSection)
+      : this.buildSectionStyleAttr(mainSection);
     const mainContent =
       mainSection.type === 'post-content'
         ? this.renderPostContentInner(mainSection, ctx)
@@ -4077,7 +5227,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       gridTemplateColumns: sidebarLeft
         ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
-      gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
+      gap: sidebarSection.gapStyle ?? mainSection.gapStyle,
     });
     return `      {/* Main Content With Sidebar */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -4088,6 +5238,87 @@ ${this.renderSidebarCard(s, ctx, 10)}
           </div>
         </div>
       </section>`;
+  }
+
+  private canRenderInSidebarMainColumn(section: SectionPlan): boolean {
+    return [
+      'post-featured-image',
+      'post-title',
+      'post-meta',
+      'post-content',
+      'page-content',
+      'prose-block',
+      'post-terms',
+      'comments',
+      'post-navigation',
+    ].includes(section.type);
+  }
+
+  private renderAllContentWithSidebar(
+    mainSections: SectionPlan[],
+    sidebarSection: SidebarSection,
+    ctx: RenderCtx,
+    sidebarLeft: boolean,
+    componentName: string,
+  ): string {
+    const { p } = ctx;
+    const shellPy = this.explicitSectionPaddingClass(sidebarSection);
+    const sectionStyle = this.buildSectionStyleAttr(sidebarSection);
+    const bg =
+      sidebarSection.background ??
+      mainSections.find((section) => section.background)?.background ??
+      p.background;
+    const gridStyle = this.buildStyleAttr({
+      gridTemplateColumns: sidebarLeft
+        ? `${ctx.l.sidebarWidth ?? '30%'} minmax(0,1fr)`
+        : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '30%'}`,
+      gap:
+        sidebarSection.gapStyle ??
+        mainSections.find((section) => section.gapStyle)?.gapStyle,
+    });
+    const mainMarkup = mainSections
+      .map((section, index) =>
+        this.renderSidebarMainColumnSection(section, ctx, componentName, index),
+      )
+      .join('\n\n');
+    const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
+
+    return `      {/* Full Main Column With Sidebar */}
+      <section className="bg-[${bg}] ${shellPy} w-full"${sectionStyle}>
+        <div className="${ctx.l.containerClass}">
+          <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
+            ${
+              sidebarLeft
+                ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>
+            <div className="min-w-0 flex flex-col">
+${mainMarkup}
+            </div>`
+                : `<div className="min-w-0 flex flex-col">
+${mainMarkup}
+            </div>
+            <aside className="min-w-0">${sidebarCard.trim()}</aside>`
+            }
+          </div>
+        </div>
+      </section>`;
+  }
+
+  private renderSidebarMainColumnSection(
+    section: SectionPlan,
+    ctx: RenderCtx,
+    componentName: string,
+    index: number,
+  ): string {
+    switch (section.type) {
+      case 'post-meta':
+        return this.renderPostMetaInline(section, ctx);
+      case 'post-terms':
+        return this.renderPostTermsInline(section, ctx);
+      case 'post-navigation':
+        return this.renderPostNavigationInline(section, ctx);
+      default:
+        return this.renderSection(section, ctx, componentName, index);
+    }
   }
 
   private renderPostContentInner(
@@ -4113,12 +5344,15 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
       : '';
+    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
+      ? `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`
+      : `<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />`;
 
     return `          {item && (
             <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
               ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               ${metaBlock}
-              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+              ${bodyMarkup}
             </article>
           )}`;
   }
@@ -4583,9 +5817,17 @@ ${children}
 ${indent}</div>`;
       }
       case 'column': {
+        const columnWidth = this.normalizeCssLength(node.columnWidth);
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'column', 'group'),
+          columnWidth
+            ? {
+                flexBasis: columnWidth,
+                flexGrow: 0,
+                flexShrink: 0,
+              }
+            : {},
         );
         return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
@@ -4648,6 +5890,9 @@ ${indent}) : null}`;
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
         const tag = `h${level}`;
         if (node.html && !node.text) {
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
+          }
           return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
         return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
@@ -4656,7 +5901,10 @@ ${indent}</${tag}>`;
       }
       case 'paragraph': {
         if (node.html && !node.text) {
-          return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
+          }
+          return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
         return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
 ${childIndent}${node.text ?? ''}
@@ -4769,6 +6017,9 @@ ${children}
 ${indent}</div>`;
         }
         if (node.html) {
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
+          }
           return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
         if (node.text) {
@@ -4808,9 +6059,6 @@ ${indent}</div>`;
       isResponsive: node.isResponsive,
     });
     const hintTitles = this.extractNavigationHintTitles(node);
-    const menuVar = `resolveNavigationMenu(${JSON.stringify(
-      hintTitles,
-    )}, ${menuIndex}, ${state.componentKind === 'footer' ? 'true' : 'false'})`;
     const listClass = isVertical
       ? 'flex flex-col gap-2'
       : 'flex flex-wrap items-center gap-4';
@@ -4821,6 +6069,33 @@ ${indent}</div>`;
       depth + 1,
       isVertical,
     );
+    if (state.componentKind === 'footer') {
+      const footerColumnVar = `resolveFooterColumn(${JSON.stringify(hintTitles)}, ${menuIndex})`;
+      return `${indent}<nav${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  {${footerColumnVar} ? (
+${indent}    <ul className="${listClass}">
+${indent}      {(${footerColumnVar}.links ?? []).map((link, linkIndex) => (
+${indent}        <li key={\`\${${footerColumnVar}.heading ?? 'footer'}-\${link.label}-\${linkIndex}\`} className="flex flex-col gap-2">
+${indent}          {isInternalPath(link.url) ? (
+${indent}            <Link to={toAppPath(link.url)} className="${this.opacityLinkClass()}">
+${indent}              {link.label}
+${indent}            </Link>
+${indent}          ) : (
+${indent}            <a href={link.url} className="${this.opacityLinkClass()}">
+${indent}              {link.label}
+${indent}            </a>
+${indent}          )}
+${indent}        </li>
+${indent}      ))}
+${indent}    </ul>
+${indent}  ) : (
+${fallbackMarkup}
+${indent}  )}
+${indent}</nav>`;
+    }
+    const menuVar = `resolveNavigationMenu(${JSON.stringify(
+      hintTitles,
+    )}, ${menuIndex}, false)`;
     const isMobileNav =
       !isVertical &&
       state.componentKind === 'header' &&
@@ -5032,20 +6307,11 @@ ${indent}</ul>`;
   private buildWpColumnsStyle(
     node: WpNode,
   ): Record<string, string | number | undefined> {
-    const cols =
-      node.children?.filter(
-        (child) => child.block === 'column' || child.block === 'core/column',
-      ) ?? [];
-    const widths = cols
-      .map((col) => this.normalizeCssLength(col.columnWidth))
-      .filter((value): value is string => !!value);
+    const isStackedOnMobile = node.params?.isStackedOnMobile !== false;
     return {
-      display: 'grid',
-      gridTemplateColumns:
-        widths.length === cols.length && widths.length > 0
-          ? widths.join(' ')
-          : `repeat(${Math.max(cols.length, 1)}, minmax(0, 1fr))`,
-      alignItems: 'start',
+      display: 'flex',
+      flexWrap: isStackedOnMobile ? 'wrap' : 'nowrap',
+      alignItems: 'flex-start',
     };
   }
 
@@ -5092,7 +6358,7 @@ ${indent}</ul>`;
     const triggerText = s.triggerText || s.heading || 'Open';
     const modalTextColor = ctx.p.text;
     const modalMutedTextColor = ctx.p.textMuted || ctx.p.text;
-    const overlayColor = s.overlayColor?.trim() || 'rgba(0, 0, 0, 0.7)';
+    const overlayColor = s.overlayColor?.trim() || 'rgba(17, 17, 17, 0.32)';
     const closeOnOverlay = s.closeOnOverlay !== false;
     const closeButtonSide = (s.closeIconPosition ?? '')
       .toLowerCase()
@@ -5150,6 +6416,9 @@ ${indent}</ul>`;
       justifyContent: 'center',
       gap: '0.5rem',
       fontWeight: '500',
+      minHeight: '44px',
+      cursor: 'pointer',
+      textDecoration: 'none',
     });
     const triggerHeadingPart = s.heading
       ? `\n          <div className="vp-uagb-modal__intro">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.headingCustomClassNames, s.presentation?.textAlign)}" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
@@ -5333,7 +6602,7 @@ ${indent}</ul>`;
     const tabButtons = s.tabs
       .map(
         (tab, index) => `            <div
-              key=${index}
+              key={${index}}
               className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
                 ? 'uagb-tab uagb-tabs__active'
                 : 'uagb-tab'}
@@ -5414,7 +6683,7 @@ ${indent}</ul>`;
             ? 'vp-uagb-tabs__panel-media-grid'
             : 'vp-uagb-tabs__panel-stack';
         return `            <div
-              key=${index}
+              key={${index}}
               id="${domKey}-panel-${index}"
               role="tabpanel"
               aria-labelledby="${domKey}-tab-${index}"
@@ -5525,7 +6794,7 @@ ${panels}
     const items = s.items
       .map(
         (item, index) => `          <div
-            key=${index}
+            key={${index}}
             className="uagb-faq-child__outer-wrap"
           >
             <div

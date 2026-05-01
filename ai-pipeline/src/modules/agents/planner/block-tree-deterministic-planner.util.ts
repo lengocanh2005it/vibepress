@@ -1,0 +1,1176 @@
+import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
+import type { DbContentResult } from '../db-content/db-content.service.js';
+import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type {
+  ColorPalette,
+  CommentsSection,
+  ComponentVisualPlan,
+  FooterSection,
+  LayoutTokens,
+  NavbarSection,
+  PageContentSection,
+  PostContentSection,
+  PostFeaturedImageSection,
+  PostListSection,
+  PostMetaSection,
+  PostNavigationSection,
+  PostTermsSection,
+  PostTitleSection,
+  SearchSection,
+  SectionPlan,
+  SidebarSection,
+  TypographyTokens,
+  VisualPlanLockPolicy,
+  VisualPlanRenderAuthority,
+} from '../react-generator/visual-plan.schema.js';
+import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
+import { assessDeterministicRenderAuthority } from './deterministic-render-authority-policy.util.js';
+
+export interface BlockTreePlannerComponentPlan {
+  templateName: string;
+  componentName: string;
+  type: 'page' | 'partial';
+  route: string | null;
+  dataNeeds: string[];
+  isDetail: boolean;
+  fixedSlug?: string;
+}
+
+interface DetailShellInfo {
+  hasSidebar: boolean;
+  sidebarNodes?: BlockNode[];
+  sidebarWidth?: string;
+  sidebarPosition?: 'left' | 'right';
+  sidebarColumnSourceNodeId?: string;
+  shellPaddingStyle?: string;
+  shellMarginStyle?: string;
+  shellGapStyle?: string;
+  shellSourceRef?: BlockNode['sourceRef'];
+  shellCustomClassNames?: string[];
+}
+
+interface SidebarShellPresentation {
+  paddingStyle?: string;
+  marginStyle?: string;
+  gapStyle?: string;
+  sourceRef?: BlockNode['sourceRef'];
+  customClassNames?: string[];
+}
+
+export interface BuildBlockTreeDrivenVisualPlanInput {
+  componentPlan: BlockTreePlannerComponentPlan;
+  draftSections?: SectionPlan[];
+  draftBlockTree?: BlockNode[];
+  content: DbContentResult;
+  tokens: ThemeTokens | undefined;
+  globalPalette: ColorPalette;
+  globalTypography: TypographyTokens;
+  deriveComponentLayout: (
+    tokens: ThemeTokens | undefined,
+    componentName: string,
+    isDetailPage?: boolean,
+  ) => LayoutTokens;
+  buildRichBoundPageDetailSections: (
+    componentPlan: BlockTreePlannerComponentPlan,
+    content: DbContentResult,
+    tokens: ThemeTokens | undefined,
+  ) => SectionPlan[] | undefined;
+  buildBoundPageContentFallbackSection: (
+    componentPlan: BlockTreePlannerComponentPlan,
+    content: DbContentResult,
+    showTitle: boolean,
+  ) => PageContentSection;
+}
+
+export function buildBlockTreeDrivenVisualPlanForComponent(
+  input: BuildBlockTreeDrivenVisualPlanInput,
+): ComponentVisualPlan | undefined {
+  const { componentPlan, draftSections, draftBlockTree, content, tokens } =
+    input;
+  if (!draftBlockTree?.length) return undefined;
+
+  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+  const layout = input.deriveComponentLayout(
+    tokens,
+    componentPlan.componentName,
+    componentPlan.isDetail === true && componentPlan.route !== '/',
+  );
+  const authorityAssessment = assessDeterministicRenderAuthority({
+    componentPlan,
+    draftBlockTree,
+    draftSections,
+  });
+  const renderAuthority = authorityAssessment.renderAuthority;
+  const lockPolicy = buildDeterministicLockPolicy(authorityAssessment.reason);
+  const base = {
+    componentName: componentPlan.componentName,
+    dataNeeds,
+    palette: input.globalPalette,
+    typography: input.globalTypography,
+    layout,
+    blockStyles: tokens?.blockStyles,
+  } as const;
+  const authorityDecorators =
+    componentPlan.type === 'partial'
+      ? {
+          deterministicAuthority: true,
+          renderAuthority,
+          lockPolicy,
+        }
+      : {
+          renderAuthority: 'ai' as const,
+        };
+
+  if (isEligibleBlockTreeSharedPartial(componentPlan)) {
+    const sections = buildBlockTreeDrivenSharedPartialSections({
+      componentPlan,
+      draftBlockTree,
+      draftSections,
+      content,
+    });
+    if (sections.length > 0) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        renderMode: 'block-centric',
+        sections,
+      };
+    }
+  }
+
+  if (
+    componentPlan.type === 'page' &&
+    componentPlan.isDetail === true &&
+    componentPlan.fixedSlug &&
+    dataNeeds.includes('pageDetail')
+  ) {
+    const result = buildBlockTreeDrivenBoundPageDetailSections({
+      componentPlan,
+      draftBlockTree,
+      content,
+      tokens,
+      deriveComponentLayout: input.deriveComponentLayout,
+      buildRichBoundPageDetailSections: input.buildRichBoundPageDetailSections,
+      buildBoundPageContentFallbackSection:
+        input.buildBoundPageContentFallbackSection,
+    });
+    if (result) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        layout: result.layout ?? layout,
+        sections: result.sections,
+      };
+    }
+  }
+
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  if (
+    componentPlan.type === 'page' &&
+    componentPlan.isDetail === true &&
+    dataNeeds.includes('postDetail') &&
+    /^(single|single-with-sidebar)$/.test(normalizedTemplate)
+  ) {
+    const result = buildBlockTreeDrivenPostDetailSections({
+      componentPlan,
+      draftBlockTree,
+      content,
+      layout,
+    });
+    if (result) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        layout: result.layout ?? layout,
+        sections: result.sections,
+      };
+    }
+  }
+
+  if (
+    componentPlan.type === 'page' &&
+    componentPlan.isDetail !== true &&
+    isEligibleBlockTreeListingTemplate(componentPlan)
+  ) {
+    const sections = buildBlockTreeDrivenListingSections({
+      componentPlan,
+      draftBlockTree,
+      draftSections,
+    });
+    if (sections?.length) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        sections,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+export function shouldBypassCoverageAuditForBlockTreeListingPlan(
+  componentPlan: BlockTreePlannerComponentPlan,
+  sections: SectionPlan[],
+): boolean {
+  if (!isEligibleBlockTreeListingTemplate(componentPlan)) {
+    return false;
+  }
+  return sections.some(
+    (section) => section.type === 'post-list' || section.type === 'search',
+  );
+}
+
+export function shouldShortCircuitBlockTreeVisualPlan(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  return (
+    isEligibleBlockTreeSharedPartial(componentPlan) ||
+    isEligibleBlockTreeListingTemplate(componentPlan)
+  );
+}
+
+function isEligibleBlockTreeSharedPartial(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'partial') return false;
+  return /^(header|footer|navigation|nav|sidebar|postmeta)$/i.test(
+    componentPlan.componentName,
+  );
+}
+
+function buildDeterministicLockPolicy(reason: string): VisualPlanLockPolicy {
+  return {
+    bypassAiGeneration: true,
+    bypassAiReviewRewrite: true,
+    allowAiFixModes: ['syntax-only'],
+    reason,
+  };
+}
+
+function buildBlockTreeDrivenSharedPartialSections(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  draftBlockTree: BlockNode[];
+  draftSections?: SectionPlan[];
+  content: DbContentResult;
+}): SectionPlan[] {
+  const { componentPlan, draftBlockTree, draftSections, content } = input;
+  const explicitChromeSections = (draftSections ?? []).filter(
+    (section) => section.type === 'navbar' || section.type === 'footer',
+  );
+  if (explicitChromeSections.length > 0) {
+    return explicitChromeSections;
+  }
+
+  const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
+  const normalizedName = componentPlan.componentName.toLowerCase();
+
+  if (/^(header|navigation|nav)$/.test(normalizedName)) {
+    const navigationNode = orderedNodes.find(
+      (node) => node.kind === 'navigation',
+    );
+    const section: NavbarSection = {
+      type: 'navbar',
+      sticky: false,
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+      orientation:
+        navigationNode?.menuOrientation ??
+        readLayoutOrientation(navigationNode) ??
+        'horizontal',
+      overlayMenu: navigationNode?.overlayMenu ?? 'mobile',
+      isResponsive: navigationNode?.isResponsive ?? true,
+      ...(navigationNode?.sourceRef
+        ? { sourceRef: navigationNode.sourceRef }
+        : {}),
+      debugKey: 'navbar-0',
+    };
+    return [section];
+  }
+
+  if (/^footer$/.test(normalizedName)) {
+    const footerColumnsNode = orderedNodes.find(
+      (node) => node.kind === 'columns',
+    );
+    const section: FooterSection = {
+      type: 'footer',
+      menuColumns: inferFooterMenuColumnsFromBlockTree(orderedNodes),
+      showSiteLogo: orderedNodes.some((node) => node.kind === 'site-logo'),
+      showSiteTitle: orderedNodes.some((node) => node.kind === 'site-title'),
+      showTagline: orderedNodes.some((node) => node.kind === 'site-tagline'),
+      ...(footerColumnsNode?.children?.length
+        ? {
+            columnWidths: footerColumnsNode.children
+              .map((child) => child.columnWidth?.trim())
+              .filter((value): value is string => !!value),
+          }
+        : {}),
+      ...(footerColumnsNode?.sourceRef
+        ? { sourceRef: footerColumnsNode.sourceRef }
+        : {}),
+      debugKey: 'footer-0',
+    };
+    return [section];
+  }
+
+  if (/^postmeta$/.test(normalizedName)) {
+    const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
+    const stats = collectPostDetailBlockStats(orderedNodes);
+    if (!stats.hasMetaSection) return [];
+    const section: PostMetaSection = {
+      type: 'post-meta',
+      layout: 'inline',
+      showAuthor: stats.hasAuthor,
+      showDate: stats.hasDate,
+      showCategories: stats.hasCategoryTerms,
+      ...(stats.metaNode?.sourceRef
+        ? { sourceRef: stats.metaNode.sourceRef }
+        : {}),
+      ...(stats.metaNode?.customClassNames?.length
+        ? { customClassNames: [...stats.metaNode.customClassNames] }
+        : {}),
+      debugKey: 'post-meta-0',
+      sectionKey: 'post-meta-0',
+    };
+    return [section];
+  }
+
+  if (/^sidebar$/.test(normalizedName)) {
+    return [buildSidebarSectionFromBlockTree(draftBlockTree, content)];
+  }
+
+  return [];
+}
+
+function inferFooterMenuColumnsFromBlockTree(
+  nodes: BlockNode[],
+): FooterSection['menuColumns'] {
+  const groups = nodes.filter((node) => node.kind === 'group');
+  const result: NonNullable<FooterSection['menuColumns']> = [];
+  for (const group of groups) {
+    const titleNode = (group.children ?? []).find(
+      (child) => child.kind === 'heading',
+    );
+    const navNode = (group.children ?? []).find((child) =>
+      containsKind(child, 'navigation'),
+    );
+    const title = titleNode?.text?.trim();
+    if (!title || !navNode) continue;
+    result.push({
+      title,
+      menuSlug: slugifyLabel(title),
+    });
+  }
+  return result;
+}
+
+function containsKind(node: BlockNode, kind: string): boolean {
+  if (node.kind === kind) return true;
+  return (node.children ?? []).some((child) => containsKind(child, kind));
+}
+
+function readLayoutOrientation(
+  node: BlockNode | undefined,
+): 'horizontal' | 'vertical' | undefined {
+  const orientation = node?.attrs?.layout as
+    | { orientation?: 'horizontal' | 'vertical' }
+    | undefined;
+  return orientation?.orientation;
+}
+
+function slugifyLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function isEligibleBlockTreeListingTemplate(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
+    return false;
+  }
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  if (!['archive', 'index', 'search'].includes(normalizedTemplate)) {
+    return false;
+  }
+  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+  return dataNeeds.includes('posts');
+}
+
+function buildBlockTreeDrivenListingSections(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  draftBlockTree: BlockNode[];
+  draftSections?: SectionPlan[];
+}): SectionPlan[] | undefined {
+  const { componentPlan, draftBlockTree, draftSections } = input;
+  if (!draftBlockTree.length) {
+    return undefined;
+  }
+
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
+  const queryNode = orderedNodes.find((node) =>
+    ['query', 'latest-posts'].includes(node.kind),
+  );
+  const searchNode = orderedNodes.find((node) => node.kind === 'search');
+  const queryTitleNode = orderedNodes.find(
+    (node) => node.kind === 'query-title',
+  );
+  const hasQueryTitle = queryTitleNode != null;
+  const patternNodes = orderedNodes.filter((node) => node.kind === 'pattern');
+
+  const sections: SectionPlan[] = [];
+  const searchSection = draftSections?.find(
+    (section): section is SearchSection => section.type === 'search',
+  );
+  if (
+    normalizedTemplate === 'search' &&
+    (searchSection || searchNode || queryTitleNode || patternNodes.length > 0)
+  ) {
+    sections.push(
+      buildBlockTreeDrivenListingSearchSection({
+        searchSection,
+        searchNode,
+        queryTitleNode,
+        patternNodes,
+        hasQueryTitle,
+      }),
+    );
+  }
+
+  const postListSection = draftSections?.find(
+    (section): section is PostListSection => section.type === 'post-list',
+  );
+  if (postListSection) {
+    sections.push({
+      ...postListSection,
+      ...(queryNode?.sourceRef && !postListSection.sourceRef
+        ? { sourceRef: queryNode.sourceRef }
+        : {}),
+    });
+  } else if (
+    queryNode ||
+    patternNodes.length > 0 ||
+    ['archive', 'index', 'search'].includes(normalizedTemplate)
+  ) {
+    sections.push(
+      buildBlockTreeDrivenListingFallbackSection(
+        componentPlan,
+        queryNode ?? patternNodes[patternNodes.length - 1] ?? queryTitleNode,
+      ),
+    );
+  }
+
+  return sections.length > 0 ? sections : undefined;
+}
+
+function buildBlockTreeDrivenListingSearchSection(input: {
+  searchSection?: SearchSection;
+  searchNode?: BlockNode;
+  queryTitleNode?: BlockNode;
+  patternNodes: BlockNode[];
+  hasQueryTitle: boolean;
+}): SearchSection {
+  const sourceRef =
+    input.searchSection?.sourceRef ??
+    pickFirstBlockSourceRef(
+      input.searchNode,
+      input.queryTitleNode,
+      ...input.patternNodes,
+    );
+  return {
+    type: 'search',
+    ...(input.searchSection ? input.searchSection : {}),
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(input.hasQueryTitle ? { title: undefined } : {}),
+    ...(input.searchSection?.obligation
+      ? { obligation: input.searchSection.obligation }
+      : {
+          obligation: {
+            role: 'search',
+            required: ['search-input'],
+          },
+        }),
+    debugKey: input.searchSection?.debugKey ?? 'search-0',
+    sectionKey: input.searchSection?.sectionKey ?? 'search-0',
+  };
+}
+
+function buildBlockTreeDrivenListingFallbackSection(
+  componentPlan: BlockTreePlannerComponentPlan,
+  queryNode?: BlockNode,
+): PostListSection {
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  return {
+    type: 'post-list',
+    ...(normalizedTemplate === 'index' ? { title: 'Posts' } : {}),
+    layout: 'grid-3',
+    showDate: normalizedTemplate === 'index',
+    showAuthor: normalizedTemplate === 'index',
+    showCategory: normalizedTemplate === 'search',
+    showExcerpt: true,
+    showFeaturedImage: true,
+    itemLayout: 'stacked',
+    metaLayout: 'inline',
+    metaAlign: 'start',
+    metaSeparator: normalizedTemplate === 'search' ? 'dot' : 'dash',
+    ...(queryNode?.sourceRef ? { sourceRef: queryNode.sourceRef } : {}),
+    debugKey: 'post-list-0',
+    sectionKey: 'post-list-0',
+    obligation: {
+      role: 'post-list',
+      required: ['posts'],
+      minItems: { posts: 1 },
+    },
+  };
+}
+
+function pickFirstBlockSourceRef(
+  ...nodes: Array<BlockNode | undefined>
+): BlockNode['sourceRef'] | undefined {
+  for (const node of nodes) {
+    if (node?.sourceRef) return node.sourceRef;
+  }
+  return undefined;
+}
+
+function buildBlockTreeDrivenPostDetailSections(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  draftBlockTree: BlockNode[];
+  content: DbContentResult;
+  layout: LayoutTokens;
+}): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
+  const shell = inspectDetailShellFromBlockTree(input.draftBlockTree);
+  const mainNodes = collectBlockNodesInOrder(
+    input.draftBlockTree,
+    shell.sidebarColumnSourceNodeId
+      ? new Set([shell.sidebarColumnSourceNodeId])
+      : undefined,
+  );
+  const stats = collectPostDetailBlockStats(mainNodes);
+  if (!stats.postContentNode) return undefined;
+
+  const sections: SectionPlan[] = [];
+
+  if (stats.featuredImageNode) {
+    const section: PostFeaturedImageSection = {
+      type: 'post-featured-image',
+      ...(stats.featuredImageNode.sourceRef
+        ? { sourceRef: stats.featuredImageNode.sourceRef }
+        : {}),
+      ...(stats.featuredImageNode.customClassNames?.length
+        ? {
+            imageCustomClassNames: [
+              ...stats.featuredImageNode.customClassNames,
+            ],
+          }
+        : {}),
+      debugKey: 'post-featured-image-0',
+      sectionKey: 'post-featured-image-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.titleNode) {
+    const level =
+      typeof stats.titleNode.level === 'number' &&
+      stats.titleNode.level >= 1 &&
+      stats.titleNode.level <= 6
+        ? (stats.titleNode.level as 1 | 2 | 3 | 4 | 5 | 6)
+        : 1;
+    const section: PostTitleSection = {
+      type: 'post-title',
+      level,
+      ...(stats.titleNode.sourceRef
+        ? { sourceRef: stats.titleNode.sourceRef }
+        : {}),
+      ...(stats.titleNode.customClassNames?.length
+        ? { titleCustomClassNames: [...stats.titleNode.customClassNames] }
+        : {}),
+      debugKey: 'post-title-0',
+      sectionKey: 'post-title-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.hasMetaSection) {
+    const section: PostMetaSection = {
+      type: 'post-meta',
+      layout: 'inline',
+      showAuthor: stats.hasAuthor,
+      showDate: stats.hasDate,
+      showCategories: stats.hasCategoryTerms,
+      ...(stats.metaNode?.sourceRef
+        ? { sourceRef: stats.metaNode.sourceRef }
+        : {}),
+      ...(stats.metaNode?.customClassNames?.length
+        ? { customClassNames: [...stats.metaNode.customClassNames] }
+        : {}),
+      debugKey: 'post-meta-0',
+      sectionKey: 'post-meta-0',
+    };
+    sections.push(section);
+  }
+
+  const postContentSection: PostContentSection = {
+    type: 'post-content',
+    showTitle: !stats.titleNode,
+    showAuthor: !stats.hasMetaSection && stats.hasAuthor,
+    showDate: !stats.hasMetaSection && stats.hasDate,
+    showCategories: !stats.hasMetaSection && stats.hasCategoryTerms,
+    ...(stats.postContentNode.sourceRef
+      ? { sourceRef: stats.postContentNode.sourceRef }
+      : {}),
+    ...(stats.postContentNode.customClassNames?.length
+      ? { customClassNames: [...stats.postContentNode.customClassNames] }
+      : {}),
+    debugKey: 'post-content-0',
+    sectionKey: 'post-content-0',
+  };
+  sections.push(postContentSection);
+
+  if (stats.termsNode && stats.hasTagTerms) {
+    const section: PostTermsSection = {
+      type: 'post-terms',
+      taxonomy: stats.termsTaxonomy ?? 'post_tag',
+      separator: stats.termsSeparator,
+      layout: 'inline',
+      ...(stats.termsNode.sourceRef
+        ? { sourceRef: stats.termsNode.sourceRef }
+        : {}),
+      ...(stats.termsNode.customClassNames?.length
+        ? { customClassNames: [...stats.termsNode.customClassNames] }
+        : {}),
+      debugKey: 'post-terms-0',
+      sectionKey: 'post-terms-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.commentsNode) {
+    const section: CommentsSection = {
+      type: 'comments',
+      showForm: true,
+      requireName: true,
+      requireEmail: true,
+      ...(stats.commentsNode.sourceRef
+        ? { sourceRef: stats.commentsNode.sourceRef }
+        : {}),
+      debugKey: 'comments-0',
+      sectionKey: 'comments-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.postNavigationNode) {
+    const section: PostNavigationSection = {
+      type: 'post-navigation',
+      showPrevious: true,
+      showNext: true,
+      ...(stats.postNavigationNode.sourceRef
+        ? { sourceRef: stats.postNavigationNode.sourceRef }
+        : {}),
+      debugKey: 'post-navigation-0',
+      sectionKey: 'post-navigation-0',
+    };
+    sections.push(section);
+  }
+
+  if (shell.sidebarNodes?.length) {
+    sections.push(
+      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
+        paddingStyle: shell.shellPaddingStyle,
+        marginStyle: shell.shellMarginStyle,
+        gapStyle: shell.shellGapStyle,
+        sourceRef: shell.shellSourceRef,
+        customClassNames: shell.shellCustomClassNames,
+      }),
+    );
+  }
+
+  return {
+    sections,
+    layout: shell.hasSidebar
+      ? {
+          ...input.layout,
+          contentLayout:
+            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
+          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
+          sidebarScope: 'all-content',
+        }
+      : input.layout,
+  };
+}
+
+function buildBlockTreeDrivenBoundPageDetailSections(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  draftBlockTree: BlockNode[];
+  content: DbContentResult;
+  tokens: ThemeTokens | undefined;
+  deriveComponentLayout: (
+    tokens: ThemeTokens | undefined,
+    componentName: string,
+    isDetailPage?: boolean,
+  ) => LayoutTokens;
+  buildRichBoundPageDetailSections: (
+    componentPlan: BlockTreePlannerComponentPlan,
+    content: DbContentResult,
+    tokens: ThemeTokens | undefined,
+  ) => SectionPlan[] | undefined;
+  buildBoundPageContentFallbackSection: (
+    componentPlan: BlockTreePlannerComponentPlan,
+    content: DbContentResult,
+    showTitle: boolean,
+  ) => PageContentSection;
+}): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
+  const shell = inspectDetailShellFromBlockTree(input.draftBlockTree);
+  const showTitle = !/no.?title/i.test(input.componentPlan.componentName);
+  const richSections = input
+    .buildRichBoundPageDetailSections(
+      input.componentPlan,
+      input.content,
+      input.tokens,
+    )
+    ?.filter(
+      (section) => section.type !== 'sidebar' && section.type !== 'search',
+    );
+
+  const sections: SectionPlan[] = richSections?.length
+    ? [...richSections]
+    : [
+        input.buildBoundPageContentFallbackSection(
+          input.componentPlan,
+          input.content,
+          showTitle,
+        ),
+      ];
+
+  if (shell.sidebarNodes?.length) {
+    sections.push(
+      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
+        paddingStyle: shell.shellPaddingStyle,
+        marginStyle: shell.shellMarginStyle,
+        gapStyle: shell.shellGapStyle,
+        sourceRef: shell.shellSourceRef,
+        customClassNames: shell.shellCustomClassNames,
+      }),
+    );
+  }
+
+  const layout = input.deriveComponentLayout(
+    input.tokens,
+    input.componentPlan.componentName,
+    true,
+  );
+  return {
+    sections,
+    layout: shell.hasSidebar
+      ? {
+          ...layout,
+          contentLayout:
+            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
+          sidebarWidth: shell.sidebarWidth ?? layout.sidebarWidth,
+          sidebarScope: 'all-content',
+        }
+      : layout,
+  };
+}
+
+function inspectDetailShellFromBlockTree(nodes: BlockNode[]): DetailShellInfo {
+  for (const node of nodes) {
+    const nested = inspectDetailShellNode(node, []);
+    if (nested.hasSidebar) return nested;
+  }
+  return { hasSidebar: false };
+}
+
+function inspectDetailShellNode(
+  node: BlockNode,
+  ancestors: BlockNode[],
+): DetailShellInfo {
+  if (node.kind === 'columns' && node.children?.length) {
+    const columns = node.children.filter((child) => child.kind === 'column');
+    const sidebarIndex = columns.findIndex((column) =>
+      blockTreeContainsSidebarTemplate(column),
+    );
+    if (sidebarIndex >= 0) {
+      const sidebarColumn = columns[sidebarIndex];
+      const outerShellNode = [...ancestors]
+        .reverse()
+        .find(
+          (candidate) =>
+            blockNodeHasBoxSpacing(candidate) ||
+            candidate.kind === 'group' ||
+            candidate.tagName === 'main',
+        );
+      const mergedPadding = mergeBlockNodeSpacing(
+        outerShellNode?.padding,
+        node.padding,
+      );
+      const mergedMargin = mergeBlockNodeSpacing(
+        outerShellNode?.margin,
+        node.margin,
+      );
+      const shellCustomClassNames = Array.from(
+        new Set([
+          ...(outerShellNode?.customClassNames ?? []),
+          ...(node.customClassNames ?? []),
+        ]),
+      );
+      return {
+        hasSidebar: true,
+        sidebarNodes: sidebarColumn.children ?? [],
+        sidebarWidth:
+          sidebarColumn.columnWidth ?? readWidthFromBlockAttrs(sidebarColumn),
+        sidebarPosition: sidebarIndex === 0 ? 'left' : 'right',
+        sidebarColumnSourceNodeId: sidebarColumn.sourceRef?.sourceNodeId,
+        shellPaddingStyle: blockSpacingToCssShorthand(mergedPadding),
+        shellMarginStyle: blockSpacingToCssShorthand(mergedMargin),
+        shellGapStyle: node.gap ?? outerShellNode?.gap,
+        shellSourceRef: outerShellNode?.sourceRef ?? node.sourceRef,
+        shellCustomClassNames:
+          shellCustomClassNames.length > 0 ? shellCustomClassNames : undefined,
+      };
+    }
+  }
+
+  for (const child of node.children ?? []) {
+    const nested = inspectDetailShellNode(child, [...ancestors, node]);
+    if (nested.hasSidebar) return nested;
+  }
+  return { hasSidebar: false };
+}
+
+function blockTreeContainsSidebarTemplate(node: BlockNode): boolean {
+  if (
+    node.kind === 'template-part' &&
+    typeof node.templatePartSlug === 'string' &&
+    /sidebar/i.test(node.templatePartSlug)
+  ) {
+    return true;
+  }
+  if (node.tagName === 'aside') return true;
+  return (node.children ?? []).some((child) =>
+    blockTreeContainsSidebarTemplate(child),
+  );
+}
+
+function collectBlockNodesInOrder(
+  nodes: BlockNode[],
+  skipSourceNodeIds?: Set<string>,
+): BlockNode[] {
+  const collected: BlockNode[] = [];
+  const visit = (node: BlockNode) => {
+    const sourceNodeId = node.sourceRef?.sourceNodeId;
+    if (sourceNodeId && skipSourceNodeIds?.has(sourceNodeId)) {
+      return;
+    }
+    collected.push(node);
+    for (const child of node.children ?? []) {
+      visit(child);
+    }
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+  return collected;
+}
+
+function collectPostDetailBlockStats(nodes: BlockNode[]): {
+  hasMetaSection: boolean;
+  hasAuthor: boolean;
+  hasDate: boolean;
+  hasCategoryTerms: boolean;
+  hasTagTerms: boolean;
+  titleNode?: BlockNode;
+  featuredImageNode?: BlockNode;
+  metaNode?: BlockNode;
+  postContentNode?: BlockNode;
+  termsNode?: BlockNode;
+  termsTaxonomy?: 'category' | 'post_tag' | 'tag';
+  termsSeparator?: string;
+  commentsNode?: BlockNode;
+  postNavigationNode?: BlockNode;
+} {
+  let titleNode: BlockNode | undefined;
+  let featuredImageNode: BlockNode | undefined;
+  let metaNode: BlockNode | undefined;
+  let postContentNode: BlockNode | undefined;
+  let termsNode: BlockNode | undefined;
+  let commentsNode: BlockNode | undefined;
+  let postNavigationNode: BlockNode | undefined;
+  let hasAuthor = false;
+  let hasDate = false;
+  let hasCategoryTerms = false;
+  let hasTagTerms = false;
+  let hasMetaSection = false;
+  let termsTaxonomy: 'category' | 'post_tag' | 'tag' | undefined;
+  let termsSeparator: string | undefined;
+
+  for (const node of nodes) {
+    switch (node.kind) {
+      case 'post-featured-image':
+        featuredImageNode ??= node;
+        break;
+      case 'post-title':
+        titleNode ??= node;
+        break;
+      case 'template-part':
+        if (!metaNode && /post-meta/i.test(node.templatePartSlug ?? '')) {
+          metaNode = node;
+          hasMetaSection = true;
+        }
+        break;
+      case 'post-author-name':
+        hasAuthor = true;
+        metaNode ??= node;
+        hasMetaSection = true;
+        break;
+      case 'post-date':
+        hasDate = true;
+        metaNode ??= node;
+        hasMetaSection = true;
+        break;
+      case 'post-content':
+        postContentNode ??= node;
+        break;
+      case 'post-terms': {
+        const taxonomy = normalizePostTermsTaxonomy(node);
+        if (taxonomy === 'category') {
+          hasCategoryTerms = true;
+          if (hasMetaSection && !termsNode) {
+            termsNode = node;
+          }
+        } else {
+          hasTagTerms = true;
+          termsNode ??= node;
+          termsTaxonomy = taxonomy;
+          termsSeparator ??= readStringBlockAttr(node, 'separator');
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    if (!commentsNode && isCommentsBlockTreeNode(node)) {
+      commentsNode = node;
+    }
+    if (!postNavigationNode && isPostNavigationBlockTreeNode(node)) {
+      postNavigationNode = node;
+    }
+  }
+
+  return {
+    hasMetaSection,
+    hasAuthor,
+    hasDate,
+    hasCategoryTerms,
+    hasTagTerms,
+    titleNode,
+    featuredImageNode,
+    metaNode,
+    postContentNode,
+    termsNode,
+    termsTaxonomy,
+    termsSeparator,
+    commentsNode,
+    postNavigationNode,
+  };
+}
+
+function buildSidebarSectionFromBlockTree(
+  sidebarNodes: BlockNode[],
+  content: DbContentResult,
+  shell?: SidebarShellPresentation,
+): SidebarSection {
+  const orderedNodes = collectBlockNodesInOrder(sidebarNodes);
+  const headingTexts = orderedNodes
+    .filter(
+      (node) =>
+        node.kind === 'heading' &&
+        typeof node.text === 'string' &&
+        node.text.trim().length > 0,
+    )
+    .map((node) => node.text!.trim());
+  const hasNavigation = orderedNodes.some((node) => node.kind === 'navigation');
+  const hasAuthorBio = orderedNodes.some((node) =>
+    ['post-author-biography', 'avatar'].includes(node.kind),
+  );
+  const hasCategories = orderedNodes.some((node) => node.kind === 'categories');
+  const hasRecentPosts = orderedNodes.some((node) =>
+    ['query', 'latest-posts'].includes(node.kind),
+  );
+
+  const widgets: SidebarSection['widgets'] = [];
+  if (hasAuthorBio) {
+    widgets.push({
+      kind: 'author-bio',
+      title:
+        headingTexts.find((heading) => /author/i.test(heading)) ??
+        'About the author',
+      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
+    });
+  }
+  if (hasCategories) {
+    widgets.push({
+      kind: 'categories',
+      title:
+        headingTexts.find((heading) => /categor/i.test(heading)) ??
+        'Popular Categories',
+    });
+  }
+  if (hasNavigation) {
+    widgets.push({
+      kind: 'navigation',
+      title:
+        headingTexts.find((heading) =>
+          /link|resource|menu|explore/i.test(heading),
+        ) ?? 'Useful Links',
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+    });
+  }
+  if (hasRecentPosts) {
+    widgets.push({
+      kind: 'recent-posts',
+      title:
+        headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
+        'Recent Posts',
+    });
+  }
+  if (widgets.length === 0) {
+    widgets.push({
+      kind: 'pages-list',
+      title:
+        headingTexts.find((heading) => /page|explore/i.test(heading)) ??
+        'Pages',
+    });
+  }
+
+  const sourceRef =
+    shell?.sourceRef ??
+    orderedNodes.find((node) => node.sourceRef)?.sourceRef ??
+    undefined;
+  const customClassNames = Array.from(
+    new Set([
+      ...(shell?.customClassNames ?? []),
+      ...orderedNodes.flatMap((node) => node.customClassNames ?? []),
+    ]),
+  );
+
+  return {
+    type: 'sidebar',
+    widgets,
+    maxItems: 6,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(customClassNames.length > 0 ? { customClassNames } : {}),
+    ...(shell?.paddingStyle ? { paddingStyle: shell.paddingStyle } : {}),
+    ...(shell?.marginStyle ? { marginStyle: shell.marginStyle } : {}),
+    ...(shell?.gapStyle ? { gapStyle: shell.gapStyle } : {}),
+    debugKey: 'sidebar-0',
+    sectionKey: 'sidebar-0',
+  };
+}
+
+function isCommentsBlockTreeNode(node: BlockNode): boolean {
+  const blockName = node.blockName.toLowerCase();
+  const patternSlug = String(node.patternSlug ?? '').toLowerCase();
+  return (
+    patternSlug.includes('comments') ||
+    blockName.includes('comment-template') ||
+    blockName.includes('comments')
+  );
+}
+
+function isPostNavigationBlockTreeNode(node: BlockNode): boolean {
+  const blockName = node.blockName.toLowerCase();
+  const patternSlug = String(node.patternSlug ?? '').toLowerCase();
+  return (
+    patternSlug.includes('post-navigation') ||
+    blockName.includes('post-navigation')
+  );
+}
+
+function normalizePostTermsTaxonomy(
+  node: BlockNode,
+): 'category' | 'post_tag' | 'tag' {
+  const taxonomy = readStringBlockAttr(node, 'term');
+  if (taxonomy === 'category') return 'category';
+  if (taxonomy === 'tag') return 'tag';
+  return 'post_tag';
+}
+
+function readWidthFromBlockAttrs(node: BlockNode): string | undefined {
+  return (
+    readStringBlockAttr(node, 'width') ?? readStringBlockAttr(node, 'flexBasis')
+  );
+}
+
+function readStringBlockAttr(
+  node: Pick<BlockNode, 'attrs'>,
+  key: string,
+): string | undefined {
+  const value = node.attrs?.[key];
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function blockNodeHasBoxSpacing(node: BlockNode | undefined): boolean {
+  if (!node) return false;
+  return Boolean(
+    node.padding?.top ||
+    node.padding?.right ||
+    node.padding?.bottom ||
+    node.padding?.left ||
+    node.margin?.top ||
+    node.margin?.right ||
+    node.margin?.bottom ||
+    node.margin?.left ||
+    node.gap,
+  );
+}
+
+function mergeBlockNodeSpacing(
+  outer?: BlockNode['padding'],
+  inner?: BlockNode['padding'],
+): BlockNode['padding'] | undefined {
+  const merged = {
+    top: inner?.top ?? outer?.top,
+    right: inner?.right ?? outer?.right,
+    bottom: inner?.bottom ?? outer?.bottom,
+    left: inner?.left ?? outer?.left,
+  };
+  return merged.top || merged.right || merged.bottom || merged.left
+    ? merged
+    : undefined;
+}
+
+function blockSpacingToCssShorthand(
+  spacing?: BlockNode['padding'],
+): string | undefined {
+  if (!spacing) return undefined;
+  const top = spacing.top ?? '0px';
+  const right = spacing.right ?? top;
+  const bottom = spacing.bottom ?? top;
+  const left = spacing.left ?? right;
+  return [top, right, bottom, left].join(' ');
+}
+
+function normalizeTemplateIdentifier(value: string | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return '';
+  const normalized = trimmed.replace(/^.*[\\/]/, '');
+  return normalized.replace(/\.(php|html)$/i, '').toLowerCase();
+}

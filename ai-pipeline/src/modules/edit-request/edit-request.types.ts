@@ -22,7 +22,7 @@ export type EditRequestMode = 'none' | 'no_capture' | 'capture';
 export type EditIntentCategory =
   | 'full_site_migration'
   | 'full_site_migration_with_focus'
-  | 'targeted_component_edit' // layout / color / content / add / replace on a specific component
+  | 'targeted_component_edit' // content / background / color / layout on a specific component
   | 'invalid';
 
 export type { EditOperation };
@@ -66,6 +66,7 @@ export type EditRequestRejectionCode =
   | 'CAPTURE_NOTE_REQUIRED'
   | 'CAPTURE_NOTE_TOO_VAGUE'
   | 'FOCUS_TARGET_ACTION_REQUIRED'
+  | 'UNSUPPORTED_EDIT_OPERATION'
   | 'UNCLEAR_INTENT'
   | 'OUT_OF_SCOPE';
 

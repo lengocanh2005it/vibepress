@@ -392,7 +392,9 @@ Rules:
 
 ### Other rules
 
-- HTML from API → `<div dangerouslySetInnerHTML={{__html:content}} />`
+- HTML from API:
+  - post/body HTML may use `dangerouslySetInnerHTML` when the approved render path expects raw post HTML
+  - page/body HTML should prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`
 - WordPress upload/media URLs should use the local preview asset path exactly as provided (`/assets/...` or `/assets/images/...`). Do NOT rewrite them back to remote WordPress URLs.
 - PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
 - `<header>` → no background color (transparent)
@@ -509,7 +511,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                              |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                              |
 | `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
-| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                                                                            |
+| `post-content` / `html` | render approved body HTML; for `post-content` raw `dangerouslySetInnerHTML` is acceptable, but page/body content should prefer structured rich-text rendering                                                                                                                                                                                            |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                                                                            |
 
 `block: "query"` → fetch `/api/posts`, map over `post` results:
@@ -547,7 +549,7 @@ Blocks form a hierarchical tree. Parent blocks control layout.
 | `navigation`    | navigation menu container                                                                                                                  |
 | `header`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<header>` only inside dedicated `Header` partials. |
 | `footer`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<footer>` only inside dedicated `Footer` partials. |
-| `html`          | render raw HTML using dangerouslySetInnerHTML                                                                                              |
+| `html`          | render approved raw HTML; prefer structured rich-text rendering for page/body wrappers when required by the approved contract                                                                                              |
 
 ## Block hierarchy — DO NOT FLATTEN
 
@@ -672,17 +674,17 @@ Only render blocks present in the template tree.
 
 ⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
 
-When the template contains a `post-content` or `html` block that is rendered via `dangerouslySetInnerHTML`, ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside `dangerouslySetInnerHTML`.
+When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved render path (`dangerouslySetInnerHTML` for post HTML or `renderRichTextChildren`/structured JSX for page HTML), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
 
 ```tsx
-// ❌ WRONG — "About" heading is already inside item.content from dangerouslySetInnerHTML
-<div dangerouslySetInnerHTML={{ __html: item.content }} />
+// ❌ WRONG — "About" heading is already inside item.content from the canonical body render
+<div>{renderRichTextChildren(item.content, "page-content")}</div>
 <section>
   <h2>About</h2>  {/* ← hallucinated duplicate */}
 </section>
 
-// ✅ CORRECT — render page content ONCE via dangerouslySetInnerHTML, nothing else
-<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+// ✅ CORRECT — render the canonical body ONCE, nothing else
+<div className="prose max-w-none">{renderRichTextChildren(item.content, "page-content")}</div>
 ```
 
 If the template JSON has individual heading/paragraph/image nodes inside a `post-content` or `page-content` section, treat them as metadata for understanding structure only — do NOT render them as separate JSX blocks.

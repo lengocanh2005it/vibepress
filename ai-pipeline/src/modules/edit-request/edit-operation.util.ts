@@ -5,12 +5,75 @@
 export type EditOperation =
   | 'change_layout' // đổi layout
   | 'change_content' // đổi nội dung
+  | 'change_background' // đổi background
   | 'change_color' // đổi màu sắc
-  | 'replace_section' // thay cái cũ bằng cái mới
-  | 'add_section' // thêm section mới (carousel, slider, v.v.)
-  | 'add_component' // thêm component mới (widget, interactive element)
-  | 'adjust_layout' // sửa layout dựa trên cái hiện có
   | 'general'; // general / undetected
+
+export const SUPPORTED_TARGETED_EDIT_OPERATIONS = [
+  'change_content',
+  'change_background',
+  'change_color',
+  'change_layout',
+] as const satisfies readonly EditOperation[];
+
+export function isSupportedTargetedEditOperation(
+  operation: EditOperation | undefined,
+): operation is (typeof SUPPORTED_TARGETED_EDIT_OPERATIONS)[number] {
+  return (
+    !!operation &&
+    (SUPPORTED_TARGETED_EDIT_OPERATIONS as readonly string[]).includes(
+      operation,
+    )
+  );
+}
+
+export function detectUnsupportedEditRequestReason(
+  prompt: string,
+): string | undefined {
+  const normalized = normalizeOp(prompt);
+  if (!normalized) return undefined;
+
+  if (
+    /\b(add|insert|create|introduce|them|chen|tao moi|bo sung)\b/.test(
+      normalized,
+    ) &&
+    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(
+      normalized,
+    )
+  ) {
+    return 'add-section-or-component';
+  }
+
+  if (
+    /\b(replace|convert|switch|swap|thay the|doi thanh|chuyen thanh)\b/.test(
+      normalized,
+    ) &&
+    /\b(section|component|widget|layout block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(
+      normalized,
+    )
+  ) {
+    return 'replace-section-or-component';
+  }
+
+  if (
+    /\b(remove|delete|drop|xoa|bo)\b/.test(normalized) &&
+    /\b(section|component|widget|block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(
+      normalized,
+    )
+  ) {
+    return 'remove-section-or-component';
+  }
+
+  if (
+    /\b(font|typography|font-size|text size|line-height|letter-spacing|font weight|chu|co chu)\b/.test(
+      normalized,
+    )
+  ) {
+    return 'typography-change';
+  }
+
+  return undefined;
+}
 
 // ── Section type detection ────────────────────────────────────────────────────
 
@@ -42,68 +105,48 @@ export function detectSectionType(prompt: string): string | undefined {
 export function detectEditOperation(prompt: string): EditOperation {
   const n = normalizeOp(prompt);
 
-  const hasAddSignal =
-    /\b(them|tao them|tao moi|bo sung|chen vao|add|insert|introduce|create new|generate new)\b/.test(
-      n,
-    );
-  const hasReplaceSignal =
-    /\b(thay bang|thay the bang|thay the boi|doi thanh|chuyen thanh|replace with|switch to|convert to)\b/.test(
+  if (detectUnsupportedEditRequestReason(n)) {
+    return 'general';
+  }
+
+  const hasBackgroundSignal =
+    /\b(background|bg|nen|overlay|gradient|hero background|banner background|mau nen)\b/.test(
       n,
     );
   const hasColorSignal =
-    /\b(mau sac|doi mau|mau nen|mau chu|background color|text color|color|palette|theme color|bo mau|mau sac moi)\b/.test(
+    /\b(mau sac|doi mau|mau chu|text color|color|palette|theme color|bo mau|mau sac moi)\b/.test(
       n,
     );
   const hasLayoutSignal =
-    /\b(layout|bo cuc|cach sap xep|column|hang cot|trai phai|chia cot|doi layout|change layout)\b/.test(
+    /\b(layout|bo cuc|cach sap xep|column|hang cot|trai phai|chia cot|doi layout|change layout|spacing|gap|padding|margin|align|can giua|can trai|can phai|center|left align|right align|rearrange)\b/.test(
       n,
     );
   const hasContentSignal =
     /\b(noi dung|van ban|chu viet|text|tieu de|heading|doi noi dung|change content|update content|noi dung moi)\b/.test(
       n,
     );
-  const hasAdjustSignal =
-    /\b(sua lai|dieu chinh|chinh sua lai|can chinh|fix|tweak|adjust|refine|improve|cai thien)\b/.test(
-      n,
-    );
-
-  const sectionType = detectSectionType(n);
-  const hasSectionKeyword =
-    /\b(section|vung|block|khu vuc|slider|carousel|modal|tabs|accordion|faq)\b/.test(
-      n,
-    );
-  const hasComponentKeyword =
-    /\b(component|widget|thanh phan|module|interactive|tinh nang)\b/.test(n);
-
-  // Add operations
-  if (hasAddSignal) {
-    if (sectionType || hasSectionKeyword) return 'add_section';
-    if (hasComponentKeyword) return 'add_component';
-    // "thêm" without specific type → treat as add_section if any interactive keyword present
-    if (/\b(interactive|animation|tinh nang tuong tac)\b/.test(n))
-      return 'add_component';
-    return 'add_section';
-  }
-
-  // Replace operations
-  if (hasReplaceSignal && (sectionType || hasSectionKeyword)) {
-    return 'replace_section';
-  }
 
   // Style operations
-  if (hasColorSignal && !hasLayoutSignal && !hasContentSignal)
+  if (hasBackgroundSignal && !hasLayoutSignal && !hasContentSignal) {
+    return 'change_background';
+  }
+
+  if (
+    hasColorSignal &&
+    !hasBackgroundSignal &&
+    !hasLayoutSignal &&
+    !hasContentSignal
+  ) {
     return 'change_color';
+  }
 
   // Layout operations
   if (hasLayoutSignal) {
-    return hasAdjustSignal ? 'adjust_layout' : 'change_layout';
+    return 'change_layout';
   }
 
   // Content operations
   if (hasContentSignal && !hasLayoutSignal) return 'change_content';
-
-  // Adjust without specific layout/content target
-  if (hasAdjustSignal) return 'adjust_layout';
 
   return 'general';
 }
@@ -118,74 +161,38 @@ export function buildOperationInstruction(
   operation: EditOperation,
   prompt: string,
 ): string {
-  const sectionType = detectSectionType(prompt);
-
   switch (operation) {
-    case 'add_section': {
-      const spec = sectionType ? buildSectionSpec(sectionType) : '';
-      return [
-        `OPERATION: ADD NEW SECTION`,
-        `Insert a new ${sectionType ?? 'section'} section at the most contextually appropriate position in the component.`,
-        spec
-          ? `Suggested section structure (adapt content, images, and colors to the actual theme palette and real data):\n\`\`\`json\n${spec}\n\`\`\``
-          : '',
-        `CRITICAL: Return the COMPLETE updated component with the new section inserted. Do NOT remove or alter any existing sections.`,
-      ]
-        .filter(Boolean)
-        .join('\n');
-    }
-
-    case 'add_component': {
-      return [
-        `OPERATION: ADD INTERACTIVE COMPONENT`,
-        `Add the requested interactive component/widget to this component.`,
-        `Implement it as a self-contained React element with appropriate state (useState/useEffect if needed).`,
-        `Place it at the most contextually appropriate position.`,
-        `Return the COMPLETE updated component with the new element inserted.`,
-      ].join('\n');
-    }
-
-    case 'replace_section': {
-      const spec = sectionType ? buildSectionSpec(sectionType) : '';
-      return [
-        `OPERATION: REPLACE SECTION`,
-        `Replace the targeted section with a new ${sectionType ?? 'section'} section as described.`,
-        spec ? `New section structure:\n\`\`\`json\n${spec}\n\`\`\`` : '',
-        `Preserve ALL surrounding sections unchanged. Only the targeted section should change.`,
-      ]
-        .filter(Boolean)
-        .join('\n');
-    }
-
     case 'change_layout':
       return [
         `OPERATION: CHANGE LAYOUT`,
         `Rearrange the visual structure as described in the request.`,
-        `Preserve all content text, data fetching, API contracts, and color scheme.`,
-        `Do NOT change copy or colors unless explicitly requested.`,
+        `Allowed scope is limited to layout only: alignment, spacing, column distribution, ordering, sizing, and wrapper structure.`,
+        `Preserve all content text, colors/backgrounds, data fetching, and API contracts.`,
+        `Do NOT add, remove, or replace sections/components.`,
       ].join('\n');
 
-    case 'adjust_layout':
+    case 'change_background':
       return [
-        `OPERATION: ADJUST LAYOUT`,
-        `Make incremental layout improvements based on the existing structure.`,
-        `Keep all data contracts, colors, and content copy intact.`,
-        `Apply only the specific layout refinements requested.`,
+        `OPERATION: CHANGE BACKGROUND`,
+        `Update ONLY the requested background treatment: solid background, gradient, overlay, or section background fill.`,
+        `Preserve all layout, text content, foreground colors, typography scale, and data contracts.`,
+        `Do NOT add, remove, move, or replace sections/components.`,
       ].join('\n');
 
     case 'change_color':
       return [
         `OPERATION: CHANGE COLORS`,
-        `Update ONLY the colors and/or backgrounds as described.`,
-        `Preserve all layout, typography scale, content text, and data contracts.`,
-        `Do not restructure or move any elements.`,
+        `Update ONLY the requested foreground colors such as text, icon, border, or button colors.`,
+        `Preserve all layout, backgrounds, typography scale, content text, and data contracts.`,
+        `Do NOT restructure, move, add, remove, or replace any elements.`,
       ].join('\n');
 
     case 'change_content':
       return [
         `OPERATION: CHANGE CONTENT`,
         `Update ONLY the specified content (text, headings, labels, descriptions).`,
-        `Preserve all layout, colors, spacing, and data contracts exactly as-is.`,
+        `Preserve all layout, background, colors, spacing, and data contracts exactly as-is.`,
+        `Do NOT add, remove, or replace sections/components.`,
       ].join('\n');
 
     default:

@@ -216,6 +216,13 @@ export class ReactVisualEditService {
       lines.push(editRequest.prompt.trim());
     }
 
+    lines.push(
+      'Supported edit scope is limited to content, background, color, or layout changes only.',
+    );
+    lines.push(
+      'Do NOT add/remove/replace sections or components, do NOT introduce new widgets/features, and do NOT alter routing or data contracts.',
+    );
+
     const editOperation = detectEditOperation(combinedInstruction);
     const operationInstruction = buildOperationInstruction(
       editOperation,
@@ -358,29 +365,6 @@ function formatVisualAttachment(
   }
   if (attachment.captureContext?.page?.route) {
     parts.push(`pageRoute=${attachment.captureContext.page.route}`);
-  }
-  if (attachment.targetNode?.route) {
-    parts.push(`targetRoute=${attachment.targetNode.route}`);
-  }
-  if (attachment.targetNode?.templateName) {
-    parts.push(`template=${attachment.targetNode.templateName}`);
-  }
-  if (attachment.targetNode?.editSourceNodeId) {
-    parts.push(`editSourceNodeId=${attachment.targetNode.editSourceNodeId}`);
-  }
-  if (attachment.targetNode?.editNodeRole) {
-    parts.push(`editRole=${attachment.targetNode.editNodeRole}`);
-  }
-  if (attachment.targetNode?.editTagName) {
-    parts.push(`editTag=${attachment.targetNode.editTagName}`);
-  }
-  if (attachment.targetNode?.nearestHeading) {
-    parts.push(
-      `heading="${truncate(attachment.targetNode.nearestHeading, 80)}"`,
-    );
-  }
-  if (attachment.domTarget?.textSnippet) {
-    parts.push(`text="${truncate(attachment.domTarget.textSnippet, 80)}"`);
   }
   if (attachment.asset?.publicUrl) {
     parts.push(`image=${attachment.asset.publicUrl}`);

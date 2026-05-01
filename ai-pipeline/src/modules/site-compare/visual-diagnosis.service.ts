@@ -82,6 +82,10 @@ export class SiteCompareVisualDiagnosisService {
       .filter(Boolean)
       .slice(0, 3);
     const visionModel = this.resolvePreferredVisionModel(requestedModel);
+    let lastVisionRawResponse: string | undefined;
+    let lastVisionExtractedJson: string | undefined;
+    let lastTextRawResponse: string | undefined;
+    let lastTextExtractedJson: string | undefined;
 
     try {
       if (visionModel && normalizedVisionUrls.length > 0) {
@@ -115,6 +119,8 @@ export class SiteCompareVisualDiagnosisService {
         );
         const text = response.choices[0]?.message?.content;
         if (text) {
+          lastVisionRawResponse = text;
+          lastVisionExtractedJson = this.extractJsonObject(text) ?? undefined;
           const parsed = this.parseVisualDiagnosisResponse(
             text,
             componentName,
@@ -122,11 +128,17 @@ export class SiteCompareVisualDiagnosisService {
             'vision',
           );
           if (parsed) {
-            return this.mergeDiagnosisWithHeuristic(
+            const merged = this.mergeDiagnosisWithHeuristic(
               parsed,
               heuristic,
               'vision',
             );
+            return this.attachDiagnosisDebugTrace(merged, {
+              source: 'vision',
+              rawModelResponse: text,
+              extractedJson: lastVisionExtractedJson,
+              parsedDiagnosis: parsed,
+            });
           }
         }
       }
@@ -138,6 +150,9 @@ export class SiteCompareVisualDiagnosisService {
         maxTokens: 1400,
         temperature: 0,
       });
+      lastTextRawResponse = response.text;
+      lastTextExtractedJson =
+        this.extractJsonObject(response.text) ?? undefined;
       const parsed = this.parseVisualDiagnosisResponse(
         response.text,
         componentName,
@@ -145,13 +160,32 @@ export class SiteCompareVisualDiagnosisService {
         'text',
       );
       if (parsed) {
-        return this.mergeDiagnosisWithHeuristic(parsed, heuristic, 'text');
+        const merged = this.mergeDiagnosisWithHeuristic(
+          parsed,
+          heuristic,
+          'text',
+        );
+        return this.attachDiagnosisDebugTrace(merged, {
+          source: 'text',
+          rawModelResponse: response.text,
+          extractedJson: lastTextExtractedJson,
+          parsedDiagnosis: parsed,
+        });
       }
     } catch {
       // Fallback to heuristic diagnosis below.
     }
 
-    return { ...heuristic, analysisMode: 'heuristic' };
+    return this.attachDiagnosisDebugTrace(
+      { ...heuristic, analysisMode: 'heuristic' },
+      {
+        source: 'heuristic',
+        rawModelResponse: lastVisionRawResponse ?? lastTextRawResponse,
+        extractedJson: lastVisionExtractedJson ?? lastTextExtractedJson,
+        parsedDiagnosis: undefined,
+        parseFailed: Boolean(lastVisionRawResponse || lastTextRawResponse),
+      },
+    );
   }
 
   async validatePostEdit(
@@ -680,6 +714,42 @@ export class SiteCompareVisualDiagnosisService {
           diagnosis.repairPlan.guardrails.length > 0
             ? diagnosis.repairPlan.guardrails
             : heuristic.repairPlan.guardrails,
+      },
+    };
+  }
+
+  private attachDiagnosisDebugTrace(
+    diagnosis: VisualMismatchDiagnosis,
+    input: {
+      source: 'vision' | 'text' | 'heuristic';
+      rawModelResponse?: string;
+      extractedJson?: string;
+      parsedDiagnosis?: VisualMismatchDiagnosis;
+      parseFailed?: boolean;
+    },
+  ): VisualMismatchDiagnosis {
+    const mergedWithoutDebug = {
+      ...diagnosis,
+      debugTrace: undefined,
+    };
+    return {
+      ...diagnosis,
+      debugTrace: {
+        source: input.source,
+        rawModelResponse: input.rawModelResponse?.trim() || undefined,
+        extractedJson: input.extractedJson?.trim() || undefined,
+        parsedDiagnosisJson: input.parsedDiagnosis
+          ? JSON.stringify(
+              {
+                ...input.parsedDiagnosis,
+                debugTrace: undefined,
+              },
+              null,
+              2,
+            )
+          : undefined,
+        mergedDiagnosisJson: JSON.stringify(mergedWithoutDebug, null, 2),
+        parseFailed: input.parseFailed === true,
       },
     };
   }
