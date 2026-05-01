@@ -134,19 +134,19 @@ export function buildEditRequestContextNote(
     route,
   ).slice(0, maxAttachments);
 
-    if (attachments.length > 0) {
+  if (attachments.length > 0) {
     lines.push(
       `Selected captures (${attachments.length}/${editRequest.attachments?.length ?? attachments.length}):`,
     );
     for (const attachment of attachments) {
       lines.push(`- ${formatAttachmentLine(attachment)}`);
     }
-      lines.push(
-        'Treat screenshot URLs and selection boxes as authoritative visual evidence for the requested change.',
-      );
-      lines.push(
-        'Use route, documentRect/normalizedRect, and the capture note to resolve the nearest generated React target region.',
-      );
+    lines.push(
+      'Treat screenshot URLs and selection boxes as authoritative visual evidence for the requested change.',
+    );
+    lines.push(
+      'Use route, documentRect/normalizedRect, and the capture note to resolve the nearest generated React target region.',
+    );
   } else if ((editRequest.attachments?.length ?? 0) > 0) {
     lines.push(
       'Selected captures exist for this edit request, but none can be confidently matched to the current scope. Do not force unrelated visual changes here.',

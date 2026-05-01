@@ -31,6 +31,7 @@ import type {
 } from '../react-generator/visual-plan.schema.js';
 import { getVisualPlanRenderAuthority } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
+import type { ComponentRenderContract } from '../planner/render-contract.schema.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
@@ -38,9 +39,6 @@ import {
   appendUniqueClasses,
   ensureReactRouterLinkImport,
   findCanonicalTextLinkSnippetsWithoutHoverUnderline,
-  findPlaceholderLinkSnippets,
-  isWithinHeadingTitleContext,
-  isWithinSlugTernaryFallback,
   repairBrokenArbitraryValueClasses,
   sanitizeTailwindClasses,
   stripDebugStatements,
@@ -79,6 +77,7 @@ export interface CodeValidationContext {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  renderContract?: ComponentRenderContract;
 }
 
 export interface ComponentValidationFailure {
@@ -197,6 +196,7 @@ export class ValidatorService {
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
         visualPlan: comp.visualPlan,
+        renderContract: comp.renderContract,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -358,6 +358,19 @@ export class ValidatorService {
       return {
         isValid: false,
         error: pixelLockedIssue,
+      };
+    }
+
+    const renderContractIssue = this.checkRenderContractCoverage(
+      code,
+      context.renderContract,
+      context.componentName,
+      context.visualPlan,
+    );
+    if (renderContractIssue) {
+      return {
+        isValid: false,
+        error: renderContractIssue,
       };
     }
 
@@ -1312,6 +1325,229 @@ export class ValidatorService {
 
   private normalizeForTextMatch(value: string): string {
     return value.toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  private checkRenderContractCoverage(
+    code: string,
+    renderContract?: ComponentRenderContract,
+    componentName?: string,
+    visualPlan?: ComponentVisualPlan,
+  ): string | null {
+    if (!renderContract) return null;
+    if (renderContract.structure.renderMode === 'fallback-section') return null;
+
+    const label =
+      componentName ??
+      visualPlan?.componentName ??
+      renderContract.sourceModel.templateName ??
+      'Component';
+    const strictBlockTree =
+      renderContract.structure.renderMode === 'block-tree';
+    const issues: string[] = [];
+    const normalizedCode = this.normalizeForTextMatch(code);
+    const auditSignals = this.collectRenderContractAuditSignals(
+      renderContract.sourceModel.blockTree,
+    );
+    const textLimit = strictBlockTree ? 8 : 4;
+    const assetLimit = strictBlockTree ? 6 : 3;
+
+    for (const text of auditSignals.staticTexts.slice(0, textLimit)) {
+      if (!normalizedCode.includes(this.normalizeForTextMatch(text))) {
+        issues.push(
+          `Missing source-backed static text "${this.summarizeRenderContractValue(text)}".`,
+        );
+      }
+    }
+
+    for (const src of auditSignals.imageSources.slice(0, assetLimit)) {
+      if (!code.includes(src)) {
+        issues.push(
+          `Missing source-backed image src "${this.summarizeRenderContractValue(src)}".`,
+        );
+      }
+    }
+
+    for (const href of auditSignals.hrefs.slice(0, assetLimit)) {
+      if (!code.includes(href)) {
+        issues.push(
+          `Missing source-backed link target "${this.summarizeRenderContractValue(href)}".`,
+        );
+      }
+    }
+
+    if (
+      auditSignals.requiresNavigationShell &&
+      !/(<nav\b|role=["']navigation["'])/i.test(code)
+    ) {
+      issues.push('Missing required navigation wrapper for source navigation.');
+    }
+
+    if (
+      auditSignals.requiresSearchShell &&
+      !/(role=["']search["']|<form\b[^>]*\brole=["']search["'])/i.test(code)
+    ) {
+      issues.push('Missing required search wrapper for source search block.');
+    }
+
+    if (strictBlockTree) {
+      for (const width of auditSignals.columnWidths.slice(0, 4)) {
+        if (!normalizedCode.includes(width.toLowerCase())) {
+          issues.push(`Missing source-backed column width "${width}".`);
+        }
+      }
+    }
+
+    if (issues.length === 0) return null;
+    const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
+    return `Render contract coverage violated for "${label}":\n${[
+      `mode=${renderContract.structure.renderMode}`,
+      `sourceRootNodes=${renderContract.sourceModel.blockTree.length}`,
+      ...detailLines,
+    ].join('\n')}`;
+  }
+
+  private collectRenderContractAuditSignals(nodes: readonly BlockNode[]): {
+    staticTexts: string[];
+    imageSources: string[];
+    hrefs: string[];
+    columnWidths: string[];
+    requiresNavigationShell: boolean;
+    requiresSearchShell: boolean;
+  } {
+    const staticTexts = new Set<string>();
+    const imageSources = new Set<string>();
+    const hrefs = new Set<string>();
+    const columnWidths = new Set<string>();
+    let requiresNavigationShell = false;
+    let requiresSearchShell = false;
+
+    const visit = (node: BlockNode, dynamicBranch = false) => {
+      const currentBranchIsDynamic =
+        dynamicBranch || this.isDynamicRenderContractNode(node);
+
+      if (
+        node.kind === 'navigation' ||
+        node.blockName.toLowerCase() === 'core/navigation'
+      ) {
+        requiresNavigationShell = true;
+      }
+      if (
+        node.kind === 'search' ||
+        node.blockName.toLowerCase() === 'core/search'
+      ) {
+        requiresSearchShell = true;
+      }
+
+      const columnWidth = node.columnWidth?.trim();
+      if (columnWidth) {
+        columnWidths.add(columnWidth);
+      }
+
+      if (!currentBranchIsDynamic) {
+        const textCandidate = this.extractRenderContractStaticText(node);
+        if (textCandidate) {
+          staticTexts.add(textCandidate);
+        }
+
+        const src = node.src?.trim();
+        if (this.isStaticRenderContractAssetValue(src)) {
+          imageSources.add(src!);
+        }
+
+        const href = node.href?.trim();
+        if (this.isStaticRenderContractAssetValue(href)) {
+          hrefs.add(href!);
+        }
+      }
+
+      for (const child of node.children ?? []) {
+        visit(child, currentBranchIsDynamic);
+      }
+    };
+
+    for (const node of nodes) visit(node);
+
+    return {
+      staticTexts: [...staticTexts],
+      imageSources: [...imageSources],
+      hrefs: [...hrefs],
+      columnWidths: [...columnWidths],
+      requiresNavigationShell,
+      requiresSearchShell,
+    };
+  }
+
+  private isDynamicRenderContractNode(node: BlockNode): boolean {
+    const sourceFile = node.sourceRef?.sourceFile?.toLowerCase() ?? '';
+    if (
+      sourceFile.startsWith('db:pages/') ||
+      sourceFile.startsWith('db:posts/') ||
+      sourceFile.startsWith('db:comments/')
+    ) {
+      return true;
+    }
+
+    switch (node.kind) {
+      case 'navigation':
+      case 'search':
+      case 'post-content':
+      case 'page-content':
+      case 'post-template':
+      case 'query':
+      case 'comments':
+      case 'latest-posts':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private extractRenderContractStaticText(node: BlockNode): string | null {
+    const values = [node.text, this.stripHtmlToPlainText(node.html)]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    for (const value of values) {
+      if (!this.isStaticRenderContractTextValue(value)) continue;
+      return this.normalizeForTextMatch(value);
+    }
+
+    return null;
+  }
+
+  private stripHtmlToPlainText(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const plainText = value
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    return plainText || undefined;
+  }
+
+  private isStaticRenderContractTextValue(value: string | undefined): boolean {
+    const normalized = value?.trim();
+    if (!normalized) return false;
+    if (normalized.length < 2 || normalized.length > 160) return false;
+    if (!/[A-Za-z0-9]/.test(normalized)) return false;
+    if (/[{}]|<\?|\$\{|\{\{/.test(normalized)) return false;
+    return true;
+  }
+
+  private isStaticRenderContractAssetValue(
+    value: string | undefined,
+  ): value is string {
+    const normalized = value?.trim();
+    if (!normalized) return false;
+    if (/[{}]|<\?|\$\{|\{\{/.test(normalized)) return false;
+    return true;
+  }
+
+  private summarizeRenderContractValue(value: string): string {
+    return value.length > 72 ? `${value.slice(0, 69)}...` : value;
   }
 
   private auditSectionContractFidelity(

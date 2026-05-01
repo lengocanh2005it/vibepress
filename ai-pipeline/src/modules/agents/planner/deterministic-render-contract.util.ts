@@ -11,6 +11,7 @@ import {
   getVisualPlanRenderAuthority,
   shouldProtectDeterministicStructureFromAi,
 } from '../react-generator/visual-plan.schema.js';
+import type { ComponentRenderContract } from './render-contract.schema.js';
 
 export interface DeterministicRenderContractArtifact {
   version: 1;
@@ -41,6 +42,7 @@ export interface DeterministicRenderContractComponent {
   blockStyles?: Record<string, BlockStyleToken>;
   sections: SectionPlan[];
   blockTree?: BlockNode[];
+  renderContract?: ComponentRenderContract;
 }
 
 export interface DeterministicRenderContractPlanLike {
@@ -54,6 +56,7 @@ export interface DeterministicRenderContractPlanLike {
   planningSourceReason?: string;
   planningSourceFile?: string;
   visualPlan?: ComponentVisualPlan;
+  renderContract?: ComponentRenderContract;
 }
 
 export function buildDeterministicRenderContractArtifact(
@@ -110,6 +113,10 @@ function toDeterministicContractComponent(
     layout: visualPlan.layout,
     blockStyles: visualPlan.blockStyles,
     sections: visualPlan.sections,
-    blockTree: visualPlan.blockTree,
+    blockTree:
+      component.renderContract?.sourceModel.blockTree ?? visualPlan.blockTree,
+    ...(component.renderContract
+      ? { renderContract: component.renderContract }
+      : {}),
   };
 }

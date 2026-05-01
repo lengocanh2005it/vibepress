@@ -16,6 +16,7 @@ import type {
   PlanningSourceCandidate,
   PlanningSourceContext,
 } from './planner-visual-repair.service.js';
+import type { ComponentRenderContract } from './render-contract.schema.js';
 
 export interface LayoutAnalysisArtifact {
   version: 1;
@@ -66,6 +67,7 @@ export interface LayoutAnalysisComponentEntry {
   blockTreeSummary?: LayoutAnalysisBlockTreeSummary;
   draftBlockTree?: BlockNode[];
   draftSections?: SectionPlan[];
+  renderContract?: ComponentRenderContract;
   visualPlan?: {
     renderMode?: ComponentVisualPlan['renderMode'];
     deterministicAuthority?: boolean;
@@ -211,6 +213,7 @@ export function buildLayoutAnalysisComponentEntry(input: {
   sourceCandidates: PlanningSourceCandidate[];
   draftBlockTree?: BlockNode[];
   draftSections?: SectionPlan[];
+  renderContract?: ComponentRenderContract;
   visualPlan?: ComponentVisualPlan;
   reason: string;
 }): LayoutAnalysisComponentEntry {
@@ -249,6 +252,7 @@ export function buildLayoutAnalysisComponentEntry(input: {
     blockTreeSummary: summarizeBlockTree(input.draftBlockTree),
     draftBlockTree: input.draftBlockTree,
     draftSections: input.draftSections,
+    renderContract: input.renderContract,
     visualPlan: input.visualPlan
       ? {
           renderMode: input.visualPlan.renderMode,

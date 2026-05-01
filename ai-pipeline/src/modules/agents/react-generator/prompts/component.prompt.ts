@@ -11,6 +11,7 @@ import type {
 } from '../../../agents/block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
+import type { ComponentRenderContract } from '../../planner/render-contract.schema.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type {
@@ -110,6 +111,7 @@ export interface ComponentPromptContext {
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
+  renderContract?: ComponentRenderContract;
 }
 
 function compactPlanText(
@@ -1408,6 +1410,7 @@ export function buildPlanContextNote(
     requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
     sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
+    renderContract?: ComponentRenderContract;
   },
   componentName?: string,
 ): string {
@@ -1429,6 +1432,16 @@ export function buildPlanContextNote(
   }
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
+  if (plan.renderContract) {
+    const rootCount = plan.renderContract.sourceModel.blockTree.length;
+    const bindingCount = plan.renderContract.structure.subtreeBindings.length;
+    lines.push(
+      `Canonical source contract: render from the preserved block tree first (${rootCount} root nodes, ${bindingCount} mapped subtrees, mode=${plan.renderContract.structure.renderMode}).`,
+    );
+    lines.push(
+      'Source fidelity contract: preserve subtree order, wrappers, class names, spacing, colors, and typography from the block tree unless a stricter validation rule explicitly says otherwise.',
+    );
+  }
   lines.push('');
   lines.push(
     buildAllowedEndpointsNote({

@@ -33,6 +33,10 @@ import type {
 } from './visual-plan.schema.js';
 import { shouldBypassAiGenerationForVisualPlan } from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
+import {
+  shouldBlockAiStructuralRewriteForRenderContract,
+  type ComponentRenderContract,
+} from '../planner/render-contract.schema.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
 const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
@@ -78,6 +82,7 @@ export interface GeneratedComponent {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  renderContract?: ComponentRenderContract;
 }
 
 export interface ReactGenerateResult {
@@ -653,17 +658,24 @@ export class ReactGeneratorService {
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
+    const effectiveRenderContract =
+      component.renderContract ?? componentPlan?.renderContract;
     const isProtectedDeterministicAuthority =
       component.generationMode === 'deterministic' &&
       shouldBypassAiGenerationForVisualPlan(component.visualPlan);
+    const isStrictRenderContractProtection =
+      shouldBlockAiStructuralRewriteForRenderContract(effectiveRenderContract);
 
-    if (isProtectedDeterministicAuthority && fixMode !== 'syntax-only') {
+    if (
+      (isProtectedDeterministicAuthority || isStrictRenderContractProtection) &&
+      fixMode !== 'syntax-only'
+    ) {
       this.logger.log(
-        `[fixer] Skipping AI auto-fix for deterministic-authority component "${component.name}" to preserve planner-owned structure`,
+        `[fixer] Skipping AI auto-fix for protected component "${component.name}" to preserve planner-owned/source-backed structure`,
       );
       await this.logToFile(
         logPath,
-        `[fixer] Skipping AI auto-fix for deterministic-authority component "${component.name}" to preserve planner-owned structure. Feedback: ${feedback}`,
+        `[fixer] Skipping AI auto-fix for protected component "${component.name}" to preserve planner-owned/source-backed structure. Feedback: ${feedback}`,
       );
       return this.attachPlanContext(component, componentPlan);
     }
@@ -853,6 +865,7 @@ ${renders}
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
       visualPlan: component.visualPlan ?? componentPlan?.visualPlan,
+      renderContract: component.renderContract ?? componentPlan?.renderContract,
       ...overrides,
     };
   }

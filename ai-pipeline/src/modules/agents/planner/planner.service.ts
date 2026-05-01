@@ -108,6 +108,10 @@ import {
   buildDeterministicRenderContractArtifact,
   type DeterministicRenderContractArtifact,
 } from './deterministic-render-contract.util.js';
+import {
+  buildComponentRenderContract,
+  type ComponentRenderContract,
+} from './render-contract.schema.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -130,6 +134,8 @@ export interface ComponentPlan {
   fixedTitle?: string;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
+  /** Canonical source-preserving render contract derived from blockTree. */
+  renderContract?: ComponentRenderContract;
 }
 
 const PLANNER_INVENTED_AUXILIARY_LABEL_SET = new Set<string>([
@@ -575,6 +581,24 @@ export class PlannerService {
         planningSourceSummary:
           'Deterministic visual-plan path; no AI source synthesis needed.',
         visualPlan: visualPlanWithRepoDefaults,
+        renderContract: buildComponentRenderContract({
+          componentName: componentPlan.componentName,
+          templateName: componentPlan.templateName,
+          planningSourceFile: inferFseSourceFile(
+            componentPlan.templateName,
+            componentPlan.type,
+          ),
+          planningSourceSummary:
+            'Deterministic visual-plan path; no AI source synthesis needed.',
+          sectionTypes: visualPlanWithRepoDefaults.sections.map(
+            (section) => section.type,
+          ),
+          fallbackSections: visualPlanWithRepoDefaults.sections,
+          visualRenderMode: visualPlanWithRepoDefaults.renderMode,
+          deterministicAuthority:
+            visualPlanWithRepoDefaults.deterministicAuthority,
+          draftBlockTree: visualPlanWithRepoDefaults.blockTree,
+        }),
       };
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
@@ -661,6 +685,21 @@ export class PlannerService {
               : {}),
             ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
           },
+          renderContract: buildComponentRenderContract({
+            componentName: componentPlan.componentName,
+            templateName: componentPlan.templateName,
+            planningSourceFile: planningSource.sourceFile,
+            planningSourceSummary:
+              'Deterministic visual-plan path derived from preserved WordPress block tree.',
+            sectionTypes: earlyBlockTreeVisualPlan.sections.map(
+              (section) => section.type,
+            ),
+            fallbackSections: earlyBlockTreeVisualPlan.sections,
+            visualRenderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+            deterministicAuthority:
+              earlyBlockTreeVisualPlan.deterministicAuthority,
+            draftBlockTree,
+          }),
         };
       }
       // Deterministically parse the WordPress block tree to get an ordered
@@ -715,6 +754,20 @@ export class PlannerService {
               : {}),
             ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
           },
+          renderContract: buildComponentRenderContract({
+            componentName: componentPlan.componentName,
+            templateName: componentPlan.templateName,
+            planningSourceFile: planningSource.sourceFile,
+            planningSourceSummary:
+              'Deterministic visual-plan path derived from preserved WordPress block tree.',
+            sectionTypes: blockTreeVisualPlan.sections.map(
+              (section) => section.type,
+            ),
+            fallbackSections: blockTreeVisualPlan.sections,
+            visualRenderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+            deterministicAuthority: blockTreeVisualPlan.deterministicAuthority,
+            draftBlockTree,
+          }),
         };
       }
       detectedCustomClassNames =
@@ -1061,6 +1114,23 @@ export class PlannerService {
       visualPlan?.sections?.length && Array.isArray(visualPlan.sections)
         ? visualPlan.sections.map((section) => ({ ...section }))
         : draftSections;
+    const finalizedVisualPlan =
+      visualPlan && draftBlockTree?.length
+        ? { ...visualPlan, blockTree: draftBlockTree }
+        : visualPlan;
+    const renderContract = buildComponentRenderContract({
+      componentName: componentPlan.componentName,
+      templateName: componentPlan.templateName,
+      planningSourceFile: planningSource?.sourceFile,
+      planningSourceSummary: planningSource?.sourceAnalysis,
+      sectionTypes: finalizedVisualPlan?.sections.map(
+        (section) => section.type,
+      ),
+      fallbackSections: finalizedDraftSections,
+      visualRenderMode: finalizedVisualPlan?.renderMode,
+      deterministicAuthority: finalizedVisualPlan?.deterministicAuthority,
+      draftBlockTree,
+    });
 
     return {
       ...componentPlan,
@@ -1086,10 +1156,8 @@ export class PlannerService {
       ...(planningSource?.sourceAnalysis
         ? { planningSourceSummary: planningSource.sourceAnalysis }
         : {}),
-      visualPlan:
-        visualPlan && draftBlockTree?.length
-          ? { ...visualPlan, blockTree: draftBlockTree }
-          : visualPlan,
+      visualPlan: finalizedVisualPlan,
+      ...(renderContract ? { renderContract } : {}),
     };
   }
 
@@ -1440,6 +1508,17 @@ export class PlannerService {
         globalPalette,
         globalTypography,
       });
+      const renderContract = buildComponentRenderContract({
+        componentName: componentPlan.componentName,
+        templateName: componentPlan.templateName,
+        planningSourceFile: planningSource?.sourceFile,
+        planningSourceSummary: planningSource?.sourceAnalysis,
+        sectionTypes: visualPlan?.sections.map((section) => section.type),
+        fallbackSections: draftSections,
+        visualRenderMode: visualPlan?.renderMode,
+        deterministicAuthority: visualPlan?.deterministicAuthority,
+        draftBlockTree,
+      });
 
       const reason = !planningSource
         ? 'No planning source could be resolved for this shared chrome component.'
@@ -1458,6 +1537,7 @@ export class PlannerService {
         sourceCandidates,
         draftBlockTree,
         draftSections,
+        renderContract,
         visualPlan,
         reason,
       });

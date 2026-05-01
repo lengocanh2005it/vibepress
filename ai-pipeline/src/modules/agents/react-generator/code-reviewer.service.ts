@@ -32,6 +32,10 @@ import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postproce
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
+  isStrictBlockTreeRenderContract,
+  shouldPreferDeterministicGenerationForRenderContract,
+} from '../planner/render-contract.schema.js';
+import {
   buildVisualPlanPrompt,
   extractStaticImageSources,
   parseVisualPlanDetailed,
@@ -1339,6 +1343,11 @@ export class CodeReviewerService {
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
       visualPlan: resolvedVisualPlan,
+      renderContract:
+        'renderContract' in (componentPlan ?? {})
+          ? (componentPlan as PlanResult[number] | ComponentPromptContext)
+              ?.renderContract
+          : undefined,
     };
   }
 
@@ -1361,6 +1370,7 @@ export class CodeReviewerService {
       type: componentPlan?.type,
       isSubComponent,
       visualPlan: componentPlan?.visualPlan,
+      renderContract: componentPlan?.renderContract,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
       requiredCustomClassNames:
         requiredCustomClassNames ?? componentPlan?.requiredCustomClassNames,
@@ -1639,6 +1649,13 @@ export class CodeReviewerService {
     componentPlan: ComponentPromptContext | undefined,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (
+      shouldPreferDeterministicGenerationForRenderContract(
+        componentPlan?.renderContract,
+      )
+    ) {
+      return true;
+    }
     if (!componentPlan?.visualPlan) return false;
     if (shouldProtectDeterministicStructureFromAi(componentPlan.visualPlan)) {
       return true;
@@ -1654,6 +1671,9 @@ export class CodeReviewerService {
     componentPlan: ReviewInput['componentPlan'] | undefined,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (isStrictBlockTreeRenderContract(componentPlan?.renderContract)) {
+      return true;
+    }
     if (!componentPlan?.visualPlan) return false;
     if (shouldBypassAiGenerationForVisualPlan(componentPlan.visualPlan)) {
       return true;
@@ -1671,7 +1691,12 @@ export class CodeReviewerService {
       | ReviewInput['componentPlan']
       | undefined,
   ): boolean {
-    return componentPlan?.type === 'partial';
+    return (
+      componentPlan?.type === 'partial' ||
+      shouldPreferDeterministicGenerationForRenderContract(
+        componentPlan?.renderContract,
+      )
+    );
   }
 
   private getVisualPlanSectionSignals(

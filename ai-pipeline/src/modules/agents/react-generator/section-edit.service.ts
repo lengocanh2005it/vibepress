@@ -81,14 +81,14 @@ export class SectionEditService {
     }
 
     return {
-        componentName: task.componentName,
-        editedComponentName: target.name,
-        component: fixed,
-        debugSummary:
-          target.name === task.componentName
-            ? `target=${task.componentName} | mode=component`
-            : `target=${task.componentName} | edited=${target.name} | mode=scoped`,
-      };
+      componentName: task.componentName,
+      editedComponentName: target.name,
+      component: fixed,
+      debugSummary:
+        target.name === task.componentName
+          ? `target=${task.componentName} | mode=component`
+          : `target=${task.componentName} | edited=${target.name} | mode=scoped`,
+    };
   }
 
   private resolveTargetComponent(
@@ -327,7 +327,8 @@ function assessFocusedEditMutation(input: {
   hasMeaningfulChange: boolean;
   retryFeedback: string;
 } {
-  const { originalCode, updatedCode, editedComponentName, exactTargets } = input;
+  const { originalCode, updatedCode, editedComponentName, exactTargets } =
+    input;
   if (normalizeForDiff(originalCode) === normalizeForDiff(updatedCode)) {
     return {
       hasMeaningfulChange: false,

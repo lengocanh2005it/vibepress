@@ -118,7 +118,9 @@ export class CaptureReviewService {
 
       if (exactTarget) {
         score += 12;
-        reasons.push(`exact-target:${exactTarget.targetNodeRole ?? 'component'}`);
+        reasons.push(
+          `exact-target:${exactTarget.targetNodeRole ?? 'component'}`,
+        );
       }
 
       const scope = resolveScope(task.planComponentName, reviewedComponentName);

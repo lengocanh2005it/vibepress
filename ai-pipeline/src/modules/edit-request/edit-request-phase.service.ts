@@ -46,13 +46,7 @@ export class EditRequestPhaseService {
     components: GeneratedComponent[];
     mutationCandidates?: UiMutationCandidate[];
   }): PostMigrationEditTask[] {
-    const {
-      request,
-      context,
-      plan,
-      components,
-      mutationCandidates,
-    } = input;
+    const { request, context, plan, components, mutationCandidates } = input;
     if (!request) return [];
 
     const planByComponent = new Map(
@@ -196,12 +190,7 @@ export class EditRequestPhaseService {
     attachments: PipelineCaptureAttachmentDto[];
     exactTargets: ResolvedCaptureTargetRecord[];
   }> {
-    const {
-      attachments,
-      plan,
-      componentNames,
-      mutationCandidates,
-    } = input;
+    const { attachments, plan, componentNames, mutationCandidates } = input;
     if (!attachments?.length) return [];
 
     const grouped = new Map<
@@ -830,7 +819,8 @@ function resolveMutationTargetForComponent(input: {
   componentPlan?: PlanResult[number];
   mutationCandidates: UiMutationCandidate[];
 }): ResolvedCaptureTargetRecord | undefined {
-  const { attachment, componentName, componentPlan, mutationCandidates } = input;
+  const { attachment, componentName, componentPlan, mutationCandidates } =
+    input;
   const candidates = mutationCandidates.filter(
     (candidate) =>
       candidate.componentName === componentName ||

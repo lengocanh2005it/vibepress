@@ -65,9 +65,7 @@ import { EditRequestPhaseService } from '../edit-request/edit-request-phase.serv
 import type { ResolvedEditRequestContext } from '../edit-request/edit-request.types.js';
 import type { ResolvedCaptureTargetRecord } from '../edit-request/ui-source-map.types.js';
 import { ThemeRepoLayoutResolverService } from '../theme/theme-repo-layout-resolver.service.js';
-import {
-  buildUiMutationCandidatesForGeneratedComponents,
-} from '../edit-request/ui-source-map.util.js';
+import { buildUiMutationCandidatesForGeneratedComponents } from '../edit-request/ui-source-map.util.js';
 import { getComponentStrategy } from '../agents/component-strategy.registry.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
@@ -336,6 +334,9 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         message: `AI workflow stopped because of an error: ${err.message}`,
       });
       subject?.complete();
+      // Clean up the progress stream after a delay, matching the happy-path
+      // cleanup so that errored jobs do not leak ReplaySubject entries.
+      setTimeout(() => this.progress.delete(jobId), 60_000);
       this.logger.error(`Pipeline ${jobId} failed:`, err);
     });
 
@@ -1336,7 +1337,7 @@ export default function ${component.name}() {
     await this.tokenTracker.init(logPath);
     let metrics: SiteCompareMetrics | null = null;
     let baselineMetrics: SiteCompareMetrics | null = null;
-    let visualRouteResults: any[] = [];
+    let visualRouteResults: AutomationComparePageResult[] = [];
     const degradedComponents: DegradedComponentRecord[] = [];
     let lastKnownSafeComponents = new Map<
       string,
@@ -2661,7 +2662,7 @@ export default function ${component.name}() {
                 siteInfo: content.siteInfo,
                 tokens:
                   'tokens' in normalizedTheme
-                    ? (normalizedTheme as any).tokens
+                    ? (normalizedTheme as { tokens?: ThemeTokens }).tokens
                     : undefined,
                 plan: reviewResult.plan,
                 repoManifest: repoResult.themeManifest,
@@ -3245,7 +3246,7 @@ export default function ${component.name}() {
                 preview.previewDir,
                 buildComponents,
                 'tokens' in normalizedTheme
-                  ? (normalizedTheme as any).tokens
+                  ? (normalizedTheme as { tokens?: ThemeTokens }).tokens
                   : undefined,
               );
               await this.validator.assertPreviewBuild(preview.frontendDir);
@@ -3822,15 +3823,14 @@ export default function ${component.name}() {
           await buildUiMutationCandidatesForGeneratedComponents({
             components: buildComponents,
           });
-        const finalPostEditTasks = this.editRequestPhase.buildPostMigrationEditTasks(
-          {
+        const finalPostEditTasks =
+          this.editRequestPhase.buildPostMigrationEditTasks({
             request: dto.editRequest,
             context: editRequestContext,
             plan: reviewResult.plan,
             components: buildComponents,
             mutationCandidates: finalMutationCandidates,
-          },
-        );
+          });
         const exactCaptureTargets = dedupeCaptureTargets(
           finalPostEditTasks.flatMap((task) => task.exactTargets),
         );
