@@ -6,7 +6,6 @@ import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
-  wpBlocksToJson,
   wpBlocksToJsonWithSourceRefs,
   ensureWpNodesHaveSourceRefs,
   wpJsonToString,
@@ -112,6 +111,10 @@ import {
   buildComponentRenderContract,
   type ComponentRenderContract,
 } from './render-contract.schema.js';
+import {
+  buildRepoRouteHints,
+  inferDeterministicRouteContract,
+} from './route-contract.util.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -202,6 +205,9 @@ export class PlannerService {
     // ── Phase A: architecture plan ─────────────────────────────────────────
     this.logger.log(
       `[Phase A] Planning architecture for ${templateNames.length} components in "${content.siteInfo.siteName}"`,
+    );
+    this.logger.log(
+      `[Phase A] Component targets: ${this.formatPhaseAComponentTargets(templateNames)}`,
     );
 
     const systemPrompt = this.buildSystemPrompt();
@@ -347,7 +353,11 @@ export class PlannerService {
       `[Phase B: Component Graph Builder] Enriching plan for ${plan.length} components`,
     );
     const enriched = this.materializeConcretePagePlans(
-      this.enrichPlan(plan, sourceMap),
+      this.applyDeterministicRouteContracts(
+        this.enrichPlan(plan, sourceMap),
+        content,
+        options?.repoManifest,
+      ),
       content,
     );
     this.logger.log(
@@ -1996,6 +2006,106 @@ export class PlannerService {
     });
   }
 
+  private applyDeterministicRouteContracts(
+    plan: PlanResult,
+    content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
+  ): PlanResult {
+    return plan.map((item) => {
+      const concretePageBindings =
+        item.type === 'page' && !item.fixedSlug
+          ? this.findConcretePagesForTemplate(item, content)
+          : [];
+      const repoRouteHints = buildRepoRouteHints(
+        item.templateName,
+        repoManifest,
+      );
+      const shouldPromoteToExactPageBinding =
+        item.type === 'page' &&
+        concretePageBindings.length > 0 &&
+        !item.fixedSlug &&
+        !item.dataNeeds.includes('post-detail');
+
+      const contract = shouldPromoteToExactPageBinding
+        ? {
+            ...inferDeterministicRouteContract({
+              templateName: item.templateName,
+              componentName: item.componentName,
+              type: item.type,
+              route: '/page/:slug',
+              dataNeeds: [...item.dataNeeds, 'page-detail'],
+              isDetail: true,
+              fixedPageId: item.fixedPageId,
+              draftBlockTree: item.draftBlockTree,
+              renderContract: item.renderContract,
+              planningSourceFile: item.planningSourceFile,
+              planningSourceLabel: item.planningSourceLabel,
+              planningSourceSummary: item.planningSourceSummary,
+              hasConcretePageBindings: true,
+              repoRouteHints,
+            }),
+            route: '/page/:slug',
+            isDetail: true,
+            requiredDataNeeds: ['page-detail'] as const,
+          }
+        : inferDeterministicRouteContract({
+            templateName: item.templateName,
+            componentName: item.componentName,
+            type: item.type,
+            route: item.route,
+            dataNeeds: item.dataNeeds,
+            isDetail: item.isDetail,
+            fixedSlug: item.fixedSlug,
+            fixedPageId: item.fixedPageId,
+            draftBlockTree: item.draftBlockTree,
+            renderContract: item.renderContract,
+            planningSourceFile: item.planningSourceFile,
+            planningSourceLabel: item.planningSourceLabel,
+            planningSourceSummary: item.planningSourceSummary,
+            hasConcretePageBindings: concretePageBindings.length > 0,
+            repoRouteHints,
+          });
+
+      const normalizedNeeds = new Set(item.dataNeeds);
+      for (const disallowedNeed of contract.disallowedDetailDataNeeds) {
+        normalizedNeeds.delete(disallowedNeed);
+      }
+      for (const requiredNeed of contract.requiredDataNeeds) {
+        normalizedNeeds.add(requiredNeed);
+      }
+
+      return {
+        ...item,
+        type: contract.type,
+        route: contract.route,
+        isDetail: contract.isDetail,
+        dataNeeds: this.orderPlannerDataNeeds([...normalizedNeeds]),
+        planningSourceLabel:
+          item.planningSourceLabel ??
+          (repoRouteHints ? `repo-chain:${item.templateName}` : undefined),
+        planningSourceFile:
+          item.planningSourceFile ?? repoRouteHints?.entryFile,
+        planningSourceSummary:
+          item.planningSourceSummary ??
+          (repoRouteHints
+            ? [
+                repoRouteHints.templatePartArea
+                  ? `templatePartArea=${repoRouteHints.templatePartArea}`
+                  : null,
+                repoRouteHints.blockTypes.length > 0
+                  ? `entryChainBlocks=${repoRouteHints.blockTypes.join(', ')}`
+                  : null,
+                repoRouteHints.notes.length > 0
+                  ? `entryChainNotes=${repoRouteHints.notes.join(', ')}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' | ')
+            : undefined),
+      };
+    });
+  }
+
   private materializeConcretePagePlans(
     plan: PlanResult,
     content: DbContentResult,
@@ -2054,6 +2164,21 @@ export class PlannerService {
     return result;
   }
 
+  private orderPlannerDataNeeds(dataNeeds: string[]): string[] {
+    const order = [
+      'post-detail',
+      'page-detail',
+      'categoryDetail',
+      'comments',
+      'posts',
+      'pages',
+      'menus',
+      'site-info',
+      'footer-links',
+    ];
+    return order.filter((need) => dataNeeds.includes(need));
+  }
+
   private shouldExpandConcretePages(item: PlanResult[number]): boolean {
     if (item.type !== 'page') return false;
     if (!item.isDetail) return false;
@@ -2061,11 +2186,7 @@ export class PlannerService {
 
     const normalizedNeeds = new Set(item.dataNeeds.map((need) => need.trim()));
     if (!normalizedNeeds.has('page-detail')) return false;
-
-    const templateBase = item.templateName
-      .replace(/\.(php|html)$/i, '')
-      .toLowerCase();
-    return templateBase.startsWith('page') || templateBase === 'frontend-page';
+    return true;
   }
 
   private findConcretePagesForTemplate(
@@ -2176,10 +2297,13 @@ For each template, decide:
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
 - page (the default page template) → route "/page/:slug"   (isDetail: true)
-- Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
-  e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
-       template "page-custom"         → "/page-custom/:slug"
-  The route segment MUST match the template name exactly — do NOT invent a different name.
+- page-* templates may use "/<exact-template-name>/:slug" ONLY when they are acting as page-detail templates
+  and are expected to materialize exact DB-backed pages later.
+- Custom templates that are NOT clear singular detail templates should default to a static route
+  "/<exact-template-name>" with isDetail: false.
+- Do NOT assume every custom template is a slug-detail page.
+- If a custom template has clear DB page bindings, prefer exact bound page components with fixedSlug
+  over inventing a generic "/template-name/:slug" route.
 - header / footer / sidebar / nav / navigation / searchform / comments / comment /
   post-meta / widget / breadcrumb / pagination / loop / content-none / no-results /
   functions → type "partial", route null
@@ -2188,8 +2312,9 @@ For each template, decide:
 Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
-- "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
+- "page-detail"  → ONLY for true page-detail templates or exact bound DB pages
 - Page templates MUST use "page-detail" — NEVER "post-detail"
+- Static custom templates MUST NOT keep "post-detail" or "page-detail" unless they are truly singular/detail routes
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
 - Dedicated Header / Navigation partials may include "menus"
@@ -3092,6 +3217,8 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - Pages must have a non-null route starting with "/"
 - Partials must have route: null, isDetail: false
 - isDetail must be true when route contains :slug
+- Custom templates without clear singular/detail evidence should stay static (\`/template-name\`), not \`/template-name/:slug\`
+- Do not keep \`post-detail\` or \`page-detail\` on static custom templates
 - Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
 - description must stay specific and source-backed; mention major layout/widgets when visible
 
@@ -4885,6 +5012,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     );
   }
 
+  private formatPhaseAComponentTargets(templateNames: string[]): string {
+    if (templateNames.length === 0) return '(none)';
+
+    return templateNames
+      .map(
+        (templateName) =>
+          `${templateName} -> ${this.toComponentName(templateName)}`,
+      )
+      .join(', ');
+  }
+
   private filterUnusedCustomPageTemplates(
     templates: Array<{ name: string; html?: string; markup?: string }>,
     content?: DbContentResult,
@@ -4939,40 +5077,19 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private buildFallbackPlan(templateNames: string[]): PlanResult {
     return templateNames.map((name) => {
       const componentName = this.toComponentName(name);
-      const isPartial = isPartialComponentName(componentName);
-
-      // Determine appropriate data needs based on template type
-      let dataNeeds: string[] = ['posts'];
-      let route: string | null = isPartial
-        ? null
-        : `/${componentName.toLowerCase()}`;
-      let isDetail = false;
-
-      if (name.toLowerCase() === 'archive') {
-        dataNeeds = ['posts'];
-        route = '/archive';
-        isDetail = false;
-      } else if (name.toLowerCase() === 'author') {
-        dataNeeds = ['posts'];
-        route = '/author/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'category') {
-        dataNeeds = ['posts'];
-        route = '/category/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'page') {
-        dataNeeds = ['page-detail'];
-        route = '/:slug';
-        isDetail = true;
-      }
+      const routeContract = inferDeterministicRouteContract({
+        templateName: name,
+        componentName,
+        type: isPartialComponentName(componentName) ? 'partial' : 'page',
+      });
 
       return {
         templateName: name,
         componentName,
-        type: isPartial ? 'partial' : 'page',
-        route,
-        dataNeeds,
-        isDetail,
+        type: routeContract.type,
+        route: routeContract.route,
+        dataNeeds: [...routeContract.requiredDataNeeds],
+        isDetail: routeContract.isDetail,
         description: `Component generated from ${name}`,
       };
     });

@@ -6,8 +6,12 @@ import type {
 } from '../react-generator/visual-plan.schema.js';
 import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-plan.prompt.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
-import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
+import {
+  inferDeterministicRouteContract,
+  type DeterministicRouteContract,
+  type RouteContractDataNeed,
+} from '../planner/route-contract.util.js';
 
 export interface PlanReviewResult {
   plan: PlanResult;
@@ -40,24 +44,8 @@ export type PlanReviewWarningCode =
   | 'home_hierarchy_route_normalized'
   | 'home_hierarchy_is_detail_normalized';
 
-type PlanDataNeed =
-  | 'posts'
-  | 'pages'
-  | 'menus'
-  | 'site-info'
-  | 'footer-links'
-  | 'post-detail'
-  | 'page-detail'
-  | 'comments'
-  | 'categoryDetail';
-
-interface RoutePolicy {
-  type: 'page' | 'partial';
-  route: string | null;
-  routeMode: 'hard' | 'soft';
-  isDetail: boolean;
-  requiredDataNeeds: PlanDataNeed[];
-}
+type PlanDataNeed = RouteContractDataNeed;
+type RoutePolicy = DeterministicRouteContract;
 
 const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'posts',
@@ -325,6 +313,19 @@ export class PlanReviewerService {
           );
           next = { ...next, route: policy.route };
         }
+      } else if (
+        next.type === 'page' &&
+        next.route &&
+        next.route.includes(':slug') &&
+        !policy.isDetail
+      ) {
+        this.pushWarning(
+          warnings,
+          warningCodes,
+          'route_normalized',
+          `Template "${next.templateName}" route "${next.route}" → normalized to "${policy.route}" because this template is not a detail route`,
+        );
+        next = { ...next, route: policy.route };
       } else if (next.type === 'page' && !next.route) {
         this.pushWarning(
           warnings,
@@ -343,18 +344,6 @@ export class PlanReviewerService {
           `Template "${next.templateName}" had isDetail=${String(next.isDetail)} → normalized to ${String(policy.isDetail)}`,
         );
         next = { ...next, isDetail: policy.isDetail };
-      }
-
-      if (
-        next.type === 'page' &&
-        next.route &&
-        next.route.includes(':slug') &&
-        !next.isDetail
-      ) {
-        warnings.push(
-          `Page "${next.componentName}" uses slug param route "${next.route}" → set isDetail=true`,
-        );
-        next = { ...next, isDetail: true };
       }
 
       return next;
@@ -386,6 +375,9 @@ export class PlanReviewerService {
       if (policy.type === 'partial') {
         needs.delete('post-detail');
         needs.delete('page-detail');
+      }
+      for (const disallowedNeed of policy.disallowedDetailDataNeeds) {
+        needs.delete(disallowedNeed);
       }
 
       for (const need of policy.requiredDataNeeds) {
@@ -1221,153 +1213,21 @@ export class PlanReviewerService {
   }
 
   private inferRoutePolicy(item: ComponentPlan): RoutePolicy {
-    const templateBase = toTemplateBase(item.templateName);
-    const routeSlug = this.toKebabCase(templateBase);
-    const normalizedNeeds = new Set(
-      (item.dataNeeds ?? []).map((need) => need.trim()),
-    );
-
-    if (isPartialComponentName(templateBase)) {
-      return {
-        type: 'partial',
-        route: null,
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: [],
-      };
-    }
-
-    if (HOME_TEMPLATE_PRIORITY_SET.has(templateBase)) {
-      return {
-        type: 'page',
-        route: item.route ?? '/',
-        routeMode: 'soft',
-        isDetail: false,
-        requiredDataNeeds: [],
-      };
-    }
-
-    if (item.fixedSlug) {
-      if (normalizedNeeds.has('page-detail')) {
-        return {
-          type: 'page',
-          route: item.route ?? `/page/${item.fixedSlug}`,
-          routeMode: 'hard',
-          isDetail: true,
-          requiredDataNeeds: ['page-detail'],
-        };
-      }
-      if (normalizedNeeds.has('post-detail')) {
-        return {
-          type: 'page',
-          route: item.route ?? `/post/${item.fixedSlug}`,
-          routeMode: 'hard',
-          isDetail: true,
-          requiredDataNeeds: ['post-detail'],
-        };
-      }
-    }
-
-    if (/^404$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '*',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: [],
-      };
-    }
-
-    if (/^search$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/search',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: ['posts'],
-      };
-    }
-
-    if (/^archive$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/archive',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: ['posts'],
-      };
-    }
-
-    if (/^blog$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/blog',
-        routeMode: 'hard',
-        isDetail: false,
-        requiredDataNeeds: ['posts'],
-      };
-    }
-
-    if (/^category(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/category/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['categoryDetail', 'posts'],
-      };
-    }
-
-    if (/^tag(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/tag/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['posts'],
-      };
-    }
-
-    if (/^author(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: '/author/:slug',
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['posts'],
-      };
-    }
-
-    if (/^single(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route:
-          templateBase === 'single' || templateBase === 'single-post'
-            ? '/post/:slug'
-            : `/${routeSlug}/:slug`,
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['post-detail'],
-      };
-    }
-
-    if (/^page(?:-.+)?$/.test(templateBase)) {
-      return {
-        type: 'page',
-        route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
-        routeMode: 'hard',
-        isDetail: true,
-        requiredDataNeeds: ['page-detail'],
-      };
-    }
-
-    return {
-      type: 'page',
-      route: `/${routeSlug}`,
-      routeMode: 'soft',
-      isDetail: false,
-      requiredDataNeeds: [],
-    };
+    return inferDeterministicRouteContract({
+      templateName: item.templateName,
+      componentName: item.componentName,
+      type: item.type,
+      route: item.route,
+      dataNeeds: item.dataNeeds,
+      isDetail: item.isDetail,
+      fixedSlug: item.fixedSlug,
+      fixedPageId: item.fixedPageId,
+      draftBlockTree: item.draftBlockTree,
+      renderContract: item.renderContract,
+      planningSourceFile: item.planningSourceFile,
+      planningSourceLabel: item.planningSourceLabel,
+      planningSourceSummary: item.planningSourceSummary,
+    });
   }
 
   private allowsConcreteTemplateMultiplicity(
