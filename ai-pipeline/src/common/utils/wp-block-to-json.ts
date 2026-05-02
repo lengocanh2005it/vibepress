@@ -689,6 +689,33 @@ function findClosingIndex(
 }
 
 /**
+ * Strip PHP template expressions from theme asset URLs, leaving only the
+ * relative path. Handles the common WordPress pattern:
+ *   <?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/foo.jpg
+ * → /assets/images/foo.jpg
+ *
+ * Also handles paths embedded inside PHP function calls:
+ *   <?php echo esc_url( get_parent_theme_file_uri('/assets/images/foo.jpg') ); ?>
+ * → /assets/images/foo.jpg
+ */
+function sanitizeThemeAssetUrl(url: string): string {
+  if (!url.includes('<?php')) return url;
+  // Pattern 1: php tag followed by a literal path — extract the path after '?>'
+  const afterPhp = url.split('?>').pop() ?? '';
+  const trimmedAfter = afterPhp.replace(/^['"]+|['"]+$/g, '').trim();
+  if (trimmedAfter) return trimmedAfter;
+  // Pattern 2: path is an argument inside the PHP call, e.g. get_parent_theme_file_uri('path')
+  const pathMatch = url.match(
+    /['"]([^'"]*\.(jpg|jpeg|png|gif|svg|webp|avif|ico))['"]/i,
+  );
+  if (pathMatch?.[1]) {
+    const p = pathMatch[1];
+    return p.startsWith('/') ? p : `/${p}`;
+  }
+  return '';
+}
+
+/**
  * Build a WpNode from a block name, params, and inner markup.
  * Decides whether to recurse into children or extract leaf content.
  */
@@ -720,7 +747,10 @@ function buildNode(
     // sections and renders the block without the correct visual treatment.
     const coverExtras: Partial<WpNode> = {};
     if (blockName === 'cover') {
-      if (params?.url) coverExtras.src = params.url as string;
+      if (params?.url) {
+        const cleanUrl = sanitizeThemeAssetUrl(params.url as string);
+        if (cleanUrl) coverExtras.src = cleanUrl;
+      }
       if (params?.customOverlayColor) {
         coverExtras.overlayColor = params.customOverlayColor as string;
       } else if (params?.overlayColor) {
@@ -745,8 +775,11 @@ function buildNode(
   }
 
   // For wp:cover (leaf, no nested blocks) — lift background image URL to top-level src
-  const coverSrc =
-    blockName === 'cover' && params?.url ? { src: params.url as string } : {};
+  const rawCoverUrl =
+    blockName === 'cover' && params?.url
+      ? sanitizeThemeAssetUrl(params.url as string)
+      : '';
+  const coverSrc = rawCoverUrl ? { src: rawCoverUrl } : {};
 
   // UAGB info-box stores title, description, and CTA inside innerHTML as class-based
   // HTML (not nested block comments). Parse them into synthetic child WpNodes so that

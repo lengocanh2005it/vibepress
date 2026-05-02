@@ -3355,12 +3355,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         // full block structure of the actual DB page is preserved in the draft.
         // The standard mapper is too aggressive at collapsing prose into single
         // hero sections, losing heading hierarchy and layout fidelity.
-        const isPageDetail =
+        const useLosslessDraft =
           componentPlan.isDetail === true &&
           componentPlan.fixedSlug != null &&
-          source.label?.startsWith('db:bound-page:');
+          source.label?.startsWith('db:bound-page:')
+            ? true
+            : this.shouldUseLosslessPlanningDraft(componentPlan, nodes);
         const draft = this.filterDegenerateDraftSections(
-          isPageDetail
+          useLosslessDraft
             ? mapWpNodesToLosslessPageSections(nodes)
             : mapWpNodesToDraftSections(nodes),
         );
@@ -3506,6 +3508,54 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number],
   ): boolean {
     return shouldShortCircuitBlockTreeVisualPlan(componentPlan);
+  }
+
+  private shouldUseLosslessPlanningDraft(
+    componentPlan: PlanResult[number],
+    nodes: WpNode[],
+  ): boolean {
+    if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
+      return false;
+    }
+
+    const TRANSACTIONAL_NAMES = [
+      'cart',
+      'checkout',
+      'my-account',
+      'order-pay',
+      'order-received',
+    ];
+
+    const normalizedTemplate = this.normalizeTemplateIdentifier(
+      componentPlan.templateName,
+    );
+    if (TRANSACTIONAL_NAMES.includes(normalizedTemplate)) {
+      return true;
+    }
+
+    const normalizedComponentName = componentPlan.componentName
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    if (TRANSACTIONAL_NAMES.includes(normalizedComponentName)) {
+      return true;
+    }
+
+    return this.containsTransactionalCommerceBlocks(nodes);
+  }
+
+  private containsTransactionalCommerceBlocks(nodes: WpNode[]): boolean {
+    const transactionalBlockPattern =
+      /^woocommerce\/(cart|checkout|my-account|order-pay|order-received)(?:$|-)/i;
+    const visit = (node: WpNode): boolean => {
+      if (transactionalBlockPattern.test(String(node.block ?? '').trim())) {
+        return true;
+      }
+      return (node.children ?? []).some((child) => visit(child));
+    };
+
+    return nodes.some((node) => visit(node));
   }
 
   private countCoverageUnits(sections: SectionPlan[] | undefined): number {
@@ -5937,7 +5987,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       }
       if (
         normalizedTemplate === 'home' &&
-        ['front-page', 'home', 'index'].includes(entryName)
+        ['home', 'index'].includes(entryName)
       ) {
         return true;
       }

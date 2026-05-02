@@ -567,7 +567,7 @@ function findMatchingEntrySourceChain(
     }
     if (
       normalizedTemplate === 'home' &&
-      ['front-page', 'home', 'index'].includes(entryName)
+      ['home', 'index'].includes(entryName)
     ) {
       return true;
     }

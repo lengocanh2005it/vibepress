@@ -1751,6 +1751,10 @@ export function sanitizeSectionsForContract(
   const allowedNeeds = new Set(contract.dataNeeds ?? []);
   const allowPostDetail = allowedNeeds.has('postDetail');
   const allowPageDetail = allowedNeeds.has('pageDetail');
+  const allowStaticSourceProse =
+    contract.componentType === 'page' &&
+    contract.isDetail !== true &&
+    !allowPostDetail;
   const allowComments = allowPostDetail || allowedNeeds.has('comments');
   const stripLayoutChrome =
     contract.stripLayoutChrome ?? contract.componentType === 'page';
@@ -1779,7 +1783,11 @@ export function sanitizeSectionsForContract(
         return null;
       }
 
-      if (section.type === 'prose-block' && !allowPageDetail) {
+      if (
+        section.type === 'prose-block' &&
+        !allowPageDetail &&
+        !allowStaticSourceProse
+      ) {
         adjustments.push(
           'removed prose-block section because contract does not allow pageDetail',
         );

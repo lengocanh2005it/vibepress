@@ -396,7 +396,7 @@ Rules:
   - post/body HTML may use `dangerouslySetInnerHTML` when the approved render path expects raw post HTML
   - page/body HTML should prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`
 - WordPress upload/media URLs should use the local preview asset path exactly as provided (`/assets/...` or `/assets/images/...`). Do NOT rewrite them back to remote WordPress URLs.
-- PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
+- PHP asset paths → extract ONLY the relative path after the closing `?>` tag, e.g. `<?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/foo.jpg` → `/assets/images/foo.jpg`. ⛔ NEVER emit raw `<?php ... ?>` code inside a JSX attribute. If a value contains `<?php` and no extractable path remains after `?>`, treat it as an empty/absent value and omit the attribute entirely.
 - `<header>` → no background color (transparent)
 - Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
 - Brand in shared chrome → when the template includes `site-logo` and/or `site-title`, wrap the entire visible brand cluster in ONE home link. Do NOT leave the logo outside that link.
@@ -671,6 +671,8 @@ Do NOT invent:
 Only render blocks present in the template tree.
 
 ⛔ **NEVER generate a section whose only content is a bare heading word like "About", "About Us", "Overview", "Introduction", or any other generic label** without real data-driven content beneath it. If a section plan has a label but no actual content nodes (no paragraphs, no images, no list items, no data), **omit the section entirely**. A heading with no body is always a hallucination artifact.
+
+⛔ **NEVER render PHP-sourced layout wrappers that have no resolved content.** When a template source comes from a PHP pattern file (e.g. `patterns/front-page.php`), some content fields may be empty strings (`""`) because they come from PHP runtime variables that cannot be resolved at build time. If ALL visible text fields (headings, paragraphs, button labels) in a wrapper element are empty strings, **skip that wrapper entirely** — do not output `{""}` placeholders or empty elements. The visual plan sections are the authoritative content; render those instead of re-inventing the PHP wrapper structure around them.
 
 ⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
 

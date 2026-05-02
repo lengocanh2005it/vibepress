@@ -2282,6 +2282,10 @@ function applyNodePresentation<T extends SectionPlan>(
   if (!next.sectionKey) {
     next.sectionKey = buildSectionKey(next.type, node.sourceRef?.topLevelIndex);
   }
+  if (!next.debugKey) {
+    const semanticDebugKey = inferSemanticDebugKey(next, node);
+    if (semanticDebugKey) next.debugKey = semanticDebugKey;
+  }
   if (node.bgColor && !next.background) next.background = node.bgColor;
   if (node.textColor && !next.textColor) next.textColor = node.textColor;
   if (node.padding && !next.paddingStyle) {
@@ -2372,9 +2376,19 @@ function applyWrapperVisualPresentation<T extends SectionPlan>(
   node: WpNode,
 ): T[] {
   if (sections.length === 0) return sections;
-  if (!node.bgColor && !node.textColor) return sections;
+  const canPromoteWrapperDebugKey = sections.length === 1;
   return sections.map((section) => {
     const next: T = { ...section };
+    const wrapperDebugKey = inferSemanticDebugKey(next, node);
+    if (
+      canPromoteWrapperDebugKey &&
+      wrapperDebugKey &&
+      (!next.debugKey ||
+        next.debugKey === next.sectionKey ||
+        isGenericSectionDebugKey(next))
+    ) {
+      next.debugKey = wrapperDebugKey;
+    }
     if (node.bgColor && !next.background) next.background = node.bgColor;
     if (node.textColor && !next.textColor) next.textColor = node.textColor;
     return next;
@@ -2525,6 +2539,77 @@ function buildSectionKey(
     return type;
   }
   return `${type}-${topLevelIndex}`;
+}
+
+function inferSemanticDebugKey(
+  section: SectionPlan,
+  node: WpNode,
+): string | undefined {
+  const metadataName = extractMetadataName(node);
+  if (metadataName) return metadataName;
+
+  const patternSlug = extractPatternSlug(node);
+  if (patternSlug) return patternSlug;
+
+  const headingLabel = extractSemanticHeadingLabel(node);
+  if (headingLabel) return headingLabel;
+
+  if (section.type === 'cover' || section.type === 'hero') {
+    const sectionHeading =
+      'heading' in section && typeof section.heading === 'string'
+        ? slugifyDebugLabel(section.heading)
+        : undefined;
+    if (sectionHeading) return sectionHeading;
+  }
+
+  return undefined;
+}
+
+function extractMetadataName(node: WpNode): string | undefined {
+  const raw = (node.params?.metadata as Record<string, unknown> | undefined)?.name;
+  return typeof raw === 'string' ? slugifyDebugLabel(raw) : undefined;
+}
+
+function extractPatternSlug(node: WpNode): string | undefined {
+  const raw = node.params?.slug;
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const leaf = raw.split('/').pop() ?? raw;
+  return slugifyDebugLabel(leaf);
+}
+
+function extractSemanticHeadingLabel(node: WpNode): string | undefined {
+  const headingNode = flattenChildren(node).find((candidate) =>
+    ['core/heading', 'heading'].includes(candidate.block),
+  );
+  const text = headingNode?.text?.trim();
+  if (!text) return undefined;
+
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact || compact.length > 48 || compact.split(/\s+/).length > 5) {
+    return undefined;
+  }
+
+  return slugifyDebugLabel(compact);
+}
+
+function slugifyDebugLabel(value: string): string | undefined {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || undefined;
+}
+
+function isGenericSectionDebugKey(section: SectionPlan): boolean {
+  const current = section.debugKey?.trim() ?? '';
+  if (!current) return false;
+  return (
+    current === section.type ||
+    current === section.sectionKey ||
+    current.startsWith(`${section.type}-`)
+  );
 }
 
 function deduplicateSectionKeys<T extends SectionPlan>(sections: T[]): T[] {

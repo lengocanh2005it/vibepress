@@ -9,6 +9,7 @@ import type {
   LayoutTokens,
   NavbarSection,
   PageContentSection,
+  ProseBlockSection,
   PostContentSection,
   PostFeaturedImageSection,
   PostListSection,
@@ -19,12 +20,21 @@ import type {
   SearchSection,
   SectionPlan,
   SidebarSection,
+  SourceSegment,
   TypographyTokens,
   VisualPlanLockPolicy,
   VisualPlanRenderAuthority,
 } from '../react-generator/visual-plan.schema.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { assessDeterministicRenderAuthority } from './deterministic-render-authority-policy.util.js';
+
+const TRANSACTIONAL_TEMPLATE_NAMES = new Set([
+  'cart',
+  'checkout',
+  'my-account',
+  'order-pay',
+  'order-received',
+]);
 
 export interface BlockTreePlannerComponentPlan {
   templateName: string;
@@ -208,6 +218,24 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     }
   }
 
+  if (
+    componentPlan.type === 'page' &&
+    componentPlan.isDetail !== true &&
+    isEligibleBlockTreeTransactionalTemplate(componentPlan, draftBlockTree)
+  ) {
+    const sections = buildBlockTreeDrivenTransactionalSections({
+      draftBlockTree,
+      draftSections,
+    });
+    if (sections?.length) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        sections,
+      };
+    }
+  }
+
   return undefined;
 }
 
@@ -228,7 +256,9 @@ export function shouldShortCircuitBlockTreeVisualPlan(
 ): boolean {
   return (
     isEligibleBlockTreeSharedPartial(componentPlan) ||
-    isEligibleBlockTreeListingTemplate(componentPlan)
+    isEligibleBlockTreeListingTemplate(componentPlan) ||
+    isEligibleTransactionalTemplateByName(componentPlan) ||
+    isEligibleTransactionalByComponentName(componentPlan)
   );
 }
 
@@ -401,6 +431,277 @@ function isEligibleBlockTreeListingTemplate(
   }
   const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
   return dataNeeds.includes('posts');
+}
+
+function isEligibleBlockTreeTransactionalTemplate(
+  componentPlan: BlockTreePlannerComponentPlan,
+  draftBlockTree: BlockNode[],
+): boolean {
+  if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
+    return false;
+  }
+
+  if (isEligibleTransactionalTemplateByName(componentPlan)) {
+    return true;
+  }
+
+  return hasTransactionalCommerceBlocks(draftBlockTree);
+}
+
+function isEligibleTransactionalTemplateByName(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  return TRANSACTIONAL_TEMPLATE_NAMES.has(normalizedTemplate);
+}
+
+// Classic themes and non-WooCommerce-FSE themes don't register cart/checkout as
+// named FSE templates — the pages are plain WP pages with shortcodes. Detect by
+// componentName so transactional short-circuit still fires regardless of theme.
+function isEligibleTransactionalByComponentName(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'page') return false;
+  const normalizedName = componentPlan.componentName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return TRANSACTIONAL_TEMPLATE_NAMES.has(normalizedName);
+}
+
+function hasTransactionalCommerceBlocks(nodes: BlockNode[]): boolean {
+  const transactionalBlockPattern =
+    /^woocommerce\/(cart|checkout|my-account|order-pay|order-received)(?:$|-)/i;
+  return collectBlockNodesInOrder(nodes).some((node) =>
+    transactionalBlockPattern.test(node.blockName),
+  );
+}
+
+function buildBlockTreeDrivenTransactionalSections(input: {
+  draftBlockTree: BlockNode[];
+  draftSections?: SectionPlan[];
+}): SectionPlan[] | undefined {
+  const preferredDraftSections = (input.draftSections ?? []).filter(
+    isUsableTransactionalSection,
+  );
+  if (preferredDraftSections.length > 0) {
+    return preferredDraftSections;
+  }
+
+  const fallbackSection = buildTransactionalFallbackProseSection(
+    input.draftBlockTree,
+  );
+  return fallbackSection ? [fallbackSection] : undefined;
+}
+
+function isUsableTransactionalSection(section: SectionPlan): boolean {
+  switch (section.type) {
+    case 'navbar':
+    case 'footer':
+    case 'page-content':
+    case 'post-content':
+    case 'post-title':
+    case 'post-featured-image':
+    case 'post-meta':
+    case 'post-terms':
+    case 'post-navigation':
+    case 'comments':
+    case 'sidebar':
+      return false;
+    case 'prose-block':
+      return Array.isArray(section.sourceSegments) && section.sourceSegments.length > 0;
+    case 'hero':
+      return typeof section.heading === 'string' && section.heading.trim().length > 0;
+    case 'cover':
+      return (
+        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
+        (typeof section.subheading === 'string' && section.subheading.trim().length > 0) ||
+        (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0)
+      );
+    case 'media-text':
+      return Boolean(
+        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
+          (typeof section.body === 'string' && section.body.trim().length > 0) ||
+          (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0) ||
+          section.listItems?.length,
+      );
+    case 'cta-strip':
+      return Boolean(
+        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
+          (typeof section.subheading === 'string' &&
+            section.subheading.trim().length > 0) ||
+          section.cta ||
+          (section.ctas?.length ?? 0) > 0,
+      );
+    case 'testimonial':
+      return Boolean(
+        (typeof section.quote === 'string' && section.quote.trim().length > 0) ||
+          (typeof section.authorName === 'string' &&
+            section.authorName.trim().length > 0),
+      );
+    case 'card-grid':
+      return section.cards.some(
+        (card) =>
+          (typeof card.heading === 'string' && card.heading.trim().length > 0) ||
+          (typeof card.body === 'string' && card.body.trim().length > 0) ||
+          (typeof card.imageSrc === 'string' && card.imageSrc.trim().length > 0),
+      );
+    case 'accordion':
+      return section.items.some(
+        (item) =>
+          (typeof item.heading === 'string' && item.heading.trim().length > 0) ||
+          (typeof item.body === 'string' && item.body.trim().length > 0),
+      );
+    case 'tabs':
+      return section.tabs.some(
+        (tab) =>
+          (typeof tab.label === 'string' && tab.label.trim().length > 0) ||
+          (typeof tab.heading === 'string' && tab.heading.trim().length > 0) ||
+          (typeof tab.body === 'string' && tab.body.trim().length > 0) ||
+          (typeof tab.imageSrc === 'string' && tab.imageSrc.trim().length > 0),
+      );
+    case 'carousel':
+      return section.slides.some(
+        (slide) =>
+          (typeof slide.heading === 'string' && slide.heading.trim().length > 0) ||
+          (typeof slide.subheading === 'string' &&
+            slide.subheading.trim().length > 0) ||
+          (typeof slide.imageSrc === 'string' && slide.imageSrc.trim().length > 0),
+      );
+    case 'modal':
+      return Boolean(
+        (typeof section.triggerText === 'string' &&
+          section.triggerText.trim().length > 0) ||
+          (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
+          (typeof section.body === 'string' && section.body.trim().length > 0) ||
+          (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0),
+      );
+    default:
+      return true;
+  }
+}
+
+function buildTransactionalFallbackProseSection(
+  draftBlockTree: BlockNode[],
+): ProseBlockSection | undefined {
+  const segments = collectTransactionalSourceSegments(draftBlockTree);
+  if (segments.length === 0) return undefined;
+
+  const sourceRef =
+    segments.find((segment) => segment.sourceRef)?.sourceRef ??
+    collectBlockNodesInOrder(draftBlockTree).find((node) => node.sourceRef)
+      ?.sourceRef;
+  const customClassNames = Array.from(
+    new Set(
+      collectBlockNodesInOrder(draftBlockTree).flatMap(
+        (node) => node.customClassNames ?? [],
+      ),
+    ),
+  );
+
+  return {
+    type: 'prose-block',
+    shellVariant: 'wide',
+    sourceSegments: segments,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(customClassNames.length > 0 ? { customClassNames } : {}),
+    debugKey: 'commerce-flow-0',
+    sectionKey: 'commerce-flow-0',
+  };
+}
+
+function collectTransactionalSourceSegments(nodes: BlockNode[]): SourceSegment[] {
+  const segments: SourceSegment[] = [];
+  const visit = (node: BlockNode) => {
+    if (isIgnoredTransactionalNode(node)) {
+      return;
+    }
+
+    const directSegment = toTransactionalSourceSegment(node);
+    if (directSegment) {
+      segments.push(directSegment);
+      return;
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child);
+    }
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+
+  return segments;
+}
+
+function isIgnoredTransactionalNode(node: BlockNode): boolean {
+  return ['template-part', 'navigation', 'site-title', 'site-tagline', 'site-logo'].includes(
+    node.kind,
+  );
+}
+
+function toTransactionalSourceSegment(
+  node: BlockNode,
+): SourceSegment | undefined {
+  const customClassNames = node.customClassNames?.length
+    ? [...new Set(node.customClassNames)]
+    : undefined;
+
+  if (node.kind === 'heading' && typeof node.text === 'string' && node.text.trim()) {
+    return {
+      type: 'heading',
+      text: node.text.trim(),
+      ...(typeof node.html === 'string' && node.html.trim()
+        ? { html: node.html.trim() }
+        : {}),
+      ...(typeof node.level === 'number' ? { level: node.level } : {}),
+      ...(customClassNames ? { customClassNames } : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (node.kind === 'image' && typeof node.src === 'string' && node.src.trim()) {
+    return {
+      type: 'image',
+      src: node.src,
+      ...(typeof node.alt === 'string' && node.alt.trim()
+        ? { alt: node.alt.trim() }
+        : {}),
+      ...(typeof node.width === 'number' ? { width: node.width } : {}),
+      ...(typeof node.height === 'number' ? { height: node.height } : {}),
+      ...(customClassNames ? { customClassNames } : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (typeof node.text === 'string' && node.text.trim()) {
+    return {
+      type: 'paragraph',
+      text: node.text.trim(),
+      html: typeof node.html === 'string' && node.html.trim() ? node.html.trim() : node.text.trim(),
+      ...(customClassNames ? { customClassNames } : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  if (
+    (!node.children || node.children.length === 0) &&
+    typeof node.html === 'string' &&
+    node.html.trim()
+  ) {
+    return {
+      type: 'html',
+      html: node.html.trim(),
+      ...(customClassNames ? { customClassNames } : {}),
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+    };
+  }
+
+  return undefined;
 }
 
 function buildBlockTreeDrivenListingSections(input: {

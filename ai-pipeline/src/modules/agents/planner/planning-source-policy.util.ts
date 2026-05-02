@@ -86,7 +86,7 @@ export function isAuthoritativeDbPlanningSource(
   if (componentPlan.route === '/') {
     return (
       /^db:page-on-front(?::|$)/.test(normalized) ||
-      /^db:[^:]+:(front-page|home)$/.test(normalized)
+      /^db:[^:]+:front-page$/.test(normalized)
     );
   }
 
@@ -418,21 +418,51 @@ export function buildPlanningSourceCandidates(
     });
   }
 
-  const hasRichDbCandidate = candidates.some(
+  const preferRepoFrontPageForRoot =
+    componentPlan.route === '/' &&
+    candidates.some((candidate) => {
+      const normalizedLabel = candidate.label.trim().toLowerCase();
+      return (
+        /^repo(?:-|:)/.test(normalizedLabel) &&
+        String(candidate.templateName ?? '')
+          .trim()
+          .toLowerCase() === 'front-page'
+      );
+    }) &&
+    !candidates.some((candidate) => {
+      const normalizedLabel = candidate.label.trim().toLowerCase();
+      return (
+        /^db:page-on-front(?::|$)/.test(normalizedLabel) ||
+        /^db:[^:]+:front-page$/.test(normalizedLabel)
+      );
+    });
+
+  const filteredRootCandidates = preferRepoFrontPageForRoot
+    ? candidates.filter((candidate) => {
+        const normalizedLabel = candidate.label.trim().toLowerCase();
+        return !/^db:[^:]+:home$/.test(normalizedLabel);
+      })
+    : candidates;
+
+  const hasRichDbCandidate = filteredRootCandidates.some(
     (candidate) =>
       candidate.label.startsWith('db:') && candidate.source.trim().length > 0,
   );
-  const hasAuthoritativeDbCandidate = candidates.some(
+  const hasAuthoritativeDbCandidate = filteredRootCandidates.some(
     (candidate) =>
       candidate.source.trim().length > 0 &&
       isAuthoritativeDbPlanningSource(componentPlan, candidate.label),
   );
 
   const filteredCandidates = hasAuthoritativeDbCandidate
-    ? candidates.filter((candidate) => candidate.label.startsWith('db:'))
+    ? filteredRootCandidates.filter((candidate) =>
+        candidate.label.startsWith('db:'),
+      )
     : hasRichDbCandidate
-      ? candidates.filter((candidate) => !/^repo:/.test(candidate.label))
-      : candidates;
+      ? filteredRootCandidates.filter(
+          (candidate) => !/^repo:/.test(candidate.label),
+        )
+      : filteredRootCandidates;
 
   return filteredCandidates
     .map((candidate) => ({

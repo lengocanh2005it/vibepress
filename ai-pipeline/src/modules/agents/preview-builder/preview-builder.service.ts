@@ -40,7 +40,7 @@ import {
   writeUiSourceMapArtifacts,
 } from '../../edit-request/ui-source-map.util.js';
 import {
-  SOURCE_MOTION_BOOTSTRAP_TS,
+  buildSourceMotionBootstrapTs,
   SOURCE_MOTION_BRIDGE_CSS,
   SPECTRA_COMPAT_CSS,
 } from './preview-bridge-assets.js';
@@ -62,6 +62,11 @@ export interface PreviewBuilderResult {
   uiSourceMapPath?: string;
   frontendPid?: number;
   serverPid?: number;
+}
+
+interface SourceMotionBridgeConfig {
+  enabled: boolean;
+  reasons: string[];
 }
 
 const TEMPLATE_DIR = resolve('templates/react-preview');
@@ -192,9 +197,13 @@ export class PreviewBuilderService {
       frontendDir,
       this.shouldInjectSpectraCompatCss(components.components, repoManifest),
     );
+    const sourceMotionConfig = this.resolveSourceMotionBridgeConfig(
+      components.components,
+      repoManifest,
+    );
     await this.applySourceMotionBridge(
       frontendDir,
-      this.shouldInjectSourceMotionBridge(components.components),
+      sourceMotionConfig,
     );
 
     // 3b. Copy đúng các asset mà component generated đang reference.
@@ -927,16 +936,22 @@ ${fontEntries}
       lines.push(styles.css);
     }
 
-    // Inject CSS files from theme assets/css/
+    // Inject CSS files from common theme vendor CSS directories.
     try {
-      const assetsCssDir = join(themeDir, 'assets', 'css');
-      const cssFiles = await readdir(assetsCssDir).catch(() => []);
-      for (const cssFile of cssFiles.filter((f) => f.endsWith('.css'))) {
-        const content = await readFile(join(assetsCssDir, cssFile), 'utf-8');
-        lines.push(`/* theme ${cssFile} */\n${content}`);
+      const cssDirs = [join(themeDir, 'assets', 'css'), join(themeDir, 'css')];
+      const seenCssFiles = new Set<string>();
+      for (const cssDir of cssDirs) {
+        const cssFiles = await readdir(cssDir).catch(() => []);
+        for (const cssFile of cssFiles.filter((f) => f.endsWith('.css'))) {
+          const seenKey = `${cssDir}::${cssFile}`.toLowerCase();
+          if (seenCssFiles.has(seenKey)) continue;
+          seenCssFiles.add(seenKey);
+          const content = await readFile(join(cssDir, cssFile), 'utf-8');
+          lines.push(`/* theme ${cssFile} */\n${content}`);
+        }
       }
     } catch {
-      // assets/css may not exist for all themes
+      // theme vendor CSS directories may not exist for all themes
     }
 
     if (lines.length > 1) {
@@ -1203,20 +1218,51 @@ ${fontEntries}
     );
   }
 
-  private shouldInjectSourceMotionBridge(
+  private resolveSourceMotionBridgeConfig(
     components: ReactGenerateResult['components'],
-  ): boolean {
+    repoManifest?: RepoThemeManifest,
+  ): SourceMotionBridgeConfig {
     const sourceMotionPattern =
       /\bwow\b[\s\S]{0,400}\banimate__[\w-]+\b|\banimate__[\w-]+\b[\s\S]{0,400}\bwow\b/;
-
-    return components.some((component) =>
+    const generatedSignalPresent = components.some((component) =>
       sourceMotionPattern.test(component.code),
     );
+    const styleFiles = this.collectSourceMotionManifestFiles(
+      repoManifest,
+      'style',
+    );
+    const runtimeFiles = this.collectSourceMotionManifestFiles(
+      repoManifest,
+      'runtime',
+    );
+    const noteSignals = [
+      ...(repoManifest?.sourceOfTruth.notes ?? []),
+      ...(repoManifest?.themes.flatMap((theme) => theme.themeNotes) ?? []),
+    ].filter((note) => /(wow|animate\.css|animate css|animate__)/i.test(note));
+
+    const reasons: string[] = [];
+    if (generatedSignalPresent) {
+      reasons.push('generated code preserves wow/animate__ classes');
+    }
+    if (styleFiles.length > 0) {
+      reasons.push(`repo motion stylesheet(s): ${styleFiles.join(', ')}`);
+    }
+    if (runtimeFiles.length > 0) {
+      reasons.push(`repo motion runtime file(s): ${runtimeFiles.join(', ')}`);
+    }
+    if (noteSignals.length > 0) {
+      reasons.push('theme profile/source-of-truth notes mention wow/animate.css');
+    }
+
+    return {
+      enabled: reasons.length > 0,
+      reasons,
+    };
   }
 
   private async applySourceMotionBridge(
     frontendDir: string,
-    enabled: boolean,
+    config: SourceMotionBridgeConfig,
   ): Promise<void> {
     const indexCssPath = join(frontendDir, 'src', 'index.css');
     const mainTsxPath = join(frontendDir, 'src', 'main.tsx');
@@ -1235,7 +1281,7 @@ ${fontEntries}
       readFile(mainTsxPath, 'utf-8'),
     ]);
 
-    if (!enabled) {
+    if (!config.enabled) {
       await Promise.all([
         rm(bridgeCssPath, { force: true }),
         rm(bridgeModulePath, { force: true }),
@@ -1258,6 +1304,10 @@ ${fontEntries}
       return;
     }
 
+    this.logger.log(
+      `Injecting source motion bridge: ${config.reasons.join(' | ')}`,
+    );
+
     await Promise.all([
       writeFile(
         bridgeCssPath,
@@ -1266,7 +1316,7 @@ ${fontEntries}
       ),
       writeFile(
         bridgeModulePath,
-        `${SOURCE_MOTION_BOOTSTRAP_TS.trimEnd()}\n`,
+        `${buildSourceMotionBootstrapTs().trimEnd()}\n`,
         'utf-8',
       ),
     ]);
@@ -1357,6 +1407,37 @@ ${fontEntries}
     );
     if (nextLines.length === lines.length) return source;
     return `${nextLines.join('\n').trimEnd()}\n`;
+  }
+
+  private collectSourceMotionManifestFiles(
+    repoManifest: RepoThemeManifest | undefined,
+    kind: 'style' | 'runtime',
+  ): string[] {
+    if (!repoManifest) return [];
+
+    const candidates =
+      kind === 'style'
+        ? [
+            ...repoManifest.sourceOfTruth.styleFiles,
+            ...repoManifest.assetManifest.css,
+          ]
+        : [
+            ...repoManifest.sourceOfTruth.runtimeFiles,
+            ...repoManifest.assetManifest.js,
+          ];
+
+    const matcher =
+      kind === 'style'
+        ? /(?:^|\/)(?:animate(?:\.min)?|animatecss)\.css$/i
+        : /(?:^|\/)(?:wow(?:\.min)?|wow-js|scrollreveal(?:\.min)?|aos(?:\.min)?)\.js$/i;
+
+    return Array.from(
+      new Set(
+        candidates
+          .map((file) => file.replace(/\\/g, '/').trim())
+          .filter((file) => matcher.test(file)),
+      ),
+    ).sort();
   }
 
   private normalizeWordPressCustomCssSelectors(css: string): string {

@@ -120,6 +120,7 @@ function collectPlanReviewBlockingIssues(
   const actionableWarnings: string[] = [];
   const ignoredWarningCodes = new Set<PlanReviewWarningCode>([
     'multiple_home_like_templates_detected',
+    'redundant_home_alias_removed',
     'type_normalized',
     'route_normalized',
     'detail_flag_normalized',
@@ -1638,6 +1639,7 @@ export default function ${component.name}() {
             expectedTemplateNames,
             repoResult.themeManifest,
           );
+          let reviewedExpectedTemplateNames = review.expectedTemplateNames;
           let planAttempt = 1;
           let planBlockingIssues = collectPlanReviewBlockingIssues(
             review,
@@ -1713,9 +1715,10 @@ export default function ${component.name}() {
             );
             review = this.planReviewer.review(
               plan,
-              expectedTemplateNames,
+              reviewedExpectedTemplateNames,
               repoResult.themeManifest,
             );
+            reviewedExpectedTemplateNames = review.expectedTemplateNames;
             planAttempt = attempt;
             planBlockingIssues = collectPlanReviewBlockingIssues(
               review,
@@ -1781,7 +1784,7 @@ export default function ${component.name}() {
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
-            expectedTemplateNames,
+            reviewedExpectedTemplateNames,
             repoResult.themeManifest,
           );
           let visualAttempt = 1;
@@ -1879,9 +1882,10 @@ export default function ${component.name}() {
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,
-              expectedTemplateNames,
+              reviewedExpectedTemplateNames,
               repoResult.themeManifest,
             );
+            reviewedExpectedTemplateNames = visualReview.expectedTemplateNames;
             visualAttempt = vAttempt;
             visualBlockingIssues = collectPlanReviewBlockingIssues(
               visualReview,

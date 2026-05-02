@@ -15,6 +15,7 @@ import {
 
 export interface PlanReviewResult {
   plan: PlanResult;
+  expectedTemplateNames: string[];
   warnings: string[];
   warningCodes: PlanReviewWarningCode[];
   errors: string[];
@@ -40,6 +41,7 @@ export type PlanReviewWarningCode =
   | 'duplicate_route_normalized'
   | 'missing_visual_plan_fallback_ai'
   | 'multiple_home_like_templates_detected'
+  | 'redundant_home_alias_removed'
   | 'home_hierarchy_type_normalized'
   | 'home_hierarchy_route_normalized'
   | 'home_hierarchy_is_detail_normalized';
@@ -62,7 +64,12 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
 const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
-const HOME_TEMPLATE_PRIORITY = ['frontend-page', 'home', 'index'] as const;
+const HOME_TEMPLATE_PRIORITY = [
+  'frontend-page',
+  'front-page',
+  'home',
+  'index',
+] as const;
 const HOME_TEMPLATE_PRIORITY_SET = new Set<string>(HOME_TEMPLATE_PRIORITY);
 
 function toTemplateBase(templateName: string): string {
@@ -72,6 +79,14 @@ function toTemplateBase(templateName: string): string {
 function getHomeTemplateBase(templateName: string): string | null {
   const base = toTemplateBase(templateName);
   return HOME_TEMPLATE_PRIORITY_SET.has(base) ? base : null;
+}
+
+function getEntryBaseName(file: string | undefined): string {
+  return String(file ?? '')
+    .split('/')
+    .pop()
+    ?.replace(/\.(php|html)$/i, '')
+    .toLowerCase() || '';
 }
 
 @Injectable()
@@ -87,6 +102,7 @@ export class PlanReviewerService {
     const warningCodes: PlanReviewWarningCode[] = [];
     const errors: string[] = [];
     let reviewed = [...plan];
+    let adjustedExpectedTemplateNames = [...expectedTemplateNames];
 
     // Pre-pass: enforce partial type for template parts with known area assignments.
     // theme.json templateParts declarations are authoritative — if theme.json says
@@ -108,11 +124,21 @@ export class PlanReviewerService {
       warningCodes,
     );
     reviewed = this.alignHomeHierarchyRoutes(reviewed, warnings, warningCodes);
+    ({
+      plan: reviewed,
+      expectedTemplateNames: adjustedExpectedTemplateNames,
+    } = this.collapseRedundantHomeAlias(
+      reviewed,
+      adjustedExpectedTemplateNames,
+      repoManifest,
+      warnings,
+      warningCodes,
+    ));
     reviewed = this.alignRouteSemantics(reviewed, warnings, warningCodes);
     reviewed = this.alignDataNeeds(reviewed, warnings, warningCodes);
     reviewed = this.fixDuplicateRoutes(reviewed, warnings, warningCodes);
     this.checkVisualPlanCoverage(reviewed, warnings, warningCodes);
-    this.validateHard(reviewed, expectedTemplateNames, errors);
+    this.validateHard(reviewed, adjustedExpectedTemplateNames, errors);
     this.validateDraftSectionFidelity(reviewed, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
@@ -140,6 +166,7 @@ export class PlanReviewerService {
 
     return {
       plan: reviewed,
+      expectedTemplateNames: adjustedExpectedTemplateNames,
       warnings,
       warningCodes,
       errors,
@@ -1072,7 +1099,8 @@ export class PlanReviewerService {
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
   ): PlanResult {
-    // WordPress hierarchy for this pipeline: frontend-page > home > index.
+    // WordPress hierarchy for this pipeline: frontend-page > front-page >
+    // home > index.
     // Keep the highest-priority home-like template first so duplicate-route
     // resolution later preserves "/" for the correct winner.
     const homeItems = plan
@@ -1124,6 +1152,83 @@ export class PlanReviewerService {
     });
   }
 
+  private collapseRedundantHomeAlias(
+    plan: PlanResult,
+    expectedTemplateNames: string[],
+    repoManifest: RepoThemeManifest | undefined,
+    warnings: string[],
+    warningCodes: PlanReviewWarningCode[],
+  ): { plan: PlanResult; expectedTemplateNames: string[] } {
+    const homeItem = plan.find(
+      (item) => toTemplateBase(item.templateName) === 'home',
+    );
+    const indexItem = plan.find(
+      (item) => toTemplateBase(item.templateName) === 'index',
+    );
+    const frontPageItem = plan.find((item) =>
+      ['front-page', 'frontend-page'].includes(toTemplateBase(item.templateName)),
+    );
+
+    if (!homeItem || !indexItem || !frontPageItem || !repoManifest) {
+      return { plan, expectedTemplateNames };
+    }
+
+    const entryChains = repoManifest.structureHints.entrySourceChains;
+    const homeChain = entryChains.find(
+      (chain) => getEntryBaseName(chain.entryFile) === 'home',
+    );
+    const indexChain = entryChains.find(
+      (chain) => getEntryBaseName(chain.entryFile) === 'index',
+    );
+    const explicitHomeSourceExists =
+      !!homeChain ||
+      repoManifest.structureHints.fileAnalyses.some(
+        (file) =>
+          ['template', 'pattern', 'php-template'].includes(file.kind) &&
+          getEntryBaseName(file.file) === 'home',
+      );
+
+    const homeResolvesToIndex =
+      !homeChain &&
+      !!indexChain &&
+      homeItem.route === '/blog' &&
+      indexItem.route === '/index';
+
+    if (!explicitHomeSourceExists && homeResolvesToIndex) {
+      const nextPlan = plan
+        .map((item) => {
+          if (item.templateName !== indexItem.templateName) return item;
+          return {
+            ...item,
+            route: homeItem.route,
+            dataNeeds: Array.from(
+              new Set([...(item.dataNeeds ?? []), ...(homeItem.dataNeeds ?? [])]),
+            ),
+            description:
+              homeItem.description?.trim() ||
+              item.description,
+          };
+        })
+        .filter((item) => item.templateName !== homeItem.templateName);
+
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'redundant_home_alias_removed',
+        `Template "home" removed because it has no dedicated source and only aliases "index"; reassigned route "${homeItem.route ?? '/blog'}" to "index"`,
+      );
+
+      return {
+        plan: nextPlan,
+        expectedTemplateNames: expectedTemplateNames.filter(
+          (templateName) => templateName !== homeItem.templateName,
+        ),
+      };
+    }
+
+    return { plan, expectedTemplateNames };
+  }
+
   private alignHomeHierarchyRoutes(
     plan: PlanResult,
     warnings: string[],
@@ -1136,6 +1241,9 @@ export class PlanReviewerService {
 
     const hasFrontendPage = plan.some((item) =>
       /^frontend-page$/i.test(toTemplateBase(item.templateName)),
+    );
+    const hasFrontPage = plan.some((item) =>
+      /^front-page$/i.test(toTemplateBase(item.templateName)),
     );
     const hasHome = plan.some((item) =>
       /^home$/i.test(toTemplateBase(item.templateName)),
@@ -1152,6 +1260,26 @@ export class PlanReviewerService {
       });
       if (hasHome) {
         byBase.set('home', { route: '/blog', type: 'page', isDetail: false });
+      }
+      if (hasIndex) {
+        byBase.set('index', {
+          route: '/index',
+          type: 'page',
+          isDetail: false,
+        });
+      }
+    } else if (hasFrontPage) {
+      byBase.set('front-page', {
+        route: '/',
+        type: 'page',
+        isDetail: false,
+      });
+      if (hasHome) {
+        byBase.set('home', {
+          route: '/blog',
+          type: 'page',
+          isDetail: false,
+        });
       }
       if (hasIndex) {
         byBase.set('index', {

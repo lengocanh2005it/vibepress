@@ -912,6 +912,8 @@ const Editor: React.FC = () => {
         },
         overlayWidth: fallbackWidth,
         overlayHeight: fallbackHeight,
+        overlayBounds: overlayRef.current?.getBoundingClientRect(),
+        frameBounds: undefined,
         frameDocument: undefined,
         page: {
           route: fallbackRoute,
@@ -950,11 +952,11 @@ const Editor: React.FC = () => {
         ),
       };
 
-      return {
-        viewport,
-        overlayWidth: Math.max(
-          1,
-          Math.round(
+        return {
+          viewport,
+          overlayWidth: Math.max(
+            1,
+            Math.round(
             overlayRef.current?.clientWidth ||
               iframeEl.clientWidth ||
               viewport.width,
@@ -968,6 +970,8 @@ const Editor: React.FC = () => {
               viewport.height,
           ),
         ),
+        overlayBounds: overlayRef.current?.getBoundingClientRect(),
+        frameBounds: iframeEl.getBoundingClientRect(),
         frameDocument,
         page: {
           route: instrumentedRoute || fallbackRoute,
@@ -1005,6 +1009,8 @@ const Editor: React.FC = () => {
         },
         overlayWidth: fallbackWidth,
         overlayHeight: fallbackHeight,
+        overlayBounds: overlayRef.current?.getBoundingClientRect(),
+        frameBounds: iframeEl.getBoundingClientRect(),
         frameDocument: undefined,
         page: {
           route: fallbackRoute,
@@ -1016,37 +1022,76 @@ const Editor: React.FC = () => {
     }
   };
 
-  const buildCaptureSnapshot = (sel: SelectionRect) => {
-    const overlayRect = getRelativeRect(sel);
-    const metrics = getCaptureMetrics();
-    const scaleX = metrics.viewport.width / Math.max(1, metrics.overlayWidth);
-    const scaleY = metrics.viewport.height / Math.max(1, metrics.overlayHeight);
+  const buildViewportRectFromOverlayRect = (
+    overlayRect: ReturnType<typeof getRelativeRect>,
+    metrics: ReturnType<typeof getCaptureMetrics>,
+  ): ViewportCaptureRect => {
+    const frameBounds = metrics.frameBounds;
+    const overlayBounds = metrics.overlayBounds;
+    const frameClientWidth = Math.max(
+      1,
+      Math.round(frameBounds?.width || iframeRef.current?.clientWidth || metrics.viewport.width),
+    );
+    const frameClientHeight = Math.max(
+      1,
+      Math.round(
+        frameBounds?.height || iframeRef.current?.clientHeight || metrics.viewport.height,
+      ),
+    );
+    const frameOffsetX =
+      frameBounds && overlayBounds ? frameBounds.left - overlayBounds.left : 0;
+    const frameOffsetY =
+      frameBounds && overlayBounds ? frameBounds.top - overlayBounds.top : 0;
+
+    const relativeLeft = clampNumber(
+      overlayRect.x - frameOffsetX,
+      0,
+      frameClientWidth - 1,
+    );
+    const relativeTop = clampNumber(
+      overlayRect.y - frameOffsetY,
+      0,
+      frameClientHeight - 1,
+    );
+    const relativeRight = clampNumber(
+      overlayRect.x + overlayRect.width - frameOffsetX,
+      relativeLeft + 1,
+      frameClientWidth,
+    );
+    const relativeBottom = clampNumber(
+      overlayRect.y + overlayRect.height - frameOffsetY,
+      relativeTop + 1,
+      frameClientHeight,
+    );
+
+    const scaleX = metrics.viewport.width / frameClientWidth;
+    const scaleY = metrics.viewport.height / frameClientHeight;
     const maxViewportWidth = Math.max(1, metrics.viewport.width);
     const maxViewportHeight = Math.max(1, metrics.viewport.height);
 
-    const viewportRect: ViewportCaptureRect = {
-      x: clampNumber(
-        roundNumber(overlayRect.x * scaleX),
-        0,
-        maxViewportWidth - 1,
-      ),
-      y: clampNumber(
-        roundNumber(overlayRect.y * scaleY),
-        0,
-        maxViewportHeight - 1,
-      ),
+    return {
+      x: clampNumber(roundNumber(relativeLeft * scaleX), 0, maxViewportWidth - 1),
+      y: clampNumber(roundNumber(relativeTop * scaleY), 0, maxViewportHeight - 1),
       width: clampNumber(
-        roundNumber(overlayRect.width * scaleX),
+        roundNumber((relativeRight - relativeLeft) * scaleX),
         1,
         maxViewportWidth,
       ),
       height: clampNumber(
-        roundNumber(overlayRect.height * scaleY),
+        roundNumber((relativeBottom - relativeTop) * scaleY),
         1,
         maxViewportHeight,
       ),
       coordinateSpace: "iframe-viewport",
     };
+  };
+
+  const buildCaptureSnapshot = (sel: SelectionRect) => {
+    const overlayRect = getRelativeRect(sel);
+    const metrics = getCaptureMetrics();
+    const maxViewportWidth = Math.max(1, metrics.viewport.width);
+    const maxViewportHeight = Math.max(1, metrics.viewport.height);
+    const viewportRect = buildViewportRectFromOverlayRect(overlayRect, metrics);
 
     const safeViewportWidth = Math.min(
       viewportRect.width,
