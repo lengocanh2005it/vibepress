@@ -2566,7 +2566,8 @@ function inferSemanticDebugKey(
 }
 
 function extractMetadataName(node: WpNode): string | undefined {
-  const raw = (node.params?.metadata as Record<string, unknown> | undefined)?.name;
+  const raw = (node.params?.metadata as Record<string, unknown> | undefined)
+    ?.name;
   return typeof raw === 'string' ? slugifyDebugLabel(raw) : undefined;
 }
 

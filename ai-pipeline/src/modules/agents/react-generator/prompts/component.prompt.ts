@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
 import { stripTags } from '../../../../common/utils/wp-block-to-json.js';
+import { extractStaticImageSources } from '../../../../common/utils/theme-asset.util.js';
 import type {
   ThemeTokens,
   ThemeInteractionState,
@@ -1619,37 +1620,6 @@ export function buildPlanContextNote(
   return lines.join('\n');
 }
 
-function extractStaticImageSources(templateSource: string): string[] {
-  const result = new Set<string>();
-
-  try {
-    const parsed = JSON.parse(templateSource);
-    const visit = (node: any) => {
-      if (!node || typeof node !== 'object') return;
-      if (typeof node.src === 'string' && node.src.trim()) {
-        result.add(node.src.trim());
-      }
-      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
-        result.add(node.imageSrc.trim());
-      }
-      if (Array.isArray(node.children)) node.children.forEach(visit);
-      if (Array.isArray(node)) node.forEach(visit);
-    };
-    visit(parsed);
-  } catch {
-    for (const match of templateSource.matchAll(
-      /(?:src|imageSrc)="([^"]+)"/g,
-    )) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
-      if (match[1]) result.add(match[1].trim());
-    }
-  }
-
-  return [...result];
-}
-
 function buildImageSourcesNote(templateSource: string): string {
   const sources = extractStaticImageSources(templateSource);
   const lines = ['## Static image sources in this template'];
@@ -1670,10 +1640,10 @@ function buildImageSourcesNote(templateSource: string): string {
     '⛔ If a testimonial/person/media block has no image source in the template, omit the image/avatar entirely.',
   );
   lines.push(
-    'For local paths (`/assets/...` or `/assets/images/...`): copy the path EXACTLY into your JSX `src` attribute.',
+    'For theme-local files canonicalized as `theme-asset:/...`: preserve that literal exactly and route it through the runtime asset resolver. Do NOT rewrite it to a guessed `/assets/...` path by hand.',
   );
   lines.push(
-    'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten to just `/assets/filename`. These URLs are automatically relinked to local paths after generation.',
+    'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten, strip, or convert it into a local asset token.',
   );
   lines.push(
     'For important screenshot/product/composite images from the template source, preserve the full asset by default: prefer `w-full h-auto object-contain` (optionally with a max-height) instead of fixed-height `object-cover` cropping, unless the source itself is intentionally cropped.',

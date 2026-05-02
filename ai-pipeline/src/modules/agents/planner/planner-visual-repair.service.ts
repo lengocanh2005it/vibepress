@@ -3,9 +3,9 @@ import { buildEditRequestContextNote } from '../../edit-request/edit-request-pro
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import {
   buildVisualPlanPrompt,
-  extractStaticImageSources,
   parseVisualPlanDetailed,
   type VisualPlanContract,
 } from '../react-generator/prompts/visual-plan.prompt.js';
@@ -23,6 +23,7 @@ import type {
   TypographyTokens,
 } from '../react-generator/visual-plan.schema.js';
 import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
+import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 
 export interface PlannerComponentPlanLike {
   templateName: string;
@@ -54,6 +55,34 @@ export interface PlanningSourceSupplement {
   reason?: string;
   templateName?: string;
   sourceFile?: string;
+  canonicalSource?: CanonicalPlanningSource;
+}
+
+export interface CanonicalPlanningSourceFacts {
+  hasQuery: boolean;
+  hasSidebarTemplatePart: boolean;
+  hasSearch: boolean;
+  hasPostContent: boolean;
+  hasPageList: boolean;
+  hasComments: boolean;
+  hasNavigation: boolean;
+  hasWooCart: boolean;
+  hasWooCheckout: boolean;
+}
+
+export interface CanonicalPlanningSource {
+  rawSource: string;
+  normalizedSource: string;
+  sourceTemplateName: string;
+  sourceFile: string;
+  wpNodes: WpNode[];
+  resolvedNodes: WpNode[];
+  blockTree: BlockNode[];
+  customClassNames: string[];
+  headingTexts: string[];
+  interactiveWidgets: string[];
+  assetRefs: string[];
+  sourceFacts: CanonicalPlanningSourceFacts;
 }
 
 export interface PlanningSourceContext {
@@ -65,6 +94,7 @@ export interface PlanningSourceContext {
   sourceTemplateName?: string;
   sourceFile?: string;
   sourceReason?: string;
+  canonicalSource?: CanonicalPlanningSource;
 }
 
 export interface PlannerPageEvidence {
@@ -99,12 +129,14 @@ export interface PlannerVisualRepairDelegate {
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext;
   buildPlanningSourceContextFromResolvedSource(
     componentPlan: PlannerComponentPlanLike,
     preferredSource: PlanningSourceCandidate,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
   ): PlanningSourceContext;
   buildDraftSectionsForPlanningSource(
     planningSource: PlanningSourceContext | undefined,
@@ -126,7 +158,7 @@ export interface PlannerVisualRepairDelegate {
     content: DbContentResult,
   ): PlannerPageEvidence[];
   collectAllowedImageSrcs(
-    planningSource: string,
+    planningSource: PlanningSourceContext | string,
     content: DbContentResult,
   ): string[];
   requestVisualPlanCompletion(input: {
@@ -181,6 +213,16 @@ export class PlannerVisualRepairService {
   private readonly logger = new Logger(PlannerVisualRepairService.name);
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
 
+  private getPlanningSourcePromptSource(
+    planningSource?: PlanningSourceContext,
+  ): string {
+    return (
+      planningSource?.canonicalSource?.normalizedSource ??
+      planningSource?.source ??
+      ''
+    );
+  }
+
   shouldAttemptSelfHeal(reason: string, dropped = '', raw = ''): boolean {
     const combined = `${reason} ${dropped} ${raw}`.trim();
     return combined.length > 0;
@@ -214,7 +256,9 @@ export class PlannerVisualRepairService {
     });
     const promptArtifacts = buildVisualPlanPrompt({
       componentName: input.componentPlan.componentName,
-      templateSource: prepared.state.planningSource.source,
+      templateSource: this.getPlanningSourcePromptSource(
+        prepared.state.planningSource,
+      ),
       content: input.content,
       tokens: input.tokens,
       repoManifest: input.repoManifest,
@@ -278,7 +322,9 @@ export class PlannerVisualRepairService {
     });
     const promptArtifacts = buildVisualPlanPrompt({
       componentName: input.componentPlan.componentName,
-      templateSource: prepared.state.planningSource.source,
+      templateSource: this.getPlanningSourcePromptSource(
+        prepared.state.planningSource,
+      ),
       content: input.content,
       tokens: input.tokens,
       repoManifest: input.repoManifest,
@@ -442,6 +488,7 @@ export class PlannerVisualRepairService {
           input.componentPlan,
           chosenCandidate,
           input.hasSharedLayoutPartials,
+          input.tokens,
         )
       : input.delegate.buildPlanningSourceContext(
           input.componentPlan,
@@ -449,6 +496,7 @@ export class PlannerVisualRepairService {
           input.sourceMap,
           input.content,
           input.hasSharedLayoutPartials,
+          input.tokens,
           input.repoManifest,
         );
 
@@ -525,10 +573,10 @@ export class PlannerVisualRepairService {
       extractAuxiliaryLabelsFromSections(draftSections),
     );
     const sourceWidgetHints = input.delegate.detectInteractiveWidgetsFromSource(
-      input.planningSource.source,
+      this.getPlanningSourcePromptSource(input.planningSource),
     );
     const allowedImageSrcs = input.delegate.collectAllowedImageSrcs(
-      input.planningSource.source,
+      input.planningSource,
       input.content,
     );
     const visualContract: VisualPlanContract = {

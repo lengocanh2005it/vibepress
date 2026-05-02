@@ -3,7 +3,7 @@ import {
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
 import { mapWpNodesToDraftSections } from '../../../common/utils/wp-node-to-sections-mapper.js';
-import { extractStaticImageSources } from '../react-generator/prompts/visual-plan.prompt.js';
+import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 
 function flattenBlockNames(node: WpNode): string[] {
   return [

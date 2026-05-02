@@ -512,47 +512,62 @@ function isUsableTransactionalSection(section: SectionPlan): boolean {
     case 'sidebar':
       return false;
     case 'prose-block':
-      return Array.isArray(section.sourceSegments) && section.sourceSegments.length > 0;
+      return (
+        Array.isArray(section.sourceSegments) &&
+        section.sourceSegments.length > 0
+      );
     case 'hero':
-      return typeof section.heading === 'string' && section.heading.trim().length > 0;
+      return (
+        typeof section.heading === 'string' && section.heading.trim().length > 0
+      );
     case 'cover':
       return (
-        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
-        (typeof section.subheading === 'string' && section.subheading.trim().length > 0) ||
-        (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0)
+        (typeof section.heading === 'string' &&
+          section.heading.trim().length > 0) ||
+        (typeof section.subheading === 'string' &&
+          section.subheading.trim().length > 0) ||
+        (typeof section.imageSrc === 'string' &&
+          section.imageSrc.trim().length > 0)
       );
     case 'media-text':
       return Boolean(
-        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
-          (typeof section.body === 'string' && section.body.trim().length > 0) ||
-          (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0) ||
-          section.listItems?.length,
+        (typeof section.heading === 'string' &&
+          section.heading.trim().length > 0) ||
+        (typeof section.body === 'string' && section.body.trim().length > 0) ||
+        (typeof section.imageSrc === 'string' &&
+          section.imageSrc.trim().length > 0) ||
+        section.listItems?.length,
       );
     case 'cta-strip':
       return Boolean(
-        (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
-          (typeof section.subheading === 'string' &&
-            section.subheading.trim().length > 0) ||
-          section.cta ||
-          (section.ctas?.length ?? 0) > 0,
+        (typeof section.heading === 'string' &&
+          section.heading.trim().length > 0) ||
+        (typeof section.subheading === 'string' &&
+          section.subheading.trim().length > 0) ||
+        section.cta ||
+        (section.ctas?.length ?? 0) > 0,
       );
     case 'testimonial':
       return Boolean(
-        (typeof section.quote === 'string' && section.quote.trim().length > 0) ||
-          (typeof section.authorName === 'string' &&
-            section.authorName.trim().length > 0),
+        (typeof section.quote === 'string' &&
+          section.quote.trim().length > 0) ||
+        (typeof section.authorName === 'string' &&
+          section.authorName.trim().length > 0),
       );
     case 'card-grid':
       return section.cards.some(
         (card) =>
-          (typeof card.heading === 'string' && card.heading.trim().length > 0) ||
+          (typeof card.heading === 'string' &&
+            card.heading.trim().length > 0) ||
           (typeof card.body === 'string' && card.body.trim().length > 0) ||
-          (typeof card.imageSrc === 'string' && card.imageSrc.trim().length > 0),
+          (typeof card.imageSrc === 'string' &&
+            card.imageSrc.trim().length > 0),
       );
     case 'accordion':
       return section.items.some(
         (item) =>
-          (typeof item.heading === 'string' && item.heading.trim().length > 0) ||
+          (typeof item.heading === 'string' &&
+            item.heading.trim().length > 0) ||
           (typeof item.body === 'string' && item.body.trim().length > 0),
       );
     case 'tabs':
@@ -566,18 +581,22 @@ function isUsableTransactionalSection(section: SectionPlan): boolean {
     case 'carousel':
       return section.slides.some(
         (slide) =>
-          (typeof slide.heading === 'string' && slide.heading.trim().length > 0) ||
+          (typeof slide.heading === 'string' &&
+            slide.heading.trim().length > 0) ||
           (typeof slide.subheading === 'string' &&
             slide.subheading.trim().length > 0) ||
-          (typeof slide.imageSrc === 'string' && slide.imageSrc.trim().length > 0),
+          (typeof slide.imageSrc === 'string' &&
+            slide.imageSrc.trim().length > 0),
       );
     case 'modal':
       return Boolean(
         (typeof section.triggerText === 'string' &&
           section.triggerText.trim().length > 0) ||
-          (typeof section.heading === 'string' && section.heading.trim().length > 0) ||
-          (typeof section.body === 'string' && section.body.trim().length > 0) ||
-          (typeof section.imageSrc === 'string' && section.imageSrc.trim().length > 0),
+        (typeof section.heading === 'string' &&
+          section.heading.trim().length > 0) ||
+        (typeof section.body === 'string' && section.body.trim().length > 0) ||
+        (typeof section.imageSrc === 'string' &&
+          section.imageSrc.trim().length > 0),
       );
     default:
       return true;
@@ -613,7 +632,9 @@ function buildTransactionalFallbackProseSection(
   };
 }
 
-function collectTransactionalSourceSegments(nodes: BlockNode[]): SourceSegment[] {
+function collectTransactionalSourceSegments(
+  nodes: BlockNode[],
+): SourceSegment[] {
   const segments: SourceSegment[] = [];
   const visit = (node: BlockNode) => {
     if (isIgnoredTransactionalNode(node)) {
@@ -639,9 +660,13 @@ function collectTransactionalSourceSegments(nodes: BlockNode[]): SourceSegment[]
 }
 
 function isIgnoredTransactionalNode(node: BlockNode): boolean {
-  return ['template-part', 'navigation', 'site-title', 'site-tagline', 'site-logo'].includes(
-    node.kind,
-  );
+  return [
+    'template-part',
+    'navigation',
+    'site-title',
+    'site-tagline',
+    'site-logo',
+  ].includes(node.kind);
 }
 
 function toTransactionalSourceSegment(
@@ -651,7 +676,11 @@ function toTransactionalSourceSegment(
     ? [...new Set(node.customClassNames)]
     : undefined;
 
-  if (node.kind === 'heading' && typeof node.text === 'string' && node.text.trim()) {
+  if (
+    node.kind === 'heading' &&
+    typeof node.text === 'string' &&
+    node.text.trim()
+  ) {
     return {
       type: 'heading',
       text: node.text.trim(),
@@ -664,7 +693,11 @@ function toTransactionalSourceSegment(
     };
   }
 
-  if (node.kind === 'image' && typeof node.src === 'string' && node.src.trim()) {
+  if (
+    node.kind === 'image' &&
+    typeof node.src === 'string' &&
+    node.src.trim()
+  ) {
     return {
       type: 'image',
       src: node.src,
@@ -682,7 +715,10 @@ function toTransactionalSourceSegment(
     return {
       type: 'paragraph',
       text: node.text.trim(),
-      html: typeof node.html === 'string' && node.html.trim() ? node.html.trim() : node.text.trim(),
+      html:
+        typeof node.html === 'string' && node.html.trim()
+          ? node.html.trim()
+          : node.text.trim(),
       ...(customClassNames ? { customClassNames } : {}),
       ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
     };

@@ -12,6 +12,10 @@ import {
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
 import {
+  canonicalizeThemeAssetReference,
+  extractStaticImageSources,
+} from '../../../common/utils/theme-asset.util.js';
+import {
   mapWpNodesToDraftSections,
   mapWpNodesToLosslessPageSections,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
@@ -38,7 +42,6 @@ import type {
 } from '../block-parser/block-parser.service.js';
 import {
   buildVisualPlanPrompt,
-  extractStaticImageSources,
   parseVisualPlanDetailed,
   sanitizeSectionsForContract,
   type VisualPlanContract,
@@ -72,6 +75,7 @@ import type {
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
+  type CanonicalPlanningSource,
   type PlanningSourceCandidate,
   type PlanningSourceContext,
   type PlanningSourceSupplement,
@@ -114,6 +118,8 @@ import {
 import {
   buildRepoRouteHints,
   inferDeterministicRouteContract,
+  matchesRepoEntrySourceTemplate,
+  resolveHomeHierarchy,
 } from './route-contract.util.js';
 
 export interface ComponentPlan {
@@ -200,7 +206,11 @@ export class PlannerService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    const templateNames = this.getExpectedTemplateNames(theme, content);
+    const templateNames = this.getExpectedTemplateNames(
+      theme,
+      content,
+      options?.repoManifest,
+    );
 
     // ── Phase A: architecture plan ─────────────────────────────────────────
     this.logger.log(
@@ -642,6 +652,7 @@ export class PlannerService {
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        tokens,
         repoManifest,
       );
       draftBlockTree = this.buildDraftBlockTreeForPlanningSource(
@@ -789,7 +800,7 @@ export class PlannerService {
           : []),
       );
       sourceWidgetHints = detectInteractiveWidgetsFromSource(
-        planningSource.source,
+        this.getPlanningSourcePromptSource(planningSource),
       );
       let visualContract: VisualPlanContract = {
         componentType: componentPlan.type,
@@ -810,7 +821,8 @@ export class PlannerService {
         }
         return buildVisualPlanPrompt({
           componentName: componentPlan.componentName,
-          templateSource: activePlanningSource.source,
+          templateSource:
+            this.getPlanningSourcePromptSource(activePlanningSource),
           content,
           tokens,
           repoManifest,
@@ -837,7 +849,7 @@ export class PlannerService {
 
       let { systemPrompt, userPrompt } = buildPromptArtifacts();
       let allowedImageSrcs = this.collectAllowedImageSrcs(
-        planningSource.source,
+        planningSource,
         content,
       );
       let repairState: PlannerVisualPlanRepairState = {
@@ -1496,6 +1508,7 @@ export class PlannerService {
             componentPlan,
             preferredSource,
             hasSharedLayoutPartials,
+            theme.tokens,
             sourceCandidates,
           )
         : undefined;
@@ -2289,9 +2302,11 @@ For each template, decide:
 7. Avoid generic descriptions like "page showing content" when the source clearly contains richer structure.
 
 ── ROUTING RULES ──────────────────────────────────────────────────────────────
-- frontend-page → route "/"
-- home → route "/" ONLY when no frontend-page template exists; otherwise route "/blog"
-- index → route "/" ONLY when neither frontend-page nor home exists; otherwise route "/index"
+ - frontend-page OR front-page → highest-priority home route "/"
+ - If both a front-page-like template and a posts-index template exist:
+   use home for "/blog" only when there is real dedicated home source evidence; otherwise let index own "/blog"
+ - index → route "/" only when there is no higher-priority front-page/home template.
+   If front-page owns "/", index may be "/blog" when it is the posts index fallback, otherwise "/index"
 - archive → route "/archive"  (WordPress archive fallback: handles category/tag/author/date archives — App.tsx will register alias routes /category/:slug, /author/:slug, /tag/:slug pointing to this component)
 - search → route "/search"
 - 404 → route "*"
@@ -2701,6 +2716,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        tokens,
         repoManifest,
       ) =>
         this.buildPlanningSourceContext(
@@ -2709,17 +2725,20 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           sourceMap,
           content,
           hasSharedLayoutPartials,
+          tokens,
           repoManifest,
         ),
       buildPlanningSourceContextFromResolvedSource: (
         componentPlan,
         preferredSource,
         hasSharedLayoutPartials,
+        tokens,
       ) =>
         this.buildPlanningSourceContextFromResolvedSource(
           componentPlan as PlanResult[number],
           preferredSource,
           hasSharedLayoutPartials,
+          tokens,
         ),
       buildDraftSectionsForPlanningSource: (
         planningSource,
@@ -3324,33 +3343,45 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     tokens: ThemeTokens | undefined,
   ): ReturnType<typeof mapWpNodesToDraftSections> | undefined {
     try {
-      const sources: PlanningSourceSupplement[] = [
-        {
-          source: planningSource?.source ?? '',
-          label: planningSource?.sourceLabel ?? componentPlan.templateName,
-          templateName:
-            planningSource?.sourceTemplateName ?? componentPlan.templateName,
-          sourceFile:
-            planningSource?.sourceFile ??
-            inferFseSourceFile(componentPlan.templateName, componentPlan.type),
-        },
-        ...(planningSource?.supplementalSources ?? []),
-      ].filter((entry) => entry.source.trim().length > 0);
+      const sources: Array<PlanningSourceSupplement & { isPrimary?: boolean }> =
+        [
+          {
+            source: planningSource?.source ?? '',
+            label: planningSource?.sourceLabel ?? componentPlan.templateName,
+            templateName:
+              planningSource?.sourceTemplateName ?? componentPlan.templateName,
+            sourceFile:
+              planningSource?.sourceFile ??
+              inferFseSourceFile(
+                componentPlan.templateName,
+                componentPlan.type,
+              ),
+            canonicalSource: planningSource?.canonicalSource,
+            isPrimary: true,
+          },
+          ...(planningSource?.supplementalSources ?? []),
+        ].filter((entry) => entry.source.trim().length > 0);
       if (sources.length === 0) return undefined;
 
       let mergedDraft: SectionPlan[] = [];
       let expectedCoverageUnits = 0;
       for (const source of sources) {
-        const parsedNodes = this.parsePlanningSourceNodes({
-          source: source.source,
-          templateName: source.templateName ?? componentPlan.templateName,
-          sourceFile:
-            source.sourceFile ??
-            inferFseSourceFile(componentPlan.templateName, componentPlan.type),
-        });
-        if (parsedNodes.length === 0) continue;
-
-        const nodes = this.styleResolver.resolve(parsedNodes, tokens);
+        const nodes = source.canonicalSource?.resolvedNodes?.length
+          ? source.canonicalSource.resolvedNodes
+          : this.styleResolver.resolve(
+              this.parsePlanningSourceNodes({
+                source: source.source,
+                templateName: source.templateName ?? componentPlan.templateName,
+                sourceFile:
+                  source.sourceFile ??
+                  inferFseSourceFile(
+                    componentPlan.templateName,
+                    componentPlan.type,
+                  ),
+              }),
+              tokens,
+            );
+        if (nodes.length === 0) continue;
         // For fixed page-detail routes, use the lossless mapper so that the
         // full block structure of the actual DB page is preserved in the draft.
         // The standard mapper is too aggressive at collapsing prose into single
@@ -3441,6 +3472,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     tokens: ThemeTokens | undefined,
   ): BlockNode[] | undefined {
     try {
+      if (planningSource?.canonicalSource?.blockTree?.length) {
+        return planningSource.canonicalSource.blockTree;
+      }
+
       const source = planningSource?.source?.trim() ?? '';
       if (!source) return undefined;
 
@@ -4235,6 +4270,119 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
   }
 
+  private buildCanonicalPlanningSource(input: {
+    source: string;
+    templateName: string;
+    sourceFile: string;
+    tokens: ThemeTokens | undefined;
+  }): CanonicalPlanningSource | undefined {
+    try {
+      const rawSource = input.source.trim();
+      if (!rawSource) return undefined;
+
+      const wpNodes = this.parsePlanningSourceNodes({
+        source: rawSource,
+        templateName: input.templateName,
+        sourceFile: input.sourceFile,
+      });
+      if (wpNodes.length === 0) return undefined;
+
+      const resolvedNodes = this.styleResolver.resolve(wpNodes, input.tokens);
+      const normalizedSource = wpJsonToString(resolvedNodes);
+      const blockTree = mapWpNodesToBlockTree(resolvedNodes);
+
+      return {
+        rawSource,
+        normalizedSource,
+        sourceTemplateName: input.templateName,
+        sourceFile: input.sourceFile,
+        wpNodes,
+        resolvedNodes,
+        blockTree,
+        customClassNames: extractCustomClassNamesFromSource(normalizedSource),
+        headingTexts: extractHeadingTextsFromSource(normalizedSource),
+        interactiveWidgets:
+          detectInteractiveWidgetsFromSource(normalizedSource),
+        assetRefs: extractStaticImageSources(normalizedSource),
+        sourceFacts: this.collectCanonicalPlanningSourceFacts(resolvedNodes),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private collectCanonicalPlanningSourceFacts(
+    resolvedNodes: WpNode[],
+  ): CanonicalPlanningSource['sourceFacts'] {
+    const blockNames = new Set<string>();
+    const templatePartHints: string[] = [];
+
+    const visitWpNode = (node: WpNode) => {
+      const normalizedBlock = String(node.block ?? '')
+        .trim()
+        .toLowerCase();
+      if (normalizedBlock) {
+        blockNames.add(normalizedBlock);
+        const shortName = normalizedBlock.includes('/')
+          ? normalizedBlock.slice(normalizedBlock.lastIndexOf('/') + 1)
+          : normalizedBlock;
+        blockNames.add(shortName);
+      }
+      if (normalizedBlock === 'core/template-part') {
+        const slug =
+          typeof node.params?.slug === 'string' ? node.params.slug : '';
+        const area =
+          typeof node.params?.area === 'string' ? node.params.area : '';
+        const classNames = Array.isArray(node.customClassNames)
+          ? node.customClassNames.join(' ')
+          : '';
+        templatePartHints.push(`${slug} ${area} ${classNames}`.trim());
+      }
+      for (const child of node.children ?? []) visitWpNode(child);
+    };
+
+    for (const node of resolvedNodes) visitWpNode(node);
+
+    const hasBlock = (...candidates: string[]) =>
+      candidates.some((candidate) => blockNames.has(candidate.toLowerCase()));
+    const hasSidebarTemplatePart = templatePartHints.some((hint) =>
+      /sidebar|widget/i.test(hint),
+    );
+
+    return {
+      hasQuery: hasBlock(
+        'core/query',
+        'query',
+        'core/latest-posts',
+        'latest-posts',
+      ),
+      hasSidebarTemplatePart,
+      hasSearch: hasBlock('core/search', 'search'),
+      hasPostContent: hasBlock('core/post-content', 'post-content'),
+      hasPageList: hasBlock('core/page-list', 'page-list'),
+      hasComments: hasBlock(
+        'core/comments',
+        'comments',
+        'core/post-comments-form',
+        'post-comments-form',
+      ),
+      hasNavigation: hasBlock('core/navigation', 'navigation'),
+      hasWooCart: hasBlock('woocommerce/cart', 'cart'),
+      hasWooCheckout: hasBlock('woocommerce/checkout', 'checkout'),
+    };
+  }
+
+  private countBlockTreeNodes(nodes: BlockNode[] | undefined): number {
+    if (!nodes?.length) return 0;
+    let count = 0;
+    const visit = (node: BlockNode) => {
+      count += 1;
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return count;
+  }
+
   private scopePlanningSourceMarkup(
     componentPlan: PlanResult[number],
     source: string,
@@ -4678,6 +4826,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           componentPlan,
           chosenCandidate,
           hasSharedLayoutPartials,
+          tokens,
         )
       : (previousPlanningSource ??
         this.buildPlanningSourceContext(
@@ -4686,6 +4835,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           sourceMap,
           content,
           hasSharedLayoutPartials,
+          tokens,
           repoManifest,
         ));
 
@@ -4707,7 +4857,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : []),
     );
     const sourceWidgetHints = detectInteractiveWidgetsFromSource(
-      planningSource.source,
+      this.getPlanningSourcePromptSource(planningSource),
     );
     const visualContract = {
       componentType: componentPlan.type,
@@ -4719,7 +4869,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       requiredSourceWidgets: sourceWidgetHints,
     } as const;
     const allowedImageSrcs = this.collectAllowedImageSrcs(
-      planningSource.source,
+      planningSource,
       content,
     );
     const investigationContext = this.buildVisualPlanRetryInvestigationContext({
@@ -4741,7 +4891,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     ].join('\n');
     const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
       componentName: componentPlan.componentName,
-      templateSource: planningSource.source,
+      templateSource: this.getPlanningSourcePromptSource(planningSource),
       content,
       tokens,
       repoManifest,
@@ -5034,7 +5184,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     const snippetLines = this.buildRetryWidgetSnippetEvidence(
-      planningSource?.source ?? '',
+      this.getPlanningSourcePromptSource(planningSource),
       sourceWidgetHints,
     );
     if (snippetLines.length > 0) {
@@ -5052,14 +5202,23 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   getExpectedTemplateNames(
     theme: PhpParseResult | BlockParseResult,
     content?: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): string[] {
     const allTemplates =
       theme.type === 'classic'
         ? theme.templates
         : [...theme.templates, ...theme.parts];
-    return this.ensureStandardTemplates(allTemplates, theme.type, content).map(
-      (template) => template.name,
-    );
+    const templateNames = this.ensureStandardTemplates(
+      allTemplates,
+      theme.type,
+      content,
+    ).map((template) => template.name);
+    return resolveHomeHierarchy({
+      templateNames,
+      repoManifest,
+      explicitTemplateNames:
+        content?.dbTemplates?.map((entry) => entry.slug) ?? [],
+    }).orderedTemplateNames;
   }
 
   private formatPhaseAComponentTargets(templateNames: string[]): string {
@@ -5196,6 +5355,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext {
     const candidates = this.buildPlanningSourceCandidates(
@@ -5221,6 +5381,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       componentPlan,
       preferredSource,
       hasSharedLayoutPartials,
+      tokens,
       candidates,
     );
   }
@@ -5229,6 +5390,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number],
     preferredSource: PlanningSourceCandidate,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     candidates: PlanningSourceCandidate[] = [],
   ): PlanningSourceContext {
     const hints: string[] = [];
@@ -5248,6 +5410,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const trimmed = scopedSource.trim();
     const fallbackSource =
       trimmed.length > 0 ? trimmed : preferredSource.source;
+    const canonicalSource = this.buildCanonicalPlanningSource({
+      source: fallbackSource,
+      templateName: sourceTemplateName,
+      sourceFile,
+      tokens,
+    });
     const supplementalSources: PlanningSourceSupplement[] = [];
     const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
@@ -5285,10 +5453,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         );
       }
     }
-    const customClassNames = extractCustomClassNamesFromSource(fallbackSource);
+    const canonicalAnalysisSource =
+      canonicalSource?.normalizedSource ?? fallbackSource;
+    const customClassNames = canonicalSource?.customClassNames.length
+      ? canonicalSource.customClassNames
+      : extractCustomClassNamesFromSource(canonicalAnalysisSource);
     const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
       extractSourceBackedAuxiliaryLabels({
-        source: fallbackSource,
+        source: canonicalAnalysisSource,
       }),
       ...(componentPlan.type === 'partial'
         ? supplementalSources.map((source) =>
@@ -5322,11 +5494,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           .join(', ')}`,
       );
     }
-    const interactiveWidgets =
-      detectInteractiveWidgetsFromSource(fallbackSource);
-    const sampledHeadings = extractHeadingTextsFromSource(fallbackSource);
-    const sourceImageCount = extractStaticImageSources(fallbackSource).length;
-    const sourceSectionCount = countDraftSectionsInSource(fallbackSource);
+    const interactiveWidgets = canonicalSource?.interactiveWidgets.length
+      ? canonicalSource.interactiveWidgets
+      : detectInteractiveWidgetsFromSource(canonicalAnalysisSource);
+    const sampledHeadings = canonicalSource?.headingTexts.length
+      ? canonicalSource.headingTexts
+      : extractHeadingTextsFromSource(canonicalAnalysisSource);
+    const sourceImageCount =
+      canonicalSource?.assetRefs.length ??
+      extractStaticImageSources(canonicalAnalysisSource).length;
+    const sourceSectionCount = countDraftSectionsInSource(
+      canonicalAnalysisSource,
+    );
     if (sampledHeadings.length > 0) {
       summaryLines.push(
         `Source-backed heading samples: ${sampledHeadings
@@ -5341,6 +5520,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (sourceSectionCount > 0) {
       summaryLines.push(
         `Approximate draft section count from source: ${sourceSectionCount}`,
+      );
+    }
+    if (canonicalSource) {
+      summaryLines.push(
+        `Canonical planner source prepared: ${canonicalSource.resolvedNodes.length} root node(s), ${this.countBlockTreeNodes(canonicalSource.blockTree)} block-tree node(s)`,
+      );
+      summaryLines.push(
+        `Canonical source facts: query=${canonicalSource.sourceFacts.hasQuery ? 'yes' : 'no'}, search=${canonicalSource.sourceFacts.hasSearch ? 'yes' : 'no'}, navigation=${canonicalSource.sourceFacts.hasNavigation ? 'yes' : 'no'}, sidebarPart=${canonicalSource.sourceFacts.hasSidebarTemplatePart ? 'yes' : 'no'}, comments=${canonicalSource.sourceFacts.hasComments ? 'yes' : 'no'}`,
       );
     }
     if (interactiveWidgets.length > 0) {
@@ -5372,6 +5559,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceTemplateName,
       sourceFile,
       sourceReason: preferredSource.reason,
+      canonicalSource,
     };
   }
 
@@ -5970,37 +6158,22 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     templateName: string,
     repoManifest?: RepoThemeManifest,
   ) {
-    const normalizedTemplate = this.normalizeTemplateIdentifier(templateName);
     if (!repoManifest) return undefined;
 
-    return repoManifest.structureHints.entrySourceChains.find((chain) => {
-      const entryName = basename(chain.entryFile)
-        .replace(/\.(php|html)$/i, '')
-        .toLowerCase();
-      if (entryName === normalizedTemplate) return true;
-
-      if (
-        normalizedTemplate === 'front-page' &&
-        ['front-page', 'home'].includes(entryName)
-      ) {
-        return true;
-      }
-      if (
-        normalizedTemplate === 'home' &&
-        ['home', 'index'].includes(entryName)
-      ) {
-        return true;
-      }
-
-      return false;
-    });
+    return repoManifest.structureHints.entrySourceChains.find((chain) =>
+      matchesRepoEntrySourceTemplate(templateName, chain.entryFile),
+    );
   }
 
   private collectAllowedImageSrcs(
-    planningSource: string,
+    planningSource: PlanningSourceContext | string,
     content: DbContentResult,
   ): string[] {
-    const result = new Set<string>(extractStaticImageSources(planningSource));
+    const promptSource =
+      typeof planningSource === 'string'
+        ? planningSource
+        : this.getPlanningSourcePromptSource(planningSource);
+    const result = new Set<string>(extractStaticImageSources(promptSource));
 
     const collectFromMarkup = (value?: string | null) => {
       if (!value?.trim()) return;
@@ -6010,8 +6183,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     };
 
     const collectDirectUrl = (value?: string | null) => {
-      if (typeof value !== 'string' || !value.trim()) return;
-      result.add(value.trim());
+      const canonical = canonicalizeThemeAssetReference(value);
+      if (canonical) result.add(canonical);
     };
 
     collectDirectUrl(content.siteInfo.logoUrl);
@@ -6035,6 +6208,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return [...result];
+  }
+
+  private getPlanningSourcePromptSource(
+    planningSource?: PlanningSourceContext,
+  ): string {
+    return (
+      planningSource?.canonicalSource?.normalizedSource ??
+      planningSource?.source ??
+      ''
+    );
   }
 
   private toComponentName(templateName: string): string {

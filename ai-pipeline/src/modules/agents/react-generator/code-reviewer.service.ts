@@ -37,11 +37,11 @@ import {
 } from '../planner/render-contract.schema.js';
 import {
   buildVisualPlanPrompt,
-  extractStaticImageSources,
   parseVisualPlanDetailed,
 } from './prompts/visual-plan.prompt.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import { inferTargetFromBlockName } from '../../../common/utils/wp-block-to-json.js';
+import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import type {
   ThemeInteractionTarget,
   ThemeTokens,

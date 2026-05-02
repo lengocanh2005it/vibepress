@@ -18,6 +18,7 @@ import { createHash } from 'crypto';
 import * as net from 'net';
 import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
+import { resolveThemeAssetPublicPath } from '../../../common/utils/theme-asset.util.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type {
   ThemeInteractionState,
@@ -201,10 +202,7 @@ export class PreviewBuilderService {
       components.components,
       repoManifest,
     );
-    await this.applySourceMotionBridge(
-      frontendDir,
-      sourceMotionConfig,
-    );
+    await this.applySourceMotionBridge(frontendDir, sourceMotionConfig);
 
     // 3b. Copy đúng các asset mà component generated đang reference.
     // Điều này tránh case assets/ có tồn tại nhưng thiếu các ảnh con mà JSX dùng.
@@ -1251,7 +1249,9 @@ ${fontEntries}
       reasons.push(`repo motion runtime file(s): ${runtimeFiles.join(', ')}`);
     }
     if (noteSignals.length > 0) {
-      reasons.push('theme profile/source-of-truth notes mention wow/animate.css');
+      reasons.push(
+        'theme profile/source-of-truth notes mention wow/animate.css',
+      );
     }
 
     return {
@@ -2929,10 +2929,16 @@ ${fontEntries}
   ): string[] {
     const assets = new Set<string>();
     const assetPattern = /\/assets\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
+    const themeAssetTokenPattern =
+      /theme-asset:\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
 
     for (const comp of components) {
       for (const match of comp.code.matchAll(assetPattern)) {
         assets.add(match[0]);
+      }
+      for (const match of comp.code.matchAll(themeAssetTokenPattern)) {
+        const publicPath = resolveThemeAssetPublicPath(match[0]);
+        if (publicPath) assets.add(publicPath);
       }
     }
 

@@ -1,4 +1,5 @@
 import { buildSourceNodeId, type SourceRef } from './source-node-id.util.js';
+import { canonicalizeThemeAssetReference } from './theme-asset.util.js';
 
 /**
  * Converts WordPress block markup into a compact JSON tree.
@@ -527,7 +528,7 @@ function parseBlocks(markup: string): WpNode[] {
           compact({
             block: 'navigation-link',
             text: params.label as string,
-            href: (params.url as string) || '#',
+            href: canonicalizeThemeAssetReference(params.url as string) || '#',
           }),
         );
       } else {
@@ -689,33 +690,6 @@ function findClosingIndex(
 }
 
 /**
- * Strip PHP template expressions from theme asset URLs, leaving only the
- * relative path. Handles the common WordPress pattern:
- *   <?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/foo.jpg
- * → /assets/images/foo.jpg
- *
- * Also handles paths embedded inside PHP function calls:
- *   <?php echo esc_url( get_parent_theme_file_uri('/assets/images/foo.jpg') ); ?>
- * → /assets/images/foo.jpg
- */
-function sanitizeThemeAssetUrl(url: string): string {
-  if (!url.includes('<?php')) return url;
-  // Pattern 1: php tag followed by a literal path — extract the path after '?>'
-  const afterPhp = url.split('?>').pop() ?? '';
-  const trimmedAfter = afterPhp.replace(/^['"]+|['"]+$/g, '').trim();
-  if (trimmedAfter) return trimmedAfter;
-  // Pattern 2: path is an argument inside the PHP call, e.g. get_parent_theme_file_uri('path')
-  const pathMatch = url.match(
-    /['"]([^'"]*\.(jpg|jpeg|png|gif|svg|webp|avif|ico))['"]/i,
-  );
-  if (pathMatch?.[1]) {
-    const p = pathMatch[1];
-    return p.startsWith('/') ? p : `/${p}`;
-  }
-  return '';
-}
-
-/**
  * Build a WpNode from a block name, params, and inner markup.
  * Decides whether to recurse into children or extract leaf content.
  */
@@ -748,7 +722,7 @@ function buildNode(
     const coverExtras: Partial<WpNode> = {};
     if (blockName === 'cover') {
       if (params?.url) {
-        const cleanUrl = sanitizeThemeAssetUrl(params.url as string);
+        const cleanUrl = canonicalizeThemeAssetReference(params.url as string);
         if (cleanUrl) coverExtras.src = cleanUrl;
       }
       if (params?.customOverlayColor) {
@@ -777,7 +751,7 @@ function buildNode(
   // For wp:cover (leaf, no nested blocks) — lift background image URL to top-level src
   const rawCoverUrl =
     blockName === 'cover' && params?.url
-      ? sanitizeThemeAssetUrl(params.url as string)
+      ? canonicalizeThemeAssetReference(params.url as string)
       : '';
   const coverSrc = rawCoverUrl ? { src: rawCoverUrl } : {};
 
@@ -811,7 +785,11 @@ function buildNode(
     if (descText)
       syntheticChildren.push({ block: 'paragraph', text: descText });
     if (ctaText && ctaHref)
-      syntheticChildren.push({ block: 'button', text: ctaText, href: ctaHref });
+      syntheticChildren.push({
+        block: 'button',
+        text: ctaText,
+        href: canonicalizeThemeAssetReference(ctaHref) ?? ctaHref,
+      });
     if (syntheticChildren.length > 0) {
       return compact({
         block: blockName,
@@ -889,7 +867,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     const width = attrs.match(/width="([^"]+)"/)?.[1];
     const height = attrs.match(/height="([^"]+)"/)?.[1];
     return {
-      src,
+      src: canonicalizeThemeAssetReference(src) ?? src,
       alt,
       ...(customClassNames.length ? { customClassNames } : {}),
       ...(width ? { width: parseInt(width) } : {}),
@@ -901,7 +879,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   const aMatch = stripped.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
   if (aMatch) {
     return {
-      href: aMatch[1],
+      href: canonicalizeThemeAssetReference(aMatch[1]) ?? aMatch[1],
       text: stripTags(aMatch[2]),
       ...(customClassNames.length ? { customClassNames } : {}),
     };
@@ -1004,8 +982,11 @@ function extractUagbModalTriggerChildren(innerMarkup: string): WpNode[] {
 
     const className = attrs.match(/\bclass="([^"]+)"/i)?.[1];
     const customClassNames = extractUsefulCustomClassNamesFromParam(className);
+    const rawHref = attrs.match(/\bhref="([^"]+)"/i)?.[1];
     const href =
-      tag === 'a' ? (attrs.match(/\bhref="([^"]+)"/i)?.[1] ?? '#') : undefined;
+      tag === 'a'
+        ? (canonicalizeThemeAssetReference(rawHref ?? '#') ?? rawHref ?? '#')
+        : undefined;
     const signature = [
       text,
       href ?? '',

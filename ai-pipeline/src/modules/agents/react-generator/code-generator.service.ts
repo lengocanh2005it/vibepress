@@ -1,4 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import {
+  THEME_ASSET_PUBLIC_ROOTS,
+  THEME_ASSET_TOKEN_PREFIX,
+} from '../../../common/utils/theme-asset.util.js';
 import type {
   ComponentVisualPlan,
   BlockNode,
@@ -705,7 +709,7 @@ export class CodeGeneratorService {
         case 'hero':
           return !!section.image?.src;
         case 'cover':
-          return section.imageSrc.startsWith('/assets/');
+          return !!section.imageSrc;
         case 'media-text':
           return !!section.imageSrc;
         case 'testimonial':
@@ -1491,9 +1495,39 @@ export class CodeGeneratorService {
     }
 
     if (this.planUsesResolveAsset(plan)) {
+      lines.push(`  const resolveAsset = (src: string) => {`);
       lines.push(
-        `  const resolveAsset = (src: string) => src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+        `    if (src.startsWith(${JSON.stringify(THEME_ASSET_TOKEN_PREFIX)})) {`,
       );
+      lines.push(
+        `      const assetPath = src.slice(${JSON.stringify(THEME_ASSET_TOKEN_PREFIX)}.length).replace(/^\\/+/,'');`,
+      );
+      lines.push(`      if (!assetPath) return src;`);
+      lines.push(
+        `      const segments = assetPath.split('/').filter(Boolean);`,
+      );
+      lines.push(`      const root = segments[0] ?? '';`);
+      lines.push(
+        `      const mappedRoot = (${JSON.stringify(THEME_ASSET_PUBLIC_ROOTS)} as Record<string, string>)[root] ?? 'assets';`,
+      );
+      lines.push(
+        `      const hasMappedRoot = Object.prototype.hasOwnProperty.call(${JSON.stringify(THEME_ASSET_PUBLIC_ROOTS)}, root);`,
+      );
+      lines.push(
+        `      const relativeSegments = hasMappedRoot ? segments.slice(1) : segments;`,
+      );
+      lines.push(`      const relativePath = relativeSegments.join('/');`);
+      lines.push(
+        `      const publicPath = relativePath ? \`\${mappedRoot}/\${relativePath}\` : mappedRoot;`,
+      );
+      lines.push(
+        `      return \`\${import.meta.env.BASE_URL}\${publicPath}\`;`,
+      );
+      lines.push(`    }`);
+      lines.push(
+        `    return src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+      );
+      lines.push(`  };`);
       lines.push('');
     }
     lines.push(
@@ -3595,9 +3629,7 @@ ${indent}) : null}`;
       { baseColor: '#ffffffcc', typography: s.subheadingStyle },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const bgSrcExpr = s.imageSrc.startsWith('/assets/')
-      ? `\`url("\${resolveAsset("${s.imageSrc}")}")\``
-      : `"url(\\"${s.imageSrc}\\")"`;
+    const bgSrcExpr = `\`url("\${resolveAsset("${s.imageSrc}")}")\``;
     const extraStyles = [
       `backgroundImage: ${bgSrcExpr}`,
       `backgroundSize: 'cover'`,

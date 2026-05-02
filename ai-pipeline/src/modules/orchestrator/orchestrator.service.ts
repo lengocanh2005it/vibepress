@@ -1601,6 +1601,7 @@ export default function ${component.name}() {
       const expectedTemplateNames = this.planner.getExpectedTemplateNames(
         normalizedTheme,
         content,
+        repoResult.themeManifest,
       );
       const reviewResult = await this.runStep(
         state,

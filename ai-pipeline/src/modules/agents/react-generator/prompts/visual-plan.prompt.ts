@@ -2,6 +2,7 @@ import type { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ThemeTokens } from '../../block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
+import { extractStaticImageSources } from '../../../../common/utils/theme-asset.util.js';
 import type {
   ColorPalette,
   ComponentVisualPlan,
@@ -628,42 +629,6 @@ function buildSpectraPlanningHint(
   return lines.join('\n');
 }
 
-export function extractStaticImageSources(templateSource: string): string[] {
-  const result = new Set<string>();
-
-  try {
-    const parsed = JSON.parse(templateSource);
-    const visit = (node: any) => {
-      if (!node || typeof node !== 'object') return;
-      if (typeof node.src === 'string' && node.src.trim()) {
-        result.add(node.src.trim());
-      }
-      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
-        result.add(node.imageSrc.trim());
-      }
-      if (Array.isArray(node.children)) node.children.forEach(visit);
-      if (Array.isArray(node)) node.forEach(visit);
-    };
-    visit(parsed);
-  } catch {
-    for (const match of templateSource.matchAll(
-      /(?:src|imageSrc)=["']([^"']+)["']/g,
-    )) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(
-      /https?:\/\/[^\s"'()<>]+\.(?:png|jpe?g|gif|webp|svg|avif)(?:\?[^\s"'()<>]*)?/gi,
-    )) {
-      if (match[0]) result.add(match[0].trim());
-    }
-  }
-
-  return [...result];
-}
-
 function buildImageSourcesHint(templateSource: string): string {
   const sources = extractStaticImageSources(templateSource);
   if (sources.length === 0) {
@@ -674,6 +639,7 @@ function buildImageSourcesHint(templateSource: string): string {
     '## Static image sources in template',
     ...sources.slice(0, 20).map((src) => `- ${src}`),
     sources.length > 20 ? `- ... and ${sources.length - 20} more` : '',
+    'Theme-local files may be canonicalized as `theme-asset:/...`; preserve that token exactly when present.',
     'Use only these exact sources for static images/avatars.',
   ]
     .filter(Boolean)

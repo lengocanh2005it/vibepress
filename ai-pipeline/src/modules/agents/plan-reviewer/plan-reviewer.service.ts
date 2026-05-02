@@ -8,9 +8,13 @@ import { sanitizeSectionsForContract } from '../react-generator/prompts/visual-p
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import {
+  buildRepoRouteHints,
+  HOME_TEMPLATE_PRIORITY,
   inferDeterministicRouteContract,
+  resolveHomeHierarchy,
   type DeterministicRouteContract,
   type RouteContractDataNeed,
+  toHomeTemplateBase,
 } from '../planner/route-contract.util.js';
 
 export interface PlanReviewResult {
@@ -64,29 +68,10 @@ const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
 // Templates injected deterministically by the planner for standard WordPress
 // archive routes — they will not appear in the raw theme template list.
 const STANDARD_INJECTABLE_TEMPLATES = new Set(['author', 'category']);
-const HOME_TEMPLATE_PRIORITY = [
-  'frontend-page',
-  'front-page',
-  'home',
-  'index',
-] as const;
 const HOME_TEMPLATE_PRIORITY_SET = new Set<string>(HOME_TEMPLATE_PRIORITY);
 
 function toTemplateBase(templateName: string): string {
   return templateName.replace(/\.(php|html)$/i, '').toLowerCase();
-}
-
-function getHomeTemplateBase(templateName: string): string | null {
-  const base = toTemplateBase(templateName);
-  return HOME_TEMPLATE_PRIORITY_SET.has(base) ? base : null;
-}
-
-function getEntryBaseName(file: string | undefined): string {
-  return String(file ?? '')
-    .split('/')
-    .pop()
-    ?.replace(/\.(php|html)$/i, '')
-    .toLowerCase() || '';
 }
 
 @Injectable()
@@ -116,29 +101,41 @@ export class PlanReviewerService {
       );
     }
 
-    reviewed = this.resolveDuplicateHomePages(reviewed, warnings, warningCodes);
     reviewed = this.normalizeComponentNames(reviewed, warnings, warningCodes);
+    ({ plan: reviewed, expectedTemplateNames: adjustedExpectedTemplateNames } =
+      this.normalizeHomeHierarchy(
+        reviewed,
+        adjustedExpectedTemplateNames,
+        repoManifest,
+        warnings,
+        warningCodes,
+      ));
     reviewed = this.fixTypeRouteInconsistencies(
       reviewed,
       warnings,
       warningCodes,
-    );
-    reviewed = this.alignHomeHierarchyRoutes(reviewed, warnings, warningCodes);
-    ({
-      plan: reviewed,
-      expectedTemplateNames: adjustedExpectedTemplateNames,
-    } = this.collapseRedundantHomeAlias(
-      reviewed,
-      adjustedExpectedTemplateNames,
       repoManifest,
+    );
+    reviewed = this.alignRouteSemantics(
+      reviewed,
       warnings,
       warningCodes,
-    ));
-    reviewed = this.alignRouteSemantics(reviewed, warnings, warningCodes);
-    reviewed = this.alignDataNeeds(reviewed, warnings, warningCodes);
+      repoManifest,
+    );
+    reviewed = this.alignDataNeeds(
+      reviewed,
+      warnings,
+      warningCodes,
+      repoManifest,
+    );
     reviewed = this.fixDuplicateRoutes(reviewed, warnings, warningCodes);
     this.checkVisualPlanCoverage(reviewed, warnings, warningCodes);
-    this.validateHard(reviewed, adjustedExpectedTemplateNames, errors);
+    this.validateHard(
+      reviewed,
+      adjustedExpectedTemplateNames,
+      errors,
+      repoManifest,
+    );
     this.validateDraftSectionFidelity(reviewed, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
@@ -256,13 +253,14 @@ export class PlanReviewerService {
     plan: PlanResult,
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
+    repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item);
+      const policy = this.inferRoutePolicy(item, repoManifest);
       let next = item;
 
-      // Don't un-demote templates that resolveDuplicateHomePages intentionally
-      // set to partial (frontend-page/home/index priority resolution).
+      // Home hierarchy normalization may intentionally keep a lower-priority
+      // home-like template out of the page path earlier in review.
       const templateBase = toTemplateBase(next.templateName);
       const isDemotedHomeTemplate =
         HOME_TEMPLATE_PRIORITY_SET.has(templateBase) &&
@@ -325,9 +323,10 @@ export class PlanReviewerService {
     plan: PlanResult,
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
+    repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item);
+      const policy = this.inferRoutePolicy(item, repoManifest);
       let next = item;
 
       if (policy.routeMode === 'hard') {
@@ -381,9 +380,10 @@ export class PlanReviewerService {
     plan: PlanResult,
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
+    repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item);
+      const policy = this.inferRoutePolicy(item, repoManifest);
       const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
         VALID_DATA_NEEDS.has(need as PlanDataNeed),
       );
@@ -665,6 +665,7 @@ export class PlanReviewerService {
     plan: PlanResult,
     expectedTemplateNames: string[],
     errors: string[],
+    repoManifest?: RepoThemeManifest,
   ): void {
     if (plan.length === 0) {
       errors.push('Plan is empty — no components were generated');
@@ -678,7 +679,7 @@ export class PlanReviewerService {
     const pageRoutes = new Map<string, string[]>();
 
     for (const item of plan) {
-      const policy = this.inferRoutePolicy(item);
+      const policy = this.inferRoutePolicy(item, repoManifest);
       templateCounts.set(
         item.templateName,
         (templateCounts.get(item.templateName) ?? 0) + 1,
@@ -1094,240 +1095,148 @@ export class PlanReviewerService {
     return false;
   }
 
-  private resolveDuplicateHomePages(
-    plan: PlanResult,
-    warnings: string[],
-    warningCodes: PlanReviewWarningCode[],
-  ): PlanResult {
-    // WordPress hierarchy for this pipeline: frontend-page > front-page >
-    // home > index.
-    // Keep the highest-priority home-like template first so duplicate-route
-    // resolution later preserves "/" for the correct winner.
-    const homeItems = plan
-      .map((item) => ({
-        item,
-        base: getHomeTemplateBase(item.templateName),
-      }))
-      .filter(
-        (item): item is { item: PlanResult[number]; base: string } =>
-          !!item.base,
-      )
-      .sort(
-        (a, b) =>
-          HOME_TEMPLATE_PRIORITY.indexOf(
-            a.base as (typeof HOME_TEMPLATE_PRIORITY)[number],
-          ) -
-          HOME_TEMPLATE_PRIORITY.indexOf(
-            b.base as (typeof HOME_TEMPLATE_PRIORITY)[number],
-          ),
-      );
-
-    if (homeItems.length <= 1) return plan;
-
-    const winner = homeItems[0];
-    this.pushWarning(
-      warnings,
-      warningCodes,
-      'multiple_home_like_templates_detected',
-      `Multiple home-like templates detected — prioritizing "${winner.base}" for route "/" and reassigning lower-priority routes later`,
-    );
-
-    const rank = new Map(
-      HOME_TEMPLATE_PRIORITY.map((name, index) => [name, index] as const),
-    );
-
-    return [...plan].sort((a, b) => {
-      const aBase = getHomeTemplateBase(a.templateName);
-      const bBase = getHomeTemplateBase(b.templateName);
-      const aRank = aBase
-        ? rank.get(aBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
-        : undefined;
-      const bRank = bBase
-        ? rank.get(bBase as (typeof HOME_TEMPLATE_PRIORITY)[number])
-        : undefined;
-      if (aRank == null && bRank == null) return 0;
-      if (aRank == null) return 1;
-      if (bRank == null) return -1;
-      return aRank - bRank;
-    });
-  }
-
-  private collapseRedundantHomeAlias(
+  private normalizeHomeHierarchy(
     plan: PlanResult,
     expectedTemplateNames: string[],
     repoManifest: RepoThemeManifest | undefined,
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
   ): { plan: PlanResult; expectedTemplateNames: string[] } {
-    const homeItem = plan.find(
-      (item) => toTemplateBase(item.templateName) === 'home',
-    );
-    const indexItem = plan.find(
-      (item) => toTemplateBase(item.templateName) === 'index',
-    );
-    const frontPageItem = plan.find((item) =>
-      ['front-page', 'frontend-page'].includes(toTemplateBase(item.templateName)),
-    );
-
-    if (!homeItem || !indexItem || !frontPageItem || !repoManifest) {
-      return { plan, expectedTemplateNames };
-    }
-
-    const entryChains = repoManifest.structureHints.entrySourceChains;
-    const homeChain = entryChains.find(
-      (chain) => getEntryBaseName(chain.entryFile) === 'home',
-    );
-    const indexChain = entryChains.find(
-      (chain) => getEntryBaseName(chain.entryFile) === 'index',
-    );
-    const explicitHomeSourceExists =
-      !!homeChain ||
-      repoManifest.structureHints.fileAnalyses.some(
-        (file) =>
-          ['template', 'pattern', 'php-template'].includes(file.kind) &&
-          getEntryBaseName(file.file) === 'home',
+    const homeItems = plan
+      .map((item) => ({
+        item,
+        base: toHomeTemplateBase(item.templateName),
+      }))
+      .filter(
+        (
+          entry,
+        ): entry is {
+          item: PlanResult[number];
+          base: NonNullable<ReturnType<typeof toHomeTemplateBase>>;
+        } => !!entry.base,
       );
 
-    const homeResolvesToIndex =
-      !homeChain &&
-      !!indexChain &&
-      homeItem.route === '/blog' &&
-      indexItem.route === '/index';
+    const explicitTemplateNames = plan
+      .filter((item) => {
+        const base = toHomeTemplateBase(item.templateName);
+        if (!base) return false;
+        const sourceFile = String(item.planningSourceFile ?? '').toLowerCase();
+        const sourceLabel = String(
+          item.planningSourceLabel ?? '',
+        ).toLowerCase();
+        return (
+          sourceFile.endsWith(`/${base}`) ||
+          sourceLabel.endsWith(`:${base}`) ||
+          sourceLabel.endsWith(`/${base}`)
+        );
+      })
+      .map((item) => item.templateName);
 
-    if (!explicitHomeSourceExists && homeResolvesToIndex) {
-      const nextPlan = plan
+    const homeHierarchy = resolveHomeHierarchy({
+      templateNames: [
+        ...expectedTemplateNames,
+        ...plan.map((item) => item.templateName),
+      ],
+      repoManifest,
+      explicitTemplateNames,
+    });
+
+    if (homeItems.length > 1 && homeHierarchy.winnerBase) {
+      this.pushWarning(
+        warnings,
+        warningCodes,
+        'multiple_home_like_templates_detected',
+        `Multiple home-like templates detected — prioritizing "${homeHierarchy.winnerBase}" for route "/" and reassigning lower-priority routes later`,
+      );
+    }
+
+    const redundantBases = new Set(homeHierarchy.redundantBases);
+    let nextPlan = plan;
+    let nextExpectedTemplateNames = expectedTemplateNames.filter(
+      (templateName) => {
+        const base = toHomeTemplateBase(templateName);
+        return !base || !redundantBases.has(base);
+      },
+    );
+
+    if (redundantBases.has('home')) {
+      const homeItem = nextPlan.find(
+        (item) => toTemplateBase(item.templateName) === 'home',
+      );
+      const indexItem = nextPlan.find(
+        (item) => toTemplateBase(item.templateName) === 'index',
+      );
+
+      nextPlan = nextPlan
         .map((item) => {
-          if (item.templateName !== indexItem.templateName) return item;
+          if (
+            !homeItem ||
+            !indexItem ||
+            item.templateName !== indexItem.templateName
+          ) {
+            return item;
+          }
           return {
             ...item,
-            route: homeItem.route,
             dataNeeds: Array.from(
-              new Set([...(item.dataNeeds ?? []), ...(homeItem.dataNeeds ?? [])]),
+              new Set([
+                ...(item.dataNeeds ?? []),
+                ...(homeItem.dataNeeds ?? []),
+              ]),
             ),
-            description:
-              homeItem.description?.trim() ||
-              item.description,
+            description: homeItem.description?.trim() || item.description,
           };
         })
-        .filter((item) => item.templateName !== homeItem.templateName);
+        .filter((item) => toTemplateBase(item.templateName) !== 'home');
 
       this.pushWarning(
         warnings,
         warningCodes,
         'redundant_home_alias_removed',
-        `Template "home" removed because it has no dedicated source and only aliases "index"; reassigned route "${homeItem.route ?? '/blog'}" to "index"`,
+        `Template "home" removed because it has no dedicated source and only aliases "index"`,
       );
-
-      return {
-        plan: nextPlan,
-        expectedTemplateNames: expectedTemplateNames.filter(
-          (templateName) => templateName !== homeItem.templateName,
-        ),
-      };
     }
 
-    return { plan, expectedTemplateNames };
-  }
-
-  private alignHomeHierarchyRoutes(
-    plan: PlanResult,
-    warnings: string[],
-    warningCodes: PlanReviewWarningCode[],
-  ): PlanResult {
-    const byBase = new Map<
-      string,
-      { route: string; type: 'page'; isDetail: false }
-    >();
-
-    const hasFrontendPage = plan.some((item) =>
-      /^frontend-page$/i.test(toTemplateBase(item.templateName)),
+    const orderRank = new Map(
+      homeHierarchy.orderedTemplateNames.map((templateName, index) => [
+        templateName,
+        index,
+      ]),
     );
-    const hasFrontPage = plan.some((item) =>
-      /^front-page$/i.test(toTemplateBase(item.templateName)),
-    );
-    const hasHome = plan.some((item) =>
-      /^home$/i.test(toTemplateBase(item.templateName)),
-    );
-    const hasIndex = plan.some((item) =>
-      /^index$/i.test(toTemplateBase(item.templateName)),
-    );
+    nextPlan = [...nextPlan].sort((left, right) => {
+      const leftRank = orderRank.get(left.templateName);
+      const rightRank = orderRank.get(right.templateName);
+      if (leftRank == null && rightRank == null) return 0;
+      if (leftRank == null) return 1;
+      if (rightRank == null) return -1;
+      return leftRank - rightRank;
+    });
 
-    if (hasFrontendPage) {
-      byBase.set('frontend-page', {
-        route: '/',
-        type: 'page',
-        isDetail: false,
-      });
-      if (hasHome) {
-        byBase.set('home', { route: '/blog', type: 'page', isDetail: false });
-      }
-      if (hasIndex) {
-        byBase.set('index', {
-          route: '/index',
-          type: 'page',
-          isDetail: false,
-        });
-      }
-    } else if (hasFrontPage) {
-      byBase.set('front-page', {
-        route: '/',
-        type: 'page',
-        isDetail: false,
-      });
-      if (hasHome) {
-        byBase.set('home', {
-          route: '/blog',
-          type: 'page',
-          isDetail: false,
-        });
-      }
-      if (hasIndex) {
-        byBase.set('index', {
-          route: '/index',
-          type: 'page',
-          isDetail: false,
-        });
-      }
-    } else if (hasHome) {
-      byBase.set('home', { route: '/', type: 'page', isDetail: false });
-      if (hasIndex) {
-        byBase.set('index', {
-          route: '/index',
-          type: 'page',
-          isDetail: false,
-        });
-      }
-    } else if (hasIndex) {
-      byBase.set('index', { route: '/', type: 'page', isDetail: false });
-    }
-
-    if (byBase.size === 0) return plan;
-
-    return plan.map((item) => {
-      const base = toTemplateBase(item.templateName);
-      const expected = byBase.get(base);
-      if (!expected) return item;
+    nextPlan = nextPlan.map((item) => {
+      const base = toHomeTemplateBase(item.templateName);
+      const expectedRoute = base ? homeHierarchy.routeByBase[base] : undefined;
+      if (!base || !expectedRoute) return item;
 
       let next = item;
-      if (next.type !== expected.type) {
+      if (next.type !== 'page') {
         this.pushWarning(
           warnings,
           warningCodes,
           'home_hierarchy_type_normalized',
-          `Template "${next.templateName}" had type "${next.type}" → normalized to "${expected.type}" by home hierarchy`,
+          `Template "${next.templateName}" had type "${next.type}" → normalized to "page" by home hierarchy`,
         );
-        next = { ...next, type: expected.type };
+        next = { ...next, type: 'page' };
       }
-      if (next.route !== expected.route) {
+      if (next.route !== expectedRoute) {
         this.pushWarning(
           warnings,
           warningCodes,
           'home_hierarchy_route_normalized',
-          `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${expected.route}" by home hierarchy`,
+          `Template "${next.templateName}" route "${next.route ?? 'null'}" → normalized to "${expectedRoute}" by home hierarchy`,
         );
-        next = { ...next, route: expected.route };
+        next = { ...next, route: expectedRoute };
       }
-      if (next.isDetail !== expected.isDetail) {
+      if (next.isDetail) {
         this.pushWarning(
           warnings,
           warningCodes,
@@ -1338,9 +1247,23 @@ export class PlanReviewerService {
       }
       return next;
     });
+
+    nextExpectedTemplateNames = resolveHomeHierarchy({
+      templateNames: nextExpectedTemplateNames,
+      repoManifest,
+      explicitTemplateNames,
+    }).orderedTemplateNames;
+
+    return {
+      plan: nextPlan,
+      expectedTemplateNames: nextExpectedTemplateNames,
+    };
   }
 
-  private inferRoutePolicy(item: ComponentPlan): RoutePolicy {
+  private inferRoutePolicy(
+    item: ComponentPlan,
+    repoManifest?: RepoThemeManifest,
+  ): RoutePolicy {
     return inferDeterministicRouteContract({
       templateName: item.templateName,
       componentName: item.componentName,
@@ -1355,6 +1278,7 @@ export class PlanReviewerService {
       planningSourceFile: item.planningSourceFile,
       planningSourceLabel: item.planningSourceLabel,
       planningSourceSummary: item.planningSourceSummary,
+      repoRouteHints: buildRepoRouteHints(item.templateName, repoManifest),
     });
   }
 

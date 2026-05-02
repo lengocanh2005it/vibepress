@@ -1734,7 +1734,7 @@ export class RepoAnalyzerService {
     const name = basename(file)
       .replace(/\.(php|html)$/i, '')
       .toLowerCase();
-    if (['front-page', 'home', 'index'].includes(name)) return 'home';
+    if (['front-page', 'home', 'index'].includes(name)) return name;
     if (name === 'page' || name.startsWith('page-')) return 'page';
     if (name === 'single' || name.startsWith('single-')) return 'single';
     if (name.startsWith('template-')) return name.replace(/^template-/, '');

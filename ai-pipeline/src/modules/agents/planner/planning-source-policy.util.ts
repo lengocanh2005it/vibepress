@@ -4,12 +4,13 @@ import type {
   RepoEntrySourceChain,
   RepoThemeManifest,
 } from '../repo-analyzer/repo-analyzer.service.js';
-import { extractStaticImageSources } from '../react-generator/prompts/visual-plan.prompt.js';
+import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import {
   detectInteractiveWidgetsFromSource,
   scorePlanningSourceRichness,
 } from './planning-source-analysis.util.js';
 import type { PlanningSourceCandidate } from './planner-visual-repair.service.js';
+import { toHomeTemplateBase } from './route-contract.util.js';
 
 export interface PlanningSourcePolicyComponentPlan {
   templateName: string;
@@ -141,10 +142,9 @@ export function isCompatibleSupplementalPlanningSource(
   if (preferredTemplate === candidateTemplate) return true;
 
   if (componentPlan.route === '/') {
-    const homeLikeTemplates = new Set(['front-page', 'home']);
     if (
-      homeLikeTemplates.has(preferredTemplate) &&
-      homeLikeTemplates.has(candidateTemplate)
+      toHomeTemplateBase(preferredTemplate) &&
+      toHomeTemplateBase(candidateTemplate)
     ) {
       return true;
     }

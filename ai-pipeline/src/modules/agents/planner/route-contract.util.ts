@@ -66,7 +66,23 @@ export interface DeterministicRouteContract {
   evidence: string[];
 }
 
-const HOME_TEMPLATE_PRIORITY_SET = new Set(['frontend-page', 'home', 'index']);
+export const HOME_TEMPLATE_PRIORITY = [
+  'frontend-page',
+  'front-page',
+  'home',
+  'index',
+] as const;
+const HOME_TEMPLATE_PRIORITY_SET = new Set<string>(HOME_TEMPLATE_PRIORITY);
+
+export type HomeTemplateBase = (typeof HOME_TEMPLATE_PRIORITY)[number];
+
+export interface HomeHierarchyResolution {
+  winnerBase: HomeTemplateBase | null;
+  orderedTemplateNames: string[];
+  routeByBase: Partial<Record<HomeTemplateBase, string>>;
+  redundantBases: HomeTemplateBase[];
+  explicitBases: HomeTemplateBase[];
+}
 
 export function inferDeterministicRouteContract(
   input: RouteContractInput,
@@ -116,6 +132,8 @@ export function inferDeterministicRouteContract(
     return {
       archetype: templateBase === 'index' ? 'posts-index' : 'home',
       type: 'page',
+      // Repo route hints for home-like templates are often coarse aliases
+      // ("home"), so they are not trustworthy for the final route path here.
       route: input.route ?? '/',
       routeMode: 'soft',
       isDetail: false,
@@ -176,11 +194,22 @@ export function inferDeterministicRouteContract(
     };
   }
 
+  const structureFirst = inferStructureFirstArchetype({
+    input,
+    templateBase,
+    routeSlug,
+    normalizedNeeds,
+    signals,
+    evidence,
+  });
+  if (structureFirst) {
+    return structureFirst;
+  }
+
   if (templateBase === 'search') {
     evidence.add('template:search');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'search',
-      type: 'page',
       route: '/search',
       routeMode: 'hard',
       isDetail: false,
@@ -190,15 +219,14 @@ export function inferDeterministicRouteContract(
         'page-detail',
         'categoryDetail',
       ],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (templateBase === 'archive') {
     evidence.add('template:archive');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'archive',
-      type: 'page',
       route: '/archive',
       routeMode: 'hard',
       isDetail: false,
@@ -208,15 +236,14 @@ export function inferDeterministicRouteContract(
         'page-detail',
         'categoryDetail',
       ],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (templateBase === 'blog') {
     evidence.add('template:blog');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'posts-index',
-      type: 'page',
       route: '/blog',
       routeMode: 'hard',
       isDetail: false,
@@ -226,8 +253,8 @@ export function inferDeterministicRouteContract(
         'page-detail',
         'categoryDetail',
       ],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (
@@ -235,23 +262,21 @@ export function inferDeterministicRouteContract(
     normalizedNeeds.has('categoryDetail')
   ) {
     evidence.add('category-archive-signal');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'category-archive',
-      type: 'page',
       route: '/category/:slug',
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['categoryDetail', 'posts'],
       disallowedDetailDataNeeds: ['post-detail', 'page-detail'],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (/^tag(?:-.+)?$/.test(templateBase)) {
     evidence.add('template:tag');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'tag-archive',
-      type: 'page',
       route: '/tag/:slug',
       routeMode: 'hard',
       isDetail: true,
@@ -261,15 +286,14 @@ export function inferDeterministicRouteContract(
         'page-detail',
         'categoryDetail',
       ],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (/^author(?:-.+)?$/.test(templateBase)) {
     evidence.add('template:author');
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'author-archive',
-      type: 'page',
       route: '/author/:slug',
       routeMode: 'hard',
       isDetail: true,
@@ -279,26 +303,21 @@ export function inferDeterministicRouteContract(
         'page-detail',
         'categoryDetail',
       ],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (
     /^single(?:-.+)?$/.test(templateBase) ||
-    (normalizedNeeds.has('post-detail') &&
-      !normalizedNeeds.has('page-detail')) ||
-    signals.hasPostDetailStructure
+    (normalizedNeeds.has('post-detail') && !normalizedNeeds.has('page-detail'))
   ) {
     evidence.add(
-      signals.hasPostDetailStructure
-        ? 'structure:post-detail'
-        : /^single(?:-.+)?$/.test(templateBase)
-          ? `template:${templateBase}`
-          : 'dataNeed:post-detail',
+      /^single(?:-.+)?$/.test(templateBase)
+        ? `template:${templateBase}`
+        : 'dataNeed:post-detail',
     );
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'single-post',
-      type: 'page',
       route:
         templateBase === 'single' || templateBase === 'single-post'
           ? '/post/:slug'
@@ -307,45 +326,38 @@ export function inferDeterministicRouteContract(
       isDetail: true,
       requiredDataNeeds: ['post-detail'],
       disallowedDetailDataNeeds: ['page-detail', 'categoryDetail'],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   if (
     templateBase === 'page' ||
     /^page-.+$/.test(templateBase) ||
-    signals.hasConcretePageBindings ||
-    signals.hasPageDetailStructure ||
     (normalizedNeeds.has('page-detail') &&
       !normalizedNeeds.has('post-detail') &&
       isLikelyPageTemplate(templateBase))
   ) {
     evidence.add(
-      signals.hasConcretePageBindings
-        ? 'db:page-binding'
-        : signals.hasPageDetailStructure
-          ? 'structure:page-detail'
-          : templateBase === 'page' || /^page-.+$/.test(templateBase)
-            ? `template:${templateBase}`
-            : 'dataNeed:page-detail',
+      templateBase === 'page' || /^page-.+$/.test(templateBase)
+        ? `template:${templateBase}`
+        : 'dataNeed:page-detail',
     );
-    return {
+    return buildFixedArchetypeContract({
       archetype: 'single-page',
-      type: 'page',
       route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['page-detail'],
       disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
-      evidence: [...evidence],
-    };
+      evidence,
+    });
   }
 
   evidence.add('static-page-fallback');
   return {
     archetype: 'static-page',
     type: 'page',
-    route: `/${routeSlug}`,
+    route: signals.normalizedRouteHint ?? `/${routeSlug}`,
     routeMode: 'soft',
     isDetail: false,
     requiredDataNeeds: [],
@@ -380,6 +392,133 @@ export function buildRepoRouteHints(
   };
 }
 
+export function toHomeTemplateBase(
+  templateName: string,
+): HomeTemplateBase | null {
+  const base = toTemplateBase(templateName);
+  return HOME_TEMPLATE_PRIORITY_SET.has(base)
+    ? (base as HomeTemplateBase)
+    : null;
+}
+
+export function matchesRepoEntrySourceTemplate(
+  templateName: string,
+  entryFile: string,
+): boolean {
+  const normalizedTemplate = toTemplateBase(templateName);
+  const entryName = toTemplateBase(entryFile.split('/').pop() ?? entryFile);
+  if (entryName === normalizedTemplate) return true;
+
+  if (
+    normalizedTemplate === 'front-page' &&
+    ['front-page', 'home'].includes(entryName)
+  ) {
+    return true;
+  }
+  if (normalizedTemplate === 'home' && ['home', 'index'].includes(entryName)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function resolveHomeHierarchy(input: {
+  templateNames: string[];
+  repoManifest?: RepoThemeManifest;
+  explicitTemplateNames?: string[];
+}): HomeHierarchyResolution {
+  const uniqueTemplateNames = Array.from(new Set(input.templateNames));
+  const homeEntries = uniqueTemplateNames
+    .map((templateName) => ({
+      templateName,
+      base: toHomeTemplateBase(templateName),
+    }))
+    .filter(
+      (entry): entry is { templateName: string; base: HomeTemplateBase } =>
+        !!entry.base,
+    );
+
+  const presentBases = HOME_TEMPLATE_PRIORITY.filter((base) =>
+    homeEntries.some((entry) => entry.base === base),
+  );
+  const winnerBase = presentBases[0] ?? null;
+  const explicitBases = collectExplicitHomeBases(
+    input.repoManifest,
+    input.explicitTemplateNames,
+  );
+  const redundantBases = new Set<HomeTemplateBase>();
+  const routeByBase: Partial<Record<HomeTemplateBase, string>> = {};
+
+  const hasBase = (base: HomeTemplateBase) => presentBases.includes(base);
+  const hasExplicitHome = explicitBases.has('home');
+  const canCollapseHomeIntoIndex =
+    hasBase('home') &&
+    hasBase('index') &&
+    !hasExplicitHome &&
+    (winnerBase === 'frontend-page' ||
+      winnerBase === 'front-page' ||
+      winnerBase === 'home');
+
+  if (canCollapseHomeIntoIndex) {
+    redundantBases.add('home');
+  }
+
+  if (winnerBase === 'frontend-page') {
+    routeByBase['frontend-page'] = '/';
+    if (hasBase('front-page')) {
+      routeByBase['front-page'] = '/front-page';
+    }
+    if (redundantBases.has('home')) {
+      routeByBase['index'] = '/blog';
+    } else {
+      if (hasBase('home')) routeByBase['home'] = '/blog';
+      if (hasBase('index')) {
+        routeByBase['index'] = hasExplicitHome ? '/index' : '/blog';
+      }
+    }
+  } else if (winnerBase === 'front-page') {
+    routeByBase['front-page'] = '/';
+    if (redundantBases.has('home')) {
+      routeByBase['index'] = '/blog';
+    } else {
+      if (hasBase('home')) routeByBase['home'] = '/blog';
+      if (hasBase('index')) {
+        routeByBase['index'] = hasExplicitHome ? '/index' : '/blog';
+      }
+    }
+  } else if (winnerBase === 'home') {
+    if (redundantBases.has('home')) {
+      routeByBase['index'] = '/';
+    } else {
+      routeByBase['home'] = '/';
+      if (hasBase('index')) routeByBase['index'] = '/index';
+    }
+  } else if (winnerBase === 'index') {
+    routeByBase['index'] = '/';
+  }
+
+  const orderedTemplateNames = [
+    ...HOME_TEMPLATE_PRIORITY.flatMap((base) =>
+      homeEntries
+        .filter(
+          (entry) => entry.base === base && !redundantBases.has(entry.base),
+        )
+        .map((entry) => entry.templateName),
+    ),
+    ...uniqueTemplateNames.filter(
+      (templateName) => !toHomeTemplateBase(templateName),
+    ),
+  ];
+
+  return {
+    winnerBase,
+    orderedTemplateNames,
+    routeByBase,
+    redundantBases: [...redundantBases],
+    explicitBases: [...explicitBases],
+  };
+}
+
 function collectArchetypeSignals(
   input: RouteContractInput,
   normalizedNeeds: Set<RouteContractDataNeed>,
@@ -389,6 +528,16 @@ function collectArchetypeSignals(
   hasConcretePageBindings: boolean;
   hasPageDetailStructure: boolean;
   hasPostDetailStructure: boolean;
+  hasSearchStructure: boolean;
+  hasQueryStructure: boolean;
+  hasArchiveStructure: boolean;
+  hasPostsIndexStructure: boolean;
+  hasCategoryArchiveHint: boolean;
+  hasTagArchiveHint: boolean;
+  hasAuthorArchiveHint: boolean;
+  hasArchiveRouteHint: boolean;
+  hasBlogRouteHint: boolean;
+  normalizedRouteHint: string | null;
   evidence: string[];
 } {
   const structuralKinds = collectStructuralKinds(input);
@@ -418,6 +567,9 @@ function collectArchetypeSignals(
     ),
   );
   const evidence: string[] = [];
+  const normalizedRouteHint = normalizeRouteHint(
+    input.repoRouteHints?.routeHint ?? input.route,
+  );
 
   const isTemplatePartSource =
     ['header', 'footer', 'sidebar'].includes(repoHintArea) ||
@@ -485,13 +637,313 @@ function collectArchetypeSignals(
     evidence.push('block:post-content');
   }
 
+  const hasSearchStructure =
+    structuralKinds.has('search') ||
+    repoHintBlockTypes.has('search') ||
+    planningSourceSummary.includes('search results') ||
+    planningSourceSummary.includes('search form');
+  if (hasSearchStructure) {
+    evidence.push('block:search');
+  }
+
+  const hasQueryStructure =
+    structuralKinds.has('query') ||
+    structuralKinds.has('latest-posts') ||
+    repoHintBlockTypes.has('query') ||
+    repoHintBlockTypes.has('latest-posts');
+  if (hasQueryStructure) {
+    evidence.push('block:query');
+  }
+
+  const hasCategoryArchiveHint =
+    normalizedNeeds.has('categoryDetail') ||
+    /^category(?:\/|$)/.test((normalizedRouteHint ?? '').replace(/^\/+/, '')) ||
+    repoHintNotes.some(
+      (note) => note.includes('category archive') || note.includes('category'),
+    );
+  const hasTagArchiveHint =
+    /^tag(?:\/|$)/.test((normalizedRouteHint ?? '').replace(/^\/+/, '')) ||
+    repoHintNotes.some((note) => note.includes('tag archive'));
+  const hasAuthorArchiveHint =
+    /^author(?:\/|$)/.test((normalizedRouteHint ?? '').replace(/^\/+/, '')) ||
+    repoHintNotes.some((note) => note.includes('author archive'));
+  const hasArchiveRouteHint = /^archive(?:\/|$)/.test(
+    (normalizedRouteHint ?? '').replace(/^\/+/, ''),
+  );
+  const hasBlogRouteHint = /^(blog|posts)(?:\/|$)/.test(
+    (normalizedRouteHint ?? '').replace(/^\/+/, ''),
+  );
+
+  const hasArchiveStructure =
+    hasQueryStructure &&
+    !hasPageDetailStructure &&
+    !hasPostDetailStructure &&
+    !hasSearchStructure;
+  const hasPostsIndexStructure =
+    hasArchiveStructure &&
+    !hasCategoryArchiveHint &&
+    !hasTagArchiveHint &&
+    !hasAuthorArchiveHint;
+
   return {
     structuralKinds,
     isTemplatePartSource,
     hasConcretePageBindings,
     hasPageDetailStructure,
     hasPostDetailStructure,
+    hasSearchStructure,
+    hasQueryStructure,
+    hasArchiveStructure,
+    hasPostsIndexStructure,
+    hasCategoryArchiveHint,
+    hasTagArchiveHint,
+    hasAuthorArchiveHint,
+    hasArchiveRouteHint,
+    hasBlogRouteHint,
+    normalizedRouteHint,
     evidence,
+  };
+}
+
+function inferStructureFirstArchetype(input: {
+  input: RouteContractInput;
+  templateBase: string;
+  routeSlug: string;
+  normalizedNeeds: Set<RouteContractDataNeed>;
+  signals: ReturnType<typeof collectArchetypeSignals>;
+  evidence: Set<string>;
+}): DeterministicRouteContract | undefined {
+  const { templateBase, routeSlug, normalizedNeeds, signals, evidence } = input;
+
+  const candidates: Array<
+    DeterministicRouteContract & { score: number; priority: number }
+  > = [];
+
+  if (signals.hasPageDetailStructure || signals.hasConcretePageBindings) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'single-page',
+        route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['page-detail'],
+        disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+        evidence: new Set([
+          ...evidence,
+          signals.hasConcretePageBindings
+            ? 'db:page-binding'
+            : 'structure:page-detail',
+        ]),
+      }),
+      score:
+        (signals.hasPageDetailStructure ? 12 : 0) +
+        (signals.hasConcretePageBindings ? 4 : 0) +
+        (normalizedNeeds.has('page-detail') ? 2 : 0),
+      priority: 100,
+    });
+  }
+
+  if (signals.hasPostDetailStructure) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'single-post',
+        route:
+          templateBase === 'single' || templateBase === 'single-post'
+            ? '/post/:slug'
+            : `/${routeSlug}/:slug`,
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['post-detail'],
+        disallowedDetailDataNeeds: ['page-detail', 'categoryDetail'],
+        evidence: new Set([...evidence, 'structure:post-detail']),
+      }),
+      score:
+        12 +
+        (normalizedNeeds.has('post-detail') ? 2 : 0) +
+        (signals.structuralKinds.has('comments') ? 1 : 0),
+      priority: 95,
+    });
+  }
+
+  if (
+    signals.hasSearchStructure &&
+    (templateBase === 'search' ||
+      signals.normalizedRouteHint === '/search' ||
+      signals.normalizedRouteHint?.startsWith('/search/') === true)
+  ) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'search',
+        route: '/search',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: new Set([...evidence, 'structure:search']),
+      }),
+      score: 9,
+      priority: 80,
+    });
+  }
+
+  if (signals.hasCategoryArchiveHint && signals.hasArchiveStructure) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'category-archive',
+        route: '/category/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['categoryDetail', 'posts'],
+        disallowedDetailDataNeeds: ['post-detail', 'page-detail'],
+        evidence: new Set([...evidence, 'structure:category-archive']),
+      }),
+      score: 9,
+      priority: 90,
+    });
+  }
+
+  if (signals.hasTagArchiveHint && signals.hasArchiveStructure) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'tag-archive',
+        route: '/tag/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['posts'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: new Set([...evidence, 'structure:tag-archive']),
+      }),
+      score: 8,
+      priority: 85,
+    });
+  }
+
+  if (signals.hasAuthorArchiveHint && signals.hasArchiveStructure) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'author-archive',
+        route: '/author/:slug',
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['posts'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: new Set([...evidence, 'structure:author-archive']),
+      }),
+      score: 8,
+      priority: 84,
+    });
+  }
+
+  if (
+    signals.hasPostsIndexStructure &&
+    (templateBase === 'blog' ||
+      templateBase === 'index' ||
+      templateBase === 'home' ||
+      templateBase === 'front-page' ||
+      signals.hasBlogRouteHint)
+  ) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: templateBase === 'front-page' ? 'home' : 'posts-index',
+        route:
+          signals.normalizedRouteHint ??
+          (templateBase === 'index' || templateBase === 'front-page'
+            ? '/'
+            : '/blog'),
+        routeMode: 'soft',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: new Set([
+          ...evidence,
+          templateBase === 'front-page'
+            ? 'structure:front-page-home'
+            : 'structure:posts-index',
+        ]),
+      }),
+      score: 7,
+      priority: 70,
+    });
+  }
+
+  if (
+    signals.hasArchiveStructure &&
+    (templateBase === 'archive' || signals.hasArchiveRouteHint)
+  ) {
+    candidates.push({
+      ...buildFixedArchetypeContract({
+        archetype: 'archive',
+        route: signals.normalizedRouteHint ?? '/archive',
+        routeMode: 'hard',
+        isDetail: false,
+        requiredDataNeeds: ['posts'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: new Set([...evidence, 'structure:archive']),
+      }),
+      score: 6,
+      priority: 60,
+    });
+  }
+
+  const winner = candidates
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return right.priority - left.priority;
+    })
+    .at(0);
+
+  return winner && winner.score >= 6
+    ? {
+        archetype: winner.archetype,
+        type: winner.type,
+        route: winner.route,
+        routeMode: winner.routeMode,
+        isDetail: winner.isDetail,
+        requiredDataNeeds: winner.requiredDataNeeds,
+        disallowedDetailDataNeeds: winner.disallowedDetailDataNeeds,
+        evidence: winner.evidence,
+      }
+    : undefined;
+}
+
+function buildFixedArchetypeContract(input: {
+  archetype: DeterministicRouteContract['archetype'];
+  route: string | null;
+  routeMode: 'hard' | 'soft';
+  isDetail: boolean;
+  requiredDataNeeds: RouteContractDataNeed[];
+  disallowedDetailDataNeeds: RouteContractDataNeed[];
+  evidence: Set<string>;
+}): DeterministicRouteContract {
+  return {
+    archetype: input.archetype,
+    type: input.archetype === 'partial' ? 'partial' : 'page',
+    route: input.route,
+    routeMode: input.routeMode,
+    isDetail: input.isDetail,
+    requiredDataNeeds: input.requiredDataNeeds,
+    disallowedDetailDataNeeds: input.disallowedDetailDataNeeds,
+    evidence: [...input.evidence],
   };
 }
 
@@ -537,6 +989,34 @@ export function toTemplateBase(templateName: string): string {
   return templateName.replace(/\.(php|html)$/i, '').toLowerCase();
 }
 
+function collectExplicitHomeBases(
+  repoManifest?: RepoThemeManifest,
+  explicitTemplateNames: string[] = [],
+): Set<HomeTemplateBase> {
+  const explicitBases = new Set<HomeTemplateBase>();
+  for (const templateName of explicitTemplateNames) {
+    const base = toHomeTemplateBase(templateName);
+    if (base) explicitBases.add(base);
+  }
+
+  if (!repoManifest) return explicitBases;
+
+  const markIfHomeBase = (value: string | undefined) => {
+    const base = toHomeTemplateBase(value ?? '');
+    if (base) explicitBases.add(base);
+  };
+
+  for (const chain of repoManifest.structureHints.entrySourceChains) {
+    markIfHomeBase(chain.entryFile.split('/').pop() ?? chain.entryFile);
+  }
+  for (const file of repoManifest.structureHints.fileAnalyses) {
+    if (!['template', 'pattern', 'php-template'].includes(file.kind)) continue;
+    markIfHomeBase(file.file.split('/').pop() ?? file.file);
+  }
+
+  return explicitBases;
+}
+
 function toKebabCase(value: string): string {
   return value
     .replace(/([a-z])([A-Z])/g, '$1-$2')
@@ -545,33 +1025,21 @@ function toKebabCase(value: string): string {
     .toLowerCase();
 }
 
+function normalizeRouteHint(value?: string | null): string | null {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return null;
+  if (trimmed === '*') return '*';
+  const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return normalized.replace(/\/+$/, '') || '/';
+}
+
 function findMatchingEntrySourceChain(
   templateName: string,
   repoManifest: RepoThemeManifest,
 ):
   | RepoThemeManifest['structureHints']['entrySourceChains'][number]
   | undefined {
-  const normalizedTemplate = toTemplateBase(templateName);
-
-  return repoManifest.structureHints.entrySourceChains.find((chain) => {
-    const entryName = toTemplateBase(
-      chain.entryFile.split('/').pop() ?? chain.entryFile,
-    );
-    if (entryName === normalizedTemplate) return true;
-
-    if (
-      normalizedTemplate === 'front-page' &&
-      ['front-page', 'home'].includes(entryName)
-    ) {
-      return true;
-    }
-    if (
-      normalizedTemplate === 'home' &&
-      ['home', 'index'].includes(entryName)
-    ) {
-      return true;
-    }
-
-    return false;
-  });
+  return repoManifest.structureHints.entrySourceChains.find((chain) =>
+    matchesRepoEntrySourceTemplate(templateName, chain.entryFile),
+  );
 }
