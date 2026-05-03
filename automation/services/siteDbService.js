@@ -40,7 +40,7 @@ async function createSiteDatabase(siteId, dumpPath) {
     }
 
     const host     = process.env.MYSQL_HOST ;
-    const port     = parseInt(process.env.MYSQL_PORT );
+    const port     = parseInt(process.env.MYSQL_HOST_PORT || process.env.MYSQL_PORT);
     const user     = process.env.MYSQL_ROOT_USER ;
     const password = process.env.MYSQL_ROOT_PASSWORD ;
 

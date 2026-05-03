@@ -216,13 +216,21 @@ const VisualEditor: React.FC = () => {
     error: string | null;
   }>({ loading: false, frontendUrl: null, error: null });
 
-  const handlePublish = async () => {
+  const [publishModal, setPublishModal] = useState<{
+    open: boolean;
+    subdomain: string;
+    checking: boolean;
+    checkError: string | null;
+  }>({ open: false, subdomain: '', checking: false, checkError: null });
+
+  const handlePublish = async (repoName: string) => {
+    setPublishModal(s => ({ ...s, open: false }));
     setPublishState({ loading: true, frontendUrl: null, error: null });
     try {
       const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, siteId }),
+        body: JSON.stringify({ jobId, siteId, repoName }),
       });
       const data = await res.json() as { success: boolean; frontendUrl?: string; githubUrl?: string; error?: string };
       if (!res.ok || !data.success) throw new Error(data.error || 'Publish failed');
@@ -230,6 +238,33 @@ const VisualEditor: React.FC = () => {
     } catch (err) {
       setPublishState({ loading: false, frontendUrl: null, error: err instanceof Error ? err.message : 'Unknown error' });
     }
+  };
+
+  const handlePublishModalConfirm = async () => {
+    const slug = publishModal.subdomain.trim().toLowerCase();
+    if (!slug) {
+      setPublishModal(s => ({ ...s, checkError: 'Vui lòng nhập subdomain.' }));
+      return;
+    }
+    if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(slug) && slug.length > 1) {
+      setPublishModal(s => ({ ...s, checkError: 'Chỉ dùng chữ thường, số và dấu gạch ngang.' }));
+      return;
+    }
+    setPublishModal(s => ({ ...s, checking: true, checkError: null }));
+    try {
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/deploy/check-subdomain?subdomain=${encodeURIComponent(slug)}`,
+      );
+      const data = await res.json() as { available: boolean };
+      if (!data.available) {
+        setPublishModal(s => ({ ...s, checking: false, checkError: `Subdomain "${slug}" đã được sử dụng. Vui lòng chọn tên khác.` }));
+        return;
+      }
+    } catch {
+      setPublishModal(s => ({ ...s, checking: false, checkError: 'Không thể kiểm tra subdomain. Thử lại.' }));
+      return;
+    }
+    void handlePublish(slug);
   };
   const [annotationComment, setAnnotationComment] = useState("");
   const [savedAnnotations, setSavedAnnotations] = useState<Array<{
@@ -493,6 +528,7 @@ const VisualEditor: React.FC = () => {
   };
 
   return (
+    <>
     <div className="h-[calc(100vh-96px)] overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(244,228,200,0.55),_transparent_34%),linear-gradient(135deg,_#f7f1e7_0%,_#f2ece2_42%,_#ece7df_100%)] px-4 pb-4 pt-4">
       <div className="flex h-full flex-col gap-4">
         <section className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-4">
@@ -540,7 +576,7 @@ const VisualEditor: React.FC = () => {
                   ) : (
                     <div className="flex flex-col items-end gap-0.5">
                       <button
-                        onClick={() => void handlePublish()}
+                        onClick={() => setPublishModal({ open: true, subdomain: '', checking: false, checkError: null })}
                         disabled={publishState.loading}
                         className="inline-flex items-center gap-1.5 rounded-full border border-[#d8cfbf] bg-white px-4 py-1.5 text-sm font-semibold text-[#30483d] transition hover:bg-[#f6f2eb] disabled:cursor-not-allowed disabled:opacity-60"
                       >
@@ -762,6 +798,65 @@ const VisualEditor: React.FC = () => {
         </section>
       </div>
     </div>
+
+    {/* Publish modal */}
+    {publishModal.open && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+        onClick={(e) => { if (e.target === e.currentTarget) setPublishModal(s => ({ ...s, open: false })); }}
+      >
+        <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+          <h2 className="text-base font-bold text-[#1a2e22]">Đặt tên subdomain</h2>
+          <p className="mt-1 text-sm text-[#6b7280]">
+            Subdomain sẽ là địa chỉ truy cập website sau khi publish.
+          </p>
+          <div className="mt-4">
+            <label className="text-xs font-semibold uppercase tracking-wide text-[#8a7a62]">Subdomain</label>
+            <div className="mt-1.5 flex items-center gap-0 rounded-xl border border-[#e0d8cc] bg-[#f9f7f4] focus-within:border-[#6366f1] focus-within:ring-1 focus-within:ring-[#6366f1]">
+              <input
+                type="text"
+                value={publishModal.subdomain}
+                onChange={(e) => setPublishModal(s => ({ ...s, subdomain: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''), checkError: null }))}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handlePublishModalConfirm(); }}
+                placeholder="ten-website-cua-ban"
+                className="flex-1 bg-transparent px-3 py-2.5 text-sm text-[#1a2e22] outline-none placeholder:text-[#b4ada4]"
+                autoFocus
+              />
+              <span className="pr-3 text-sm text-[#9ca3af]">.xpress.aihubproduction.com</span>
+            </div>
+            {publishModal.checkError && (
+              <p className="mt-1.5 text-xs text-red-500">{publishModal.checkError}</p>
+            )}
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              onClick={() => setPublishModal(s => ({ ...s, open: false }))}
+              className="rounded-xl border border-[#e0d8cc] px-4 py-2 text-sm font-semibold text-[#6b7280] hover:bg-[#f6f2eb]"
+            >
+              Huỷ
+            </button>
+            <button
+              onClick={() => void handlePublishModalConfirm()}
+              disabled={publishModal.checking || !publishModal.subdomain.trim()}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-[#30483d] px-4 py-2 text-sm font-semibold text-white hover:bg-[#243129] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {publishModal.checking ? (
+                <>
+                  <span className="material-symbols-outlined animate-spin text-[15px]">progress_activity</span>
+                  Đang kiểm tra…
+                </>
+              ) : (
+                <>
+                  <span className="material-symbols-outlined text-[15px]">language</span>
+                  Publish
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 

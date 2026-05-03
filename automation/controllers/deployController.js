@@ -57,4 +57,21 @@ async function pushToGitJob(req, res) {
   }
 }
 
-module.exports = { deployJob, pushToGitJob };
+async function checkSubdomain(req, res) {
+  const { subdomain } = req.query;
+  if (!subdomain || typeof subdomain !== 'string' || !subdomain.trim()) {
+    return res.status(400).json({ error: 'subdomain is required' });
+  }
+  const slug = subdomain.trim().toLowerCase();
+  const row = await queryOne(
+    `SELECT id FROM react_migrations
+     WHERE github_repo_url LIKE CONCAT('%/', ?)
+        OR deployed_url LIKE CONCAT('http://', ?, '.%')
+        OR deployed_url LIKE CONCAT('https://', ?, '.%')
+     LIMIT 1`,
+    [slug, slug, slug],
+  );
+  res.json({ available: !row });
+}
+
+module.exports = { deployJob, pushToGitJob, checkSubdomain };

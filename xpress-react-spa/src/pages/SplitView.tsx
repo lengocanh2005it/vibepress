@@ -1345,39 +1345,6 @@ const SplitView: React.FC = () => {
     }
   };
 
-  const [pushGitState, setPushGitState] = useState<{
-    loading: boolean;
-    githubUrl: string | null;
-    frontendUrl: string | null;
-    error: string | null;
-  }>({ loading: false, githubUrl: null, frontendUrl: null, error: null });
-
-  const handlePushToGit = async () => {
-    setPushGitState({ loading: true, githubUrl: null, frontendUrl: null, error: null });
-    try {
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/deploy`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId, siteId }),
-        },
-      );
-      const data = await res.json();
-      if (!res.ok || !data.success)
-        throw new Error(data.error || "Push failed");
-      setPushGitState({
-        loading: false,
-        githubUrl: data.githubUrl ?? null,
-        frontendUrl: data.frontendUrl ?? null,
-        error: null,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setPushGitState({ loading: false, githubUrl: null, frontendUrl: null, error: message });
-    }
-  };
-
   const actionButtonClass =
     "inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2";
 
@@ -1983,35 +1950,7 @@ const SplitView: React.FC = () => {
                     View Metrics
                   </button>
                 )}
-                {completionEvent &&
-                  (pushGitState.frontendUrl || pushGitState.githubUrl ? (
-                    <>
-                      {pushGitState.frontendUrl && (
-                        <button
-                          onClick={() =>
-                            window.open(pushGitState.frontendUrl!, "_blank")
-                          }
-                          className={`${actionButtonClass} border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700 focus-visible:ring-emerald-500`}
-                        >
-                          Visit Site
-                        </button>
-                      )}
-                    </>
-                  ) : (
-                    <button
-                      onClick={handlePushToGit}
-                      disabled={pushGitState.loading}
-                      className={`${actionButtonClass} border-slate-950 bg-slate-900 text-white hover:bg-black focus-visible:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-50`}
-                    >
-                      {pushGitState.loading ? "Pushing…" : "Push to GitHub"}
-                    </button>
-                  ))}
               </div>
-              {pushGitState.error && (
-                <p className="mt-3 text-xs text-red-700">
-                  {pushGitState.error}
-                </p>
-              )}
             </div>
           )}
         </div>

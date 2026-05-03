@@ -31,6 +31,7 @@ const ProjectSelector: React.FC = () => {
   const navigate = useNavigate();
   const { token } = useUser();
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [isLoadingRepositories, setIsLoadingRepositories] = useState(false);
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
   const [commitHistory, setCommitHistory] = useState<Commit[]>([]);
   const [commitPage, setCommitPage] = useState(1);
@@ -42,10 +43,32 @@ const ProjectSelector: React.FC = () => {
   });
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setRepositories([]);
+      setSelectedRepo(null);
+      setCommitHistory([]);
+      setIsLoadingRepositories(false);
+      return;
+    }
+
+    let isActive = true;
+    setIsLoadingRepositories(true);
+
     getMyRepos(token)
-      .then(data => setRepositories(data))
-      .catch(err => console.error('Error fetching repos:', err));
+      .then((data) => {
+        if (!isActive) return;
+        setRepositories(Array.isArray(data) ? data : []);
+      })
+      .catch(err => console.error('Error fetching repos:', err))
+      .finally(() => {
+        if (isActive) {
+          setIsLoadingRepositories(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
   }, [token]);
 
   useEffect(() => {
@@ -69,7 +92,13 @@ const ProjectSelector: React.FC = () => {
         </div>
 
         <div className="flex flex-col gap-4">
-          {repositories.length > 0 ? (
+          {!token ? (
+            <p className="text-[#8e9892] text-[13px] px-2">Vui lòng đăng nhập để xem repositories.</p>
+          ) : isLoadingRepositories ? (
+            <p className="text-[#8e9892] text-[13px] px-2">Đang tải repositories...</p>
+          ) : repositories.length === 0 ? (
+            <p className="text-[#8e9892] text-[13px] px-2">Chưa có repo nào.</p>
+          ) : (
             repositories.map((repo) => {
               const isSelected = selectedRepo?.siteId === repo.siteId;
               return (
@@ -100,10 +129,6 @@ const ProjectSelector: React.FC = () => {
                 </div>
               );
             })
-          ) : (
-            <p className="text-[#8e9892] text-[13px] px-2">
-              {token ? 'Đang tải repositories...' : 'Vui lòng đăng nhập để xem repositories.'}
-            </p>
           )}
 
           {/* Connect New */}

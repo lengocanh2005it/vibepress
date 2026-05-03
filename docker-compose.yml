@@ -29,6 +29,7 @@ services:
     environment:
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
+      MYSQL_HOST_PORT: 3307
       MYSQL_DB: ${MYSQL_DB:-vibepress}
       MYSQL_USER: ${MYSQL_USER:-vibepress}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-vibepress_pass}

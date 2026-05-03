@@ -1,8 +1,8 @@
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
+import TopNav from './TopNav';
 
 const SharedLayout = () => {
   const location = useLocation();
-  const navigate = useNavigate();
 
   const stepItems = [
     { label: 'Page setup', path: '/app/projects' },
@@ -21,46 +21,8 @@ const SharedLayout = () => {
   return (
     <div className="flex flex-col bg-surface text-on-surface font-body antialiased min-h-screen overflow-hidden">
       <header className="sticky top-0 z-50 bg-surface/95 backdrop-blur-md border-b border-outline-variant/30 shadow-sm">
-        <div className="max-w- mx-auto w-full px-5 py-3">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="group inline-flex items-center gap-3 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-surface-container"
-            >
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary font-bold">
-                XP
-              </span>
-              <span className="flex flex-col leading-tight">
-                <span className="text-xl font-bold text-primary font-headline italic">X-press AI</span>
-              </span>
-            </button>
-
-            <nav className="flex w-full items-center justify-start gap-2 rounded-full border border-outline-variant/40 bg-white/70 p-1 text-sm font-medium text-stone-700 md:w-auto md:justify-end">
-              <NavLink
-                to="/"
-                className={({ isActive }) =>
-                  `rounded-full px-3 py-1.5 transition-colors ${isActive ? 'bg-primary text-white shadow-sm' : 'hover:bg-surface-container hover:text-primary'}`
-                }
-              >
-                Home
-              </NavLink>
-              <button
-                type="button"
-                className="rounded-full px-3 py-1.5 text-stone-600 transition-colors hover:bg-surface-container hover:text-primary"
-              >
-                Hosting
-              </button>
-              <button
-                type="button"
-                className="rounded-full px-3 py-1.5 text-stone-600 transition-colors hover:bg-surface-container hover:text-primary"
-              >
-                Support
-              </button>
-            </nav>
-          </div>
-        </div>
-        <div className="px-5 pb-4 space-y-3">
+        <TopNav />
+        <div className="px-5 pb-4 space-y-3 mt-20">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-[#4a6d4e]">Progress</h3>
             <span className="text-xs font-semibold text-[#4b7a5b]">Step {currentStep + 1} of {stepItems.length}</span>
