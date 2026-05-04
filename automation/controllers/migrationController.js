@@ -1,4 +1,54 @@
+const path = require('path');
+const fs = require('fs/promises');
+const { chromium } = require('playwright');
 const { query, queryOne } = require('../db/mysql');
+const { uploadCaptureAsset } = require('../services/imageUploadService');
+const { AI_PIPELINE_URL, UPLOAD_ROOT } = require('../config/constants');
+
+async function captureMigrationThumbnail(migrationId, jobId) {
+  let browser;
+  try {
+    const previewRes = await fetch(`${AI_PIPELINE_URL}/pipeline/start-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId }),
+    });
+    if (!previewRes.ok) {
+      console.warn(`[Migration] thumbnail: start-preview HTTP ${previewRes.status} job=${jobId}`);
+      return;
+    }
+    const { previewUrl } = await previewRes.json();
+    if (!previewUrl) {
+      console.warn(`[Migration] thumbnail: no previewUrl returned job=${jobId}`);
+      return;
+    }
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(previewUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+    const filename = `thumbnail_${jobId}.png`;
+    const localPath = path.join(UPLOAD_ROOT, 'captures', filename);
+    await page.screenshot({ path: localPath, type: 'png' });
+
+    const asset = await uploadCaptureAsset(
+      localPath,
+      filename,
+      `/captures/${filename}`,
+      { width: 1280, height: 800 },
+    );
+    if (!asset?.url) return;
+    if (asset.provider !== 'local') await fs.unlink(localPath).catch(() => {});
+
+    await query('UPDATE react_migrations SET thumbnail_url = ? WHERE id = ?', [asset.url, migrationId]);
+    console.log(`[Migration] Thumbnail saved id=${migrationId}: ${asset.url}`);
+  } catch (err) {
+    console.error(`[Migration] captureMigrationThumbnail error job=${jobId}:`, err.message);
+  } finally {
+    await browser?.close();
+  }
+}
 
 async function createMigration(req, res) {
   const { site_id, job_id } = req.body;
@@ -16,7 +66,8 @@ async function createMigration(req, res) {
     );
     const migration = await queryOne('SELECT * FROM react_migrations WHERE id = ?', [result.insertId]);
     console.log(`[Migration] Đã tạo migration id=${result.insertId} site=${site_id} job=${job_id}`);
-    return res.status(201).json(migration);
+    res.status(201).json(migration);
+    captureMigrationThumbnail(result.insertId, job_id);
   } catch (err) {
     console.error(`[Migration] createMigration lỗi:`, err);
     return res.status(500).json({ error: 'Lỗi khi lưu migration', detail: err.message });
