@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import {
   AiProcessError,
@@ -295,10 +295,11 @@ const VisualEditor: React.FC = () => {
           (data.result?.routeEntries?.length ?? 0) > 0;
         if (!hasRouteData && siteUrl) {
           fetch(`/api/wp/site-pages?siteUrl=${encodeURIComponent(siteUrl)}`)
-            .then((r) => (r.ok ? r.json() : []))
-            .then((pages: Array<{ slug: string; link: string }>) => {
+            .then((r) => (r.ok ? r.json() : {}))
+            .then((res: { pages?: Array<{ slug: string; link: string; title: string }> }) => {
+              const pages = res.pages ?? [];
               setWpFallbackPages(
-                pages.map((p) => ({ url: p.link, slug: p.slug || "", type: "page" })),
+                pages.map((p) => ({ url: p.link, slug: p.title || p.slug || "", type: "page" })),
               );
             })
             .catch(() => {});
@@ -311,6 +312,19 @@ const VisualEditor: React.FC = () => {
   }, [jobId, siteUrl]);
 
   const [selectedRouteId, setSelectedRouteId] = useState("");
+  const [routeDropdownOpen, setRouteDropdownOpen] = useState(false);
+  const routeDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!routeDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (routeDropdownRef.current && !routeDropdownRef.current.contains(e.target as Node)) {
+        setRouteDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [routeDropdownOpen]);
   const [frameTitle, setFrameTitle] = useState("");
   const [loadedSrc, setLoadedSrc] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -741,17 +755,37 @@ const VisualEditor: React.FC = () => {
                 ) : error ? (
                   <span className="text-xs text-[#e57373]">{error}</span>
                 ) : (
-                  <select
-                    value={effectiveRouteId}
-                    onChange={(e) => setSelectedRouteId(e.target.value)}
-                    className="w-1/4 min-w-[160px] rounded-full border border-[#d8cfbf] bg-white px-3 py-1 text-xs font-medium text-[#1f2a24] outline-none transition focus:border-[#3f6b58] cursor-pointer"
-                  >
-                    {routes.map((route) => (
-                      <option key={route.id} value={route.id}>
-                        {route.label} — {route.route}
-                      </option>
-                    ))}
-                  </select>
+                  <div ref={routeDropdownRef} className="relative w-fit">
+                    <button
+                      onClick={() => setRouteDropdownOpen((o) => !o)}
+                      className="flex items-center gap-2 rounded-full border border-[#d8cfbf] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#1f2a24] outline-none transition hover:border-[#4a7c59] hover:bg-[#f6f2eb] cursor-pointer"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#4a7c59] shrink-0" />
+                      <span className="max-w-[160px] truncate">{selectedRoute?.label || "Home"}</span>
+                      <code className="text-[10px] text-[#9ca3af] font-mono">{selectedRoute?.route || "/"}</code>
+                      <span className="material-symbols-outlined text-[14px] text-[#9ca3af] leading-none">
+                        {routeDropdownOpen ? "expand_less" : "expand_more"}
+                      </span>
+                    </button>
+                    {routeDropdownOpen && (
+                      <div className="absolute top-full left-0 mt-1.5 z-50 min-w-[220px] rounded-2xl border border-[#e8e4dc] bg-white shadow-xl overflow-hidden">
+                        {routes.map((route) => (
+                          <button
+                            key={route.id}
+                            onClick={() => { setSelectedRouteId(route.id); setRouteDropdownOpen(false); }}
+                            className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left transition hover:bg-[#f5f2eb] ${
+                              route.id === effectiveRouteId
+                                ? "bg-[#4a7c59]/10 text-[#2e3230]"
+                                : "text-[#4a4e4a]"
+                            }`}
+                          >
+                            <span className="text-xs font-semibold truncate">{route.label}</span>
+                            <code className="text-[10px] text-[#9ca3af] font-mono shrink-0">{route.route}</code>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
               {/* Actions */}
