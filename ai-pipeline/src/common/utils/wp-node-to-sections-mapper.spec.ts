@@ -118,4 +118,174 @@ describe('mapWpNodesToDraftSections', () => {
       ],
     });
   });
+
+  it('collapses repeated testimonial group cards into one card-grid section', () => {
+    const markup = `
+<!-- wp:group -->
+<div class="wp-block-group">
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:paragraph -->
+    <p>Testimonials</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading -->
+    <h2>What My Clients Say About Me</h2>
+    <!-- /wp:heading -->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group {"layout":{"type":"grid","minimumColumnWidth":"21rem"}} -->
+  <div class="wp-block-group">
+    <!-- wp:group -->
+    <div class="wp-block-group">
+      <!-- wp:paragraph -->
+      <p>☆☆☆☆☆</p>
+      <!-- /wp:paragraph -->
+      <!-- wp:paragraph -->
+      <p><em>"Quote one from client"</em></p>
+      <!-- /wp:paragraph -->
+      <!-- wp:group -->
+      <div class="wp-block-group">
+        <!-- wp:image -->
+        <figure class="wp-block-image"><img src="/avatar-1.jpg" alt="Sarah Jenkins" /></figure>
+        <!-- /wp:image -->
+        <!-- wp:group -->
+        <div class="wp-block-group">
+          <!-- wp:paragraph -->
+          <p>Sarah Jenkins</p>
+          <!-- /wp:paragraph -->
+          <!-- wp:paragraph -->
+          <p>CEO at TechFlow</p>
+          <!-- /wp:paragraph -->
+        </div>
+        <!-- /wp:group -->
+      </div>
+      <!-- /wp:group -->
+    </div>
+    <!-- /wp:group -->
+
+    <!-- wp:group -->
+    <div class="wp-block-group">
+      <!-- wp:paragraph -->
+      <p>☆☆☆☆☆</p>
+      <!-- /wp:paragraph -->
+      <!-- wp:paragraph -->
+      <p><strong>"Quote two from client"</strong></p>
+      <!-- /wp:paragraph -->
+      <!-- wp:group -->
+      <div class="wp-block-group">
+        <!-- wp:image -->
+        <figure class="wp-block-image"><img src="/avatar-2.jpg" alt="David Chen" /></figure>
+        <!-- /wp:image -->
+        <!-- wp:group -->
+        <div class="wp-block-group">
+          <!-- wp:paragraph -->
+          <p>David Chen</p>
+          <!-- /wp:paragraph -->
+          <!-- wp:paragraph -->
+          <p>Founder at TechFlow</p>
+          <!-- /wp:paragraph -->
+        </div>
+        <!-- /wp:group -->
+      </div>
+      <!-- /wp:group -->
+    </div>
+    <!-- /wp:group -->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'card-grid',
+      title: 'What My Clients Say About Me',
+      subtitle: 'Testimonials',
+      columns: 2,
+      cards: [
+        {
+          heading: 'Sarah Jenkins',
+          body: 'Quote one from client',
+          imageSrc: '/avatar-1.jpg',
+        },
+        {
+          heading: 'David Chen',
+          body: 'Quote two from client',
+          imageSrc: '/avatar-2.jpg',
+        },
+      ],
+    });
+  });
+
+  it('collapses repeated icon/text skill groups into one card-grid section', () => {
+    const markup = `
+<!-- wp:group -->
+<div class="wp-block-group">
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:paragraph -->
+    <p>Skills</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading -->
+    <h2>Skills and Tools</h2>
+    <!-- /wp:heading -->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group {"layout":{"type":"grid"}} -->
+  <div class="wp-block-group">
+    <!-- wp:group -->
+    <div class="wp-block-group">
+      <!-- wp:image -->
+      <figure class="wp-block-image"><img src="/figma.png" alt="Figma" /></figure>
+      <!-- /wp:image -->
+      <!-- wp:paragraph -->
+      <p>UI/UX Design</p>
+      <!-- /wp:paragraph -->
+    </div>
+    <!-- /wp:group -->
+
+    <!-- wp:group -->
+    <div class="wp-block-group">
+      <!-- wp:image -->
+      <figure class="wp-block-image"><img src="/photoshop.png" alt="Photoshop" /></figure>
+      <!-- /wp:image -->
+      <!-- wp:paragraph -->
+      <p>Graphic Design</p>
+      <!-- /wp:paragraph -->
+    </div>
+    <!-- /wp:group -->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'card-grid',
+      title: 'Skills and Tools',
+      subtitle: 'Skills',
+      columns: 2,
+      cards: [
+        {
+          heading: 'UI/UX Design',
+          body: '',
+          imageSrc: '/figma.png',
+        },
+        {
+          heading: 'Graphic Design',
+          body: '',
+          imageSrc: '/photoshop.png',
+        },
+      ],
+    });
+  });
 });

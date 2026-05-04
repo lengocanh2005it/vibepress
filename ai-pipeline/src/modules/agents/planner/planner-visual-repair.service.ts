@@ -733,6 +733,8 @@ export class PlannerVisualRepairService {
     if (/card-grid|card heading|card subtitle/.test(combined))
       pushWidget('card-grid');
     if (/post-list|post list/.test(combined)) pushWidget('post-list');
+    if (/testimonial/.test(combined)) pushWidget('testimonial');
+    if (/newsletter/.test(combined)) pushWidget('newsletter');
 
     if (categories.length === 0) {
       pushCategory('unknown');
@@ -1110,6 +1112,16 @@ export class PlannerVisualRepairService {
         '- `tabs.tabs` must preserve every source-backed tab label and panel body.',
       );
     }
+    if (diagnosis.focusWidgets.includes('testimonial')) {
+      lines.push(
+        '- The output is missing a `testimonial` section that the deterministic draft requires. You MUST include it with at least the source-backed testimonial items (name, quote/body).',
+      );
+    }
+    if (diagnosis.focusWidgets.includes('newsletter')) {
+      lines.push(
+        '- The output is missing a `newsletter` section that the deterministic draft requires. You MUST include it with a heading and CTA.',
+      );
+    }
     if (diagnosis.categories.includes('image-resolution')) {
       lines.push(
         '- Use only image URLs from the validated image pool or the selected source. Do not invent image URLs.',
@@ -1432,19 +1444,25 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       (section): section is Extract<SectionPlan, { type: 'card-grid' }> =>
         section.type === 'card-grid',
     );
+    const unmatchedFinalCardGrids = finalCardGrids.map((section, index) => ({
+      section,
+      index,
+    }));
     draftCardGrids.forEach((draftSection, index) => {
-      const repairedSection = finalCardGrids[index];
-      if (!repairedSection) return;
+      const repairedMatch = this.findBestMatchingCardGrid(
+        draftSection,
+        unmatchedFinalCardGrids,
+      );
+      if (!repairedMatch) return;
+      const repairedSection = repairedMatch.section;
+      unmatchedFinalCardGrids.splice(repairedMatch.indexInPool, 1);
       if (repairedSection.cards.length < draftSection.cards.length) {
         issues.push(
           `card-grid section ${index + 1} kept only ${repairedSection.cards.length}/${draftSection.cards.length} cards`,
         );
       }
-      const weakCards = repairedSection.cards.filter(
-        (card) =>
-          !card.heading?.trim() ||
-          !card.body?.trim() ||
-          this.isTrivialContentDuplicate(card.heading, card.body),
+      const weakCards = repairedSection.cards.filter((card, cardIndex) =>
+        this.isWeakCardGridCard(card, draftSection.cards[cardIndex]),
       );
       if (weakCards.length > 0) {
         issues.push(
@@ -1487,6 +1505,137 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const normalizedRight = this.normalizeSemanticText(right);
     if (!normalizedLeft || !normalizedRight) return false;
     return normalizedLeft === normalizedRight;
+  }
+
+  private isWeakCardGridCard(
+    card: { heading: string; body: string; imageSrc?: string },
+    draftCard:
+      | {
+          heading: string;
+          body: string;
+          imageSrc?: string;
+        }
+      | undefined,
+  ): boolean {
+    const hasHeading = card.heading?.trim().length > 0;
+    const hasBody = card.body?.trim().length > 0;
+    if (!hasHeading) return true;
+
+    const draftRequiresBody = this.cardGridDraftCardRequiresBody(draftCard);
+    // Image cards (imageSrc present) are self-contained — body can be empty.
+    const hasImage = !!card.imageSrc?.trim();
+    if (draftRequiresBody && !hasBody && !hasImage) return true;
+
+    // For icon/skill cards that carry an imageSrc, heading==body is an
+    // intentional accessible-label pattern and must not be flagged as weak.
+    if (
+      hasBody &&
+      this.isTrivialContentDuplicate(card.heading, card.body) &&
+      draftRequiresBody &&
+      !hasImage
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private cardGridDraftCardRequiresBody(
+    draftCard:
+      | {
+          heading: string;
+          body: string;
+          imageSrc?: string;
+        }
+      | undefined,
+  ): boolean {
+    if (!draftCard) return true;
+    // Icon/skill cards: imageSrc + heading is self-contained — body is optional
+    // even when the draft happens to carry the heading text as the body value.
+    if (draftCard.imageSrc?.trim() && draftCard.heading?.trim()) return false;
+    if (draftCard.body?.trim()) return true;
+    return false;
+  }
+
+  private findBestMatchingCardGrid(
+    draftSection: Extract<SectionPlan, { type: 'card-grid' }>,
+    candidates: Array<{
+      section: Extract<SectionPlan, { type: 'card-grid' }>;
+      index: number;
+    }>,
+  ):
+    | {
+        section: Extract<SectionPlan, { type: 'card-grid' }>;
+        indexInPool: number;
+      }
+    | undefined {
+    let best:
+      | {
+          section: Extract<SectionPlan, { type: 'card-grid' }>;
+          indexInPool: number;
+          score: number;
+        }
+      | undefined;
+
+    candidates.forEach((candidate, indexInPool) => {
+      const score = this.scoreCardGridMatch(draftSection, candidate.section);
+      if (!best || score > best.score) {
+        best = { section: candidate.section, indexInPool, score };
+      }
+    });
+
+    return best;
+  }
+
+  private scoreCardGridMatch(
+    left: Extract<SectionPlan, { type: 'card-grid' }>,
+    right: Extract<SectionPlan, { type: 'card-grid' }>,
+  ): number {
+    let score = 0;
+
+    if (
+      left.sourceRef?.sourceNodeId &&
+      right.sourceRef?.sourceNodeId &&
+      left.sourceRef.sourceNodeId === right.sourceRef.sourceNodeId
+    ) {
+      score += 100;
+    }
+
+    const leftIdentity = this.normalizeSemanticText(
+      left.debugKey ?? left.sectionKey ?? left.title ?? '',
+    );
+    const rightIdentity = this.normalizeSemanticText(
+      right.debugKey ?? right.sectionKey ?? right.title ?? '',
+    );
+    if (leftIdentity && rightIdentity && leftIdentity === rightIdentity) {
+      score += 40;
+    }
+
+    const leftTitle = this.normalizeSemanticText(left.title ?? '');
+    const rightTitle = this.normalizeSemanticText(right.title ?? '');
+    if (leftTitle && rightTitle && leftTitle === rightTitle) {
+      score += 20;
+    }
+
+    if (left.cards.length === right.cards.length) {
+      score += 10;
+    }
+
+    const leftHeadings = new Set(
+      left.cards
+        .map((card) => this.normalizeSemanticText(card.heading))
+        .filter(Boolean),
+    );
+    const rightHeadings = new Set(
+      right.cards
+        .map((card) => this.normalizeSemanticText(card.heading))
+        .filter(Boolean),
+    );
+    for (const heading of leftHeadings) {
+      if (rightHeadings.has(heading)) score += 5;
+    }
+
+    return score;
   }
 
   private normalizeSemanticText(value: string): string {

@@ -106,7 +106,8 @@ export class OrchestratorController {
 
   @Post('start-preview')
   async startPreview(@Body() body: { jobId: string }) {
-    if (!body?.jobId?.trim()) throw new BadRequestException('jobId is required');
+    if (!body?.jobId?.trim())
+      throw new BadRequestException('jobId is required');
     return this.orchestratorService.startPreview(body.jobId.trim());
   }
 

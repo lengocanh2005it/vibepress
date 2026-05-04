@@ -367,6 +367,11 @@ export interface FooterSection extends BaseSection {
   brandDescription?: string; // uses siteInfo.blogDescription if omitted
   menuColumns: { title: string; menuSlug: string }[];
   columnWidths?: string[];
+  supplementalImages?: Array<{
+    src: string;
+    alt?: string;
+    customClassNames?: string[];
+  }>;
   showSiteLogo?: boolean;
   showSiteTitle?: boolean;
   showTagline?: boolean;

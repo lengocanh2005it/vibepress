@@ -331,9 +331,24 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
     const footerColumnsNode = orderedNodes.find(
       (node) => node.kind === 'columns',
     );
+    const supplementalImages = orderedNodes
+      .filter(
+        (node) =>
+          node.kind === 'image' &&
+          typeof node.src === 'string' &&
+          node.src.trim(),
+      )
+      .map((node) => ({
+        src: node.src!.trim(),
+        ...(node.alt?.trim() ? { alt: node.alt.trim() } : {}),
+        ...(node.customClassNames?.length
+          ? { customClassNames: [...new Set(node.customClassNames)] }
+          : {}),
+      }));
     const section: FooterSection = {
       type: 'footer',
       menuColumns: inferFooterMenuColumnsFromBlockTree(orderedNodes),
+      ...(supplementalImages.length > 0 ? { supplementalImages } : {}),
       showSiteLogo: orderedNodes.some((node) => node.kind === 'site-logo'),
       showSiteTitle: orderedNodes.some((node) => node.kind === 'site-title'),
       showTagline: orderedNodes.some((node) => node.kind === 'site-tagline'),
@@ -1495,6 +1510,7 @@ function buildSidebarSectionFromBlockTree(
         node.text.trim().length > 0,
     )
     .map((node) => node.text!.trim());
+  const hasSearch = orderedNodes.some((node) => node.kind === 'search');
   const hasNavigation = orderedNodes.some((node) => node.kind === 'navigation');
   const hasAuthorBio = orderedNodes.some((node) =>
     ['post-author-biography', 'avatar'].includes(node.kind),
@@ -1505,6 +1521,16 @@ function buildSidebarSectionFromBlockTree(
   );
 
   const widgets: SidebarSection['widgets'] = [];
+  if (hasSearch) {
+    widgets.push({
+      kind: 'search',
+      ...(headingTexts.find((heading) => /search/i.test(heading))
+        ? {
+            title: headingTexts.find((heading) => /search/i.test(heading)),
+          }
+        : {}),
+    });
+  }
   if (hasAuthorBio) {
     widgets.push({
       kind: 'author-bio',

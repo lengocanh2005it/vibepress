@@ -958,6 +958,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     );
   }
 
+  const repeatedGroupGrid = buildCardGridFromRepeatedGroupChildren(node);
+  if (repeatedGroupGrid) {
+    return toMappedSections(repeatedGroupGrid, node);
+  }
+
   // Testimonial groups can be explicit ("testimonial" metadata) or implicit
   // (a long quote plus compact author/source copy nested in the group).
   const metadataName = (
@@ -3015,6 +3020,11 @@ function collectCardGridRows(node: WpNode): CardGridSection[] | null {
   }
 
   if ((block === 'core/group' || block === 'group') && node.children?.length) {
+    const repeatedGroupGrid = buildCardGridFromRepeatedGroupChildren(node);
+    if (repeatedGroupGrid) {
+      return [repeatedGroupGrid];
+    }
+
     const rows: CardGridSection[] = [];
     for (const child of node.children) {
       const nestedRows = collectCardGridRows(child);
@@ -3025,6 +3035,148 @@ function collectCardGridRows(node: WpNode): CardGridSection[] | null {
   }
 
   return null;
+}
+
+function buildCardGridFromRepeatedGroupChildren(
+  node: WpNode,
+): CardGridSection | null {
+  const children = (node.children ?? []).filter(
+    (child) => !isSpacerBlock(child.block),
+  );
+  if (children.length < 2) return null;
+
+  const layoutType = String(node.params?.layout?.type ?? '').toLowerCase();
+  const hasGridLayout =
+    layoutType === 'grid' ||
+    typeof node.params?.layout?.minimumColumnWidth === 'string';
+  if (!hasGridLayout) return null;
+
+  const groupChildren = children.filter(
+    (child) => child.block === 'core/group' || child.block === 'group',
+  );
+  if (groupChildren.length < 2 || groupChildren.length !== children.length) {
+    return null;
+  }
+
+  const cards = groupChildren
+    .map((child) => buildCardGridCardFromGroup(child))
+    .filter(
+      (
+        card,
+      ): card is NonNullable<ReturnType<typeof buildCardGridCardFromGroup>> =>
+        !!card,
+    );
+  if (cards.length < 2 || cards.length !== groupChildren.length) {
+    return null;
+  }
+
+  return {
+    type: 'card-grid',
+    columns: Math.min(Math.max(cards.length, 2), 4) as 2 | 3 | 4,
+    cards,
+  };
+}
+
+function buildCardGridCardFromGroup(node: WpNode): {
+  heading: string;
+  body: string;
+  headingCustomClassNames?: string[];
+  bodyCustomClassNames?: string[];
+  imageSrc?: string;
+  imageAlt?: string;
+  customClassNames?: string[];
+  imageCustomClassNames?: string[];
+} | null {
+  const testimonial = buildTestimonialFromGroup(node, node.children ?? []);
+  if (testimonial) {
+    return {
+      heading:
+        testimonial.authorName || testimonial.authorTitle || 'Testimonial',
+      body: testimonial.quote,
+      ...(testimonial.authorAvatar
+        ? {
+            imageSrc: testimonial.authorAvatar,
+            imageAlt: testimonial.authorName || '',
+          }
+        : {}),
+      ...(testimonial.authorCustomClassNames?.length
+        ? { headingCustomClassNames: testimonial.authorCustomClassNames }
+        : {}),
+      ...(testimonial.quoteCustomClassNames?.length
+        ? { bodyCustomClassNames: testimonial.quoteCustomClassNames }
+        : {}),
+      ...(node.customClassNames?.length
+        ? { customClassNames: uniqueClassNames(node.customClassNames) }
+        : {}),
+      ...(testimonial.authorAvatarCustomClassNames?.length
+        ? {
+            imageCustomClassNames: testimonial.authorAvatarCustomClassNames,
+          }
+        : {}),
+    };
+  }
+
+  const flat = flattenChildren(node);
+  const headingNode = findFirstByBlock(flat, ['core/heading', 'heading']);
+  const paragraphNodes = flat.filter((candidate) =>
+    ['core/paragraph', 'paragraph'].includes(candidate.block),
+  );
+  const imageNode = findFirstByBlock(flat, ['core/image', 'image']);
+
+  const headingText = headingNode ? extractNodeText(headingNode) : '';
+  const primaryParagraph = paragraphNodes.find((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
+  const primaryParagraphText = primaryParagraph
+    ? extractNodeText(primaryParagraph)
+    : '';
+  const bodyParagraphs = paragraphNodes.filter((candidate) => {
+    if (headingNode) return true;
+    return candidate !== primaryParagraph;
+  });
+  const bodyText = extractRichTextFromNodes(bodyParagraphs);
+
+  const heading = headingText || primaryParagraphText;
+  const body = bodyText || '';
+  if (!heading && !body && !imageNode?.src) {
+    return null;
+  }
+
+  return {
+    heading,
+    body,
+    ...(extractStyleVariantClassNames(
+      (headingNode ?? primaryParagraph)?.customClassNames,
+    ).length
+      ? {
+          headingCustomClassNames: extractStyleVariantClassNames(
+            (headingNode ?? primaryParagraph)?.customClassNames,
+          ),
+        }
+      : {}),
+    ...(extractStyleVariantClassNames(bodyParagraphs[0]?.customClassNames)
+      .length
+      ? {
+          bodyCustomClassNames: extractStyleVariantClassNames(
+            bodyParagraphs[0]?.customClassNames,
+          ),
+        }
+      : {}),
+    ...(imageNode?.src
+      ? {
+          imageSrc: imageNode.src,
+          imageAlt: imageNode.alt ?? '',
+        }
+      : {}),
+    ...(node.customClassNames?.length
+      ? { customClassNames: uniqueClassNames(node.customClassNames) }
+      : {}),
+    ...(imageNode?.customClassNames?.length
+      ? {
+          imageCustomClassNames: uniqueClassNames(imageNode.customClassNames),
+        }
+      : {}),
+  };
 }
 
 function buildHeroFromChildren(

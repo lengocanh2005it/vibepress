@@ -189,4 +189,32 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('Search posts...');
     expect(code).toContain('>Find</button>');
   });
+
+  it('renders supplemental footer images from deterministic footer sections', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Footer',
+      dataNeeds: ['siteInfo', 'footerLinks'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+          supplementalImages: [
+            {
+              src: 'theme-asset:/assets/images/arrow-up.png',
+              alt: 'Back to top',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
+    );
+    expect(code).toContain('Back to top');
+  });
 });

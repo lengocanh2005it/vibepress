@@ -5399,6 +5399,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const sourceEvidence = this.collectSectionSourceEvidence(sections);
     const widgets: SidebarSection['widgets'] = [];
 
+    if (hasSearch) {
+      widgets.push({
+        kind: 'search',
+        ...(headingTexts.find((heading) => /search/i.test(heading))
+          ? {
+              title: headingTexts.find((heading) => /search/i.test(heading)),
+            }
+          : {}),
+      });
+    }
+
     if (hasAuthorBio) {
       widgets.push({
         kind: 'author-bio',
