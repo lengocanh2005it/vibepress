@@ -51,6 +51,7 @@ export default function ReactProjects() {
         state: {
           jobId: active.job_id,
           siteId: active.site_id,
+          siteUrl: active.site_url,
           previewUrl: data.previewUrl,
           apiBaseUrl: data.apiBaseUrl,
           deployedUrl: active.deployed_url,

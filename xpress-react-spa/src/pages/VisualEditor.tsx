@@ -47,6 +47,7 @@ interface PipelineStatusResponse {
 interface LocationState {
   jobId?: string;
   siteId?: string;
+  siteUrl?: string;
   previewUrl?: string;
   apiBaseUrl?: string;
   deployedUrl?: string | null;
@@ -263,6 +264,7 @@ const VisualEditor: React.FC = () => {
   const state = (location.state ?? {}) as LocationState;
   const jobId = state.jobId || "";
   const siteId = state.siteId || "";
+  const siteUrl = state.siteUrl || "";
 
   const {
     iframeRef,
@@ -275,6 +277,7 @@ const VisualEditor: React.FC = () => {
   const [statusData, setStatusData] = useState<PipelineStatusResponse | null>(null);
   const [loading, setLoading] = useState(!!jobId);
   const [error, setError] = useState<string | null>(null);
+  const [wpFallbackPages, setWpFallbackPages] = useState<MetricPage[]>([]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -287,12 +290,25 @@ const VisualEditor: React.FC = () => {
       .then((data) => {
         setStatusData(data);
         setLoading(false);
+        const hasRouteData =
+          (data.result?.metrics?.pages?.length ?? 0) > 0 ||
+          (data.result?.routeEntries?.length ?? 0) > 0;
+        if (!hasRouteData && siteUrl) {
+          fetch(`/api/wp/site-pages?siteUrl=${encodeURIComponent(siteUrl)}`)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((pages: Array<{ slug: string; link: string }>) => {
+              setWpFallbackPages(
+                pages.map((p) => ({ url: p.link, slug: p.slug || "", type: "page" })),
+              );
+            })
+            .catch(() => {});
+        }
       })
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : "Không thể tải dữ liệu.");
         setLoading(false);
       });
-  }, [jobId]);
+  }, [jobId, siteUrl]);
 
   const [selectedRouteId, setSelectedRouteId] = useState("");
   const [frameTitle, setFrameTitle] = useState("");
@@ -395,15 +411,19 @@ const VisualEditor: React.FC = () => {
 
   const resolvedPreviewUrl = resolvePreviewUrl(previewUrl);
 
+  const effectivePages = statusData?.result?.metrics?.pages?.length
+    ? statusData.result.metrics.pages
+    : wpFallbackPages;
+
   const routes = useMemo(
     () =>
       buildRouteItems(
         resolvedPreviewUrl,
         previewUrl,
-        statusData?.result?.metrics?.pages,
+        effectivePages,
         statusData?.result?.routeEntries,
       ),
-    [previewUrl, resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries],
+    [previewUrl, resolvedPreviewUrl, effectivePages, statusData?.result?.routeEntries],
   );
 
   const effectiveRouteId = routes.some((r) => r.id === selectedRouteId)
