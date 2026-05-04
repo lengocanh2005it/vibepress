@@ -596,13 +596,9 @@ export class CodeGeneratorService {
         case 'query':
         case 'latest-posts':
           needs.add('posts');
-          needs.add('siteInfo');
           break;
         case 'post-author-biography':
           needs.add('siteInfo');
-          break;
-        case 'navigation':
-          needs.add('menus');
           break;
       }
       if (node.children?.length) {
@@ -735,16 +731,22 @@ export class CodeGeneratorService {
   }
 
   private planUsesResolveAsset(plan: ComponentVisualPlan): boolean {
-    return plan.sections.some((section) => {
+    const sectionUsesResolveAsset = plan.sections.some((section) => {
       switch (section.type) {
         case 'hero':
           return !!section.image?.src;
         case 'cover':
           return !!section.imageSrc;
+        case 'card-grid':
+          return section.cards.some((card) => !!card.imageSrc);
         case 'media-text':
           return !!section.imageSrc;
         case 'testimonial':
           return !!section.authorAvatar;
+        case 'footer':
+          return (section.supplementalImages ?? []).some(
+            (image) => !!image.src,
+          );
         case 'modal':
           return !!section.imageSrc;
         case 'tabs':
@@ -758,6 +760,43 @@ export class CodeGeneratorService {
         default:
           return false;
       }
+    });
+    if (sectionUsesResolveAsset) return true;
+    return this.blockTreeUsesResolveAsset(plan.blockTree ?? []);
+  }
+
+  private blockTreeUsesResolveAsset(nodes: BlockNode[]): boolean {
+    return nodes.some((node) => {
+      if (
+        ['cover', 'image'].includes(node.kind) &&
+        typeof node.src === 'string' &&
+        node.src.length > 0
+      ) {
+        return true;
+      }
+      return this.blockTreeUsesResolveAsset(node.children ?? []);
+    });
+  }
+
+  private planUsesAppPathHelpers(plan: ComponentVisualPlan): boolean {
+    if (
+      plan.sections.some((section) => {
+        if (section.type === 'navbar' || section.type === 'footer') return true;
+        if (section.type !== 'sidebar') return false;
+        return (section.widgets ?? []).some(
+          (widget) => widget.kind === 'navigation',
+        );
+      })
+    ) {
+      return true;
+    }
+    return this.blockTreeUsesAppPathHelpers(plan.blockTree ?? []);
+  }
+
+  private blockTreeUsesAppPathHelpers(nodes: BlockNode[]): boolean {
+    return nodes.some((node) => {
+      if (['navigation', 'navigation-link'].includes(node.kind)) return true;
+      return this.blockTreeUsesAppPathHelpers(node.children ?? []);
     });
   }
 
@@ -1561,6 +1600,38 @@ export class CodeGeneratorService {
       lines.push(`  };`);
       lines.push('');
     }
+    if (this.planUsesAppPathHelpers(plan)) {
+      lines.push(`  const toAppPath = (url?: string) => {`);
+      lines.push(`    if (!url) return '/';`);
+      lines.push(`    try {`);
+      if (dataNeeds.includes('siteInfo')) {
+        lines.push(
+          `      const baseUrl = siteInfo?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');`,
+        );
+      } else {
+        lines.push(
+          `      const baseUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';`,
+        );
+      }
+      lines.push(`      const base = new URL(baseUrl);`);
+      lines.push(`      const resolved = new URL(url, baseUrl);`);
+      lines.push(`      if (resolved.origin === base.origin) {`);
+      lines.push(
+        `        return \`\${resolved.pathname}\${resolved.search}\${resolved.hash}\` || '/';`,
+      );
+      lines.push(`      }`);
+      lines.push(`      return url;`);
+      lines.push(`    } catch {`);
+      lines.push(`      return url;`);
+      lines.push(`    }`);
+      lines.push(`  };`);
+      lines.push('');
+      lines.push(`  const isInternalPath = (url?: string) => {`);
+      lines.push(`    const next = toAppPath(url);`);
+      lines.push(`    return next.startsWith('/');`);
+      lines.push(`  };`);
+      lines.push('');
+    }
     lines.push(
       `  if (loading) return <div className="min-h-screen flex items-center justify-center"><span>Loading...</span></div>;`,
     );
@@ -2163,7 +2234,7 @@ ${indent}</form>`;
         backgroundColor: 'rgba(0,0,0,0.05)',
       },
     )}>
-${indent}  {((posts.find((post) => post.author)?.author ?? siteInfo?.siteName ?? '?').charAt(0) || '?').toUpperCase()}
+${indent}  {((posts.find((post) => post.author)?.author ?? '?').charAt(0) || '?').toUpperCase()}
 ${indent}</div>`;
   }
 
@@ -3470,7 +3541,7 @@ ${indent}) : null}`;
         : `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(this.textLinkClass(tc, p.accent), s.cta.customClassNames)}"${navLinkStyle}>${s.cta.text}</Link>`
       : '';
 
-    const navItems = `menus.find(m => m.slug === '${s.menuSlug}')?.items.filter(i => i.parentId === 0)`;
+    const navItems = `((menus.find((menu) => menu.location === 'primary') ?? menus.find((menu) => menu.slug === 'primary') ?? menus.find((menu) => menu.slug === '${s.menuSlug}') ?? menus[0])?.items ?? []).filter((item) => item.parentId === 0)`;
     const renderNavItem = (extraClass = '') =>
       `(isInternalPath(item.url) ? (
                     <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}"${navLinkStyle}>
