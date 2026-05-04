@@ -29,6 +29,12 @@ export function buildEditRequestContextNote(
   lines.push(
     'Treat page references and capture notes as focus hints for extra fidelity, not as migration scope limits.',
   );
+  lines.push(
+    'Supported edit scope is limited to: content changes, background changes, color changes, and layout changes.',
+  );
+  lines.push(
+    'Do NOT add/remove/replace sections or components, and do NOT reinterpret the request as a new feature request.',
+  );
 
   if (editRequest.prompt) {
     lines.push(`Primary request: ${editRequest.prompt}`);
@@ -139,7 +145,7 @@ export function buildEditRequestContextNote(
       'Treat screenshot URLs and selection boxes as authoritative visual evidence for the requested change.',
     );
     lines.push(
-      'Use documentRect, normalizedRect, route, and DOM fingerprints to match each capture to the nearest section in the WordPress template source.',
+      'Use route, documentRect/normalizedRect, and the capture note to resolve the nearest generated React target region.',
     );
   } else if ((editRequest.attachments?.length ?? 0) > 0) {
     lines.push(
@@ -180,44 +186,8 @@ function scoreAttachment(
   let score = 0;
   if (attachment.note) score += 1;
   if (attachment.selection) score += 1;
-  if (attachment.domTarget) score += 1;
-  if (attachment.targetNode) score += 2;
-
-  if (componentName && attachment.domTarget) {
-    const domTokens = [
-      attachment.domTarget.blockName,
-      attachment.domTarget.blockClientId,
-      attachment.domTarget.elementId,
-      attachment.domTarget.tagName,
-      attachment.domTarget.cssSelector,
-      attachment.domTarget.domPath,
-      attachment.domTarget.classNames?.join(' '),
-      attachment.domTarget.nearestHeading,
-      attachment.domTarget.nearestLandmark,
-      attachment.domTarget.textSnippet,
-    ]
-      .filter(Boolean)
-      .join(' ');
-    if (fuzzyMatch(componentName, domTokens)) score += 5;
-  }
-
-  if (componentName && attachment.targetNode) {
-    const targetTokens = [
-      attachment.targetNode.templateName,
-      attachment.targetNode.blockName,
-      attachment.targetNode.tagName,
-      attachment.targetNode.domPath,
-      attachment.targetNode.nearestHeading,
-      attachment.targetNode.nearestLandmark,
-    ]
-      .filter(Boolean)
-      .join(' ');
-    if (fuzzyMatch(componentName, targetTokens)) score += 6;
-  }
 
   if (route) {
-    if (routeMatchesPath(route, attachment.targetNode?.route)) score += 10;
-
     const pageRoute =
       attachment.captureContext?.page?.route ??
       toComparablePath(attachment.sourcePageUrl);
@@ -343,67 +313,15 @@ function formatGeometryLine(
 }
 
 function formatTargetNodeLine(
-  attachment: PipelineCaptureAttachmentDto,
+  _attachment: PipelineCaptureAttachmentDto,
 ): string | null {
-  if (!attachment.targetNode) return null;
-
-  const parts = [
-    attachment.targetNode.nodeId
-      ? `node=${attachment.targetNode.nodeId}`
-      : null,
-    attachment.targetNode.templateName
-      ? `template=${attachment.targetNode.templateName}`
-      : null,
-    attachment.targetNode.route
-      ? `targetRoute=${attachment.targetNode.route}`
-      : null,
-    attachment.targetNode.blockName
-      ? `block=${attachment.targetNode.blockName}`
-      : null,
-    attachment.targetNode.blockClientId
-      ? `blockClientId=${attachment.targetNode.blockClientId}`
-      : null,
-    attachment.targetNode.tagName
-      ? `targetTag=${attachment.targetNode.tagName}`
-      : null,
-    attachment.targetNode.domPath
-      ? `targetPath=${attachment.targetNode.domPath}`
-      : null,
-    attachment.targetNode.nearestHeading
-      ? `targetHeading="${truncate(attachment.targetNode.nearestHeading, 60)}"`
-      : null,
-    attachment.targetNode.nearestLandmark
-      ? `targetLandmark=${attachment.targetNode.nearestLandmark}`
-      : null,
-  ].filter(Boolean);
-
-  return parts.length > 0 ? parts.join(' ') : null;
+  return null;
 }
 
 function formatDomTarget(
-  attachment: PipelineCaptureAttachmentDto,
+  _attachment: PipelineCaptureAttachmentDto,
 ): string | null {
-  if (!attachment.domTarget) return null;
-  const parts = [
-    attachment.domTarget.blockName,
-    attachment.domTarget.elementId
-      ? `#${attachment.domTarget.elementId}`
-      : null,
-    attachment.domTarget.cssSelector,
-    attachment.domTarget.domPath
-      ? `path=${attachment.domTarget.domPath}`
-      : null,
-    attachment.domTarget.nearestLandmark
-      ? `landmark=${attachment.domTarget.nearestLandmark}`
-      : null,
-    attachment.domTarget.nearestHeading
-      ? `heading="${truncate(attachment.domTarget.nearestHeading, 60)}"`
-      : null,
-    attachment.domTarget.textSnippet
-      ? `"${truncate(attachment.domTarget.textSnippet, 80)}"`
-      : null,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(' ') : null;
+  return null;
 }
 
 function isExplicitlyTargetedElsewhere(
@@ -448,7 +366,10 @@ function routeMatchesPath(
   if (!normalizedRoute || !normalizedPath) return false;
   if (normalizedRoute === normalizedPath) return true;
   if (normalizedRoute === '/') return normalizedPath === '/';
-  return normalizedPath.startsWith(`${normalizedRoute}/`);
+  return (
+    normalizedPath.startsWith(`${normalizedRoute}/`) ||
+    normalizedRoute.startsWith(`${normalizedPath}/`)
+  );
 }
 
 function normalizeRoute(value?: string | null): string | null {

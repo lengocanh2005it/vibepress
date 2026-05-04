@@ -1,8 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import {
-  CaptureSectionMatcherService,
-  type CaptureSectionMatch,
-} from '../../edit-request/capture-section-matcher.service.js';
 import { CaptureVisionInputService } from '../../edit-request/capture-vision-input.service.js';
 import type { PostMigrationEditTask } from '../../edit-request/edit-request-phase.service.js';
 import type { ResolvedCaptureTargetRecord } from '../../edit-request/ui-source-map.types.js';
@@ -22,7 +18,6 @@ export interface SectionEditResult {
 export class SectionEditService {
   constructor(
     private readonly reactGenerator: ReactGeneratorService,
-    private readonly captureSectionMatcher: CaptureSectionMatcherService,
     private readonly captureVisionInput: CaptureVisionInputService,
   ) {}
 
@@ -34,7 +29,7 @@ export class SectionEditService {
     modelConfig?: { fixAgent?: string };
     logPath?: string;
   }): Promise<SectionEditResult | null> {
-    const { task, request, plan, components, modelConfig, logPath } = input;
+    const { task, plan, components, modelConfig, logPath } = input;
     const parentComponent = components.find(
       (component) => component.name === task.componentName,
     );
@@ -43,28 +38,14 @@ export class SectionEditService {
     const componentPlan = plan.find(
       (entry) => entry.componentName === task.planComponentName,
     );
-    const sectionMatches =
-      task.sectionMatches.length > 0
-        ? task.sectionMatches
-        : this.captureSectionMatcher.matchComponentSections({
-            componentPlan,
-            attachments: task.attachments,
-            request,
-          });
-
-    const target = this.resolveTargetComponent(
-      task,
-      sectionMatches,
-      components,
-    );
+    const target = this.resolveTargetComponent(task, components);
     const visionInput = this.captureVisionInput.buildVisionInput({
       attachments: task.attachments,
-      maxImages: target.isSectionTarget ? 2 : 3,
+      maxImages: target.isScopedTarget ? 2 : 3,
     });
     const scopedFeedback = buildScopedFeedback({
       task,
       editedComponentName: target.name,
-      sectionMatches,
       currentCode: target.component.code,
       componentPlan,
     });
@@ -74,6 +55,7 @@ export class SectionEditService {
       feedback: scopedFeedback,
       modelConfig,
       logPath,
+      fixMode: 'edit-request-safe',
       visionImageUrls: visionInput.imageUrls,
       visionContextNote: visionInput.summaryNote,
       tokenScope: 'edit-request',
@@ -83,7 +65,6 @@ export class SectionEditService {
       updatedCode: fixed.code,
       editedComponentName: target.name,
       exactTargets: task.exactTargets,
-      sectionMatches,
     });
     if (!mutationAudit.hasMeaningfulChange) {
       fixed = await this.reactGenerator.fixComponent({
@@ -92,6 +73,7 @@ export class SectionEditService {
         feedback: `${scopedFeedback}\n\n${mutationAudit.retryFeedback}`,
         modelConfig,
         logPath,
+        fixMode: 'edit-request-safe',
         visionImageUrls: visionInput.imageUrls,
         visionContextNote: visionInput.summaryNote,
         tokenScope: 'edit-request',
@@ -105,19 +87,38 @@ export class SectionEditService {
       debugSummary:
         target.name === task.componentName
           ? `target=${task.componentName} | mode=component`
-          : `target=${task.componentName} | edited=${target.name} | mode=section`,
+          : `target=${task.componentName} | edited=${target.name} | mode=scoped`,
     };
   }
 
   private resolveTargetComponent(
     task: PostMigrationEditTask,
-    sectionMatches: CaptureSectionMatch[],
     components: GeneratedComponent[],
   ): {
     name: string;
     component: GeneratedComponent;
-    isSectionTarget: boolean;
+    isScopedTarget: boolean;
   } {
+    const exactTargetComponentNames = Array.from(
+      new Set(
+        task.exactTargets
+          .map((target) => resolveExactTargetComponentName(target))
+          .filter(Boolean),
+      ),
+    );
+    for (const candidateName of exactTargetComponentNames) {
+      const exactTargetComponent = components.find(
+        (component) => component.name === candidateName,
+      );
+      if (exactTargetComponent) {
+        return {
+          name: candidateName,
+          component: exactTargetComponent,
+          isScopedTarget: candidateName !== task.componentName,
+        };
+      }
+    }
+
     const exactComponent = components.find(
       (component) => component.name === task.componentName,
     );
@@ -125,22 +126,8 @@ export class SectionEditService {
       return {
         name: task.componentName,
         component: exactComponent,
-        isSectionTarget: task.planComponentName !== task.componentName,
+        isScopedTarget: task.planComponentName !== task.componentName,
       };
-    }
-
-    for (const match of sectionMatches) {
-      const candidateName = `${task.planComponentName}Section${match.sectionIndex + 1}`;
-      const sectionComponent = components.find(
-        (component) => component.name === candidateName,
-      );
-      if (sectionComponent) {
-        return {
-          name: candidateName,
-          component: sectionComponent,
-          isSectionTarget: true,
-        };
-      }
     }
 
     const parentComponent = components.find(
@@ -155,7 +142,7 @@ export class SectionEditService {
     return {
       name: task.planComponentName,
       component: parentComponent,
-      isSectionTarget: false,
+      isScopedTarget: false,
     };
   }
 }
@@ -163,17 +150,10 @@ export class SectionEditService {
 function buildScopedFeedback(input: {
   task: PostMigrationEditTask;
   editedComponentName: string;
-  sectionMatches: CaptureSectionMatch[];
   currentCode: string;
   componentPlan?: PlanResult[number];
 }): string {
-  const {
-    task,
-    editedComponentName,
-    sectionMatches,
-    currentCode,
-    componentPlan,
-  } = input;
+  const { task, editedComponentName, currentCode, componentPlan } = input;
   const lines = [task.feedback];
 
   if (editedComponentName !== task.componentName) {
@@ -186,7 +166,7 @@ function buildScopedFeedback(input: {
     lines.push('Exact generated React target metadata:');
     for (const target of task.exactTargets) {
       lines.push(
-        `- attachment=${target.captureId} -> file=${target.outputFilePath} debugKey=${target.debugKey ?? target.sectionKey ?? 'unknown'} sourceNodeId=${target.sourceNodeId} lines=${formatLineRange(target.startLine, target.endLine)} resolution=${target.resolution} confidence=${target.confidence.toFixed(2)}`,
+        `- attachment=${target.captureId} -> file=${target.outputFilePath} ownerLines=${formatLineRange(target.startLine, target.endLine)} targetComponent=${target.targetComponentName ?? target.componentName} targetRole=${target.targetNodeRole ?? 'section'} targetLines=${formatLineRange(target.targetStartLine, target.targetEndLine)} resolution=${target.resolution} confidence=${target.confidence.toFixed(2)}`,
       );
     }
   }
@@ -210,22 +190,12 @@ function buildScopedFeedback(input: {
     }
   }
 
-  if (sectionMatches.length > 0) {
-    lines.push('Prioritized section evidence:');
-    for (const match of sectionMatches.slice(0, 4)) {
-      lines.push(
-        `- attachment=${match.attachmentId} -> section[${match.sectionIndex}] ${match.sectionType} (score=${match.score})`,
-      );
-    }
-  }
-
   lines.push(
     'Material change requirement: do NOT return the component unchanged or with only unrelated edits. The targeted capture region must show a visible code change that implements the requested refinement while preserving the same semantic/source-backed ownership.',
   );
 
   const preservationContract = buildUntouchedSectionPreservationContract({
     componentPlan,
-    sectionMatches,
     exactTargets: task.exactTargets,
   });
   if (preservationContract) {
@@ -237,10 +207,9 @@ function buildScopedFeedback(input: {
 
 function buildUntouchedSectionPreservationContract(input: {
   componentPlan?: PlanResult[number];
-  sectionMatches: CaptureSectionMatch[];
   exactTargets: ResolvedCaptureTargetRecord[];
 }): string {
-  const { componentPlan, sectionMatches, exactTargets } = input;
+  const { componentPlan, exactTargets } = input;
   const sections = componentPlan?.visualPlan?.sections ?? [];
   if (sections.length === 0) return '';
 
@@ -254,16 +223,6 @@ function buildUntouchedSectionPreservationContract(input: {
     if (target.debugKey?.trim()) targetedIds.add(target.debugKey.trim());
     if (target.sectionKey?.trim()) targetedIds.add(target.sectionKey.trim());
   }
-  for (const match of sectionMatches) {
-    const section = sections[match.sectionIndex];
-    if (!section) continue;
-    if (section.sourceRef?.sourceNodeId?.trim()) {
-      targetedIds.add(section.sourceRef.sourceNodeId.trim());
-    }
-    if (section.debugKey?.trim()) targetedIds.add(section.debugKey.trim());
-    if (section.sectionKey?.trim()) targetedIds.add(section.sectionKey.trim());
-  }
-
   const untouched = sections.filter((section) => {
     const sourceNodeId = section.sourceRef?.sourceNodeId?.trim();
     const debugKey = section.debugKey?.trim() ?? section.sectionKey?.trim();
@@ -364,25 +323,18 @@ function assessFocusedEditMutation(input: {
   updatedCode: string;
   editedComponentName: string;
   exactTargets: ResolvedCaptureTargetRecord[];
-  sectionMatches: CaptureSectionMatch[];
 }): {
   hasMeaningfulChange: boolean;
   retryFeedback: string;
 } {
-  const {
-    originalCode,
-    updatedCode,
-    editedComponentName,
-    exactTargets,
-    sectionMatches,
-  } = input;
+  const { originalCode, updatedCode, editedComponentName, exactTargets } =
+    input;
   if (normalizeForDiff(originalCode) === normalizeForDiff(updatedCode)) {
     return {
       hasMeaningfulChange: false,
       retryFeedback: buildNoOpRetryFeedback({
         editedComponentName,
         exactTargets,
-        sectionMatches,
         originalCode,
         reason:
           'The previous attempt returned code that is effectively unchanged from the original component.',
@@ -419,7 +371,6 @@ function assessFocusedEditMutation(input: {
     retryFeedback: buildNoOpRetryFeedback({
       editedComponentName,
       exactTargets: relevantTargets,
-      sectionMatches,
       originalCode,
       reason:
         'The previous attempt changed code outside the exact capture target, but the target region itself still appears unchanged.',
@@ -430,35 +381,16 @@ function assessFocusedEditMutation(input: {
 function buildNoOpRetryFeedback(input: {
   editedComponentName: string;
   exactTargets: ResolvedCaptureTargetRecord[];
-  sectionMatches: CaptureSectionMatch[];
   originalCode: string;
   reason: string;
 }): string {
-  const {
-    editedComponentName,
-    exactTargets,
-    sectionMatches,
-    originalCode,
-    reason,
-  } = input;
+  const { editedComponentName, exactTargets, originalCode, reason } = input;
   const lines = [
     `Retry required for "${editedComponentName}".`,
     reason,
     'You MUST materially modify the targeted capture region first. Do not return the original code and do not spend the edit budget on unrelated parts of the component.',
     'Preserve the same semantic region ownership and source-backed boundaries for the targeted element.',
   ];
-
-  if (sectionMatches.length > 0) {
-    lines.push(
-      `Matched section priority: ${sectionMatches
-        .slice(0, 3)
-        .map(
-          (match) =>
-            `attachment=${match.attachmentId} -> section[${match.sectionIndex}] ${match.sectionType}`,
-        )
-        .join(' | ')}`,
-    );
-  }
 
   const exactTargetExcerpts = buildExactTargetExcerpts(
     originalCode,

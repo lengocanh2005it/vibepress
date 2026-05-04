@@ -3,9 +3,9 @@ import { buildEditRequestContextNote } from '../../edit-request/edit-request-pro
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import {
   buildVisualPlanPrompt,
-  extractStaticImageSources,
   parseVisualPlanDetailed,
   type VisualPlanContract,
 } from '../react-generator/prompts/visual-plan.prompt.js';
@@ -22,6 +22,9 @@ import type {
   SectionPlan,
   TypographyTokens,
 } from '../react-generator/visual-plan.schema.js';
+import type { BlockNode } from '../../../common/utils/wp-node-to-block-tree.js';
+import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
+import type { PlannerSurfacePlan } from './planner-surface-plan.schema.js';
 
 export interface PlannerComponentPlanLike {
   templateName: string;
@@ -53,6 +56,34 @@ export interface PlanningSourceSupplement {
   reason?: string;
   templateName?: string;
   sourceFile?: string;
+  canonicalSource?: CanonicalPlanningSource;
+}
+
+export interface CanonicalPlanningSourceFacts {
+  hasQuery: boolean;
+  hasSidebarTemplatePart: boolean;
+  hasSearch: boolean;
+  hasPostContent: boolean;
+  hasPageList: boolean;
+  hasComments: boolean;
+  hasNavigation: boolean;
+  hasWooCart: boolean;
+  hasWooCheckout: boolean;
+}
+
+export interface CanonicalPlanningSource {
+  rawSource: string;
+  normalizedSource: string;
+  sourceTemplateName: string;
+  sourceFile: string;
+  wpNodes: WpNode[];
+  resolvedNodes: WpNode[];
+  blockTree: BlockNode[];
+  customClassNames: string[];
+  headingTexts: string[];
+  interactiveWidgets: string[];
+  assetRefs: string[];
+  sourceFacts: CanonicalPlanningSourceFacts;
 }
 
 export interface PlanningSourceContext {
@@ -64,6 +95,7 @@ export interface PlanningSourceContext {
   sourceTemplateName?: string;
   sourceFile?: string;
   sourceReason?: string;
+  canonicalSource?: CanonicalPlanningSource;
 }
 
 export interface PlannerPageEvidence {
@@ -76,6 +108,8 @@ export interface PlannerPageEvidence {
 export interface PlannerVisualPlanRepairState {
   planningSource: PlanningSourceContext;
   draftSections?: SectionPlan[];
+  draftBlockTree?: BlockNode[];
+  surfacePlan?: PlannerSurfacePlan;
   detectedCustomClassNames: string[];
   sourceBackedAuxiliaryLabels: string[];
   sourceWidgetHints: string[];
@@ -97,18 +131,39 @@ export interface PlannerVisualRepairDelegate {
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext;
   buildPlanningSourceContextFromResolvedSource(
     componentPlan: PlannerComponentPlanLike,
     preferredSource: PlanningSourceCandidate,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
   ): PlanningSourceContext;
   buildDraftSectionsForPlanningSource(
     planningSource: PlanningSourceContext | undefined,
     componentPlan: PlannerComponentPlanLike,
     tokens: ThemeTokens | undefined,
   ): SectionPlan[] | undefined;
+  buildDraftBlockTreeForPlanningSource(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlannerComponentPlanLike,
+    tokens: ThemeTokens | undefined,
+  ): BlockNode[] | undefined;
+  buildSurfacePlanForComponent(input: {
+    componentPlan: PlannerComponentPlanLike;
+    content: DbContentResult;
+    planningSource?: PlanningSourceContext;
+    draftSections?: SectionPlan[];
+    draftBlockTree?: BlockNode[];
+    visualPlan?: ComponentVisualPlan;
+    detectedCustomClassNames?: string[];
+    sourceWidgetHints?: string[];
+    hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+    tokens: ThemeTokens | undefined;
+  }): PlannerSurfacePlan | undefined;
   collectDraftCustomClassNames(draftSections?: SectionPlan[]): string[];
   detectInteractiveWidgetsFromSource(source: string): string[];
   extractHeadingTextsFromSource(source: string): string[];
@@ -119,7 +174,7 @@ export interface PlannerVisualRepairDelegate {
     content: DbContentResult,
   ): PlannerPageEvidence[];
   collectAllowedImageSrcs(
-    planningSource: string,
+    planningSource: PlanningSourceContext | string,
     content: DbContentResult,
   ): string[];
   requestVisualPlanCompletion(input: {
@@ -143,6 +198,7 @@ export interface PlannerVisualRepairDelegate {
   deriveComponentLayout(
     tokens: ThemeTokens | undefined,
     componentName: string,
+    isDetailPage?: boolean,
   ): LayoutTokens;
   mergeDraftSectionPresentation(
     sections: SectionPlan[],
@@ -171,7 +227,18 @@ interface PreparedRepairContext {
 @Injectable()
 export class PlannerVisualRepairService {
   private readonly logger = new Logger(PlannerVisualRepairService.name);
+  private readonly phaseC5LogLabel = 'Phase C.5: Surface+Visual Replan';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
+
+  private getPlanningSourcePromptSource(
+    planningSource?: PlanningSourceContext,
+  ): string {
+    return (
+      planningSource?.canonicalSource?.normalizedSource ??
+      planningSource?.source ??
+      ''
+    );
+  }
 
   shouldAttemptSelfHeal(reason: string, dropped = '', raw = ''): boolean {
     const combined = `${reason} ${dropped} ${raw}`.trim();
@@ -187,6 +254,8 @@ export class PlannerVisualRepairService {
     scopedEditRequest: PipelineEditRequestDto | undefined;
     visualDataNeeds: DataNeed[];
     hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
     currentState: PlannerVisualPlanRepairState;
     previousReason: string;
     previousDropped: string;
@@ -206,7 +275,9 @@ export class PlannerVisualRepairService {
     });
     const promptArtifacts = buildVisualPlanPrompt({
       componentName: input.componentPlan.componentName,
-      templateSource: prepared.state.planningSource.source,
+      templateSource: this.getPlanningSourcePromptSource(
+        prepared.state.planningSource,
+      ),
       content: input.content,
       tokens: input.tokens,
       repoManifest: input.repoManifest,
@@ -217,6 +288,7 @@ export class PlannerVisualRepairService {
       sourceAnalysis: prepared.state.planningSource.sourceAnalysis,
       sourceBackedAuxiliaryLabels: prepared.state.sourceBackedAuxiliaryLabels,
       sourceWidgetHints: prepared.state.sourceWidgetHints,
+      surfacePlan: prepared.state.surfacePlan,
       draftSections: prepared.state.draftSections,
       editRequestContextNote: [
         buildEditRequestContextNote(input.scopedEditRequest, {
@@ -270,7 +342,9 @@ export class PlannerVisualRepairService {
     });
     const promptArtifacts = buildVisualPlanPrompt({
       componentName: input.componentPlan.componentName,
-      templateSource: prepared.state.planningSource.source,
+      templateSource: this.getPlanningSourcePromptSource(
+        prepared.state.planningSource,
+      ),
       content: input.content,
       tokens: input.tokens,
       repoManifest: input.repoManifest,
@@ -281,6 +355,7 @@ export class PlannerVisualRepairService {
       sourceAnalysis: prepared.state.planningSource.sourceAnalysis,
       sourceBackedAuxiliaryLabels: prepared.state.sourceBackedAuxiliaryLabels,
       sourceWidgetHints: prepared.state.sourceWidgetHints,
+      surfacePlan: prepared.state.surfacePlan,
       draftSections: prepared.state.draftSections,
       editRequestContextNote: [
         buildEditRequestContextNote(input.scopedEditRequest, {
@@ -295,11 +370,24 @@ export class PlannerVisualRepairService {
     });
 
     this.logger.log(
-      `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" diagnosis: ${prepared.diagnosis.summary}`,
+      this.formatPhaseC5Log(
+        `diagnosis=${prepared.diagnosis.summary} | ${this.formatPlanSnapshot({
+          componentPlan: input.componentPlan,
+          planningSourceLabel: prepared.state.planningSource.sourceLabel,
+          surfacePlan: prepared.state.surfacePlan,
+          visualPlan: {
+            sections: prepared.state.draftSections ?? [],
+            renderMode: 'section-centric',
+            deterministicAuthority: false,
+          },
+        })}`,
+      ),
     );
     if (prepared.sourceChanged) {
       this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" investigating source ${prepared.previousSourceLabel ?? 'unknown'} -> ${prepared.state.planningSource.sourceLabel ?? 'unknown'}`,
+        this.formatPhaseC5Log(
+          `"${input.componentPlan.componentName}" investigating source ${prepared.previousSourceLabel ?? 'unknown'} -> ${prepared.state.planningSource.sourceLabel ?? 'unknown'}`,
+        ),
       );
     }
 
@@ -323,7 +411,14 @@ export class PlannerVisualRepairService {
     lastRaw = firstPass.raw;
     if (firstPass.visualPlan) {
       this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" replan succeeded with ${firstPass.visualPlan.sections.length} sections`,
+        this.formatPhaseC5Log(
+          `replan succeeded ✓ ${this.formatPlanSnapshot({
+            componentPlan: input.componentPlan,
+            planningSourceLabel: prepared.state.planningSource.sourceLabel,
+            surfacePlan: prepared.state.surfacePlan,
+            visualPlan: firstPass.visualPlan,
+          })}`,
+        ),
       );
       return {
         visualPlan: firstPass.visualPlan,
@@ -337,7 +432,9 @@ export class PlannerVisualRepairService {
     lastReason = firstPass.reason;
     lastDropped = firstPass.dropped;
     this.logger.warn(
-      `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" replan pass failed: ${lastReason}${lastDropped} — attempting strict repair`,
+      this.formatPhaseC5Log(
+        `"${input.componentPlan.componentName}" replan pass failed: ${lastReason}${lastDropped} — attempting strict repair`,
+      ),
     );
 
     const strictRepairPrompt = this.buildStrictRetryPrompt({
@@ -366,7 +463,14 @@ export class PlannerVisualRepairService {
     lastRaw = secondPass.raw;
     if (secondPass.visualPlan) {
       this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" strict repair succeeded with ${secondPass.visualPlan.sections.length} sections ${this.formatSectionList(secondPass.visualPlan.sections)}`,
+        this.formatPhaseC5Log(
+          `strict repair succeeded ✓ ${this.formatPlanSnapshot({
+            componentPlan: input.componentPlan,
+            planningSourceLabel: prepared.state.planningSource.sourceLabel,
+            surfacePlan: prepared.state.surfacePlan,
+            visualPlan: secondPass.visualPlan,
+          })}`,
+        ),
       );
       return {
         visualPlan: secondPass.visualPlan,
@@ -380,7 +484,9 @@ export class PlannerVisualRepairService {
     lastReason = secondPass.reason;
     lastDropped = secondPass.dropped;
     this.logger.warn(
-      `[Phase C.5: Investigate/Replan] "${input.componentPlan.componentName}" replan failed: ${lastReason}${lastDropped}${this.formatRawOutput(lastRaw)}`,
+      this.formatPhaseC5Log(
+        `"${input.componentPlan.componentName}" replan failed: ${lastReason}${lastDropped}${this.formatRawOutput(lastRaw)}`,
+      ),
     );
     return {
       state: prepared.state,
@@ -405,6 +511,8 @@ export class PlannerVisualRepairService {
     repoManifest?: RepoThemeManifest;
     visualDataNeeds: DataNeed[];
     hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
     currentState: PlannerVisualPlanRepairState;
     previousReason: string;
     previousDropped: string;
@@ -434,6 +542,7 @@ export class PlannerVisualRepairService {
           input.componentPlan,
           chosenCandidate,
           input.hasSharedLayoutPartials,
+          input.tokens,
         )
       : input.delegate.buildPlanningSourceContext(
           input.componentPlan,
@@ -441,6 +550,7 @@ export class PlannerVisualRepairService {
           input.sourceMap,
           input.content,
           input.hasSharedLayoutPartials,
+          input.tokens,
           input.repoManifest,
         );
 
@@ -450,6 +560,9 @@ export class PlannerVisualRepairService {
       tokens: input.tokens,
       visualDataNeeds: input.visualDataNeeds,
       planningSource,
+      hasSharedLayoutPartials: input.hasSharedLayoutPartials,
+      globalPalette: input.globalPalette,
+      globalTypography: input.globalTypography,
       delegate: input.delegate,
     });
     const investigationContext = this.buildVisualPlanRetryInvestigationContext({
@@ -498,9 +611,17 @@ export class PlannerVisualRepairService {
     tokens: ThemeTokens | undefined;
     visualDataNeeds: DataNeed[];
     planningSource: PlanningSourceContext;
+    hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
     delegate: PlannerVisualRepairDelegate;
   }): PlannerVisualPlanRepairState {
     const draftSections = input.delegate.buildDraftSectionsForPlanningSource(
+      input.planningSource,
+      input.componentPlan,
+      input.tokens,
+    );
+    const draftBlockTree = input.delegate.buildDraftBlockTreeForPlanningSource(
       input.planningSource,
       input.componentPlan,
       input.tokens,
@@ -512,10 +633,10 @@ export class PlannerVisualRepairService {
       extractAuxiliaryLabelsFromSections(draftSections),
     );
     const sourceWidgetHints = input.delegate.detectInteractiveWidgetsFromSource(
-      input.planningSource.source,
+      this.getPlanningSourcePromptSource(input.planningSource),
     );
     const allowedImageSrcs = input.delegate.collectAllowedImageSrcs(
-      input.planningSource.source,
+      input.planningSource,
       input.content,
     );
     const visualContract: VisualPlanContract = {
@@ -527,9 +648,24 @@ export class PlannerVisualRepairService {
       sourceBackedAuxiliaryLabels,
       requiredSourceWidgets: sourceWidgetHints,
     };
+    const surfacePlan = input.delegate.buildSurfacePlanForComponent({
+      componentPlan: input.componentPlan,
+      content: input.content,
+      planningSource: input.planningSource,
+      draftSections,
+      draftBlockTree,
+      detectedCustomClassNames,
+      sourceWidgetHints,
+      hasSharedLayoutPartials: input.hasSharedLayoutPartials,
+      globalPalette: input.globalPalette,
+      globalTypography: input.globalTypography,
+      tokens: input.tokens,
+    });
     return {
       planningSource: input.planningSource,
       draftSections,
+      draftBlockTree,
+      surfacePlan,
       detectedCustomClassNames,
       sourceBackedAuxiliaryLabels,
       sourceWidgetHints,
@@ -805,6 +941,38 @@ export class PlannerVisualRepairService {
     return `[${labels.join(', ')}]`;
   }
 
+  private formatPhaseC5Log(message: string): string {
+    return `[${this.phaseC5LogLabel}] ${message}`;
+  }
+
+  private formatPlanSnapshot(input: {
+    componentPlan: PlannerComponentPlanLike;
+    planningSourceLabel?: string;
+    surfacePlan?: PlannerSurfacePlan;
+    visualPlan?: Pick<
+      ComponentVisualPlan,
+      'sections' | 'renderMode' | 'deterministicAuthority'
+    >;
+  }): string {
+    const parts = [
+      `"${input.componentPlan.componentName}"`,
+      `kind=${input.surfacePlan?.kind ?? 'unknown'}`,
+      `authority=${input.surfacePlan?.authority.level ?? 'unknown'}`,
+      `pageIntent=${input.surfacePlan?.pageIntent.kind ?? 'unknown'}`,
+      `source=${input.planningSourceLabel ?? input.componentPlan.templateName}`,
+      `visualMode=${input.visualPlan?.renderMode ?? 'section-centric'}`,
+      `deterministicAuthority=${input.visualPlan?.deterministicAuthority === true ? 'yes' : 'no'}`,
+      `sections=${this.formatSectionList(input.visualPlan?.sections ?? [])}`,
+    ];
+    if (input.componentPlan.fixedSlug) {
+      parts.push(`fixedSlug=${input.componentPlan.fixedSlug}`);
+    }
+    if (input.componentPlan.dataNeeds?.length) {
+      parts.push(`dataNeeds=${input.componentPlan.dataNeeds.join(',')}`);
+    }
+    return parts.join(' | ');
+  }
+
   private buildRetryDraftEvidence(
     draftSections: SectionPlan[] | undefined,
     diagnosis: VisualPlanFailureDiagnosis,
@@ -1038,6 +1206,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const layout = input.delegate.deriveComponentLayout(
         input.tokens,
         input.componentPlan.componentName,
+        input.componentPlan.isDetail === true &&
+          input.componentPlan.route !== '/',
       );
       const mergedSections = input.delegate.mergeDraftSectionPresentation(
         parsedResult.plan.sections,
@@ -1162,14 +1332,26 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const draftSections = repairState.draftSections ?? [];
     const finalSections = visualPlan.sections;
 
-    if (draftSections.length >= 6) {
-      const minimumSectionCount = Math.max(
-        4,
-        Math.ceil(draftSections.length * 0.7),
+    if (draftSections.length >= 4) {
+      const expectedCoverageUnits = this.countCoverageUnits(draftSections);
+      const actualCoverageUnits = this.countCoverageUnits(finalSections);
+      const hasStructuredDraftSections = draftSections.some((section) =>
+        this.isStructuredDraftSectionType(section.type),
       );
-      if (finalSections.length < minimumSectionCount) {
+      const minimumCoverageRatio = hasStructuredDraftSections ? 0.35 : 0.2;
+      const minimumCoverageUnits =
+        expectedCoverageUnits >= 8
+          ? Math.max(2, Math.ceil(expectedCoverageUnits * minimumCoverageRatio))
+          : expectedCoverageUnits >= 4
+            ? 2
+            : 0;
+
+      if (
+        minimumCoverageUnits > 0 &&
+        actualCoverageUnits < minimumCoverageUnits
+      ) {
         issues.push(
-          `section coverage too low (${finalSections.length}/${draftSections.length}); expected at least ${minimumSectionCount} source-backed sections to survive repair`,
+          `section coverage collapsed too far (${actualCoverageUnits}/${expectedCoverageUnits}); expected at least ${minimumCoverageUnits} draft coverage units to survive`,
         );
       }
     }
@@ -1272,6 +1454,32 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
 
     return [...new Set(issues)];
+  }
+
+  private countCoverageUnits(sections: SectionPlan[] | undefined): number {
+    if (!sections?.length) return 0;
+    return sections.reduce((count, section) => {
+      if (section.type !== 'prose-block') return count + 1;
+      return count + Math.max(1, section.sourceSegments.length);
+    }, 0);
+  }
+
+  private isStructuredDraftSectionType(type: SectionPlan['type']): boolean {
+    return new Set<SectionPlan['type']>([
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+      'post-list',
+      'search',
+      'sidebar',
+      'comments',
+      'page-content',
+      'post-content',
+      'post-meta',
+      'post-terms',
+      'post-navigation',
+    ]).has(type);
   }
 
   private isTrivialContentDuplicate(left: string, right: string): boolean {

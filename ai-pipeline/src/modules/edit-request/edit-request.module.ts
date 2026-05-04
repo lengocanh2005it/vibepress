@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CapturePlanningService } from './capture-planning.service.js';
 import { CaptureReviewService } from './capture-review.service.js';
-import { CaptureSectionMatcherService } from './capture-section-matcher.service.js';
 import { CaptureVisionInputService } from './capture-vision-input.service.js';
 import { EditIntentService } from './edit-intent.service.js';
 import { EditRequestFacadeService } from './edit-request.facade.service.js';
@@ -14,7 +13,6 @@ import { EditRequestValidatorService } from './edit-request-validator.service.js
   providers: [
     CapturePlanningService,
     CaptureReviewService,
-    CaptureSectionMatcherService,
     CaptureVisionInputService,
     EditRequestService,
     EditRequestValidatorService,
@@ -26,7 +24,6 @@ import { EditRequestValidatorService } from './edit-request-validator.service.js
   exports: [
     CapturePlanningService,
     CaptureReviewService,
-    CaptureSectionMatcherService,
     CaptureVisionInputService,
     EditRequestService,
     EditRequestFacadeService,

@@ -20,63 +20,6 @@ function normalizeBaseUrl(value) {
   return typeof value === 'string' ? value.trim().replace(/\/$/, '') : '';
 }
 
-function buildMockCompareResult(payload) {
-  const routeEntries = Array.isArray(payload.routeEntries) ? payload.routeEntries : [];
-  const pages = routeEntries.map((entry, index) => {
-    const route =
-      entry && typeof entry === 'object' && typeof entry.path === 'string'
-        ? entry.path
-        : index === 0
-          ? '/'
-          : `/route-${index + 1}`;
-
-    return {
-      route,
-      componentHint:
-        entry && typeof entry === 'object' && typeof entry.componentName === 'string'
-          ? entry.componentName
-          : undefined,
-      repairPriority: 'low',
-      visual: {
-        status: 'PENDING',
-        accuracy: 100,
-        diffPct: 0,
-        regions: [],
-      },
-      content: {
-        status: 'PENDING',
-      },
-    };
-  });
-
-  return {
-    provider: 'openclaw',
-    result: {
-      urlA: payload.wpBaseUrl,
-      urlB: payload.reactFeUrl,
-      diffPercentage: 0,
-      differentPixels: 0,
-      totalPixels: 0,
-      summary: {
-        overall: {
-          visualAvgAccuracy: 100,
-          visualPassRate: 1,
-          contentAvgOverall: 1,
-          diffPercentage: 0,
-          differentPixels: 0,
-          totalPixels: 0,
-        },
-      },
-      artifacts: {
-        provider: 'openclaw',
-        mode: payload.mode ?? 'baseline',
-        note: 'Mock compare result from scaffolded OpenClaw plugin. Replace with real browser compare logic.',
-      },
-      pages,
-    },
-  };
-}
-
 async function forwardComparePayload(forwardUrl, secret, payload) {
   const headers = {
     'content-type': 'application/json',
@@ -154,17 +97,20 @@ export default definePluginEntry({
           payload.reactBeUrl = normalizeBaseUrl(payload.reactBeUrl);
 
           const forwardUrl = process.env.SITE_COMPARE_FORWARD_URL?.trim();
-          if (forwardUrl) {
-            const forwarded = await forwardComparePayload(
-              forwardUrl,
-              secret,
-              payload,
-            );
-            json(response, 200, forwarded);
+          if (!forwardUrl) {
+            json(response, 500, {
+              error:
+                'SITE_COMPARE_FORWARD_URL is not configured. OpenClaw site-compare mock mode has been removed; configure a real compare worker.',
+            });
             return true;
           }
 
-          json(response, 200, buildMockCompareResult(payload));
+          const forwarded = await forwardComparePayload(
+            forwardUrl,
+            secret,
+            payload,
+          );
+          json(response, 200, forwarded);
           return true;
         } catch (error) {
           json(response, 500, {

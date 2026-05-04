@@ -2,17 +2,23 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { WpNode } from '../../../../common/utils/wp-block-to-json.js';
 import { stripTags } from '../../../../common/utils/wp-block-to-json.js';
+import { extractStaticImageSources } from '../../../../common/utils/theme-asset.util.js';
 import type {
   ThemeTokens,
   ThemeInteractionState,
   ThemeInteractionStyle,
   ThemeInteractionTokens,
+  ThemeInteractionTarget,
 } from '../../../agents/block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
+import type { ComponentRenderContract } from '../../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../../planner/planner-surface-plan.schema.js';
+import { collectSurfacePlanRequiredLiterals } from '../../planner/planner-surface-plan.util.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type {
+  BlockNode,
   ComponentVisualPlan,
   SectionPlan,
 } from '../visual-plan.schema.js';
@@ -30,6 +36,12 @@ import {
   POST_FIELDS,
   SITE_INFO_FIELDS,
 } from '../api-contract.js';
+import {
+  buildBlockTreeStructuralPromptLines,
+  buildClassicDetailContentHint,
+  buildFixedPageDetailPromptLines,
+  PAGE_COMPONENT_RICH_TEXT_RULE,
+} from '../prompt-policy.util.js';
 
 export function extractTexts(nodes: WpNode[]): string[] {
   const result: string[] = [];
@@ -99,8 +111,11 @@ export interface ComponentPromptContext {
   fixedTitle?: string;
   fixedPageId?: number | string;
   requiredCustomClassNames?: string[];
+  requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
+  renderContract?: ComponentRenderContract;
 }
 
 function compactPlanText(
@@ -108,10 +123,19 @@ function compactPlanText(
   maxChars: number = MAX_PLAN_TEXT_CHARS,
 ): string | null {
   if (!value) return null;
-  const cleaned = stripTags(value).replace(/\s+/g, ' ').trim();
-  if (!cleaned) return null;
-  if (cleaned.length <= maxChars) return cleaned;
-  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  const rich = value
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  const plain = stripTags(rich).replace(/\s+/g, ' ').trim();
+  if (!plain) return null;
+
+  const hasHtmlTags = /<[^>]+>/.test(rich);
+  if (hasHtmlTags && plain.length <= maxChars) {
+    return rich;
+  }
+  if (plain.length <= maxChars) return plain;
+  return `${plain.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function pushPlanTextPart(
@@ -375,6 +399,9 @@ export function buildSpectraContractPromptNote(
   lines.push(
     'Preserve these plugin markers/classes when rendering interactive sections. Do not replace them with generic Tailwind-only markup if the approved plan/source expects Spectra semantics.',
   );
+  lines.push(
+    'Prefer the plugin-faithful DOM hierarchy, especially `uagb-spectra-button-wrapper > uagb-modal-trigger/uagb-modal-button-link > uagb-modal-popup.active > uagb-modal-popup-wrap > uagb-modal-popup-content` for modal, and `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide` for slider/carousel.',
+  );
   return lines.join('\n');
 }
 
@@ -443,14 +470,28 @@ function buildAllowedEndpointsNote(input: {
     );
   }
 
+  // post-navigation sections need the posts collection to find prev/next entries
+  const hasPostNavigation = input.visualPlan?.sections?.some(
+    (section) => section.type === 'post-navigation',
+  );
+  if (hasPostNavigation) {
+    allowed.add('GET /api/posts');
+  }
+
   const sidebarSection = input.visualPlan?.sections?.find(
     (section) => section.type === 'sidebar',
   );
   if (sidebarSection?.type === 'sidebar') {
-    if (sidebarSection.showPages) allowed.add('GET /api/pages');
-    if (sidebarSection.showPosts) allowed.add('GET /api/posts');
-    if (sidebarSection.showSiteInfo) allowed.add('GET /api/site-info');
-    if (sidebarSection.menuSlug) allowed.add('GET /api/menus');
+    for (const widget of sidebarSection.widgets ?? []) {
+      if (widget.kind === 'author-bio') {
+        allowed.add('GET /api/posts');
+        allowed.add('GET /api/site-info');
+      }
+      if (widget.kind === 'categories') allowed.add('GET /api/posts');
+      if (widget.kind === 'navigation') allowed.add('GET /api/menus');
+      if (widget.kind === 'pages-list') allowed.add('GET /api/pages');
+      if (widget.kind === 'recent-posts') allowed.add('GET /api/posts');
+    }
   }
 
   if (allowed.size === 0) {
@@ -472,6 +513,7 @@ function buildForbiddenBehaviorNote(input: {
   dataNeeds: string[];
   route?: string | null;
   fixedSlug?: string;
+  visualPlan?: { sections?: Array<{ type: string }> } | null;
 }): string {
   const lines = ['## Forbidden behavior'];
   const routeHasParams = /:[A-Za-z_]/.test(input.route ?? '');
@@ -528,9 +570,18 @@ function buildForbiddenBehaviorNote(input: {
     '- Do NOT invent hero sections, widgets, promos, author bios, utility links, or filler content not present in the source template or approved visual plan.',
   );
   if (isPageDetail || isPostDetail) {
-    lines.push(
-      `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside \`dangerouslySetInnerHTML\`.`,
+    const hasPageContentSection = input.visualPlan?.sections?.some(
+      (s) => s.type === 'page-content',
     );
+    if (isPageDetail && !hasPageContentSection) {
+      lines.push(
+        '⛔ MANDATORY: This visual plan has NO `page-content` section. Do NOT access `page.content` or `item.content` as a rendered body anywhere in this component. Render ONLY the decomposed sections from the approved visual plan (prose-block, card-grid, media-text, etc.). Using `page.content` here will fail validation.',
+      );
+    } else {
+      lines.push(
+        `- For ${isPageDetail ? '`pageDetail`' : '`postDetail`'} routes, the HTML body from \`${isPageDetail ? 'page.content' : 'post.content'}\` is the canonical long-form content. Do NOT restate, summarize, rebuild, or continue that body as extra hardcoded sections outside the approved content render path.`,
+      );
+    }
     lines.push(
       '- Do NOT append footer-style link columns such as "About", "Privacy", "Social", "Resources", or "Useful Links" after the main content unless those exact blocks are already inside the HTML body being rendered.',
     );
@@ -538,15 +589,7 @@ function buildForbiddenBehaviorNote(input: {
       '- Do NOT duplicate content that already appears in the fetched HTML body. If the body contains columns/cards/lists/images, render the body once and stop; do not recreate those blocks as separate React sections.',
     );
     if (isPageDetail && input.fixedSlug) {
-      lines.push(
-        '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.',
-      );
-      lines.push(
-        '- Do NOT redesign a fixed page-detail into a centered feature article shell with classes such as `max-w-[620px]`, `max-w-2xl`, `max-w-3xl`, or broad `mx-auto` wrappers unless that exact narrow shell is clearly source-backed in the approved layout.',
-      );
-      lines.push(
-        '- Preserve the surrounding template shell/layout rhythm from the approved source. Replace the long-form body with `page.content`, but do NOT invent a new hero-centered article wrapper, oversized centered title block, or optional featured-image treatment unless the source layout already proves those elements.',
-      );
+      lines.push(...buildFixedPageDetailPromptLines());
     }
   }
   lines.push(
@@ -688,9 +731,7 @@ function buildScopedApiContractNote(input: {
   lines.push(
     '- Pages must NOT use post-only fields such as `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`.',
   );
-  lines.push(
-    '- `post.content` and `page.content` are normalized HTML strings ready for `dangerouslySetInnerHTML`.',
-  );
+  lines.push(PAGE_COMPONENT_RICH_TEXT_RULE);
   lines.push(
     '- In ordinary post meta/listings, author names should link to `/author/${post.authorSlug}` when that route is approved and `post.authorSlug` exists. Plain-text `post.author` is only acceptable when it is the actual page/article/archive title or heading (for example an `h1`).',
   );
@@ -766,7 +807,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     return '';
 
   const lines: string[] = [
-    '## Theme design tokens — use these Tailwind classes',
+    '## Theme design tokens — preserve WordPress semantics and use these resolved values',
   ];
 
   if (tokens.defaults) {
@@ -774,19 +815,38 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
     lines.push(
       '**Default colors** — apply these when a block has NO explicit `bgColor`/`textColor` attribute:',
     );
-    if (d.bgColor) lines.push(`- Page/root background: \`bg-[${d.bgColor}]\``);
+    if (d.bgColor)
+      lines.push(
+        `- Page/root background: prefer inherited global/theme CSS or source-backed background classes first; only use \`style={{backgroundColor:"${d.bgColor}"}}\` when the source/plan explicitly overrides the default.`,
+      );
     if (d.textColor)
-      lines.push(`- Body text (default): \`text-[${d.textColor}]\``);
+      lines.push(
+        `- Body text (default): let \`.wp-site-blocks\` / inherited theme CSS carry this by default; use \`style={{color:"${d.textColor}"}}\` only for explicit overrides.`,
+      );
     if (d.headingColor)
-      lines.push(`- All headings (h1–h6): \`text-[${d.headingColor}]\``);
-    if (d.linkColor) lines.push(`- Links (\`<a>\`): \`text-[${d.linkColor}]\``);
+      lines.push(
+        `- All headings (h1–h6): preserve source heading classes first; otherwise \`style={{color:"${d.headingColor}"}}\` when an explicit heading override is needed.`,
+      );
+    if (d.linkColor)
+      lines.push(
+        `- Links (\`<a>\`): preserve source link classes first; otherwise \`style={{color:"${d.linkColor}"}}\` for explicit overrides.`,
+      );
     if (d.captionColor)
-      lines.push(`- Captions / secondary text: \`text-[${d.captionColor}]\``);
+      lines.push(
+        `- Captions / secondary text: \`style={{color:"${d.captionColor}"}}\` only when the source/plan explicitly calls for a secondary text override.`,
+      );
     if (d.buttonBgColor)
-      lines.push(`- Button background: \`bg-[${d.buttonBgColor}]\``);
+      lines.push(
+        `- Button background: prefer preserved source button classes first; otherwise \`style={{backgroundColor:"${d.buttonBgColor}"}}\` when the source/plan explicitly sets a button color.`,
+      );
     if (d.buttonTextColor)
-      lines.push(`- Button text: \`text-[${d.buttonTextColor}]\``);
-    if (d.fontSize) lines.push(`- Default font size: \`text-[${d.fontSize}]\``);
+      lines.push(
+        `- Button text: \`style={{color:"${d.buttonTextColor}"}}\` only when the source/plan explicitly sets button text color.`,
+      );
+    if (d.fontSize)
+      lines.push(
+        `- Default font size: let inherited theme CSS handle this by default; only use \`style={{fontSize:"${d.fontSize}"}}\` for explicit overrides.`,
+      );
     if (d.fontFamily)
       lines.push(
         `- Default font family: do NOT hardcode this inline on every wrapper. Let global theme CSS / \`.wp-site-blocks\` inherit it, and only add \`style={{fontFamily:"${d.fontFamily}"}}\` when a specific block explicitly overrides the default.`,
@@ -814,15 +874,15 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.contentWidth)
       lines.push(
-        `- Content max-width: \`max-w-[${d.contentWidth}]\` on long-form content wrappers only (article/page body, comments, prose). Do NOT use this as the full-page or full-section container by default.`,
+        `- Content max-width: preserve source width/alignment classes first; if an explicit content wrapper override is needed, use \`style={{maxWidth:"${d.contentWidth}"}}\` on long-form content wrappers only (article/page body, comments, prose). Do NOT use this as the full-page or full-section container by default.`,
       );
     if (d.wideWidth)
       lines.push(
-        `- Wide content max-width: \`max-w-[${d.wideWidth}]\` on wide/full-width blocks`,
+        `- Wide content max-width: preserve \`alignwide\` / source width semantics first; if an explicit override is needed, use \`style={{maxWidth:"${d.wideWidth}"}}\` on wide/full-width blocks.`,
       );
     if (d.buttonBorderRadius)
       lines.push(
-        `- Button border radius: \`rounded-[${d.buttonBorderRadius}]\``,
+        `- Button border radius: \`style={{borderRadius:"${d.buttonBorderRadius}"}}\` when the source/plan explicitly sets it.`,
       );
     if (d.buttonPadding)
       lines.push(
@@ -830,7 +890,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
     if (d.blockGap)
       lines.push(
-        `- Default block gap: \`${d.blockGap}\` — apply \`flex flex-col gap-[${d.blockGap}]\` on the component root wrapper only. Inner section containers should use their own gap values from the visual plan; do NOT repeat this global default on every nested flex/grid.`,
+        `- Default block gap: \`${d.blockGap}\` — use inherited/global theme CSS first. Only apply \`style={{gap:"${d.blockGap}"}}\` on wrappers that truly need an explicit gap override. Do NOT repeat this global default on every nested flex/grid.`,
       );
     if (d.rootPadding)
       lines.push(
@@ -842,9 +902,10 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       );
       for (const [level, style] of Object.entries(d.headings)) {
         const parts: string[] = [];
-        if (style.fontSize) parts.push(`size: \`text-[${style.fontSize}]\``);
+        if (style.fontSize)
+          parts.push(`size: \`style={{fontSize:"${style.fontSize}"}}\``);
         if (style.fontWeight)
-          parts.push(`weight: \`font-[${style.fontWeight}]\``);
+          parts.push(`weight: \`style={{fontWeight:"${style.fontWeight}"}}\``);
         if (parts.length > 0)
           lines.push(`- \`<${level}>\`: ${parts.join(', ')}`);
       }
@@ -862,22 +923,22 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.fontSizes.length > 0) {
     lines.push(
-      '**Font sizes** — when a block has a `fontSize` slug, use Tailwind arbitrary value `text-[size]`:',
+      '**Font sizes** — when a block has a `fontSize` slug, preserve the source `has-[slug]-font-size` class if it already exists; otherwise use inline `style={{fontSize:"..."}}` on the explicit override node:',
     );
     for (const s of tokens.fontSizes) {
-      lines.push(`- slug \`${s.slug}\` → \`text-[${s.size}]\``);
+      lines.push(`- slug \`${s.slug}\` → \`${s.size}\``);
     }
   }
 
   if (tokens.colors.length > 0) {
     lines.push(
-      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Apply them directly:',
+      '**Colors** — `bgColor`/`textColor`/`overlayColor` fields in the template JSON are already resolved to hex. Preserve source palette classes first; otherwise apply explicit overrides directly via inline `style`:',
     );
     lines.push(
-      '- `bgColor` → prefer `bg-[#hex]`; use `style={{backgroundColor:"#hex"}}` only when the value is dynamic',
+      '- `bgColor` → preserve source `has-[slug]-background-color` / other source-backed classes first; otherwise `style={{backgroundColor:"#hex"}}` for explicit overrides',
     );
     lines.push(
-      '- `textColor` → prefer `text-[#hex]`; use `style={{color:"#hex"}}` only when the value is dynamic',
+      '- `textColor` → preserve source `has-[slug]-color` / other source-backed classes first; otherwise `style={{color:"#hex"}}` for explicit overrides',
     );
     lines.push('- Palette values available from the theme tokens:');
     for (const c of tokens.colors) {
@@ -892,7 +953,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
       '- When `page.content` / `post.content` HTML carries these classes, do NOT strip them — they resolve correctly in the preview.',
     );
     lines.push(
-      '- When `customClassNames` on a section/element applies a palette color, prefer `has-[slug]-color` or `has-[slug]-background-color` instead of an inline Tailwind arbitrary value when the source already uses that class.',
+      '- When `customClassNames` on a section/element applies a palette color, preserve `has-[slug]-color` or `has-[slug]-background-color` when the source already uses that class. Do not replace it with a Tailwind-only color utility.',
     );
   }
 
@@ -929,7 +990,7 @@ export function buildThemeTokensNote(tokens?: ThemeTokens): string {
 
   if (tokens.spacing.length > 0) {
     lines.push(
-      '**Spacing** — when template uses `var:preset|spacing|N` or `var(--wp--preset--spacing--N)`, use Tailwind arbitrary value `p-[size]` / `py-[size]` / `px-[size]` / `gap-[size]`:',
+      '**Spacing** — when template uses `var:preset|spacing|N` or `var(--wp--preset--spacing--N)`, preserve the source class/style semantics first; otherwise use explicit inline `style` values on the relevant wrapper/node after resolving the token:',
     );
     for (const s of tokens.spacing) {
       lines.push(`- slug \`${s.slug}\` → \`${s.size}\``);
@@ -1136,10 +1197,10 @@ function buildClassicThemeNote(
 ): string {
   if (!templateSource.includes('{/* WP:')) return '';
 
-  const contentHint =
-    isSingle || isPage
-      ? `- \`{/* WP: post.content (HTML) */}\` → render \`${isSingle ? 'post' : 'page'}?.content\` with \`dangerouslySetInnerHTML={{ __html: ${isSingle ? 'post' : 'page'}?.content ?? '' }}\` (NO fetch array)`
-      : `- \`{/* WP: post.content (HTML) */}\` → render content ONLY from the endpoint(s) explicitly approved in the component plan. ⛔ NEVER fetch a full list and pick \`pages[0]\` or \`posts[0]\`.`;
+  const contentHint = buildClassicDetailContentHint({
+    isSingle,
+    isPage,
+  });
 
   const loopHint =
     isSingle || isPage
@@ -1350,8 +1411,11 @@ export function buildPlanContextNote(
     fixedTitle?: string;
     fixedPageId?: number | string;
     requiredCustomClassNames?: string[];
+    requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
     sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
+    surfacePlan?: PlannerSurfacePlan;
+    renderContract?: ComponentRenderContract;
   },
   componentName?: string,
 ): string {
@@ -1373,6 +1437,16 @@ export function buildPlanContextNote(
   }
   if (normalizedDataNeeds.length > 0)
     lines.push(`Data needed: ${normalizedDataNeeds.join(', ')}`);
+  if (plan.renderContract) {
+    const rootCount = plan.renderContract.sourceModel.blockTree.length;
+    const bindingCount = plan.renderContract.structure.subtreeBindings.length;
+    lines.push(
+      `Canonical source contract: render from the preserved block tree first (${rootCount} root nodes, ${bindingCount} mapped subtrees, mode=${plan.renderContract.structure.renderMode}).`,
+    );
+    lines.push(
+      'Source fidelity contract: preserve subtree order, wrappers, class names, spacing, colors, and typography from the block tree unless a stricter validation rule explicitly says otherwise.',
+    );
+  }
   lines.push('');
   lines.push(
     buildAllowedEndpointsNote({
@@ -1390,6 +1464,7 @@ export function buildPlanContextNote(
       dataNeeds: normalizedDataNeeds,
       route: plan.route,
       fixedSlug: plan.fixedSlug,
+      visualPlan: plan.visualPlan,
     }),
   );
   const routeHasParams = /:[A-Za-z_]/.test(plan.route ?? '');
@@ -1523,46 +1598,178 @@ export function buildPlanContextNote(
     '- Use semantic HTML that matches the role of the original content (`<main>`, `<section>`, `<article>`, `<aside>`, `<nav>`).',
   );
   if (plan.requiredCustomClassNames?.length) {
+    const targetLabels: Record<ThemeInteractionTarget, string> = {
+      button: '<button> or button-styled <Link>/<a>',
+      link: '<a> or <Link>',
+      image: '<img>',
+      card: 'card wrapper element',
+    };
+    const targets = plan.requiredCustomClassTargets ?? {};
+    const classHints = plan.requiredCustomClassNames
+      .map((cls) => {
+        const target = targets[cls];
+        return target
+          ? `\`${cls}\` (on ${targetLabels[target]})`
+          : `\`${cls}\``;
+      })
+      .join(', ');
     lines.push(
-      `- Preserve these exact source custom classes in JSX \`className\` output whenever you render the corresponding source-backed elements: ${formatClassList(plan.requiredCustomClassNames)}.`,
+      `- Preserve these exact source custom classes in JSX \`className\` output on their source-backed elements: ${classHints}.`,
     );
     lines.push(
-      '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them alongside Tailwind utility classes.',
+      '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them intact, and only add minimal helper classes when the runtime truly needs them.',
     );
   }
 
   return lines.join('\n');
 }
 
-function extractStaticImageSources(templateSource: string): string[] {
-  const result = new Set<string>();
+export function buildSurfacePlanContextNote(
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!surfacePlan) return '';
 
-  try {
-    const parsed = JSON.parse(templateSource);
-    const visit = (node: any) => {
-      if (!node || typeof node !== 'object') return;
-      if (typeof node.src === 'string' && node.src.trim()) {
-        result.add(node.src.trim());
-      }
-      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
-        result.add(node.imageSrc.trim());
-      }
-      if (Array.isArray(node.children)) node.children.forEach(visit);
-      if (Array.isArray(node)) node.forEach(visit);
-    };
-    visit(parsed);
-  } catch {
-    for (const match of templateSource.matchAll(
-      /(?:src|imageSrc)="([^"]+)"/g,
-    )) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
-      if (match[1]) result.add(match[1].trim());
-    }
+  const lines: string[] = [
+    '## Surface-plan authority',
+    `Surface-plan kind: \`${surfacePlan.kind}\``,
+    `Authority: \`${surfacePlan.authority.level}\` (${surfacePlan.authority.reason})`,
+    `Page intent: \`${surfacePlan.pageIntent.kind}\` (confidence ${surfacePlan.pageIntent.confidence})`,
+    `Shared chrome ownership: \`${surfacePlan.contract.sharedChromeOwnership}\``,
+    'Treat this as the planner-owned composition policy. The visual plan below is the execution-layer blueprint and must stay inside these source-backed boundaries.',
+  ];
+
+  if (surfacePlan.authority.level === 'strict') {
+    lines.push(
+      'Strict authority: do not substitute section families, reorder major clusters, or recompose wrappers beyond what the approved visual plan already encodes.',
+    );
+  } else if (surfacePlan.authority.level === 'guided') {
+    lines.push(
+      'Guided authority: light wrapper/layout recomposition is allowed only if the same source-backed headings, widgets, and content clusters survive intact.',
+    );
+  } else {
+    lines.push(
+      'Free authority: implementation can be looser, but the approved source evidence and route/data contract must still remain recognizable.',
+    );
   }
 
-  return [...result];
+  if (surfacePlan.acceptance.mustKeep.length > 0) {
+    lines.push(
+      `Must keep: ${surfacePlan.acceptance.mustKeep.slice(0, 6).join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+    lines.push(
+      `Must not invent: ${surfacePlan.acceptance.mustNotInvent
+        .slice(0, 6)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mayRecompose.length > 0) {
+    lines.push(
+      `May recompose: ${surfacePlan.acceptance.mayRecompose
+        .slice(0, 5)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.primaryHeadings.length > 0) {
+    lines.push(
+      `Primary source headings: ${surfacePlan.sourceEvidence.primaryHeadings
+        .slice(0, 6)
+        .map((heading) => JSON.stringify(heading))
+        .join(', ')}`,
+    );
+  }
+  if (
+    surfacePlan.contract.sharedChromeOwnership === 'self' &&
+    surfacePlan.sourceEvidence.navigationLabels?.length
+  ) {
+    lines.push(
+      `Source navigation labels: ${surfacePlan.sourceEvidence.navigationLabels
+        .slice(0, 8)
+        .map((label) => JSON.stringify(label))
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.widgets.length > 0) {
+    lines.push(
+      `Source widgets: ${surfacePlan.sourceEvidence.widgets
+        .map((widget) =>
+          widget.required ? `${widget.kind} (required)` : widget.kind,
+        )
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.compositionHints.keepAdjacentClusterPairs.length > 0) {
+    lines.push(
+      `Keep adjacent cluster pairs: ${surfacePlan.compositionHints.keepAdjacentClusterPairs
+        .slice(0, 4)
+        .map((pair) => `${pair[0]} -> ${pair[1]}`)
+        .join(' | ')}`,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export function buildSurfacePlanRepairContextNote(
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!surfacePlan) return '';
+
+  const requiredLiterals = collectSurfacePlanRequiredLiterals(surfacePlan);
+  const lines: string[] = [
+    '### Surface-plan repair contract',
+    `- kind=${surfacePlan.kind}`,
+    `- authority=${surfacePlan.authority.level}`,
+    `- pageIntent=${surfacePlan.pageIntent.kind}`,
+    `- sharedChromeOwnership=${surfacePlan.contract.sharedChromeOwnership}`,
+  ];
+
+  if (surfacePlan.acceptance.mustKeep.length > 0) {
+    lines.push(
+      `- mustKeep=${surfacePlan.acceptance.mustKeep.slice(0, 6).join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+    lines.push(
+      `- mustNotInvent=${surfacePlan.acceptance.mustNotInvent
+        .slice(0, 6)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mayRecompose.length > 0) {
+    lines.push(
+      `- mayRecompose=${surfacePlan.acceptance.mayRecompose
+        .slice(0, 5)
+        .join(' | ')}`,
+    );
+  }
+  if (requiredLiterals.length > 0) {
+    lines.push(
+      `- restoreOrKeepSourceLiterals=${requiredLiterals
+        .map((literal) => JSON.stringify(literal))
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.widgets.length > 0) {
+    lines.push(
+      `- requiredWidgets=${surfacePlan.sourceEvidence.widgets
+        .map((widget) =>
+          widget.required ? `${widget.kind}:required` : widget.kind,
+        )
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.representativeBindings?.length) {
+    lines.push(
+      `- representativeBindings=${surfacePlan.sourceEvidence.representativeBindings
+        .slice(0, 4)
+        .map((binding) => `${binding.kind}:${binding.slug ?? binding.id}`)
+        .join(' | ')}`,
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function buildImageSourcesNote(templateSource: string): string {
@@ -1585,10 +1792,10 @@ function buildImageSourcesNote(templateSource: string): string {
     '⛔ If a testimonial/person/media block has no image source in the template, omit the image/avatar entirely.',
   );
   lines.push(
-    'For local paths (`/assets/...` or `/assets/images/...`): copy the path EXACTLY into your JSX `src` attribute.',
+    'For theme-local files canonicalized as `theme-asset:/...`: preserve that literal exactly and route it through the runtime asset resolver. Do NOT rewrite it to a guessed `/assets/...` path by hand.',
   );
   lines.push(
-    'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten to just `/assets/filename`. These URLs are automatically relinked to local paths after generation.',
+    'For full `http://` / `https://` URLs: use the EXACT full URL in your JSX `src` — do NOT shorten, strip, or convert it into a local asset token.',
   );
   lines.push(
     'For important screenshot/product/composite images from the template source, preserve the full asset by default: prefer `w-full h-auto object-contain` (optionally with a max-height) instead of fixed-height `object-cover` cropping, unless the source itself is intentionally cropped.',
@@ -1601,6 +1808,9 @@ function buildImageSourcesNote(templateSource: string): string {
   );
   lines.push(
     'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), render it with `dangerouslySetInnerHTML={{ __html: item }}` on the `<li>` element instead of outputting the string as plain text. Example: `<li dangerouslySetInnerHTML={{ __html: "Trạng thái <strong>Đã thanh toán</strong>" }} />`.',
+  );
+  lines.push(
+    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. For non-form text containers, prefer `dangerouslySetInnerHTML` on the final text node.',
   );
 
   return lines.join('\n');
@@ -1721,10 +1931,18 @@ function buildCompactSectionSummary(
         break;
       case 'sidebar':
         pushPlanTextPart(parts, 'title', section.title);
-        parts.push(`showPages=${section.showPages}`);
-        parts.push(`showPosts=${section.showPosts}`);
-        parts.push(`showSiteInfo=${section.showSiteInfo}`);
-        if (section.menuSlug) parts.push(`menuSlug=${section.menuSlug}`);
+        if (section.widgets?.length) {
+          parts.push(
+            `widgets=${section.widgets
+              .map((widget) => {
+                if (widget.kind === 'navigation') {
+                  return `${widget.kind}:${widget.title ?? 'untitled'}:${widget.menuSlug ?? 'none'}`;
+                }
+                return `${widget.kind}:${widget.title ?? 'untitled'}`;
+              })
+              .join(' | ')}`,
+          );
+        }
         if (section.maxItems) parts.push(`maxItems=${section.maxItems}`);
         break;
       case 'post-list':
@@ -1766,12 +1984,34 @@ function buildCompactSectionSummary(
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showCategories=${section.showCategories}`);
         break;
+      case 'post-title':
+        parts.push(`level=${section.level ?? 1}`);
+        break;
+      case 'post-featured-image':
+        if (section.imageRadius)
+          parts.push(`imageRadius=${section.imageRadius}`);
+        if (section.imageAspectRatio)
+          parts.push(`imageAspectRatio=${section.imageAspectRatio}`);
+        break;
       case 'post-meta':
         parts.push(`layout=${section.layout ?? 'inline'}`);
         parts.push(`showAuthor=${section.showAuthor}`);
         parts.push(`showDate=${section.showDate}`);
         parts.push(`showCategories=${section.showCategories}`);
         parts.push(`showSeparator=${section.showSeparator !== false}`);
+        break;
+      case 'post-terms':
+        if (section.taxonomy) parts.push(`taxonomy=${section.taxonomy}`);
+        if (section.prefix) parts.push(`prefix=${section.prefix}`);
+        if (section.separator) parts.push(`separator=${section.separator}`);
+        parts.push(`layout=${section.layout ?? 'inline'}`);
+        break;
+      case 'post-navigation':
+        parts.push(`showPrevious=${section.showPrevious !== false}`);
+        parts.push(`showNext=${section.showNext !== false}`);
+        if (section.previousLabel)
+          parts.push(`previousLabel=${section.previousLabel}`);
+        if (section.nextLabel) parts.push(`nextLabel=${section.nextLabel}`);
         break;
       case 'page-content':
         parts.push(`showTitle=${section.showTitle}`);
@@ -2066,6 +2306,13 @@ function buildCompactSectionSummary(
         break;
       case 'search':
         pushPlanTextPart(parts, 'title', section.title);
+        parts.push('semanticShell=<form role="search">');
+        parts.push('inputType=search');
+        if (section.obligation?.required?.length) {
+          parts.push(
+            `requiredCapabilities=${section.obligation.required.join('|')}`,
+          );
+        }
         break;
       case 'comments':
         parts.push(`showForm=${section.showForm}`);
@@ -2101,13 +2348,16 @@ function buildCompactSectionSummary(
 export function buildVisualPlanContextNote(
   visualPlan?: ComponentVisualPlan,
   componentName?: string,
+  surfacePlan?: PlannerSurfacePlan,
 ): string {
   if (!visualPlan) return '';
 
   const lines: string[] = [
     '## Approved visual plan from previous stage',
-    'Treat this plan as the primary code generation blueprint.',
-    'Preserve section order, required data dependencies, and the overall layout unless the template/data grounding above proves a field is impossible.',
+    surfacePlan
+      ? 'Treat this plan as the execution-layer blueprint for the planner-owned surface plan above.'
+      : 'Treat this plan as the approved execution blueprint for code generation.',
+    'Preserve section order, required data dependencies, and the overall layout unless the planner-owned surface-plan authority above explicitly permits light recomposition without losing source-backed evidence.',
     'Do NOT reinterpret this into a prettier or more modern layout. Preserve the original WordPress look and structure.',
   ];
 
@@ -2116,9 +2366,12 @@ export function buildVisualPlanContextNote(
   }
   const requiredCustomClassNames = [
     ...new Set(
-      visualPlan.sections.flatMap((section) =>
-        extractCustomClassNamesFromSection(section),
-      ),
+      [
+        ...visualPlan.sections.flatMap((section) =>
+          extractCustomClassNamesFromSection(section),
+        ),
+        ...extractCustomClassNamesFromBlockTree(visualPlan.blockTree),
+      ].filter(Boolean),
     ),
   ];
   if (requiredCustomClassNames.length > 0) {
@@ -2130,14 +2383,23 @@ export function buildVisualPlanContextNote(
     );
   }
 
+  if (visualPlan.blockTree?.length) {
+    lines.push(...buildBlockTreeStructuralPromptLines(visualPlan));
+    lines.push('Block-tree outline:');
+    lines.push(...summarizeVisualPlanBlockTree(visualPlan.blockTree));
+  }
+
   // Strict section whitelist — prevents AI from inventing extra sections
   if (visualPlan.sections?.length > 0) {
+    const hasBlockTree = (visualPlan.blockTree?.length ?? 0) > 0;
     const sectionTypes = visualPlan.sections
       .map((s) => `"${s.type}"`)
       .join(', ');
     lines.push('');
     lines.push(
-      `⛔ STRICT SECTION CONTRACT: Generate ONLY these section types in this exact order: ${sectionTypes}.`,
+      hasBlockTree
+        ? `⛔ STRICT SECTION CONTRACT: Use ONLY these approved section behaviors/contracts while preserving the blockTree structure: ${sectionTypes}. Do NOT reinterpret them into a new top-level section stack.`
+        : `⛔ STRICT SECTION CONTRACT: Generate ONLY these section types in this exact order: ${sectionTypes}.`,
     );
     lines.push(
       '⛔ Do NOT add newsletter, testimonial, hero, cover, card-grid, pricing, features, call-to-action, or ANY other section type not listed above — even if you think it would improve the design.',
@@ -2152,7 +2414,7 @@ export function buildVisualPlanContextNote(
       '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
     );
     lines.push(
-      '⛔ For every `search` section, render the approved search widget/result block exactly as contracted. If the approved section only carries `search-input`, you MUST render a real search form/input and MUST NOT replace it with comment filtering, author filler, or promotional content.',
+      '⛔ For every `search` section, render the approved search widget/result block exactly as contracted. If the approved section only carries `search-input`, you MUST render a real `<form role="search">` with a real search input and MUST NOT replace it with comment filtering, author filler, or promotional content.',
     );
     lines.push(
       '⛔ Only render post-result rows/cards inside a `search` section when the approved section contract explicitly requires `posts`. If the approved contract is just a sidebar/site search widget, keep it as an input/form widget only.',
@@ -2218,13 +2480,23 @@ export function buildVisualPlanContextNote(
     lines.push('');
     lines.push('## Sidebar contract — MANDATORY');
     lines.push(
-      'Treat the `sidebar` section as a constrained data widget area, not a free-design area.',
+      'Treat the `sidebar` section as an ordered, source-backed widget column. Preserve each approved widget instead of collapsing them into a generic pages/posts/menu box.',
     );
     lines.push(
-      `Allowed sidebar sources from the approved plan: showPages=${sidebarSection.showPages}, showPosts=${sidebarSection.showPosts}, showSiteInfo=${sidebarSection.showSiteInfo}, menuSlug=${sidebarSection.menuSlug ?? 'none'}.`,
+      `Approved sidebar widgets: ${
+        sidebarSection.widgets?.length
+          ? sidebarSection.widgets
+              .map((widget) =>
+                widget.kind === 'navigation'
+                  ? `${widget.kind}(${widget.title ?? 'untitled'}, menuSlug=${widget.menuSlug ?? 'none'})`
+                  : `${widget.kind}(${widget.title ?? 'untitled'})`,
+              )
+              .join(' | ')
+          : 'none'
+      }.`,
     );
     lines.push(
-      '⛔ Do NOT invent extra sidebar widgets such as "Useful Links", "Resources", "Quick Links", social links, footer-style columns, or author bio blocks unless they are explicitly present in the template source or directly supported by approved API data above.',
+      '⛔ Do NOT replace approved sidebar widgets with generic "Pages", "Latest Posts", site-brand blocks, or arbitrary utility boxes unless those exact widgets are in the approved plan.',
     );
     lines.push(
       'If a URL is not present in the template source or API data, prefer a temporary `href="#"` placeholder over inventing a fake internal route path.',
@@ -2257,6 +2529,9 @@ export function buildVisualPlanContextNote(
     lines.push(
       '⛔ `testimonial`, `cta-strip`, `cover`, `media-text`, `carousel`, `modal`, `tabs`, `accordion`, `post-list`, and major CTA/blog wrappers should keep the wide section shell. Use the narrow prose container only for long-form content bodies such as `page-content`, `post-content`, and comments.',
     );
+    lines.push(
+      `⛔ SHELL CONTAINER PATTERN: When a section uses the wide container, always structure it as \`<section className="w-full"><div className="${visualPlan.layout.containerClass} px-4">\` — the container class goes on an INNER div, NOT directly on the \`<section>\` element. This ensures ALL shell sections share the same horizontal alignment regardless of their background width.`,
+    );
   }
   if (visualPlan.layout?.contentContainerClass) {
     lines.push(
@@ -2274,13 +2549,16 @@ export function buildVisualPlanContextNote(
       '- Footer partials must fetch `/api/footer-links` and render footer columns from that API data. Do NOT rebuild footer columns from `/api/menus`.',
     );
     lines.push(
-      '- If the approved footer plan includes `brandDescription`, render that exact approved text. Do NOT silently replace it with `siteInfo.blogDescription` or omit it.',
+      '- For footer brand copy, prefer `siteInfo.blogDescription` whenever `showTagline` is true. Only render a literal `brandDescription` when the approved plan explicitly requires custom footer copy distinct from the site tagline.',
     );
     lines.push(
       '- Do NOT declare hardcoded fallback arrays such as `staticSections`, `fallbackSections`, `defaultFooterColumns`, or placeholder footer link groups when the approved contract already provides `footerLinks`.',
     );
     lines.push(
       '- If `/api/footer-links` returns an empty array, keep the footer column area structurally empty or minimal. Do NOT fabricate About/Privacy/Social columns or placeholder links.',
+    );
+    lines.push(
+      '- Always render siteInfo brand elements (logo when `logoUrl` exists, site title when `showSiteTitle` is true, tagline/description when `showTagline` is true). These must appear in the footer even when `footerLinks` is empty — do NOT make them conditional on `footerLinks.length > 0`.',
     );
     lines.push(
       '- Render the footer column area by iterating the fetched footer-links collection directly. Do NOT create helper functions like `getColumnLinks(...)` that inject hardcoded fallback link labels per column.',
@@ -2407,7 +2685,12 @@ export function buildComponentPrompt(
     : '';
   const planContext = [
     buildPlanContextNote(componentPlan, componentName),
-    buildVisualPlanContextNote(componentPlan?.visualPlan, componentName),
+    buildSurfacePlanContextNote(componentPlan?.surfacePlan),
+    buildVisualPlanContextNote(
+      componentPlan?.visualPlan,
+      componentName,
+      componentPlan?.surfacePlan,
+    ),
     buildFullFileVisualPlanBehaviorChecklist(componentPlan?.visualPlan),
     buildFullFileLiteralChecklist(componentPlan?.visualPlan),
     repoContext,
@@ -2509,10 +2792,16 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- Modal trigger/button output must include `uagb-modal-trigger` and `uagb-modal-button-link`.',
     );
     lines.push(
+      '- Wrap the trigger button in `uagb-spectra-button-wrapper` instead of emitting a bare standalone button.',
+    );
+    lines.push(
       '- Modal popup output must include `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
     );
     lines.push(
       '- When the modal popup is rendered open, the popup overlay className must also include `active` so Spectra/UAGB compat CSS actually makes it visible.',
+    );
+    lines.push(
+      '- Keep a real close button with class `uagb-modal-popup-close`; do not replace the popup with inline text or a bare card.',
     );
   }
 
@@ -2525,7 +2814,13 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- If you render a `.swiper-wrapper`, bind its inline transform to `activeCarousels[...]` with `translateX(...)` so prev/next/dots move the active slide.',
     );
     lines.push(
+      '- Keep the Spectra slider hierarchy `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide`; do not flatten it into arbitrary cards or a generic marquee shell.',
+    );
+    lines.push(
       '- `swiper-button-prev` and `swiper-button-next` must render a visible SVG or text child. Do NOT leave control buttons empty.',
+    );
+    lines.push(
+      '- If dots are rendered, keep a `swiper-pagination` wrapper with clickable bullets that update `setActiveCarousels(...)`.',
     );
     lines.push(
       '- If you declare drag/swipe helpers such as `beginCarouselDrag`, `updateCarouselDrag`, `finishCarouselDrag`, `cancelCarouselDrag`, or `isCarouselInteractiveTarget`, you must attach them to the rendered slider shell via pointer handlers. Do NOT leave these helpers unused.',
@@ -2541,6 +2836,9 @@ function buildFullFileVisualPlanBehaviorChecklist(
       '- Tabs sections must use shared tabs state such as `const [activeTabs, setActiveTabs] = useState<Record<string, number>>({});`. Do NOT render all tab panels permanently visible.',
     );
     lines.push(
+      '- Use the Spectra-compatible DOM structure for tabs: the outer wrapper must have className `uagb-tabs__wrap`, tab panels must use className `uagb-tabs__panel`, and the panels container must use className `uagb-tabs__body-wrap`.',
+    );
+    lines.push(
       '- Preserve approved tabs blueprint fields such as `activeTab`, `variant`, and `tabAlign`. If the plan carries a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same visual family instead of replacing it with generic pills or underlines.',
     );
     lines.push(
@@ -2552,6 +2850,9 @@ function buildFullFileVisualPlanBehaviorChecklist(
     if (lines.length === 0) lines.push('## Required interactive behavior');
     lines.push(
       '- Accordion sections must use shared accordion state such as `const [openAccordions, setOpenAccordions] = useState<Record<string, number[]>>({});`.',
+    );
+    lines.push(
+      '- Use the Spectra-compatible DOM structure for accordion: the outer wrapper must have className `uagb-faq__wrap`, each item must use className `uagb-faq-item`, the trigger button must use className `uagb-faq-questions-button`, and the answer panel must use className `uagb-faq-content`.',
     );
     lines.push(
       '- Preserve approved accordion blueprint fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into always-open static content.',
@@ -2635,6 +2936,8 @@ function buildFullFileLiteralChecklist(
             `- ${label} requiredCapabilities: ${section.obligation.required.join(', ')}`,
           );
         }
+        lines.push(`- ${label} semanticShell: "<form role=\\"search\\">"`);
+        lines.push(`- ${label} inputType: "search"`);
         break;
       case 'prose-block':
         lines.push(
@@ -2807,9 +3110,11 @@ Render ONLY the JSX for the blocks in the template source below.`;
   const planContext = [
     sectionContextNote,
     buildPlanContextNote(input.componentPlan, input.parentName),
+    buildSurfacePlanContextNote(input.componentPlan?.surfacePlan),
     buildVisualPlanContextNote(
       input.componentPlan?.visualPlan,
       input.parentName,
+      input.componentPlan?.surfacePlan,
     ),
     sourceTrackingNote,
     repoContext,
@@ -2909,6 +3214,7 @@ When this section renders post-list/archive/search/recent-post meta:
           }
         : undefined,
       input.componentName,
+      input.componentPlan?.surfacePlan,
     ),
     input.content
       ? buildDataGroundingNote(input.content, {
@@ -2945,12 +3251,32 @@ When this section renders post-list/archive/search/recent-post meta:
 function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
   const stateKeyHint = resolveInteractiveSectionPromptStateKey(section);
   switch (section.type) {
+    case 'page-content':
+      return [
+        '## Section behavior contract',
+        '- This is the ONLY place that should render `page.content` or `item.content`.',
+        '- Render the page body using `dangerouslySetInnerHTML={{ __html: page.content }}` or `renderRichTextChildren(page.content, ...)` inside this section ONLY.',
+        '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
+        '- Do NOT render `page.content` outside of this section element.',
+      ].join('\n');
     case 'prose-block':
       return [
         '## Section behavior contract',
         '- Render `sourceSegments` in the exact approved order. Do not merge adjacent segments or collapse them into a single generic wrapper.',
         '- Preserve inline HTML inside paragraph/list/html segments instead of flattening it to plain text.',
         '- Preserve image visibility for image segments; do not replace source-backed images with placeholders.',
+      ].join('\n');
+    case 'post-title':
+      return [
+        '## Section behavior contract',
+        '- Render the current post title from the existing `item` object only.',
+        '- Do not fetch inside this JSX fragment and do not duplicate meta/date/author here.',
+      ].join('\n');
+    case 'post-featured-image':
+      return [
+        '## Section behavior contract',
+        '- Render the current post featured image from `item.featuredImage` only.',
+        '- Preserve the approved spacing/radius classes; do not replace the image with placeholder artwork.',
       ].join('\n');
     case 'post-meta':
       return [
@@ -2959,6 +3285,24 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- Prefer the existing `post` prop first, then fall back to `item` when it is a post-detail object.',
         '- Author/category labels must use canonical archive links when `authorSlug` or `categorySlugs[0]` exists.',
       ].join('\n');
+    case 'post-terms':
+      return [
+        '## Section behavior contract',
+        '- Render only the current post taxonomy terms approved in the section JSON.',
+        '- Do not fetch inside this JSX fragment; use the existing `item` post-detail object.',
+        '- Preserve the approved prefix/separator text literally when present.',
+      ].join('\n');
+    case 'post-navigation':
+      return [
+        '## Section behavior contract',
+        '- The page shell MUST fetch `GET /api/posts` and store the result as `posts` state.',
+        '- Find adjacent posts with: `const idx = posts.findIndex(p => p.slug === item.slug);`',
+        '- `previousPost` = `idx > 0 ? posts[idx - 1] : null` (older post in WP reading direction).',
+        '- `nextPost` = `idx < posts.length - 1 ? posts[idx + 1] : null` (newer post).',
+        '- Render each as `<Link to={\\`/posts/${post.slug}\\`}>{post.title}</Link>` — NEVER hardcode URLs.',
+        "- Both `item.slug` and each rendered post's `post.slug` MUST appear in the component code.",
+        '- Do not add local hooks or new fetches inside this JSX fragment.',
+      ].join('\n');
     case 'post-list':
       return [
         '## Section behavior contract',
@@ -2966,6 +3310,14 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- If `itemLayout=title-meta-inline`, keep the title and metadata on the same horizontal row on desktop, allowing only responsive wrap on narrow widths.',
         '- If `metaLayout=inline`, keep date / author / category in one metadata row; if `metaLayout=stacked`, render them vertically.',
         '- Preserve approved `metaAlign`, `metaSeparator`, `itemGap`, and `metaGap` values when they are present.',
+      ].join('\n');
+    case 'search':
+      return [
+        '## Section behavior contract',
+        '- Render a real semantic search wrapper: use `<form role="search">` for the search shell, not a generic `<div>`.',
+        '- The search control itself must include a real `<input type="search" ... />` inside that form.',
+        '- If the approved contract only requires `search-input`, keep this section as an input/form widget only and do not invent result cards, comment filters, author bio copy, or promotional content here.',
+        '- Only render result rows/cards inside this section when its approved obligation explicitly requires `posts`.',
       ].join('\n');
     case 'carousel':
       return [
@@ -2979,7 +3331,9 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           : '- Reuse one exact carousel state key consistently for autoplay, track transform, prev/next buttons, and pagination dots.',
         `- If you render a \`.swiper-wrapper\`, it must bind its transform to the existing page-shell carousel state, for example \`transform: 'translateX(-' + ((activeCarousels[${stateKeyHint ?? '"approved-carousel-key"'}] ?? 0) * 100) + '%)'\`.`,
         '- Use the existing page-shell carousel state (`activeCarousels` / `setActiveCarousels`) for prev/next/dot navigation. Do NOT add local hooks or helper functions in this JSX fragment.',
+        '- Keep the Spectra slider hierarchy `uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide`.',
         '- Prev/next controls must have className markers `swiper-button-prev` and `swiper-button-next` and must render a visible child such as SVG arrows or text. Do NOT leave these buttons empty.',
+        '- If dots are rendered, keep a `swiper-pagination` wrapper with clickable bullets; do not render decorative dots only.',
         '- Pagination dots must update `setActiveCarousels(...)` so clicking a dot moves to the selected slide.',
         '- Preserve approved carousel fields such as `slideHeight`, `dotsColor`, `arrowColor`, `arrowBackground`, `autoplay`, `autoplaySpeed`, `loop`, `effect`, `showDots`, `showArrows`, `vertical`, `transitionSpeed`, and `pauseOn` when they are present in the plan.',
       ].join('\n');
@@ -2991,6 +3345,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           : '- Use one stable existing tabs state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell tabs state (`activeTabs` / `setActiveTabs`) for tab selection. Do NOT use `activeCarousels` for tabs.',
         '- Tab buttons must update `setActiveTabs(...)`, and the active panel visibility must read from `activeTabs[...]`.',
+        '- Use the Spectra-compatible DOM structure: outer wrapper must have className `uagb-tabs__wrap`, panels container must have className `uagb-tabs__body-wrap`, and each panel must have className `uagb-tabs__panel`.',
         '- Preserve approved tabs fields such as `activeTab`, `variant`, and `tabAlign`. If the plan uses a Spectra variant like `hstyle*`, `vstyle*`, or `stack*`, keep that same variant family instead of redesigning the tabs.',
       ].join('\n');
     case 'accordion':
@@ -3000,6 +3355,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
           ? `- Use the exact approved accordion state key ${stateKeyHint} everywhere in this section.`
           : '- Use one stable existing accordion state key from the approved section identity everywhere in this section.',
         '- Use the existing page-shell accordion state (`openAccordions` / `setOpenAccordions`) for open/close behavior.',
+        '- Use the Spectra-compatible DOM structure: outer wrapper must have className `uagb-faq__wrap`, each item must have className `uagb-faq-item`, the trigger button must have className `uagb-faq-questions-button`, and the answer panel must have className `uagb-faq-content`.',
         '- Preserve approved accordion fields such as `allowMultiple`, `enableToggle`, `defaultOpenItems`, and `variant`. Do NOT flatten the accordion into static always-open content.',
       ].join('\n');
     case 'modal':
@@ -3012,10 +3368,10 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         stateKeyHint
           ? `- The same key ${stateKeyHint} must be reused for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.`
           : '- Reuse one exact modal state key for trigger open, conditional popup render, overlay close, close button, and ESC close logic. Do NOT reuse any carousel or other section key here.',
-        '- Keep a visible trigger button whose className includes `uagb-modal-trigger uagb-modal-button-link`.',
+        '- Keep a visible trigger button whose className includes `uagb-modal-trigger uagb-modal-button-link`, wrapped by `uagb-spectra-button-wrapper`.',
         '- Use the existing page-shell modal state (`openModals` / `setOpenModals`) to open and close the popup. Do NOT add local hooks or helper functions in this JSX fragment.',
         `- Render the popup conditionally, for example \`{openModals[${stateKeyHint ?? '"approved-modal-key"'}] ? (...) : null}\`.`,
-        '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, and the dialog body must include `uagb-modal-popup-content`.',
+        '- The popup overlay must include `uagb-modal-popup`, the dialog shell must include `uagb-modal-popup-wrap`, the dialog body must include `uagb-modal-popup-content`, and the close button must include `uagb-modal-popup-close`.',
         '- Because Spectra compat CSS reveals the popup via `.uagb-modal-popup.active`, the rendered open overlay className must include both `uagb-modal-popup` and `active`.',
         '- The trigger must call `setOpenModals(... true)`, and the close button or overlay-close handler must call `setOpenModals(... false)`.',
         '- Preserve approved modal fields such as `triggerStyle`, `width`, `height`, `overlayColor`, `ctaStyle`, and `secondaryCtaStyle` instead of falling back to generic dialog defaults.',
@@ -3080,6 +3436,43 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       lines.push(
         `- showSeparator: ${JSON.stringify(section.showSeparator !== false)}`,
       );
+      break;
+    case 'post-title':
+      lines.push(`- level: ${JSON.stringify(section.level ?? 1)}`);
+      break;
+    case 'post-featured-image':
+      if (section.imageRadius) {
+        lines.push(`- imageRadius: ${JSON.stringify(section.imageRadius)}`);
+      }
+      if (section.imageAspectRatio) {
+        lines.push(
+          `- imageAspectRatio: ${JSON.stringify(section.imageAspectRatio)}`,
+        );
+      }
+      break;
+    case 'post-terms':
+      if (section.taxonomy) {
+        lines.push(`- taxonomy: ${JSON.stringify(section.taxonomy)}`);
+      }
+      if (section.prefix) {
+        lines.push(`- prefix: ${JSON.stringify(section.prefix)}`);
+      }
+      if (section.separator) {
+        lines.push(`- separator: ${JSON.stringify(section.separator)}`);
+      }
+      lines.push(`- layout: ${JSON.stringify(section.layout ?? 'inline')}`);
+      break;
+    case 'post-navigation':
+      lines.push(
+        `- showPrevious: ${JSON.stringify(section.showPrevious !== false)}`,
+      );
+      lines.push(`- showNext: ${JSON.stringify(section.showNext !== false)}`);
+      if (section.previousLabel) {
+        lines.push(`- previousLabel: ${JSON.stringify(section.previousLabel)}`);
+      }
+      if (section.nextLabel) {
+        lines.push(`- nextLabel: ${JSON.stringify(section.nextLabel)}`);
+      }
       break;
     case 'media-text':
       if (section.imageSrc) {
@@ -3385,13 +3778,16 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         }
       });
       lines.push(
-        '- Keep the carousel structure markers: `swiper-wrapper`, `swiper-slide`, `swiper-button-prev`, and `swiper-button-next`.',
+        '- Keep the carousel structure markers: `uagb-slider-container`, `uagb-swiper`, `swiper-wrapper`, `swiper-slide`, `swiper-button-prev`, and `swiper-button-next`.',
       );
       lines.push(
         '- The `.swiper-wrapper` must use a state-driven `translateX(...)` transform instead of staying static.',
       );
       lines.push(
         '- Prev/next buttons must include visible SVG or text children.',
+      );
+      lines.push(
+        '- If dots are rendered, keep the `swiper-pagination` wrapper instead of free-floating bullets.',
       );
       lines.push(
         '- Preserve the approved carousel interaction/settings contract instead of falling back to a generic slider implementation.',
@@ -3442,7 +3838,7 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
         );
       lines.push(
-        '- Keep the Spectra modal structure markers: `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, and `uagb-modal-popup-content`.',
+        '- Keep the Spectra modal structure markers: `uagb-spectra-button-wrapper`, `uagb-modal-trigger`, `uagb-modal-popup`, `uagb-modal-popup-wrap`, `uagb-modal-popup-content`, and `uagb-modal-popup-close`.',
       );
       lines.push(
         '- If the popup overlay is open/rendered, its className must also include `active` so Spectra compat CSS does not keep it hidden.',
@@ -3674,6 +4070,52 @@ function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
   }
 
   return [...result];
+}
+
+function extractCustomClassNamesFromBlockTree(
+  nodes?: readonly BlockNode[],
+): string[] {
+  if (!nodes?.length) return [];
+  const result = new Set<string>();
+  const visit = (node: BlockNode) => {
+    for (const className of node.customClassNames ?? []) {
+      const normalized = className.trim();
+      if (normalized) result.add(normalized);
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of nodes) visit(node);
+  return [...result];
+}
+
+function summarizeVisualPlanBlockTree(
+  nodes: readonly BlockNode[],
+  depth = 0,
+  lines: string[] = [],
+  limit = 14,
+): string[] {
+  for (const node of nodes) {
+    if (lines.length >= limit) break;
+    const parts = [
+      `${'  '.repeat(depth)}- ${node.kind}`,
+      node.sourceRef?.sourceNodeId
+        ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+        : null,
+      node.templatePartSlug ? `templatePart=${node.templatePartSlug}` : null,
+      node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+      node.customClassNames?.length
+        ? `classes=${JSON.stringify(node.customClassNames.slice(0, 4))}`
+        : null,
+    ].filter(Boolean);
+    lines.push(parts.join(' | '));
+    if (node.children?.length && lines.length < limit) {
+      summarizeVisualPlanBlockTree(node.children, depth + 1, lines, limit);
+    }
+  }
+  if (depth === 0 && lines.length >= limit) {
+    lines.push('- ...');
+  }
+  return lines;
 }
 
 function extractInnerCustomClassNamesFromSection(

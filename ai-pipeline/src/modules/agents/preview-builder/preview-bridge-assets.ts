@@ -1,79 +1,116 @@
 export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   .wow {
     will-change: opacity, transform;
+    backface-visibility: hidden;
+    transform-origin: center center;
+    --vp-wow-distance: 24px;
+    --vp-wow-scale: 0.92;
+    --vp-wow-duration: 700ms;
+    --vp-wow-delay: 0ms;
+    --vp-wow-timing: ease;
   }
 
   .wow.animate__animated {
     opacity: 0;
+    transition-property: opacity, transform;
+    transition-duration: var(--vp-wow-duration);
+    transition-delay: var(--vp-wow-delay);
+    transition-timing-function: var(--vp-wow-timing);
   }
 
   .wow.animate__animated.vp-wow-visible,
   .wow.vp-wow-visible {
     opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
   }
 
-  .wow.animate__fadeInUp {
-    transform: translateY(24px);
-    transition:
-      opacity 700ms ease,
-      transform 700ms ease;
+  .wow.animate__fadeIn {
+    transform: translate3d(0, 0, 0);
   }
 
-  .wow.animate__fadeInUp.vp-wow-visible {
-    transform: translateY(0);
+  .wow.animate__fadeInUp,
+  .wow.animate__fadeInUpBig,
+  .wow.animate__slideInUp,
+  .wow.animate__bounceInUp {
+    transform: translate3d(0, var(--vp-wow-distance), 0);
   }
 
-  .wow.animate__fadeInLeft {
-    transform: translateX(-24px);
-    transition:
-      opacity 700ms ease,
-      transform 700ms ease;
+  .wow.animate__fadeInDown,
+  .wow.animate__fadeInDownBig,
+  .wow.animate__slideInDown,
+  .wow.animate__bounceInDown {
+    transform: translate3d(0, calc(var(--vp-wow-distance) * -1), 0);
   }
 
-  .wow.animate__fadeInLeft.vp-wow-visible {
-    transform: translateX(0);
+  .wow.animate__fadeInLeft,
+  .wow.animate__fadeInLeftBig,
+  .wow.animate__slideInLeft,
+  .wow.animate__bounceInLeft {
+    transform: translate3d(calc(var(--vp-wow-distance) * -1), 0, 0);
   }
 
-  .wow.animate__fadeInRight {
-    transform: translateX(24px);
-    transition:
-      opacity 700ms ease,
-      transform 700ms ease;
+  .wow.animate__fadeInRight,
+  .wow.animate__fadeInRightBig,
+  .wow.animate__slideInRight,
+  .wow.animate__bounceInRight {
+    transform: translate3d(var(--vp-wow-distance), 0, 0);
   }
 
-  .wow.animate__fadeInRight.vp-wow-visible {
-    transform: translateX(0);
+  .wow.animate__zoomIn,
+  .wow.animate__zoomInDown,
+  .wow.animate__zoomInUp,
+  .wow.animate__zoomInLeft,
+  .wow.animate__zoomInRight,
+  .wow.animate__bounceIn {
+    transform: scale(var(--vp-wow-scale));
   }
 
-  .wow.animate__zoomIn {
-    transform: scale(0.92);
-    transition:
-      opacity 700ms ease,
-      transform 700ms ease;
+  .wow.animate__flipInX {
+    transform: perspective(900px) rotateX(-12deg);
   }
 
-  .wow.animate__zoomIn.vp-wow-visible {
-    transform: scale(1);
+  .wow.animate__flipInY {
+    transform: perspective(900px) rotateY(-12deg);
+  }
+
+  .wow.animate__fast {
+    --vp-wow-duration: 560ms;
+  }
+
+  .wow.animate__faster {
+    --vp-wow-duration: 420ms;
+  }
+
+  .wow.animate__slow {
+    --vp-wow-duration: 900ms;
+  }
+
+  .wow.animate__slower {
+    --vp-wow-duration: 1200ms;
+  }
+
+  .wow.animate__delay-500ms {
+    --vp-wow-delay: 500ms;
   }
 
   .wow.animate__delay-1s {
-    transition-delay: 1s;
+    --vp-wow-delay: 1s;
   }
 
   .wow.animate__delay-2s {
-    transition-delay: 2s;
+    --vp-wow-delay: 2s;
   }
 
   .wow.animate__delay-3s {
-    transition-delay: 3s;
+    --vp-wow-delay: 3s;
   }
 
   .wow.animate__delay-4s {
-    transition-delay: 4s;
+    --vp-wow-delay: 4s;
   }
 
   .wow.animate__delay-5s {
-    transition-delay: 5s;
+    --vp-wow-delay: 5s;
   }
 }
 
@@ -82,8 +119,17 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     .wow,
     .wow.animate__animated,
     .wow.animate__fadeInUp,
+    .wow.animate__fadeInUpBig,
+    .wow.animate__fadeInDown,
+    .wow.animate__fadeInDownBig,
     .wow.animate__fadeInLeft,
+    .wow.animate__fadeInLeftBig,
     .wow.animate__fadeInRight,
+    .wow.animate__fadeInRightBig,
+    .wow.animate__slideInUp,
+    .wow.animate__slideInDown,
+    .wow.animate__slideInLeft,
+    .wow.animate__slideInRight,
     .wow.animate__zoomIn {
       opacity: 1;
       transform: none;
@@ -93,7 +139,8 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
 }
 `;
 
-export const SOURCE_MOTION_BOOTSTRAP_TS = String.raw`const SOURCE_MOTION_SELECTOR =
+export function buildSourceMotionBootstrapTs(): string {
+  return String.raw`const SOURCE_MOTION_SELECTOR =
   '.wow.animate__animated, .wow[class*="animate__"]';
 
 function startSourceMotionBridge() {
@@ -231,6 +278,7 @@ export function watchForSourceMotionSignals() {
   window.requestAnimationFrame(check);
 }
 `;
+}
 
 export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
   body.hide-scroll {
@@ -336,6 +384,73 @@ export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
     align-items: center;
   }
 
+  .vp-uagb-modal__stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .vp-uagb-modal__intro {
+    max-width: 42rem;
+  }
+
+  .vp-uagb-modal__image-frame {
+    position: relative;
+    overflow: hidden;
+    background: rgba(15, 23, 42, 0.06);
+  }
+
+  .vp-uagb-modal-popup {
+    z-index: 90;
+    padding: 1rem;
+  }
+
+  .vp-uagb-modal-popup__wrap {
+    width: 100%;
+    background: #ffffff;
+  }
+
+  .vp-uagb-modal-popup__close {
+    position: absolute;
+    z-index: 10;
+    width: 25px;
+    height: 25px;
+    justify-content: center;
+    color: #ffffff;
+  }
+
+  .vp-uagb-modal__content-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .vp-uagb-modal__content-grid--split {
+    display: grid;
+    gap: 2rem;
+  }
+
+  .vp-uagb-modal__content-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  @media (min-width: 640px) {
+    .vp-uagb-modal-popup {
+      padding-top: 2rem;
+      padding-bottom: 2rem;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .vp-uagb-modal__content-grid--split {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 0.88fr);
+      align-items: center;
+    }
+  }
+
   .uagb-tabs__wrap {
     display: flex;
     width: 100%;
@@ -420,6 +535,75 @@ export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
     display: block;
   }
 
+  .vp-uagb-tabs {
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .vp-uagb-tabs__title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .vp-uagb-tabs__surface {
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    padding: 0.5rem;
+  }
+
+  .vp-uagb-tabs__button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border: 1px solid transparent;
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease,
+      background-color 0.2s ease,
+      color 0.2s ease;
+  }
+
+  .vp-uagb-tabs__body-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .vp-uagb-tabs__panel-surface {
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+  }
+
+  .vp-uagb-tabs__panel-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .vp-uagb-tabs__panel-media-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+  }
+
+  .vp-uagb-tabs__media-image {
+    display: block;
+    width: 100%;
+    height: auto;
+    object-fit: cover;
+  }
+
+  @media (min-width: 1024px) {
+    .vp-uagb-tabs__panel-media-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      align-items: center;
+    }
+  }
+
   .uagb-slider-container {
     position: relative;
     width: 100%;
@@ -485,6 +669,137 @@ export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
     display: inline-flex;
   }
 
+  .vp-uagb-carousel__viewport--draggable {
+    user-select: none;
+    cursor: grab;
+  }
+
+  .vp-uagb-carousel__viewport--draggable:active {
+    cursor: grabbing;
+  }
+
+  .vp-uagb-carousel__track--stacked {
+    position: relative;
+    height: 100%;
+  }
+
+  .vp-uagb-carousel__track--slide {
+    display: flex;
+    height: 100%;
+    transition-timing-function: ease-out;
+  }
+
+  .vp-uagb-carousel__slide {
+    position: relative;
+  }
+
+  .vp-uagb-carousel__slide--stacked {
+    position: absolute;
+    inset: 0;
+  }
+
+  .vp-uagb-carousel__image {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .vp-uagb-carousel__overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.72) 0%,
+      rgba(0, 0, 0, 0.42) 48%,
+      rgba(0, 0, 0, 0.1) 100%
+    );
+  }
+
+  .vp-uagb-carousel__content {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    height: 100%;
+    flex-direction: column;
+  }
+
+  .vp-uagb-carousel__content--media {
+    justify-content: flex-end;
+    padding: 1.5rem;
+  }
+
+  .vp-uagb-carousel__content--plain {
+    align-items: center;
+    justify-content: center;
+    padding: 0.75rem 1.5rem;
+  }
+
+  .vp-uagb-carousel__surface {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .vp-uagb-carousel__surface--media {
+    background: rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(2px);
+  }
+
+  .vp-uagb-carousel__nav {
+    pointer-events: none;
+    position: absolute;
+    inset-inline: 0;
+    top: 50%;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transform: translateY(-50%);
+    padding-inline: 0.75rem;
+  }
+
+  .vp-uagb-carousel__arrow {
+    pointer-events: auto;
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease;
+  }
+
+  .vp-uagb-carousel__pagination {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 1.25rem;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .vp-uagb-carousel__bullet {
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease,
+      width 0.2s ease;
+  }
+
+  @media (min-width: 640px) {
+    .vp-uagb-carousel__content--media {
+      padding: 2.5rem;
+    }
+
+    .vp-uagb-carousel__content--plain {
+      padding: 1rem 2.5rem;
+    }
+
+    .vp-uagb-carousel__nav {
+      padding-inline: 1.25rem;
+    }
+  }
+
   .wp-block-uagb-faq.uagb-faq__wrap {
     width: 100%;
   }
@@ -511,6 +826,45 @@ export const SPECTRA_COMPAT_CSS = String.raw`@layer components {
 
   .wp-block-uagb-faq .uagb-faq-icon-wrap {
     flex: 0 0 auto;
+  }
+
+  .vp-uagb-faq {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .vp-uagb-faq__item {
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    border-radius: 24px;
+    padding: 0.25rem;
+  }
+
+  .vp-uagb-faq__question {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    text-align: left;
+    border: 0;
+    background: transparent;
+  }
+
+  .vp-uagb-faq__icon {
+    display: inline-flex;
+    width: 2.5rem;
+    height: 2.5rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    transition: transform 0.2s ease;
+  }
+
+  .vp-uagb-faq__content {
+    border-top: 1px solid rgba(15, 23, 42, 0.1);
+    padding: 0.25rem 1.25rem 1.25rem;
   }
 
   .uagb-faq-layout-grid.uagb-faq-equal-height.uagb-faq__wrap

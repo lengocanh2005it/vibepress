@@ -2,11 +2,14 @@ import type { DbContentResult } from '../../db-content/db-content.service.js';
 import type { ThemeTokens } from '../../block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
+import { extractStaticImageSources } from '../../../../common/utils/theme-asset.util.js';
+import type { PlannerSurfacePlan } from '../../planner/planner-surface-plan.schema.js';
 import type {
   ColorPalette,
   ComponentVisualPlan,
   DataNeed,
   SectionPlan,
+  SidebarWidget,
   SourceSegment,
 } from '../visual-plan.schema.js';
 import {
@@ -31,6 +34,7 @@ export function buildVisualPlanPrompt(input: {
   sourceAnalysis?: string;
   sourceBackedAuxiliaryLabels?: string[];
   sourceWidgetHints?: string[];
+  surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
   draftSections?: SectionPlan[];
@@ -49,6 +53,7 @@ export function buildVisualPlanPrompt(input: {
     sourceAnalysis,
     sourceBackedAuxiliaryLabels,
     sourceWidgetHints,
+    surfacePlan,
     draftSections,
     editRequestContextNote,
   } = input;
@@ -199,7 +204,7 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 |---|---|
 | \`navbar\` | header/navigation bar |
 | \`hero\` | large heading + optional CTA + optional image; \`centered\` / \`left\` heroes keep image BELOW text, only \`split\` may place image beside text |
-| \`cta-strip\` | standalone button/CTA row without a hero heading |
+| \`cta-strip\` | CTA banner or button row, optionally with brief heading/subheading above the CTA |
 | \`cover\` | full-width image with overlay text |
 | \`post-list\` | list or grid of blog posts from API |
 | \`card-grid\` | static grid of feature cards |
@@ -208,7 +213,11 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 | \`newsletter\` | email signup section |
 | \`footer\` | page footer with nav columns |
 | \`post-content\` | single post detail (uses :slug param) |
+| \`post-title\` | current post title block |
+| \`post-featured-image\` | current post featured image block |
 | \`post-meta\` | reusable byline/meta row for one current post item |
+| \`post-terms\` | taxonomy terms row for the current post, such as tags below the content |
+| \`post-navigation\` | previous/next post links for the current post |
 | \`page-content\` | single page detail (uses :slug param) |
 | \`prose-block\` | source-backed ordered prose/image/list segments for lossless fixed page detail rendering |
 | \`comments\`     | WordPress comments list + leave a reply form |
@@ -225,7 +234,7 @@ Fill from: card wrapper background/padding/radius in template → layout.cardRad
 \`\`\`
 navbar:       { sticky, menuSlug, cta? }
 hero:         { layout: centered|left|split, heading, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, image? } // centered|left => vertical stack (text first, image below)
-cta-strip:    { align?: left|center|right, cta?, ctas? }
+cta-strip:    { align?: left|center|right, heading?, subheading?, cta?, ctas? }
 cover:        { imageSrc, dimRatio, minHeight, heading?, subheading?, headingStyle?, subheadingStyle?, cta?, ctas?, contentAlign }
 post-list:    { title?, layout: list|grid-2|grid-3, showDate, showAuthor, showCategory, showExcerpt, showFeaturedImage, itemLayout?: title-meta-inline|stacked, metaLayout?: inline|stacked, metaAlign?: start|end, metaSeparator?: none|dot|dash|slash|pipe, itemGap?, metaGap? }
 card-grid:    { title?, titleStyle?, subtitle?, columns: 2|3|4, columnWidths?, cardStyle?, cards: [{heading,body}] }
@@ -234,13 +243,17 @@ testimonial:  { quote, authorName, authorTitle?, authorAvatar?, contentAlign?, q
 newsletter:   { heading, headingStyle?, subheading?, buttonText, layout: centered|card, inputStyle?, cardStyle? }
 footer:       { brandDescription?, menuColumns: [{title,menuSlug}], copyright? }
 post-content: { showTitle, showAuthor, showDate, showCategories }
+post-title:   { level?, titleStyle? }
+post-featured-image: { imageRadius?, imageAspectRatio? }
 post-meta:    { layout?: inline|stacked, showAuthor, showDate, showCategories, showSeparator? }
+post-terms:   { taxonomy?: category|post_tag|tag, prefix?, separator?, layout?: inline|stacked }
+post-navigation: { showPrevious?, showNext?, previousLabel?, nextLabel? }
 page-content: { showTitle }
 prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|paragraph|image|list|html, ... }] }
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
-sidebar:      { title?, menuSlug?, showSiteInfo, showPages, showPosts, maxItems? }
+sidebar:      { title?, widgets: [{ kind: search|author-bio|categories|navigation|pages-list|recent-posts, ... }], maxItems? }
 modal:        { triggerText?, triggerStyle?, heading?, headingStyle?, body?, bodyStyle?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
 tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
@@ -252,7 +265,8 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - Treat the selected WordPress source, theme files under \`themes/**\`, and interactive plugin contracts from \`plugins/ultimate-addons-for-gutenberg\` / Spectra as the primary source of truth. Prefer extracting exact structure from those sources over inferring a cleaner or more generic composition.
 - When repo hints expose concrete wrapper classes, variant names, item classes, alignment classes, or widget attr keys from Spectra/UAGB plugin source, preserve that same widget family in the plan instead of collapsing it into generic hero/card/media-text sections.
 - If theme or plugin source is sparse, keep the plan sparse. Do NOT compensate by inventing extra wrapper sections, promo rows, centered hero treatments, or broader containers.
-- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
+- When a "## Surface plan" block is present in the user message: treat it as the PRIMARY planning brief for page-level composition. Follow its contract, authority policy, source evidence, composition hints, and acceptance rules before applying any fallback heuristics.
+- When a "## Detected section order" block is present in the user message: for strict/non-page flows, treat its "sections" array as the authoritative order. For guided page flows, treat it as deterministic source evidence/fallback that should preserve source-backed section identity and widgets even when light wrapper recomposition is allowed by the surface plan authority.
 - When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`debugKey\`/legacy \`sectionKey\` labels or different \`sourceRef.sourceNodeId\`.
 - If a deterministic draft section is \`prose-block\`, preserve its \`sourceSegments\` literally and in order. Do NOT summarize them into a shorter hero/cover/media-text replacement.
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
@@ -281,7 +295,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
 - The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
 - If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
-- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must be content-only: use \`showPages\` and/or \`showPosts\`, but NEVER set \`menuSlug\` or \`showSiteInfo\`.
+- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must stay content-only. Use only widget kinds like \`search\`, \`pages-list\`, \`recent-posts\`, or \`categories\`. Do NOT use \`author-bio\` or \`navigation\` for page sidebars.
 - For page/listing/body components, do NOT add trailing utility/footer/sidebar-like sections or headings such as ${formatInventedAuxiliarySectionLabels()} unless that EXACT label is already source-backed in the scoped template source or deterministic draft sections supplied in the user prompt.
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
@@ -300,7 +314,8 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - For Spectra/UAGB widgets, prefer exact source attrs and plugin contract cues over generic defaults. Examples: preserve slider arrows/dots/autoplay/effect, modal width/height/overlay-close behavior, tabs variant/alignment, accordion toggle rules, and source-backed inner wrappers.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
-  const draftHint = buildDraftSectionsHint(draftSections);
+  const surfacePlanHint = buildSurfacePlanHint(surfacePlan);
+  const draftHint = buildDraftSectionsHint(draftSections, surfacePlan);
 
   const userPrompt = `## Component to plan: ${componentName}
 
@@ -314,7 +329,7 @@ ${palette}
 
 ${imageHints}
 
-${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}${draftHint ? `${draftHint}\n\n` : ''}## Template source
+${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}${surfacePlanHint ? `${surfacePlanHint}\n\n` : ''}${draftHint ? `${draftHint}\n\n` : ''}## Template source
 
 ${templateSource}
 
@@ -327,23 +342,143 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
-  if (!draftSections || draftSections.length === 0) return '';
+function buildSurfacePlanHint(surfacePlan?: PlannerSurfacePlan): string {
+  if (!surfacePlan) return '';
+
+  const compactPlan = {
+    kind: surfacePlan.kind,
+    contract: surfacePlan.contract,
+    authority: surfacePlan.authority,
+    pageIntent: surfacePlan.pageIntent,
+    sourceEvidence: {
+      planningSourceLabel: surfacePlan.sourceEvidence.planningSourceLabel,
+      planningSourceFile: surfacePlan.sourceEvidence.planningSourceFile,
+      sourceFacts: surfacePlan.sourceEvidence.sourceFacts,
+      primaryHeadings: surfacePlan.sourceEvidence.primaryHeadings.slice(0, 6),
+      primaryImages: surfacePlan.sourceEvidence.primaryImages.slice(0, 6),
+      paragraphSnippets: surfacePlan.sourceEvidence.paragraphSnippets?.slice(
+        0,
+        4,
+      ),
+      navigationLabels: surfacePlan.sourceEvidence.navigationLabels?.slice(
+        0,
+        8,
+      ),
+      contentClusters: surfacePlan.sourceEvidence.contentClusters
+        .slice(0, 10)
+        .map((cluster) => ({
+          id: cluster.id,
+          kind: cluster.kind,
+          importance: cluster.importance,
+          itemCountHint: cluster.itemCountHint,
+          sourceRef: cluster.sourceRef,
+          textEvidence: cluster.textEvidence?.slice(0, 3),
+          imageEvidence: cluster.imageEvidence?.slice(0, 2),
+          ctaEvidence: cluster.ctaEvidence?.slice(0, 2),
+          customClassNames: cluster.customClassNames?.slice(0, 6),
+        })),
+      wrapperFacts: surfacePlan.sourceEvidence.wrapperFacts
+        .slice(0, 8)
+        .map((wrapper) => ({
+          id: wrapper.id,
+          kind: wrapper.kind,
+          importance: wrapper.importance,
+          sourceRef: wrapper.sourceRef,
+          hints: wrapper.hints?.slice(0, 4),
+          customClassNames: wrapper.customClassNames?.slice(0, 6),
+        })),
+      widgets: surfacePlan.sourceEvidence.widgets.map((widget) => ({
+        kind: widget.kind,
+        required: widget.required,
+        sourceRef: widget.sourceRef,
+        customClassNames: widget.customClassNames?.slice(0, 6),
+      })),
+      representativeBindings:
+        surfacePlan.sourceEvidence.representativeBindings?.slice(0, 4),
+      evidenceNotes: surfacePlan.sourceEvidence.evidenceNotes?.slice(0, 8),
+      blockTreeNodeCount: surfacePlan.sourceEvidence.blockTree?.length,
+    },
+    designEvidence: {
+      importantClassNames: surfacePlan.designEvidence.importantClassNames.slice(
+        0,
+        12,
+      ),
+      spacingRhythm: surfacePlan.designEvidence.spacingRhythm,
+      visualToneHints: surfacePlan.designEvidence.visualToneHints.slice(0, 8),
+      tokens: {
+        palette: surfacePlan.designEvidence.tokens.palette,
+        typography: surfacePlan.designEvidence.tokens.typography,
+        hasBlockStyles: Boolean(surfacePlan.designEvidence.tokens.blockStyles),
+      },
+    },
+    compositionHints: surfacePlan.compositionHints,
+    acceptance: surfacePlan.acceptance,
+    ...(surfacePlan.kind === 'home-page'
+      ? {
+          heroEvidence: surfacePlan.heroEvidence,
+          feedEvidence: surfacePlan.feedEvidence,
+          brandEvidence: surfacePlan.brandEvidence,
+          homepageRules: surfacePlan.homepageRules,
+        }
+      : {}),
+    ...(surfacePlan.kind === 'post-detail'
+      ? {
+          postMeta: surfacePlan.postMeta,
+          postBody: surfacePlan.postBody,
+          postLayout: surfacePlan.postLayout,
+          articleRules: surfacePlan.articleRules,
+        }
+      : {}),
+  };
 
   const lines = [
-    '## Detected section order (deterministic, from WordPress block tree)',
-    'The following sections were detected in the EXACT order they appear in the WordPress template.',
-    'You MUST preserve this order in the `sections` array.',
-    'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
-    'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
-    'You MUST NOT reorder, merge, split, or drop sections from this list.',
-    'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
-    'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
+    '## Surface plan (primary evidence-guided brief)',
+    'Treat this surface plan as the primary blueprint for section families, wrapper composition, and what must stay source-backed.',
+    `Authority level: \`${surfacePlan.authority.level}\` (${surfacePlan.authority.reason})`,
+    `Page intent: \`${surfacePlan.pageIntent.kind}\` (confidence ${surfacePlan.pageIntent.confidence})`,
+    'Follow `acceptance.mustKeep` and `acceptance.mustNotInvent` strictly. Use `acceptance.mayRecompose` only within the authority policy.',
+    'If legacy draft sections below feel more rigid than this surface plan, prefer the surface plan for page-level composition while still preserving source-backed section identity, widgets, and content evidence.',
     '',
     '```json',
-    JSON.stringify(draftSections, null, 2),
+    JSON.stringify(compactPlan, null, 2),
     '```',
   ];
+
+  return lines.join('\n');
+}
+
+function buildDraftSectionsHint(
+  draftSections?: SectionPlan[],
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!draftSections || draftSections.length === 0) return '';
+
+  const strictDraftOrder =
+    !surfacePlan ||
+    surfacePlan.contract.componentType !== 'page' ||
+    surfacePlan.authority.level === 'strict';
+
+  const lines = strictDraftOrder
+    ? [
+        '## Detected section order (deterministic, from WordPress block tree)',
+        'The following sections were detected in the EXACT order they appear in the WordPress template.',
+        'You MUST preserve this order in the `sections` array.',
+        'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+        'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
+        'You MUST NOT reorder, merge, split, or drop sections from this list.',
+        'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
+        'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
+      ]
+    : [
+        '## Legacy draft sections (deterministic evidence / fallback)',
+        'These draft sections are a deterministic extraction from the WordPress source.',
+        'For page-level planning, treat the surface plan above as the primary brief and use this draft list as section-by-section evidence and fallback structure.',
+        'Keep a strong 1:1 correspondence when a draft entry clearly maps to a source-backed section, widget, or unique `sourceRef.sourceNodeId`.',
+        'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into the matching output section. Do NOT replace them with palette defaults.',
+        'You SHOULD NOT drop source-backed sections or merge adjacent entries with different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId` unless the surface plan authority clearly permits light recomposition and the same evidence survives in the final output.',
+        'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section unless one shared source wrapper proves that relationship.',
+      ];
+  lines.push('', '```json', JSON.stringify(draftSections, null, 2), '```');
   return lines.join('\n');
 }
 
@@ -619,42 +754,6 @@ function buildSpectraPlanningHint(
   return lines.join('\n');
 }
 
-export function extractStaticImageSources(templateSource: string): string[] {
-  const result = new Set<string>();
-
-  try {
-    const parsed = JSON.parse(templateSource);
-    const visit = (node: any) => {
-      if (!node || typeof node !== 'object') return;
-      if (typeof node.src === 'string' && node.src.trim()) {
-        result.add(node.src.trim());
-      }
-      if (typeof node.imageSrc === 'string' && node.imageSrc.trim()) {
-        result.add(node.imageSrc.trim());
-      }
-      if (Array.isArray(node.children)) node.children.forEach(visit);
-      if (Array.isArray(node)) node.forEach(visit);
-    };
-    visit(parsed);
-  } catch {
-    for (const match of templateSource.matchAll(
-      /(?:src|imageSrc)=["']([^"']+)["']/g,
-    )) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(/"src":"([^"]+)"/g)) {
-      if (match[1]) result.add(match[1].trim());
-    }
-    for (const match of templateSource.matchAll(
-      /https?:\/\/[^\s"'()<>]+\.(?:png|jpe?g|gif|webp|svg|avif)(?:\?[^\s"'()<>]*)?/gi,
-    )) {
-      if (match[0]) result.add(match[0].trim());
-    }
-  }
-
-  return [...result];
-}
-
 function buildImageSourcesHint(templateSource: string): string {
   const sources = extractStaticImageSources(templateSource);
   if (sources.length === 0) {
@@ -665,6 +764,7 @@ function buildImageSourcesHint(templateSource: string): string {
     '## Static image sources in template',
     ...sources.slice(0, 20).map((src) => `- ${src}`),
     sources.length > 20 ? `- ... and ${sources.length - 20} more` : '',
+    'Theme-local files may be canonicalized as `theme-asset:/...`; preserve that token exactly when present.',
     'Use only these exact sources for static images/avatars.',
   ]
     .filter(Boolean)
@@ -685,7 +785,11 @@ const VALID_SECTION_TYPES = new Set<string>([
   'newsletter',
   'footer',
   'post-content',
+  'post-title',
+  'post-featured-image',
   'post-meta',
+  'post-terms',
+  'post-navigation',
   'page-content',
   'prose-block',
   'comments',
@@ -892,6 +996,118 @@ function normalizeSourceSegment(raw: unknown): SourceSegment | null {
   }
 }
 
+function sanitizeSidebarLinks(
+  rawLinks: unknown,
+): Array<{ label: string; url?: string }> {
+  if (!Array.isArray(rawLinks)) return [];
+  return rawLinks
+    .map((rawLink) => {
+      if (!rawLink || typeof rawLink !== 'object') return null;
+      const label =
+        typeof (rawLink as { label?: unknown }).label === 'string'
+          ? (rawLink as { label: string }).label.trim()
+          : '';
+      const url =
+        typeof (rawLink as { url?: unknown }).url === 'string'
+          ? (rawLink as { url: string }).url.trim()
+          : undefined;
+      if (!label) return null;
+      return url ? { label, url } : { label };
+    })
+    .filter((value): value is { label: string; url?: string } =>
+      Boolean(value),
+    );
+}
+
+function sanitizeSidebarWidgets(rawWidgets: unknown): SidebarWidget[] {
+  if (!Array.isArray(rawWidgets)) return [];
+  const widgets: SidebarWidget[] = [];
+  for (const rawWidget of rawWidgets) {
+    if (!rawWidget || typeof rawWidget !== 'object') continue;
+    const kind =
+      typeof (rawWidget as { kind?: unknown }).kind === 'string'
+        ? (rawWidget as { kind: string }).kind
+        : '';
+    const title =
+      typeof (rawWidget as { title?: unknown }).title === 'string'
+        ? (rawWidget as { title: string }).title.trim()
+        : undefined;
+    const description =
+      typeof (rawWidget as { description?: unknown }).description === 'string'
+        ? (rawWidget as { description: string }).description.trim()
+        : undefined;
+    switch (kind) {
+      case 'search': {
+        const placeholder =
+          typeof (rawWidget as { placeholder?: unknown }).placeholder ===
+          'string'
+            ? (rawWidget as { placeholder: string }).placeholder.trim()
+            : undefined;
+        const buttonLabel =
+          typeof (rawWidget as { buttonLabel?: unknown }).buttonLabel ===
+          'string'
+            ? (rawWidget as { buttonLabel: string }).buttonLabel.trim()
+            : undefined;
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(placeholder ? { placeholder } : {}),
+          ...(buttonLabel ? { buttonLabel } : {}),
+        });
+        break;
+      }
+      case 'author-bio':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(description ? { description } : {}),
+          ...(typeof (rawWidget as { showAvatar?: unknown }).showAvatar ===
+          'boolean'
+            ? { showAvatar: (rawWidget as { showAvatar: boolean }).showAvatar }
+            : {}),
+        });
+        break;
+      case 'categories':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(typeof (rawWidget as { showCounts?: unknown }).showCounts ===
+          'boolean'
+            ? { showCounts: (rawWidget as { showCounts: boolean }).showCounts }
+            : {}),
+        });
+        break;
+      case 'navigation': {
+        const menuSlug =
+          typeof (rawWidget as { menuSlug?: unknown }).menuSlug === 'string'
+            ? (rawWidget as { menuSlug: string }).menuSlug.trim()
+            : undefined;
+        const links = sanitizeSidebarLinks(
+          (rawWidget as { links?: unknown }).links,
+        );
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(description ? { description } : {}),
+          ...(menuSlug ? { menuSlug } : {}),
+          ...(links.length > 0 ? { links } : {}),
+        });
+        break;
+      }
+      case 'pages-list':
+      case 'recent-posts':
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+        });
+        break;
+      default:
+        break;
+    }
+  }
+  return widgets;
+}
+
 /**
  * Validate one section object. Returns the (potentially auto-repaired) section
  * or null if the section is structurally broken and cannot be used.
@@ -1002,8 +1218,8 @@ function validateSectionDetailed(
 
     case 'cta-strip':
       if (!['left', 'center', 'right'].includes(raw.align)) delete raw.align;
-      delete raw.heading;
-      delete raw.subheading;
+      if (typeof raw.heading !== 'string') delete raw.heading;
+      if (typeof raw.subheading !== 'string') delete raw.subheading;
       delete raw.image;
       if (!raw.cta && !raw.ctas?.length) {
         return {
@@ -1180,6 +1396,39 @@ function validateSectionDetailed(
       if (typeof raw.showSeparator !== 'boolean') raw.showSeparator = true;
       break;
 
+    case 'post-title':
+      if (
+        typeof raw.level !== 'number' ||
+        !Number.isFinite(raw.level) ||
+        raw.level < 1 ||
+        raw.level > 6
+      ) {
+        raw.level = 1;
+      }
+      break;
+
+    case 'post-featured-image':
+      if (typeof raw.imageRadius !== 'string') delete raw.imageRadius;
+      if (typeof raw.imageAspectRatio !== 'string') delete raw.imageAspectRatio;
+      break;
+
+    case 'post-terms':
+      if (!['category', 'post_tag', 'tag'].includes(raw.taxonomy)) {
+        delete raw.taxonomy;
+      }
+      if (!['inline', 'stacked'].includes(raw.layout)) raw.layout = 'inline';
+      if (typeof raw.prefix !== 'string') delete raw.prefix;
+      if (typeof raw.separator !== 'string') delete raw.separator;
+      break;
+
+    case 'post-navigation':
+      if (typeof raw.showPrevious !== 'boolean') raw.showPrevious = true;
+      if (typeof raw.showNext !== 'boolean') raw.showNext = true;
+      if (typeof raw.previousLabel !== 'string')
+        raw.previousLabel = 'Previous:';
+      if (typeof raw.nextLabel !== 'string') raw.nextLabel = 'Next:';
+      break;
+
     case 'page-content':
       if (typeof raw.showTitle !== 'boolean') raw.showTitle = true;
       break;
@@ -1209,12 +1458,10 @@ function validateSectionDetailed(
 
     case 'sidebar':
       if (typeof raw.title !== 'string') delete raw.title;
-      if (typeof raw.menuSlug !== 'string' || !raw.menuSlug.trim()) {
-        delete raw.menuSlug;
+      raw.widgets = sanitizeSidebarWidgets(raw.widgets);
+      if (raw.widgets.length === 0) {
+        raw.widgets = [{ kind: 'pages-list', title: 'Pages' }];
       }
-      if (typeof raw.showSiteInfo !== 'boolean') raw.showSiteInfo = false;
-      if (typeof raw.showPages !== 'boolean') raw.showPages = true;
-      if (typeof raw.showPosts !== 'boolean') raw.showPosts = false;
       if (typeof raw.maxItems !== 'number' || raw.maxItems <= 0)
         raw.maxItems = 6;
       break;
@@ -1371,7 +1618,9 @@ function validateSectionDetailed(
                 ? item.label.trim()
                 : typeof item.title === 'string' && item.title.trim()
                   ? item.title.trim()
-                  : '';
+                  : typeof item.question === 'string' && item.question.trim()
+                    ? item.question.trim()
+                    : '';
           const body =
             typeof item.body === 'string' && item.body.trim()
               ? item.body.trim()
@@ -1379,7 +1628,9 @@ function validateSectionDetailed(
                 ? item.content.trim()
                 : typeof item.text === 'string' && item.text.trim()
                   ? item.text.trim()
-                  : '';
+                  : typeof item.answer === 'string' && item.answer.trim()
+                    ? item.answer.trim()
+                    : '';
           if (!heading || !body) return null;
           return { heading, body };
         })
@@ -1614,6 +1865,10 @@ export function sanitizeSectionsForContract(
   const allowedNeeds = new Set(contract.dataNeeds ?? []);
   const allowPostDetail = allowedNeeds.has('postDetail');
   const allowPageDetail = allowedNeeds.has('pageDetail');
+  const allowStaticSourceProse =
+    contract.componentType === 'page' &&
+    contract.isDetail !== true &&
+    !allowPostDetail;
   const allowComments = allowPostDetail || allowedNeeds.has('comments');
   const stripLayoutChrome =
     contract.stripLayoutChrome ?? contract.componentType === 'page';
@@ -1642,7 +1897,11 @@ export function sanitizeSectionsForContract(
         return null;
       }
 
-      if (section.type === 'prose-block' && !allowPageDetail) {
+      if (
+        section.type === 'prose-block' &&
+        !allowPageDetail &&
+        !allowStaticSourceProse
+      ) {
         adjustments.push(
           'removed prose-block section because contract does not allow pageDetail',
         );
@@ -1656,24 +1915,40 @@ export function sanitizeSectionsForContract(
         return null;
       }
 
+      if (
+        (section.type === 'post-title' ||
+          section.type === 'post-featured-image' ||
+          section.type === 'post-terms' ||
+          section.type === 'post-navigation') &&
+        !allowPostDetail
+      ) {
+        adjustments.push(
+          `removed ${section.type} section because contract does not allow postDetail`,
+        );
+        return null;
+      }
+
       if (section.type === 'sidebar' && contract.componentType === 'page') {
         const next = { ...section };
         let changed = false;
-        if (next.menuSlug) {
-          delete next.menuSlug;
+        const allowedWidgets = (next.widgets ?? []).filter(
+          (widget) =>
+            widget.kind === 'search' ||
+            widget.kind === 'pages-list' ||
+            widget.kind === 'recent-posts' ||
+            widget.kind === 'categories',
+        );
+        if (allowedWidgets.length !== (next.widgets ?? []).length) {
+          next.widgets = allowedWidgets;
           changed = true;
         }
-        if (next.showSiteInfo) {
-          next.showSiteInfo = false;
-          changed = true;
-        }
-        if (!next.showPages && !next.showPosts) {
-          next.showPages = true;
+        if ((next.widgets ?? []).length === 0) {
+          next.widgets = [{ kind: 'pages-list', title: 'Pages' }];
           changed = true;
         }
         if (changed) {
           adjustments.push(
-            'sanitized sidebar to remove shared chrome and keep only content widgets',
+            'sanitized sidebar to remove shared chrome widgets and keep only content widgets',
           );
         }
         return next;

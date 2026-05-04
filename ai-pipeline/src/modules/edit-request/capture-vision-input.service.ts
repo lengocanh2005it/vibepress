@@ -44,11 +44,6 @@ function formatAttachmentSummary(
   if (attachment.captureContext?.page?.route) {
     parts.push(`route=${attachment.captureContext.page.route}`);
   }
-  if (attachment.targetNode?.nearestHeading) {
-    parts.push(
-      `heading="${truncate(attachment.targetNode.nearestHeading, 80)}"`,
-    );
-  }
   if (attachment.geometry?.documentRect) {
     const rect = attachment.geometry.documentRect;
     parts.push(

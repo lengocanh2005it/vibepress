@@ -109,8 +109,6 @@ export interface CaptureData {
   page: CapturePage;
   selection: CaptureSelection;
   geometry: CaptureGeometry;
-  domTarget?: CaptureDomTarget;
-  targetNode?: CaptureTargetNode;
 }
 
 /** Alias for CaptureData — dùng trong Editor state */

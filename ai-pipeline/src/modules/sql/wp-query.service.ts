@@ -101,6 +101,7 @@ export interface WpDbGlobalStyle {
   id: number;
   title: string;
   slug: string;
+  themeSlug: string | null;
   content: string;
   status: string;
   modified: string;
@@ -558,6 +559,10 @@ export class WpQueryService {
       const opts: Record<string, string> = {};
       for (const row of rows) opts[row.option_name] = row.option_value;
 
+      this.logger.log(
+        `Resolved WordPress site options from prefix "${prefix}": stylesheet="${opts['stylesheet'] ?? ''}", template="${opts['template'] ?? ''}"`,
+      );
+
       return {
         siteUrl: opts['siteurl'] ?? '',
         siteName: opts['blogname'] ?? '',
@@ -584,13 +589,29 @@ export class WpQueryService {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
         `SELECT p.ID, p.post_type, p.post_title, p.post_name, p.post_content, p.post_status, p.post_modified,
-                area_terms.slug AS area_slug
+                (
+                  SELECT area_terms.slug
+                  FROM \`${prefix}term_relationships\` tr_area
+                  INNER JOIN \`${prefix}term_taxonomy\` tt_area
+                    ON tt_area.term_taxonomy_id = tr_area.term_taxonomy_id
+                   AND tt_area.taxonomy = 'wp_template_part_area'
+                  INNER JOIN \`${prefix}terms\` area_terms
+                    ON area_terms.term_id = tt_area.term_id
+                  WHERE tr_area.object_id = p.ID
+                  LIMIT 1
+                ) AS area_slug,
+                (
+                  SELECT theme_terms.slug
+                  FROM \`${prefix}term_relationships\` tr_theme
+                  INNER JOIN \`${prefix}term_taxonomy\` tt_theme
+                    ON tt_theme.term_taxonomy_id = tr_theme.term_taxonomy_id
+                   AND tt_theme.taxonomy = 'wp_theme'
+                  INNER JOIN \`${prefix}terms\` theme_terms
+                    ON theme_terms.term_id = tt_theme.term_id
+                  WHERE tr_theme.object_id = p.ID
+                  LIMIT 1
+                ) AS theme_slug
          FROM \`${prefix}posts\` p
-         LEFT JOIN \`${prefix}term_relationships\` tr_area ON tr_area.object_id = p.ID
-         LEFT JOIN \`${prefix}term_taxonomy\` tt_area
-           ON tt_area.term_taxonomy_id = tr_area.term_taxonomy_id
-          AND tt_area.taxonomy = 'wp_template_part_area'
-         LEFT JOIN \`${prefix}terms\` area_terms ON area_terms.term_id = tt_area.term_id
          WHERE post_type IN ('wp_template', 'wp_template_part')
            AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
          ORDER BY p.post_modified DESC, p.ID DESC`,
@@ -598,6 +619,8 @@ export class WpQueryService {
 
       return rows.map((row) => {
         const slugInfo = this.parseDbTemplateSlug(String(row.post_name ?? ''));
+        const taxonomyThemeSlug = String(row.theme_slug ?? '').trim() || null;
+        const effectiveThemeSlug = taxonomyThemeSlug ?? slugInfo.themeSlug;
         const content = String(row.post_content ?? '');
         return {
           id: Number(row.ID),
@@ -605,12 +628,15 @@ export class WpQueryService {
           title: String(row.post_title ?? ''),
           slug: String(row.post_name ?? ''),
           canonicalSlug: slugInfo.canonicalSlug,
-          themeSlug: slugInfo.themeSlug,
+          themeSlug: effectiveThemeSlug,
           area:
             row.post_type === 'wp_template_part'
               ? String(row.area_slug ?? '').trim() || null
               : null,
-          sourceEntityKey: slugInfo.sourceEntityKey,
+          sourceEntityKey: (effectiveThemeSlug
+            ? `${effectiveThemeSlug}//${slugInfo.canonicalSlug}`
+            : slugInfo.canonicalSlug
+          ).toLowerCase(),
           content,
           status: String(row.post_status ?? ''),
           modified: String(row.post_modified ?? ''),
@@ -680,8 +706,20 @@ export class WpQueryService {
     try {
       const prefix = await this.getTablePrefix(conn);
       const [rows] = await conn.query<any[]>(
-        `SELECT ID, post_title, post_name, post_content, post_status, post_modified
-         FROM \`${prefix}posts\`
+        `SELECT ID, post_title, post_name, post_content, post_status, post_modified,
+                (
+                  SELECT theme_terms.slug
+                  FROM \`${prefix}term_relationships\` tr_theme
+                  INNER JOIN \`${prefix}term_taxonomy\` tt_theme
+                    ON tt_theme.term_taxonomy_id = tr_theme.term_taxonomy_id
+                   AND tt_theme.taxonomy = 'wp_theme'
+                  INNER JOIN \`${prefix}terms\` theme_terms
+                    ON theme_terms.term_id = tt_theme.term_id
+                  WHERE tr_theme.object_id = p.ID
+                  LIMIT 1
+                ) AS theme_slug
+          FROM \`${prefix}posts\`
+          p
          WHERE post_type = 'wp_global_styles'
            AND post_status IN ('publish', 'private', 'draft', 'auto-draft')
          ORDER BY post_modified DESC, ID DESC`,
@@ -691,6 +729,9 @@ export class WpQueryService {
         id: Number(row.ID),
         title: String(row.post_title ?? ''),
         slug: String(row.post_name ?? ''),
+        themeSlug:
+          String(row.theme_slug ?? '').trim() ||
+          this.parseDbGlobalStyleThemeSlug(String(row.post_name ?? '')),
         content: String(row.post_content ?? ''),
         status: String(row.post_status ?? ''),
         modified: String(row.post_modified ?? ''),
@@ -1048,11 +1089,130 @@ export class WpQueryService {
   ): Promise<string> {
     const [rows] = await conn.query<any[]>(
       `SELECT table_name AS tableName FROM information_schema.tables
-       WHERE table_schema = DATABASE() AND table_name LIKE '%options' LIMIT 1`,
+       WHERE table_schema = DATABASE() AND table_name LIKE '%options'
+       ORDER BY table_name ASC`,
     );
     if (!rows.length) return 'wp_';
-    const tableName: string = rows[0].tableName;
-    return tableName.replace(/options$/, '');
+
+    const candidates = (
+      await Promise.all(
+        rows
+          .map((row) => String(row.tableName ?? '').trim())
+          .filter((tableName) => /options$/i.test(tableName))
+          .map((tableName) =>
+            this.inspectOptionsTableCandidate(conn, tableName),
+          ),
+      )
+    ).filter((candidate) => candidate !== null);
+
+    if (candidates.length === 0) return 'wp_';
+
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (Number(b.hasThemeMods) !== Number(a.hasThemeMods)) {
+        return Number(b.hasThemeMods) - Number(a.hasThemeMods);
+      }
+      if (Number(b.isRootLike) !== Number(a.isRootLike)) {
+        return Number(b.isRootLike) - Number(a.isRootLike);
+      }
+      if (a.prefix.length !== b.prefix.length) {
+        return a.prefix.length - b.prefix.length;
+      }
+      return a.tableName.localeCompare(b.tableName);
+    });
+
+    const best = candidates[0];
+    if (!best) return 'wp_';
+
+    if (candidates.length > 1) {
+      this.logger.warn(
+        `Resolved multiple WordPress options-table candidates; selected prefix "${best.prefix}" from "${best.tableName}" (score=${best.score}, stylesheet="${best.stylesheet}", template="${best.template}"). Candidates: ${candidates
+          .map(
+            (candidate) =>
+              `${candidate.tableName}[score=${candidate.score},stylesheet=${candidate.stylesheet || '(empty)'},template=${candidate.template || '(empty)'}]`,
+          )
+          .join(', ')}`,
+      );
+    }
+
+    return best.prefix;
+  }
+
+  private async inspectOptionsTableCandidate(
+    conn: Awaited<ReturnType<typeof createConnection>>,
+    tableName: string,
+  ): Promise<{
+    tableName: string;
+    prefix: string;
+    stylesheet: string;
+    template: string;
+    siteUrl: string;
+    home: string;
+    blogName: string;
+    hasThemeMods: boolean;
+    isRootLike: boolean;
+    score: number;
+  } | null> {
+    try {
+      const prefix = tableName.replace(/options$/i, '');
+      const keys = ['stylesheet', 'template', 'siteurl', 'home', 'blogname'];
+      const [rows] = await conn.query<any[]>(
+        `SELECT option_name, option_value FROM \`${tableName}\`
+         WHERE option_name IN (${keys.map(() => '?').join(',')})`,
+        keys,
+      );
+      const optionMap = new Map<string, string>();
+      for (const row of rows) {
+        optionMap.set(
+          String(row.option_name ?? ''),
+          String(row.option_value ?? '').trim(),
+        );
+      }
+
+      const stylesheet = optionMap.get('stylesheet') ?? '';
+      const template = optionMap.get('template') ?? '';
+      const siteUrl = optionMap.get('siteurl') ?? '';
+      const home = optionMap.get('home') ?? '';
+      const blogName = optionMap.get('blogname') ?? '';
+      const isRootLike = !/\d+_$/.test(prefix);
+
+      let hasThemeMods = false;
+      if (stylesheet) {
+        const [[modsRow]] = await conn.query<any[]>(
+          `SELECT 1 AS present FROM \`${tableName}\` WHERE option_name = ? LIMIT 1`,
+          [`theme_mods_${stylesheet}`],
+        );
+        hasThemeMods = Boolean(modsRow?.present);
+      }
+
+      let score = 0;
+      if (stylesheet) score += 6;
+      if (template) score += 6;
+      if (siteUrl) score += 4;
+      if (home) score += 3;
+      if (blogName) score += 1;
+      if (hasThemeMods) score += 4;
+      if (isRootLike) score += 1;
+      if (stylesheet && template && stylesheet === template) score += 1;
+
+      return {
+        tableName,
+        prefix,
+        stylesheet,
+        template,
+        siteUrl,
+        home,
+        blogName,
+        hasThemeMods,
+        isRootLike,
+        score,
+      };
+    } catch (error: any) {
+      this.logger.warn(
+        `Failed to inspect WordPress options-table candidate "${tableName}": ${error?.message ?? error}`,
+      );
+      return null;
+    }
   }
 
   private async createConnection(connectionString: string) {
@@ -1417,6 +1577,14 @@ export class WpQueryService {
         : canonicalSlug
       ).toLowerCase(),
     };
+  }
+
+  private parseDbGlobalStyleThemeSlug(rawSlug: string): string | null {
+    const trimmed = String(rawSlug ?? '')
+      .trim()
+      .toLowerCase();
+    const match = trimmed.match(/^wp-global-styles-(.+)$/);
+    return match?.[1]?.trim() || null;
   }
 
   private extractBlockTypes(content: string): string[] {

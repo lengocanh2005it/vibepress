@@ -345,28 +345,25 @@ Hard rules:
 - The product migrates full sites. A request may still be a targeted UI edit on an already-generated component.
 - "full_site_migration" — user wants to migrate or regenerate the full site with no specific focus.
 - "full_site_migration_with_focus" — user wants full migration but with extra focus on one page or area.
-- "targeted_component_edit" — user wants to edit an already-generated component: change layout/colors/content, add a new section (carousel, slider, modal, tabs, accordion, etc.), replace an existing section, or adjust layout. These are post-generation edits, not full regenerations.
+- "targeted_component_edit" — user wants to edit an already-generated component, but ONLY within these supported scopes: change content, change background, change color, or change layout. These are post-generation edits, not full regenerations.
 - If captures exist, treat them as visual evidence of the targeted area.
-- Accept UI edit requests (layout, color, content, add section, replace section) as "targeted_component_edit".
-- Accept feature additions (carousel, FAQ, newsletter, modal, chat, widget) as "targeted_component_edit" if they target a specific component, or as "full_site_migration_with_focus" if they apply site-wide.
+- Accept UI edit requests for content/background/color/layout as "targeted_component_edit".
+- Reject requests to add/remove/replace sections, add widgets/components/features, or perform typography-only redesigns. Those are not supported by the current edit flow.
 - If the request is vague but still plausibly about UI/migration, prefer the closest accepted category instead of "invalid".
 - Reject anything clearly unrelated to UI, migration, or component editing.
 
 editOperation values (pick the best match):
 - "change_layout" — rearranging visual structure
 - "change_content" — updating text, headings, copy
-- "change_color" — changing colors, backgrounds
-- "replace_section" — replacing one section type with another
-- "add_section" — adding a new section (carousel, tabs, accordion, modal, etc.)
-- "add_component" — adding a new interactive widget
-- "adjust_layout" — minor layout tweaks based on existing structure
+- "change_background" — changing backgrounds, gradients, overlays
+- "change_color" — changing foreground colors such as text/icon/button/border color
 - "general" — general edit not matching above
 
 Return ONLY valid JSON with this exact shape:
 {
   "accepted": boolean,
   "category": "full_site_migration" | "full_site_migration_with_focus" | "targeted_component_edit" | "invalid",
-  "editOperation": "change_layout" | "change_content" | "change_color" | "replace_section" | "add_section" | "add_component" | "adjust_layout" | "general" | null,
+  "editOperation": "change_layout" | "change_content" | "change_background" | "change_color" | "general" | null,
   "focusHint": string | null,
   "confidence": number,
   "rejectionCode": "UNCLEAR_INTENT" | "OUT_OF_SCOPE" | null,
@@ -412,7 +409,7 @@ function buildIntentClassifierPrompt(input: ValidatedEditRequest): string {
     lines.push('Capture notes:');
     for (const attachment of request.attachments.slice(0, 6)) {
       lines.push(
-        `- id=${attachment.id}; note=${attachment.note?.trim() || '(empty)'}; page=${attachment.sourcePageUrl ?? attachment.captureContext?.page?.url ?? '(none)'}; route=${attachment.targetNode?.route ?? attachment.captureContext?.page?.route ?? '(none)'}; template=${attachment.targetNode?.templateName ?? '(none)'}; targetRole=${attachment.targetNode?.editNodeRole ?? '(none)'}`,
+        `- id=${attachment.id}; note=${attachment.note?.trim() || '(empty)'}; page=${attachment.sourcePageUrl ?? attachment.captureContext?.page?.url ?? '(none)'}; route=${attachment.captureContext?.page?.route ?? '(none)'}`,
       );
     }
   }
@@ -570,14 +567,11 @@ function collectTargetCandidates(
 
   for (const attachment of request.attachments ?? []) {
     const route =
-      attachment.targetNode?.route ??
       attachment.captureContext?.page?.route ??
       toComparablePath(attachment.sourcePageUrl) ??
       undefined;
     const templateName =
-      attachment.targetNode?.templateName ??
-      request.targetHint?.templateName ??
-      inferTemplateNameFromRoute(route);
+      request.targetHint?.templateName ?? inferTemplateNameFromRoute(route);
     const componentName =
       request.targetHint?.componentName ??
       deriveComponentNameFromTemplateName(templateName) ??
@@ -585,22 +579,15 @@ function collectTargetCandidates(
     const sectionType =
       request.targetHint?.sectionType ??
       inferSectionTypeFromCaptureSignals(attachment);
-    const sourceNodeId =
-      attachment.targetNode?.sourceNodeId ?? request.targetHint?.sourceNodeId;
+    const sourceNodeId = request.targetHint?.sourceNodeId;
     const targetNodeRole = normalizeNodeRole(
-      attachment.targetNode?.editNodeRole ?? request.targetHint?.targetNodeRole,
+      request.targetHint?.targetNodeRole,
     );
     const evidence = compactStrings([
       `attachment=${attachment.id}`,
       attachment.note ? `note="${truncate(attachment.note, 100)}"` : undefined,
       route ? `route=${route}` : undefined,
       templateName ? `template=${templateName}` : undefined,
-      attachment.targetNode?.nearestHeading
-        ? `heading="${truncate(attachment.targetNode.nearestHeading, 80)}"`
-        : undefined,
-      attachment.targetNode?.blockName
-        ? `block=${attachment.targetNode.blockName}`
-        : undefined,
       sourceNodeId ? `sourceNodeId=${sourceNodeId}` : undefined,
       targetNodeRole ? `targetRole=${targetNodeRole}` : undefined,
     ]);
@@ -632,10 +619,7 @@ function inferTargetScope(
   if (
     request?.targetHint?.targetNodeRole ||
     request?.targetHint?.targetTextPreview ||
-    request?.targetHint?.targetElementTag ||
-    request?.attachments?.some(
-      (attachment) => attachment.targetNode?.editNodeRole,
-    )
+    request?.targetHint?.targetElementTag
   ) {
     return 'element';
   }
@@ -938,11 +922,11 @@ function stripVietnameseMarks(value: string): string {
 
 function looksLikeTargetedComponentEdit(prompt: string): boolean {
   const editActionSignal =
-    /\b(doi|sua|thay|them|chen|bo sung|change|edit|update|replace|add|insert|adjust|refine|switch|convert)\b/.test(
+    /\b(doi|sua|thay|change|edit|update|adjust|refine|switch|align|rearrange)\b/.test(
       prompt,
     );
   const uiTargetSignal =
-    /\b(layout|mau|color|noi dung|content|section|vung|component|widget|slider|carousel|modal|tabs|accordion|faq|hero|banner|header|footer|background|bo cuc|giao dien)\b/.test(
+    /\b(layout|mau|color|noi dung|content|section|vung|component|hero|banner|header|footer|background|bo cuc|giao dien)\b/.test(
       prompt,
     );
   return editActionSignal && uiTargetSignal;
@@ -951,11 +935,8 @@ function looksLikeTargetedComponentEdit(prompt: string): boolean {
 const VALID_EDIT_OPERATIONS = [
   'change_layout',
   'change_content',
+  'change_background',
   'change_color',
-  'replace_section',
-  'add_section',
-  'add_component',
-  'adjust_layout',
   'general',
 ] as const;
 
@@ -972,18 +953,12 @@ function buildTargetedEditIntent(
 ): string {
   const snippet = `"${prompt.slice(0, 120)}"`;
   switch (operation) {
-    case 'add_section':
-      return `Add a new section to the targeted component as described: ${snippet}`;
-    case 'add_component':
-      return `Add a new interactive component to the targeted area as described: ${snippet}`;
-    case 'replace_section':
-      return `Replace the targeted section with a new one as described: ${snippet}`;
     case 'change_layout':
       return `Change the layout of the targeted component/section as described: ${snippet}`;
-    case 'adjust_layout':
-      return `Adjust the layout of the targeted component based on its current structure: ${snippet}`;
+    case 'change_background':
+      return `Update the background treatment of the targeted component as described: ${snippet}`;
     case 'change_color':
-      return `Update the colors/backgrounds of the targeted component as described: ${snippet}`;
+      return `Update the foreground colors of the targeted component as described: ${snippet}`;
     case 'change_content':
       return `Update the content (text, headings) of the targeted component as described: ${snippet}`;
     default:
@@ -1009,10 +984,6 @@ function scoreAttachmentCandidateConfidence(
 ): number {
   let score = 0.38;
   if (attachment.note?.trim()) score += 0.16;
-  if (attachment.targetNode?.route) score += 0.14;
-  if (attachment.targetNode?.templateName) score += 0.12;
-  if (attachment.targetNode?.nearestHeading) score += 0.07;
-  if (attachment.targetNode?.editNodeRole) score += 0.07;
   if (attachment.geometry?.normalizedRect) score += 0.04;
   return clampMetric(score);
 }
@@ -1086,21 +1057,7 @@ function inferTemplateNameFromRoute(route?: string | null): string | undefined {
 function inferSectionTypeFromCaptureSignals(
   attachment: NonNullable<PipelineEditRequestDto['attachments']>[number],
 ): string | undefined {
-  const signal = normalizeText(
-    compactStrings([
-      attachment.targetNode?.blockName,
-      attachment.targetNode?.tagName,
-      attachment.targetNode?.domPath,
-      attachment.targetNode?.nearestHeading,
-      attachment.targetNode?.nearestLandmark,
-      attachment.domTarget?.blockName,
-      attachment.domTarget?.tagName,
-      attachment.domTarget?.domPath,
-      attachment.domTarget?.nearestHeading,
-      attachment.domTarget?.nearestLandmark,
-      attachment.note,
-    ]).join(' '),
-  );
+  const signal = normalizeText(compactStrings([attachment.note]).join(' '));
 
   if (!signal) return undefined;
   if (/\b(hero|banner|cover)\b/.test(signal)) return 'hero';

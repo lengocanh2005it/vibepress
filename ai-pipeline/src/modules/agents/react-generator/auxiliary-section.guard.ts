@@ -125,6 +125,11 @@ export function pruneTrailingInventedAuxiliarySections(
 
   while (next.length > 0) {
     const lastSection = next[next.length - 1];
+    // Structural chrome sections (footer, navbar) must never be pruned regardless
+    // of their menu column titles matching auxiliary labels like "navigation".
+    if (lastSection.type === 'footer' || lastSection.type === 'navbar') {
+      break;
+    }
     const label = getPrimaryInventedAuxiliaryLabelForSection(lastSection);
     if (!label || allowed.has(label)) break;
     droppedLabels.push(label);

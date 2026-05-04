@@ -4,9 +4,82 @@ const { chromium } = require('playwright');
 const { UPLOAD_ROOT } = require('../config/constants');
 const { uploadCaptureAsset } = require('../services/imageUploadService');
 const { query } = require('../db/mysql');
+const { buildPublicUrl, resolvePublicBaseUrl } = require('../utils/publicUrl');
 
 const CAPTURES_DIR = path.join(UPLOAD_ROOT, 'captures');
 fse.ensureDirSync(CAPTURES_DIR);
+
+function resolveCaptureTargetUrl(req, pageUrl, proxyUrl) {
+  const normalizedProxyUrl =
+    typeof proxyUrl === 'string' ? proxyUrl.trim() : '';
+
+  if (normalizedProxyUrl) {
+    try {
+      return new URL(normalizedProxyUrl).toString();
+    } catch {
+      try {
+        return new URL(normalizedProxyUrl, resolvePublicBaseUrl(req)).toString();
+      } catch {
+        // Fall back to the raw WordPress page when the proxy URL is malformed.
+      }
+    }
+  }
+
+  return pageUrl;
+}
+
+async function stabilizePageForCapture(page) {
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 });
+  } catch {
+    // Some pages keep background requests alive; continue with best-effort stabilization.
+  }
+
+  await page.addStyleTag({
+    content: `
+      html {
+        scroll-behavior: auto !important;
+      }
+
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+        caret-color: transparent !important;
+      }
+
+      .wow,
+      .animated,
+      [class*="animate__"],
+      [class*="fadeIn"],
+      [class*="slideIn"],
+      [class*="zoomIn"] {
+        animation: none !important;
+        transition: none !important;
+        transform: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+      }
+    `,
+  });
+
+  await page.evaluate(async () => {
+    try {
+      if (document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+    } catch {
+      // Ignore font readiness failures.
+    }
+
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(resolve);
+      });
+    });
+  });
+
+  await page.waitForTimeout(150);
+}
 
 // -------------------------------------------------------
 // POST /api/wp/capture
@@ -27,8 +100,9 @@ async function captureRegion(req, res) {
 
   const filename = `capture-${Date.now()}.png`;
   const filePath = path.join(CAPTURES_DIR, filename);
-  // Playwright chạy trên server nên truy cập thẳng WordPress, không cần qua proxy
-  const targetUrl = pageUrl;
+  // Prefer the proxied preview URL so the saved screenshot matches the iframe
+  // the user selected inside the editor.
+  const targetUrl = resolveCaptureTargetUrl(req, pageUrl, proxyUrl);
   const viewportWidth = Math.max(
     1,
     Math.round(Number(viewport?.width) || 1280),
@@ -51,13 +125,14 @@ async function captureRegion(req, res) {
     });
     const page = await context.newPage();
     await page.goto(targetUrl, { waitUntil: 'load', timeout: 60000 });
+    await stabilizePageForCapture(page);
 
     if (scrollX > 0 || scrollY > 0) {
       await page.evaluate(
         ({ x, y }) => window.scrollTo(x, y),
         { x: scrollX, y: scrollY },
       );
-      await page.waitForTimeout(150);
+      await stabilizePageForCapture(page);
     }
 
     const clipX = Math.max(0, Math.round(x));
@@ -94,7 +169,7 @@ async function captureRegion(req, res) {
       },
     });
 
-    const localPublicUrl = `${req.protocol}://${req.get('host')}/captures/${filename}`;
+    const localPublicUrl = buildPublicUrl(req, `/captures/${filename}`);
     const asset = await uploadCaptureAsset(filePath, filename, localPublicUrl, {
       width: clipWidth,
       height: clipHeight,
@@ -132,10 +207,8 @@ async function saveCapture(req, res) {
         comment, page_url, iframe_src, captured_at,
         viewport,
         page,
-        selection, geometry,
-        dom_target,
-        target_node
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        selection, geometry
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         captureData.id,
         siteId,
@@ -150,8 +223,6 @@ async function saveCapture(req, res) {
         captureData.page       ? JSON.stringify(captureData.page)       : null,
         captureData.selection  ? JSON.stringify(captureData.selection)  : null,
         captureData.geometry   ? JSON.stringify(captureData.geometry)   : null,
-        captureData.domTarget  ? JSON.stringify(captureData.domTarget)  : null,
-        captureData.targetNode ? JSON.stringify(captureData.targetNode) : null,
       ],
     );
 

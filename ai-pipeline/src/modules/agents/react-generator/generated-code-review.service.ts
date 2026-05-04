@@ -5,12 +5,21 @@ import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
-import type { CardGridSection, SectionPlan } from './visual-plan.schema.js';
+import type {
+  BlockNode,
+  CardGridSection,
+  SectionPlan,
+} from './visual-plan.schema.js';
 import {
   extractAuxiliaryLabelsFromSections,
   getExactInventedAuxiliaryLabel,
   mergeAuxiliaryLabels,
 } from './auxiliary-section.guard.js';
+import {
+  FIXED_PAGE_DETAIL_CANONICAL_BODY_REQUIRED_REVIEW_MESSAGE,
+  FIXED_PAGE_DETAIL_DUPLICATE_MODE_REVIEW_MESSAGE,
+  FIXED_PAGE_DETAIL_NARROW_SHELL_REVIEW_MESSAGE,
+} from './prompt-policy.util.js';
 
 interface CodeReviewIssue {
   severity: 'high' | 'medium' | 'low';
@@ -129,7 +138,7 @@ export class GeneratedCodeReviewService {
 
     return {
       success: mode === 'blocking' ? failures.length === 0 : true,
-      failures: mode === 'blocking' ? failures : [],
+      failures,
     };
   }
 
@@ -209,6 +218,7 @@ export class GeneratedCodeReviewService {
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
     const visualSections =
       visualSectionTypes.length > 0 ? visualSectionTypes.join(', ') : '(none)';
+    const blockTreeSummary = this.buildBlockTreeDetailLines(contract);
     const knownRoutes = this.buildKnownRoutesLines(plan);
     const isArchive = component.name === 'Archive';
 
@@ -262,6 +272,8 @@ Approved contract:
 - approved visual sections: ${visualSections}
 - approved visual section details:
 ${this.buildVisualSectionDetailLines(contract)}
+- approved block hierarchy:
+${blockTreeSummary}
 - known app routes:
 ${knownRoutes}
 - allowed API expectations:
@@ -287,20 +299,7 @@ ${component.code}
     fixedSlug?: string | null,
   ): string {
     const normalized = new Set(
-      dataNeeds.map((value) => {
-        switch (value) {
-          case 'siteInfo':
-            return 'site-info';
-          case 'footerLinks':
-            return 'footer-links';
-          case 'postDetail':
-            return 'post-detail';
-          case 'pageDetail':
-            return 'page-detail';
-          default:
-            return value;
-        }
-      }),
+      dataNeeds.map((value) => this.normalizeDataNeed(value)),
     );
     const lines: string[] = [];
     if (normalized.has('site-info')) lines.push('- /api/site-info');
@@ -434,6 +433,56 @@ ${component.code}
       .join('\n');
   }
 
+  private buildBlockTreeDetailLines(
+    contract: PlanResult[number] | null,
+  ): string {
+    const nodes = contract?.visualPlan?.blockTree ?? [];
+    if (nodes.length === 0) return '- (none)';
+
+    const lines: string[] = [];
+    const visit = (items: readonly BlockNode[], depth = 0) => {
+      for (const node of items) {
+        if (lines.length >= 12) return;
+        lines.push(
+          [
+            `${'  '.repeat(depth)}- ${node.kind}`,
+            node.sourceRef?.sourceNodeId
+              ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+              : null,
+            node.templatePartSlug
+              ? `templatePart=${node.templatePartSlug}`
+              : null,
+            node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+          ]
+            .filter(Boolean)
+            .join(' | '),
+        );
+        if (node.children?.length && lines.length < 12) {
+          visit(node.children, depth + 1);
+        }
+      }
+    };
+
+    visit(nodes);
+    if (lines.length >= 12) lines.push('- ...');
+    return lines.join('\n');
+  }
+
+  private normalizeDataNeed(value: string): string {
+    switch (value) {
+      case 'siteInfo':
+        return 'site-info';
+      case 'footerLinks':
+        return 'footer-links';
+      case 'postDetail':
+        return 'post-detail';
+      case 'pageDetail':
+        return 'page-detail';
+      default:
+        return value;
+    }
+  }
+
   private applyDeterministicIssues(
     review: CodeReviewResult,
     component: GeneratedComponent,
@@ -462,7 +511,9 @@ ${component.code}
     const isPageComponent = (contract?.type ?? component.type) === 'page';
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const normalizedDataNeeds = new Set(
-      contract?.dataNeeds ?? component.dataNeeds ?? [],
+      (contract?.dataNeeds ?? component.dataNeeds ?? []).map((value) =>
+        this.normalizeDataNeed(value),
+      ),
     );
     const allowedSectionTypes = new Set(
       sections.map((section) => section.type),
@@ -473,6 +524,9 @@ ${component.code}
     const hasSourceBackedProseBlock = sections.some(
       (section) =>
         section.type === 'prose-block' && section.sourceSegments.length > 0,
+    );
+    const hasSourceBackedPageCompanionSections = sections.some((section) =>
+      this.isSourceBackedPageDetailCompanionSection(section),
     );
     const isFixedPageDetailComponent =
       !!fixedSlug &&
@@ -548,7 +602,7 @@ ${component.code}
       }
 
       if (
-        normalizedDataNeeds.has('pageDetail') &&
+        normalizedDataNeeds.has('page-detail') &&
         /\/api\/pages\/\$\{slug\}|\/api\/pages\/['"`]\s*\+\s*slug/.test(
           component.code,
         )
@@ -560,7 +614,7 @@ ${component.code}
       }
 
       if (
-        normalizedDataNeeds.has('postDetail') &&
+        normalizedDataNeeds.has('post-detail') &&
         /\/api\/posts\/\$\{slug\}|\/api\/posts\/['"`]\s*\+\s*slug/.test(
           component.code,
         )
@@ -574,14 +628,23 @@ ${component.code}
 
     if (isFixedPageDetailComponent) {
       if (
+        hasSourceBackedPageCompanionSections &&
+        this.hasCanonicalPageContentRender(component.code)
+      ) {
+        issues.push({
+          severity: 'high',
+          message: FIXED_PAGE_DETAIL_DUPLICATE_MODE_REVIEW_MESSAGE,
+        });
+      }
+
+      if (
         hasPageContentSection &&
         !hasSourceBackedProseBlock &&
         !this.hasCanonicalPageContentRender(component.code)
       ) {
         issues.push({
           severity: 'high',
-          message:
-            'Fixed page-detail component does not render the fetched `page.content`/`item.content` body via `dangerouslySetInnerHTML`. The canonical page body must be rendered instead of replacing the page with bespoke static sections.',
+          message: FIXED_PAGE_DETAIL_CANONICAL_BODY_REQUIRED_REVIEW_MESSAGE,
         });
       }
 
@@ -603,15 +666,14 @@ ${component.code}
       ) {
         issues.push({
           severity: 'high',
-          message:
-            'Fixed page-detail component wraps the canonical page body in a narrow centered article shell (for example `max-w-[620px] mx-auto` with hero-like centered title treatment) instead of preserving the approved source/template layout shell.',
+          message: FIXED_PAGE_DETAIL_NARROW_SHELL_REVIEW_MESSAGE,
         });
       }
     }
 
     const expectsSidebarDetailShell =
       (contract?.isDetail ?? component.isDetail) === true &&
-      normalizedDataNeeds.has('postDetail') &&
+      normalizedDataNeeds.has('post-detail') &&
       allowedSectionTypes.has('sidebar');
     if (expectsSidebarDetailShell) {
       if (!this.hasSidebarArticleLayout(component.code)) {
@@ -684,13 +746,45 @@ ${component.code}
 
   private hasCanonicalPageContentRender(code: string): boolean {
     return (
-      /dangerouslySetInnerHTML/.test(code) &&
-      /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code)
+      /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code) &&
+      /dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code)
+    );
+  }
+
+  private isSourceBackedPageDetailCompanionSection(
+    section: SectionPlan,
+  ): boolean {
+    if (
+      ![
+        'prose-block',
+        'media-text',
+        'card-grid',
+        'tabs',
+        'accordion',
+        'carousel',
+        'modal',
+      ].includes(section.type)
+    ) {
+      return false;
+    }
+
+    const sourceFiles = [
+      section.sourceRef?.sourceFile,
+      ...(section.obligation?.sourceEvidence?.sourceFiles ?? []),
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    return sourceFiles.some(
+      (sourceFile) =>
+        sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/'),
     );
   }
 
   private hasUnexpectedNarrowCenteredPageShell(code: string): boolean {
-    if (!/dangerouslySetInnerHTML/.test(code)) return false;
+    if (!/dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code))
+      return false;
     const hasNarrowShell =
       /<(?:article|main|section|div)\b[^>]*className="[^"]*\bmax-w-\[(?:5\d{2}|6\d{2}|7\d{2})px\][^"]*\bmx-auto\b[^"]*"/.test(
         code,
@@ -716,8 +810,8 @@ ${component.code}
   ): string[] {
     const snippets: string[] = [];
     const patterns = [
-      /Links I found useful and wanted to share\./gi,
-      /<h[1-6]\b[^>]*>\s*About the author\s*<\/h[1-6]>/gi,
+      /\[button\]\s*Latest inflation report/gi,
+      /\[button\]\s*Financial apps for families/gi,
     ];
 
     for (const pattern of patterns) {
@@ -851,6 +945,20 @@ ${component.code}
           severity: 'high',
           message:
             'Approved modal section renders a Spectra/UAGB popup without an `active` class on the open `.uagb-modal-popup` overlay. The compat CSS keeps `.uagb-modal-popup` hidden until `.active` is present, so the modal opens invisibly.',
+        });
+      }
+      const hasHiddenModalTrigger =
+        /className\s*=\s*\{?["'`][^"'`]*\buagb-modal-trigger\b[^"'`]*\b(?:hidden|sr-only|invisible|opacity-0|pointer-events-none)\b/.test(
+          rawCode,
+        ) ||
+        /\buagb-modal-trigger\b[\s\S]{0,220}style=\{\{[\s\S]{0,120}display\s*:\s*['"`]none['"`]/.test(
+          rawCode,
+        );
+      if (hasHiddenModalTrigger) {
+        issues.push({
+          severity: 'high',
+          message:
+            'Approved modal trigger exists structurally but is hidden or visually suppressed. Keep the trigger visibly rendered in normal document flow before the popup opens.',
         });
       }
     }
@@ -1037,6 +1145,11 @@ ${component.code}
       'wrong endpoint',
       'clearly violates the route/data contract',
       'route/data contract',
+      'materially violates the page-detail contract',
+      'materially redesigns the approved page-detail layout',
+      'approved page-detail body is not the main preserved wordpress layout',
+      'main content should be rendered from `/api/pages/',
+      'approved fixed page detail',
       'jsx/tsx structure is likely broken',
       'jsx',
       'syntax',
@@ -1056,6 +1169,11 @@ ${component.code}
       'narrow centered article shell',
       'main article + sidebar structure',
       'invented placeholder copy',
+      'including post meta',
+      'footer-links data contract',
+      'comments submission is materially broken',
+      'fake hard-coded email',
+      'hardcodes `const post: postmetadata | null = null;`',
       'comment-filter search ui',
       'must preserve spectra/uagb-compatible markers',
       'must keep real interactive state wiring',

@@ -1,4 +1,5 @@
-You are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX + Tailwind CSS) that fetches its own data.
+You are a WordPress-to-React migration expert. Convert the WordPress template below into a clean React functional component (TypeScript + TSX) that fetches its own data.
+Preserve original WordPress class/style semantics first. Do NOT translate source-backed WordPress/plugin classes or inline style attributes into Tailwind utilities by default.
 
 {{apiContract}}
 
@@ -284,6 +285,8 @@ const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
 ⛔ NEVER choose menus by arbitrary content slugs like `about`, `company`, `resources`, `links`. Use `location` first; `slug === "primary"` is allowed only as a fallback when `location` is missing.
 ⛔ NEVER skip `menu.items` rendering — always map over `(menu.items ?? [])` even if you're unsure items exist
 ⛔ NEVER hardcode footer columns/links as fallback — if both APIs return empty, render nothing
+⛔ NEVER create `staticItems`, `staticHeadings`, or any fallback constant that mirrors expected link labels — this causes content to be hardcoded even when the API returns real data
+⛔ Footer link rendering: a URL of `"#"` is NOT internal (does not start with `/`) and NOT external — render it as `<a href="#">` NOT as `<span>` and NOT as `<Link to="#">`. Any non-empty URL that is not clearly external should be rendered as a clickable `<a>` tag.
 
 {{dataGrounding}}
 
@@ -296,57 +299,60 @@ const aboutMenu = menus.find(m => m.slug === 'about'); // ← NEVER do this
 Functional component, no props, export default. Import React/useState/useEffect.
 ⛔ **Single-file only** — do NOT import from `@/components/`, `@/pages/`, or any `./LocalComponent`. Sub-component files do not exist at runtime. Inline all JSX.
 
-### Tailwind-only styling
+### Source-faithful styling
 
-Use Tailwind utilities to recreate the original WordPress layout as closely as possible.
-
-✅ Preserve the original block order, section density, spacing, and widths from the template source.
-✅ Translate template spacing/typography values into explicit Tailwind utilities.
-✅ Keep wrappers simple and deterministic; use semantic HTML plus Tailwind utilities.
+✅ Preserve the original block order, section density, spacing, widths, wrappers, and DOM hierarchy from the template source.
+✅ Preserve ALL source-backed WordPress/plugin classes verbatim on the equivalent JSX element: `wp-block-*`, `has-*`, `align*`, `is-style-*`, `uagb-*`, and other source custom classes.
+✅ Preserve explicit style/layout attributes from the source as inline `style={{ ... }}` props when they represent real node attributes or resolved theme token values.
+✅ Use the preview's WordPress/theme CSS bridges as the primary styling mechanism when the source already provides the class semantics.
+✅ Only add minimal runtime/helper classes when there is no source-backed equivalent and the component would otherwise be unusable.
 ⛔ No CSS imports inside generated components.
-⛔ No CSS vars in Tailwind: `gap-[var(--foo)]` → BROKEN. Resolve to `gap-[24px]` first.
-⛔ No bare numeric classes: `gap-1rem` → INVALID. Always `gap-[1rem]`.
-⛔ HARD RULE: Tailwind arbitrary values using `min()`, `max()`, or `clamp()` must be fully compact inside the parentheses.
-⛔ NEVER write `py-[min(6.5rem, 8vw)]`, `px-[max(2rem, 5vw)]`, `text-[clamp(1rem, 2vw, 2rem)]`.
-✅ ALWAYS write `py-[min(6.5rem,8vw)]`, `px-[max(2rem,5vw)]`, `text-[clamp(1rem,2vw,2rem)]`.
-⛔ Before returning the final TSX, remove every space after commas inside any Tailwind CSS function.
+⛔ Do NOT replace source-backed WordPress/plugin classes with Tailwind-only equivalents.
+⛔ Do NOT convert source inline style attributes into Tailwind utilities by default.
+⛔ Do NOT invent generic responsive spacing/padding utilities when the source already carries spacing via class/style attributes.
 
-| ⛔ Avoid                                                        | ✅ Use instead            |
-| --------------------------------------------------------------- | ------------------------- |
-| `text-gray-*` `bg-white` `bg-black` when theme gives real color | `text-[#hex]` `bg-[#hex]` |
-| `text-sm` `text-xl` when theme gives exact size                 | `text-[1.25rem]`          |
-| `p-4` `gap-4` when template gives exact value                   | `p-[exact]` `gap-[exact]` |
-| `font-bold` when theme gives specific weight                    | `font-[700]`              |
-| `rounded-lg` when block gives radius                            | `rounded-[value]`         |
+### Node field → JSX output
 
-### Node field → Tailwind
+| Field                             | Apply as |
+| --------------------------------- | -------- |
+| source `class` / `customClassNames` | preserve verbatim in `className` on the equivalent JSX element |
+| `gap`                             | `style={{ gap: 'value' }}` when the source/block explicitly provides it |
+| `padding` {top/right/bottom/left} | `style={{ paddingTop, paddingRight, paddingBottom, paddingLeft }}` |
+| `margin` {top/right/bottom/left}  | `style={{ marginTop, marginRight, marginBottom, marginLeft }}` |
+| `minHeight`                       | `style={{ minHeight: value }}` |
 
-| Field                             | Apply as                                                              |
-| --------------------------------- | --------------------------------------------------------------------- |
-| `gap`                             | `gap-[value]` on container — resolve CSS vars via Spacing table first |
-| `padding` {top/right/bottom/left} | `pt-[t] pr-[r] pb-[b] pl-[l]` (values pre-resolved)                   |
-| `margin` {top/right/bottom/left}  | `mt-[t] mr-[r] mb-[b] ml-[l]`                                         |
-| `minHeight`                       | `min-h-[value]`                                                       |
-| `textAlign`                       | `text-left/center/right`                                              |
-| `align: "full"`                   | full-bleed section wrapper, e.g. `w-full`                             |
-| `align: "wide"`                   | wide container, e.g. `max-w-[1280px] mx-auto`                         |
-| `align: center/absent`            | normal content container using theme widths                           |
-| `borderRadius`                    | `rounded-[value]` — resolve CSS vars; if unresolvable, omit           |
-| `columnWidth` e.g. `"33.33%"`     | `style={{flexBasis:'33.33%',flexGrow:0,flexShrink:0}}`                |
-| `overlayColor` on cover           | `style={{backgroundColor:'#hex'}}` on overlay div                     |
-| `fontFamily` slug                 | `style={{fontFamily:'actual-family-string'}}` only when that node/block explicitly overrides inherited theme font |
-| `typography` field                | `tracking-[v]` `uppercase` `leading-[v]` `text-[v]` `font-[v]`        |
-| `bgColor` / `textColor`           | `bg-[#hex]` / `text-[#hex]` — NEVER ignore on buttons                 |
+### Section-level spacing (from section plan summary)
+
+When a section in the plan summary has spacing fields, bind them as follows — these come from the original WordPress block's `style.spacing` attributes and must be applied exactly:
+
+| Section plan field | Apply as | Target element |
+| ------------------ | -------- | -------------- |
+| `padding=<value>`  | `style={{ padding: '<value>' }}` | outermost section wrapper `<section>` or `<div>` |
+| `margin=<value>`   | `style={{ margin: '<value>' }}` | outermost section wrapper `<section>` or `<div>` |
+| `gap=<value>`      | `style={{ gap: '<value>' }}` | the direct children container (the flex/grid `<div>` wrapping child elements) |
+
+Rules:
+- When `padding=<value>` is present on a section, apply it via inline `style={{ padding }}` on the outermost wrapper. Do NOT add conflicting `px-*`/`py-*` Tailwind classes on the same element that would override the explicit value.
+- When `gap=<value>` is present on a section, apply it on the flex/grid container that holds the section's direct children — not on the outer wrapper.
+- If no spacing field is present, fall back to the responsive defaults in the table below.
+| `textAlign`                       | preserve existing alignment classes when present; otherwise `style={{ textAlign: '...' }}` |
+| `align: "full"`                   | preserve `alignfull` / source width semantics first; only add helper wrapper classes when absolutely necessary |
+| `align: "wide"`                   | preserve `alignwide` / source width semantics first; only add helper wrapper classes when absolutely necessary |
+| `columnWidth` e.g. `"33.33%"`     | `style={{ flexBasis:'33.33%', flexGrow:0, flexShrink:0 }}` |
+| `overlayColor` on cover           | `style={{ backgroundColor:'#hex' }}` on overlay div |
+| `fontFamily` slug                 | `style={{ fontFamily:'actual-family-string' }}` only when that node/block explicitly overrides inherited theme font |
+| `typography` field                | preserve source typography classes first; use inline `style` only for explicit overrides |
+| `bgColor` / `textColor`           | preserve source palette classes first; otherwise inline `style` for explicit overrides |
 
 ### Theme tokens
 
-- Root wrapper: use theme tokens to reproduce the WordPress layout with Tailwind classes.
+- Root wrapper: preserve `.wp-site-blocks`, source-backed width/alignment classes, and inherited theme CSS first.
 - Body/heading fonts should come from the provided theme tokens and inherited global CSS first. Do NOT add inline `fontFamily` on the page root or every section by default.
 - Inline `fontFamily` is only for blocks/nodes that explicitly override the inherited theme font.
-- Default block gap (from tokens table): `flex flex-col gap-[blockGap]` on root wrapper + all inner containers with no explicit `gap`
-- **Fallback** (no blockGap in tokens): root → `flex flex-col gap-16`; ungapped containers → `gap-8`; group sections with no padding → `py-12 px-4 sm:px-6`
-- Headings: exact token size/weight per level (`text-[3rem] font-[700]`)
-- Buttons: apply theme border-radius + padding from tokens
+- Default block gap (from tokens table): use inherited/global theme CSS first; only add inline `style={{ gap: blockGap }}` on wrappers that truly need an explicit override.
+- **Fallback** (no blockGap in tokens): do NOT invent broad spacing systems that are not source-backed. Keep wrapper structure minimal.
+- Headings: preserve source heading classes first; use exact token size/weight as inline `style` only when the source or plan explicitly overrides them.
+- Buttons: apply theme border-radius + padding from tokens via inline `style` only when the source/plan explicitly requires those values.
 - Per-block-type styles: apply as defaults, override only when block has explicit attribute
 
 ### Cover block
@@ -386,9 +392,11 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 
 ### Other rules
 
-- HTML from API → `<div className="prose max-w-none" dangerouslySetInnerHTML={{__html:content}} />`
+- HTML from API:
+  - post/body HTML may use `dangerouslySetInnerHTML` when the approved render path expects raw post HTML
+  - page/body HTML should prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`
 - WordPress upload/media URLs should use the local preview asset path exactly as provided (`/assets/...` or `/assets/images/...`). Do NOT rewrite them back to remote WordPress URLs.
-- PHP asset paths → convert to `/assets/...` (relative to public folder); only use paths that appear in template source
+- PHP asset paths → extract ONLY the relative path after the closing `?>` tag, e.g. `<?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/foo.jpg` → `/assets/images/foo.jpg`. ⛔ NEVER emit raw `<?php ... ?>` code inside a JSX attribute. If a value contains `<?php` and no extractable path remains after `?>`, treat it as an empty/absent value and omit the attribute entirely.
 - `<header>` → no background color (transparent)
 - Site logo in shared chrome → render `<img>` ONLY when `siteInfo.logoUrl` or the parsed block `src` exists; if neither exists, render nothing for `site-logo`
 - Brand in shared chrome → when the template includes `site-logo` and/or `site-title`, wrap the entire visible brand cluster in ONE home link. Do NOT leave the logo outside that link.
@@ -402,10 +410,11 @@ Use Tailwind utilities to recreate the original WordPress layout as closely as p
 | Pattern                      | Rule                                                                                                                                                                    |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `block: "columns"`           | `flex flex-col gap-6 md:flex-row`                                                                                                                                       |
+| **Footer column layout**     | ⚠️ Use **inline styles** `style={{ display:'flex', flexDirection:'row', gap:'2rem', flexWrap:'wrap' }}` — do NOT use Tailwind responsive classes like `md:flex-row` for the footer multi-column row (built CSS may purge them)  |
 | Post/card grids              | `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6`                                                                                                                  |
-| Section padding              | `px-4 sm:px-6 lg:px-8` on every section/group                                                                                                                           |
-| Section with `padding` field | `px-4 sm:px-6 pt-[top] pb-[bottom] lg:px-[right]`                                                                                                                       |
-| Navigation                   | `hidden md:flex`; wrap: `<nav className="flex items-center justify-between px-4 sm:px-6 py-4">`                                                                         |
+| Section padding (no `padding=` in plan) | `px-4 sm:px-6 lg:px-8` on every section/group for horizontal gutters |
+| Section with `padding=` in plan | Use `style={{ padding: value }}` from plan — skip conflicting `px-*`/`py-*` Tailwind classes on the same element |
+| Navigation                   | `hidden md:flex`; the outer header row uses `justify-between` to split logo vs nav — the inner `<nav>` wrapping only nav items must use `gap-6 md:gap-8` (NOT `justify-between`, NOT extra `px-*` padding)  |
 | Heading ≥ 3rem               | `text-[2rem] md:text-[3rem] lg:text-[4rem]`                                                                                                                             |
 | Cover min-height             | `min-h-[300px] md:min-h-[500px] lg:min-h-[600px]`                                                                                                                       |
 | Images                       | `w-full object-cover h-[200px] md:h-[350px] lg:h-[450px]` only for decorative crops; for important screenshots/product composites prefer `w-full h-auto object-contain` |
@@ -420,21 +429,6 @@ Site: {{siteName}} | URL: {{siteUrl}}
 ## Quick reference — common mistakes
 
 ```tsx
-// ❌ CSS var inside Tailwind → NEVER works
-<img className="rounded-[var(--wp--preset--spacing--20)]" />
-// ✅ Resolve from Spacing table
-<img className="rounded-[8px]" />
-
-// ❌ No brackets
-<div className="gap-1rem mt-2rem" />
-// ✅
-<div className="gap-[1rem] mt-[2rem]" />
-
-// ❌ Space inside CSS function → Tailwind silently ignores the class, no padding applied!
-<div className="py-[min(6.5rem, 8vw)] px-[max(2rem, 5vw)]" />
-// ✅ No space after comma
-<div className="py-[min(6.5rem,8vw)] px-[max(2rem,5vw)]" />
-
 // ❌ Hardcoded nav/footer links
 <a href="#">Team</a>
 // ✅ Fetch from /api/menus — use <Link> for internal, <a> for external
@@ -486,35 +480,17 @@ Site: {{siteName}} | URL: {{siteUrl}}
 {post.categories?.[0] && <span>{post.categories[0]}</span>}
 {post.author && <span>{post.author}</span>}
 
-// ❌ Section container missing horizontal padding — content touches screen edge on mobile
-<section className="max-w-[1280px] mx-auto w-full flex flex-col gap-[1.2rem]">
-  <h2>Title</h2>
-</section>
-// ✅ ALWAYS add px-4 sm:px-6 lg:px-8 on the content container
-<section className="w-full bg-[#f9f9f9]">
-  <div className="max-w-[1280px] mx-auto w-full px-4 sm:px-6 lg:px-8 py-[min(6.5rem,8vw)] flex flex-col gap-[1.2rem]">
-    <h2>Title</h2>
-  </div>
-</section>
-
-// ❌ Arbitrary px value instead of responsive breakpoints
-<div className="max-w-[1280px] mx-auto px-[min(1.5rem,2vw)]">
-// ✅ Use px-4 sm:px-6 lg:px-8 — never substitute with px-[min(...)]
+// ❌ Replace source-backed classes with new Tailwind-only styling
 <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8">
-
-// ❌ Inline style padding on section — breaks responsive behaviour
-<section style={{ padding: "min(6.5rem, 8vw)" }}>
-// ✅ Use Tailwind classes — never inline style for section padding
-<section className="py-[min(6.5rem,8vw)] px-4 sm:px-6 lg:px-8">
+// ✅ Preserve the original WordPress classes and explicit style attrs
+<div className="wp-block-group alignwide has-base-background-color" style={{ paddingTop: '1.5rem' }}>
 ```
 
 ## Final self-check before returning code
 
-- If any `className` contains `min(`, `max(`, or `clamp(`, ensure every comma is immediately followed by the next token with no space.
-  - Bad: `py-[min(6.5rem, 8vw)]`
-  - Good: `py-[min(6.5rem,8vw)]`
-- Every content section/container that holds text or cards **MUST** have `px-4 sm:px-6 lg:px-8` for horizontal padding. Never use `px-[min(...)]` as a substitute and never omit padding entirely.
-- Never use inline `style={{ padding: ... }}` for section/container padding. Use Tailwind `px-*` and `py-*` classes instead.
+- Preserve source-backed classes verbatim on the equivalent JSX element whenever the source provided them.
+- Preserve explicit style/layout attrs as inline `style` props when they came from the source or resolved theme tokens.
+- Do NOT replace source-backed WordPress/plugin semantics with new Tailwind-only wrappers just because they look cleaner.
 
 ## GOLDEN RULE
 
@@ -535,7 +511,7 @@ Pre-parsed block tree. Each node may include: `block`, `align`, `textAlign`, `te
 | `columns`               | `flex flex-col md:flex-row` or CSS grid                                                                                                                                                                              |
 | `image`                 | `<img src={node.src}>` — skip if no src                                                                                                                                                                              |
 | `navigation`            | fetch `/api/menus`, NEVER static `<a>` — use `navigation-link` children labels to match the correct menu; fallback: `menus.find(m => m.location === 'primary') ?? menus.find(m => m.slug === 'primary') ?? menus[0]` |
-| `post-content` / `html` | `dangerouslySetInnerHTML`                                                                                                                                                                                            |
+| `post-content` / `html` | render approved body HTML; for `post-content` raw `dangerouslySetInnerHTML` is acceptable, but page/body content should prefer structured rich-text rendering                                                                                                                                                                                            |
 | `query-pagination`      | render ONLY if present in JSON, else omit                                                                                                                                                                            |
 
 `block: "query"` → fetch `/api/posts`, map over `post` results:
@@ -573,7 +549,7 @@ Blocks form a hierarchical tree. Parent blocks control layout.
 | `navigation`    | navigation menu container                                                                                                                  |
 | `header`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<header>` only inside dedicated `Header` partials. |
 | `footer`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<footer>` only inside dedicated `Footer` partials. |
-| `html`          | render raw HTML using dangerouslySetInnerHTML                                                                                              |
+| `html`          | render approved raw HTML; prefer structured rich-text rendering for page/body wrappers when required by the approved contract                                                                                              |
 
 ## Block hierarchy — DO NOT FLATTEN
 
@@ -636,12 +612,13 @@ Rules:
   - For **link / navigation-link nodes**: apply on the `<Link>` or `<a>` element alongside `vp-generated-link`. Example: `customClassNames: ["vp-hover-underline"]` → `<Link className="vp-generated-link vp-hover-underline ..." />`.
   - For **card / repeating item wrappers** (post cards, testimonial cards, feature cards): apply on the outermost `<article>` or `<div>` of each card alongside any bridge class. Example: `customClassNames: ["vp-hover-lift"]` → `<article className="vp-hover-lift ..." />`.
   - These classes drive precise CSS interaction bridges (e.g., hover translate, lift, zoom, shadow) that are pre-generated in `index.css`. **Missing them = no animation.**
+  - **CRITICAL for `vp-hover-shadow` buttons**: hover bridge CSS can lose to inline `backgroundColor`. If the source already provides a class-based hover treatment, preserve that class and avoid adding a conflicting inline background override on the same element.
 - **NEVER remove `vp-generated-button`, `vp-generated-image`, or `vp-generated-link` classes** from any element. These are injected by the pipeline's interaction bridge and power hover/focus/transition CSS. If you receive code containing these classes, keep them exactly as-is.
 - Preserve WordPress block style classes like `is-style-*` when they are present in approved `customClassNames` or source-tracked nodes, and keep them on the equivalent JSX element. The preview pipeline injects compatibility CSS for detected `is-style-*` classes, so deleting them can break fidelity.
-- If an `is-style-*` class is present and you also add Tailwind utilities for parity, keep the original `is-style-*` token as well. Do not replace it with Tailwind-only styling.
+- If an `is-style-*` class is present and you also add minimal helper classes for runtime structure, keep the original `is-style-*` token as well. Do not replace it with new styling that changes the WordPress semantics.
 - **Card bridge classes**: if the theme tokens list a `card (.some-class)` interaction bridge, that exact class name MUST appear on the outermost `<div>` or `<article>` of each repeated card/item — never implement the effect with Tailwind `hover:` utilities or `onMouseEnter` when the CSS class is already provided.
 - Layout attributes affect the wrapper element
-- Style attributes must be converted to Tailwind utilities
+- Style attributes from the source should be preserved as inline `style` props after token resolution; do NOT force-convert them to Tailwind utilities
 
 ## Query loop structure
 
@@ -695,19 +672,21 @@ Only render blocks present in the template tree.
 
 ⛔ **NEVER generate a section whose only content is a bare heading word like "About", "About Us", "Overview", "Introduction", or any other generic label** without real data-driven content beneath it. If a section plan has a label but no actual content nodes (no paragraphs, no images, no list items, no data), **omit the section entirely**. A heading with no body is always a hallucination artifact.
 
+⛔ **NEVER render PHP-sourced layout wrappers that have no resolved content.** When a template source comes from a PHP pattern file (e.g. `patterns/front-page.php`), some content fields may be empty strings (`""`) because they come from PHP runtime variables that cannot be resolved at build time. If ALL visible text fields (headings, paragraphs, button labels) in a wrapper element are empty strings, **skip that wrapper entirely** — do not output `{""}` placeholders or empty elements. The visual plan sections are the authoritative content; render those instead of re-inventing the PHP wrapper structure around them.
+
 ⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
 
-When the template contains a `post-content` or `html` block that is rendered via `dangerouslySetInnerHTML`, ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside `dangerouslySetInnerHTML`.
+When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved render path (`dangerouslySetInnerHTML` for post HTML or `renderRichTextChildren`/structured JSX for page HTML), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
 
 ```tsx
-// ❌ WRONG — "About" heading is already inside item.content from dangerouslySetInnerHTML
-<div dangerouslySetInnerHTML={{ __html: item.content }} />
+// ❌ WRONG — "About" heading is already inside item.content from the canonical body render
+<div>{renderRichTextChildren(item.content, "page-content")}</div>
 <section>
   <h2>About</h2>  {/* ← hallucinated duplicate */}
 </section>
 
-// ✅ CORRECT — render page content ONCE via dangerouslySetInnerHTML, nothing else
-<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+// ✅ CORRECT — render the canonical body ONCE, nothing else
+<div className="prose max-w-none">{renderRichTextChildren(item.content, "page-content")}</div>
 ```
 
 If the template JSON has individual heading/paragraph/image nodes inside a `post-content` or `page-content` section, treat them as metadata for understanding structure only — do NOT render them as separate JSX blocks.

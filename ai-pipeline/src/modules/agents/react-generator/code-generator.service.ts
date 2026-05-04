@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
+import {
+  THEME_ASSET_PUBLIC_ROOTS,
+  THEME_ASSET_TOKEN_PREFIX,
+} from '../../../common/utils/theme-asset.util.js';
 import type {
   ComponentVisualPlan,
+  BlockNode,
   ColorPalette,
   TypographyTokens,
   LayoutTokens,
@@ -17,11 +22,16 @@ import type {
   NewsletterSection,
   FooterSection,
   PostContentSection,
+  PostTitleSection,
+  PostFeaturedImageSection,
   PostMetaSection,
+  PostTermsSection,
+  PostNavigationSection,
   PageContentSection,
   ProseBlockSection,
   CommentsSection,
   SearchSection,
+  SidebarWidget,
   SidebarSection,
   ModalSection,
   TabsSection,
@@ -58,6 +68,7 @@ interface RenderCtx {
   l: LayoutTokens;
   b?: Record<string, BlockStyleToken>;
   supportsPostsPagination?: boolean;
+  avoidDangerouslySetInnerHTML?: boolean;
 }
 
 interface BlockFaithfulPartialInput {
@@ -97,6 +108,8 @@ export class CodeGeneratorService {
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
       supportsPostsPagination: this.needsPagination(effectivePlan),
+      avoidDangerouslySetInnerHTML:
+        this.shouldAvoidDangerouslySetInnerHTML(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -122,6 +135,8 @@ export class CodeGeneratorService {
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
       supportsPostsPagination: this.needsPagination(effectivePlan),
+      avoidDangerouslySetInnerHTML:
+        this.shouldAvoidDangerouslySetInnerHTML(effectivePlan),
     };
 
     const imports = this.buildImports(effectivePlan, needsRouter, needsParams);
@@ -156,6 +171,8 @@ export class CodeGeneratorService {
       t: effectivePlan.typography,
       l: effectivePlan.layout,
       b: effectivePlan.blockStyles,
+      avoidDangerouslySetInnerHTML:
+        this.shouldAvoidDangerouslySetInnerHTML(effectivePlan),
     };
     const section = effectivePlan.sections[sectionIndex];
     if (!section) {
@@ -422,28 +439,68 @@ export class CodeGeneratorService {
       lines.push('      });');
     }
 
-    lines.push('');
-    lines.push('  const toAppPath = (url?: string) => {');
-    lines.push("    if (!url) return '/';");
-    lines.push('    try {');
-    lines.push('      if (!siteInfo?.siteUrl) return url;');
-    lines.push('      const site = new URL(siteInfo.siteUrl);');
-    lines.push('      const resolved = new URL(url, siteInfo.siteUrl);');
-    lines.push('      if (resolved.origin === site.origin) {');
-    lines.push(
-      "        return `${resolved.pathname}${resolved.search}${resolved.hash}` || '/';",
-    );
-    lines.push('      }');
-    lines.push('      return url;');
-    lines.push('    } catch {');
-    lines.push('      return url;');
-    lines.push('    }');
-    lines.push('  };');
-    lines.push('');
-    lines.push('  const isInternalPath = (url?: string) => {');
-    lines.push('    const next = toAppPath(url);');
-    lines.push("    return next.startsWith('/');");
-    lines.push('  };');
+    if (needsFooterLinks && renderState.componentKind === 'footer') {
+      lines.push('');
+      lines.push(
+        "  const normalizeFooterLabel = (value: string) => value.toLowerCase().replace(/\\s+/g, ' ').trim();",
+      );
+      lines.push(
+        '  const scoreFooterColumnByHints = (column: FooterColumn, hintTitles: string[]) => {',
+      );
+      lines.push('    if (hintTitles.length === 0) return 0;');
+      lines.push(
+        '    const labels = (column.links ?? []).map((link) => normalizeFooterLabel(link.label));',
+      );
+      lines.push('    return hintTitles.reduce((score, title) => {');
+      lines.push(
+        '      return score + (labels.includes(normalizeFooterLabel(title)) ? 1 : 0);',
+      );
+      lines.push('    }, 0);');
+      lines.push('  };');
+      lines.push(
+        '  const resolveFooterColumn = (hintTitles: string[] = [], index = 0) => {',
+      );
+      lines.push(
+        '    const pool = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);',
+      );
+      lines.push('    if (pool.length === 0) return null;');
+      lines.push('    const hintedTitles = hintTitles.filter(Boolean);');
+      lines.push('    const scored = pool');
+      lines.push(
+        '      .map((column) => ({ column, score: scoreFooterColumnByHints(column, hintedTitles) }))',
+      );
+      lines.push('      .sort((a, b) => b.score - a.score);');
+      lines.push(
+        '    if ((scored[0]?.score ?? 0) > 0) return scored[0]?.column ?? null;',
+      );
+      lines.push('    return pool[index] ?? pool[0] ?? null;');
+      lines.push('  };');
+    }
+
+    if (needsMenus || needsFooterLinks) {
+      lines.push('');
+      lines.push('  const toAppPath = (url?: string) => {');
+      lines.push("    if (!url) return '/';");
+      lines.push('    try {');
+      lines.push('      if (!siteInfo?.siteUrl) return url;');
+      lines.push('      const site = new URL(siteInfo.siteUrl);');
+      lines.push('      const resolved = new URL(url, siteInfo.siteUrl);');
+      lines.push('      if (resolved.origin === site.origin) {');
+      lines.push(
+        "        return `${resolved.pathname}${resolved.search}${resolved.hash}` || '/';",
+      );
+      lines.push('      }');
+      lines.push('      return url;');
+      lines.push('    } catch {');
+      lines.push('      return url;');
+      lines.push('    }');
+      lines.push('  };');
+      lines.push('');
+      lines.push('  const isInternalPath = (url?: string) => {');
+      lines.push('    const next = toAppPath(url);');
+      lines.push("    return next.startsWith('/');");
+      lines.push('  };');
+    }
 
     if (needsSiteInfo) {
       lines.push('');
@@ -489,9 +546,16 @@ export class CodeGeneratorService {
           break;
         case 'post-content':
         case 'comments':
+        case 'post-title':
+        case 'post-featured-image':
           needs.add('postDetail');
           break;
         case 'post-meta':
+        case 'post-terms':
+          break;
+        case 'post-navigation':
+          needs.add('postDetail');
+          needs.add('posts');
           break;
         case 'page-content':
         case 'prose-block':
@@ -499,10 +563,16 @@ export class CodeGeneratorService {
           break;
         case 'sidebar': {
           const sidebar = section as SidebarSection;
-          if (sidebar.showSiteInfo) needs.add('siteInfo');
-          if (sidebar.showPages) needs.add('pages');
-          if (sidebar.showPosts) needs.add('posts');
-          if (sidebar.menuSlug) needs.add('menus');
+          for (const widget of sidebar.widgets ?? []) {
+            if (widget.kind === 'author-bio') {
+              needs.add('siteInfo');
+              needs.add('posts');
+            }
+            if (widget.kind === 'categories') needs.add('posts');
+            if (widget.kind === 'navigation') needs.add('menus');
+            if (widget.kind === 'pages-list') needs.add('pages');
+            if (widget.kind === 'recent-posts') needs.add('posts');
+          }
           break;
         }
       }
@@ -603,6 +673,8 @@ export class CodeGeneratorService {
         'post-list',
         'post-content',
         'post-meta',
+        'post-terms',
+        'post-navigation',
         'search',
         'sidebar',
         'hero',
@@ -624,13 +696,20 @@ export class CodeGeneratorService {
     return /^(archive|index|search|blog)/i.test(plan.componentName);
   }
 
+  private shouldAvoidDangerouslySetInnerHTML(
+    plan: ComponentVisualPlan,
+  ): boolean {
+    if (isPartialComponentName(plan.componentName)) return false;
+    return true;
+  }
+
   private planUsesResolveAsset(plan: ComponentVisualPlan): boolean {
     return plan.sections.some((section) => {
       switch (section.type) {
         case 'hero':
           return !!section.image?.src;
         case 'cover':
-          return section.imageSrc.startsWith('/assets/');
+          return !!section.imageSrc;
         case 'media-text':
           return !!section.imageSrc;
         case 'testimonial':
@@ -726,6 +805,94 @@ export class CodeGeneratorService {
       );
     } else {
       lines.push(`const ${componentName}: React.FC = () => {`);
+    }
+
+    if (this.shouldAvoidDangerouslySetInnerHTML(plan)) {
+      lines.push(`  const SAFE_RICH_TEXT_TAGS = new Set([`);
+      lines.push(
+        `    'a', 'blockquote', 'br', 'code', 'div', 'em', 'figcaption', 'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'li', 'mark', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub', 'sup', 'u', 'ul',`,
+      );
+      lines.push(`  ]);`);
+      lines.push(
+        `  const renderRichTextNode = (node: ChildNode, key: string): React.ReactNode => {`,
+      );
+      lines.push(
+        `    if (node.nodeType === Node.TEXT_NODE) return node.textContent;`,
+      );
+      lines.push(`    if (node.nodeType !== Node.ELEMENT_NODE) return null;`);
+      lines.push(`    const element = node as HTMLElement;`);
+      lines.push(`    const tag = element.tagName.toLowerCase();`);
+      lines.push(
+        `    const className = element.getAttribute('class') || undefined;`,
+      );
+      lines.push(
+        `    const title = element.getAttribute('title') || undefined;`,
+      );
+      lines.push(`    const children = Array.from(element.childNodes)`);
+      lines.push(
+        `      .map((child, index) => renderRichTextNode(child, \`\${key}-\${index}\`))`,
+      );
+      lines.push(
+        `    const filteredChildren = children.filter((child) => child !== null && child !== undefined) as React.ReactNode[];`,
+      );
+      lines.push(`    if (tag === 'a') {`);
+      lines.push(`      const href = element.getAttribute('href') || '#';`);
+      lines.push(`      return React.createElement(`);
+      lines.push(`        'a',`);
+      lines.push(
+        `        { key, href, className, title, target: element.getAttribute('target') || undefined, rel: element.getAttribute('rel') || undefined },`,
+      );
+      lines.push(
+        `        filteredChildren.length > 0 ? filteredChildren : (element.textContent || href),`,
+      );
+      lines.push(`      );`);
+      lines.push(`    }`);
+      lines.push(`    if (tag === 'img') {`);
+      lines.push(`      return React.createElement('img', {`);
+      lines.push(`        key,`);
+      lines.push(`        src: element.getAttribute('src') || '',`);
+      lines.push(`        alt: element.getAttribute('alt') || '',`);
+      lines.push(`        className,`);
+      lines.push(`        title,`);
+      lines.push(`      });`);
+      lines.push(`    }`);
+      lines.push(`    if (tag === 'br' || tag === 'hr') {`);
+      lines.push(
+        `      return React.createElement(tag, { key, className, title });`,
+      );
+      lines.push(`    }`);
+      lines.push(`    if (!SAFE_RICH_TEXT_TAGS.has(tag)) {`);
+      lines.push(
+        `      return React.createElement(React.Fragment, { key }, ...filteredChildren);`,
+      );
+      lines.push(`    }`);
+      lines.push(`    const props: Record<string, unknown> = { key };`);
+      lines.push(`    if (className) props.className = className;`);
+      lines.push(`    if (title) props.title = title;`);
+      lines.push(`    return React.createElement(`);
+      lines.push(`      tag,`);
+      lines.push(`      props,`);
+      lines.push(
+        `      filteredChildren.length > 0 ? filteredChildren : (element.textContent || ''),`,
+      );
+      lines.push(`    );`);
+      lines.push(`  };`);
+      lines.push(
+        `  const renderRichTextChildren = (html: string, keyPrefix: string): React.ReactNode[] => {`,
+      );
+      lines.push(
+        `    const doc = new DOMParser().parseFromString(\`<div>\${html}</div>\`, 'text/html');`,
+      );
+      lines.push(`    const container = doc.body.firstElementChild;`);
+      lines.push(`    if (!container) return [];`);
+      lines.push(`    return Array.from(container.childNodes)`);
+      lines.push(
+        `      .map((child, index) => renderRichTextNode(child, \`\${keyPrefix}-\${index}\`))`,
+      );
+      lines.push(
+        `      .filter((child) => child !== null && child !== undefined) as React.ReactNode[];`,
+      );
+      lines.push(`  };`);
     }
 
     // State
@@ -905,6 +1072,12 @@ export class CodeGeneratorService {
       lines.push(`  const [commentEmail, setCommentEmail] = useState('');`);
       lines.push(`  const [commentWebsite, setCommentWebsite] = useState('');`);
       lines.push(`  const [commentContent, setCommentContent] = useState('');`);
+      lines.push(
+        `  const [commentParentId, setCommentParentId] = useState(0);`,
+      );
+      lines.push(
+        `  const [commentReplyTarget, setCommentReplyTarget] = useState<string | null>(null);`,
+      );
       lines.push(
         `  const [submittingComment, setSubmittingComment] = useState(false);`,
       );
@@ -1263,7 +1436,7 @@ export class CodeGeneratorService {
       lines.push(`          email: ${emailValue},`);
       lines.push(`          website: commentWebsite.trim(),`);
       lines.push(`          content: commentContent.trim(),`);
-      lines.push(`          parentId: 0,`);
+      lines.push(`          parentId: commentParentId,`);
       lines.push(`          clientToken: commentClientToken,`);
       lines.push(`        }),`);
       lines.push(`      });`);
@@ -1284,6 +1457,8 @@ export class CodeGeneratorService {
       );
       lines.push(`      });`);
       lines.push(`      setCommentContent('');`);
+      lines.push(`      setCommentParentId(0);`);
+      lines.push(`      setCommentReplyTarget(null);`);
       lines.push(
         `      setCommentSuccess('Comment submitted and awaiting moderation.');`,
       );
@@ -1300,13 +1475,59 @@ export class CodeGeneratorService {
       lines.push(`      setSubmittingComment(false);`);
       lines.push(`    }`);
       lines.push(`  };`);
+      lines.push(``);
+      lines.push(`  const beginCommentReply = (comment: Comment) => {`);
+      lines.push(`    setCommentParentId(comment.id);`);
+      lines.push(`    setCommentReplyTarget(comment.author);`);
+      lines.push(`    setCommentError(null);`);
+      lines.push(`    setCommentSuccess(null);`);
+      lines.push(`    if (typeof document !== 'undefined') {`);
+      lines.push(
+        `      document.getElementById('respond')?.scrollIntoView({ behavior: 'smooth', block: 'start' });`,
+      );
+      lines.push(`    }`);
+      lines.push(`  };`);
+      lines.push(`  const cancelCommentReply = () => {`);
+      lines.push(`    setCommentParentId(0);`);
+      lines.push(`    setCommentReplyTarget(null);`);
+      lines.push(`  };`);
       lines.push('');
     }
 
     if (this.planUsesResolveAsset(plan)) {
+      lines.push(`  const resolveAsset = (src: string) => {`);
       lines.push(
-        `  const resolveAsset = (src: string) => src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+        `    if (src.startsWith(${JSON.stringify(THEME_ASSET_TOKEN_PREFIX)})) {`,
       );
+      lines.push(
+        `      const assetPath = src.slice(${JSON.stringify(THEME_ASSET_TOKEN_PREFIX)}.length).replace(/^\\/+/,'');`,
+      );
+      lines.push(`      if (!assetPath) return src;`);
+      lines.push(
+        `      const segments = assetPath.split('/').filter(Boolean);`,
+      );
+      lines.push(`      const root = segments[0] ?? '';`);
+      lines.push(
+        `      const mappedRoot = (${JSON.stringify(THEME_ASSET_PUBLIC_ROOTS)} as Record<string, string>)[root] ?? 'assets';`,
+      );
+      lines.push(
+        `      const hasMappedRoot = Object.prototype.hasOwnProperty.call(${JSON.stringify(THEME_ASSET_PUBLIC_ROOTS)}, root);`,
+      );
+      lines.push(
+        `      const relativeSegments = hasMappedRoot ? segments.slice(1) : segments;`,
+      );
+      lines.push(`      const relativePath = relativeSegments.join('/');`);
+      lines.push(
+        `      const publicPath = relativePath ? \`\${mappedRoot}/\${relativePath}\` : mappedRoot;`,
+      );
+      lines.push(
+        `      return \`\${import.meta.env.BASE_URL}\${publicPath}\`;`,
+      );
+      lines.push(`    }`);
+      lines.push(
+        `    return src.startsWith('/assets/') ? \`\${import.meta.env.BASE_URL}assets/\${src.slice('/assets/'.length)}\` : src;`,
+      );
+      lines.push(`  };`);
       lines.push('');
     }
     lines.push(
@@ -1341,8 +1562,81 @@ export default ${componentName};`;
     ctx: RenderCtx,
   ): string {
     const { componentName, palette, sections } = plan;
+    const sidebarSectionIndex =
+      plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
+        ? sections.findIndex((section) => section.type === 'sidebar')
+        : -1;
+    const mainContentSectionIndex = sections.findIndex(
+      (section) =>
+        section.type === 'page-content' ||
+        section.type === 'post-content' ||
+        section.type === 'prose-block',
+    );
+    const hasSidebarLayout =
+      sidebarSectionIndex >= 0 && mainContentSectionIndex >= 0;
+    const wrapperSection =
+      hasSidebarLayout && sidebarSectionIndex >= 0
+        ? sections[sidebarSectionIndex]
+        : null;
+    const wrapperBg =
+      hasSidebarLayout && mainContentSectionIndex >= 0
+        ? (sections[mainContentSectionIndex]?.background ?? palette.background)
+        : palette.background;
+    const wrapperPy = wrapperSection
+      ? this.explicitSectionPaddingClass(wrapperSection)
+      : '';
+    const wrapperSectionStyle = wrapperSection
+      ? this.buildSectionStyleAttr(wrapperSection)
+      : '';
+    const gridStyle = hasSidebarLayout
+      ? this.buildStyleAttr({
+          gridTemplateColumns:
+            plan.layout.contentLayout === 'sidebar-left'
+              ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
+              : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
+          gap:
+            sections[sidebarSectionIndex]?.gapStyle ??
+            sections[mainContentSectionIndex]?.gapStyle,
+        })
+      : '';
     const placeholders = sections
-      .map((_, index) => `      ${this.buildSectionAssemblyPlaceholder(index)}`)
+      .map((section, index) => {
+        if (hasSidebarLayout && index === sidebarSectionIndex) {
+          return '';
+        }
+        if (hasSidebarLayout && index === mainContentSectionIndex) {
+          const mainPlaceholder = this.buildSectionAssemblyPlaceholder(index);
+          const sidebarPlaceholder =
+            this.buildSectionAssemblyPlaceholder(sidebarSectionIndex);
+          return `      <section className="bg-[${wrapperBg}] ${wrapperPy} w-full"${wrapperSectionStyle}>
+        <div className="${ctx.l.containerClass}">
+          <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
+            ${
+              plan.layout.contentLayout === 'sidebar-left'
+                ? `<aside className="min-w-0">
+              ${sidebarPlaceholder}
+            </aside>
+            <div className="min-w-0">
+              <div className="${this.contentContainerClass(ctx)}">
+                ${mainPlaceholder}
+              </div>
+            </div>`
+                : `<div className="min-w-0">
+              <div className="${this.contentContainerClass(ctx)}">
+                ${mainPlaceholder}
+              </div>
+            </div>
+            <aside className="min-w-0">
+              ${sidebarPlaceholder}
+            </aside>`
+            }
+          </div>
+        </div>
+      </section>`;
+        }
+        return `      ${this.buildSectionAssemblyPlaceholder(index)}`;
+      })
+      .filter(Boolean)
       .join('\n\n');
 
     return `  return (
@@ -1560,20 +1854,762 @@ export default ${componentName};`;
       : '';
   }
 
+  // ── Block-tree renderer ───────────────────────────────────────────────────
+
+  private renderBlockTree(
+    nodes: BlockNode[],
+    ctx: RenderCtx,
+    componentName: string,
+    depth = 0,
+  ): string {
+    return nodes
+      .map((node) => this.renderBlockNode(node, ctx, componentName, depth))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private normalizeBlockTreeText(
+    value: string | undefined,
+  ): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const phpTranslationMatch = trimmed.match(
+      /esc_html_e\(\s*['"]([^'"]+)['"]\s*,/i,
+    );
+    if (phpTranslationMatch?.[1]) {
+      return phpTranslationMatch[1];
+    }
+    return trimmed.replace(/<\?php|\?>/g, '').trim() || trimmed;
+  }
+
+  private blockTreeTextLiteral(
+    value: string | undefined,
+    fallback = '',
+  ): string {
+    return `{${JSON.stringify(
+      this.normalizeBlockTreeText(value) ?? fallback,
+    )}}`;
+  }
+
+  private renderBlockNode(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    depth: number,
+  ): string {
+    const tagName = this.blockNodeTagName(node, 'div');
+    const indent = '  '.repeat(depth + 3);
+    const children = node.children?.length
+      ? `\n${this.renderBlockTree(node.children, ctx, componentName, depth + 1)}\n${indent}`
+      : '';
+    const styleAttr = this.blockNodeStyleAttr(node);
+
+    switch (node.kind) {
+      case 'group':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${styleAttr}>${children}</${tagName}>`;
+
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
+
+      case 'columns': {
+        const columnsStyle = this.blockNodeStyleAttr(node, {
+          display: 'grid',
+          gridTemplateColumns: this.buildColumnTemplate(node),
+        });
+        return `${indent}<div${this.blockNodeClassAttr(node)}${columnsStyle}>${children}</div>`;
+      }
+
+      case 'column': {
+        const columnStyle = this.blockNodeStyleAttr(node, {
+          flex: node.columnWidth ? `0 0 ${node.columnWidth}` : '1 1 0',
+          minWidth: '0',
+        });
+        return `${indent}<div${this.blockNodeClassAttr(node)}${columnStyle}>${children}</div>`;
+      }
+
+      case 'heading': {
+        const tag = `h${node.level ?? 2}`;
+        return `${indent}<${tag}${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</${tag}>`;
+      }
+
+      case 'query-title':
+        return `${indent}<h1${this.blockNodeClassAttr(node)}${styleAttr}>${this.queryTitleMarkup(componentName)}</h1>`;
+
+      case 'paragraph':
+        if (node.html) {
+          return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'p'}")}</p>`;
+        }
+        return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</p>`;
+
+      case 'image':
+        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.blockNodeClassAttr(node)}${styleAttr} />`;
+
+      case 'navigation':
+        return this.renderBlockTreeNavigation(node, ctx, componentName, depth);
+
+      case 'navigation-link':
+        return this.renderBlockTreeNavigationLink(node, depth);
+
+      case 'button':
+        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, ['btn'])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</a>`;
+
+      case 'search':
+        return this.renderBlockTreeSearch(node, depth);
+
+      case 'avatar':
+        return this.renderBlockTreeAvatar(node, depth);
+
+      case 'post-author-biography':
+        return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>{siteInfo?.blogDescription}</p>`;
+
+      case 'categories':
+        return this.renderBlockTreeCategories(node, depth);
+
+      case 'query':
+      case 'latest-posts':
+        return this.renderBlockTreeRecentPosts(node, depth);
+
+      case 'spacer':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${styleAttr} aria-hidden="true" />`;
+
+      case 'separator':
+        return `${indent}<hr${this.blockNodeClassAttr(node)}${styleAttr} />`;
+
+      case 'post-title':
+        return `${indent}<h1 className="post-title"{styleAttr}>{item?.title}</h1>`;
+
+      case 'post-featured-image':
+        return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''} className="post-featured-image"${styleAttr} />`;
+
+      case 'post-content':
+        return `${indent}<div className="post-content"{styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
+
+      case 'post-excerpt':
+        return `${indent}<p className="post-excerpt"{styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
+
+      case 'post-date':
+        return this.renderBlockTreePostDate(node, depth);
+
+      case 'post-author-name':
+        return this.renderBlockTreePostAuthorName(node, depth);
+
+      case 'post-terms':
+        return this.renderBlockTreePostTerms(node, depth);
+
+      case 'post-meta':
+        return `${indent}<div className="post-meta"${styleAttr}>
+${indent}  {metaSource ? (
+${indent}    <>
+${indent}      <time dateTime={metaSource.date}>{new Date(metaSource.date).toLocaleDateString()}</time>
+${indent}      {metaSource.author ? <span>by {metaSource.author}</span> : null}
+${indent}    </>
+${indent}  ) : null}
+${indent}</div>`;
+
+      case 'post-navigation':
+        return `${indent}<nav className="post-navigation">{/* prev/next */}</nav>`;
+
+      case 'comments':
+        return `${indent}<div className="comments-area">{/* comments */}</div>`;
+
+      case 'template-part':
+        if (node.templatePartSlug) {
+          const name = node.templatePartSlug
+            .split(/[-/]/)
+            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+            .join('');
+          return `${indent}<${name} />`;
+        }
+        return '';
+
+      default:
+        if (children) {
+          return `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${children}</div>`;
+        }
+        return node.text
+          ? `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</div>`
+          : '';
+    }
+  }
+
+  private renderBlockTreeNavigation(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const orientation =
+      node.menuOrientation ??
+      (
+        node.attrs?.layout as
+          | { orientation?: 'horizontal' | 'vertical' }
+          | undefined
+      )?.orientation ??
+      'vertical';
+    const isVertical =
+      orientation === 'vertical' || /^sidebar$/i.test(componentName);
+    const listClass = isVertical
+      ? 'flex flex-col gap-2'
+      : 'flex flex-wrap items-center gap-4';
+    const items = (node.children ?? [])
+      .map((child) =>
+        this.renderBlockNode(child, ctx, componentName, depth + 2),
+      )
+      .filter(Boolean)
+      .join('\n');
+    return `${indent}<nav${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="${listClass}">
+${items}
+${indent}  </ul>
+${indent}</nav>`;
+  }
+
+  private renderBlockTreeNavigationLink(
+    node: BlockNode,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const href = node.href?.trim() ?? '';
+    const usableHref = href.length > 0 ? href : '#';
+    const label = this.blockTreeTextLiteral(node.text, usableHref);
+    return `${indent}<li>
+${indent}  {isInternalPath(${JSON.stringify(usableHref)}) ? (
+${indent}    <Link to={toAppPath(${JSON.stringify(usableHref)})}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      ${label}
+${indent}    </Link>
+${indent}  ) : (
+${indent}    <a href="${usableHref}"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      ${label}
+${indent}    </a>
+${indent}  )}
+${indent}</li>`;
+  }
+
+  private renderBlockTreeSearch(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const placeholder =
+      this.blockNodeStringAttr(node, 'placeholder') ?? 'Search...';
+    const buttonText = this.blockNodeStringAttr(node, 'buttonText') ?? 'Search';
+    const width = this.normalizeCssLength(
+      this.blockNodeStringAttr(node, 'widthUnit') === '%'
+        ? `${String(node.attrs?.width ?? '')}%`
+        : this.blockNodeStringAttr(node, 'width'),
+    );
+    return `${indent}<form role="search"${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+      node,
+      {
+        display: 'flex',
+        alignItems: 'center',
+        gap: node.gap ?? '0.5rem',
+        width,
+      },
+    )}>
+${indent}  <input type="search" placeholder=${JSON.stringify(placeholder)} className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
+${indent}  <button type="submit" className="border border-black/20 px-4 py-2">${buttonText}</button>
+${indent}</form>`;
+  }
+
+  private renderBlockTreeAvatar(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const sizeValue = node.attrs?.size;
+    const size =
+      typeof sizeValue === 'number'
+        ? `${sizeValue}px`
+        : typeof sizeValue === 'string'
+          ? this.normalizeCssLength(sizeValue)
+          : '80px';
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+      node,
+      {
+        width: size,
+        height: size,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        backgroundColor: 'rgba(0,0,0,0.05)',
+      },
+    )}>
+${indent}  {((posts.find((post) => post.author)?.author ?? siteInfo?.siteName ?? '?').charAt(0) || '?').toUpperCase()}
+${indent}</div>`;
+  }
+
+  private renderBlockTreeCategories(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const showPostCounts = this.blockNodeBooleanAttr(node, 'showPostCounts');
+    const showPostCountsLiteral = showPostCounts ? 'true' : 'false';
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="flex flex-col gap-2">
+${indent}    {(() => {
+${indent}      const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+${indent}      posts.forEach((post) => {
+${indent}        (post.categories ?? []).forEach((name, index) => {
+${indent}          const slug = post.categorySlugs?.[index] ?? '';
+${indent}          const key = name + '::' + slug;
+${indent}          const existing = categoryMap.get(key);
+${indent}          if (existing) existing.count += 1;
+${indent}          else categoryMap.set(key, { name, slug, count: 1 });
+${indent}        });
+${indent}      });
+${indent}      return Array.from(categoryMap.values()).map((category) => (
+${indent}        <li key={category.slug || category.name}>
+${indent}          {category.slug ? (
+${indent}            <Link to={'/category/' + category.slug} className="hover:underline underline-offset-4">
+${indent}              {category.name}{${showPostCountsLiteral} ? \` (\${category.count})\` : ''}
+${indent}            </Link>
+${indent}          ) : (
+${indent}            <span>{category.name}{${showPostCountsLiteral} ? \` (\${category.count})\` : ''}</span>
+${indent}          )}
+${indent}        </li>
+${indent}      ));
+${indent}    })()}
+${indent}  </ul>
+${indent}</div>`;
+  }
+
+  private renderBlockTreeRecentPosts(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <ul className="flex flex-col gap-2">
+${indent}    {posts.slice(0, 5).map((post) => (
+${indent}      <li key={post.id}>
+${indent}        <Link to={'/post/' + post.slug} className="hover:underline underline-offset-4">
+${indent}          {post.title}
+${indent}        </Link>
+${indent}      </li>
+${indent}    ))}
+${indent}  </ul>
+${indent}</div>`;
+  }
+
+  private renderBlockTreePostDate(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const isLink = this.blockNodeBooleanAttr(node, 'isLink');
+    return isLink
+      ? `${indent}{metaSource?.date ? (
+${indent}  <Link to={'/post/' + metaSource.slug}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}    <time dateTime={metaSource.date}>{new Date(metaSource.date).toLocaleDateString()}</time>
+${indent}  </Link>
+${indent}) : null}`
+      : `${indent}{metaSource?.date ? (
+${indent}  <time dateTime={metaSource.date}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}    {new Date(metaSource.date).toLocaleDateString()}
+${indent}  </time>
+${indent}) : null}`;
+  }
+
+  private renderBlockTreePostAuthorName(
+    node: BlockNode,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const isLink = this.blockNodeBooleanAttr(node, 'isLink');
+    if (isLink) {
+      return `${indent}{metaSource?.author ? (
+${indent}  metaSource.authorSlug ? (
+${indent}    <Link to={'/author/' + metaSource.authorSlug}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}      {metaSource.author}
+${indent}    </Link>
+${indent}  ) : (
+${indent}    <span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>{metaSource.author}</span>
+${indent}  )
+${indent}) : null}`;
+    }
+    return `${indent}<span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>{metaSource?.author}</span>`;
+  }
+
+  private renderBlockTreePostTerms(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const taxonomy = (
+      this.blockNodeStringAttr(node, 'term') ?? 'category'
+    ).toLowerCase();
+    const isCategory = taxonomy === 'category';
+    const prefix = this.blockNodeStringAttr(node, 'prefix');
+    const separator = this.blockNodeStringAttr(node, 'separator') ?? ', ';
+    const termsExpr = isCategory
+      ? 'metaSource?.categories'
+      : 'metaSource?.tags';
+    const slugsExpr = isCategory ? 'metaSource?.categorySlugs' : '[]';
+    return `${indent}{Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+${indent}  <span${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${prefix ? `${indent}    <span>{${JSON.stringify(prefix)}}</span>\n` : ''}${indent}    {${termsExpr}.map((term, index) => (
+${indent}      <React.Fragment key={term + '-' + index}>
+${indent}        {index > 0 ? <span aria-hidden="true">{${JSON.stringify(separator)}}</span> : null}
+${indent}        {${isCategory ? `(Array.isArray(${slugsExpr}) && ${slugsExpr}[index])` : 'false'} ? (
+${indent}          <Link to={'/category/' + ${slugsExpr}[index]} className="hover:underline underline-offset-4">
+${indent}            {term}
+${indent}          </Link>
+${indent}        ) : (
+${indent}          <span>{term}</span>
+${indent}        )}
+${indent}      </React.Fragment>
+${indent}    ))}
+${indent}  </span>
+${indent}) : null}`;
+  }
+
+  private blockNodeStringAttr(
+    node: BlockNode,
+    key: string,
+  ): string | undefined {
+    const value = node.attrs?.[key];
+    return typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined;
+  }
+
+  private blockNodeBooleanAttr(node: BlockNode, key: string): boolean {
+    return node.attrs?.[key] === true;
+  }
+
+  private queryTitleMarkup(componentName: string): string {
+    if (/^search$/i.test(componentName)) {
+      return `{(() => {
+        const term = searchParams.get('q') ?? searchParams.get('s') ?? '';
+        return term ? \`Search results for "\${term}"\` : 'Search Results';
+      })()}`;
+    }
+    if (/^archive$/i.test(componentName)) {
+      return 'Archive';
+    }
+    return 'Posts';
+  }
+
+  private renderHybridSections(
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+  ): string {
+    const state = {
+      usedSectionIndexes: new Set<number>(),
+    };
+    const treeMarkup = this.renderHybridBlockTree(
+      plan.blockTree ?? [],
+      plan,
+      ctx,
+      state,
+    );
+    const trailingSections = plan.sections
+      .map((section, index) =>
+        state.usedSectionIndexes.has(index)
+          ? ''
+          : this.renderSection(section, ctx, plan.componentName, index),
+      )
+      .filter(Boolean)
+      .join('\n');
+
+    return [treeMarkup, trailingSections].filter(Boolean).join('\n');
+  }
+
+  private renderHybridBlockTree(
+    nodes: BlockNode[],
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+    state: { usedSectionIndexes: Set<number> },
+    depth = 0,
+  ): string {
+    return nodes
+      .map((node) => this.renderHybridBlockNode(node, plan, ctx, state, depth))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private renderHybridBlockNode(
+    node: BlockNode,
+    plan: ComponentVisualPlan,
+    ctx: RenderCtx,
+    state: { usedSectionIndexes: Set<number> },
+    depth: number,
+  ): string {
+    const matchedSection = this.findMatchingSectionForBlockNode(
+      node,
+      plan,
+      state.usedSectionIndexes,
+    );
+    if (matchedSection) {
+      state.usedSectionIndexes.add(matchedSection.index);
+      return this.renderSection(
+        matchedSection.section,
+        ctx,
+        plan.componentName,
+        matchedSection.index,
+      );
+    }
+
+    const tagName = this.blockNodeTagName(node, 'div');
+    const indent = '  '.repeat(depth + 3);
+    const children = node.children?.length
+      ? `\n${this.renderHybridBlockTree(node.children, plan, ctx, state, depth + 1)}\n${indent}`
+      : '';
+
+    switch (node.kind) {
+      case 'group':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>${children}</${tagName}>`;
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
+      case 'columns':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+          node,
+          {
+            display: 'grid',
+            gridTemplateColumns: this.buildColumnTemplate(node),
+          },
+        )}>${children}</div>`;
+      case 'column':
+        return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
+          node,
+          {
+            flex: node.columnWidth ? `0 0 ${node.columnWidth}` : '1 1 0',
+            minWidth: '0',
+          },
+        )}>${children}</div>`;
+      default:
+        return this.renderBlockNode(node, ctx, plan.componentName, depth);
+    }
+  }
+
+  private findMatchingSectionForBlockNode(
+    node: BlockNode,
+    plan: ComponentVisualPlan,
+    usedSectionIndexes: Set<number>,
+  ): { section: SectionPlan; index: number } | null {
+    const exactSourceNodeId = node.sourceRef?.sourceNodeId?.trim();
+    if (exactSourceNodeId) {
+      const exactIndex = plan.sections.findIndex(
+        (section, index) =>
+          !usedSectionIndexes.has(index) &&
+          section.sourceRef?.sourceNodeId?.trim() === exactSourceNodeId,
+      );
+      if (exactIndex >= 0) {
+        return {
+          section: plan.sections[exactIndex]!,
+          index: exactIndex,
+        };
+      }
+    }
+
+    const findUnusedSectionIndex = (
+      matcher: (section: SectionPlan) => boolean,
+    ) =>
+      plan.sections.findIndex(
+        (section, index) => !usedSectionIndexes.has(index) && matcher(section),
+      );
+
+    const kindMappedIndex = (() => {
+      switch (node.kind) {
+        case 'post-title':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-title',
+          );
+        case 'post-featured-image':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-featured-image',
+          );
+        case 'post-content':
+          return findUnusedSectionIndex((section) =>
+            ['post-content', 'page-content', 'prose-block'].includes(
+              section.type,
+            ),
+          );
+        case 'query':
+        case 'latest-posts':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-list',
+          );
+        case 'post-terms':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-terms',
+          );
+        case 'post-navigation':
+        case 'post-navigation-link':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-navigation',
+          );
+        case 'comments':
+        case 'comment-template':
+        case 'comments-title':
+        case 'post-comments-form':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'comments',
+          );
+        case 'search':
+          return findUnusedSectionIndex((section) => section.type === 'search');
+        case 'post-date':
+        case 'post-author-name':
+        case 'post-author-biography':
+          return findUnusedSectionIndex(
+            (section) => section.type === 'post-meta',
+          );
+        default:
+          if (this.isSidebarBlockNode(node)) {
+            return findUnusedSectionIndex(
+              (section) => section.type === 'sidebar',
+            );
+          }
+          return -1;
+      }
+    })();
+
+    if (kindMappedIndex >= 0) {
+      return {
+        section: plan.sections[kindMappedIndex]!,
+        index: kindMappedIndex,
+      };
+    }
+
+    return null;
+  }
+
+  private isSidebarBlockNode(node: BlockNode): boolean {
+    if (
+      [
+        'search',
+        'categories',
+        'avatar',
+        'navigation',
+        'query',
+        'latest-posts',
+      ].includes(node.kind)
+    ) {
+      return true;
+    }
+    if (
+      node.kind === 'template-part' &&
+      typeof node.templatePartSlug === 'string' &&
+      /sidebar/i.test(node.templatePartSlug)
+    ) {
+      return true;
+    }
+    return (node.children ?? []).some((child) =>
+      this.isSidebarBlockNode(child),
+    );
+  }
+
+  private blockNodeClassAttr(
+    node: BlockNode,
+    extraClassNames: string[] = [],
+  ): string {
+    const classNames = [
+      ...(node.customClassNames ?? []),
+      ...(node.align ? [`align${node.align}`] : []),
+      ...extraClassNames,
+    ].filter(Boolean);
+    return classNames.length > 0
+      ? ` className="${[...new Set(classNames)].join(' ')}"`
+      : '';
+  }
+
+  private blockNodeTagName(node: BlockNode, fallback: string): string {
+    const tagName = node.tagName?.trim().toLowerCase();
+    return tagName && /^[a-z][a-z0-9-]*$/.test(tagName) ? tagName : fallback;
+  }
+
+  private buildColumnTemplate(node: BlockNode): string | undefined {
+    const widths = (node.children ?? [])
+      .map((child) => child.columnWidth?.trim())
+      .filter((value): value is string => Boolean(value));
+    if (widths.length === 0 || widths.length !== (node.children ?? []).length) {
+      return undefined;
+    }
+    return widths.join(' ');
+  }
+
+  private blockNodeStyleAttr(
+    node: BlockNode,
+    extra: Record<string, string | number | undefined> = {},
+  ): string {
+    const typography = node.typography as
+      | Record<string, string | number | undefined>
+      | undefined;
+    return this.buildStyleAttr({
+      padding: node.padding ? this.boxSpacingToCss(node.padding) : undefined,
+      margin: node.margin ? this.boxSpacingToCss(node.margin) : undefined,
+      gap: node.gap,
+      minHeight: node.minHeight,
+      backgroundColor: node.bgColor,
+      color: node.textColor,
+      borderRadius: node.borderRadius,
+      textAlign: node.textAlign,
+      justifyContent: node.justifyContent,
+      fontFamily: node.fontFamily,
+      fontSize:
+        typeof typography?.fontSize === 'string'
+          ? typography.fontSize
+          : undefined,
+      fontStyle:
+        typeof typography?.fontStyle === 'string'
+          ? typography.fontStyle
+          : undefined,
+      fontWeight:
+        typeof typography?.fontWeight === 'string' ||
+        typeof typography?.fontWeight === 'number'
+          ? typography.fontWeight
+          : undefined,
+      lineHeight:
+        typeof typography?.lineHeight === 'string'
+          ? typography.lineHeight
+          : undefined,
+      letterSpacing:
+        typeof typography?.letterSpacing === 'string'
+          ? typography.letterSpacing
+          : undefined,
+      textDecoration:
+        typeof typography?.textDecoration === 'string'
+          ? typography.textDecoration
+          : undefined,
+      textTransform:
+        typeof typography?.textTransform === 'string'
+          ? typography.textTransform
+          : undefined,
+      ...extra,
+    });
+  }
+
   private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
     const parts: string[] = [];
+    const preferSemanticDeterministicPartial =
+      this.shouldPreferSemanticDeterministicPartial(plan);
+
+    if (
+      !preferSemanticDeterministicPartial &&
+      plan.renderMode === 'block-centric' &&
+      plan.blockTree?.length
+    ) {
+      return this.renderBlockTree(plan.blockTree, ctx, plan.componentName);
+    }
+    if (!preferSemanticDeterministicPartial && plan.blockTree?.length) {
+      return this.renderHybridSections(plan, ctx);
+    }
+
     const sidebarSection =
       plan.layout.contentLayout && plan.layout.contentLayout !== 'single-column'
         ? (plan.sections.find(
             (s): s is SidebarSection => s.type === 'sidebar',
           ) ?? null)
         : null;
+    const allContentSidebarLayout =
+      !!sidebarSection &&
+      plan.layout.sidebarScope === 'all-content' &&
+      plan.sections
+        .filter((section) => section !== sidebarSection)
+        .every((section) => this.canRenderInSidebarMainColumn(section));
     const mainContentSection = plan.sections.find(
       (s): s is PostContentSection | PageContentSection | ProseBlockSection =>
         s.type === 'page-content' ||
         s.type === 'post-content' ||
         s.type === 'prose-block',
     );
+
+    if (sidebarSection && allContentSidebarLayout) {
+      return this.renderAllContentWithSidebar(
+        plan.sections.filter((section) => section !== sidebarSection),
+        sidebarSection,
+        ctx,
+        plan.layout.contentLayout === 'sidebar-left',
+        plan.componentName,
+      );
+    }
 
     for (let index = 0; index < plan.sections.length; index++) {
       const section = plan.sections[index];
@@ -1600,6 +2636,34 @@ export default ${componentName};`;
     }
 
     return parts.join('\n\n');
+  }
+
+  private shouldPreferSemanticDeterministicPartial(
+    plan: ComponentVisualPlan,
+  ): boolean {
+    if (plan.renderMode !== 'block-centric') return false;
+    const normalizedName = plan.componentName.trim().toLowerCase();
+    return [
+      'header',
+      'navigation',
+      'nav',
+      'footer',
+      'sidebar',
+      'postmeta',
+    ].includes(normalizedName);
+  }
+
+  private buildBlockTreeCoverStyleAttr(node: BlockNode): string {
+    const baseStyle = this.blockNodeStyleAttr(node, {
+      position: node.src ? 'relative' : undefined,
+      overflow: node.src ? 'hidden' : undefined,
+    });
+    if (!node.src) return baseStyle;
+
+    const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
+      node.src,
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    return this.mergeStyleAttrs(baseStyle, backgroundStyle);
   }
 
   // ── Section dispatcher ────────────────────────────────────────────────────
@@ -1649,8 +2713,20 @@ export default ${componentName};`;
       case 'post-content':
         markup = this.renderPostContent(section, ctx, py);
         break;
+      case 'post-title':
+        markup = this.renderPostTitle(section, ctx, py);
+        break;
+      case 'post-featured-image':
+        markup = this.renderPostFeaturedImage(section, ctx, py);
+        break;
       case 'post-meta':
         markup = this.renderPostMeta(section, ctx, bg, py);
+        break;
+      case 'post-terms':
+        markup = this.renderPostTerms(section, ctx, bg, py);
+        break;
+      case 'post-navigation':
+        markup = this.renderPostNavigation(section, ctx, bg, py);
         break;
       case 'page-content':
         markup = this.renderPageContent(section, ctx, py);
@@ -1728,6 +2804,12 @@ export default ${componentName};`;
   private sectionPaddingClass(section: SectionPlan): string {
     if (section.paddingStyle) return '';
     return PADDING_MAP[section.padding ?? 'lg'];
+  }
+
+  private explicitSectionPaddingClass(section?: SectionPlan | null): string {
+    if (!section) return '';
+    if (section.paddingStyle) return '';
+    return section.padding ? PADDING_MAP[section.padding] : '';
   }
 
   private buildSectionGapStyleAttr(section: SectionPlan): string {
@@ -2501,12 +3583,33 @@ export default ${componentName};`;
     ctx: RenderCtx,
     py: string,
   ): string {
+    const { t } = ctx;
     const bg = s.background ?? ctx.p.background;
     const sectionStyle = this.buildSectionStyleAttr(s);
     const presentation = this.resolveSectionPresentation(s, {
       container: 'shell',
       contentAlign: s.align ?? 'left',
     });
+    const headingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? ctx.p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    const subheadingStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? ctx.p.textMuted },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const headingClassName = this.appendStyledTextAlignClass(
+      `${t.h2} font-normal`,
+      undefined,
+      presentation.textAlign,
+    );
+    const subheadingClassName = this.appendStyledTextAlignClass(
+      'text-[1.05rem]',
+      undefined,
+      presentation.textAlign,
+    );
     const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
       align: this.presentationJustifyValue(presentation.justify),
       ctaStyle: s.ctaStyle,
@@ -2516,6 +3619,8 @@ export default ${componentName};`;
       <section className="bg-[${bg}] ${py}"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
           <div className="flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.mergeStyleAttrs(this.buildSectionGapStyleAttr(s), this.presentationMaxWidthStyleAttr(presentation))}>
+            ${s.heading ? `<h2 className="${headingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
+            ${s.subheading ? `<p className="${subheadingClassName}"${subheadingStyle}>${s.subheading}</p>` : ''}
             ${cta}
           </div>
         </div>
@@ -2540,9 +3645,7 @@ export default ${componentName};`;
       { baseColor: '#ffffffcc', typography: s.subheadingStyle },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const bgSrcExpr = s.imageSrc.startsWith('/assets/')
-      ? `\`url("\${resolveAsset("${s.imageSrc}")}")\``
-      : `"url(\\"${s.imageSrc}\\")"`;
+    const bgSrcExpr = `\`url("\${resolveAsset("${s.imageSrc}")}")\``;
     const extraStyles = [
       `backgroundImage: ${bgSrcExpr}`,
       `backgroundSize: 'cover'`,
@@ -2683,19 +3786,24 @@ export default ${componentName};`;
                   : ''
               }`;
 
+    const featuredImageMarkup = s.showFeaturedImage
+      ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}`
+      : '';
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding, gap: postListLayout.itemGap }, false, ctx)}>
-              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}` : ''}
+              ${featuredImageMarkup}
               ${postListLayout.itemLayout === 'title-meta-inline' && hasMeta ? titleMetaRow : stackedContent}
             </article>`
       : postListLayout.itemLayout === 'title-meta-inline' && hasMeta
         ? `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${featuredImageMarkup}
                ${titleMetaRow}
                ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
-             </article>`
+              </article>`
         : `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${featuredImageMarkup}
                ${stackedContent}
-             </article>`;
+              </article>`;
 
     return `      {/* Post List */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -2962,15 +4070,330 @@ ${postCard}
       );
     }
 
-    return `      {metaSource ? (
-        <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
-          <div className="${l.containerClass}">
+    return `      <React.Fragment>
+        {metaSource ? (
+          <section className={['bg-[${bg}] ${py} w-full', className].filter(Boolean).join(' ')}${sectionStyle}>
+            <div className="${l.containerClass}">
+              <div className="text-sm text-[${p.textMuted}] ${flex}"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+                ${parts.join('\n              ')}
+              </div>
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTitle(
+    s: PostTitleSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const { p, t } = ctx;
+    const level = Math.min(Math.max(s.level ?? 1, 1), 6);
+    const tag = `h${level}`;
+    const baseClass =
+      level <= 1
+        ? `${t.h1} font-normal`
+        : level === 2
+          ? `${t.h2} font-normal`
+          : `${t.h3} font-normal`;
+    const titleClassName = this.appendStyledTextAlignClass(
+      baseClass,
+      s.titleCustomClassNames,
+      s.presentation?.textAlign,
+    );
+    const styleAttr = s.titleStyle
+      ? this.blueprintTypographyStyleAttr(s.titleStyle)
+      : this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: s.textColor ?? p.text },
+          this.pickBlockStyle(ctx, 'post-title', 'heading'),
+        );
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    return `      <React.Fragment>
+        {item ? (
+          <section className="${py} w-full"${sectionStyle}>
+            <${tag} className="${titleClassName}"${styleAttr}>{item.title}</${tag}>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostFeaturedImage(
+    s: PostFeaturedImageSection,
+    ctx: RenderCtx,
+    py: string,
+  ): string {
+    const imageStyle = this.pickBlockStyle(ctx, 'image', 'post-featured-image');
+    const radiusClass =
+      this.exactRadiusClass(s.imageRadius) ||
+      this.imageRadiusClass(ctx) ||
+      this.cardRadiusClass(ctx);
+    const imageClassName = this.appendOptionalCustomClasses(
+      `w-full h-auto ${this.inlineImageFitClass()} ${radiusClass}`.trim(),
+      s.imageCustomClassNames,
+    );
+    const imageStyleAttr = this.buildStyleAttr({
+      ...this.buildBlockStyleMap(imageStyle, {}, false, ctx),
+      borderRadius: s.imageRadius,
+      aspectRatio: s.imageAspectRatio,
+    });
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    return `      <React.Fragment>
+        {item?.featuredImage ? (
+          <section className="${py} w-full"${sectionStyle}>
+            <figure className="wp-block-post-featured-image">
+              <img src={item.featuredImage} alt={item.title} className="${imageClassName}" loading="eager"${imageStyleAttr} />
+            </figure>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTerms(
+    s: PostTermsSection,
+    ctx: RenderCtx,
+    bg: string,
+    py: string,
+  ): string {
+    const { p, l } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const termsExpr =
+      s.taxonomy === 'category' ? 'item.categories' : 'item.tags';
+    const prefixLiteral = s.prefix ? JSON.stringify(s.prefix) : null;
+    const separatorLiteral = JSON.stringify(
+      s.separator === undefined ? ' · ' : s.separator,
+    );
+    const layoutClass =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+
+    return `      <React.Fragment>
+        {item && Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+          <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+            <div className="${l.containerClass}">
+              <div className="${layoutClass} text-sm text-[${p.textMuted}]"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+                ${prefixLiteral ? `<span>{${prefixLiteral}}</span>` : ''}
+                {${termsExpr}.map((term, index) => (
+                  <React.Fragment key={term + '-' + index}>
+                    {index > 0 ? <span aria-hidden="true">{${separatorLiteral}}</span> : null}
+                    <span>{term}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostNavigation(
+    s: PostNavigationSection,
+    ctx: RenderCtx,
+    bg: string,
+    py: string,
+  ): string {
+    const { p, t, l } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const linkBaseClass = `group flex flex-col gap-1 hover:underline underline-offset-4`;
+    const previousLabelLiteral = JSON.stringify(s.previousLabel ?? 'Previous:');
+    const nextLabelLiteral = JSON.stringify(s.nextLabel ?? 'Next:');
+    const labelStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+
+    return `      <React.Fragment>
+        {item ? (() => {
+          const currentIndex = posts.findIndex((post) => post.slug === item.slug);
+          const previousPost = currentIndex >= 0 ? posts[currentIndex + 1] ?? null : null;
+          const nextPost = currentIndex >= 0 ? posts[currentIndex - 1] ?? null : null;
+          if (!previousPost && !nextPost) return null;
+          return (
+            <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
+              <nav className="wp-block-group" aria-label="Posts">
+                <div className="${l.containerClass}">
+                  <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between"${this.buildSectionGapStyleAttr(s)}>
+                    ${
+                      s.showPrevious === false
+                        ? ''
+                        : `{previousPost ? (
+                      <Link to={'/post/' + previousPost.slug} className="${linkBaseClass} md:max-w-[48%]">
+                        <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${previousLabelLiteral}}</span>
+                        <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{previousPost.title}</span>
+                      </Link>
+                    ) : <span />}`
+                    }
+                    ${
+                      s.showNext === false
+                        ? ''
+                        : `{nextPost ? (
+                      <Link to={'/post/' + nextPost.slug} className="${linkBaseClass} md:ml-auto md:max-w-[48%] md:text-right md:items-end">
+                        <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${nextLabelLiteral}}</span>
+                        <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{nextPost.title}</span>
+                      </Link>
+                    ) : <span />}`
+                    }
+                  </div>
+                </div>
+              </nav>
+            </section>
+          );
+        })() : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostMetaInline(s: PostMetaSection, ctx: RenderCtx): string {
+    const { p } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const metaLinkClass = this.textLinkClass(p.textMuted, p.accent);
+    const flex =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+    const separator =
+      s.showSeparator === false ? '' : '<span aria-hidden="true">-</span>';
+    const parts: string[] = [];
+    if (s.showDate) {
+      parts.push(
+        `<time dateTime={item.date} className="whitespace-nowrap">{new Date(item.date).toLocaleDateString()}</time>`,
+      );
+    }
+    if (s.showAuthor) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{item.author && (item.authorSlug ? <Link to={\`/author/\${item.authorSlug}\`} className="${metaLinkClass}">by {item.author}</Link> : <span>by {item.author}</span>)}`,
+      );
+    }
+    if (s.showCategories) {
+      if (parts.length > 0 && separator) parts.push(separator);
+      parts.push(
+        `{item.categories?.[0] && (item.categorySlugs?.[0] ? <Link to={\`/category/\${item.categorySlugs[0]}\`} className="${metaLinkClass}">{item.categories[0]}</Link> : <span>{item.categories[0]}</span>)}`,
+      );
+    }
+    return `      <React.Fragment>
+        {item ? (
+          <section className="w-full"${sectionStyle}>
             <div className="text-sm text-[${p.textMuted}] ${flex}"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
               ${parts.join('\n              ')}
             </div>
-          </div>
-        </section>
-      ) : null}`;
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostTermsInline(s: PostTermsSection, ctx: RenderCtx): string {
+    const { p } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const metaStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const termsExpr =
+      s.taxonomy === 'category' ? 'item.categories' : 'item.tags';
+    const prefixLiteral = s.prefix ? JSON.stringify(s.prefix) : null;
+    const separatorLiteral = JSON.stringify(
+      s.separator === undefined ? ' · ' : s.separator,
+    );
+    const layoutClass =
+      s.layout === 'stacked'
+        ? 'flex flex-col items-start gap-2'
+        : 'flex flex-wrap items-center gap-2';
+    return `      <React.Fragment>
+        {item && Array.isArray(${termsExpr}) && ${termsExpr}.length > 0 ? (
+          <section className="w-full"${sectionStyle}>
+            <div className="${layoutClass} text-sm text-[${p.textMuted}]"${this.mergeStyleAttrs(metaStyle, this.buildSectionGapStyleAttr(s))}>
+              ${prefixLiteral ? `<span>{${prefixLiteral}}</span>` : ''}
+              {${termsExpr}.map((term, index) => (
+                <React.Fragment key={term + '-' + index}>
+                  {index > 0 ? <span aria-hidden="true">{${separatorLiteral}}</span> : null}
+                  <span>{term}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </React.Fragment>`;
+  }
+
+  private renderPostNavigationInline(
+    s: PostNavigationSection,
+    ctx: RenderCtx,
+  ): string {
+    const { p, t } = ctx;
+    const sectionStyle = this.buildSectionStyleAttr(s);
+    const linkBaseClass = `group flex flex-col gap-1 hover:underline underline-offset-4`;
+    const previousLabelLiteral = JSON.stringify(s.previousLabel ?? 'Previous:');
+    const nextLabelLiteral = JSON.stringify(s.nextLabel ?? 'Next:');
+    const labelStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.textMuted },
+      this.pickBlockStyle(ctx, 'site-tagline'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const titleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: s.textColor ?? p.text },
+      this.pickBlockStyle(ctx, 'heading'),
+    );
+    return `      <React.Fragment>
+        {item ? (() => {
+          const currentIndex = posts.findIndex((post) => post.slug === item.slug);
+          const previousPost = currentIndex >= 0 ? posts[currentIndex + 1] ?? null : null;
+          const nextPost = currentIndex >= 0 ? posts[currentIndex - 1] ?? null : null;
+          if (!previousPost && !nextPost) return null;
+          return (
+            <section className="w-full"${sectionStyle}>
+              <nav className="wp-block-group" aria-label="Posts">
+                <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between"${this.buildSectionGapStyleAttr(s)}>
+                  ${
+                    s.showPrevious === false
+                      ? ''
+                      : `{previousPost ? (
+                    <Link to={'/post/' + previousPost.slug} className="${linkBaseClass} md:max-w-[48%]">
+                      <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${previousLabelLiteral}}</span>
+                      <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{previousPost.title}</span>
+                    </Link>
+                  ) : <span />}`
+                  }
+                  ${
+                    s.showNext === false
+                      ? ''
+                      : `{nextPost ? (
+                    <Link to={'/post/' + nextPost.slug} className="${linkBaseClass} md:ml-auto md:max-w-[48%] md:text-right md:items-end">
+                      <span className="text-sm text-[${p.textMuted}]"${labelStyle}>{${nextLabelLiteral}}</span>
+                      <span className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>{nextPost.title}</span>
+                    </Link>
+                  ) : <span />}`
+                  }
+                </div>
+              </nav>
+            </section>
+          );
+        })() : null}
+      </React.Fragment>`;
   }
 
   private renderCardGrid(
@@ -3067,7 +4490,7 @@ ${postCard}
           c.imageCustomClassNames,
         );
         return `          <div className="${cardClassName}"${cardStyle}>
-            ${c.imageSrc ? `<img src="${c.imageSrc}" alt="${c.imageAlt ?? ''}" className="${cardImageClassName}" loading="lazy"${cardImageStyle} />` : ''}
+            ${c.imageSrc ? `<img src={resolveAsset("${c.imageSrc}")} alt="${c.imageAlt ?? ''}" className="${cardImageClassName}" loading="lazy"${cardImageStyle} />` : ''}
             ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none" aria-hidden="true">*</span>` : ''}
             ${c.heading ? `<h3 className="${cardHeadingClassName}"${cardHeadingStyle}>${c.heading}</h3>` : ''}
             ${c.body ? `<p${cardBodyClassName ? ` className="${cardBodyClassName}"` : ''}${cardBodyStyle}>${c.body}</p>` : ''}
@@ -3090,13 +4513,28 @@ ${postCard}
              ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none ${hasCenteredIntro ? 'mb-2' : 'mb-3'}" aria-hidden="true">*</span>` : ''}
              ${s.title ? `<h2 className="${introTitleClassName}"${titleStyle}>${s.title}</h2>` : ''}
              ${s.subtitle ? `<p className="${introSubtitleClassName}"${subtitleStyle}>${s.subtitle}</p>` : ''}
-           </div>`
+            </div>`
+        : '';
+    const ctas = this.resolveSectionCtas(s);
+    const ctaGroup =
+      ctas.length > 0
+        ? this.renderButtonCtaGroup(ctas, ctx, {
+            align:
+              sectionAlign === 'center'
+                ? 'center'
+                : sectionAlign === 'right'
+                  ? 'end'
+                  : 'start',
+            ctaStyle: s.ctaStyle,
+            secondaryCtaStyle: s.secondaryCtaStyle,
+          })
         : '';
 
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
 ${intro}
+${ctaGroup}
           <div className="grid ${colClass} gap-6 ${gridJustifyClass}"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
@@ -3177,7 +4615,7 @@ ${cards}
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
             ${s.heading ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>` : ''}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? (ctx.avoidDangerouslySetInnerHTML ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />`) : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
             ${cta}
           </div>`;
 
@@ -3386,9 +4824,6 @@ ${cards}
     const brandDescriptionExpr = s.brandDescription
       ? JSON.stringify(s.brandDescription)
       : 'siteInfo?.blogDescription';
-    const fallbackColumns = JSON.stringify(
-      s.menuColumns.map((col) => ({ heading: col.title, links: [] })),
-    );
     const outerTracks =
       s.columnWidths
         ?.map((value) => value.trim().replace(/\s+/g, ''))
@@ -3424,20 +4859,8 @@ ${cards}
             <div className="min-w-0">
               <div className="grid ${menuGridClass} items-start gap-8">
                 {(() => {
-                  const approvedFooterColumns = ${fallbackColumns};
                   const displayFooterColumns = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);
-                  const orderedFooterColumns = approvedFooterColumns
-                    .map((approvedColumn) =>
-                      displayFooterColumns.find(
-                        (column) =>
-                          String(column.heading ?? '').trim().toLowerCase() ===
-                          String(approvedColumn.heading ?? '').trim().toLowerCase(),
-                      ),
-                    )
-                    .filter((column): column is FooterColumn => Boolean(column));
-                  const columnsToRender =
-                    orderedFooterColumns.length > 0 ? orderedFooterColumns : displayFooterColumns;
-                  return columnsToRender.map((column, columnIndex) => (
+                  return displayFooterColumns.map((column, columnIndex) => (
                     <div key={column.heading ?? columnIndex} className="flex min-w-0 flex-col gap-3">
                       <h3 className="font-semibold text-[${tc}]"${columnHeadingStyle}>{column.heading}</h3>
                       <nav className="flex flex-col gap-2">
@@ -3510,18 +4933,20 @@ ${this.renderPostContentInner(s, ctx)}
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const commentCardStyle = this.buildMergedBlockStyleAttr(
+    const commentGroupStyle = this.buildMergedBlockStyleAttr(
       ctx,
       {
-        padding: '1rem',
-        borderRadius: '5px',
-        borderColor: 'rgb(0 0 0 / 0.08)',
-        borderWidth: '1px',
-        borderStyle: 'solid',
+        margin: '0 0 var(--wp--preset--spacing--30) 0',
       },
       false,
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
+    );
+    const replyLinkStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: p.textMuted },
+      this.pickBlockStyle(ctx, 'navigation'),
+      this.pickBlockStyle(ctx, 'paragraph'),
     );
     const inputStyle = this.buildMergedBlockStyleAttr(
       ctx,
@@ -3546,33 +4971,56 @@ ${this.renderPostContentInner(s, ctx)}
     );
     const renderCommentCard = (
       commentVar: string,
-    ) => `                      <article className="comment-body wp-block-group has-base-background-color has-background"${commentCardStyle}>
-                        <footer className="comment-meta">
-                          <div className="comment-author vcard flex items-start gap-3">
-                            <span className="avatar avatar-44 photo inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]" aria-hidden="true">
-                              {${commentVar}.author.charAt(0).toUpperCase()}
-                            </span>
-                            <div className="wp-block-group flex flex-col gap-0.5">
-                              <b className="fn text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</b>
-                              <a href={'#comment-' + ${commentVar}.id} className="comment-date text-xs text-[${p.textMuted}]"${metaStyle}>
-                                <time dateTime={${commentVar}.date}>{${commentVar}.date}</time>
-                              </a>
+    ) => `                      <div className="wp-block-group"${commentGroupStyle}>
+                         <div className="wp-block-group flex items-start gap-2">
+                           <span className="avatar avatar-40 photo inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm font-medium text-[${tc}]" aria-hidden="true">
+                               {${commentVar}.author.charAt(0).toUpperCase()}
+                             </span>
+                             <div className="wp-block-group flex flex-col gap-0.5">
+                               <div className="wp-block-comment-author-name text-sm font-medium text-[${tc}]"${authorStyle}>{${commentVar}.author}</div>
+                               <a href={'#comment-' + ${commentVar}.id} className="wp-block-comment-date comment-date text-xs text-[${p.textMuted}] hover:underline underline-offset-4"${metaStyle}>
+                                 <time dateTime={${commentVar}.date}>{new Date(${commentVar}.date).toLocaleDateString()}</time>
+                               </a>
+                             </div>
                             </div>
-                          </div>
-                        </footer>
-                        <div className="comment-content wp-block-comment-content">
-                          <p className="mt-3 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
-                        </div>
-                      </article>`;
+                          <div className="comment-content wp-block-comment-content">
+                           <p className="mt-3 whitespace-pre-line text-sm text-[${p.textMuted}]"${bodyStyle}>{${commentVar}.content}</p>
+                         </div>
+                         <div className="wp-block-group flex items-center gap-4">
+                           <button
+                             type="button"
+                             className="comment-edit-link text-sm text-[${p.textMuted}] hover:underline underline-offset-4"
+${replyLinkStyle}
+                           >
+                             Edit
+                           </button>
+                           <button
+                             type="button"
+                             className="comment-reply-link text-sm text-[${p.textMuted}] hover:underline underline-offset-4"
+                             onClick={() => beginCommentReply(${commentVar})}
+${replyLinkStyle}
+                           >
+                             Reply
+                           </button>
+                         </div>
+                       </div>`;
     const formBlock = s.showForm
       ? `
               <div id="respond" className="comment-respond">
                 <h3 id="reply-title" className="comment-reply-title ${t.h3} font-normal text-[${tc}]"${headingStyle}>
-                  Leave a Reply
+                  {commentReplyTarget ? \`Leave a Reply to \${commentReplyTarget}\` : 'Leave a Reply'}
                 </h3>
                 <p className="comment-notes text-sm text-[${p.textMuted}]"${bodyStyle}>
                   Your email address will not be published. Required fields are marked *
                 </p>
+                {commentReplyTarget ? (
+                  <p className="mb-3 text-sm text-[${p.textMuted}]">
+                    Replying to <strong className="text-[${tc}]">{commentReplyTarget}</strong>{' '}
+                    <button type="button" className="hover:underline underline-offset-4" onClick={cancelCommentReply}>
+                      Cancel reply
+                    </button>
+                  </p>
+                ) : null}
                 <form id="commentform" className="comment-form" onSubmit={handleCommentSubmit}>
                   ${
                     s.requireName
@@ -3637,17 +5085,17 @@ ${this.renderPostContentInner(s, ctx)}
                 <h2 className="wp-block-heading ${t.h2} font-normal text-[${tc}]"${headingStyle}>
                   Comments
                 </h2>
-                <p className="wp-block-comments-title text-sm text-[${p.textMuted}]"${metaStyle}>
-                  {comments.length === 1 ? '1 Comment' : \`\${comments.length} Comments\`}
-                </p>
+                <h3 className="wp-block-comments-title ${t.h3} font-normal text-[${tc}]"${headingStyle}>
+                  {comments.length === 1 ? \`One response to "\${item.title}"\` : \`\${comments.length} responses to "\${item.title}"\`}
+                </h3>
               </div>
               {topLevelComments.length > 0 ? (
-                <ol className="comment-list wp-block-comment-template">
+                <ol className="comment-list wp-block-comment-template list-none pl-0">
                   {topLevelComments.map((comment) => (
                     <li key={comment.id} id={\`comment-\${comment.id}\`} className="comment depth-1">
 ${renderCommentCard('comment')}
                       {repliesFor(comment.id).length > 0 ? (
-                        <ol className="children">
+                        <ol className="children ml-6 list-none pl-0">
                             {repliesFor(comment.id).map((reply) => (
                               <li key={reply.id} id={\`comment-\${reply.id}\`} className="comment depth-2">
 ${renderCommentCard('reply')}
@@ -3660,7 +5108,11 @@ ${renderCommentCard('reply')}
                 </ol>
               ) : (
                 <p className="no-comments text-sm text-[${p.textMuted}]"${bodyStyle}>No comments yet.</p>
-              )}${pendingBlock}${formBlock}
+              )}
+              <div className="wp-block-comments-pagination flex items-center justify-between text-sm text-[${p.textMuted}]"${metaStyle}>
+                <span className="wp-block-comments-pagination-previous opacity-60">Previous</span>
+                <span className="wp-block-comments-pagination-next opacity-60">Next</span>
+              </div>${pendingBlock}${formBlock}
             </div>
           )}
         </div>
@@ -3709,6 +5161,9 @@ ${this.renderProseBlockInner(s, ctx)}
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+    });
     const titleStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc },
@@ -3739,21 +5194,33 @@ ${this.renderProseBlockInner(s, ctx)}
       this.pickBlockStyle(ctx, 'search'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
+    const shouldRenderResults =
+      s.obligation?.required?.includes('posts') === true;
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
+    });
     return `      {/* Search */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6"${titleStyle}>${s.title}</h2>` : ''}
-          <div className="flex gap-2">
+          ${s.title ? `<h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-normal text-[${tc}] mb-6`, undefined, presentation.textAlign)}"${titleStyle}>${s.title}</h2>` : ''}
+          <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
             <input type="search" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
-            <button className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
-          </div>
-          <div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
+            <button type="submit" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
+          </form>
+          ${cta}
+          ${
+            shouldRenderResults
+              ? `<div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
             {posts.map(post => (
               <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent)}"${resultLinkStyle}>{post.title}</Link>
             ))}
-          </div>
+          </div>`
+              : ''
+          }
           ${
-            ctx.supportsPostsPagination
+            shouldRenderResults && ctx.supportsPostsPagination
               ? `{totalPages > 1 && (
             <div className="mt-8 flex items-center justify-between gap-4 text-sm text-[${p.textMuted}]"${metaStyle}>
               <button
@@ -3813,9 +5280,19 @@ ${this.renderSidebarCard(s, ctx, 10)}
     componentName: string,
   ): string {
     const { p } = ctx;
-    const bg = mainSection.background ?? p.background;
-    const py = this.sectionPaddingClass(mainSection);
-    const sectionStyle = this.buildSectionStyleAttr(mainSection);
+    const shellHasExplicitSpacing = Boolean(
+      sidebarSection.paddingStyle ||
+      sidebarSection.marginStyle ||
+      sidebarSection.padding,
+    );
+    const bg =
+      sidebarSection.background ?? mainSection.background ?? p.background;
+    const py = shellHasExplicitSpacing
+      ? this.explicitSectionPaddingClass(sidebarSection)
+      : this.sectionPaddingClass(mainSection);
+    const sectionStyle = shellHasExplicitSpacing
+      ? this.buildSectionStyleAttr(sidebarSection)
+      : this.buildSectionStyleAttr(mainSection);
     const mainContent =
       mainSection.type === 'post-content'
         ? this.renderPostContentInner(mainSection, ctx)
@@ -3827,7 +5304,7 @@ ${this.renderSidebarCard(s, ctx, 10)}
       gridTemplateColumns: sidebarLeft
         ? `${ctx.l.sidebarWidth ?? '320px'} minmax(0,1fr)`
         : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '320px'}`,
-      gap: mainSection.gapStyle ?? sidebarSection.gapStyle,
+      gap: sidebarSection.gapStyle ?? mainSection.gapStyle,
     });
     return `      {/* Main Content With Sidebar */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -3838,6 +5315,87 @@ ${this.renderSidebarCard(s, ctx, 10)}
           </div>
         </div>
       </section>`;
+  }
+
+  private canRenderInSidebarMainColumn(section: SectionPlan): boolean {
+    return [
+      'post-featured-image',
+      'post-title',
+      'post-meta',
+      'post-content',
+      'page-content',
+      'prose-block',
+      'post-terms',
+      'comments',
+      'post-navigation',
+    ].includes(section.type);
+  }
+
+  private renderAllContentWithSidebar(
+    mainSections: SectionPlan[],
+    sidebarSection: SidebarSection,
+    ctx: RenderCtx,
+    sidebarLeft: boolean,
+    componentName: string,
+  ): string {
+    const { p } = ctx;
+    const shellPy = this.explicitSectionPaddingClass(sidebarSection);
+    const sectionStyle = this.buildSectionStyleAttr(sidebarSection);
+    const bg =
+      sidebarSection.background ??
+      mainSections.find((section) => section.background)?.background ??
+      p.background;
+    const gridStyle = this.buildStyleAttr({
+      gridTemplateColumns: sidebarLeft
+        ? `${ctx.l.sidebarWidth ?? '30%'} minmax(0,1fr)`
+        : `minmax(0,1fr) ${ctx.l.sidebarWidth ?? '30%'}`,
+      gap:
+        sidebarSection.gapStyle ??
+        mainSections.find((section) => section.gapStyle)?.gapStyle,
+    });
+    const mainMarkup = mainSections
+      .map((section, index) =>
+        this.renderSidebarMainColumnSection(section, ctx, componentName, index),
+      )
+      .join('\n\n');
+    const sidebarCard = this.renderSidebarCard(sidebarSection, ctx, 8);
+
+    return `      {/* Full Main Column With Sidebar */}
+      <section className="bg-[${bg}] ${shellPy} w-full"${sectionStyle}>
+        <div className="${ctx.l.containerClass}">
+          <div className="grid grid-cols-1 gap-8 lg:items-start lg:grid-cols-[1fr]"${gridStyle}>
+            ${
+              sidebarLeft
+                ? `<aside className="min-w-0">${sidebarCard.trim()}</aside>
+            <div className="min-w-0 flex flex-col">
+${mainMarkup}
+            </div>`
+                : `<div className="min-w-0 flex flex-col">
+${mainMarkup}
+            </div>
+            <aside className="min-w-0">${sidebarCard.trim()}</aside>`
+            }
+          </div>
+        </div>
+      </section>`;
+  }
+
+  private renderSidebarMainColumnSection(
+    section: SectionPlan,
+    ctx: RenderCtx,
+    componentName: string,
+    index: number,
+  ): string {
+    switch (section.type) {
+      case 'post-meta':
+        return this.renderPostMetaInline(section, ctx);
+      case 'post-terms':
+        return this.renderPostTermsInline(section, ctx);
+      case 'post-navigation':
+        return this.renderPostNavigationInline(section, ctx);
+      default:
+        return this.renderSection(section, ctx, componentName, index);
+    }
   }
 
   private renderPostContentInner(
@@ -3863,12 +5421,15 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
       : '';
+    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
+      ? `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`
+      : `<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />`;
 
     return `          {item && (
             <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
               ${s.showTitle ? `<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>` : ''}
               ${metaBlock}
-              <div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />
+              ${bodyMarkup}
             </article>
           )}`;
   }
@@ -3882,10 +5443,13 @@ ${this.renderSidebarCard(s, ctx, 10)}
     const bodyClass = this.buildPageContentBodyClass(s, ctx);
     const titleWrapperClass =
       s.shellVariant === 'wide' ? this.contentContainerClass(ctx) : '';
+    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
+      ? `<div className="${bodyClass}">{renderRichTextChildren(item.content, "page-content")}</div>`
+      : `<div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />`;
     return `          {item && (
              <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
                ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
-                <div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />
+               ${bodyMarkup}
               </article>
             )}`;
   }
@@ -3941,6 +5505,11 @@ ${segments}
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
         if (segment.html && /<[^>]+>/.test(segment.html)) {
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `            <div className="${segmentContainerClass}">
+              <${tag} className="${headingClass}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-heading'}")}</${tag}>
+            </div>`;
+          }
           return `            <div className="${segmentContainerClass}">
               <${tag} className="${headingClass}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
             </div>`;
@@ -3958,6 +5527,11 @@ ${segments}
           ),
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
+        if (ctx.avoidDangerouslySetInnerHTML) {
+          return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${paragraphStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-paragraph'}")}</div>
+            </div>`;
+        }
         return `            <div className="${segmentContainerClass}">
               <div className="${bodyBaseClass}"${paragraphStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
             </div>`;
@@ -4002,7 +5576,9 @@ ${segments}
                 ${segment.items
                   .map((item) =>
                     /<[a-z]/i.test(item)
-                      ? `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
+                      ? ctx.avoidDangerouslySetInnerHTML
+                        ? `<li className="${itemClass}">{renderRichTextChildren(${JSON.stringify(item)}, "${section.debugKey ?? section.sectionKey ?? 'prose-list'}")}</li>`
+                        : `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
                       : `<li className="${itemClass}">${item}</li>`,
                   )
                   .join('\n                ')}
@@ -4015,6 +5591,11 @@ ${segments}
           { baseColor: tc },
           this.pickBlockStyle(ctx, 'paragraph'),
         );
+        if (ctx.avoidDangerouslySetInnerHTML) {
+          return `            <div className="${segmentContainerClass}">
+              <div className="${bodyBaseClass}"${htmlStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-html'}")}</div>
+            </div>`;
+        }
         return `            <div className="${segmentContainerClass}">
               <div className="${bodyBaseClass}"${htmlStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
             </div>`;
@@ -4041,15 +5622,32 @@ ${segments}
       { baseColor: p.text },
       this.pickBlockStyle(ctx, 'heading'),
     );
-    const brandStyle = this.buildTextTokenStyleAttr(
+    const titleBlock = s.title
+      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>${s.title}</h3>\n`
+      : '';
+    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
+    const widgetBlocks = (s.widgets ?? [])
+      .map((widget) => this.renderSidebarWidget(widget, ctx, maxItems))
+      .join('\n');
+
+    return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
+${titleBlock}${widgetBlocks}          </div>`;
+  }
+
+  private renderSidebarWidget(
+    widget: SidebarWidget,
+    ctx: RenderCtx,
+    maxItems: number,
+  ): string {
+    const { p, t } = ctx;
+    const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.text },
-      this.pickBlockStyle(ctx, 'site-title', 'heading'),
+      this.pickBlockStyle(ctx, 'heading'),
     );
-    const metaStyle = this.buildTextTokenStyleAttr(
+    const bodyStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: p.textMuted },
-      this.pickBlockStyle(ctx, 'site-tagline'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
     const navLinkStyle = this.buildTextTokenStyleAttr(
@@ -4058,75 +5656,178 @@ ${segments}
       this.pickBlockStyle(ctx, 'navigation'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
-    const titleBlock = s.title
-      ? `            <h3 className="${t.h3} font-normal text-[${p.text}]"${titleStyle}>${s.title}</h3>\n`
-      : '';
-    const maxItems = maxItemsOverride ?? s.maxItems ?? 6;
-    const menuSlug = s.menuSlug ? `'${s.menuSlug}'` : 'undefined';
+    const searchControlStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        color: p.text,
+        backgroundColor: 'transparent',
+        borderColor: 'rgb(0 0 0 / 0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        padding: '0.625rem 1rem',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'search'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
+    const linkClass = this.textLinkClass(p.text, p.accent, 'text-sm');
 
-    const siteInfoBlock = s.showSiteInfo
-      ? `            <div className="flex flex-col gap-2">
-              <div className="font-semibold text-[${p.text}]"${brandStyle}>{siteInfo?.siteName}</div>
-              {siteInfo?.blogDescription && (
-                <p className="text-sm text-[${p.textMuted}]"${metaStyle}>{siteInfo.blogDescription}</p>
-              )}
-            </div>
+    switch (widget.kind) {
+      case 'search': {
+        const placeholder = JSON.stringify(widget.placeholder ?? 'Search...');
+        const buttonLabel = widget.buttonLabel ?? 'Search';
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
 `
-      : '';
-
-    const menuBlock = s.menuSlug
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Navigation</div>
-              <nav className="flex flex-col gap-2">
-                {(menus.find(m => m.slug === ${menuSlug}) ?? menus[0])?.items
-                  ?.filter(item => item.parentId === 0)
-                  ?.slice(0, ${maxItems})
-                  ?.map(item => (
-                    isInternalPath(item.url) ? (
-                      <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
-                        {item.title}
-                      </Link>
-                    ) : (
-                      <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
-                        {item.title}
+    : ''
+}              <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
+                <input type="search" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
+                <button type="submit" className="bg-[${p.accent}] px-4 py-2 text-[${p.accentText}] ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>${buttonLabel}</button>
+              </form>
+            </section>`;
+      }
+      case 'author-bio': {
+        const descriptionExpr = widget.description
+          ? JSON.stringify(widget.description)
+          : 'siteInfo?.blogDescription';
+        const authorNameExpr =
+          'posts.find((post) => post.author)?.author ?? siteInfo?.siteName ?? ""';
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.showAvatar === false
+    ? ''
+    : `              <div className="inline-flex h-20 w-20 items-center justify-center rounded-[16px] bg-white text-xl font-semibold text-[${p.text}]">
+                 {(${authorNameExpr} || '?').charAt(0).toUpperCase()}
+               </div>
+`
+}
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+`
+    : ''
+}              <div className="flex flex-col gap-2">
+                 <p className="text-sm font-medium text-[${p.text}]">
+                   {${authorNameExpr}}
+                 </p>
+                 {${descriptionExpr} ? (
+                   <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${descriptionExpr}}</p>
+                 ) : null}
+              </div>
+            </section>`;
+      }
+      case 'categories':
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+`
+    : ''
+}              <ul className="flex flex-col gap-2 text-sm text-[${p.textMuted}]">
+                {(() => {
+                  const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+                  posts.forEach((post) => {
+                    (post.categories ?? []).forEach((name, index) => {
+                      const slug = post.categorySlugs?.[index] ?? '';
+                      const key = name + '::' + slug;
+                      const existing = categoryMap.get(key);
+                      if (existing) existing.count += 1;
+                      else categoryMap.set(key, { name, slug, count: 1 });
+                    });
+                  });
+                  return Array.from(categoryMap.values())
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, ${maxItems})
+                    .map((category) => (
+                      <li key={category.slug || category.name}>
+                        {category.slug ? (
+                          <Link to={'/category/' + category.slug} className="${linkClass}"${navLinkStyle}>
+                            {category.name}${widget.showCounts ? ` ({category.count})` : ''}
+                          </Link>
+                        ) : (
+                          <span>{category.name}${widget.showCounts ? ` ({category.count})` : ''}</span>
+                        )}
+                      </li>
+                    ));
+                })()}
+              </ul>
+            </section>`;
+      case 'navigation': {
+        const menuSlug = widget.menuSlug
+          ? JSON.stringify(widget.menuSlug)
+          : 'undefined';
+        const fallbackLinks = JSON.stringify(widget.links ?? []);
+        const description = widget.description
+          ? `              <p className="text-sm text-[${p.textMuted}]"${bodyStyle}>{${JSON.stringify(widget.description)}}</p>\n`
+          : '';
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+`
+    : ''
+}${description}              <nav className="flex flex-col gap-2">
+                {(() => {
+                  const menuItems = ((menus.find((menu) => menu.slug === ${menuSlug}) ?? menus[0])?.items ?? [])
+                    .filter((item) => item.parentId === 0)
+                    .slice(0, ${maxItems});
+                  if (menuItems.length > 0) {
+                    return menuItems.map((item) =>
+                      isInternalPath(item.url) ? (
+                        <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
+                          {item.title}
+                        </Link>
+                      ) : (
+                        <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${linkClass}"${navLinkStyle}>
+                          {item.title}
+                        </a>
+                      ),
+                    );
+                  }
+                  return (${fallbackLinks} as Array<{ label: string; url?: string }>)
+                    .slice(0, ${maxItems})
+                    .map((link, index) => (
+                      <a key={link.label + '-' + index} href={link.url ?? '#'} className="${linkClass}"${navLinkStyle}>
+                        {link.label}
                       </a>
-                    )
-                  ))}
+                    ));
+                })()}
               </nav>
-            </div>
+            </section>`;
+      }
+      case 'pages-list':
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
 `
-      : '';
-
-    const pagesBlock = s.showPages
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Pages</div>
-              <nav className="flex flex-col gap-2">
-                {pages.slice(0, ${maxItems}).map(page => (
-                  <Link key={page.id} to={\`/page/\${page.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
+    : ''
+}              <nav className="flex flex-col gap-2">
+                {pages.slice(0, ${maxItems}).map((page) => (
+                  <Link key={page.id} to={'/page/' + page.slug} className="${linkClass}"${navLinkStyle}>
                     {page.title}
                   </Link>
                 ))}
               </nav>
-            </div>
+            </section>`;
+      case 'recent-posts':
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
 `
-      : '';
-
-    const postsBlock = s.showPosts
-      ? `            <div className="flex flex-col gap-3">
-              <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[${p.textMuted}]"${metaStyle}>Latest Posts</div>
-              <div className="flex flex-col gap-3">
-                {posts.slice(0, ${maxItems}).map(post => (
-                  <Link key={post.id} to={\`/post/\${post.slug}\`} className="${this.textLinkClass(p.text, p.accent, 'text-sm')}"${navLinkStyle}>
+    : ''
+}              <div className="flex flex-col gap-2">
+                {posts.slice(0, ${maxItems}).map((post) => (
+                  <Link key={post.id} to={'/post/' + post.slug} className="${linkClass}"${navLinkStyle}>
                     {post.title}
                   </Link>
                 ))}
               </div>
-            </div>
-`
-      : '';
-
-    return `          <div className="bg-[${p.surface}] border border-black/10 ${radius} flex flex-col gap-6"${paddingStyle}>
-${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </div>`;
+            </section>`;
+    }
   }
 
   private extractSectionStyleBase(
@@ -4207,7 +5908,13 @@ ${titleBlock}${siteInfoBlock}${menuBlock}${pagesBlock}${postsBlock}          </d
           this.pickBlockStyle(ctx, 'group'),
           this.buildWpLayoutStyle(node),
         );
-        return `${indent}<div className="${this.mergeWpNodeClassName('w-full', node)}"${styleAttr}>
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+${children}
+${indent}</div>`;
+      }
+      case 'cover': {
+        const styleAttr = this.buildWpCoverStyleAttr(node, ctx);
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -4217,16 +5924,24 @@ ${indent}</div>`;
           this.pickBlockStyle(ctx, 'columns', 'group'),
           this.buildWpColumnsStyle(node),
         );
-        return `${indent}<div className="${this.mergeWpNodeClassName('w-full min-w-0', node)}"${styleAttr}>
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
       case 'column': {
+        const columnWidth = this.normalizeCssLength(node.columnWidth);
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'column', 'group'),
+          columnWidth
+            ? {
+                flexBasis: columnWidth,
+                flexGrow: 0,
+                flexShrink: 0,
+              }
+            : {},
         );
-        return `${indent}<div className="${this.mergeWpNodeClassName('min-w-0', node)}"${styleAttr}>
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -4243,26 +5958,26 @@ ${indent}</div>`;
 ${
   hasUsableHref
     ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
- ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})} className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
 ${childIndent}) : (
- ${childIndent}  <a href="${href}" className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <a href="${href}"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
 ${childIndent})}`
-    : `${childIndent}<a href="#" className="${this.mergeWpNodeClassName(this.opacityLinkClass(), node)}"${this.buildWpNodeStyleAttr(node)}>
+    : `${childIndent}<a href="#"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
 ${childIndent}</a>`
 }${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
-        return `${indent}<Link to="/" className="${this.mergeWpNodeClassName(this.opacityLinkClass('font-semibold'), node)}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+        return `${indent}<Link to="/"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
 ${childIndent}{siteInfo?.siteName}
 ${indent}</Link>`;
       case 'site-tagline':
-        return `${indent}<p className="text-sm"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
+        return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
 ${childIndent}{siteInfo?.blogDescription}
 ${indent}</p>`;
       case 'site-logo': {
@@ -4278,8 +5993,8 @@ ${indent}</p>`;
           width ? { width, maxWidth: '100%' } : {},
         );
         return `${indent}{${logoSrcExpr} ? (
- ${childIndent}<Link to="/" className="${this.mergeWpNodeClassName('inline-flex items-center', node)}"${styleAttr}>
-${childIndent}  <img src={${logoSrcExpr}} alt={siteInfo?.siteName ?? 'Site logo'} className="h-auto w-full object-contain" />
+ ${childIndent}<Link to="/"${this.buildWpNodeClassAttr(node)}${styleAttr}>
+ ${childIndent}  <img src={${logoSrcExpr}} alt={siteInfo?.siteName ?? 'Site logo'} />
 ${childIndent}</Link>
 ${indent}) : null}`;
       }
@@ -4287,17 +6002,23 @@ ${indent}) : null}`;
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
         const tag = `h${level}`;
         if (node.html && !node.text) {
-          return `${indent}<${tag}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
+          }
+          return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
-        return `${indent}<${tag}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
+        return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
 ${childIndent}${node.text ?? ''}
 ${indent}</${tag}>`;
       }
       case 'paragraph': {
         if (node.html && !node.text) {
-          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
+          }
+          return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
-        return `${indent}<p${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
+        return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
 ${childIndent}${node.text ?? ''}
 ${indent}</p>`;
       }
@@ -4312,7 +6033,7 @@ ${indent}</p>`;
             gap: node.gap ?? '0.75rem',
           },
         );
-        return `${indent}<div${styleAttr}>
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -4325,15 +6046,15 @@ ${indent}</div>`;
         );
         return hasUsableHref
           ? `${indent}{isInternalPath(${JSON.stringify(href)}) ? (
- ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})} className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
+ ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</Link>
 ${indent}) : (
- ${childIndent}<a href="${href}" className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
+ ${childIndent}<a href="${href}"${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</a>
 ${indent})}`
-          : `${indent}<a href="#" className="${this.mergeWpNodeClassName('inline-flex items-center justify-center no-underline transition-opacity hover:opacity-90', node)}"${styleAttr}>
+          : `${indent}<a href="#"${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${childIndent}${node.text ?? ''}
 ${indent}</a>`;
       }
@@ -4346,7 +6067,7 @@ ${indent}</a>`;
             height: node.height ? `${node.height}px` : undefined,
           },
         );
-        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}" className="${this.mergeWpNodeClassName('h-auto max-w-full object-contain', node)}"${styleAttr} />`;
+        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.buildWpNodeClassAttr(node)}${styleAttr} />`;
       }
       case 'search': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -4358,7 +6079,7 @@ ${indent}</a>`;
             gap: node.gap ?? '0.5rem',
           },
         );
-        return `${indent}<form role="search"${styleAttr}>
+        return `${indent}<form role="search"${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${childIndent}<input type="search" placeholder="Search..." className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
 ${childIndent}<button type="submit" className="border border-black/20 px-4 py-2">Search</button>
 ${indent}</form>`;
@@ -4374,7 +6095,7 @@ ${indent}</form>`;
             gap: node.gap ?? '0.75rem',
           },
         );
-        return `${indent}<div${styleAttr}>
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -4382,15 +6103,15 @@ ${indent}</div>`;
         const service = String(node.params?.service ?? node.text ?? 'Social');
         const href = String(node.params?.url ?? node.href ?? '').trim();
         return href && href !== '#'
-          ? `${indent}<a href="${href}" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          ? `${indent}<a href="${href}"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
 ${indent}</a>`
-          : `${indent}<a href="#" className="${this.opacityLinkClass()}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          : `${indent}<a href="#"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
 ${indent}</a>`;
       }
       case 'separator':
-        return `${indent}<hr className="w-full border-0 border-t border-current/20"${this.buildWpNodeStyleAttr(node)} />`;
+        return `${indent}<hr${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)} />`;
       case 'spacer': {
         const height = this.normalizeCssLength(
           String(
@@ -4399,19 +6120,22 @@ ${indent}</a>`;
               '2rem',
           ),
         );
-        return `${indent}<div aria-hidden="true"${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
+        return `${indent}<div aria-hidden="true"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
       }
       default: {
         if (children) {
-          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>
+          return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>
 ${children}
 ${indent}</div>`;
         }
         if (node.html) {
-          return `${indent}<div${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          if (ctx.avoidDangerouslySetInnerHTML) {
+            return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
+          }
+          return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
         if (node.text) {
-          return `${indent}<span${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
+          return `${indent}<span${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
         }
         return '';
       }
@@ -4447,9 +6171,6 @@ ${indent}</div>`;
       isResponsive: node.isResponsive,
     });
     const hintTitles = this.extractNavigationHintTitles(node);
-    const menuVar = `resolveNavigationMenu(${JSON.stringify(
-      hintTitles,
-    )}, ${menuIndex}, ${state.componentKind === 'footer' ? 'true' : 'false'})`;
     const listClass = isVertical
       ? 'flex flex-col gap-2'
       : 'flex flex-wrap items-center gap-4';
@@ -4460,6 +6181,33 @@ ${indent}</div>`;
       depth + 1,
       isVertical,
     );
+    if (state.componentKind === 'footer') {
+      const footerColumnVar = `resolveFooterColumn(${JSON.stringify(hintTitles)}, ${menuIndex})`;
+      return `${indent}<nav${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  {${footerColumnVar} ? (
+${indent}    <ul className="${listClass}">
+${indent}      {(${footerColumnVar}.links ?? []).map((link, linkIndex) => (
+${indent}        <li key={\`\${${footerColumnVar}.heading ?? 'footer'}-\${link.label}-\${linkIndex}\`} className="flex flex-col gap-2">
+${indent}          {isInternalPath(link.url) ? (
+${indent}            <Link to={toAppPath(link.url)} className="${this.opacityLinkClass()}">
+${indent}              {link.label}
+${indent}            </Link>
+${indent}          ) : (
+${indent}            <a href={link.url} className="${this.opacityLinkClass()}">
+${indent}              {link.label}
+${indent}            </a>
+${indent}          )}
+${indent}        </li>
+${indent}      ))}
+${indent}    </ul>
+${indent}  ) : (
+${fallbackMarkup}
+${indent}  )}
+${indent}</nav>`;
+    }
+    const menuVar = `resolveNavigationMenu(${JSON.stringify(
+      hintTitles,
+    )}, ${menuIndex}, false)`;
     const isMobileNav =
       !isVertical &&
       state.componentKind === 'header' &&
@@ -4478,7 +6226,7 @@ ${indent}</div>`;
           ? 'absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50'
           : 'md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50';
       return `${indent}<>
-${indent}  <nav className="${desktopNavClass}"${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  <nav${this.buildWpNodeClassAttr(node, desktopNavClass)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}    {${menuVar} ? (
 ${indent}      <ul className="${listClass}">
 ${indent}        {renderMenuItems(${menuVar}.items, 0, false)}
@@ -4513,7 +6261,7 @@ ${indent}    </nav>
 ${indent}  )}
 ${indent}</>`;
     }
-    return `${indent}<nav${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+    return `${indent}<nav${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
 ${indent}    <ul className="${listClass}">
 ${indent}      {renderMenuItems(${menuVar}.items, 0, ${isVertical ? 'true' : 'false'})}
@@ -4570,6 +6318,28 @@ ${indent}</ul>`;
       ...this.wpNodeToStyleMap(node),
       ...extra,
     });
+  }
+
+  private buildWpCoverStyleAttr(node: WpNode, ctx: RenderCtx): string {
+    const baseStyle = this.buildWpNodeStyleAttr(
+      node,
+      this.pickBlockStyle(ctx, 'cover', 'group'),
+      {
+        position: node.src ? 'relative' : undefined,
+        overflow: node.src ? 'hidden' : undefined,
+      },
+    );
+    if (!node.src) return baseStyle;
+
+    const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
+      node.src,
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    return this.mergeStyleAttrs(baseStyle, backgroundStyle);
+  }
+
+  private buildWpNodeClassAttr(node: WpNode, base: string = ''): string {
+    const className = this.mergeWpNodeClassName(base, node);
+    return className ? ` className="${className}"` : '';
   }
 
   private mergeWpNodeClassName(base: string, node: WpNode): string {
@@ -4666,20 +6436,11 @@ ${indent}</ul>`;
   private buildWpColumnsStyle(
     node: WpNode,
   ): Record<string, string | number | undefined> {
-    const cols =
-      node.children?.filter(
-        (child) => child.block === 'column' || child.block === 'core/column',
-      ) ?? [];
-    const widths = cols
-      .map((col) => this.normalizeCssLength(col.columnWidth))
-      .filter((value): value is string => !!value);
+    const isStackedOnMobile = node.params?.isStackedOnMobile !== false;
     return {
-      display: 'grid',
-      gridTemplateColumns:
-        widths.length === cols.length && widths.length > 0
-          ? widths.join(' ')
-          : `repeat(${Math.max(cols.length, 1)}, minmax(0, 1fr))`,
-      alignItems: 'start',
+      display: 'flex',
+      flexWrap: isStackedOnMobile ? 'wrap' : 'nowrap',
+      alignItems: 'flex-start',
     };
   }
 
@@ -4726,16 +6487,16 @@ ${indent}</ul>`;
     const triggerText = s.triggerText || s.heading || 'Open';
     const modalTextColor = ctx.p.text;
     const modalMutedTextColor = ctx.p.textMuted || ctx.p.text;
-    const overlayColor = s.overlayColor?.trim() || 'rgba(0, 0, 0, 0.7)';
+    const overlayColor = s.overlayColor?.trim() || 'rgba(17, 17, 17, 0.32)';
     const closeOnOverlay = s.closeOnOverlay !== false;
     const closeButtonSide = (s.closeIconPosition ?? '')
       .toLowerCase()
       .includes('left')
-      ? '-left-5 sm:-left-6'
-      : '-right-5 sm:-right-6';
+      ? 'left'
+      : 'right';
     const modalWidth =
       this.normalizeCssLength(s.width) ??
-      (s.layout === 'split' && s.imageSrc ? '880px' : '700px');
+      (s.layout === 'split' && s.imageSrc ? '880px' : '600px');
     const modalHeight = this.normalizeCssLength(s.height);
     const modalShellStyle = this.buildStyleAttr({
       width: '100%',
@@ -4745,9 +6506,14 @@ ${indent}</ul>`;
         ? `min(${modalHeight}, calc(100vh - 2rem))`
         : 'calc(100vh - 2rem)',
     });
+    const closeButtonPositionStyle = this.buildStyleAttr({
+      top: '-25px',
+      left: closeButtonSide === 'left' ? '-20px' : undefined,
+      right: closeButtonSide === 'right' ? '-20px' : undefined,
+    });
     const dialogBodyStyle = this.buildMergedBlockStyleAttr(
       ctx,
-      { padding: s.layout === 'split' && s.imageSrc ? '1.5rem' : '1.25rem' },
+      { padding: '35px' },
       true,
       this.pickBlockStyle(ctx, 'group'),
       this.pickBlockStyle(ctx, 'column'),
@@ -4773,14 +6539,26 @@ ${indent}</ul>`;
       ctx,
     );
     const imageRadius = this.imageRadiusClass(ctx) || 'rounded-[24px]';
+    const baseTriggerStyle = this.buildStyleAttr({
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '0.5rem',
+      fontWeight: '500',
+      minHeight: '44px',
+      cursor: 'pointer',
+      textDecoration: 'none',
+    });
     const triggerHeadingPart = s.heading
-      ? `\n          <div className="max-w-2xl">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.headingCustomClassNames, s.presentation?.textAlign)}" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
+      ? `\n          <div className="vp-uagb-modal__intro">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.headingCustomClassNames, s.presentation?.textAlign)}" style={{ color: '${tc}' }}>{${JSON.stringify(s.heading)}}</h2>\n          </div>`
       : '';
     const headingPart = s.heading
       ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold tracking-[-0.02em]`, s.headingCustomClassNames, s.presentation?.textAlign)}"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
       : '';
     const bodyPart = s.body
-      ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      ? ctx.avoidDangerouslySetInnerHTML
+        ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "modal-body")}</div>`
+        : `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
       : '';
     const ctaPart = this.renderInteractiveAnchorCtaGroup(
       this.resolveSectionCtas(s),
@@ -4791,28 +6569,47 @@ ${indent}</ul>`;
       },
     );
     const imagePart = s.imageSrc
-      ? `\n                <div className="relative overflow-hidden ${imageRadius} bg-slate-100">\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses('h-full min-h-[240px] w-full object-cover', s.imageCustomClassNames)}"${imageStyle} />\n                </div>`
+      ? `\n                <div className="vp-uagb-modal__image-frame ${imageRadius}">\n                  <img src={resolveAsset(${JSON.stringify(s.imageSrc)})} alt={${JSON.stringify(s.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses('', s.imageCustomClassNames)}"${this.mergeStyleAttrs(
+          this.buildStyleAttr({
+            width: '100%',
+            height: '100%',
+            minHeight: '240px',
+            objectFit: 'cover',
+          }),
+          imageStyle,
+        )} />\n                </div>`
       : '';
     const contentGridClass =
       s.layout === 'split' && s.imageSrc
-        ? 'grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.88fr)] lg:items-center'
-        : 'flex flex-col gap-6';
+        ? 'vp-uagb-modal__content-grid vp-uagb-modal__content-grid--split'
+        : 'vp-uagb-modal__content-grid';
 
     return `
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${ctx.l.containerClass} px-4 sm:px-6">
-        <div className="uagb-modal-wrapper flex flex-col items-start gap-4"${gapStyle}>${triggerHeadingPart}
+        <div className="uagb-modal-wrapper vp-uagb-modal__stack"${gapStyle}>${triggerHeadingPart}
+          <div className="uagb-spectra-button-wrapper">
           <button
             type="button"
             onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: true }))}
-            className="${this.appendOptionalCustomClasses(`uagb-modal-trigger uagb-modal-button-link inline-flex items-center justify-center gap-2 ${ctx.t.buttonRadius} px-5 py-3 font-medium transition-transform transition-opacity hover:-translate-y-0.5 hover:opacity-90`, s.triggerCustomClassNames)}"
-            ${s.triggerStyle ? this.blueprintButtonStyleAttr(s.triggerStyle) : this.buildStyleAttr({ background: ctx.p.accent, color: ctx.p.accentText })}
+            className="${this.appendOptionalCustomClasses(`uagb-modal-trigger uagb-modal-button-link ${ctx.t.buttonRadius}`, s.triggerCustomClassNames)}"
+            ${this.mergeStyleAttrs(
+              baseTriggerStyle,
+              s.triggerStyle
+                ? this.blueprintButtonStyleAttr(s.triggerStyle)
+                : this.buildStyleAttr({
+                    background: ctx.p.accent,
+                    color: ctx.p.accentText,
+                    padding: ctx.l.buttonPadding ?? '0.75rem 1.25rem',
+                  }),
+            )}
           >
             {${JSON.stringify(triggerText)}}
           </button>
+          </div>
           {openModals[${stateKey}] ? (
             <div
-              className="uagb-modal-popup active uagb-effect-default fixed inset-0 z-[90] flex items-center justify-center px-4 py-4 sm:py-8"
+              className="uagb-modal-popup active uagb-effect-default vp-uagb-modal-popup"
               style={{ background: '${overlayColor}' }}
               onClick={() => {
                 if (${closeOnOverlay ? 'true' : 'false'}) {
@@ -4821,7 +6618,7 @@ ${indent}</ul>`;
               }}
             >
               <div
-                className="uagb-modal-popup-wrap relative overflow-y-auto rounded-[30px] bg-white shadow-[0_30px_80px_rgba(15,23,42,0.28)]"
+                className="uagb-modal-popup-wrap vp-uagb-modal-popup__wrap"
                 onClick={(event) => event.stopPropagation()}
                 role="dialog"
                 aria-modal="true"
@@ -4831,7 +6628,8 @@ ${indent}</ul>`;
                 <button
                   type="button"
                   onClick={() => setOpenModals((prev) => ({ ...prev, [${stateKey}]: false }))}
-                  className="uagb-modal-popup-close absolute -top-5 z-10 inline-flex h-10 w-10 items-center justify-center text-white transition-opacity hover:opacity-75 sm:-top-6 ${closeButtonSide}"
+                  className="uagb-modal-popup-close vp-uagb-modal-popup__close"
+                  ${closeButtonPositionStyle}
                   aria-label="Close modal"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -4840,7 +6638,7 @@ ${indent}</ul>`;
                   </svg>
                 </button>
                 <div className="uagb-modal-popup-content ${contentGridClass}"${dialogBodyStyle}>
-                  <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
+                  <div className="vp-uagb-modal__content-stack">${headingPart}${bodyPart}${ctaPart}
                   </div>${imagePart}
                 </div>
               </div>
@@ -4927,31 +6725,13 @@ ${indent}</ul>`;
       this.pickBlockStyle(ctx, 'gallery'),
     );
     const imageRadius = this.imageRadiusClass(ctx) || this.cardRadiusClass(ctx);
-    const tabsLayoutClass = isVertical
-      ? 'grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start'
-      : isStacked
-        ? 'flex flex-col gap-4'
-        : 'flex flex-col gap-6';
-    const tabAlignClass = isDistributedTabs
-      ? 'justify-between'
-      : s.tabAlign === 'center'
-        ? 'justify-center'
-        : s.tabAlign === 'right'
-          ? 'justify-end'
-          : 'justify-start';
-    const tabListClass = isVertical
-      ? 'flex flex-col gap-2'
-      : `flex flex-wrap gap-3 ${tabAlignClass}`;
-    const tabListSurfaceClass = isPillLike
-      ? 'rounded-[24px] border border-black/10 bg-white/70 p-2 shadow-[0_18px_40px_rgba(15,23,42,0.06)]'
-      : 'border-b border-black/10 pb-1';
     const titlePart = s.title
-      ? `\n          <div className="flex flex-col gap-3">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.titleCustomClassNames, 'left')}"${titleStyle}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
+      ? `\n          <div className="vp-uagb-tabs__title-wrap">\n            <h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold`, s.titleCustomClassNames, 'left')}"${titleStyle}>{${JSON.stringify(s.title)}}</h2>\n          </div>`
       : '';
     const tabButtons = s.tabs
       .map(
         (tab, index) => `            <div
-              key=${index}
+              key={${index}}
               className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
                 ? 'uagb-tab uagb-tabs__active'
                 : 'uagb-tab'}
@@ -4975,9 +6755,16 @@ ${indent}</ul>`;
                   setActiveTabs((prev) => ({ ...prev, [${stateKey}]: next }));
                 }}
                 className={(activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
-                  ? 'uagb-tabs-list ${isVertical ? 'flex w-full items-center justify-between' : 'inline-flex items-center justify-center'} rounded-[18px] px-4 py-3 text-left font-semibold shadow-sm'
-                  : 'uagb-tabs-list ${isVertical ? 'flex w-full items-center justify-between' : 'inline-flex items-center justify-center'} rounded-[18px] px-4 py-3 text-left font-medium opacity-80 transition-all hover:opacity-100'}
+                  ? 'uagb-tabs-list vp-uagb-tabs__button'
+                  : 'uagb-tabs-list vp-uagb-tabs__button'}
                 style={{
+                  display: '${isVertical ? 'flex' : 'inline-flex'}',
+                  width: '${isVertical ? '100%' : 'auto'}',
+                  alignItems: 'center',
+                  justifyContent: '${isVertical ? 'space-between' : 'center'}',
+                  fontWeight: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? '600'
+                    : '500',
                   color: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
                     ? '${isPillLike ? ctx.p.accentText : tc}'
                     : '${tc}',
@@ -4988,6 +6775,12 @@ ${indent}</ul>`;
                     ? '${ctx.p.accent}'
                     : 'transparent',
                   borderWidth: '${isPillLike ? '1px' : '0'}',
+                  opacity: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? 1
+                    : 0.82,
+                  boxShadow: (activeTabs[${stateKey}] ?? ${defaultActiveTab}) === ${index}
+                    ? '0 8px 20px rgba(15,23,42,0.08)'
+                    : 'none',
                 }}
               >
                 {${JSON.stringify(tab.label)}}
@@ -5001,10 +6794,12 @@ ${indent}</ul>`;
           ? `\n                <h3 className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold`, tab.headingCustomClassNames, 'left')}"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
           : '';
         const bodyPart = tab.body
-          ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          ? ctx.avoidDangerouslySetInnerHTML
+            ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle}>{renderRichTextChildren(${JSON.stringify(tab.body)}, "${domKey}-tab-body-${index}")}</div>`
+            : `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
           : '';
         const imagePart = tab.imageSrc
-          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`h-auto w-full ${imageRadius} object-cover`, tab.imageCustomClassNames)}"${imageStyle} />`
+          ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`vp-uagb-tabs__media-image ${imageRadius}`, tab.imageCustomClassNames)}"${imageStyle} />`
           : '';
         const ctaPart = tab.cta
           ? `\n                <a href={${JSON.stringify(tab.cta.link)}} className="${this.buildInteractiveCtaClassName(
@@ -5014,10 +6809,10 @@ ${indent}</ul>`;
           : '';
         const panelGridClass =
           tab.imageSrc && (tab.heading || tab.body || tab.cta)
-            ? 'grid gap-8 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] lg:items-center'
-            : 'flex flex-col gap-5';
+            ? 'vp-uagb-tabs__panel-media-grid'
+            : 'vp-uagb-tabs__panel-stack';
         return `            <div
-              key=${index}
+              key={${index}}
               id="${domKey}-panel-${index}"
               role="tabpanel"
               aria-labelledby="${domKey}-tab-${index}"
@@ -5025,8 +6820,8 @@ ${indent}</ul>`;
                 ? 'uagb-tabs__body-container uagb-tabs-body__active block'
                 : 'uagb-tabs__body-container hidden'}
             >
-              <div className="${panelGridClass} rounded-[28px] border border-black/10 bg-white/75 shadow-[0_24px_60px_rgba(15,23,42,0.08)]"${panelStyle}>
-                <div className="flex flex-col gap-5">${headingPart}${bodyPart}${ctaPart}
+              <div className="vp-uagb-tabs__panel-surface ${panelGridClass}"${panelStyle}>
+                <div className="vp-uagb-tabs__panel-stack">${headingPart}${bodyPart}${ctaPart}
                 </div>${imagePart ? `\n                <div>${imagePart}\n                </div>` : ''}
               </div>
             </div>`;
@@ -5037,13 +6832,37 @@ ${indent}</ul>`;
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${ctx.l.containerClass} px-4 sm:px-6">
         <div className="flex flex-col gap-6"${gapStyle}>${titlePart}
-          <div className="uagb-tabs__wrap ${spectraVariantClass} ${tabsLayoutClass}">
-            <div className="${tabListSurfaceClass}">
-              <div className="uagb-tabs__panel ${spectraAlignClass} ${tabListClass}" role="tablist" aria-orientation="${isVertical ? 'vertical' : 'horizontal'}">
+          <div className="uagb-tabs__wrap ${spectraVariantClass} vp-uagb-tabs${isStacked ? ' vp-uagb-tabs--stacked' : ''}">
+            <div className="vp-uagb-tabs__surface"${this.buildStyleAttr({
+              borderRadius: isPillLike ? '24px' : undefined,
+              background: isPillLike ? 'rgba(255,255,255,0.70)' : undefined,
+              boxShadow: isPillLike
+                ? '0 18px 40px rgba(15,23,42,0.06)'
+                : undefined,
+              borderBottom: isPillLike
+                ? undefined
+                : '1px solid rgba(15,23,42,0.10)',
+              paddingBottom: isPillLike ? undefined : '0.25rem',
+            })}>
+              <div className="uagb-tabs__panel ${spectraAlignClass}" role="tablist" aria-orientation="${isVertical ? 'vertical' : 'horizontal'}"${this.buildStyleAttr(
+                {
+                  display: 'flex',
+                  flexDirection: isVertical ? 'column' : 'row',
+                  flexWrap: isVertical ? undefined : 'wrap',
+                  gap: isVertical ? '0.5rem' : '0.75rem',
+                  justifyContent: isDistributedTabs
+                    ? 'space-between'
+                    : s.tabAlign === 'center'
+                      ? 'center'
+                      : s.tabAlign === 'right'
+                        ? 'flex-end'
+                        : 'flex-start',
+                },
+              )}>
 ${tabButtons}
               </div>
             </div>
-            <div className="uagb-tabs__body-wrap flex flex-col gap-4">
+            <div className="uagb-tabs__body-wrap vp-uagb-tabs__body-wrap">
 ${panels}
             </div>
           </div>
@@ -5104,14 +6923,14 @@ ${panels}
     const items = s.items
       .map(
         (item, index) => `          <div
-            key=${index}
+            key={${index}}
             className="uagb-faq-child__outer-wrap"
           >
             <div
               id="${domKey}-item-${index}"
               className={((${openStateExpr}).includes(${index}))
-                ? 'uagb-faq-item uagb-faq-item-active overflow-hidden rounded-[24px] border p-1 shadow-[0_20px_44px_rgba(15,23,42,0.08)]'
-                : 'uagb-faq-item overflow-hidden rounded-[24px] border p-1'}
+                ? 'uagb-faq-item uagb-faq-item-active vp-uagb-faq__item'
+                : 'uagb-faq-item vp-uagb-faq__item'}
             style={{
               background: ((${openStateExpr}).includes(${index}))
                 ? '${isBoxedVariant ? 'rgba(255,255,255,0.94)' : 'rgba(255,255,255,0.76)'}'
@@ -5148,12 +6967,12 @@ ${panels}
               }
               aria-expanded={((${openStateExpr}).includes(${index}))}
               aria-controls="${domKey}-panel-${index}"
-              className="uagb-faq-questions-button uagb-faq-questions flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+              className="uagb-faq-questions-button uagb-faq-questions vp-uagb-faq__question"
               style={{ color: '${tc}' }}
             >
               <span className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold pr-4`, item.headingCustomClassNames, 'left')}"${itemHeadingStyle}>{${JSON.stringify(item.heading)}}</span>
               <span
-                className="uagb-faq-icon-wrap inline-flex h-10 w-10 items-center justify-center rounded-full transition-transform"
+                className="uagb-faq-icon-wrap vp-uagb-faq__icon"
                 style={{
                   background: ((${openStateExpr}).includes(${index})) ? '${ctx.p.accent}' : 'rgba(15,23,42,0.06)',
                   color: ((${openStateExpr}).includes(${index})) ? '${ctx.p.accentText}' : '${tc}',
@@ -5168,8 +6987,8 @@ ${panels}
               </span>
             </button>
             {((${openStateExpr}).includes(${index})) ? (
-              <div id="${domKey}-panel-${index}" className="uagb-faq-content border-t border-black/10 px-5 pb-5 pt-1">
-                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />
+              <div id="${domKey}-panel-${index}" className="uagb-faq-content vp-uagb-faq__content">
+                ${ctx.avoidDangerouslySetInnerHTML ? `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle}>{renderRichTextChildren(${JSON.stringify(item.body)}, "${domKey}-accordion-body-${index}")}</div>` : `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />`}
               </div>
             ) : null}
             </div>
@@ -5180,7 +6999,7 @@ ${panels}
     return `
     <section className="w-full ${py} bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${this.contentContainerClass(ctx)} px-4 sm:px-6">
-        <div className="wp-block-uagb-faq uagb-faq__wrap ${accordionLayoutClass} flex flex-col gap-4"${gapStyle}>${titlePart}
+        <div className="wp-block-uagb-faq uagb-faq__wrap ${accordionLayoutClass} vp-uagb-faq"${gapStyle}>${titlePart}
 ${items}
         </div>
       </div>
@@ -5220,8 +7039,7 @@ ${items}
       ? 'rgba(255,255,255,0.5)'
       : 'rgba(17,17,17,0.24)';
     const arrowBg =
-      s.arrowBackground ??
-      (hasSlideImages ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.95)');
+      s.arrowBackground ?? (hasSlideImages ? 'rgba(0,0,0,0.35)' : '#efefef');
     const arrowFg = s.arrowColor ?? (hasSlideImages ? '#ffffff' : '#111111');
     const slideSurfaceStyle = this.buildBlockStyleAttr(
       this.mergeBlockStyleTokens(
@@ -5279,7 +7097,7 @@ ${items}
     const slides = s.slides
       .map((slide, i) => {
         const imgPart = slide.imageSrc
-          ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`absolute inset-0 h-full w-full object-cover ${imageRadius}`, slide.imageCustomClassNames)}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
+          ? `\n              <img src={resolveAsset(${JSON.stringify(slide.imageSrc)})} alt={${JSON.stringify(slide.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`vp-uagb-carousel__image ${imageRadius}`, slide.imageCustomClassNames)}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />`
           : '';
         const headingPart = slide.heading
           ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} ${hasSlideImages ? 'max-w-[18ch] font-bold text-white' : 'font-bold'}`, slide.headingCustomClassNames, presentation.textAlign)}"${headingStyle}>${slide.heading}</h3>`
@@ -5297,13 +7115,13 @@ ${items}
           : '';
         const slideSurface = hasSlideImages
           ? `${imgPart}
-              <div className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/42 to-black/10" />
-              <div className="relative z-10 flex h-full flex-col justify-end p-6 sm:p-10">
-                <div className="flex flex-col gap-4 rounded-[28px] bg-black/20 backdrop-blur-[2px] ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
+              <div className="vp-uagb-carousel__overlay" />
+              <div className="vp-uagb-carousel__content vp-uagb-carousel__content--media">
+                <div className="vp-uagb-carousel__surface vp-uagb-carousel__surface--media ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`
-          : `<div className="relative z-10 flex h-full flex-col items-center justify-center px-6 py-3 sm:px-10 sm:py-4">
-                <div className="flex w-full flex-col gap-4 ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
+          : `<div className="vp-uagb-carousel__content vp-uagb-carousel__content--plain">
+                <div className="vp-uagb-carousel__surface ${align}"${this.mergeStyleAttrs(slideSurfaceStyle, this.presentationMaxWidthStyleAttr(presentation))}>${headingPart}${subPart}${ctaPart}
                 </div>
               </div>`;
         if (useStackedSlides) {
@@ -5312,18 +7130,20 @@ ${items}
             id="${domKey}-slide-${i}"
             aria-hidden={(${activeIndexExpr}) !== ${i}}
             className={(${activeIndexExpr}) === ${i}
-              ? 'swiper-slide absolute inset-0 z-10 overflow-hidden ${imageRadius}'
-              : 'swiper-slide absolute inset-0 overflow-hidden ${imageRadius} pointer-events-none'}
+              ? 'swiper-slide vp-uagb-carousel__slide vp-uagb-carousel__slide--stacked ${imageRadius}'
+              : 'swiper-slide vp-uagb-carousel__slide vp-uagb-carousel__slide--stacked ${imageRadius} pointer-events-none'}
             style={{
               opacity: (${activeIndexExpr}) === ${i} ? 1 : 0,
               transform: (${activeIndexExpr}) === ${i} ? '${activeTransform}' : '${inactiveTransform}',
               transitionDuration: '${transitionSpeed}ms',
+              zIndex: (${activeIndexExpr}) === ${i} ? 10 : 0,
+              overflow: 'hidden',
             }}
           >
 ${slideSurface}
           </article>`;
         }
-        return `          <article key={${i}} id="${domKey}-slide-${i}" className="swiper-slide relative h-full w-full shrink-0 grow-0 basis-full overflow-hidden ${imageRadius}">
+        return `          <article key={${i}} id="${domKey}-slide-${i}" className="swiper-slide vp-uagb-carousel__slide h-full w-full shrink-0 grow-0 basis-full overflow-hidden ${imageRadius}">
 ${slideSurface}
           </article>`;
       })
@@ -5383,12 +7203,16 @@ ${slideSurface}
               }}
               data-carousel-control="true"
               className={(${activeIndexExpr}) === ${i}
-                ? 'swiper-pagination-bullet swiper-pagination-bullet-active h-2.5 w-8 rounded-full transition-all duration-200 hover:scale-110 hover:opacity-100'
-                : 'swiper-pagination-bullet h-2.5 w-2.5 rounded-full opacity-80 transition-all duration-200 hover:scale-110 hover:opacity-100'}
+                ? 'swiper-pagination-bullet swiper-pagination-bullet-active vp-uagb-carousel__bullet'
+                : 'swiper-pagination-bullet vp-uagb-carousel__bullet'}
               style={{
                 background: (${activeIndexExpr}) === ${i}
                   ? '${dotsActiveColor}'
                   : '${dotsInactiveColor}',
+                width: (${activeIndexExpr}) === ${i} ? '2rem' : '0.625rem',
+                height: '0.625rem',
+                borderRadius: '999px',
+                opacity: (${activeIndexExpr}) === ${i} ? 1 : 0.8,
               }}
             />`,
           )
@@ -5399,15 +7223,17 @@ ${slideSurface}
     <section className="w-full ${py} overflow-hidden bg-[${bg}] text-[${tc}]"${sectionStyle}>
       <div className="${this.sectionContainerClass(s, ctx, hasSlideImages ? 'shell' : 'content')} px-4 sm:px-6">
         <div
-          className="uagb-slider-container uagb-swiper relative"
+          className="uagb-slider-container vp-uagb-carousel"
           onMouseEnter={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: true }))` : 'undefined'}}
           onMouseLeave={${pauseOnHover ? `() => setHoveredCarousels((prev) => ({ ...prev, [${stateKey}]: false }))` : 'undefined'}}
         >
           <div
-            className="${hasSlideImages ? `swiper relative overflow-hidden rounded-[32px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]` : `swiper relative overflow-visible`}${enableSwipe ? ' select-none cursor-grab active:cursor-grabbing' : ''}"
+            className="${hasSlideImages ? `uagb-swiper swiper vp-uagb-carousel__viewport vp-uagb-carousel__viewport--media` : `uagb-swiper swiper vp-uagb-carousel__viewport`}${enableSwipe ? ' vp-uagb-carousel__viewport--draggable' : ''}"
             ${this.buildStyleAttr({
               minHeight: slideMinHeight,
               touchAction: enableSwipe ? 'pan-y' : undefined,
+              background: hasSlideImages ? '#0f172a' : undefined,
+              overflow: hasSlideImages ? 'hidden' : undefined,
             })}
             onPointerDown={${enableSwipe ? pointerDownHandler : 'undefined'}}
             onPointerMove={${enableSwipe ? pointerMoveHandler : 'undefined'}}
@@ -5416,9 +7242,13 @@ ${slideSurface}
           >
             ${
               useStackedSlides
-                ? slides
+                ? `<div
+              className="swiper-wrapper vp-uagb-carousel__track--stacked"
+            >
+${slides}
+            </div>`
                 : `<div
-              className="swiper-wrapper flex h-full transition-transform ease-out"
+              className="swiper-wrapper vp-uagb-carousel__track--slide"
               style={{
                 transform: 'translateX(-' + ((${activeIndexExpr}) * 100) + '%)',
                 transitionDuration: '${transitionSpeed}ms',
@@ -5430,13 +7260,13 @@ ${slides}
           </div>
           ${
             showArrows
-              ? `<div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 items-center justify-between px-3 sm:px-5">
+              ? `<div className="vp-uagb-carousel__nav">
             <button
               type="button"
               aria-label="Previous slide"
               data-carousel-control="true"
               onClick={${previousHandler}}
-              className="swiper-button-prev pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5"
+              className="swiper-button-prev vp-uagb-carousel__arrow"
               style={{ background: '${arrowBg}', color: '${arrowFg}', border: '${hasSlideImages ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(0,0,0,0.1)'}' }}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5448,7 +7278,7 @@ ${slides}
               aria-label="Next slide"
               data-carousel-control="true"
               onClick={${nextHandler}}
-              className="swiper-button-next pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 hover:opacity-90 hover:-translate-y-0.5"
+              className="swiper-button-next vp-uagb-carousel__arrow"
               style={{ background: '${arrowBg}', color: '${arrowFg}', border: '${hasSlideImages ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(0,0,0,0.1)'}' }}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5460,7 +7290,7 @@ ${slides}
           }
           ${
             showDots
-              ? `<div className="swiper-pagination swiper-pagination-bullets absolute inset-x-0 bottom-5 z-20 flex items-center justify-center gap-2">
+              ? `<div className="swiper-pagination swiper-pagination-bullets vp-uagb-carousel__pagination">
 ${dots}
           </div>`
               : ''

@@ -17,14 +17,12 @@ export class EditRequestTargetResolverService {
 
     const route =
       normalizeRoute(baseTargetHint?.route) ??
-      normalizeRoute(primaryAttachment?.targetNode?.route) ??
       normalizeRoute(primaryAttachment?.captureContext?.page?.route) ??
       normalizeRoute(request.pageContext?.wordpressRoute) ??
       undefined;
 
     const templateName =
       normalizeTemplateName(baseTargetHint?.templateName) ??
-      normalizeTemplateName(primaryAttachment?.targetNode?.templateName) ??
       inferTemplateNameFromRoute(route) ??
       undefined;
 
@@ -42,7 +40,7 @@ export class EditRequestTargetResolverService {
     const sectionIndex =
       typeof baseTargetHint?.sectionIndex === 'number'
         ? baseTargetHint.sectionIndex
-        : inferSectionIndex(primaryAttachment);
+        : undefined;
 
     const targetHint = compactObject<PipelineEditTargetHintDto>({
       ...baseTargetHint,
@@ -77,10 +75,6 @@ export class EditRequestTargetResolverService {
     let score = 0;
 
     if (attachment.note) score += 2;
-    if (attachment.targetNode?.templateName) score += 10;
-    if (attachment.targetNode?.route) score += 8;
-    if (attachment.targetNode?.blockName) score += 6;
-    if (attachment.targetNode?.nearestHeading) score += 4;
     if (attachment.geometry?.normalizedRect) score += 4;
     if (attachment.geometry?.documentRect) score += 3;
     if (attachment.selection) score += 2;
@@ -128,21 +122,7 @@ function inferSectionType(
   if (!attachment) return undefined;
 
   const signal = normalizeSearchText(
-    [
-      attachment.targetNode?.blockName,
-      attachment.targetNode?.tagName,
-      attachment.targetNode?.domPath,
-      attachment.targetNode?.nearestHeading,
-      attachment.targetNode?.nearestLandmark,
-      attachment.domTarget?.blockName,
-      attachment.domTarget?.tagName,
-      attachment.domTarget?.domPath,
-      attachment.domTarget?.nearestHeading,
-      attachment.domTarget?.nearestLandmark,
-      attachment.note,
-    ]
-      .filter(Boolean)
-      .join(' '),
+    [attachment.note].filter(Boolean).join(' '),
   );
 
   if (!signal) return undefined;
@@ -166,40 +146,6 @@ function inferSectionType(
   }
 
   return undefined;
-}
-
-function inferSectionIndex(
-  attachment?: PipelineCaptureAttachmentDto,
-): number | undefined {
-  const y =
-    attachment?.geometry?.normalizedRect?.y ??
-    deriveNormalizedY(
-      attachment?.geometry?.documentRect?.y ?? attachment?.selection?.y,
-      attachment?.captureContext?.document?.height,
-    );
-
-  if (typeof y !== 'number' || Number.isNaN(y)) {
-    return undefined;
-  }
-
-  return Math.max(0, Math.min(9, Math.floor(y * 10)));
-}
-
-function deriveNormalizedY(
-  y?: number,
-  documentHeight?: number,
-): number | undefined {
-  if (
-    typeof y !== 'number' ||
-    Number.isNaN(y) ||
-    typeof documentHeight !== 'number' ||
-    Number.isNaN(documentHeight) ||
-    documentHeight <= 0
-  ) {
-    return undefined;
-  }
-
-  return clampRatio(y / documentHeight);
 }
 
 function normalizeRoute(route?: string | null): string | null {
@@ -239,14 +185,6 @@ function stripVietnameseMarks(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/g, 'd')
     .replace(/Đ/g, 'D');
-}
-
-function clampRatio(value: number): number {
-  return Math.min(Math.max(roundMetric(value), 0), 1);
-}
-
-function roundMetric(value: number): number {
-  return Math.round(value * 1000) / 1000;
 }
 
 function hasMeaningfulTargetHint(

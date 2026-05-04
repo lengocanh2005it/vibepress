@@ -1,4 +1,5 @@
 import { buildSourceNodeId, type SourceRef } from './source-node-id.util.js';
+import { canonicalizeThemeAssetReference } from './theme-asset.util.js';
 
 /**
  * Converts WordPress block markup into a compact JSON tree.
@@ -53,7 +54,7 @@ export interface WpNode {
  * Entry point: parse full template markup into a JSON array of WpNode.
  */
 export function wpBlocksToJson(markup: string): WpNode[] {
-  return parseBlocks(markup.trim());
+  return parseBlocks(normalizeWordPressPhpMarkup(markup).trim());
 }
 
 export function wpBlocksToJsonWithSourceRefs(input: {
@@ -61,7 +62,7 @@ export function wpBlocksToJsonWithSourceRefs(input: {
   templateName: string;
   sourceFile: string;
 }): WpNode[] {
-  const nodes = parseBlocks(input.markup.trim());
+  const nodes = parseBlocks(normalizeWordPressPhpMarkup(input.markup).trim());
   return annotateSourceRefs(nodes, {
     templateName: input.templateName,
     sourceFile: input.sourceFile,
@@ -85,6 +86,42 @@ export function ensureWpNodesHaveSourceRefs(input: {
  */
 export function wpJsonToString(nodes: WpNode[]): string {
   return JSON.stringify(stripParams(nodes));
+}
+
+function normalizeWordPressPhpMarkup(raw: string): string {
+  return String(raw ?? '')
+    .replace(/<\?php\s*\/\*\*[\s\S]*?\*\/\s*\?>/g, '')
+    .replace(
+      /<\?php\s+(?:echo\s+)?esc_html_x\s*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1[\s\S]*?\?>/g,
+      '$2',
+    )
+    .replace(
+      /<\?php\s+(?:echo\s+)?(?:esc_html__|esc_attr__|esc_html_e|esc_attr_e|esc_html|esc_attr|__|_e)\s*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1[\s\S]*?\?>/g,
+      '$2',
+    )
+    .replace(
+      /esc_html_x\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_html__\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_attr__\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_attr_e\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /<\?php\s+echo\s+(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*;\s*\?>/g,
+      '$2',
+    )
+    .replace(/<\?php[\s\S]*?\?>/g, '')
+    .replace(/<\?php[^>]*$/gm, '')
+    .replace(/\\(['"`])/g, '$1');
 }
 
 const BASE_USEFUL_PARAM_KEYS = new Set([
@@ -527,7 +564,7 @@ function parseBlocks(markup: string): WpNode[] {
           compact({
             block: 'navigation-link',
             text: params.label as string,
-            href: (params.url as string) || '#',
+            href: canonicalizeThemeAssetReference(params.url as string) || '#',
           }),
         );
       } else {
@@ -720,7 +757,10 @@ function buildNode(
     // sections and renders the block without the correct visual treatment.
     const coverExtras: Partial<WpNode> = {};
     if (blockName === 'cover') {
-      if (params?.url) coverExtras.src = params.url as string;
+      if (params?.url) {
+        const cleanUrl = canonicalizeThemeAssetReference(params.url as string);
+        if (cleanUrl) coverExtras.src = cleanUrl;
+      }
       if (params?.customOverlayColor) {
         coverExtras.overlayColor = params.customOverlayColor as string;
       } else if (params?.overlayColor) {
@@ -728,6 +768,11 @@ function buildNode(
       }
       if (params?.minHeight)
         coverExtras.minHeight = normalizeCssLength(params.minHeight);
+    }
+    const detailsExtras: Partial<WpNode> = {};
+    if (blockName === 'details' || blockName === 'core/details') {
+      const summaryText = extractDetailsSummaryText(innerMarkup);
+      if (summaryText) detailsExtras.text = summaryText;
     }
     return compact({
       block: blockName,
@@ -740,13 +785,17 @@ function buildNode(
           }
         : {}),
       ...coverExtras,
+      ...detailsExtras,
       children,
     });
   }
 
   // For wp:cover (leaf, no nested blocks) — lift background image URL to top-level src
-  const coverSrc =
-    blockName === 'cover' && params?.url ? { src: params.url as string } : {};
+  const rawCoverUrl =
+    blockName === 'cover' && params?.url
+      ? canonicalizeThemeAssetReference(params.url as string)
+      : '';
+  const coverSrc = rawCoverUrl ? { src: rawCoverUrl } : {};
 
   // UAGB info-box stores title, description, and CTA inside innerHTML as class-based
   // HTML (not nested block comments). Parse them into synthetic child WpNodes so that
@@ -778,7 +827,11 @@ function buildNode(
     if (descText)
       syntheticChildren.push({ block: 'paragraph', text: descText });
     if (ctaText && ctaHref)
-      syntheticChildren.push({ block: 'button', text: ctaText, href: ctaHref });
+      syntheticChildren.push({
+        block: 'button',
+        text: ctaText,
+        href: canonicalizeThemeAssetReference(ctaHref) ?? ctaHref,
+      });
     if (syntheticChildren.length > 0) {
       return compact({
         block: blockName,
@@ -856,7 +909,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     const width = attrs.match(/width="([^"]+)"/)?.[1];
     const height = attrs.match(/height="([^"]+)"/)?.[1];
     return {
-      src,
+      src: canonicalizeThemeAssetReference(src) ?? src,
       alt,
       ...(customClassNames.length ? { customClassNames } : {}),
       ...(width ? { width: parseInt(width) } : {}),
@@ -868,7 +921,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   const aMatch = stripped.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
   if (aMatch) {
     return {
-      href: aMatch[1],
+      href: canonicalizeThemeAssetReference(aMatch[1]) ?? aMatch[1],
       text: stripTags(aMatch[2]),
       ...(customClassNames.length ? { customClassNames } : {}),
     };
@@ -907,6 +960,14 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   }
 
   return customClassNames.length ? { customClassNames } : {};
+}
+
+function extractDetailsSummaryText(html: string): string | undefined {
+  const summaryMatch = String(html ?? '').match(
+    /<summary[^>]*>([\s\S]*?)<\/summary>/i,
+  );
+  const summaryText = summaryMatch ? stripTags(summaryMatch[1]) : '';
+  return summaryText.trim() || undefined;
 }
 
 export function stripTags(html: string): string {
@@ -971,8 +1032,11 @@ function extractUagbModalTriggerChildren(innerMarkup: string): WpNode[] {
 
     const className = attrs.match(/\bclass="([^"]+)"/i)?.[1];
     const customClassNames = extractUsefulCustomClassNamesFromParam(className);
+    const rawHref = attrs.match(/\bhref="([^"]+)"/i)?.[1];
     const href =
-      tag === 'a' ? (attrs.match(/\bhref="([^"]+)"/i)?.[1] ?? '#') : undefined;
+      tag === 'a'
+        ? (canonicalizeThemeAssetReference(rawHref ?? '#') ?? rawHref ?? '#')
+        : undefined;
     const signature = [
       text,
       href ?? '',
@@ -1040,4 +1104,31 @@ function extractUsefulCustomClassNames(tokens: string[]): string[] {
       }),
     ),
   );
+}
+
+/**
+ * Maps a WordPress block name to a ThemeInteractionTarget used by the
+ * validator's repair/detection logic. Returns undefined for blocks that do
+ * not map to a specific interactive element type.
+ */
+export function inferTargetFromBlockName(
+  blockName: string,
+): 'button' | 'link' | 'image' | 'card' | undefined {
+  const lower = (blockName ?? '').toLowerCase();
+  if (lower === 'core/button') return 'button';
+  if (
+    lower === 'core/image' ||
+    lower === 'core/post-featured-image' ||
+    lower === 'core/site-logo'
+  )
+    return 'image';
+  if (
+    lower === 'core/navigation-link' ||
+    lower === 'core/navigation-submenu' ||
+    lower === 'core/social-link' ||
+    lower === 'core/loginout' ||
+    lower === 'core/read-more'
+  )
+    return 'link';
+  return undefined;
 }

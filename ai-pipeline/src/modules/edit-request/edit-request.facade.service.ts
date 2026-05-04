@@ -151,6 +151,10 @@ function localizeEditRequestError(
       vi: 'Nếu bạn nhắc đến một page như Home, hãy nói rõ phần nào trên đó cần thay đổi.',
       en: 'When you mention a page like Home, also describe what should change there.',
     },
+    UNSUPPORTED_EDIT_OPERATION: {
+      vi: 'Luồng edit hiện chỉ hỗ trợ 4 nhóm thay đổi: đổi nội dung, đổi background, đổi color, hoặc đổi layout. Các yêu cầu thêm/xóa/thay section hoặc đổi typography hiện chưa được hỗ trợ.',
+      en: 'The current edit flow only supports content, background, color, or layout changes. Adding/removing/replacing sections or typography-only edits are not supported.',
+    },
     UNCLEAR_INTENT: {
       vi: 'Yêu cầu chưa đủ rõ. Hãy mô tả migrate toàn bộ site hoặc migrate toàn site kèm focus vào một page/khu vực cụ thể.',
       en: 'Describe either a full-site migration intent or a page-level focus for the migration.',

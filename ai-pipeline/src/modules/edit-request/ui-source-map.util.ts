@@ -1,12 +1,10 @@
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import ts from 'typescript';
 import { isPartialComponentName } from '../agents/shared/component-kind.util.js';
 import type { PlanResult } from '../agents/planner/planner.service.js';
 import type { GeneratedComponent } from '../agents/react-generator/react-generator.service.js';
-import type { PipelineCaptureAttachmentDto } from '../orchestrator/orchestrator.dto.js';
 import type {
-  ResolvedCaptureTargetRecord,
   UiMutationCandidate,
   UiMutationNodeRole,
   UiSourceMapEntry,
@@ -19,17 +17,6 @@ export async function buildUiSourceMapForProject(input: {
 }): Promise<UiSourceMapEntry[]> {
   const { plan } = input;
   void input.srcDir;
-  void input.components;
-  const entries = createUiSourceMapEntryAccumulator(plan);
-
-  return sortUiSourceMapEntries(entries);
-}
-
-export async function buildUiSourceMapForGeneratedComponents(input: {
-  components: GeneratedComponent[];
-  plan?: PlanResult;
-}): Promise<UiSourceMapEntry[]> {
-  const { plan } = input;
   void input.components;
   const entries = createUiSourceMapEntryAccumulator(plan);
 
@@ -91,77 +78,6 @@ export async function writeUiSourceMapArtifacts(input: {
   await writeFile(publicPath, payload, 'utf-8');
 
   return previewPath;
-}
-
-export async function readUiSourceMapEntries(
-  filePath?: string | null,
-): Promise<UiSourceMapEntry[]> {
-  if (!filePath) return [];
-
-  try {
-    const raw = await readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as UiSourceMapEntry[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function resolveCaptureTargetsFromUiSourceMap(input: {
-  attachments?: PipelineCaptureAttachmentDto[];
-  uiSourceMap: UiSourceMapEntry[];
-}): ResolvedCaptureTargetRecord[] {
-  const { attachments, uiSourceMap } = input;
-  if (!attachments?.length || uiSourceMap.length === 0) return [];
-
-  const bySourceNodeId = new Map(
-    uiSourceMap.map((entry) => [entry.sourceNodeId, entry]),
-  );
-  const byTemplateAndIndex = new Map<string, UiSourceMapEntry[]>();
-  for (const entry of uiSourceMap) {
-    const key = buildTemplateIndexKey(entry.templateName, entry.topLevelIndex);
-    const bucket = byTemplateAndIndex.get(key) ?? [];
-    bucket.push(entry);
-    byTemplateAndIndex.set(key, bucket);
-  }
-
-  return attachments
-    .map((attachment) => {
-      const exactSourceNodeId = attachment.targetNode?.sourceNodeId?.trim();
-      if (exactSourceNodeId) {
-        const exact = bySourceNodeId.get(exactSourceNodeId);
-        if (exact) {
-          return toResolvedCaptureTargetRecord(attachment.id, exact, {
-            resolution: 'exact-source-map',
-            confidence:
-              typeof exact.startLine === 'number' &&
-              typeof exact.endLine === 'number'
-                ? 1
-                : 0.94,
-          });
-        }
-      }
-
-      const templateName = attachment.targetNode?.templateName?.trim();
-      const topLevelIndex = attachment.targetNode?.topLevelIndex;
-      if (!templateName || typeof topLevelIndex !== 'number') return undefined;
-
-      const heuristicCandidates =
-        byTemplateAndIndex.get(
-          buildTemplateIndexKey(templateName, topLevelIndex),
-        ) ?? [];
-      if (heuristicCandidates.length !== 1) return undefined;
-
-      return toResolvedCaptureTargetRecord(
-        attachment.id,
-        heuristicCandidates[0],
-        {
-          resolution: 'heuristic',
-          confidence: 0.72,
-        },
-      );
-    })
-    .filter((value): value is ResolvedCaptureTargetRecord => !!value);
 }
 
 function buildFallbackUiSourceMapEntries(
@@ -567,31 +483,6 @@ function buildTemplateIndexKey(
   topLevelIndex: number,
 ): string {
   return `${templateName}::${topLevelIndex}`;
-}
-
-function toResolvedCaptureTargetRecord(
-  captureId: string,
-  entry: UiSourceMapEntry,
-  input: {
-    resolution: ResolvedCaptureTargetRecord['resolution'];
-    confidence: number;
-  },
-): ResolvedCaptureTargetRecord {
-  return {
-    captureId,
-    sourceNodeId: entry.sourceNodeId,
-    templateName: entry.templateName,
-    sourceFile: entry.sourceFile,
-    componentName: entry.componentName,
-    sectionKey: entry.sectionKey,
-    debugKey: entry.debugKey,
-    sectionComponentName: entry.sectionComponentName,
-    outputFilePath: entry.outputFilePath,
-    startLine: entry.startLine,
-    endLine: entry.endLine,
-    resolution: input.resolution,
-    confidence: input.confidence,
-  };
 }
 
 function buildFallbackSectionKey(type: string, index: number): string {

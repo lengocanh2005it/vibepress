@@ -25,17 +25,24 @@ import type {
   MediaTextSection,
   FooterSection,
   PostContentSection,
+  PostTitleSection,
+  PostFeaturedImageSection,
   PageContentSection,
   ProseBlockSection,
+  PostMetaSection,
+  PostTermsSection,
+  PostNavigationSection,
   SearchSection,
   BreadcrumbSection,
   SidebarSection,
+  CommentsSection,
   ModalSection,
   TestimonialSection,
   TabsSection,
   AccordionSection,
   CarouselSection,
   SourceSegment,
+  SectionCardStyle,
 } from '../../modules/agents/react-generator/visual-plan.schema.js';
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -46,13 +53,13 @@ import type {
  * AI-only planning).
  */
 export function mapWpNodesToDraftSections(nodes: WpNode[]): SectionPlan[] {
-  return mapNodes(nodes, nodes);
+  return deduplicateSectionKeys(mapNodes(nodes, nodes));
 }
 
 export function mapWpNodesToLosslessPageSections(
   nodes: WpNode[],
 ): SectionPlan[] {
-  return mapNodesLosslessPage(nodes, nodes);
+  return deduplicateSectionKeys(mapNodesLosslessPage(nodes, nodes));
 }
 
 // ── Per-node dispatch ───────────────────────────────────────────────────────
@@ -498,9 +505,47 @@ function mergeAdjacentCardGridRows(
 function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   const block = node.block;
 
+  // Dynamic title blocks — text is a runtime placeholder ("WordPress", archive name,
+  // search term) that is never meaningful at parse time. Skip entirely.
+  if (
+    block === 'core/query-title' ||
+    block === 'query-title' ||
+    block === 'core/archive-title' ||
+    block === 'archive-title'
+  ) {
+    return [];
+  }
+
+  if (block === 'core/post-title' || block === 'post-title') {
+    return toMappedSections(mapPostTitle(node), node);
+  }
+
+  // query-no-results — fallback shown when query has no results; not a real page section.
+  if (block === 'core/query-no-results' || block === 'query-no-results') {
+    return [];
+  }
+
+  // query-pagination — navigation chrome, not a content section.
+  if (
+    block === 'core/query-pagination' ||
+    block === 'query-pagination' ||
+    block === 'core/query-pagination-previous' ||
+    block === 'query-pagination-previous' ||
+    block === 'core/query-pagination-next' ||
+    block === 'query-pagination-next' ||
+    block === 'core/query-pagination-numbers' ||
+    block === 'query-pagination-numbers'
+  ) {
+    return [];
+  }
+
   // template-part blocks: delegate by slug
   if (block === 'core/template-part' || block === 'template-part') {
     return toMappedSections(mapTemplatePart(node), node);
+  }
+
+  if (block === 'core/pattern' || block === 'pattern') {
+    return toMappedSections(mapPattern(node), node);
   }
 
   // Navigation / site header chrome
@@ -560,6 +605,18 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/post-content' || block === 'post-content') {
     return toMappedSections(mapPostContent(node), node);
   }
+  if (block === 'core/post-featured-image' || block === 'post-featured-image') {
+    return toMappedSections(mapPostFeaturedImage(node), node);
+  }
+  if (block === 'core/post-terms' || block === 'post-terms') {
+    return toMappedSections(mapPostTerms(node), node);
+  }
+  if (
+    block === 'core/post-navigation-link' ||
+    block === 'post-navigation-link'
+  ) {
+    return [];
+  }
   if (
     block === 'core/page-list' ||
     block === 'core/pages' ||
@@ -574,6 +631,10 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   if (block === 'core/search' || block === 'search') {
     const s: SearchSection = { type: 'search' };
     return toMappedSections(s, node);
+  }
+
+  if (block === 'core/comments' || block === 'comments') {
+    return toMappedSections(mapComments(node), node);
   }
 
   // Separator / spacer — skip, not a section
@@ -626,7 +687,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   }
 
   // Accordion / FAQ / content-toggle: preserve panel headings + bodies
-  if (/\b(accordion|faq|content-toggle|toggle)\b/.test(block)) {
+  if (isAccordionLikeBlockName(block)) {
     return toMappedSections(mapAccordionLike(node), node);
   }
 
@@ -685,15 +746,37 @@ function mapTemplatePart(node: WpNode): SectionPlan | null {
   if (slugL.includes('sidebar')) {
     const s: SidebarSection = {
       type: 'sidebar',
-      showSiteInfo: false,
-      showPages: true,
-      showPosts: true,
+      widgets: [
+        { kind: 'pages-list', title: 'Pages' },
+        { kind: 'recent-posts', title: 'Recent Posts' },
+      ],
+    };
+    return s;
+  }
+  if (slugL.includes('post-meta')) {
+    const s: PostMetaSection = {
+      type: 'post-meta',
+      padding: 'none',
+      layout: 'inline',
+      showAuthor: true,
+      showDate: true,
+      showCategories: true,
+      showSeparator: true,
     };
     return s;
   }
   if (slugL.includes('breadcrumb')) {
     const s: BreadcrumbSection = { type: 'breadcrumb' };
     return s;
+  }
+  return null;
+}
+
+function mapPattern(node: WpNode): SectionPlan | null {
+  const slug = String(node.params?.slug ?? '').toLowerCase();
+  if (!slug) return null;
+  if (slug.includes('post-navigation')) {
+    return buildPostNavigationSection();
   }
   return null;
 }
@@ -885,6 +968,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     if (testimonial) return toMappedSections(testimonial, node);
   }
 
+  const accordionSection = buildAccordionFromGroup(node, children);
+  if (accordionSection) {
+    return toMappedSections(accordionSection, node);
+  }
+
   // If any UAGB interactive block (slider/modal/tabs) is nested anywhere in the
   // subtree, skip static heuristics so recursion maps each child to the correct
   // interactive section type.
@@ -985,6 +1073,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
     ]);
     if (headingChild?.text) s.title = headingChild.text;
     return toMappedSections(s, node);
+  }
+
+  const postNavigationSection = mapPostNavigationGroup(node);
+  if (postNavigationSection) {
+    return toMappedSections(postNavigationSection, node);
   }
 
   // Nested group that contains further sub-sections — recurse and keep them all.
@@ -1412,23 +1505,145 @@ function collectFooterMenuColumns(
 // ── post-content ────────────────────────────────────────────────────────────
 
 function mapPostContent(node: WpNode): PostContentSection | PageContentSection {
-  // If it's inside a post/single template context it's a post-content; the
-  // caller decides dataNeeds. We default to post-content and let AI/reviewer
-  // correct it when the component contract says pageDetail instead.
   const s: PostContentSection = {
     type: 'post-content',
-    showTitle: true,
-    showAuthor: true,
-    showDate: true,
-    showCategories: true,
+    padding: 'none',
+    showTitle: false,
+    showAuthor: false,
+    showDate: false,
+    showCategories: false,
   };
   return s;
 }
 
+function mapPostTitle(node: WpNode): PostTitleSection {
+  return {
+    type: 'post-title',
+    padding: 'none',
+    ...(typeof node.params?.level === 'number'
+      ? {
+          level: Math.min(Math.max(Number(node.params.level), 1), 6) as
+            | 1
+            | 2
+            | 3
+            | 4
+            | 5
+            | 6,
+        }
+      : { level: 1 }),
+    ...(node.typography || node.fontFamily
+      ? { titleStyle: toTypographyStyle(node) }
+      : {}),
+    ...(extractStyleVariantClassNames(node.customClassNames).length > 0
+      ? {
+          titleCustomClassNames: extractStyleVariantClassNames(
+            node.customClassNames,
+          ),
+        }
+      : {}),
+  };
+}
+
+function mapPostFeaturedImage(node: WpNode): PostFeaturedImageSection {
+  return {
+    type: 'post-featured-image',
+    padding: 'none',
+    ...(node.borderRadius ? { imageRadius: node.borderRadius } : {}),
+    ...(node.customClassNames?.length
+      ? { imageCustomClassNames: uniqueClassNames(node.customClassNames) }
+      : {}),
+  };
+}
+
+function mapPostTerms(node: WpNode): PostTermsSection {
+  const term = String(node.params?.term ?? '').toLowerCase();
+  const taxonomy: PostTermsSection['taxonomy'] =
+    term === 'category'
+      ? 'category'
+      : term === 'post_tag' || term === 'tag'
+        ? 'post_tag'
+        : undefined;
+
+  return {
+    type: 'post-terms',
+    padding: 'none',
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(typeof node.params?.prefix === 'string' && node.params.prefix.trim()
+      ? { prefix: node.params.prefix.trim() }
+      : {}),
+    ...(typeof node.params?.separator === 'string' && node.params.separator
+      ? { separator: node.params.separator }
+      : {}),
+    layout: 'inline',
+  };
+}
+
+function mapComments(node: WpNode): CommentsSection {
+  const flat = flattenChildren(node);
+  const hasCommentForm = flat.some((child) =>
+    ['core/post-comments-form', 'post-comments-form'].includes(child.block),
+  );
+
+  return {
+    type: 'comments',
+    padding: 'none',
+    showForm: hasCommentForm,
+    requireName: true,
+    requireEmail: true,
+  };
+}
+
+function mapPostNavigationGroup(node: WpNode): PostNavigationSection | null {
+  const flat = flattenChildren(node);
+  const navLinks = flat.filter((child) =>
+    ['core/post-navigation-link', 'post-navigation-link'].includes(child.block),
+  );
+  if (navLinks.length === 0) return null;
+
+  const previousLink = navLinks.find(
+    (child) => String(child.params?.type ?? '').toLowerCase() === 'previous',
+  );
+  const nextLink = navLinks.find(
+    (child) => String(child.params?.type ?? '').toLowerCase() !== 'previous',
+  );
+
+  return buildPostNavigationSection({
+    showPrevious: !!previousLink,
+    showNext: !!nextLink,
+    previousLabel:
+      typeof previousLink?.params?.label === 'string'
+        ? previousLink.params.label
+        : undefined,
+    nextLabel:
+      typeof nextLink?.params?.label === 'string'
+        ? nextLink.params.label
+        : undefined,
+  });
+}
+
+function buildPostNavigationSection(
+  overrides: Partial<PostNavigationSection> = {},
+): PostNavigationSection {
+  return {
+    type: 'post-navigation',
+    padding: 'none',
+    showPrevious: overrides.showPrevious ?? true,
+    showNext: overrides.showNext ?? true,
+    previousLabel: overrides.previousLabel ?? 'Previous:',
+    nextLabel: overrides.nextLabel ?? 'Next:',
+  };
+}
+
 // ── standalone heading / quote ──────────────────────────────────────────────
+
+function isDecorativeText(text: string): boolean {
+  // Pure dash / separator characters used as visual dividers (e.g. "—", "–", "-", "---")
+  return /^[\s—–\-_·•|\/\\]+$/.test(text.trim());
+}
 
 function mapStandaloneHeading(node: WpNode): HeroSection | null {
   if (!node.text?.trim()) return null;
+  if (isDecorativeText(node.text)) return null;
   const hero: HeroSection = {
     type: 'hero',
     layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
@@ -1450,15 +1665,18 @@ function mapStandaloneHeading(node: WpNode): HeroSection | null {
 }
 
 function mapStandaloneParagraph(node: WpNode): HeroSection | null {
-  const text = extractNodeText(node);
-  if (!text) return null;
+  const plainText = extractNodeText(node);
+  if (!plainText) return null;
+  if (isDecorativeText(plainText)) return null;
 
-  const preferHeading = isHeadingLikeStandaloneText(node, text);
+  const richText = extractNodeRichText(node);
+
+  const preferHeading = isHeadingLikeStandaloneText(node, plainText);
   const hero: HeroSection = {
     type: 'hero',
     layout: inferSectionAlignment(node, []) === 'center' ? 'centered' : 'left',
-    heading: preferHeading ? text : '',
-    ...(!preferHeading ? { subheading: text } : {}),
+    heading: preferHeading ? plainText : '',
+    ...(!preferHeading ? { subheading: richText } : {}),
   };
   const classNames = extractStyleVariantClassNames(node.customClassNames);
   if (classNames.length > 0) {
@@ -1675,15 +1893,40 @@ function mapUagbInfoBox(node: WpNode): CardGridSection | null {
     (node.params?.iconBoxDesc as string | undefined) ??
     '';
   if (!heading && !body) return null;
-  return { type: 'card-grid', columns: 3, cards: [{ heading, body }] };
+
+  const descFontSize = node.params?.descFontSize as number | undefined;
+  const descFontSizeType =
+    (node.params?.descFontSizeType as string | undefined) ?? 'px';
+  const pTop = node.params?.blockTopPadding as number | undefined;
+  const pRight = node.params?.blockRightPadding as number | undefined;
+  const pBottom = node.params?.blockBottomPadding as number | undefined;
+  const pLeft = node.params?.blockLeftPadding as number | undefined;
+  const pType =
+    (node.params?.blockTopPaddingType as string | undefined) ?? 'px';
+
+  const cardStyle: SectionCardStyle = {};
+  if (descFontSize != null) {
+    cardStyle.bodyStyle = { fontSize: `${descFontSize}${descFontSizeType}` };
+  }
+  if (pTop != null || pRight != null || pBottom != null || pLeft != null) {
+    cardStyle.padding = `${pTop ?? 0}${pType} ${pRight ?? 0}${pType} ${pBottom ?? 0}${pType} ${pLeft ?? 0}${pType}`;
+  }
+
+  return {
+    type: 'card-grid',
+    columns: 3,
+    cards: [{ heading, body }],
+    ...(Object.keys(cardStyle).length > 0 ? { cardStyle } : {}),
+  };
 }
 
 function mapUagbTabs(node: WpNode): TabsSection | null {
   const tabChildren = (node.children ?? []).filter(
     (c) => c.block === 'uagb/tabs-child',
   );
+  const fallbackTitles = extractUagbTabTitlesFromHtml(node.html);
   const tabs = tabChildren
-    .map((tab) => {
+    .map((tab, index) => {
       const flat = flattenChildren(tab);
       const h = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
@@ -1693,7 +1936,10 @@ function mapUagbTabs(node: WpNode): TabsSection | null {
       );
       const buttonNode = findBestButtonNode(flat);
       const tabTitle =
-        (tab.params?.tabTitle as string | undefined) ?? h?.text ?? '';
+        (tab.params?.tabTitle as string | undefined) ??
+        fallbackTitles[index] ??
+        h?.text ??
+        '';
       const body = extractRichTextFromNodes(flat);
       const heading =
         h?.text && h.text.trim() && h.text.trim() !== tabTitle.trim()
@@ -1764,21 +2010,51 @@ function mapUagbTabs(node: WpNode): TabsSection | null {
   return section;
 }
 
+function extractUagbTabTitlesFromHtml(html?: string): string[] {
+  if (!html) return [];
+  const titles: string[] = [];
+  const pattern =
+    /class="[^"]*\buagb-tabs-list\b[^"]*"[\s\S]*?<div>([\s\S]*?)<\/div>/gi;
+  for (const match of html.matchAll(pattern)) {
+    const label = normalizeInlineHtmlText(match[1]);
+    if (label) titles.push(label);
+  }
+  return titles;
+}
+
+function normalizeInlineHtmlText(value?: string | null): string {
+  if (!value) return '';
+  return decodeBasicHtmlEntities(value)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeBasicHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
 function mapAccordionLike(node: WpNode): AccordionSection | null {
-  const panelChildren = (node.children ?? []).filter((child) =>
-    /\b(accordion|faq|content-toggle|toggle)\b/.test(child.block),
-  );
-  const sourcePanels =
-    panelChildren.length > 0 ? panelChildren : (node.children ?? []);
+  const sourcePanels = collectAccordionPanelNodes(node);
 
   const items = sourcePanels
     .map((panel) => {
       const flat = flattenChildren(panel);
+      const detailsNode = isAccordionLikeBlockName(panel.block)
+        ? panel
+        : flat.find((c) => isAccordionLikeBlockName(c.block));
       const headingNode = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
       const heading =
         headingNode?.text ??
+        detailsNode?.text ??
         (panel.params?.title as string | undefined) ??
         (panel.params?.heading as string | undefined) ??
         (panel.params?.label as string | undefined) ??
@@ -1830,7 +2106,12 @@ function mapAccordionLike(node: WpNode): AccordionSection | null {
 
   if (items.length === 0) return null;
 
+  const titleNode = findFirstByBlock(node.children ?? [], [
+    'core/heading',
+    'heading',
+  ]);
   const title =
+    titleNode?.text ??
     (node.params?.title as string | undefined) ??
     (node.params?.heading as string | undefined);
   const allowMultiple =
@@ -1865,6 +2146,40 @@ function mapAccordionLike(node: WpNode): AccordionSection | null {
     ...(defaultOpenItems ? { defaultOpenItems } : {}),
     ...(variant ? { variant } : {}),
   };
+}
+
+function buildAccordionFromGroup(
+  node: WpNode,
+  children: WpNode[],
+): AccordionSection | null {
+  const metadataName = String(
+    (node.params?.metadata as Record<string, string> | undefined)?.name ?? '',
+  ).toLowerCase();
+  const panelNodes = collectAccordionPanelNodes(node);
+  const hasHint =
+    /\b(accordion|faq|details|content-toggle|toggle)\b/.test(metadataName) ||
+    panelNodes.length >= 2;
+  if (!hasHint || panelNodes.length === 0) return null;
+  if (!children.some((child) => hasAccordionPanelDescendant(child)))
+    return null;
+  return mapAccordionLike(node);
+}
+
+function collectAccordionPanelNodes(node: WpNode): WpNode[] {
+  const panels: WpNode[] = [];
+  const visit = (candidate: WpNode) => {
+    if (isAccordionLikeBlockName(candidate.block)) {
+      panels.push(candidate);
+      return;
+    }
+    for (const child of candidate.children ?? []) {
+      visit(child);
+    }
+  };
+  for (const child of node.children ?? []) {
+    visit(child);
+  }
+  return panels;
 }
 
 function mapUagbModal(node: WpNode): ModalSection | null {
@@ -2011,6 +2326,10 @@ function applyNodePresentation<T extends SectionPlan>(
   if (!next.sectionKey) {
     next.sectionKey = buildSectionKey(next.type, node.sourceRef?.topLevelIndex);
   }
+  if (!next.debugKey) {
+    const semanticDebugKey = inferSemanticDebugKey(next, node);
+    if (semanticDebugKey) next.debugKey = semanticDebugKey;
+  }
   if (node.bgColor && !next.background) next.background = node.bgColor;
   if (node.textColor && !next.textColor) next.textColor = node.textColor;
   if (node.padding && !next.paddingStyle) {
@@ -2024,6 +2343,12 @@ function applyNodePresentation<T extends SectionPlan>(
       typeof node.gap === 'string'
         ? node.gap
         : (normalizeGapStyleValue(node.gap) ?? next.gapStyle);
+  }
+  if (node.borderRadius && !next.border?.radius) {
+    next.border = {
+      ...(next.border ?? {}),
+      radius: node.borderRadius,
+    };
   }
   let mergedClassNames = uniqueClassNames([
     ...(next.customClassNames ?? []),
@@ -2095,9 +2420,19 @@ function applyWrapperVisualPresentation<T extends SectionPlan>(
   node: WpNode,
 ): T[] {
   if (sections.length === 0) return sections;
-  if (!node.bgColor && !node.textColor) return sections;
+  const canPromoteWrapperDebugKey = sections.length === 1;
   return sections.map((section) => {
     const next: T = { ...section };
+    const wrapperDebugKey = inferSemanticDebugKey(next, node);
+    if (
+      canPromoteWrapperDebugKey &&
+      wrapperDebugKey &&
+      (!next.debugKey ||
+        next.debugKey === next.sectionKey ||
+        isGenericSectionDebugKey(next))
+    ) {
+      next.debugKey = wrapperDebugKey;
+    }
     if (node.bgColor && !next.background) next.background = node.bgColor;
     if (node.textColor && !next.textColor) next.textColor = node.textColor;
     return next;
@@ -2248,6 +2583,90 @@ function buildSectionKey(
     return type;
   }
   return `${type}-${topLevelIndex}`;
+}
+
+function inferSemanticDebugKey(
+  section: SectionPlan,
+  node: WpNode,
+): string | undefined {
+  const metadataName = extractMetadataName(node);
+  if (metadataName) return metadataName;
+
+  const patternSlug = extractPatternSlug(node);
+  if (patternSlug) return patternSlug;
+
+  const headingLabel = extractSemanticHeadingLabel(node);
+  if (headingLabel) return headingLabel;
+
+  if (section.type === 'cover' || section.type === 'hero') {
+    const sectionHeading =
+      'heading' in section && typeof section.heading === 'string'
+        ? slugifyDebugLabel(section.heading)
+        : undefined;
+    if (sectionHeading) return sectionHeading;
+  }
+
+  return undefined;
+}
+
+function extractMetadataName(node: WpNode): string | undefined {
+  const raw = (node.params?.metadata as Record<string, unknown> | undefined)
+    ?.name;
+  return typeof raw === 'string' ? slugifyDebugLabel(raw) : undefined;
+}
+
+function extractPatternSlug(node: WpNode): string | undefined {
+  const raw = node.params?.slug;
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const leaf = raw.split('/').pop() ?? raw;
+  return slugifyDebugLabel(leaf);
+}
+
+function extractSemanticHeadingLabel(node: WpNode): string | undefined {
+  const headingNode = flattenChildren(node).find((candidate) =>
+    ['core/heading', 'heading'].includes(candidate.block),
+  );
+  const text = headingNode?.text?.trim();
+  if (!text) return undefined;
+
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact || compact.length > 48 || compact.split(/\s+/).length > 5) {
+    return undefined;
+  }
+
+  return slugifyDebugLabel(compact);
+}
+
+function slugifyDebugLabel(value: string): string | undefined {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || undefined;
+}
+
+function isGenericSectionDebugKey(section: SectionPlan): boolean {
+  const current = section.debugKey?.trim() ?? '';
+  if (!current) return false;
+  return (
+    current === section.type ||
+    current === section.sectionKey ||
+    current.startsWith(`${section.type}-`)
+  );
+}
+
+function deduplicateSectionKeys<T extends SectionPlan>(sections: T[]): T[] {
+  const counts = new Map<string, number>();
+  return sections.map((section) => {
+    const key = section.sectionKey;
+    if (!key) return section;
+    const seen = counts.get(key) ?? 0;
+    counts.set(key, seen + 1);
+    if (seen === 0) return section;
+    return { ...section, sectionKey: `${key}_${seen}` };
+  });
 }
 
 // ── helpers: recognise group intent ────────────────────────────────────────
@@ -2869,6 +3288,8 @@ const POST_DETAIL_LAYOUT_BLOCKS = new Set<string>([
   'post-author-biography',
   'core/post-terms',
   'post-terms',
+  'core/post-navigation-link',
+  'post-navigation-link',
   'core/comments',
   'comments',
   'core/comment-template',
@@ -2974,6 +3395,21 @@ function findFirstByBlock(nodes: WpNode[], blocks: string[]): WpNode | null {
     }
   }
   return null;
+}
+
+function isAccordionLikeBlockName(block?: string): boolean {
+  return /\b(accordion|faq|content-toggle|toggle|details)\b/.test(
+    String(block ?? '')
+      .trim()
+      .toLowerCase(),
+  );
+}
+
+function hasAccordionPanelDescendant(node: WpNode): boolean {
+  if (isAccordionLikeBlockName(node.block)) return true;
+  return (node.children ?? []).some((child) =>
+    hasAccordionPanelDescendant(child),
+  );
 }
 
 function isSpacerBlock(block: string): boolean {
@@ -3218,11 +3654,19 @@ function buildCtaBannerSection(
   node: WpNode,
   children: WpNode[],
 ): CtaStripSection {
+  const flat = flattenChildren({ children } as WpNode);
   const ctas = buildSectionCtas(children);
   const align = inferSectionAlignment(node, children);
+  const headingNode = flat.find(
+    (child) => child.block === 'core/heading' || child.block === 'heading',
+  );
+  const heading = headingNode ? extractNodeText(headingNode) : '';
+  const subheading = extractRichTextFromNodes(flat);
   const s: CtaStripSection = {
     type: 'cta-strip',
     ...(align ? { align } : {}),
+    ...(heading ? { heading } : {}),
+    ...(subheading ? { subheading } : {}),
   };
   if (ctas[0]) s.cta = ctas[0];
   if (ctas.length > 1) s.ctas = ctas;
@@ -3324,6 +3768,20 @@ function extractNodeText(node: WpNode): string {
   return '';
 }
 
+function extractNodeRichText(node: WpNode): string {
+  const html = String(node.html ?? '').trim();
+  if (html) {
+    return html
+      .replace(/^<(?:p|li)[^>]*>/i, '')
+      .replace(/<\/(?:p|li)>$/i, '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  return extractNodeText(node);
+}
+
 function extractRichTextFromNodes(nodes: WpNode[]): string {
   const texts = nodes
     .filter(
@@ -3333,7 +3791,7 @@ function extractRichTextFromNodes(nodes: WpNode[]): string {
         node.block === 'core/list-item' ||
         node.block === 'list-item',
     )
-    .map((node) => extractNodeText(node))
+    .map((node) => extractNodeRichText(node))
     .filter(Boolean);
   return texts.join('\n');
 }

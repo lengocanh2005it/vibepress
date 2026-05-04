@@ -165,20 +165,15 @@ export interface ReactVisualEditRouteEntry {
 
 export interface ReactVisualEditPayload extends AiEditRequestPayload {
     targetHint?: {
-        // Route-level context
         route?: string | null;
-        // Section identity (from data-vp-* / ui-source-map)
-        sourceNodeId?: string;
-        sectionKey?: string;
         componentName?: string;
-        sectionComponentName?: string;
         templateName?: string;
         sourceFile?: string;
-        // Code location (from ui-source-map)
         outputFilePath?: string;
+        sectionIndex?: number;
+        sectionType?: string;
         startLine?: number;
         endLine?: number;
-        // Child node targeting
         targetNodeRole?: string;
         targetElementTag?: string;
         targetTextPreview?: string;
@@ -275,6 +270,14 @@ export interface PendingEditDecisionResult {
     error?: string;
 }
 
+export interface SkipVisualCompareResult {
+    accepted: boolean;
+    jobId: string;
+    siteId: string;
+    step: '9_visual_compare';
+    error?: string;
+}
+
 export const undoReactVisualEdit = async (
     siteId: string,
     jobId: string,
@@ -333,6 +336,28 @@ export const skipPendingEditRequest = async (
         try { errorPayload = await response.json(); } catch { errorPayload = null; }
         throw new AiProcessError(
             errorPayload?.message || 'Failed to skip the pending edit request.',
+            response.status,
+            errorPayload?.code,
+            errorPayload?.details,
+        );
+    }
+    return response.json();
+};
+
+export const skipVisualCompare = async (
+    siteId: string,
+    jobId: string,
+): Promise<SkipVisualCompareResult> => {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/skip-visual-compare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, jobId }),
+    });
+    if (!response.ok) {
+        let errorPayload: any = null;
+        try { errorPayload = await response.json(); } catch { errorPayload = null; }
+        throw new AiProcessError(
+            errorPayload?.message || 'Failed to skip visual compare.',
             response.status,
             errorPayload?.code,
             errorPayload?.details,

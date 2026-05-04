@@ -4,7 +4,14 @@
       "Bash(rg *)",
       "Bash(npm run build)",
       "Bash(npm run test)",
-      "Bash(npm run lint *)"
+      "Bash(npm run lint *)",
+      "Bash(curl -s http://localhost:5346/api/footer-links)",
+      "Bash(grep -i \"home\\\\|route=/preview.*/$\\\\|routeKey=home\\\\|component=Home\" \"d:/casso/vibepress/ai-pipeline/temp/logs/b67ce5a5-54c8-48c8-a3aa-94c813b06477/run-summary.log\")",
+      "Bash(grep -v \"^$\")",
+      "Bash([ -f \"d:/casso/vibepress/ai-pipeline/temp/logs/$d/plan.final.json\" ])",
+      "Bash(break)",
+      "Bash(grep -v \"^.*//.*$\")",
+      "PowerShell($job = Start-Job -ScriptBlock { cd \"d:\\\\casso\\\\vibepress\\\\ai-pipeline\"; npm run build 2>&1 }; Wait-Job $job -Timeout 240; Receive-Job $job | Select-Object -Last 40)"
     ]
   }
 }

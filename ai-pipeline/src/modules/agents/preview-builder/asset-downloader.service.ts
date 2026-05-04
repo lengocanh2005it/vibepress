@@ -6,6 +6,9 @@ import { join } from 'path';
 // Each entry: [src relative to themeDir, dest relative to publicDir]
 const THEME_ASSET_DIRS: [string, string][] = [
   ['assets', 'assets'], // most common: assets/ (preserves sub-structure)
+  ['css', 'assets/css'], // some themes keep vendor CSS like animate.css at root
+  ['js', 'assets/js'], // some themes keep vendor JS like wow.js at root
+  ['scripts', 'assets/scripts'], // alternate root runtime script directory
   ['images', 'assets/images'], // theme root images/
   ['img', 'assets/img'], // theme root img/
   ['fonts', 'assets/fonts'], // theme root fonts/

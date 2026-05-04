@@ -1,7 +1,3 @@
-export type SiteCompareProviderKind = 'automation' | 'openclaw' | 'hybrid';
-
-export type SiteCompareFallbackProviderKind = 'automation' | 'none';
-
 export interface SiteCompareMetrics {
   urlA?: string;
   urlB?: string;
@@ -30,6 +26,23 @@ export interface SiteCompareMetrics {
   [key: string]: unknown;
 }
 
+export interface SiteCompareRouteEntry {
+  route: string;
+  componentName: string;
+}
+
+export interface SiteCompareTarget {
+  wpUrl: string;
+  reactUrl: string;
+  route: string;
+  routeKey?: string;
+  slug?: string;
+  type?: string;
+  componentName?: string;
+  componentHint?: string;
+  repairPriority?: 'low' | 'medium' | 'high';
+}
+
 export interface SiteCompareInput {
   siteId: string;
   wpBaseUrl: string;
@@ -37,12 +50,12 @@ export interface SiteCompareInput {
   reactBeUrl: string;
   jobId?: string;
   mode?: 'baseline' | 'edited';
-  routeEntries?: unknown[];
+  routeEntries?: SiteCompareRouteEntry[];
+  compareTargets?: SiteCompareTarget[];
 }
 
 export interface SiteCompareExecutionResult {
-  provider: Exclude<SiteCompareProviderKind, 'hybrid'>;
+  provider: 'automation';
   metrics?: SiteCompareMetrics;
   warnings?: string[];
-  fallbackUsed?: boolean;
 }

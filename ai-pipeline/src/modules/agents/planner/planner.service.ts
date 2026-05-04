@@ -6,21 +6,29 @@ import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import { TokenTracker } from '../../../common/utils/token-tracker.js';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import {
-  wpBlocksToJson,
   wpBlocksToJsonWithSourceRefs,
   ensureWpNodesHaveSourceRefs,
   wpJsonToString,
   type WpNode,
 } from '../../../common/utils/wp-block-to-json.js';
 import {
+  canonicalizeThemeAssetReference,
+  extractStaticImageSources,
+} from '../../../common/utils/theme-asset.util.js';
+import {
   mapWpNodesToDraftSections,
   mapWpNodesToLosslessPageSections,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import {
+  mapWpNodesToBlockTree,
+  type BlockNode,
+} from '../../../common/utils/wp-node-to-block-tree.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
 import { buildEditRequestContextNote } from '../../edit-request/edit-request-prompt.util.js';
 import { CapturePlanningService } from '../../edit-request/capture-planning.service.js';
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import {
   getComponentStrategy,
   isSharedChromePartialComponent,
@@ -34,7 +42,6 @@ import type {
 } from '../block-parser/block-parser.service.js';
 import {
   buildVisualPlanPrompt,
-  extractStaticImageSources,
   parseVisualPlanDetailed,
   sanitizeSectionsForContract,
   type VisualPlanContract,
@@ -47,23 +54,79 @@ import {
 import { buildRepoManifestContextNote } from '../repo-analyzer/repo-manifest-context.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type {
+  CommentsSection,
   ComponentVisualPlan,
   ColorPalette,
   DataNeed,
   TypographyTokens,
   LayoutTokens,
   PageContentSection,
+  PostListSection,
+  PostContentSection,
+  PostFeaturedImageSection,
+  PostMetaSection,
+  PostNavigationSection,
+  PostTermsSection,
+  PostTitleSection,
+  SearchSection,
   SectionPlan,
+  SidebarSection,
 } from '../react-generator/visual-plan.schema.js';
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
+  type CanonicalPlanningSource,
   type PlanningSourceCandidate,
   type PlanningSourceContext,
   type PlanningSourceSupplement,
   type PlannerVisualPlanRepairState,
   type PlannerVisualRepairDelegate,
 } from './planner-visual-repair.service.js';
+import {
+  countDraftSectionsInSource,
+  detectInteractiveWidgetsFromSource,
+  extractCustomClassNamesFromSource,
+  extractHeadingTextsFromSource,
+  extractNavigationLinkItemsFromSource,
+  extractParagraphTextsFromSource,
+  scorePlanningSourceRichness,
+  sourceContainsBlock,
+} from './planning-source-analysis.util.js';
+import {
+  buildBlockTreeDrivenVisualPlanForComponent,
+  shouldBypassCoverageAuditForBlockTreeListingPlan,
+  shouldShortCircuitBlockTreeVisualPlan,
+} from './block-tree-deterministic-planner.util.js';
+import { summarizeSharedLayoutSubtree } from './shared-layout-subtree.util.js';
+import { buildPlanningSourceCandidates } from './planning-source-policy.util.js';
+import {
+  buildLayoutAnalysisComponentEntry,
+  createLayoutAnalysisArtifact,
+  createUnsupportedLayoutAnalysisArtifact,
+  type LayoutAnalysisArtifact,
+} from './layout-analysis.util.js';
+import {
+  buildDeterministicRenderContractArtifact,
+  type DeterministicRenderContractArtifact,
+} from './deterministic-render-contract.util.js';
+import {
+  buildComponentRenderContract,
+  type ComponentRenderContract,
+} from './render-contract.schema.js';
+import type {
+  PlannerAuthorityLevel,
+  PlannerClusterKind,
+  PlannerPageIntentKind,
+  PlannerSourceFactsSummary,
+  PlannerSurfacePlan,
+  PlannerWidgetKind,
+} from './planner-surface-plan.schema.js';
+import {
+  buildRepoRouteHints,
+  inferDeterministicRouteContract,
+  matchesRepoEntrySourceTemplate,
+  resolveHomeHierarchy,
+} from './route-contract.util.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -76,6 +139,7 @@ export interface ComponentPlan {
   customClassNames?: string[];
   sourceBackedAuxiliaryLabels?: string[];
   draftSections?: SectionPlan[];
+  draftBlockTree?: BlockNode[];
   planningSourceLabel?: string;
   planningSourceReason?: string;
   planningSourceFile?: string;
@@ -83,15 +147,31 @@ export interface ComponentPlan {
   fixedSlug?: string;
   fixedPageId?: number | string;
   fixedTitle?: string;
+  /** Evidence-guided surface brief for page/home/post composition. */
+  surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
+  /** Canonical source-preserving render contract derived from blockTree. */
+  renderContract?: ComponentRenderContract;
 }
+
+const PLANNER_INVENTED_AUXILIARY_LABEL_SET = new Set<string>([
+  'about',
+  'privacy',
+  'resources',
+  'useful links',
+  'navigation',
+  'pages',
+  'latest posts',
+  'social',
+]);
 
 export type PlanResult = ComponentPlan[];
 
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
+  private readonly phaseCLogLabel = 'Phase C: Surface+Visual Plan';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
   private readonly tokenTracker = new TokenTracker();
 
@@ -135,11 +215,18 @@ export class PlannerService {
       await this.tokenTracker.init(tokenLogPath);
     }
 
-    const templateNames = this.getExpectedTemplateNames(theme, content);
+    const templateNames = this.getExpectedTemplateNames(
+      theme,
+      content,
+      options?.repoManifest,
+    );
 
     // ── Phase A: architecture plan ─────────────────────────────────────────
     this.logger.log(
       `[Phase A] Planning architecture for ${templateNames.length} components in "${content.siteInfo.siteName}"`,
+    );
+    this.logger.log(
+      `[Phase A] Component targets: ${this.formatPhaseAComponentTargets(templateNames)}`,
     );
 
     const systemPrompt = this.buildSystemPrompt();
@@ -285,7 +372,11 @@ export class PlannerService {
       `[Phase B: Component Graph Builder] Enriching plan for ${plan.length} components`,
     );
     const enriched = this.materializeConcretePagePlans(
-      this.enrichPlan(plan, sourceMap),
+      this.applyDeterministicRouteContracts(
+        this.enrichPlan(plan, sourceMap),
+        content,
+        options?.repoManifest,
+      ),
       content,
     );
     this.logger.log(
@@ -305,13 +396,17 @@ export class PlannerService {
 
     if (skipVisualPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] Skipped visual plan generation (${includeVisualPlans ? 'minimalVisualPlan=true' : 'deferred until after plan review'}), plan only includes data/contract`,
+        this.formatPhaseCLog(
+          `Skipped visual plan generation (${includeVisualPlans ? 'minimalVisualPlan=true' : 'deferred until after plan review'}), plan only includes route/data contract`,
+        ),
       );
       return enriched;
     }
 
     this.logger.log(
-      `[Phase C: AI Visual Sections] Generating visual plans for ${enriched.length} components (palette + typography from theme tokens)`,
+      this.formatPhaseCLog(
+        `Generating visual plans for ${enriched.length} components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
+      ),
     );
 
     return this.buildVisualPlans(
@@ -340,7 +435,9 @@ export class PlannerService {
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
     if (skipVisualPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] Skipped visual plan generation (minimalVisualPlan=true), plan only includes data/contract`,
+        this.formatPhaseCLog(
+          'Skipped visual plan generation (minimalVisualPlan=true), plan only includes route/data contract',
+        ),
       );
       return plan;
     }
@@ -362,7 +459,9 @@ export class PlannerService {
     const concretizedPlan = this.materializeConcretePagePlans(plan, content);
 
     this.logger.log(
-      `[Phase C: AI Visual Sections] Generating visual plans for ${concretizedPlan.length} reviewed components (palette + typography from theme tokens)`,
+      this.formatPhaseCLog(
+        `Generating visual plans for ${concretizedPlan.length} reviewed components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
+      ),
     );
 
     return this.buildVisualPlans(
@@ -434,13 +533,17 @@ export class PlannerService {
       }
 
       this.logger.log(
-        `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+        this.formatPhaseCLog(
+          `Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+        ),
       );
     }
 
     const withPlan = result.filter((c) => c.visualPlan).length;
     this.logger.log(
-      `[Phase C: AI Visual Sections] Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
+      this.formatPhaseCLog(
+        `Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
+      ),
     );
 
     return result;
@@ -464,6 +567,7 @@ export class PlannerService {
     let detectedCustomClassNames: string[] = [];
     let sourceBackedAuxiliaryLabels: string[] = [];
     let draftSections: ReturnType<typeof mapWpNodesToDraftSections> | undefined;
+    let draftBlockTree: BlockNode[] | undefined;
     let planningSource: PlanningSourceContext | undefined;
     let sourceWidgetHints: string[] = [];
     const hasSharedLayoutPartials = fullPlan.some(
@@ -471,14 +575,22 @@ export class PlannerService {
         item.type === 'partial' &&
         isSharedChromePartialComponent(item.componentName),
     );
-    const deterministicPlan = this.buildDeterministicVisualPlanForComponent(
-      componentPlan,
-      content,
-      tokens,
-      globalPalette,
-      globalTypography,
-      fullPlan,
-    );
+    const shouldDeferDeterministicPartialToBlockTree =
+      componentPlan.type === 'partial' &&
+      /^(header|footer|navigation|nav|sidebar|postmeta)$/i.test(
+        componentPlan.componentName,
+      ) &&
+      this.looksLikeBlockMarkup(templateSource);
+    const deterministicPlan = shouldDeferDeterministicPartialToBlockTree
+      ? undefined
+      : this.buildDeterministicVisualPlanForComponent(
+          componentPlan,
+          content,
+          tokens,
+          globalPalette,
+          globalTypography,
+          fullPlan,
+        );
     if (deterministicPlan) {
       const visualPlanWithRepoDefaults = this.applyRepoInteractiveDefaults(
         {
@@ -496,8 +608,24 @@ export class PlannerService {
         },
         repoManifest,
       );
+      const deterministicSurfacePlan = this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        visualPlan: visualPlanWithRepoDefaults,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      });
       this.logger.log(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓ ${this.formatSectionList(deterministicPlan.sections)}`,
+        this.formatPhaseCLog(
+          `deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+            componentPlan,
+            planningSourceLabel: `deterministic:${componentPlan.templateName}`,
+            surfacePlan: deterministicSurfacePlan,
+            visualPlan: visualPlanWithRepoDefaults,
+          })}`,
+        ),
       );
       return {
         ...componentPlan,
@@ -510,11 +638,32 @@ export class PlannerService {
         planningSourceSummary:
           'Deterministic visual-plan path; no AI source synthesis needed.',
         visualPlan: visualPlanWithRepoDefaults,
+        surfacePlan: deterministicSurfacePlan,
+        renderContract: buildComponentRenderContract({
+          componentName: componentPlan.componentName,
+          templateName: componentPlan.templateName,
+          planningSourceFile: inferFseSourceFile(
+            componentPlan.templateName,
+            componentPlan.type,
+          ),
+          planningSourceSummary:
+            'Deterministic visual-plan path; no AI source synthesis needed.',
+          sectionTypes: visualPlanWithRepoDefaults.sections.map(
+            (section) => section.type,
+          ),
+          fallbackSections: visualPlanWithRepoDefaults.sections,
+          visualRenderMode: visualPlanWithRepoDefaults.renderMode,
+          deterministicAuthority:
+            visualPlanWithRepoDefaults.deterministicAuthority,
+          draftBlockTree: visualPlanWithRepoDefaults.blockTree,
+        }),
       };
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+        this.formatPhaseCLog(
+          `"${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+        ),
       );
       return {
         ...componentPlan,
@@ -530,7 +679,7 @@ export class PlannerService {
       };
     }
     try {
-      const visualDataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+      const visualDataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
       const scopedEditRequest = this.capturePlanning.scopeRequestToComponent({
         request: editRequest,
         componentName: componentPlan.componentName,
@@ -543,8 +692,121 @@ export class PlannerService {
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        tokens,
         repoManifest,
       );
+      draftBlockTree = this.buildDraftBlockTreeForPlanningSource(
+        planningSource,
+        componentPlan,
+        tokens,
+      );
+      const earlyBlockTreeVisualPlan =
+        this.buildBlockTreeDrivenVisualPlanForComponent({
+          componentPlan,
+          draftBlockTree,
+          content,
+          tokens,
+          globalPalette,
+          globalTypography,
+        });
+      if (
+        earlyBlockTreeVisualPlan &&
+        this.shouldShortCircuitBlockTreeVisualPlan(
+          componentPlan,
+          draftBlockTree,
+        )
+      ) {
+        const earlyBlockTreeSurfacePlan = this.buildSurfacePlanForComponent({
+          componentPlan,
+          content,
+          planningSource,
+          draftSections: earlyBlockTreeVisualPlan.sections,
+          draftBlockTree,
+          visualPlan: {
+            ...earlyBlockTreeVisualPlan,
+            renderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          detectedCustomClassNames,
+          sourceWidgetHints,
+          hasSharedLayoutPartials,
+          globalPalette,
+          globalTypography,
+          tokens,
+        });
+        this.logger.log(
+          this.formatPhaseCLog(
+            `block-tree deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+              componentPlan,
+              planningSourceLabel:
+                planningSource.sourceLabel ??
+                `block-tree:${componentPlan.templateName}`,
+              surfacePlan: earlyBlockTreeSurfacePlan,
+              visualPlan: {
+                ...earlyBlockTreeVisualPlan,
+                renderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+              },
+            })}`,
+          ),
+        );
+        return {
+          ...componentPlan,
+          draftSections: earlyBlockTreeVisualPlan.sections.map((section) => ({
+            ...section,
+          })),
+          ...(draftBlockTree?.length ? { draftBlockTree } : {}),
+          planningSourceLabel:
+            planningSource.sourceLabel ??
+            `block-tree:${componentPlan.templateName}`,
+          planningSourceReason: 'block-tree deterministic visual plan path',
+          ...(planningSource.sourceFile
+            ? { planningSourceFile: planningSource.sourceFile }
+            : {}),
+          planningSourceSummary:
+            'Deterministic visual-plan path derived from preserved WordPress block tree.',
+          visualPlan: {
+            ...earlyBlockTreeVisualPlan,
+            renderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          surfacePlan: earlyBlockTreeSurfacePlan,
+          renderContract: buildComponentRenderContract({
+            componentName: componentPlan.componentName,
+            templateName: componentPlan.templateName,
+            planningSourceFile: planningSource.sourceFile,
+            planningSourceSummary:
+              'Deterministic visual-plan path derived from preserved WordPress block tree.',
+            sectionTypes: earlyBlockTreeVisualPlan.sections.map(
+              (section) => section.type,
+            ),
+            fallbackSections: earlyBlockTreeVisualPlan.sections,
+            visualRenderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+            deterministicAuthority:
+              earlyBlockTreeVisualPlan.deterministicAuthority,
+            draftBlockTree,
+          }),
+        };
+      }
       // Deterministically parse the WordPress block tree to get an ordered
       // draft of sections. This is injected into the prompt as a hard-ordered
       // skeleton so AI only needs to fill in content, not infer layout order.
@@ -553,6 +815,107 @@ export class PlannerService {
         componentPlan,
         tokens,
       );
+      const blockTreeVisualPlan =
+        this.buildBlockTreeDrivenVisualPlanForComponent({
+          componentPlan,
+          draftSections,
+          draftBlockTree,
+          content,
+          tokens,
+          globalPalette,
+          globalTypography,
+        });
+      if (blockTreeVisualPlan) {
+        const blockTreeSurfacePlan = this.buildSurfacePlanForComponent({
+          componentPlan,
+          content,
+          planningSource,
+          draftSections: blockTreeVisualPlan.sections,
+          draftBlockTree,
+          visualPlan: {
+            ...blockTreeVisualPlan,
+            renderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          detectedCustomClassNames,
+          sourceWidgetHints,
+          hasSharedLayoutPartials,
+          globalPalette,
+          globalTypography,
+          tokens,
+        });
+        this.logger.log(
+          this.formatPhaseCLog(
+            `block-tree deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+              componentPlan,
+              planningSourceLabel:
+                planningSource.sourceLabel ??
+                `block-tree:${componentPlan.templateName}`,
+              surfacePlan: blockTreeSurfacePlan,
+              visualPlan: {
+                ...blockTreeVisualPlan,
+                renderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+              },
+            })}`,
+          ),
+        );
+        return {
+          ...componentPlan,
+          draftSections: blockTreeVisualPlan.sections.map((section) => ({
+            ...section,
+          })),
+          ...(draftBlockTree?.length ? { draftBlockTree } : {}),
+          planningSourceLabel:
+            planningSource.sourceLabel ??
+            `block-tree:${componentPlan.templateName}`,
+          planningSourceReason: 'block-tree deterministic visual plan path',
+          ...(planningSource.sourceFile
+            ? { planningSourceFile: planningSource.sourceFile }
+            : {}),
+          planningSourceSummary:
+            'Deterministic visual-plan path derived from preserved WordPress block tree.',
+          visualPlan: {
+            ...blockTreeVisualPlan,
+            renderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          surfacePlan: blockTreeSurfacePlan,
+          renderContract: buildComponentRenderContract({
+            componentName: componentPlan.componentName,
+            templateName: componentPlan.templateName,
+            planningSourceFile: planningSource.sourceFile,
+            planningSourceSummary:
+              'Deterministic visual-plan path derived from preserved WordPress block tree.',
+            sectionTypes: blockTreeVisualPlan.sections.map(
+              (section) => section.type,
+            ),
+            fallbackSections: blockTreeVisualPlan.sections,
+            visualRenderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+            deterministicAuthority: blockTreeVisualPlan.deterministicAuthority,
+            draftBlockTree,
+          }),
+        };
+      }
       detectedCustomClassNames =
         this.collectDraftCustomClassNames(draftSections);
       sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
@@ -561,9 +924,20 @@ export class PlannerService {
           ? [extractAuxiliaryLabelsFromSections(draftSections)]
           : []),
       );
-      sourceWidgetHints = this.detectInteractiveWidgetsFromSource(
-        planningSource.source,
+      sourceWidgetHints = detectInteractiveWidgetsFromSource(
+        this.getPlanningSourcePromptSource(planningSource),
       );
+      const augmentedDraftSections = this.augmentDraftSectionsWithSourceWidgets(
+        {
+          draftSections,
+          planningSource,
+          sourceWidgetHints,
+          componentName: componentPlan.componentName,
+        },
+      );
+      if (augmentedDraftSections) {
+        draftSections = augmentedDraftSections;
+      }
       let visualContract: VisualPlanContract = {
         componentType: componentPlan.type,
         route: componentPlan.route,
@@ -573,6 +947,19 @@ export class PlannerService {
         sourceBackedAuxiliaryLabels,
         requiredSourceWidgets: sourceWidgetHints,
       };
+      let surfacePlan = this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        planningSource,
+        draftSections,
+        draftBlockTree,
+        detectedCustomClassNames,
+        sourceWidgetHints,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      });
 
       const buildPromptArtifacts = (extraContextNote?: string) => {
         const activePlanningSource = planningSource;
@@ -583,7 +970,8 @@ export class PlannerService {
         }
         return buildVisualPlanPrompt({
           componentName: componentPlan.componentName,
-          templateSource: activePlanningSource.source,
+          templateSource:
+            this.getPlanningSourcePromptSource(activePlanningSource),
           content,
           tokens,
           repoManifest,
@@ -594,6 +982,7 @@ export class PlannerService {
           sourceAnalysis: activePlanningSource.sourceAnalysis,
           sourceBackedAuxiliaryLabels,
           sourceWidgetHints,
+          surfacePlan,
           draftSections,
           editRequestContextNote: [
             buildEditRequestContextNote(scopedEditRequest, {
@@ -610,12 +999,14 @@ export class PlannerService {
 
       let { systemPrompt, userPrompt } = buildPromptArtifacts();
       let allowedImageSrcs = this.collectAllowedImageSrcs(
-        planningSource.source,
+        planningSource,
         content,
       );
       let repairState: PlannerVisualPlanRepairState = {
         planningSource,
         draftSections,
+        draftBlockTree,
+        surfacePlan,
         detectedCustomClassNames,
         sourceBackedAuxiliaryLabels,
         sourceWidgetHints,
@@ -629,6 +1020,8 @@ export class PlannerService {
         repairState = nextState;
         planningSource = nextState.planningSource;
         draftSections = nextState.draftSections;
+        draftBlockTree = nextState.draftBlockTree;
+        surfacePlan = nextState.surfacePlan;
         detectedCustomClassNames = nextState.detectedCustomClassNames;
         sourceBackedAuxiliaryLabels = nextState.sourceBackedAuxiliaryLabels;
         sourceWidgetHints = nextState.sourceWidgetHints;
@@ -662,6 +1055,8 @@ export class PlannerService {
             scopedEditRequest,
             visualDataNeeds,
             hasSharedLayoutPartials,
+            globalPalette,
+            globalTypography,
             currentState: repairState,
             previousReason: lastReason,
             previousDropped: lastDropped,
@@ -673,8 +1068,23 @@ export class PlannerService {
           userPrompt = repairAttempt.userPrompt;
           this.logger.log(
             repairAttempt.sourceChanged
-              ? `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 repair context: ${repairAttempt.previousSourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'}`
-              : `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 self-heal: ${repairAttempt.diagnosis.summary}`,
+              ? this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" attempt 2 repair context: ${repairAttempt.previousSourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'} | diagnosis=${repairAttempt.diagnosis.summary}`,
+                )
+              : this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" attempt 2 self-heal: diagnosis=${repairAttempt.diagnosis.summary} | ${this.formatPhaseCPlanSnapshot(
+                    {
+                      componentPlan,
+                      planningSourceLabel: planningSource.sourceLabel,
+                      surfacePlan,
+                      visualPlan: {
+                        sections: draftSections ?? [],
+                        renderMode: 'section-centric',
+                        deterministicAuthority: false,
+                      },
+                    },
+                  )}`,
+                ),
           );
         }
 
@@ -693,7 +1103,9 @@ export class PlannerService {
           try {
             if (transportAttempt > 1) {
               this.logger.log(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
+                ),
               );
             }
             const completion = await this.requestVisualPlanCompletion({
@@ -716,7 +1128,9 @@ export class PlannerService {
               throw err;
             }
             this.logger.warn(
-              `[Phase C: AI Visual Sections] "${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
+              this.formatPhaseCLog(
+                `"${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
+              ),
             );
             await this.delay(1200 * transportAttempt);
           }
@@ -760,7 +1174,9 @@ export class PlannerService {
             lastDropped = ` | degenerateSections: ${degenerateSections.join('; ')}`;
             if (attempt < 2) {
               this.logger.warn(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                ),
               );
             }
             continue;
@@ -769,11 +1185,12 @@ export class PlannerService {
           const layout = this.deriveComponentLayout(
             tokens,
             componentPlan.componentName,
+            componentPlan.isDetail === true && componentPlan.route !== '/',
           );
           visualPlan = this.applyRepoInteractiveDefaults(
             {
               ...parsed,
-              dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+              dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
               ...(componentPlan.fixedSlug
                 ? {
                     pageBinding: {
@@ -788,10 +1205,15 @@ export class PlannerService {
               typography: globalTypography,
               layout,
               blockStyles: tokens?.blockStyles,
-              sections: this.mergeDraftSectionPresentation(
-                parsed.sections,
+              sections: this.injectMissingDraftSections(
+                this.mergeDraftSectionPresentation(
+                  parsed.sections,
+                  draftSections,
+                  visualContract,
+                ),
                 draftSections,
                 visualContract,
+                componentPlan.componentName,
               ),
             },
             repoManifest,
@@ -806,14 +1228,29 @@ export class PlannerService {
             lastDropped = ` | qualityIssues: ${qualityIssues.join('; ')}`;
             if (attempt < 2) {
               this.logger.warn(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                ),
               );
             }
             visualPlan = undefined;
             continue;
           }
           this.logger.log(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
+            this.formatPhaseCLog(
+              `accepted AI visual plan ✓ (attempt ${attempt}) ${this.formatPhaseCPlanSnapshot(
+                {
+                  componentPlan,
+                  planningSourceLabel: planningSource?.sourceLabel,
+                  surfacePlan,
+                  visualPlan: {
+                    sections: parsed.sections,
+                    renderMode: 'section-centric',
+                    deterministicAuthority: false,
+                  },
+                },
+              )}`,
+            ),
           );
           break;
         }
@@ -827,7 +1264,9 @@ export class PlannerService {
 
         if (attempt < 2) {
           this.logger.warn(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+            this.formatPhaseCLog(
+              `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+            ),
           );
         }
       }
@@ -841,7 +1280,9 @@ export class PlannerService {
           )
         ) {
           this.logger.warn(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 did not yield a valid plan: ${lastReason}${lastDropped} — escalating to Phase C.5 investigate/replan`,
+            this.formatPhaseCLog(
+              `"${componentPlan.componentName}" attempt 2 did not yield a valid plan: ${lastReason}${lastDropped} — escalating to Phase C.5 investigate/replan`,
+            ),
           );
           const investigateResult =
             await this.visualRepair.investigateAndReplanVisualPlan({
@@ -876,12 +1317,16 @@ export class PlannerService {
 
       if (!visualPlan) {
         this.logger.warn(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}" plan parse failed: ${lastReason}${lastDropped} — generator will fallback to D3${this.formatRawOutput(lastRaw)}`,
+          this.formatPhaseCLog(
+            `"${componentPlan.componentName}" plan parse failed: ${lastReason}${lastDropped} — generator will fallback to D3${this.formatRawOutput(lastRaw)}`,
+          ),
         );
       }
     } catch (err: any) {
       this.logger.warn(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}" error: ${err?.message} — generator will fallback to D3`,
+        this.formatPhaseCLog(
+          `"${componentPlan.componentName}" error: ${err?.message} — generator will fallback to D3`,
+        ),
       );
     }
 
@@ -889,12 +1334,30 @@ export class PlannerService {
       visualPlan?.sections?.length && Array.isArray(visualPlan.sections)
         ? visualPlan.sections.map((section) => ({ ...section }))
         : draftSections;
+    const finalizedVisualPlan =
+      visualPlan && draftBlockTree?.length
+        ? { ...visualPlan, blockTree: draftBlockTree }
+        : visualPlan;
+    const renderContract = buildComponentRenderContract({
+      componentName: componentPlan.componentName,
+      templateName: componentPlan.templateName,
+      planningSourceFile: planningSource?.sourceFile,
+      planningSourceSummary: planningSource?.sourceAnalysis,
+      sectionTypes: finalizedVisualPlan?.sections.map(
+        (section) => section.type,
+      ),
+      fallbackSections: finalizedDraftSections,
+      visualRenderMode: finalizedVisualPlan?.renderMode,
+      deterministicAuthority: finalizedVisualPlan?.deterministicAuthority,
+      draftBlockTree,
+    });
 
     return {
       ...componentPlan,
       ...(finalizedDraftSections?.length
         ? { draftSections: finalizedDraftSections }
         : {}),
+      ...(draftBlockTree?.length ? { draftBlockTree } : {}),
       ...(detectedCustomClassNames.length > 0
         ? { customClassNames: detectedCustomClassNames }
         : {}),
@@ -913,8 +1376,1330 @@ export class PlannerService {
       ...(planningSource?.sourceAnalysis
         ? { planningSourceSummary: planningSource.sourceAnalysis }
         : {}),
-      visualPlan,
+      surfacePlan: this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        planningSource,
+        draftSections: finalizedDraftSections,
+        draftBlockTree,
+        visualPlan: finalizedVisualPlan,
+        detectedCustomClassNames,
+        sourceWidgetHints,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      }),
+      visualPlan: finalizedVisualPlan,
+      ...(renderContract ? { renderContract } : {}),
     };
+  }
+
+  private buildSurfacePlanForComponent(input: {
+    componentPlan: PlanResult[number];
+    content: DbContentResult;
+    planningSource?: PlanningSourceContext;
+    draftSections?: SectionPlan[];
+    draftBlockTree?: BlockNode[];
+    visualPlan?: ComponentVisualPlan;
+    detectedCustomClassNames?: string[];
+    sourceWidgetHints?: string[];
+    hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+    tokens: ThemeTokens | undefined;
+  }): PlannerSurfacePlan | undefined {
+    const { componentPlan } = input;
+    if (componentPlan.type !== 'page') return undefined;
+
+    const sections = input.draftSections?.length
+      ? input.draftSections
+      : input.visualPlan?.sections;
+    const authority = this.buildSurfacePlanAuthority({
+      componentPlan,
+      visualPlan: input.visualPlan,
+      draftBlockTree: input.draftBlockTree,
+      draftSections: sections,
+    });
+    const sourceEvidence = this.buildSurfacePlanSourceEvidence({
+      componentPlan,
+      content: input.content,
+      planningSource: input.planningSource,
+      draftBlockTree: input.draftBlockTree,
+      draftSections: sections,
+      visualPlan: input.visualPlan,
+      detectedCustomClassNames: input.detectedCustomClassNames ?? [],
+      sourceWidgetHints: input.sourceWidgetHints ?? [],
+    });
+    const pageIntent = {
+      kind: this.inferSurfacePlanIntentKind({
+        componentPlan,
+        sourceEvidence,
+        sections,
+      }),
+      confidence:
+        sourceEvidence.contentClusters.length > 0
+          ? 0.86
+          : sections && sections.length > 0
+            ? 0.8
+            : input.draftBlockTree?.length
+              ? 0.72
+              : 0.6,
+    } as const;
+    const designEvidence = this.buildSurfacePlanDesignEvidence({
+      sections,
+      pageIntent: pageIntent.kind,
+      customClassNames: sourceEvidence.customClassNames,
+      sourceEvidence,
+      globalPalette: input.globalPalette,
+      globalTypography: input.globalTypography,
+      tokens: input.tokens,
+    });
+    const compositionHints = this.buildSurfacePlanCompositionHints(
+      sourceEvidence.contentClusters,
+      pageIntent.kind,
+    );
+    const acceptance = this.buildSurfacePlanAcceptance({
+      componentPlan,
+      authorityLevel: authority.level,
+      pageIntent: pageIntent.kind,
+      sourceEvidence,
+    });
+    const sharedChromeOwnership: 'layout' | 'self' =
+      input.hasSharedLayoutPartials ? 'layout' : 'self';
+    const base = {
+      kind: 'standard-page' as const,
+      componentName: componentPlan.componentName,
+      templateName: componentPlan.templateName,
+      contract: {
+        route: componentPlan.route,
+        dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
+        isDetail: componentPlan.isDetail,
+        componentType: componentPlan.type,
+        sharedChromeOwnership,
+      },
+      authority,
+      pageIntent,
+      sourceEvidence,
+      designEvidence,
+      compositionHints,
+      acceptance,
+      debug:
+        sections?.length || input.draftBlockTree?.length
+          ? {
+              ...(sections?.length
+                ? {
+                    legacyDraftSections: sections.map((section) => ({
+                      ...section,
+                    })),
+                  }
+                : {}),
+            }
+          : undefined,
+    };
+
+    if (this.isHomeLikeComponentPlan(componentPlan)) {
+      const openingKinds = new Set(
+        sourceEvidence.contentClusters
+          .slice(0, 2)
+          .map((cluster) => cluster.kind),
+      );
+      const heroLikeCluster = sourceEvidence.contentClusters.find(
+        (cluster) => cluster.kind === 'hero-like' || cluster.kind === 'opening',
+      );
+      const feedCluster = sourceEvidence.contentClusters.find(
+        (cluster) => cluster.kind === 'posts-feed',
+      );
+      const trustSignalKinds = new Set(['testimonials', 'logo-cloud', 'stats']);
+      return {
+        ...base,
+        kind: 'home-page',
+        homeMode: this.inferHomeMode(
+          componentPlan,
+          sourceEvidence.contentClusters,
+        ),
+        heroEvidence: {
+          headingPresent: sourceEvidence.primaryHeadings.length > 0,
+          primaryCtaPresent: sourceEvidence.contentClusters.some(
+            (cluster) => (cluster.ctaEvidence?.length ?? 0) > 0,
+          ),
+          mediaPresent: sourceEvidence.primaryImages.length > 0,
+          backgroundMediaPresent:
+            heroLikeCluster?.kind === 'hero-like' &&
+            (heroLikeCluster.imageEvidence?.length ?? 0) > 0,
+          sourceRef: heroLikeCluster?.sourceRef,
+        },
+        feedEvidence: {
+          kind: feedCluster ? 'posts' : 'none',
+          required:
+            !!feedCluster ||
+            toVisualDataNeeds(componentPlan.dataNeeds).includes('posts'),
+          sourceRef: feedCluster?.sourceRef,
+        },
+        brandEvidence: {
+          siteTitleProminence: openingKinds.has('opening') ? 'high' : 'medium',
+          logoProminence: input.hasSharedLayoutPartials ? 'medium' : 'low',
+          taglineProminence: openingKinds.has('hero-like') ? 'medium' : 'low',
+          trustSignalsPresent: sourceEvidence.contentClusters.some((cluster) =>
+            trustSignalKinds.has(cluster.kind),
+          ),
+          sourceRef: heroLikeCluster?.sourceRef,
+        },
+        homepageRules: {
+          preserveOpeningImpact:
+            openingKinds.has('hero-like') || openingKinds.has('opening'),
+          preserveBrandFirstRead: true,
+          preserveEditorialFlow: !!feedCluster,
+          allowHeroToRecompose: authority.level !== 'strict',
+          allowFeedSectionToMove: authority.level === 'free',
+        },
+      };
+    }
+
+    if (this.isPostDetailComponentPlan(componentPlan)) {
+      const sectionTypes = new Set(
+        sections?.map((section) => section.type) ?? [],
+      );
+      const metaIndex =
+        sections?.findIndex((section) => section.type === 'post-meta') ?? -1;
+      const titleIndex =
+        sections?.findIndex((section) => section.type === 'post-title') ?? -1;
+      const featuredIndex =
+        sections?.findIndex(
+          (section) => section.type === 'post-featured-image',
+        ) ?? -1;
+      const hasSidebar =
+        sourceEvidence.wrapperFacts.some((fact) => fact.kind === 'sidebar') ||
+        sectionTypes.has('sidebar');
+      return {
+        ...base,
+        kind: 'post-detail',
+        postMeta: {
+          titleRequired: true,
+          featuredImageRequired: sectionTypes.has('post-featured-image'),
+          publishDatePresent: sectionTypes.has('post-meta'),
+          authorPresent: sectionTypes.has('post-meta'),
+          categoryOrTagPresent:
+            sectionTypes.has('post-meta') || sectionTypes.has('post-terms'),
+          commentsPresent:
+            sectionTypes.has('comments') ||
+            toVisualDataNeeds(componentPlan.dataNeeds).includes('comments'),
+          postNavigationPresent: sectionTypes.has('post-navigation'),
+        },
+        postBody: {
+          proseDensity:
+            sourceEvidence.contentClusters.filter(
+              (cluster) =>
+                cluster.kind === 'article-body' || cluster.kind === 'prose',
+            ).length > 1
+              ? 'heavy'
+              : sourceEvidence.primaryHeadings.length > 1
+                ? 'medium'
+                : 'light',
+          bodyHasImages: sourceEvidence.primaryImages.length > 0,
+          bodyHasGallery: sourceEvidence.widgets.some(
+            (widget) => widget.kind === 'gallery',
+          ),
+          bodyHasLists: sourceEvidence.contentClusters.some(
+            (cluster) => cluster.kind === 'feature-list',
+          ),
+          bodyHasQuotes: sourceEvidence.contentClusters.some(
+            (cluster) => cluster.kind === 'testimonials',
+          ),
+          bodyHasTables: false,
+        },
+        postLayout: {
+          shell: hasSidebar
+            ? 'with-sidebar'
+            : designEvidence.spacingRhythm.density === 'airy'
+              ? 'narrow-article'
+              : 'full-width',
+          metaPlacement:
+            metaIndex !== -1 && titleIndex !== -1 && metaIndex < titleIndex
+              ? 'above-title'
+              : metaIndex !== -1 && titleIndex !== -1
+                ? 'below-title'
+                : 'mixed',
+          featuredImagePlacement:
+            featuredIndex === -1
+              ? 'none'
+              : titleIndex !== -1 && featuredIndex < titleIndex
+                ? 'before-title'
+                : titleIndex !== -1
+                  ? 'after-title'
+                  : 'inside-body',
+          authorBoxPlacement: sectionTypes.has('comments')
+            ? 'after-comments'
+            : sourceEvidence.contentClusters.some(
+                  (cluster) => cluster.kind === 'author-box',
+                )
+              ? 'after-body'
+              : 'none',
+        },
+        articleRules: {
+          preserveReadingFlow: true,
+          preserveSemanticMeta: true,
+          preserveCommentsCapability: toVisualDataNeeds(
+            componentPlan.dataNeeds,
+          ).includes('comments'),
+          forbidLandingPageRecomposition: true,
+        },
+      };
+    }
+
+    return base;
+  }
+
+  private buildSurfacePlanAuthority(input: {
+    componentPlan: PlanResult[number];
+    visualPlan?: ComponentVisualPlan;
+    draftBlockTree?: BlockNode[];
+    draftSections?: SectionPlan[];
+  }) {
+    const preserveExactBlockStructure =
+      input.visualPlan?.deterministicAuthority === true ||
+      input.visualPlan?.renderAuthority === 'deterministic-pixel' ||
+      input.visualPlan?.renderAuthority === 'deterministic-structure';
+    const hasStructureEvidence =
+      (input.draftBlockTree?.length ?? 0) > 0 ||
+      (input.draftSections?.length ?? 0) > 0;
+    const level: PlannerAuthorityLevel = preserveExactBlockStructure
+      ? 'strict'
+      : this.isHomeLikeComponentPlan(input.componentPlan) ||
+          this.isPostDetailComponentPlan(input.componentPlan) ||
+          input.componentPlan.isDetail ||
+          hasStructureEvidence
+        ? 'guided'
+        : 'free';
+    const reason =
+      level === 'strict'
+        ? 'Deterministic render authority already exists for this surface.'
+        : level === 'guided'
+          ? 'Preserve route-owned evidence and grouping while allowing composition changes.'
+          : 'Low-constraint page surface; composition may adapt more freely.';
+    return {
+      level,
+      reason,
+      allowSectionTypeSubstitution: level !== 'strict',
+      allowReorderWithinGroups: level === 'free',
+      allowWrapperRecomposition: level !== 'strict',
+      preserveExactBlockStructure,
+    };
+  }
+
+  private inferSurfacePlanIntentKind(input: {
+    componentPlan: PlanResult[number];
+    sourceEvidence: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      contentClusters: Array<{ kind: PlannerClusterKind }>;
+      representativeBindings?: Array<{ kind: 'page' | 'post' }>;
+      navigationLabels?: string[];
+      paragraphSnippets?: string[];
+      primaryHeadings: string[];
+      widgets: Array<{ kind: PlannerWidgetKind }>;
+    };
+    sections?: SectionPlan[];
+  }): PlannerPageIntentKind {
+    const template = input.componentPlan.templateName.toLowerCase();
+    const route = input.componentPlan.route ?? '';
+    const dataNeeds = new Set(
+      toVisualDataNeeds(input.componentPlan.dataNeeds).map((need) =>
+        String(need).toLowerCase(),
+      ),
+    );
+    const sectionTypes = new Set(
+      input.sections?.map((section) => section.type) ?? [],
+    );
+    const clusterKinds = new Set(
+      input.sourceEvidence.contentClusters.map((cluster) => cluster.kind),
+    );
+    const sourceFacts = input.sourceEvidence.sourceFacts;
+    if (this.isHomeLikeComponentPlan(input.componentPlan)) {
+      if (
+        dataNeeds.has('posts') &&
+        (sectionTypes.has('post-list') ||
+          clusterKinds.has('posts-feed') ||
+          sourceFacts?.hasQuery)
+      ) {
+        return template === 'front-page'
+          ? 'homepage-hybrid'
+          : 'homepage-content';
+      }
+      return 'homepage-brand';
+    }
+    if (this.isPostDetailComponentPlan(input.componentPlan)) {
+      return 'article';
+    }
+    if (
+      sectionTypes.has('post-list') ||
+      sectionTypes.has('search') ||
+      clusterKinds.has('posts-feed') ||
+      input.sourceEvidence.widgets.some((widget) => widget.kind === 'query') ||
+      sourceFacts?.hasQuery
+    ) {
+      return 'directory';
+    }
+    if (
+      sectionTypes.has('card-grid') &&
+      (sectionTypes.has('hero') || sectionTypes.has('cover'))
+    ) {
+      return 'service';
+    }
+    if (
+      clusterKinds.has('form') &&
+      clusterKinds.has('cta') &&
+      (clusterKinds.has('hero-like') || clusterKinds.has('opening'))
+    ) {
+      return 'landing';
+    }
+    if (
+      input.sourceEvidence.navigationLabels &&
+      input.sourceEvidence.navigationLabels.length >= 4 &&
+      input.sourceEvidence.paragraphSnippets &&
+      input.sourceEvidence.paragraphSnippets.length <= 2
+    ) {
+      return 'directory';
+    }
+    if (sectionTypes.has('hero') || sectionTypes.has('cover')) {
+      return 'landing';
+    }
+    if (
+      input.sourceEvidence.representativeBindings?.some(
+        (binding) => binding.kind === 'page',
+      ) &&
+      input.sourceEvidence.primaryHeadings.length <= 2 &&
+      (input.sourceEvidence.paragraphSnippets?.length ?? 0) >= 2
+    ) {
+      return 'minimal-prose';
+    }
+    if (input.componentPlan.isDetail && route.startsWith('/page/')) {
+      return 'minimal-prose';
+    }
+    return 'editorial';
+  }
+
+  private buildSurfacePlanSourceEvidence(input: {
+    componentPlan: PlanResult[number];
+    content: DbContentResult;
+    planningSource?: PlanningSourceContext;
+    draftBlockTree?: BlockNode[];
+    draftSections?: SectionPlan[];
+    visualPlan?: ComponentVisualPlan;
+    detectedCustomClassNames: string[];
+    sourceWidgetHints: string[];
+  }) {
+    const promptSource = this.getPlanningSourcePromptSource(
+      input.planningSource,
+    );
+    const paragraphSnippets = extractParagraphTextsFromSource(promptSource);
+    const navigationLabels = extractNavigationLinkItemsFromSource(
+      promptSource,
+    ).map((link) => link.label);
+    const sourceFacts = input.planningSource?.canonicalSource?.sourceFacts;
+    const headingTexts =
+      input.planningSource?.canonicalSource?.headingTexts ??
+      extractHeadingTextsFromSource(promptSource);
+    const primaryImages =
+      input.planningSource?.canonicalSource?.assetRefs ??
+      extractStaticImageSources(promptSource);
+    const contentClusters = this.buildSurfacePlanContentClusters(
+      input.draftSections ?? input.visualPlan?.sections,
+      input.componentPlan,
+    );
+    const widgetHints = [
+      ...input.sourceWidgetHints,
+      ...(input.planningSource?.canonicalSource?.interactiveWidgets ?? []),
+    ];
+    const representativeBindings = this.buildSurfacePlanRepresentativeBindings(
+      input.componentPlan,
+      input.content,
+    );
+    const evidenceNotes = this.buildSurfacePlanEvidenceNotes({
+      componentPlan: input.componentPlan,
+      sourceFacts,
+      contentClusters,
+      paragraphSnippets,
+      navigationLabels,
+      representativeBindings,
+    });
+    return {
+      planningSourceLabel: input.planningSource?.sourceLabel,
+      planningSourceFile: input.planningSource?.sourceFile,
+      ...(input.draftBlockTree?.length
+        ? { blockTree: input.draftBlockTree }
+        : {}),
+      ...(sourceFacts ? { sourceFacts } : {}),
+      primaryHeadings: this.dedupeStringList(headingTexts).slice(0, 8),
+      primaryImages: this.dedupeStringList(primaryImages).slice(0, 8),
+      ...(paragraphSnippets.length
+        ? {
+            paragraphSnippets: this.dedupeStringList(paragraphSnippets).slice(
+              0,
+              6,
+            ),
+          }
+        : {}),
+      ...(navigationLabels.length
+        ? {
+            navigationLabels: this.dedupeStringList(navigationLabels).slice(
+              0,
+              8,
+            ),
+          }
+        : {}),
+      customClassNames: this.dedupeStringList([
+        ...input.detectedCustomClassNames,
+        ...(input.planningSource?.canonicalSource?.customClassNames ?? []),
+      ]).slice(0, 20),
+      contentClusters,
+      wrapperFacts: this.buildSurfacePlanWrapperFacts(
+        input.draftSections ?? input.visualPlan?.sections,
+        input.planningSource,
+      ),
+      widgets: this.buildSurfacePlanWidgetEvidence(
+        widgetHints,
+        input.componentPlan,
+      ),
+      ...(representativeBindings.length ? { representativeBindings } : {}),
+      ...(evidenceNotes.length ? { evidenceNotes } : {}),
+    };
+  }
+
+  private buildSurfacePlanDesignEvidence(input: {
+    sections?: SectionPlan[];
+    pageIntent: PlannerPageIntentKind;
+    customClassNames: string[];
+    sourceEvidence?: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      paragraphSnippets?: string[];
+      navigationLabels?: string[];
+    };
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+    tokens: ThemeTokens | undefined;
+  }) {
+    const density = this.inferSurfacePlanDensity(input.sections);
+    const rhythmHints = [
+      density === 'airy'
+        ? 'Favor generous breathing room between primary clusters.'
+        : density === 'compact'
+          ? 'Keep section spacing efficient and editorially tight.'
+          : 'Balance separation between clusters without over-expanding the page.',
+    ];
+    if (
+      input.sections?.some(
+        (section) => section.type === 'hero' || section.type === 'cover',
+      )
+    ) {
+      rhythmHints.push('Preserve a visually distinct opening block.');
+    }
+    if (input.sections?.some((section) => section.type === 'post-list')) {
+      rhythmHints.push(
+        'Listing/feed regions may be denser than the opening section.',
+      );
+    }
+    if (input.sourceEvidence?.sourceFacts?.hasSidebarTemplatePart) {
+      rhythmHints.push(
+        'Preserve a primary content column with a complementary side rail.',
+      );
+    }
+    if ((input.sourceEvidence?.navigationLabels?.length ?? 0) >= 5) {
+      rhythmHints.push(
+        'Navigation-heavy source suggests a more structured, utility-forward rhythm.',
+      );
+    }
+    return {
+      importantClassNames: input.customClassNames.slice(0, 12),
+      spacingRhythm: {
+        density,
+        rhythmHints,
+      },
+      visualToneHints: this.buildSurfacePlanToneHints(
+        input.pageIntent,
+        input.sections,
+        input.sourceEvidence,
+      ),
+      tokens: {
+        palette: input.globalPalette,
+        typography: input.globalTypography,
+        blockStyles: input.tokens?.blockStyles,
+      },
+    };
+  }
+
+  private buildSurfacePlanCompositionHints(
+    clusters: Array<{
+      id: string;
+      kind: PlannerClusterKind;
+      importance: string;
+    }>,
+    pageIntent: PlannerPageIntentKind,
+  ) {
+    const macroOrder = clusters.map((cluster) => cluster.id);
+    const preferredGrouping: string[][] = [];
+    const keepAdjacentClusterPairs: Array<[string, string]> = [];
+    for (let index = 0; index < clusters.length; index++) {
+      const current = clusters[index];
+      const next = clusters[index + 1];
+      if (!current) continue;
+      preferredGrouping.push([current.id]);
+      if (
+        next &&
+        current.importance === 'high' &&
+        next.importance === 'high' &&
+        current.kind !== 'posts-feed'
+      ) {
+        keepAdjacentClusterPairs.push([current.id, next.id]);
+      }
+    }
+    return {
+      macroOrder,
+      preferredGrouping,
+      keepAdjacentClusterPairs,
+      mayCollapseClusters: clusters
+        .filter((cluster) => cluster.importance === 'low')
+        .map((cluster) => cluster.id)
+        .slice(0, 4),
+      mayExpandClusters: clusters
+        .filter((cluster) =>
+          ['feature-list', 'gallery', 'posts-feed', 'article-body'].includes(
+            cluster.kind,
+          ),
+        )
+        .map((cluster) => cluster.id)
+        .slice(0, pageIntent.startsWith('homepage') ? 3 : 2),
+    };
+  }
+
+  private buildSurfacePlanAcceptance(input: {
+    componentPlan: PlanResult[number];
+    authorityLevel: PlannerAuthorityLevel;
+    pageIntent: PlannerPageIntentKind;
+    sourceEvidence: {
+      primaryHeadings: string[];
+      widgets: Array<{ kind: PlannerWidgetKind; required: boolean }>;
+      contentClusters: Array<{ kind: PlannerClusterKind; importance: string }>;
+    };
+  }) {
+    const mustKeep = [
+      ...input.sourceEvidence.primaryHeadings
+        .slice(0, 2)
+        .map((heading) => `Preserve source heading: "${heading}"`),
+      ...input.sourceEvidence.widgets
+        .filter((widget) => widget.required)
+        .map((widget) => `Preserve source widget: ${widget.kind}`),
+      ...input.sourceEvidence.contentClusters
+        .filter((cluster) => cluster.importance === 'high')
+        .slice(0, 4)
+        .map(
+          (cluster) =>
+            `Preserve ${cluster.kind} cluster in the final composition`,
+        ),
+    ];
+    const mustNotInvent = [
+      'Do not invent extra shared chrome inside the page body.',
+      'Do not add out-of-contract dynamic data requirements.',
+      ...(input.pageIntent === 'article'
+        ? ['Do not reframe the article as a marketing landing page.']
+        : []),
+    ];
+    const mayRecompose = [
+      input.authorityLevel === 'strict'
+        ? 'Keep the block structure fixed.'
+        : 'Section taxonomy may change if the same source-backed evidence survives.',
+      input.pageIntent.startsWith('homepage')
+        ? 'Opening brand composition may adapt if headline, CTA, and feed intent remain visible.'
+        : 'Wrapper composition may adapt while preserving route-owned evidence.',
+    ];
+    return {
+      mustKeep: this.dedupeStringList(mustKeep).slice(0, 8),
+      mustNotInvent: this.dedupeStringList(mustNotInvent).slice(0, 6),
+      mayRecompose: this.dedupeStringList(mayRecompose).slice(0, 6),
+    };
+  }
+
+  private buildSurfacePlanContentClusters(
+    sections: SectionPlan[] | undefined,
+    componentPlan: PlanResult[number],
+  ) {
+    if (!sections?.length) return [];
+    const clusters = sections.map((section, index) => {
+      const kind = this.mapSurfacePlanClusterKind(
+        section,
+        componentPlan,
+        index,
+      );
+      const sourceRef = section.sourceRef
+        ? {
+            sourceNodeId: section.sourceRef.sourceNodeId,
+            sourceFile: section.sourceRef.sourceFile,
+            templateName: section.sourceRef.templateName,
+            blockName: section.sourceRef.blockName,
+          }
+        : undefined;
+      const importance: 'high' | 'medium' | 'low' =
+        index < 2 ||
+        kind === 'posts-feed' ||
+        kind === 'article-body' ||
+        kind === 'cta'
+          ? 'high'
+          : kind === 'comments' || kind === 'post-navigation'
+            ? 'medium'
+            : section.sourceRef
+              ? 'medium'
+              : 'low';
+      return {
+        id: section.debugKey ?? section.sectionKey ?? `${kind}-${index + 1}`,
+        kind,
+        importance,
+        ...(sourceRef ? { sourceRef } : {}),
+        ...(this.extractSurfacePlanSectionTexts(section).length
+          ? {
+              textEvidence: this.extractSurfacePlanSectionTexts(section).slice(
+                0,
+                4,
+              ),
+            }
+          : {}),
+        ...(this.extractSurfacePlanSectionImages(section).length
+          ? {
+              imageEvidence: this.extractSurfacePlanSectionImages(
+                section,
+              ).slice(0, 4),
+            }
+          : {}),
+        ...(this.extractSurfacePlanSectionCtas(section).length
+          ? {
+              ctaEvidence: this.extractSurfacePlanSectionCtas(section).slice(
+                0,
+                3,
+              ),
+            }
+          : {}),
+        ...(this.extractSurfacePlanItemCountHint(section)
+          ? { itemCountHint: this.extractSurfacePlanItemCountHint(section) }
+          : {}),
+        ...(section.customClassNames?.length
+          ? { customClassNames: section.customClassNames.slice(0, 6) }
+          : {}),
+      };
+    });
+    return this.normalizeSurfacePlanClusters(clusters);
+  }
+
+  private buildSurfacePlanWrapperFacts(
+    sections: SectionPlan[] | undefined,
+    planningSource?: PlanningSourceContext,
+  ) {
+    const facts: Array<{
+      id: string;
+      kind:
+        | 'stack'
+        | 'contained-group'
+        | 'full-bleed'
+        | 'two-column'
+        | 'three-column'
+        | 'sidebar'
+        | 'article-shell';
+      importance: 'high' | 'medium';
+      hints?: string[];
+    }> = [];
+    const pushFact = (
+      id: string,
+      kind:
+        | 'stack'
+        | 'contained-group'
+        | 'full-bleed'
+        | 'two-column'
+        | 'three-column'
+        | 'sidebar'
+        | 'article-shell',
+      importance: 'high' | 'medium',
+      hint?: string,
+    ) => {
+      if (facts.some((fact) => fact.kind === kind)) return;
+      facts.push({
+        id,
+        kind,
+        importance,
+        ...(hint ? { hints: [hint] } : {}),
+      });
+    };
+
+    pushFact(
+      'stack-root',
+      'stack',
+      'high',
+      'Preserve top-to-bottom page flow.',
+    );
+
+    for (const section of sections ?? []) {
+      switch (section.type) {
+        case 'media-text':
+          pushFact(
+            'two-column',
+            'two-column',
+            'high',
+            'Source contains a split content block.',
+          );
+          break;
+        case 'sidebar':
+          pushFact(
+            'sidebar',
+            'sidebar',
+            'high',
+            'Sidebar layout exists in source.',
+          );
+          break;
+        case 'hero':
+        case 'cover':
+          pushFact(
+            'full-bleed-opening',
+            'full-bleed',
+            'medium',
+            'Opening section may need stronger edge-to-edge treatment.',
+          );
+          break;
+        case 'card-grid': {
+          const cards = (section as { cards?: unknown[] }).cards ?? [];
+          if (cards.length >= 3) {
+            pushFact(
+              'three-column-grid',
+              'three-column',
+              'medium',
+              'Multi-card region likely benefits from repeated columns.',
+            );
+          } else {
+            pushFact(
+              'contained-group',
+              'contained-group',
+              'medium',
+              'Grouped feature content should stay visually associated.',
+            );
+          }
+          break;
+        }
+        case 'post-content':
+        case 'page-content':
+        case 'prose-block':
+          pushFact(
+            'article-shell',
+            'article-shell',
+            'medium',
+            'Reading-focused shell should preserve content hierarchy.',
+          );
+          break;
+      }
+    }
+
+    if (planningSource?.canonicalSource?.sourceFacts.hasSidebarTemplatePart) {
+      pushFact(
+        'sidebar-source-fact',
+        'sidebar',
+        'high',
+        'Sidebar template part exists.',
+      );
+    }
+    if (planningSource?.canonicalSource?.sourceFacts.hasNavigation) {
+      pushFact(
+        'contained-navigation',
+        'contained-group',
+        'medium',
+        'Source includes navigation-driven grouping that should read as one system.',
+      );
+    }
+    if (planningSource?.canonicalSource?.sourceFacts.hasQuery) {
+      pushFact(
+        'feed-shell',
+        'contained-group',
+        'medium',
+        'Query/feed blocks should keep a coherent listing shell.',
+      );
+    }
+
+    return facts;
+  }
+
+  private buildSurfacePlanWidgetEvidence(
+    widgetHints: string[],
+    componentPlan: PlanResult[number],
+  ) {
+    const entries = this.dedupeStringList(widgetHints)
+      .map((hint) => this.mapSurfacePlanWidgetKind(hint))
+      .filter((kind): kind is PlannerWidgetKind => !!kind)
+      .map((kind) => ({
+        kind,
+        required: true,
+      }));
+
+    if (
+      this.isPostDetailComponentPlan(componentPlan) &&
+      toVisualDataNeeds(componentPlan.dataNeeds).includes('comments') &&
+      !entries.some((entry) => entry.kind === 'comments')
+    ) {
+      entries.push({ kind: 'comments', required: true });
+    }
+
+    return entries;
+  }
+
+  private buildSurfacePlanRepresentativeBindings(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ) {
+    const representativePages = this.findRepresentativePagesForTemplate(
+      componentPlan,
+      content,
+    ).map((page) => ({
+      kind: 'page' as const,
+      id: page.id,
+      slug: page.slug,
+      title: page.title,
+      template: page.template ?? null,
+    }));
+    const representativePosts = this.findRepresentativePostsForTemplate(
+      componentPlan,
+      content,
+    ).map((post) => ({
+      kind: 'post' as const,
+      id: post.id,
+      slug: post.slug,
+      title: post.title,
+      template: null,
+    }));
+    return [...representativePages, ...representativePosts].slice(0, 3);
+  }
+
+  private buildSurfacePlanEvidenceNotes(input: {
+    componentPlan: PlanResult[number];
+    sourceFacts?: PlannerSourceFactsSummary;
+    contentClusters: Array<{ kind: PlannerClusterKind; importance: string }>;
+    paragraphSnippets: string[];
+    navigationLabels: string[];
+    representativeBindings: Array<{ kind: 'page' | 'post'; title: string }>;
+  }): string[] {
+    const notes: string[] = [];
+    const highPriorityClusters = input.contentClusters.filter(
+      (cluster) => cluster.importance === 'high',
+    ).length;
+    if (input.sourceFacts?.hasQuery) {
+      notes.push(
+        'Source contains a query/listing pattern that should remain visually legible.',
+      );
+    }
+    if (input.sourceFacts?.hasComments) {
+      notes.push(
+        'Source includes comments capability; preserve a discussion affordance.',
+      );
+    }
+    if (input.sourceFacts?.hasNavigation && input.componentPlan.route === '/') {
+      notes.push(
+        'Homepage source mixes navigational identity with route-owned content.',
+      );
+    }
+    if (input.navigationLabels.length >= 5) {
+      notes.push(
+        'Source exposes many navigation labels; avoid collapsing all utility links into a single CTA.',
+      );
+    }
+    if (highPriorityClusters >= 4) {
+      notes.push(
+        'Source contains several high-priority clusters; maintain clear macro-order.',
+      );
+    }
+    if (input.paragraphSnippets.length >= 3) {
+      notes.push('Paragraph-rich source suggests an editorial reading rhythm.');
+    }
+    if (input.representativeBindings.length > 0) {
+      notes.push(
+        `Representative content sampled from ${input.representativeBindings
+          .map((binding) => `"${binding.title}"`)
+          .join(', ')}.`,
+      );
+    }
+    return notes.slice(0, 6);
+  }
+
+  private normalizeSurfacePlanClusters(
+    clusters: Array<{
+      id: string;
+      kind: PlannerClusterKind;
+      importance: 'high' | 'medium' | 'low';
+      sourceRef?: {
+        sourceNodeId?: string;
+        sourceFile?: string;
+        templateName?: string;
+        blockName?: string;
+      };
+      textEvidence?: string[];
+      imageEvidence?: string[];
+      ctaEvidence?: string[];
+      itemCountHint?: number;
+      customClassNames?: string[];
+    }>,
+  ) {
+    const normalized: typeof clusters = [];
+    for (const cluster of clusters) {
+      const previous = normalized[normalized.length - 1];
+      const proseLike =
+        cluster.kind === 'prose' || cluster.kind === 'article-body';
+      if (
+        previous &&
+        previous.kind === cluster.kind &&
+        proseLike &&
+        (previous.textEvidence?.length ?? 0) < 6
+      ) {
+        previous.textEvidence = this.dedupeStringList([
+          ...(previous.textEvidence ?? []),
+          ...(cluster.textEvidence ?? []),
+        ]).slice(0, 6);
+        previous.imageEvidence = this.dedupeStringList([
+          ...(previous.imageEvidence ?? []),
+          ...(cluster.imageEvidence ?? []),
+        ]).slice(0, 4);
+        previous.ctaEvidence = this.dedupeStringList([
+          ...(previous.ctaEvidence ?? []),
+          ...(cluster.ctaEvidence ?? []),
+        ]).slice(0, 3);
+        previous.customClassNames = this.dedupeStringList([
+          ...(previous.customClassNames ?? []),
+          ...(cluster.customClassNames ?? []),
+        ]).slice(0, 6);
+        previous.itemCountHint = Math.max(
+          previous.itemCountHint ?? 0,
+          cluster.itemCountHint ?? 0,
+        );
+        continue;
+      }
+      normalized.push({ ...cluster });
+    }
+    return normalized;
+  }
+
+  private mapSurfacePlanClusterKind(
+    section: SectionPlan,
+    componentPlan: PlanResult[number],
+    index: number,
+  ): PlannerClusterKind {
+    switch (section.type) {
+      case 'hero':
+      case 'cover':
+        return index === 0 ? 'hero-like' : 'opening';
+      case 'card-grid':
+      case 'tabs':
+      case 'accordion':
+        return section.type === 'accordion' ? 'faq' : 'feature-list';
+      case 'media-text':
+        return 'split-content';
+      case 'post-list':
+      case 'search':
+        return 'posts-feed';
+      case 'newsletter':
+        return 'form';
+      case 'testimonial':
+        return 'testimonials';
+      case 'carousel':
+        return 'gallery';
+      case 'comments':
+        return 'comments';
+      case 'post-navigation':
+        return 'post-navigation';
+      case 'post-meta':
+        return 'article-meta';
+      case 'post-content':
+      case 'page-content':
+      case 'prose-block':
+        return this.isPostDetailComponentPlan(componentPlan)
+          ? 'article-body'
+          : 'prose';
+      case 'post-title':
+      case 'post-featured-image':
+        return 'opening';
+      case 'sidebar':
+        return 'related-posts';
+      default:
+        return index === 0 ? 'opening' : 'cta';
+    }
+  }
+
+  private extractSurfacePlanSectionTexts(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cleaned) values.add(cleaned);
+    };
+
+    switch (section.type) {
+      case 'hero':
+      case 'cover':
+        push(section.heading);
+        push(section.subheading);
+        break;
+      case 'media-text':
+        push(section.heading);
+        push(section.body);
+        (section.listItems ?? []).forEach(push);
+        break;
+      case 'card-grid':
+        push(section.title);
+        push(section.subtitle);
+        (section.cards ?? []).forEach((card) => {
+          push(card.heading);
+          push(card.body);
+        });
+        break;
+      case 'prose-block':
+        (section.sourceSegments ?? []).forEach((segment) => {
+          if ('text' in segment) push(segment.text);
+          if ('html' in segment) push(segment.html);
+        });
+        break;
+      case 'accordion':
+        (section.items ?? []).forEach((item) => {
+          push(item.heading);
+          push(item.body);
+        });
+        break;
+      case 'tabs':
+        (section.tabs ?? []).forEach((tab) => {
+          push(tab.label);
+          push(tab.heading);
+          push(tab.body);
+        });
+        break;
+      case 'modal':
+        push(section.triggerText);
+        push(section.heading);
+        push(section.body);
+        break;
+      default:
+        push((section as { title?: string }).title);
+        push((section as { heading?: string }).heading);
+    }
+
+    return [...values];
+  }
+
+  private extractSurfacePlanSectionImages(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '').trim();
+      if (cleaned) values.add(cleaned);
+    };
+    switch (section.type) {
+      case 'hero':
+        push(section.image?.src);
+        break;
+      case 'cover':
+        push(section.imageSrc);
+        break;
+      case 'media-text':
+        push(section.imageSrc);
+        break;
+      case 'card-grid':
+        (section.cards ?? []).forEach((card) => push(card.imageSrc));
+        break;
+      case 'carousel':
+        (section.slides ?? []).forEach((slide) => push(slide.imageSrc));
+        break;
+      case 'modal':
+        push(section.imageSrc);
+        break;
+      case 'post-featured-image':
+        push((section as { imageSrc?: string }).imageSrc);
+        break;
+    }
+    return [...values];
+  }
+
+  private extractSurfacePlanSectionCtas(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '').trim();
+      if (cleaned) values.add(cleaned);
+    };
+    if ('cta' in section && section.cta) {
+      push(section.cta.text);
+      push(section.cta.link);
+    }
+    if ('ctas' in section && Array.isArray(section.ctas)) {
+      section.ctas.forEach((cta) => {
+        push(cta?.text);
+        push(cta?.link);
+      });
+    }
+    if (section.type === 'newsletter') {
+      push(section.buttonText);
+    }
+    if (section.type === 'modal') {
+      push(section.triggerText);
+    }
+    return [...values];
+  }
+
+  private extractSurfacePlanItemCountHint(
+    section: SectionPlan,
+  ): number | undefined {
+    switch (section.type) {
+      case 'card-grid':
+        return section.cards?.length || undefined;
+      case 'carousel':
+        return section.slides?.length || undefined;
+      case 'accordion':
+        return section.items?.length || undefined;
+      case 'tabs':
+        return section.tabs?.length || undefined;
+      case 'media-text':
+        return section.listItems?.length || undefined;
+      default:
+        return undefined;
+    }
+  }
+
+  private inferSurfacePlanDensity(
+    sections: SectionPlan[] | undefined,
+  ): 'compact' | 'balanced' | 'airy' {
+    if (!sections?.length) return 'balanced';
+    const hasLargeOpening = sections.some(
+      (section) => section.type === 'hero' || section.type === 'cover',
+    );
+    const proseHeavy = sections.filter(
+      (section) =>
+        section.type === 'prose-block' ||
+        section.type === 'post-content' ||
+        section.type === 'page-content',
+    ).length;
+    if (hasLargeOpening && sections.length <= 4) return 'airy';
+    if (sections.length >= 7 || proseHeavy >= 2) return 'compact';
+    return 'balanced';
+  }
+
+  private buildSurfacePlanToneHints(
+    pageIntent: PlannerPageIntentKind,
+    sections: SectionPlan[] | undefined,
+    sourceEvidence?: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      paragraphSnippets?: string[];
+      navigationLabels?: string[];
+    },
+  ): string[] {
+    const hints = new Set<string>();
+    switch (pageIntent) {
+      case 'homepage-brand':
+      case 'homepage-hybrid':
+        hints.add('brand-forward');
+        hints.add('high-contrast opening hierarchy');
+        break;
+      case 'homepage-content':
+        hints.add('editorial homepage');
+        break;
+      case 'article':
+        hints.add('reading-first article presentation');
+        break;
+      case 'landing':
+        hints.add('campaign-style lead section');
+        break;
+      case 'service':
+        hints.add('service-oriented content grouping');
+        break;
+      default:
+        hints.add('source-faithful visual rhythm');
+    }
+    if (sections?.some((section) => section.type === 'media-text')) {
+      hints.add('asymmetric split-content moments');
+    }
+    if (sections?.some((section) => section.type === 'card-grid')) {
+      hints.add('repeated card-based content grouping');
+    }
+    if (sourceEvidence?.sourceFacts?.hasQuery) {
+      hints.add('content-discovery surface');
+    }
+    if ((sourceEvidence?.paragraphSnippets?.length ?? 0) >= 3) {
+      hints.add('editorial copy-led pacing');
+    }
+    if ((sourceEvidence?.navigationLabels?.length ?? 0) >= 5) {
+      hints.add('utility-rich navigation vocabulary');
+    }
+    return [...hints].slice(0, 5);
+  }
+
+  private mapSurfacePlanWidgetKind(
+    hint: string,
+  ): PlannerWidgetKind | undefined {
+    const normalized = hint.trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized.includes('search')) return 'search';
+    if (normalized.includes('comment')) return 'comments';
+    if (normalized.includes('gallery')) return 'gallery';
+    if (normalized.includes('tab')) return 'tabs';
+    if (normalized.includes('accordion')) return 'accordion';
+    if (normalized.includes('modal') || normalized.includes('popup'))
+      return 'modal';
+    if (normalized.includes('slider') || normalized.includes('carousel'))
+      return 'slider';
+    if (normalized.includes('nav') || normalized.includes('menu'))
+      return 'navigation';
+    if (normalized.includes('newsletter') || normalized.includes('subscribe')) {
+      return 'newsletter';
+    }
+    if (normalized.includes('query') || normalized.includes('post-list'))
+      return 'query';
+    return undefined;
+  }
+
+  private isHomeLikeComponentPlan(componentPlan: PlanResult[number]): boolean {
+    const template = componentPlan.templateName.toLowerCase();
+    return (
+      componentPlan.route === '/' ||
+      template === 'front-page' ||
+      template === 'frontend-page' ||
+      template === 'home' ||
+      template === 'index'
+    );
+  }
+
+  private isPostDetailComponentPlan(
+    componentPlan: PlanResult[number],
+  ): boolean {
+    const needs = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
+    return (
+      componentPlan.isDetail === true &&
+      (needs.has('postDetail') ||
+        componentPlan.templateName.toLowerCase().startsWith('single') ||
+        (componentPlan.route ?? '').startsWith('/post/'))
+    );
+  }
+
+  private inferHomeMode(
+    componentPlan: PlanResult[number],
+    clusters: Array<{ kind: PlannerClusterKind }>,
+  ): 'front-page' | 'posts-index' | 'hybrid-home' {
+    const template = componentPlan.templateName.toLowerCase();
+    const hasFeed = clusters.some((cluster) => cluster.kind === 'posts-feed');
+    if (template === 'front-page' || template === 'frontend-page') {
+      return hasFeed ? 'hybrid-home' : 'front-page';
+    }
+    if (template === 'home' || template === 'index') {
+      return hasFeed ? 'posts-index' : 'hybrid-home';
+    }
+    return hasFeed ? 'hybrid-home' : 'front-page';
+  }
+
+  private dedupeStringList(values: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(normalized);
+    }
+    return result;
   }
 
   private async requestVisualPlanCompletion(input: {
@@ -948,8 +2733,9 @@ export class PlannerService {
     const layout = this.deriveComponentLayout(
       tokens,
       componentPlan.componentName,
+      componentPlan.isDetail === true && componentPlan.route !== '/',
     );
-    const dataNeeds = this.toVisualDataNeeds(componentPlan.dataNeeds);
+    const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
     const base = {
       componentName: componentPlan.componentName,
       dataNeeds,
@@ -959,55 +2745,6 @@ export class PlannerService {
       blockStyles: tokens?.blockStyles,
     } as const;
     const strategy = getComponentStrategy(componentPlan.componentName);
-    const isFixedBoundPageDetail =
-      componentPlan.fixedSlug &&
-      componentPlan.type === 'page' &&
-      componentPlan.isDetail === true &&
-      dataNeeds.includes('pageDetail');
-
-    if (isFixedBoundPageDetail) {
-      const normalizedTemplate = this.normalizeTemplateIdentifier(
-        componentPlan.templateName,
-      );
-      const hasSidebarTemplate =
-        /sidebar/.test(normalizedTemplate) ||
-        /withsidebar|sidebar/i.test(componentPlan.componentName);
-      const showTitle = !/no.?title/i.test(componentPlan.componentName);
-      const richSections = this.buildRichBoundPageDetailSections(
-        componentPlan,
-        content,
-        tokens,
-      );
-      const fallbackPageContent = this.buildBoundPageContentFallbackSection(
-        componentPlan,
-        content,
-        showTitle,
-      );
-      const fallbackSidebarSection = {
-        type: 'sidebar' as const,
-        title: 'Explore',
-        showSiteInfo: false,
-        showPages: true,
-        showPosts: content.posts.length > 0,
-        maxItems: 8,
-      };
-      const sections = richSections?.length
-        ? hasSidebarTemplate &&
-          !richSections.some((section) => section.type === 'sidebar')
-          ? [...richSections, fallbackSidebarSection]
-          : richSections
-        : hasSidebarTemplate
-          ? [fallbackPageContent, fallbackSidebarSection]
-          : [fallbackPageContent];
-      return {
-        ...base,
-        layout: hasSidebarTemplate
-          ? { ...layout, contentLayout: 'sidebar-right' as const }
-          : layout,
-        sections,
-      };
-    }
-
     switch (strategy.kind) {
       case 'not-found':
         if (!strategy.deterministicFirst) return undefined;
@@ -1049,10 +2786,23 @@ export class PlannerService {
           sections: [
             {
               type: 'footer',
-              menuColumns: content.menus.slice(0, 3).map((menu) => ({
-                title: menu.name,
-                menuSlug: menu.slug,
-              })),
+              // Filter out menus whose name matches invented auxiliary labels
+              // (e.g. "Navigation") to avoid the footer section being pruned by
+              // pruneTrailingInventedAuxiliarySections when its only column is a
+              // generic "Navigation" menu. The auxiliary guard now also skips
+              // footer/navbar sections entirely, but keep this filter as defense-in-depth.
+              menuColumns: content.menus
+                .slice(0, 3)
+                .filter(
+                  (menu) =>
+                    !PLANNER_INVENTED_AUXILIARY_LABEL_SET.has(
+                      menu.name.trim().toLowerCase(),
+                    ),
+                )
+                .map((menu) => ({
+                  title: menu.name,
+                  menuSlug: menu.slug,
+                })),
               showSiteLogo: true,
               showSiteTitle: true,
               showTagline: true,
@@ -1067,9 +2817,12 @@ export class PlannerService {
             {
               type: 'sidebar',
               title: 'Explore',
-              showSiteInfo: false,
-              showPages: true,
-              showPosts: content.posts.length > 0,
+              widgets: [
+                { kind: 'pages-list', title: 'Pages' },
+                ...(content.posts.length > 0
+                  ? ([{ kind: 'recent-posts', title: 'Recent Posts' }] as const)
+                  : []),
+              ],
               maxItems: 6,
             },
           ],
@@ -1203,6 +2956,150 @@ export class PlannerService {
     }
   }
 
+  buildLayoutAnalysisArtifact(
+    theme: PhpParseResult | BlockParseResult,
+    content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
+  ): LayoutAnalysisArtifact {
+    if (theme.type !== 'fse') {
+      return createUnsupportedLayoutAnalysisArtifact({
+        parserType: theme.type,
+        supportReason:
+          'Layout analysis artifact currently supports only FSE themes.',
+        manifest: repoManifest,
+        resolvedSource: repoManifest?.resolvedSource,
+        content,
+      });
+    }
+
+    const detectedThemeKind = repoManifest?.themeTypeHints.detectedThemeKind;
+    if (
+      detectedThemeKind &&
+      detectedThemeKind !== 'block' &&
+      detectedThemeKind !== 'hybrid'
+    ) {
+      return createUnsupportedLayoutAnalysisArtifact({
+        parserType: theme.type,
+        supportReason: `Theme kind "${detectedThemeKind}" is outside the current deterministic FSE scope.`,
+        manifest: repoManifest,
+        resolvedSource: repoManifest?.resolvedSource,
+        content,
+      });
+    }
+
+    const sourceMap = new Map<string, string>();
+    const allTemplates = [...theme.templates, ...theme.parts];
+    for (const template of allTemplates) {
+      sourceMap.set(template.name, template.markup);
+    }
+
+    const candidatePlans = this.enrichPlan(
+      theme.parts
+        .map((part) => ({
+          templateName: part.name,
+          componentName: this.toComponentName(part.name),
+          type: 'partial' as const,
+          route: null,
+          dataNeeds: [],
+          isDetail: false,
+          description: `Deterministic layout analysis for ${part.name}`,
+        }))
+        .filter((plan) => isSharedChromePartialComponent(plan.componentName)),
+      sourceMap,
+    );
+
+    const globalPalette = this.deriveGlobalPalette(theme.tokens);
+    const globalTypography = this.deriveGlobalTypography(theme.tokens);
+    const hasSharedLayoutPartials = candidatePlans.length > 0;
+
+    const components = candidatePlans.map((componentPlan) => {
+      const templateSource = sourceMap.get(componentPlan.templateName) ?? '';
+      const sourceCandidates = this.buildPlanningSourceCandidates(
+        componentPlan,
+        templateSource,
+        sourceMap,
+        content,
+        repoManifest,
+      );
+      const preferredSource = sourceCandidates[0];
+      const planningSource = preferredSource
+        ? this.buildPlanningSourceContextFromResolvedSource(
+            componentPlan,
+            preferredSource,
+            hasSharedLayoutPartials,
+            theme.tokens,
+            sourceCandidates,
+          )
+        : undefined;
+      const draftSections = this.buildDraftSectionsForPlanningSource(
+        planningSource,
+        componentPlan,
+        theme.tokens,
+      );
+      const draftBlockTree = this.buildDraftBlockTreeForPlanningSource(
+        planningSource,
+        componentPlan,
+        theme.tokens,
+      );
+      const visualPlan = this.buildBlockTreeDrivenVisualPlanForComponent({
+        componentPlan,
+        draftSections,
+        draftBlockTree,
+        content,
+        tokens: theme.tokens,
+        globalPalette,
+        globalTypography,
+      });
+      const renderContract = buildComponentRenderContract({
+        componentName: componentPlan.componentName,
+        templateName: componentPlan.templateName,
+        planningSourceFile: planningSource?.sourceFile,
+        planningSourceSummary: planningSource?.sourceAnalysis,
+        sectionTypes: visualPlan?.sections.map((section) => section.type),
+        fallbackSections: draftSections,
+        visualRenderMode: visualPlan?.renderMode,
+        deterministicAuthority: visualPlan?.deterministicAuthority,
+        draftBlockTree,
+      });
+
+      const reason = !planningSource
+        ? 'No planning source could be resolved for this shared chrome component.'
+        : !draftBlockTree?.length
+          ? 'Planning source was resolved, but it did not produce a usable block tree.'
+          : visualPlan?.deterministicAuthority === true
+            ? 'Resolved FSE source produced a block tree and deterministic visual plan; downstream codegen should preserve structure and bind data only.'
+            : 'Block tree was recovered, but no deterministic shared-chrome visual plan was produced yet.';
+
+      return buildLayoutAnalysisComponentEntry({
+        templateName: componentPlan.templateName,
+        componentName: componentPlan.componentName,
+        componentType: componentPlan.type,
+        dataNeeds: componentPlan.dataNeeds,
+        planningSource,
+        sourceCandidates,
+        draftBlockTree,
+        draftSections,
+        renderContract,
+        visualPlan,
+        reason,
+      });
+    });
+
+    return createLayoutAnalysisArtifact({
+      parserType: theme.type,
+      manifest: repoManifest,
+      resolvedSource: repoManifest?.resolvedSource,
+      content,
+      components,
+    });
+  }
+
+  buildDeterministicRenderContractArtifact(
+    plan: PlanResult,
+  ): DeterministicRenderContractArtifact {
+    return buildDeterministicRenderContractArtifact(plan);
+  }
+
   private buildPlannerArtifactPath(logPath: string, fileName: string): string {
     const normalized = logPath.replace(/\\/g, '/');
     const baseDir = normalized.endsWith('.json')
@@ -1326,6 +3223,7 @@ export class PlannerService {
   private deriveComponentLayout(
     tokens: ThemeTokens | undefined,
     componentName: string,
+    isDetailPage: boolean = false,
   ): LayoutTokens {
     const d: ThemeDefaults = tokens?.defaults ?? {};
     const imageRadius =
@@ -1343,12 +3241,15 @@ export class PlannerService {
       tokens?.blockStyles?.quote?.spacing?.padding ??
       tokens?.blockStyles?.pullquote?.spacing?.padding;
     const isSidebarLayout = /WithSidebar$/i.test(componentName);
+    const isCanonicalSingleWithSidebar = /^SingleWithSidebar$/i.test(
+      componentName,
+    );
 
-    // WordPress contentSize is usually the prose/article width, not the outer
-    // shell width for heroes, cards, grids, headers, footers, or sidebars.
-    // Likewise, rootPadding from theme defaults is a site-shell concern and is
-    // intentionally NOT propagated into per-component layout tokens, because it
-    // causes generated pages to double-pad and look unnaturally narrow.
+    // containerClass wraps each section at wideSize so wide/full-aligned blocks
+    // can span the full allowed width. contentContainerClass constrains prose
+    // and inline content to contentSize. Both rules apply to all page types —
+    // using contentSize as the section container incorrectly clips full-width
+    // sections on bound-page templates (title1, senior-swe, etc.).
     const sectionMaxW = d.wideWidth ?? d.contentWidth ?? '1280px';
     const contentMaxW = d.contentWidth ?? '800px';
     // Clamp wide width to a sane upper bound — some themes set wideSize to
@@ -1371,7 +3272,8 @@ export class PlannerService {
       contentContainerClass,
       blockGap,
       contentLayout: isSidebarLayout ? 'sidebar-right' : 'single-column',
-      sidebarWidth: '320px',
+      sidebarWidth: isCanonicalSingleWithSidebar ? '30%' : '320px',
+      sidebarScope: isCanonicalSingleWithSidebar ? 'all-content' : 'main-only',
       buttonPadding: d.buttonPadding,
       imageRadius,
       cardRadius,
@@ -1531,6 +3433,9 @@ export class PlannerService {
       const templateBase = item.templateName
         .replace(/\.(php|html)$/i, '')
         .toLowerCase();
+      const isSidebarLike =
+        /(^|[\s/_-])sidebar(?:$|[\s/_-])/.test(componentKey) ||
+        templateBase.includes('sidebar');
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'frontend-page';
       const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
@@ -1558,6 +3463,29 @@ export class PlannerService {
         source.includes('wp:site-tagline')
       )
         if (ownsSharedChromeData) needs.add('site-info');
+      if (
+        isSidebarLike &&
+        (source.includes('wp:post-author-biography') ||
+          source.includes('"post-author-biography"') ||
+          source.includes('wp:avatar') ||
+          source.includes('"avatar"'))
+      ) {
+        needs.add('posts');
+        needs.add('site-info');
+      }
+      if (
+        isSidebarLike &&
+        (source.includes('wp:categories') || source.includes('"categories"'))
+      ) {
+        needs.add('posts');
+      }
+      if (
+        isSidebarLike &&
+        (source.includes('wp:latest-posts') ||
+          source.includes('"latest-posts"'))
+      ) {
+        needs.add('posts');
+      }
 
       // Classic PHP theme
       if (
@@ -1607,6 +3535,106 @@ export class PlannerService {
       }
 
       return { ...item, dataNeeds: Array.from(needs) };
+    });
+  }
+
+  private applyDeterministicRouteContracts(
+    plan: PlanResult,
+    content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
+  ): PlanResult {
+    return plan.map((item) => {
+      const concretePageBindings =
+        item.type === 'page' && !item.fixedSlug
+          ? this.findConcretePagesForTemplate(item, content)
+          : [];
+      const repoRouteHints = buildRepoRouteHints(
+        item.templateName,
+        repoManifest,
+      );
+      const shouldPromoteToExactPageBinding =
+        item.type === 'page' &&
+        concretePageBindings.length > 0 &&
+        !item.fixedSlug &&
+        !item.dataNeeds.includes('post-detail');
+
+      const contract = shouldPromoteToExactPageBinding
+        ? {
+            ...inferDeterministicRouteContract({
+              templateName: item.templateName,
+              componentName: item.componentName,
+              type: item.type,
+              route: '/page/:slug',
+              dataNeeds: [...item.dataNeeds, 'page-detail'],
+              isDetail: true,
+              fixedPageId: item.fixedPageId,
+              draftBlockTree: item.draftBlockTree,
+              renderContract: item.renderContract,
+              planningSourceFile: item.planningSourceFile,
+              planningSourceLabel: item.planningSourceLabel,
+              planningSourceSummary: item.planningSourceSummary,
+              hasConcretePageBindings: true,
+              repoRouteHints,
+            }),
+            route: '/page/:slug',
+            isDetail: true,
+            requiredDataNeeds: ['page-detail'] as const,
+          }
+        : inferDeterministicRouteContract({
+            templateName: item.templateName,
+            componentName: item.componentName,
+            type: item.type,
+            route: item.route,
+            dataNeeds: item.dataNeeds,
+            isDetail: item.isDetail,
+            fixedSlug: item.fixedSlug,
+            fixedPageId: item.fixedPageId,
+            draftBlockTree: item.draftBlockTree,
+            renderContract: item.renderContract,
+            planningSourceFile: item.planningSourceFile,
+            planningSourceLabel: item.planningSourceLabel,
+            planningSourceSummary: item.planningSourceSummary,
+            hasConcretePageBindings: concretePageBindings.length > 0,
+            repoRouteHints,
+          });
+
+      const normalizedNeeds = new Set(item.dataNeeds);
+      for (const disallowedNeed of contract.disallowedDetailDataNeeds) {
+        normalizedNeeds.delete(disallowedNeed);
+      }
+      for (const requiredNeed of contract.requiredDataNeeds) {
+        normalizedNeeds.add(requiredNeed);
+      }
+
+      return {
+        ...item,
+        type: contract.type,
+        route: contract.route,
+        isDetail: contract.isDetail,
+        dataNeeds: this.orderPlannerDataNeeds([...normalizedNeeds]),
+        planningSourceLabel:
+          item.planningSourceLabel ??
+          (repoRouteHints ? `repo-chain:${item.templateName}` : undefined),
+        planningSourceFile:
+          item.planningSourceFile ?? repoRouteHints?.entryFile,
+        planningSourceSummary:
+          item.planningSourceSummary ??
+          (repoRouteHints
+            ? [
+                repoRouteHints.templatePartArea
+                  ? `templatePartArea=${repoRouteHints.templatePartArea}`
+                  : null,
+                repoRouteHints.blockTypes.length > 0
+                  ? `entryChainBlocks=${repoRouteHints.blockTypes.join(', ')}`
+                  : null,
+                repoRouteHints.notes.length > 0
+                  ? `entryChainNotes=${repoRouteHints.notes.join(', ')}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' | ')
+            : undefined),
+      };
     });
   }
 
@@ -1668,6 +3696,21 @@ export class PlannerService {
     return result;
   }
 
+  private orderPlannerDataNeeds(dataNeeds: string[]): string[] {
+    const order = [
+      'post-detail',
+      'page-detail',
+      'categoryDetail',
+      'comments',
+      'posts',
+      'pages',
+      'menus',
+      'site-info',
+      'footer-links',
+    ];
+    return order.filter((need) => dataNeeds.includes(need));
+  }
+
   private shouldExpandConcretePages(item: PlanResult[number]): boolean {
     if (item.type !== 'page') return false;
     if (!item.isDetail) return false;
@@ -1675,11 +3718,7 @@ export class PlannerService {
 
     const normalizedNeeds = new Set(item.dataNeeds.map((need) => need.trim()));
     if (!normalizedNeeds.has('page-detail')) return false;
-
-    const templateBase = item.templateName
-      .replace(/\.(php|html)$/i, '')
-      .toLowerCase();
-    return templateBase.startsWith('page') || templateBase === 'frontend-page';
+    return true;
   }
 
   private findConcretePagesForTemplate(
@@ -1782,18 +3821,23 @@ For each template, decide:
 7. Avoid generic descriptions like "page showing content" when the source clearly contains richer structure.
 
 ── ROUTING RULES ──────────────────────────────────────────────────────────────
-- frontend-page → route "/"
-- home → route "/" ONLY when no frontend-page template exists; otherwise route "/blog"
-- index → route "/" ONLY when neither frontend-page nor home exists; otherwise route "/index"
+ - frontend-page OR front-page → highest-priority home route "/"
+ - If both a front-page-like template and a posts-index template exist:
+   use home for "/blog" only when there is real dedicated home source evidence; otherwise let index own "/blog"
+ - index → route "/" only when there is no higher-priority front-page/home template.
+   If front-page owns "/", index may be "/blog" when it is the posts index fallback, otherwise "/index"
 - archive → route "/archive"  (WordPress archive fallback: handles category/tag/author/date archives — App.tsx will register alias routes /category/:slug, /author/:slug, /tag/:slug pointing to this component)
 - search → route "/search"
 - 404 → route "*"
 - single / single-post → route "/post/:slug"   (isDetail: true)
 - page (the default page template) → route "/page/:slug"   (isDetail: true)
-- Every OTHER page template → route "/<exact-template-name>/:slug"  (isDetail: true)
-  e.g. template "single-with-sidebar" → "/single-with-sidebar/:slug"
-       template "page-custom"         → "/page-custom/:slug"
-  The route segment MUST match the template name exactly — do NOT invent a different name.
+- page-* templates may use "/<exact-template-name>/:slug" ONLY when they are acting as page-detail templates
+  and are expected to materialize exact DB-backed pages later.
+- Custom templates that are NOT clear singular detail templates should default to a static route
+  "/<exact-template-name>" with isDetail: false.
+- Do NOT assume every custom template is a slug-detail page.
+- If a custom template has clear DB page bindings, prefer exact bound page components with fixedSlug
+  over inventing a generic "/template-name/:slug" route.
 - header / footer / sidebar / nav / navigation / searchform / comments / comment /
   post-meta / widget / breadcrumb / pagination / loop / content-none / no-results /
   functions → type "partial", route null
@@ -1802,8 +3846,9 @@ For each template, decide:
 Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
-- "page-detail"  → ONLY for page templates (route /page/:slug or /page-*/:slug)
+- "page-detail"  → ONLY for true page-detail templates or exact bound DB pages
 - Page templates MUST use "page-detail" — NEVER "post-detail"
+- Static custom templates MUST NOT keep "post-detail" or "page-detail" unless they are truly singular/detail routes
 - Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
 - Archive / listing pages use "posts", not "post-detail"
 - Dedicated Header / Navigation partials may include "menus"
@@ -2190,6 +4235,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         sourceMap,
         content,
         hasSharedLayoutPartials,
+        tokens,
         repoManifest,
       ) =>
         this.buildPlanningSourceContext(
@@ -2198,17 +4244,20 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           sourceMap,
           content,
           hasSharedLayoutPartials,
+          tokens,
           repoManifest,
         ),
       buildPlanningSourceContextFromResolvedSource: (
         componentPlan,
         preferredSource,
         hasSharedLayoutPartials,
+        tokens,
       ) =>
         this.buildPlanningSourceContextFromResolvedSource(
           componentPlan as PlanResult[number],
           preferredSource,
           hasSharedLayoutPartials,
+          tokens,
         ),
       buildDraftSectionsForPlanningSource: (
         planningSource,
@@ -2220,16 +4269,41 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           componentPlan as PlanResult[number],
           tokens,
         ),
+      buildDraftBlockTreeForPlanningSource: (
+        planningSource,
+        componentPlan,
+        tokens,
+      ) =>
+        this.buildDraftBlockTreeForPlanningSource(
+          planningSource,
+          componentPlan as PlanResult[number],
+          tokens,
+        ),
+      buildSurfacePlanForComponent: (input) =>
+        this.buildSurfacePlanForComponent({
+          componentPlan: input.componentPlan as PlanResult[number],
+          content: input.content,
+          planningSource: input.planningSource,
+          draftSections: input.draftSections,
+          draftBlockTree: input.draftBlockTree,
+          visualPlan: input.visualPlan,
+          detectedCustomClassNames: input.detectedCustomClassNames,
+          sourceWidgetHints: input.sourceWidgetHints,
+          hasSharedLayoutPartials: input.hasSharedLayoutPartials,
+          globalPalette: input.globalPalette,
+          globalTypography: input.globalTypography,
+          tokens: input.tokens,
+        }),
       collectDraftCustomClassNames: (draftSections) =>
         this.collectDraftCustomClassNames(draftSections),
       detectInteractiveWidgetsFromSource: (source) =>
-        this.detectInteractiveWidgetsFromSource(source),
+        detectInteractiveWidgetsFromSource(source),
       extractHeadingTextsFromSource: (source) =>
-        this.extractHeadingTextsFromSource(source),
+        extractHeadingTextsFromSource(source),
       countDraftSectionsInSource: (source) =>
-        this.countDraftSectionsInSource(source),
+        countDraftSectionsInSource(source),
       scorePlanningSourceRichness: (source) =>
-        this.scorePlanningSourceRichness(source),
+        scorePlanningSourceRichness(source),
       findRepresentativePagesForTemplate: (componentPlan, content) =>
         this.findRepresentativePagesForTemplate(
           componentPlan as PlanResult[number],
@@ -2258,8 +4332,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           },
         );
       },
-      deriveComponentLayout: (tokens, componentName) =>
-        this.deriveComponentLayout(tokens, componentName),
+      deriveComponentLayout: (tokens, componentName, isDetailPage) =>
+        this.deriveComponentLayout(tokens, componentName, isDetailPage),
       mergeDraftSectionPresentation: (sections, draftSections, contract) =>
         this.mergeDraftSectionPresentation(sections, draftSections, contract),
     };
@@ -2274,14 +4348,18 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     const effectiveDraft = contract
       ? sanitizeSectionsForContract(draftSections, contract).sections
       : draftSections;
+    const mergeMode = this.shouldUseLightDraftMerge(contract)
+      ? 'light'
+      : 'full';
     return sections.map((section, index) =>
-      this.mergeDraftSection(section, effectiveDraft[index]),
+      this.mergeDraftSection(section, effectiveDraft[index], mergeMode),
     );
   }
 
   private mergeDraftSection(
     section: SectionPlan,
     draft?: SectionPlan,
+    mergeMode: 'light' | 'full' = 'full',
   ): SectionPlan {
     if (!draft) return section;
     // Always carry debug/source trace fields regardless of type
@@ -2295,20 +4373,40 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       };
     }
 
-    const mergedBase = {
+    const traceBase = {
       ...section,
       ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
       ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
-      ...(draft.background ? { background: draft.background } : {}),
-      ...(draft.textColor ? { textColor: draft.textColor } : {}),
-      ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
-      ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
-      ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+      ...(draft.customClassNames?.length
+        ? {
+            customClassNames: this.dedupeStringList([
+              ...(section.customClassNames ?? []),
+              ...draft.customClassNames,
+            ]),
+          }
+        : {}),
+      ...(draft.obligation && !section.obligation
+        ? { obligation: draft.obligation }
+        : {}),
     };
+    const mergedBase =
+      mergeMode === 'light'
+        ? traceBase
+        : {
+            ...traceBase,
+            ...(draft.background ? { background: draft.background } : {}),
+            ...(draft.textColor ? { textColor: draft.textColor } : {}),
+            ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
+            ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
+            ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+          };
 
     switch (section.type) {
       case 'navbar': {
         const navbarDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           menuSlug: navbarDraft.menuSlug ?? section.menuSlug,
@@ -2339,6 +4437,15 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       case 'footer': {
         const footerDraft = draft as any;
         const footerSection = section as any;
+        if (mergeMode === 'light') {
+          return {
+            ...mergedBase,
+            menuColumns:
+              (footerDraft.menuColumns?.length ?? 0) > 0
+                ? footerDraft.menuColumns
+                : footerSection.menuColumns,
+          } as SectionPlan;
+        }
         return {
           ...mergedBase,
           menuColumns:
@@ -2360,13 +4467,13 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           ...(footerDraft.logoWidth
             ? { logoWidth: footerDraft.logoWidth }
             : {}),
-          ...(footerDraft.brandDescription
-            ? { brandDescription: footerDraft.brandDescription }
-            : {}),
         } as SectionPlan;
       }
       case 'hero': {
         const heroDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           ...(heroDraft.headingStyle
@@ -2379,6 +4486,12 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       }
       case 'cover': {
         const coverDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return {
+            ...mergedBase,
+            minHeight: coverDraft.minHeight ?? section.minHeight,
+          } as SectionPlan;
+        }
         return {
           ...mergedBase,
           minHeight: coverDraft.minHeight ?? section.minHeight,
@@ -2403,13 +4516,16 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         return {
           ...mergedBase,
           cards: mergedCards,
-          ...(cardGridDraft.columnWidths
+          ...(mergeMode === 'full' && cardGridDraft.columnWidths
             ? { columnWidths: cardGridDraft.columnWidths }
             : {}),
         } as SectionPlan;
       }
       case 'media-text': {
         const mediaTextDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           ...(mediaTextDraft.columnWidths
@@ -2455,7 +4571,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         return {
           ...mergedBase,
           items: draftItems.length > aiItems.length ? draftItems : aiItems,
-          ...(typeof accordionDraft.allowMultiple === 'boolean'
+          ...(mergeMode === 'full' &&
+          typeof accordionDraft.allowMultiple === 'boolean'
             ? { allowMultiple: accordionDraft.allowMultiple }
             : {}),
         } as SectionPlan;
@@ -2463,6 +4580,61 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       default:
         return mergedBase as SectionPlan;
     }
+  }
+
+  private injectMissingDraftSections(
+    sections: SectionPlan[],
+    draftSections: SectionPlan[] | undefined,
+    contract: VisualPlanContract | undefined,
+    componentName: string,
+  ): SectionPlan[] {
+    if (!draftSections?.length) return sections;
+
+    const effectiveDraft = contract
+      ? sanitizeSectionsForContract(draftSections, contract).sections
+      : draftSections;
+
+    if (!effectiveDraft.length) return sections;
+    if (this.shouldSkipFullDraftInjection(contract)) {
+      return sections;
+    }
+
+    // AI-generated sections never carry debugKey/sectionKey (those come from the
+    // draft mapper). Using key-based matching would always see an empty coveredKeys
+    // set and inject every draft section on top of the AI output, doubling content.
+    // Type-count comparison is the correct signal: if AI produced N sections of a
+    // given type and the draft has M > N, inject the remaining M-N from the draft.
+    const planTypeCounts = new Map<string, number>();
+    for (const s of sections) {
+      planTypeCounts.set(s.type, (planTypeCounts.get(s.type) ?? 0) + 1);
+    }
+
+    const draftTypeConsumed = new Map<string, number>();
+    const toInject: SectionPlan[] = [];
+
+    for (const draft of effectiveDraft) {
+      const consumed = draftTypeConsumed.get(draft.type) ?? 0;
+      const planCount = planTypeCounts.get(draft.type) ?? 0;
+      if (consumed >= planCount) {
+        toInject.push(draft);
+      }
+      draftTypeConsumed.set(draft.type, consumed + 1);
+    }
+
+    if (!toInject.length) return sections;
+
+    this.logger.warn(
+      `[Visual Plan] "${componentName}": injecting ${toInject.length} missing draft section(s) not generated by AI: ${toInject.map((s) => s.debugKey ?? s.sectionKey ?? s.type).join(', ')}`,
+    );
+    return [...sections, ...toInject];
+  }
+
+  private shouldUseLightDraftMerge(contract?: VisualPlanContract): boolean {
+    return contract?.componentType === 'page';
+  }
+
+  private shouldSkipFullDraftInjection(contract?: VisualPlanContract): boolean {
+    return contract?.componentType === 'page';
   }
 
   private applyRepoInteractiveDefaults(
@@ -2492,11 +4664,6 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
                 ? {}
                 : defaults.height
                   ? { height: defaults.height }
-                  : {}),
-              ...(section.overlayColor
-                ? {}
-                : defaults.overlayColor
-                  ? { overlayColor: defaults.overlayColor }
                   : {}),
             } as SectionPlan;
           }
@@ -2660,6 +4827,8 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - Pages must have a non-null route starting with "/"
 - Partials must have route: null, isDetail: false
 - isDetail must be true when route contains :slug
+- Custom templates without clear singular/detail evidence should stay static (\`/template-name\`), not \`/template-name/:slug\`
+- Do not keep \`post-detail\` or \`page-detail\` on static custom templates
 - Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
 - description must stay specific and source-backed; mention major layout/widgets when visible
 
@@ -2765,35 +4934,59 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     tokens: ThemeTokens | undefined,
   ): ReturnType<typeof mapWpNodesToDraftSections> | undefined {
     try {
-      const sources: PlanningSourceSupplement[] = [
-        {
-          source: planningSource?.source ?? '',
-          label: planningSource?.sourceLabel ?? componentPlan.templateName,
-          templateName:
-            planningSource?.sourceTemplateName ?? componentPlan.templateName,
-          sourceFile:
-            planningSource?.sourceFile ??
-            inferFseSourceFile(componentPlan.templateName, componentPlan.type),
-        },
-        ...(planningSource?.supplementalSources ?? []),
-      ].filter((entry) => entry.source.trim().length > 0);
+      const sources: Array<PlanningSourceSupplement & { isPrimary?: boolean }> =
+        [
+          {
+            source: planningSource?.source ?? '',
+            label: planningSource?.sourceLabel ?? componentPlan.templateName,
+            templateName:
+              planningSource?.sourceTemplateName ?? componentPlan.templateName,
+            sourceFile:
+              planningSource?.sourceFile ??
+              inferFseSourceFile(
+                componentPlan.templateName,
+                componentPlan.type,
+              ),
+            canonicalSource: planningSource?.canonicalSource,
+            isPrimary: true,
+          },
+          ...(planningSource?.supplementalSources ?? []),
+        ].filter((entry) => entry.source.trim().length > 0);
       if (sources.length === 0) return undefined;
 
       let mergedDraft: SectionPlan[] = [];
       let expectedCoverageUnits = 0;
       for (const source of sources) {
-        const parsedNodes = this.parsePlanningSourceNodes({
-          source: source.source,
-          templateName: source.templateName ?? componentPlan.templateName,
-          sourceFile:
-            source.sourceFile ??
-            inferFseSourceFile(componentPlan.templateName, componentPlan.type),
-        });
-        if (parsedNodes.length === 0) continue;
-
-        const nodes = this.styleResolver.resolve(parsedNodes, tokens);
+        const nodes = source.canonicalSource?.resolvedNodes?.length
+          ? source.canonicalSource.resolvedNodes
+          : this.styleResolver.resolve(
+              this.parsePlanningSourceNodes({
+                source: source.source,
+                templateName: source.templateName ?? componentPlan.templateName,
+                sourceFile:
+                  source.sourceFile ??
+                  inferFseSourceFile(
+                    componentPlan.templateName,
+                    componentPlan.type,
+                  ),
+              }),
+              tokens,
+            );
+        if (nodes.length === 0) continue;
+        // For fixed page-detail routes, use the lossless mapper so that the
+        // full block structure of the actual DB page is preserved in the draft.
+        // The standard mapper is too aggressive at collapsing prose into single
+        // hero sections, losing heading hierarchy and layout fidelity.
+        const useLosslessDraft =
+          componentPlan.isDetail === true &&
+          componentPlan.fixedSlug != null &&
+          source.label?.startsWith('db:bound-page:')
+            ? true
+            : this.shouldUseLosslessPlanningDraft(componentPlan, nodes);
         const draft = this.filterDegenerateDraftSections(
-          mapWpNodesToDraftSections(nodes),
+          useLosslessDraft
+            ? mapWpNodesToLosslessPageSections(nodes)
+            : mapWpNodesToDraftSections(nodes),
         );
         if (draft.length === 0) continue;
         expectedCoverageUnits += this.countCoverageUnits(draft);
@@ -2801,13 +4994,24 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         mergedDraft = this.mergeDraftSectionsAcrossSources(mergedDraft, draft);
       }
 
+      // Deduplicate listing sections that appear more than once due to multiple
+      // sources all containing the same query loop (e.g. archive.html + archive.php).
+      const listingTypes = new Set(['post-list', 'search']);
+      const seenListingTypes = new Set<string>();
+      mergedDraft = mergedDraft.filter((s) => {
+        if (!listingTypes.has(s.type)) return true;
+        if (seenListingTypes.has(s.type)) return false;
+        seenListingTypes.add(s.type);
+        return true;
+      });
+
       if (mergedDraft.length === 0) return undefined;
 
       const sanitizedSections = sanitizeSectionsForContract(mergedDraft, {
         componentType: componentPlan.type,
         route: componentPlan.route,
         isDetail: componentPlan.isDetail,
-        dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+        dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
         stripLayoutChrome: componentPlan.type === 'page',
         sourceBackedAuxiliaryLabels:
           planningSource?.sourceBackedAuxiliaryLabels ?? [],
@@ -2815,6 +5019,24 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const filteredSections =
         this.filterDegenerateDraftSections(sanitizedSections);
       if (filteredSections.length === 0) return undefined;
+
+      const semanticPartialDraft = this.buildSemanticPartialDraftSections({
+        componentPlan,
+        source: sources.map((entry) => entry.source).join('\n\n'),
+        sections: filteredSections,
+      });
+      if (semanticPartialDraft?.length) {
+        return semanticPartialDraft;
+      }
+
+      if (
+        this.shouldBypassCoverageAuditForBlockTreeListingPlan(
+          componentPlan,
+          filteredSections,
+        )
+      ) {
+        return filteredSections;
+      }
 
       const coverageAudit = this.assessPlanningSourceDraftCoverage({
         componentPlan,
@@ -2824,7 +5046,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       });
       if (!coverageAudit.ok) {
         this.logger.warn(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+          this.formatPhaseCLog(
+            `"${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+          ),
         );
         return undefined;
       }
@@ -2835,12 +5059,537 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
+  private augmentDraftSectionsWithSourceWidgets(input: {
+    draftSections?: SectionPlan[];
+    planningSource?: PlanningSourceContext;
+    sourceWidgetHints?: string[];
+    componentName: string;
+  }): SectionPlan[] | undefined {
+    const baseSections = input.draftSections ? [...input.draftSections] : [];
+    const hints = new Set(input.sourceWidgetHints ?? []);
+    if (hints.size === 0) {
+      return input.draftSections;
+    }
+
+    const widgetSectionTypes = new Map<string, SectionPlan['type']>([
+      ['accordion', 'accordion'],
+      ['tabs', 'tabs'],
+      ['modal', 'modal'],
+      ['slider', 'carousel'],
+      ['carousel', 'carousel'],
+    ]);
+
+    const missingHints = [...hints].filter((hint) => {
+      const sectionType = widgetSectionTypes.get(hint);
+      return (
+        sectionType &&
+        !baseSections.some((section) => section.type === sectionType)
+      );
+    });
+    if (missingHints.length === 0) {
+      return input.draftSections;
+    }
+
+    const resolvedNodes =
+      input.planningSource?.canonicalSource?.resolvedNodes ?? [];
+    if (resolvedNodes.length === 0) {
+      return input.draftSections;
+    }
+
+    const injected: SectionPlan[] = [];
+    const visit = (node: WpNode) => {
+      for (const hint of [...missingHints]) {
+        if (!this.matchesRequiredWidgetHint(node, hint)) continue;
+        const expectedType = widgetSectionTypes.get(hint);
+        if (!expectedType) continue;
+        const mappedSections = this.filterDegenerateDraftSections(
+          mapWpNodesToDraftSections([node]),
+        );
+        const recovered = mappedSections.find(
+          (section) => section.type === expectedType,
+        );
+        if (!recovered) continue;
+        baseSections.push(recovered);
+        injected.push(recovered);
+        missingHints.splice(missingHints.indexOf(hint), 1);
+        break;
+      }
+      if (missingHints.length === 0) return;
+      for (const child of node.children ?? []) {
+        visit(child);
+        if (missingHints.length === 0) return;
+      }
+    };
+
+    for (const node of resolvedNodes) {
+      visit(node);
+      if (missingHints.length === 0) break;
+    }
+
+    if (injected.length > 0) {
+      this.logger.warn(
+        this.formatPhaseCLog(
+          `"${input.componentName}": injected ${injected.length} nested source widget fallback section(s): ${injected
+            .map(
+              (section) =>
+                section.debugKey ?? section.sectionKey ?? section.type,
+            )
+            .join(', ')}`,
+        ),
+      );
+    }
+
+    return injected.length > 0 ? baseSections : input.draftSections;
+  }
+
+  private matchesRequiredWidgetHint(node: WpNode, hint: string): boolean {
+    const block = String(node.block ?? '')
+      .trim()
+      .toLowerCase();
+    switch (hint) {
+      case 'accordion':
+        return /\b(accordion|faq|content-toggle|toggle|details)\b/.test(block);
+      case 'tabs':
+        return /\btabs\b/.test(block);
+      case 'modal':
+        return /\b(modal|popup|dialog)\b/.test(block);
+      case 'slider':
+      case 'carousel':
+        return /\b(slider|carousel)\b/.test(block);
+      default:
+        return false;
+    }
+  }
+
+  private buildDraftBlockTreeForPlanningSource(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlanResult[number],
+    tokens: ThemeTokens | undefined,
+  ): BlockNode[] | undefined {
+    try {
+      if (planningSource?.canonicalSource?.blockTree?.length) {
+        return planningSource.canonicalSource.blockTree;
+      }
+
+      const source = planningSource?.source?.trim() ?? '';
+      if (!source) return undefined;
+
+      const parsedNodes = this.parsePlanningSourceNodes({
+        source,
+        templateName:
+          planningSource?.sourceTemplateName ?? componentPlan.templateName,
+        sourceFile:
+          planningSource?.sourceFile ??
+          inferFseSourceFile(componentPlan.templateName, componentPlan.type),
+      });
+      if (parsedNodes.length === 0) return undefined;
+
+      const nodes = this.styleResolver.resolve(parsedNodes, tokens);
+      const blockTree = mapWpNodesToBlockTree(nodes);
+      return blockTree.length > 0 ? blockTree : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private buildBlockTreeDrivenVisualPlanForComponent(input: {
+    componentPlan: PlanResult[number];
+    draftSections?: SectionPlan[];
+    draftBlockTree?: BlockNode[];
+    content: DbContentResult;
+    tokens: ThemeTokens | undefined;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+  }): ComponentVisualPlan | undefined {
+    return buildBlockTreeDrivenVisualPlanForComponent({
+      ...input,
+      deriveComponentLayout: (tokens, componentName, isDetailPage) =>
+        this.deriveComponentLayout(tokens, componentName, isDetailPage),
+      buildRichBoundPageDetailSections: (componentPlan, content, tokens) =>
+        this.buildRichBoundPageDetailSections(
+          componentPlan as ComponentPlan,
+          content,
+          tokens,
+        ),
+      buildBoundPageContentFallbackSection: (
+        componentPlan,
+        content,
+        showTitle,
+      ) =>
+        this.buildBoundPageContentFallbackSection(
+          componentPlan as ComponentPlan,
+          content,
+          showTitle,
+        ),
+    });
+  }
+
+  private shouldBypassCoverageAuditForBlockTreeListingPlan(
+    componentPlan: PlanResult[number],
+    sections: SectionPlan[],
+  ): boolean {
+    return shouldBypassCoverageAuditForBlockTreeListingPlan(
+      componentPlan,
+      sections,
+    );
+  }
+
+  private shouldShortCircuitBlockTreeVisualPlan(
+    componentPlan: PlanResult[number],
+    draftBlockTree?: BlockNode[],
+  ): boolean {
+    return shouldShortCircuitBlockTreeVisualPlan(componentPlan, draftBlockTree);
+  }
+
+  private shouldUseLosslessPlanningDraft(
+    componentPlan: PlanResult[number],
+    nodes: WpNode[],
+  ): boolean {
+    if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
+      return false;
+    }
+
+    const TRANSACTIONAL_NAMES = [
+      'cart',
+      'checkout',
+      'my-account',
+      'order-pay',
+      'order-received',
+    ];
+
+    const normalizedTemplate = this.normalizeTemplateIdentifier(
+      componentPlan.templateName,
+    );
+    if (TRANSACTIONAL_NAMES.includes(normalizedTemplate)) {
+      return true;
+    }
+
+    const normalizedComponentName = componentPlan.componentName
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    if (TRANSACTIONAL_NAMES.includes(normalizedComponentName)) {
+      return true;
+    }
+
+    return this.containsTransactionalCommerceBlocks(nodes);
+  }
+
+  private containsTransactionalCommerceBlocks(nodes: WpNode[]): boolean {
+    const transactionalBlockPattern =
+      /^woocommerce\/(cart|checkout|my-account|order-pay|order-received)(?:$|-)/i;
+    const visit = (node: WpNode): boolean => {
+      if (transactionalBlockPattern.test(String(node.block ?? '').trim())) {
+        return true;
+      }
+      return (node.children ?? []).some((child) => visit(child));
+    };
+
+    return nodes.some((node) => visit(node));
+  }
+
   private countCoverageUnits(sections: SectionPlan[] | undefined): number {
     if (!sections?.length) return 0;
     return sections.reduce((count, section) => {
       if (section.type !== 'prose-block') return count + 1;
       return count + Math.max(1, section.sourceSegments.length);
     }, 0);
+  }
+
+  private buildSemanticPartialDraftSections(input: {
+    componentPlan: PlanResult[number];
+    source: string;
+    sections: SectionPlan[];
+  }): SectionPlan[] | undefined {
+    const { componentPlan, source, sections } = input;
+    if (componentPlan.type !== 'partial' || sections.length === 0) {
+      return undefined;
+    }
+
+    const strategy = getComponentStrategy(componentPlan.componentName);
+    switch (strategy.kind) {
+      case 'post-meta':
+        return this.buildCanonicalPostMetaDraftSections(source, sections);
+      case 'sidebar':
+        return this.buildCanonicalSidebarDraftSections(source, sections);
+      default:
+        return undefined;
+    }
+  }
+
+  private buildCanonicalPostMetaDraftSections(
+    source: string,
+    sections: SectionPlan[],
+  ): SectionPlan[] | undefined {
+    const hasDate = sourceContainsBlock(source, 'post-date');
+    const hasAuthor = sourceContainsBlock(source, 'post-author-name');
+    const hasCategories = sourceContainsBlock(source, 'post-terms');
+    if (!hasDate && !hasAuthor && !hasCategories) {
+      return undefined;
+    }
+
+    const textColor =
+      sections.find((section) => typeof section.textColor === 'string')
+        ?.textColor ?? undefined;
+    const sourceRef =
+      sections.find((section) => section.sourceRef)?.sourceRef ?? undefined;
+    const customClassNames = this.collectSectionCustomClassNames(sections);
+    const sourceEvidence = this.collectSectionSourceEvidence(sections);
+    const showSeparator = sections.some(
+      (section) =>
+        section.type === 'hero' &&
+        ['—', '–', '-'].includes(section.heading.trim()),
+    );
+
+    const canonicalSection: PostMetaSection = {
+      type: 'post-meta',
+      layout: 'inline',
+      showDate: hasDate,
+      showAuthor: hasAuthor,
+      showCategories: hasCategories,
+      ...(showSeparator ? { showSeparator: true } : {}),
+      ...(textColor ? { textColor } : {}),
+      ...(sourceRef ? { sourceRef } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(sourceEvidence
+        ? {
+            obligation: {
+              role: 'post-meta',
+              required: [],
+              sourceEvidence,
+            },
+          }
+        : {}),
+      debugKey: 'post-meta-0',
+      sectionKey: 'post-meta-0',
+    };
+
+    return [canonicalSection];
+  }
+
+  private buildCanonicalSidebarDraftSections(
+    source: string,
+    sections: SectionPlan[],
+  ): SectionPlan[] | undefined {
+    const hasNavigation = sourceContainsBlock(source, 'navigation');
+    const hasSearch = sourceContainsBlock(source, 'search');
+    const hasAuthorBio =
+      sourceContainsBlock(source, 'post-author-biography') ||
+      sourceContainsBlock(source, 'avatar');
+    const hasCategories = sourceContainsBlock(source, 'categories');
+    const hasRecentPosts =
+      sourceContainsBlock(source, 'query') ||
+      sourceContainsBlock(source, 'latest-posts');
+
+    const headingTexts = extractHeadingTextsFromSource(source);
+    const paragraphTexts = extractParagraphTextsFromSource(source);
+    const navigationLinks = extractNavigationLinkItemsFromSource(source);
+    const existingNavbar = sections.find(
+      (section) => section.type === 'navbar',
+    );
+    const existingSearch = sections.find(
+      (section): section is SearchSection => section.type === 'search',
+    );
+    const sourceRef =
+      sections.find((section) => section.sourceRef)?.sourceRef ?? undefined;
+    const customClassNames = this.collectSectionCustomClassNames(
+      sections.filter((section) => section.type !== 'search'),
+    );
+    const sourceEvidence = this.collectSectionSourceEvidence(sections);
+    const widgets: SidebarSection['widgets'] = [];
+
+    if (hasAuthorBio) {
+      widgets.push({
+        kind: 'author-bio',
+        title:
+          headingTexts.find((heading) => /author/i.test(heading)) ??
+          'About the author',
+        showAvatar: sourceContainsBlock(source, 'avatar'),
+      });
+    }
+
+    if (hasCategories) {
+      widgets.push({
+        kind: 'categories',
+        title:
+          headingTexts.find((heading) => /categor/i.test(heading)) ??
+          'Popular Categories',
+        showCounts: /"showPostCounts"\s*:\s*true/i.test(source),
+      });
+    }
+
+    if (hasNavigation) {
+      widgets.push({
+        kind: 'navigation',
+        title:
+          headingTexts.find((heading) =>
+            /link|resource|menu|explore/i.test(heading),
+          ) ?? 'Useful Links',
+        ...(paragraphTexts.find((text) => !/search/i.test(text))
+          ? {
+              description: paragraphTexts.find((text) => !/search/i.test(text)),
+            }
+          : {}),
+        menuSlug:
+          existingNavbar?.type === 'navbar'
+            ? existingNavbar.menuSlug
+            : 'primary',
+        ...(navigationLinks.length > 0 ? { links: navigationLinks } : {}),
+      });
+    }
+
+    if (!hasNavigation && hasRecentPosts) {
+      widgets.push({
+        kind: 'recent-posts',
+        title:
+          headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
+          'Recent Posts',
+      });
+    }
+
+    if (
+      widgets.length === 0 &&
+      !hasNavigation &&
+      !hasRecentPosts &&
+      hasCategories
+    ) {
+      widgets.push({
+        kind: 'pages-list',
+        title:
+          headingTexts.find((heading) => /page|explore/i.test(heading)) ??
+          'Pages',
+      });
+    }
+
+    const requiredCapabilities = new Set<
+      'menus' | 'pages' | 'posts' | 'site-info'
+    >();
+    for (const widget of widgets) {
+      if (widget.kind === 'author-bio') {
+        requiredCapabilities.add('posts');
+        requiredCapabilities.add('site-info');
+      }
+      if (widget.kind === 'categories') requiredCapabilities.add('posts');
+      if (widget.kind === 'navigation') requiredCapabilities.add('menus');
+      if (widget.kind === 'pages-list') requiredCapabilities.add('pages');
+      if (widget.kind === 'recent-posts') requiredCapabilities.add('posts');
+    }
+
+    if (widgets.length === 0 && !hasSearch && existingSearch == null) {
+      return undefined;
+    }
+
+    const sidebarSection: SidebarSection = {
+      type: 'sidebar',
+      widgets,
+      ...(widgets.length > 0 ? { maxItems: 6 } : {}),
+      ...(sourceRef ? { sourceRef } : {}),
+      ...(customClassNames.length > 0 ? { customClassNames } : {}),
+      ...(sourceEvidence
+        ? {
+            obligation: {
+              role: 'sidebar',
+              required: Array.from(requiredCapabilities),
+              sourceEvidence,
+            },
+          }
+        : {}),
+      debugKey: 'sidebar-0',
+      sectionKey: 'sidebar-0',
+    };
+
+    const canonicalSections: SectionPlan[] = [sidebarSection];
+
+    if (hasSearch || existingSearch) {
+      const searchSection: SearchSection = {
+        type: 'search',
+        ...(existingSearch?.title
+          ? { title: existingSearch.title }
+          : headingTexts.find((heading) => /search/i.test(heading))
+            ? {
+                title: headingTexts.find((heading) => /search/i.test(heading)),
+              }
+            : {}),
+        ...(existingSearch?.sourceRef
+          ? { sourceRef: existingSearch.sourceRef }
+          : {}),
+        ...(existingSearch?.customClassNames?.length
+          ? { customClassNames: existingSearch.customClassNames }
+          : {}),
+        ...(existingSearch?.obligation
+          ? { obligation: existingSearch.obligation }
+          : sourceEvidence
+            ? {
+                obligation: {
+                  role: 'search',
+                  required: ['search-input'],
+                  sourceEvidence,
+                },
+              }
+            : {}),
+        debugKey: 'search-0',
+        sectionKey: 'search-0',
+      };
+      canonicalSections.push(searchSection);
+    }
+
+    return canonicalSections;
+  }
+
+  private collectSectionCustomClassNames(sections: SectionPlan[]): string[] {
+    return this.uniqueStrings(
+      sections.flatMap((section) => section.customClassNames ?? []),
+    );
+  }
+
+  private collectSectionSourceEvidence(sections: SectionPlan[]) {
+    const sourceNodeIds = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.sourceNodeIds ?? [],
+      ),
+    );
+    const sourceFiles = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.sourceFiles ?? [],
+      ),
+    );
+    const blockNames = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.blockNames ?? [],
+      ),
+    );
+    const templateNames = this.uniqueStrings(
+      sections.flatMap(
+        (section) => section.obligation?.sourceEvidence?.templateNames ?? [],
+      ),
+    );
+
+    if (
+      sourceNodeIds.length === 0 &&
+      sourceFiles.length === 0 &&
+      blockNames.length === 0 &&
+      templateNames.length === 0
+    ) {
+      return undefined;
+    }
+
+    return {
+      ...(sourceNodeIds.length > 0 ? { sourceNodeIds } : {}),
+      ...(sourceFiles.length > 0 ? { sourceFiles } : {}),
+      ...(blockNames.length > 0 ? { blockNames } : {}),
+      ...(templateNames.length > 0 ? { templateNames } : {}),
+    };
+  }
+
+  private uniqueStrings(values: Array<string | undefined | null>): string[] {
+    const seen = new Set<string>();
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (!normalized) continue;
+      seen.add(normalized);
+    }
+    return [...seen];
   }
 
   private assessPlanningSourceDraftCoverage(input: {
@@ -2864,6 +5613,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const canonicalContentTypes = new Set<SectionPlan['type']>([
       'page-content',
       'post-content',
+      'post-meta',
+      'post-terms',
+      'post-navigation',
       'prose-block',
       'comments',
       'sidebar',
@@ -3010,7 +5762,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (!meaningful.length) return false;
 
     const STRONG_RICH = new Set<SectionPlan['type']>([
-      'prose-block',
       'hero',
       'cover',
       'media-text',
@@ -3027,11 +5778,20 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       'search',
       'breadcrumb',
     ]);
+    const proseOnlyCount = meaningful.filter(
+      (section) => section.type === 'prose-block',
+    ).length;
 
     const strongCount = meaningful.filter((s) =>
       STRONG_RICH.has(s.type),
     ).length;
     const weakCount = meaningful.filter((s) => WEAK_RICH.has(s.type)).length;
+
+    // A fixed DB-backed page that only decomposes into prose blocks is usually
+    // safer as one canonical page-content render path. Treat prose-only drafts
+    // as insufficiently rich so we fall back before validator over-enforces
+    // dozens of page-backed literals section-by-section.
+    if (proseOnlyCount === meaningful.length) return false;
 
     // Reject if everything collapsed into one weak section
     if (meaningful.length === 1 && !strongCount) return false;
@@ -3094,6 +5854,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (!source) return undefined;
 
     try {
+      if (this.classifyBoundPageDetailContent(source) !== 'rich_candidate') {
+        return undefined;
+      }
+
       const nodes = this.styleResolver.resolve(
         this.parsePlanningSourceNodes({
           source,
@@ -3112,7 +5876,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           componentType: componentPlan.type,
           route: componentPlan.route,
           isDetail: componentPlan.isDetail,
-          dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
+          dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
           stripLayoutChrome: componentPlan.type === 'page',
           sourceBackedAuxiliaryLabels: [],
         },
@@ -3202,6 +5966,119 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
   }
 
+  private buildCanonicalPlanningSource(input: {
+    source: string;
+    templateName: string;
+    sourceFile: string;
+    tokens: ThemeTokens | undefined;
+  }): CanonicalPlanningSource | undefined {
+    try {
+      const rawSource = input.source.trim();
+      if (!rawSource) return undefined;
+
+      const wpNodes = this.parsePlanningSourceNodes({
+        source: rawSource,
+        templateName: input.templateName,
+        sourceFile: input.sourceFile,
+      });
+      if (wpNodes.length === 0) return undefined;
+
+      const resolvedNodes = this.styleResolver.resolve(wpNodes, input.tokens);
+      const normalizedSource = wpJsonToString(resolvedNodes);
+      const blockTree = mapWpNodesToBlockTree(resolvedNodes);
+
+      return {
+        rawSource,
+        normalizedSource,
+        sourceTemplateName: input.templateName,
+        sourceFile: input.sourceFile,
+        wpNodes,
+        resolvedNodes,
+        blockTree,
+        customClassNames: extractCustomClassNamesFromSource(normalizedSource),
+        headingTexts: extractHeadingTextsFromSource(normalizedSource),
+        interactiveWidgets:
+          detectInteractiveWidgetsFromSource(normalizedSource),
+        assetRefs: extractStaticImageSources(normalizedSource),
+        sourceFacts: this.collectCanonicalPlanningSourceFacts(resolvedNodes),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private collectCanonicalPlanningSourceFacts(
+    resolvedNodes: WpNode[],
+  ): CanonicalPlanningSource['sourceFacts'] {
+    const blockNames = new Set<string>();
+    const templatePartHints: string[] = [];
+
+    const visitWpNode = (node: WpNode) => {
+      const normalizedBlock = String(node.block ?? '')
+        .trim()
+        .toLowerCase();
+      if (normalizedBlock) {
+        blockNames.add(normalizedBlock);
+        const shortName = normalizedBlock.includes('/')
+          ? normalizedBlock.slice(normalizedBlock.lastIndexOf('/') + 1)
+          : normalizedBlock;
+        blockNames.add(shortName);
+      }
+      if (normalizedBlock === 'core/template-part') {
+        const slug =
+          typeof node.params?.slug === 'string' ? node.params.slug : '';
+        const area =
+          typeof node.params?.area === 'string' ? node.params.area : '';
+        const classNames = Array.isArray(node.customClassNames)
+          ? node.customClassNames.join(' ')
+          : '';
+        templatePartHints.push(`${slug} ${area} ${classNames}`.trim());
+      }
+      for (const child of node.children ?? []) visitWpNode(child);
+    };
+
+    for (const node of resolvedNodes) visitWpNode(node);
+
+    const hasBlock = (...candidates: string[]) =>
+      candidates.some((candidate) => blockNames.has(candidate.toLowerCase()));
+    const hasSidebarTemplatePart = templatePartHints.some((hint) =>
+      /sidebar|widget/i.test(hint),
+    );
+
+    return {
+      hasQuery: hasBlock(
+        'core/query',
+        'query',
+        'core/latest-posts',
+        'latest-posts',
+      ),
+      hasSidebarTemplatePart,
+      hasSearch: hasBlock('core/search', 'search'),
+      hasPostContent: hasBlock('core/post-content', 'post-content'),
+      hasPageList: hasBlock('core/page-list', 'page-list'),
+      hasComments: hasBlock(
+        'core/comments',
+        'comments',
+        'core/post-comments-form',
+        'post-comments-form',
+      ),
+      hasNavigation: hasBlock('core/navigation', 'navigation'),
+      hasWooCart: hasBlock('woocommerce/cart', 'cart'),
+      hasWooCheckout: hasBlock('woocommerce/checkout', 'checkout'),
+    };
+  }
+
+  private countBlockTreeNodes(nodes: BlockNode[] | undefined): number {
+    if (!nodes?.length) return 0;
+    let count = 0;
+    const visit = (node: BlockNode) => {
+      count += 1;
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return count;
+  }
+
   private scopePlanningSourceMarkup(
     componentPlan: PlanResult[number],
     source: string,
@@ -3233,12 +6110,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     if (componentPlan.type === 'page') {
-      const filteredNodes = bodyNodes.filter(
-        (node) => !this.isSharedLayoutBlockNode(node),
+      const filteredNodes = this.filterOutSharedLayoutBlockNodes(
+        bodyNodes,
+        hints,
       );
-      if (filteredNodes.length !== bodyNodes.length) {
-        hints?.push('removed top-level shared layout blocks from block tree');
-      }
       if (filteredNodes.length > 0) {
         return wpJsonToString(filteredNodes);
       }
@@ -3329,12 +6204,33 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       cta: { text?: string; link?: string } | undefined,
     ): boolean => !!cta && (hasText(cta.text) || hasText(cta.link));
 
+    // WP dynamic-title blocks that survive into draft sections carry a
+    // generic placeholder like "WordPress" that never reflects real content.
+    const WP_GENERIC_PLACEHOLDERS = new Set(['WordPress', 'wordpress', 'by']);
+    const isPlaceholderOnly = (value: unknown): boolean => {
+      const cleaned = String(value ?? '')
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      return WP_GENERIC_PLACEHOLDERS.has(cleaned);
+    };
+
     switch (section.type) {
       case 'prose-block':
         return section.sourceSegments.length === 0;
       case 'hero':
-        return (
+        // Empty hero
+        if (
           !hasText(section.heading) &&
+          !hasText(section.subheading) &&
+          !section.image?.src &&
+          !hasCta(section.cta) &&
+          !(section.ctas ?? []).some(hasCta)
+        ) {
+          return true;
+        }
+        // Heading-only hero whose heading is a generic WP placeholder
+        return (
+          isPlaceholderOnly(section.heading) &&
           !hasText(section.subheading) &&
           !section.image?.src &&
           !hasCta(section.cta) &&
@@ -3377,39 +6273,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       default:
         return false;
     }
-  }
-
-  private isAuthoritativeDbPlanningSource(
-    componentPlan: PlanResult[number],
-    label: string | undefined,
-  ): boolean {
-    const normalized = String(label ?? '')
-      .trim()
-      .toLowerCase();
-    if (!normalized.startsWith('db:')) return false;
-
-    if (componentPlan.route === '/') {
-      return (
-        /^db:page-on-front(?::|$)/.test(normalized) ||
-        /^db:[^:]+:(front-page|home)$/.test(normalized)
-      );
-    }
-
-    if (componentPlan.fixedSlug) {
-      return /^db:bound-page:(.+)$/.test(normalized);
-    }
-
-    return false;
-  }
-
-  private shouldDisableSupplementalPlanningSources(
-    componentPlan: PlanResult[number],
-    preferredSource: PlanningSourceCandidate,
-  ): boolean {
-    return this.isAuthoritativeDbPlanningSource(
-      componentPlan,
-      preferredSource.label,
-    );
   }
 
   private buildDraftSectionKey(section: SectionPlan): string {
@@ -3555,362 +6418,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
-  private pickInvestigativePlanningSource(input: {
-    componentPlan: PlanResult[number];
-    sourceMap: Map<string, string>;
-    content: DbContentResult;
-    repoManifest?: RepoThemeManifest;
-    currentPlanningSource?: PlanningSourceContext;
-    previousReason: string;
-  }): PlanningSourceCandidate | null {
-    const {
-      componentPlan,
-      sourceMap,
-      content,
-      repoManifest,
-      currentPlanningSource,
-      previousReason,
-    } = input;
-    const focusWidgets = new Set<string>();
-    if (/carousel|slider/i.test(previousReason)) focusWidgets.add('carousel');
-    if (/modal/i.test(previousReason)) focusWidgets.add('modal');
-    if (/accordion/i.test(previousReason)) focusWidgets.add('accordion');
-    if (/tabs/i.test(previousReason)) focusWidgets.add('tabs');
-    const imageSensitive = /imagesrc|image/i.test(previousReason);
-
-    const candidates = this.buildPlanningSourceCandidates(
-      componentPlan,
-      currentPlanningSource?.source ?? '',
-      sourceMap,
-      content,
-      repoManifest,
-    );
-    if (candidates.length === 0) return null;
-
-    const ranked = candidates
-      .map((candidate) => {
-        const widgets = new Set(
-          this.detectInteractiveWidgetsFromSource(candidate.source),
-        );
-        let score = candidate.richness + candidate.priority;
-        for (const widget of focusWidgets) {
-          if (widgets.has(widget)) score += 140;
-        }
-        if (imageSensitive) {
-          score += extractStaticImageSources(candidate.source).length * 20;
-        }
-        if (candidate.label === currentPlanningSource?.sourceLabel) score -= 40;
-        if (candidate.source === currentPlanningSource?.source) score -= 40;
-        return { candidate, score };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    return ranked[0]?.candidate ?? null;
-  }
-
-  private async investigateAndReplanVisualPlan(input: {
-    componentPlan: PlanResult[number];
-    sourceMap: Map<string, string>;
-    content: DbContentResult;
-    tokens: ThemeTokens | undefined;
-    globalPalette: ColorPalette;
-    globalTypography: TypographyTokens;
-    repoManifest: RepoThemeManifest | undefined;
-    modelName: string;
-    logPath?: string;
-    scopedEditRequest: PipelineEditRequestDto | undefined;
-    visualDataNeeds: DataNeed[];
-    hasSharedLayoutPartials: boolean;
-    previousPlanningSource?: PlanningSourceContext;
-    previousDraftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
-    previousReason: string;
-    previousDropped: string;
-    previousRaw: string;
-  }): Promise<{
-    visualPlan?: ComponentVisualPlan;
-    planningSource: PlanningSourceContext;
-    draftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
-    detectedCustomClassNames: string[];
-    sourceBackedAuxiliaryLabels: string[];
-    sourceWidgetHints: string[];
-    allowedImageSrcs: string[];
-    lastReason: string;
-    lastDropped: string;
-    lastRaw: string;
-  }> {
-    const {
-      componentPlan,
-      sourceMap,
-      content,
-      tokens,
-      globalPalette,
-      globalTypography,
-      repoManifest,
-      modelName,
-      logPath,
-      scopedEditRequest,
-      visualDataNeeds,
-      hasSharedLayoutPartials,
-      previousPlanningSource,
-      previousReason,
-      previousDropped,
-      previousRaw,
-    } = input;
-
-    const chosenCandidate = this.pickInvestigativePlanningSource({
-      componentPlan,
-      sourceMap,
-      content,
-      repoManifest,
-      currentPlanningSource: previousPlanningSource,
-      previousReason,
-    });
-
-    const planningSource = chosenCandidate
-      ? this.buildPlanningSourceContextFromResolvedSource(
-          componentPlan,
-          chosenCandidate,
-          hasSharedLayoutPartials,
-        )
-      : (previousPlanningSource ??
-        this.buildPlanningSourceContext(
-          componentPlan,
-          sourceMap.get(componentPlan.templateName) ?? '',
-          sourceMap,
-          content,
-          hasSharedLayoutPartials,
-          repoManifest,
-        ));
-
-    this.logger.log(
-      `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" investigating source ${previousPlanningSource?.sourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'}`,
-    );
-
-    const draftSections = this.buildDraftSectionsForPlanningSource(
-      planningSource,
-      componentPlan,
-      tokens,
-    );
-    const detectedCustomClassNames =
-      this.collectDraftCustomClassNames(draftSections);
-    const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
-      planningSource.sourceBackedAuxiliaryLabels,
-      ...(componentPlan.type === 'partial'
-        ? [extractAuxiliaryLabelsFromSections(draftSections)]
-        : []),
-    );
-    const sourceWidgetHints = this.detectInteractiveWidgetsFromSource(
-      planningSource.source,
-    );
-    const visualContract = {
-      componentType: componentPlan.type,
-      route: componentPlan.route,
-      isDetail: componentPlan.isDetail,
-      dataNeeds: visualDataNeeds,
-      stripLayoutChrome: componentPlan.type === 'page',
-      sourceBackedAuxiliaryLabels,
-      requiredSourceWidgets: sourceWidgetHints,
-    } as const;
-    const allowedImageSrcs = this.collectAllowedImageSrcs(
-      planningSource.source,
-      content,
-    );
-    const investigationContext = this.buildVisualPlanRetryInvestigationContext({
-      componentPlan,
-      planningSource,
-      sourceMap,
-      content,
-      repoManifest,
-      draftSections,
-      sourceWidgetHints,
-      allowedImageSrcs,
-      reason: `${previousReason}${previousDropped}`,
-    });
-    const c5Note = [
-      'Phase C.5 investigation is active because the previous visual plan could not be parsed.',
-      `Previous failure: ${previousReason}${previousDropped}`,
-      'Use the newly selected source and deterministic draft below to repair the plan instead of repeating the same structure.',
-      investigationContext,
-    ].join('\n');
-    const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
-      componentName: componentPlan.componentName,
-      templateSource: planningSource.source,
-      content,
-      tokens,
-      repoManifest,
-      componentType: componentPlan.type,
-      route: componentPlan.route,
-      isDetail: componentPlan.isDetail,
-      dataNeeds: visualDataNeeds,
-      sourceAnalysis: planningSource.sourceAnalysis,
-      sourceBackedAuxiliaryLabels,
-      sourceWidgetHints,
-      draftSections,
-      editRequestContextNote: [
-        buildEditRequestContextNote(scopedEditRequest, {
-          audience: 'visual-plan',
-          componentName: componentPlan.componentName,
-          route: componentPlan.route,
-        }),
-        c5Note,
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-    });
-
-    let lastRaw = previousRaw;
-    let lastReason = previousReason;
-    let lastDropped = previousDropped;
-    let completionReceived = false;
-    let inTok = 0;
-    let outTok = 0;
-    let lastTransportError = '';
-    const maxTransportRetries = 3;
-
-    for (
-      let transportAttempt = 1;
-      transportAttempt <= maxTransportRetries;
-      transportAttempt++
-    ) {
-      try {
-        if (transportAttempt > 1) {
-          this.logger.log(
-            `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
-          );
-        }
-        const completion = await this.requestVisualPlanCompletion({
-          model: modelName,
-          systemPrompt,
-          userPrompt,
-          maxTokens: 4096,
-        });
-        lastRaw = completion.text;
-        inTok = completion.inputTokens;
-        outTok = completion.outputTokens;
-        completionReceived = true;
-        break;
-      } catch (err: any) {
-        lastTransportError = err?.message ?? String(err);
-        if (
-          !this.isRetryableVisualPlanError(err) ||
-          transportAttempt >= maxTransportRetries
-        ) {
-          break;
-        }
-        this.logger.warn(
-          `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
-        );
-        await this.delay(1200 * transportAttempt);
-      }
-    }
-
-    if (!completionReceived) {
-      return {
-        planningSource,
-        draftSections,
-        detectedCustomClassNames,
-        sourceBackedAuxiliaryLabels,
-        sourceWidgetHints,
-        allowedImageSrcs,
-        lastReason: lastTransportError || previousReason,
-        lastDropped: previousDropped,
-        lastRaw,
-      };
-    }
-
-    const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
-    if (tokenLogPath) {
-      await this.tokenTracker.track(
-        modelName,
-        inTok,
-        outTok,
-        `${componentPlan.componentName}:visual-plan:c5`,
-        {
-          scope: scopedEditRequest ? 'edit-request' : 'base',
-        },
-      );
-    }
-
-    const parsedResult = parseVisualPlanDetailed(
-      lastRaw,
-      componentPlan.componentName,
-      {
-        allowedImageSrcs,
-        contract: visualContract,
-        draftSections,
-      },
-    );
-    if (parsedResult.plan) {
-      const layout = this.deriveComponentLayout(
-        tokens,
-        componentPlan.componentName,
-      );
-      const visualPlan = this.applyRepoInteractiveDefaults(
-        {
-          ...parsedResult.plan,
-          dataNeeds: this.toVisualDataNeeds(componentPlan.dataNeeds),
-          ...(componentPlan.fixedSlug
-            ? {
-                pageBinding: {
-                  id: componentPlan.fixedPageId,
-                  slug: componentPlan.fixedSlug,
-                  title: componentPlan.fixedTitle,
-                  route: componentPlan.route ?? undefined,
-                },
-              }
-            : {}),
-          palette: globalPalette,
-          typography: globalTypography,
-          layout,
-          blockStyles: tokens?.blockStyles,
-          sections: this.mergeDraftSectionPresentation(
-            parsedResult.plan.sections,
-            draftSections,
-            visualContract,
-          ),
-        },
-        repoManifest,
-      );
-      this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" replan succeeded with ${parsedResult.plan.sections.length} sections`,
-      );
-      return {
-        visualPlan,
-        planningSource,
-        draftSections,
-        detectedCustomClassNames,
-        sourceBackedAuxiliaryLabels,
-        sourceWidgetHints,
-        allowedImageSrcs,
-        lastReason: '',
-        lastDropped: '',
-        lastRaw,
-      };
-    }
-
-    lastReason =
-      parsedResult.diagnostic?.reason ??
-      'unknown investigate/replan parse failure';
-    lastDropped = parsedResult.diagnostic?.droppedSections?.length
-      ? ` | droppedSections: ${parsedResult.diagnostic.droppedSections.join('; ')}`
-      : '';
-    this.logger.warn(
-      `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" replan failed: ${lastReason}${lastDropped}${this.formatRawOutput(lastRaw)}`,
-    );
-
-    return {
-      planningSource,
-      draftSections,
-      detectedCustomClassNames,
-      sourceBackedAuxiliaryLabels,
-      sourceWidgetHints,
-      allowedImageSrcs,
-      lastReason,
-      lastDropped,
-      lastRaw,
-    };
-  }
-
   private ensureStandardTemplates(
     templates: Array<{ name: string; html?: string; markup?: string }>,
     themeType: 'classic' | 'fse',
@@ -4021,7 +6528,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     const snippetLines = this.buildRetryWidgetSnippetEvidence(
-      planningSource?.source ?? '',
+      this.getPlanningSourcePromptSource(planningSource),
       sourceWidgetHints,
     );
     if (snippetLines.length > 0) {
@@ -4039,14 +6546,34 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   getExpectedTemplateNames(
     theme: PhpParseResult | BlockParseResult,
     content?: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): string[] {
     const allTemplates =
       theme.type === 'classic'
         ? theme.templates
         : [...theme.templates, ...theme.parts];
-    return this.ensureStandardTemplates(allTemplates, theme.type, content).map(
-      (template) => template.name,
-    );
+    const templateNames = this.ensureStandardTemplates(
+      allTemplates,
+      theme.type,
+      content,
+    ).map((template) => template.name);
+    return resolveHomeHierarchy({
+      templateNames,
+      repoManifest,
+      explicitTemplateNames:
+        content?.dbTemplates?.map((entry) => entry.slug) ?? [],
+    }).orderedTemplateNames;
+  }
+
+  private formatPhaseAComponentTargets(templateNames: string[]): string {
+    if (templateNames.length === 0) return '(none)';
+
+    return templateNames
+      .map(
+        (templateName) =>
+          `${templateName} -> ${this.toComponentName(templateName)}`,
+      )
+      .join(', ');
   }
 
   private filterUnusedCustomPageTemplates(
@@ -4103,40 +6630,19 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private buildFallbackPlan(templateNames: string[]): PlanResult {
     return templateNames.map((name) => {
       const componentName = this.toComponentName(name);
-      const isPartial = isPartialComponentName(componentName);
-
-      // Determine appropriate data needs based on template type
-      let dataNeeds: string[] = ['posts'];
-      let route: string | null = isPartial
-        ? null
-        : `/${componentName.toLowerCase()}`;
-      let isDetail = false;
-
-      if (name.toLowerCase() === 'archive') {
-        dataNeeds = ['posts'];
-        route = '/archive';
-        isDetail = false;
-      } else if (name.toLowerCase() === 'author') {
-        dataNeeds = ['posts'];
-        route = '/author/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'category') {
-        dataNeeds = ['posts'];
-        route = '/category/:slug';
-        isDetail = true;
-      } else if (name.toLowerCase() === 'page') {
-        dataNeeds = ['page-detail'];
-        route = '/:slug';
-        isDetail = true;
-      }
+      const routeContract = inferDeterministicRouteContract({
+        templateName: name,
+        componentName,
+        type: isPartialComponentName(componentName) ? 'partial' : 'page',
+      });
 
       return {
         templateName: name,
         componentName,
-        type: isPartial ? 'partial' : 'page',
-        route,
-        dataNeeds,
-        isDetail,
+        type: routeContract.type,
+        route: routeContract.route,
+        dataNeeds: [...routeContract.requiredDataNeeds],
+        isDetail: routeContract.isDetail,
         description: `Component generated from ${name}`,
       };
     });
@@ -4193,6 +6699,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     sourceMap: Map<string, string>,
     content: DbContentResult,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     repoManifest?: RepoThemeManifest,
   ): PlanningSourceContext {
     const candidates = this.buildPlanningSourceCandidates(
@@ -4212,12 +6719,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         componentPlan.type,
       ),
       priority: 0,
-      richness: this.scorePlanningSourceRichness(templateSource),
+      richness: scorePlanningSourceRichness(templateSource),
     };
     return this.buildPlanningSourceContextFromResolvedSource(
       componentPlan,
       preferredSource,
       hasSharedLayoutPartials,
+      tokens,
       candidates,
     );
   }
@@ -4226,14 +6734,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     componentPlan: PlanResult[number],
     preferredSource: PlanningSourceCandidate,
     hasSharedLayoutPartials: boolean,
+    tokens: ThemeTokens | undefined,
     candidates: PlanningSourceCandidate[] = [],
   ): PlanningSourceContext {
     const hints: string[] = [];
-    const disableSupplementalSources =
-      this.shouldDisableSupplementalPlanningSources(
-        componentPlan,
-        preferredSource,
-      );
     const sourceTemplateName =
       preferredSource.templateName ?? componentPlan.templateName;
     const sourceFile =
@@ -4250,50 +6754,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     const trimmed = scopedSource.trim();
     const fallbackSource =
       trimmed.length > 0 ? trimmed : preferredSource.source;
-    const preferredOrigin = this.extractPlanningSourceOrigin(
-      preferredSource.label,
-    );
-    const supplementalSources: PlanningSourceSupplement[] =
-      disableSupplementalSources
-        ? []
-        : candidates
-            .filter((candidate) => candidate.label !== preferredSource.label)
-            .filter(
-              (candidate) =>
-                this.extractPlanningSourceOrigin(candidate.label) !==
-                preferredOrigin,
-            )
-            .filter((candidate) =>
-              this.isCompatibleSupplementalPlanningSource(
-                componentPlan,
-                preferredSource,
-                candidate,
-              ),
-            )
-            .slice(0, 2)
-            .map((candidate) => {
-              const candidateTemplateName =
-                candidate.templateName ?? componentPlan.templateName;
-              const candidateSourceFile =
-                candidate.sourceFile ??
-                inferFseSourceFile(
-                  componentPlan.templateName,
-                  componentPlan.type,
-                );
-              return {
-                source: this.scopePlanningSourceMarkup(
-                  componentPlan,
-                  candidate.source,
-                  candidateTemplateName,
-                  candidateSourceFile,
-                ),
-                label: candidate.label,
-                reason: candidate.reason,
-                templateName: candidateTemplateName,
-                sourceFile: candidateSourceFile,
-              };
-            })
-            .filter((candidate) => candidate.source.trim().length > 0);
+    const canonicalSource = this.buildCanonicalPlanningSource({
+      source: fallbackSource,
+      templateName: sourceTemplateName,
+      sourceFile,
+      tokens,
+    });
+    const supplementalSources: PlanningSourceSupplement[] = [];
     const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
       : 'body-only markup';
@@ -4315,11 +6782,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     summaryLines.push(
       `Component body source narrowed to route-owned content: ${componentPlan.type === 'page' ? 'yes' : 'partial/full-source'}`,
     );
-    if (disableSupplementalSources) {
-      summaryLines.push(
-        'Source of truth policy: authoritative DB source selected; supplemental repo sources disabled.',
-      );
-    }
+    summaryLines.push(
+      'Source of truth policy: only the selected primary planning source is used; supplemental planning sources are disabled.',
+    );
     if (hints.length > 0) {
       summaryLines.push(...hints.map((hint) => `- ${hint}`));
     }
@@ -4332,11 +6797,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         );
       }
     }
-    const customClassNames =
-      this.extractCustomClassNamesFromSource(fallbackSource);
+    const canonicalAnalysisSource =
+      canonicalSource?.normalizedSource ?? fallbackSource;
+    const customClassNames = canonicalSource?.customClassNames.length
+      ? canonicalSource.customClassNames
+      : extractCustomClassNamesFromSource(canonicalAnalysisSource);
     const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
       extractSourceBackedAuxiliaryLabels({
-        source: fallbackSource,
+        source: canonicalAnalysisSource,
       }),
       ...(componentPlan.type === 'partial'
         ? supplementalSources.map((source) =>
@@ -4370,11 +6838,18 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
           .join(', ')}`,
       );
     }
-    const interactiveWidgets =
-      this.detectInteractiveWidgetsFromSource(fallbackSource);
-    const sampledHeadings = this.extractHeadingTextsFromSource(fallbackSource);
-    const sourceImageCount = extractStaticImageSources(fallbackSource).length;
-    const sourceSectionCount = this.countDraftSectionsInSource(fallbackSource);
+    const interactiveWidgets = canonicalSource?.interactiveWidgets.length
+      ? canonicalSource.interactiveWidgets
+      : detectInteractiveWidgetsFromSource(canonicalAnalysisSource);
+    const sampledHeadings = canonicalSource?.headingTexts.length
+      ? canonicalSource.headingTexts
+      : extractHeadingTextsFromSource(canonicalAnalysisSource);
+    const sourceImageCount =
+      canonicalSource?.assetRefs.length ??
+      extractStaticImageSources(canonicalAnalysisSource).length;
+    const sourceSectionCount = countDraftSectionsInSource(
+      canonicalAnalysisSource,
+    );
     if (sampledHeadings.length > 0) {
       summaryLines.push(
         `Source-backed heading samples: ${sampledHeadings
@@ -4389,6 +6864,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (sourceSectionCount > 0) {
       summaryLines.push(
         `Approximate draft section count from source: ${sourceSectionCount}`,
+      );
+    }
+    if (canonicalSource) {
+      summaryLines.push(
+        `Canonical planner source prepared: ${canonicalSource.resolvedNodes.length} root node(s), ${this.countBlockTreeNodes(canonicalSource.blockTree)} block-tree node(s)`,
+      );
+      summaryLines.push(
+        `Canonical source facts: query=${canonicalSource.sourceFacts.hasQuery ? 'yes' : 'no'}, search=${canonicalSource.sourceFacts.hasSearch ? 'yes' : 'no'}, navigation=${canonicalSource.sourceFacts.hasNavigation ? 'yes' : 'no'}, sidebarPart=${canonicalSource.sourceFacts.hasSidebarTemplatePart ? 'yes' : 'no'}, comments=${canonicalSource.sourceFacts.hasComments ? 'yes' : 'no'}`,
       );
     }
     if (interactiveWidgets.length > 0) {
@@ -4420,6 +6903,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceTemplateName,
       sourceFile,
       sourceReason: preferredSource.reason,
+      canonicalSource,
     };
   }
 
@@ -4441,8 +6925,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .slice(0, 3);
 
     return candidates.map((candidate) => {
-      const widgets = this.detectInteractiveWidgetsFromSource(candidate.source);
-      const headings = this.extractHeadingTextsFromSource(candidate.source);
+      const widgets = detectInteractiveWidgetsFromSource(candidate.source);
+      const headings = extractHeadingTextsFromSource(candidate.source);
       const imageCount = extractStaticImageSources(candidate.source).length;
       return `${candidate.label} | score=${candidate.richness} | widgets=${widgets.join(', ') || 'none'} | images=${imageCount} | headings=${headings.slice(0, 3).join(' | ') || 'none'}`;
     });
@@ -4500,8 +6984,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       content,
     ).slice(0, 2);
     const lines: string[] = pages.map((page) => {
-      const widgets = this.detectInteractiveWidgetsFromSource(page.content);
-      const headings = this.extractHeadingTextsFromSource(page.content);
+      const widgets = detectInteractiveWidgetsFromSource(page.content);
+      const headings = extractHeadingTextsFromSource(page.content);
       return `page:${page.slug || page.id} | title=${JSON.stringify(page.title)} | widgets=${widgets.join(', ') || 'none'} | headings=${headings.slice(0, 4).join(' | ') || 'none'}`;
     });
 
@@ -4516,7 +7000,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : undefined;
       if (frontPage) {
         lines.unshift(
-          `front-page-db:${frontPage.slug || frontPage.id} | title=${JSON.stringify(frontPage.title)} | widgets=${this.detectInteractiveWidgetsFromSource(frontPage.content).join(', ') || 'none'}`,
+          `front-page-db:${frontPage.slug || frontPage.id} | title=${JSON.stringify(frontPage.title)} | widgets=${detectInteractiveWidgetsFromSource(frontPage.content).join(', ') || 'none'}`,
         );
       }
     }
@@ -4566,391 +7050,27 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     content: DbContentResult,
     repoManifest?: RepoThemeManifest,
   ): PlanningSourceCandidate[] {
-    const repoEntryChain = this.findRepoEntrySourceChain(
-      componentPlan.templateName,
-      repoManifest,
-    );
-    const candidates: Array<{
-      source: string;
-      label: string;
-      templateName?: string;
-      sourceFile?: string;
-      priority: number;
-    }> = [];
-    const seen = new Set<string>();
-    const pushCandidate = (candidate: {
-      source?: string;
-      label: string;
-      templateName?: string;
-      sourceFile?: string;
-      priority: number;
-    }) => {
-      const normalized = String(candidate.source ?? '').trim();
-      if (!normalized || seen.has(normalized)) return;
-      seen.add(normalized);
-      candidates.push({
-        source: normalized,
-        label: candidate.label,
-        templateName: candidate.templateName,
-        sourceFile: candidate.sourceFile,
-        priority: candidate.priority,
-      });
-    };
-
-    if (componentPlan.fixedSlug) {
-      const boundPage = content.pages.find(
-        (page) =>
-          String(page.id) === String(componentPlan.fixedPageId ?? '') ||
-          page.slug === componentPlan.fixedSlug,
-      );
-      pushCandidate({
-        source: boundPage?.content,
-        label: boundPage
-          ? `db:bound-page:${boundPage.slug || boundPage.id}`
-          : `db:bound-page:${componentPlan.fixedSlug}`,
-        templateName: componentPlan.templateName,
-        sourceFile: boundPage
-          ? `db:pages/${boundPage.slug || boundPage.id}`
-          : `db:pages/${componentPlan.fixedSlug}`,
-        priority: 120,
-      });
-    }
-
-    pushCandidate({
-      source: templateSource,
-      label: `repo:${componentPlan.templateName}`,
-      templateName: componentPlan.templateName,
-      sourceFile: inferFseSourceFile(
-        componentPlan.templateName,
-        componentPlan.type,
-      ),
-      priority: repoEntryChain ? 35 : 15,
-    });
-
-    pushCandidate({
-      source: repoEntryChain?.composedSource,
-      label: repoEntryChain
-        ? `repo-chain:${repoEntryChain.entryFile}`
-        : `repo-chain:${componentPlan.templateName}`,
-      templateName: componentPlan.templateName,
-      sourceFile: repoEntryChain?.entryFile,
-      priority:
-        componentPlan.route === '/' ? 85 : componentPlan.fixedSlug ? 70 : 55,
-    });
-
-    if (componentPlan.route === '/') {
-      for (const templateName of ['front-page', 'home', 'index']) {
-        const candidateChain = this.findRepoEntrySourceChain(
-          templateName,
-          repoManifest,
-        );
-        pushCandidate({
-          source: candidateChain?.composedSource ?? sourceMap.get(templateName),
-          label: `repo:${templateName}`,
-          templateName,
-          sourceFile:
-            candidateChain?.entryFile ??
-            inferFseSourceFile(templateName, componentPlan.type),
-          priority:
-            templateName === 'front-page'
-              ? candidateChain
-                ? 95
-                : 30
-              : templateName === 'home'
-                ? candidateChain
-                  ? 75
-                  : 20
-                : candidateChain
-                  ? 60
-                  : 10,
-        });
-      }
-
-      const frontPage = content.readingSettings?.pageOnFrontId
-        ? content.pages.find(
-            (page) => page.id === content.readingSettings.pageOnFrontId,
-          )
-        : undefined;
-      pushCandidate({
-        source: frontPage?.content,
-        label: frontPage
-          ? `db:page-on-front:${frontPage.slug || frontPage.id}`
-          : 'db:page-on-front',
-        templateName: componentPlan.templateName,
-        sourceFile: frontPage
-          ? `db:pages/${frontPage.slug || frontPage.id}`
-          : 'db:pages/front-page',
-        priority: content.readingSettings?.showOnFront === 'page' ? 60 : 25,
-      });
-
-      const postsPage = content.readingSettings?.pageForPostsId
-        ? content.pages.find(
-            (page) => page.id === content.readingSettings.pageForPostsId,
-          )
-        : undefined;
-      pushCandidate({
-        source: postsPage?.content,
-        label: postsPage
-          ? `db:page-for-posts:${postsPage.slug || postsPage.id}`
-          : 'db:page-for-posts',
-        templateName: componentPlan.templateName,
-        sourceFile: postsPage
-          ? `db:pages/${postsPage.slug || postsPage.id}`
-          : 'db:pages/posts-page',
-        priority: 45,
-      });
-
-      for (const dbTemplate of content.dbTemplates.filter((entry) =>
-        ['front-page', 'home', 'index'].includes(entry.slug),
-      )) {
-        pushCandidate({
-          source: dbTemplate.content,
-          label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
-          templateName: dbTemplate.slug,
-          sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
-          priority:
-            dbTemplate.slug === 'front-page'
-              ? 55
-              : dbTemplate.slug === 'home'
-                ? 50
-                : 40,
-        });
-      }
-    }
-
-    // For non-Home pages with a fixedSlug, enrich candidates with page-specific repo
-    // templates and matching DB templates — mirroring the multi-source enrichment
-    // that Home pages get from the front-page/home/index template hierarchy.
-    if (componentPlan.fixedSlug && componentPlan.route !== '/') {
-      const boundPage = content.pages.find(
-        (page) =>
-          String(page.id) === String(componentPlan.fixedPageId ?? '') ||
-          page.slug === componentPlan.fixedSlug,
-      );
-
-      // WordPress page template hierarchy: assigned template > page-{slug} > page-{id} > page > singular
-      const assignedTemplate = boundPage?.template
-        ?.replace(/\.php$/, '')
-        .replace(/^templates\//, '')
-        .trim();
-      const pageTemplateNames = [
-        assignedTemplate || null,
-        `page-${componentPlan.fixedSlug}`,
-        componentPlan.fixedPageId ? `page-${componentPlan.fixedPageId}` : null,
-        'page',
-        'singular',
-      ].filter(
-        (t): t is string => Boolean(t) && t !== componentPlan.templateName,
-      );
-
-      for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
-        pushCandidate({
-          source: chain?.composedSource ?? sourceMap.get(templateName),
-          label: `repo:${templateName}`,
-          templateName,
-          sourceFile:
-            chain?.entryFile ??
-            inferFseSourceFile(templateName, componentPlan.type),
-          priority:
-            assignedTemplate && templateName === assignedTemplate
-              ? chain
-                ? 85
-                : 30
-              : templateName.startsWith('page-')
-                ? chain
-                  ? 70
-                  : 20
-                : chain
-                  ? 50
-                  : 10,
-        });
-      }
-
-      // Also add the repo-chain for each page-specific template
-      for (const templateName of pageTemplateNames) {
-        const chain = this.findRepoEntrySourceChain(templateName, repoManifest);
-        if (chain?.composedSource) {
-          pushCandidate({
-            source: chain.composedSource,
-            label: `repo-chain:${chain.entryFile ?? templateName}`,
-            templateName,
-            sourceFile: chain.entryFile,
-            priority:
-              assignedTemplate && templateName === assignedTemplate
-                ? 80
-                : templateName.startsWith('page-')
-                  ? 65
-                  : 45,
-          });
-        }
-      }
-
-      // DB templates (FSE/theme builder) matching this page's slug or assigned template
-      const pageTemplateSlugs = new Set(
-        [
-          componentPlan.fixedSlug,
-          assignedTemplate,
-          `page-${componentPlan.fixedSlug}`,
-        ].filter(Boolean),
-      );
-      for (const dbTemplate of content.dbTemplates.filter((entry) =>
-        pageTemplateSlugs.has(entry.slug),
-      )) {
-        pushCandidate({
-          source: dbTemplate.content,
-          label: `db:${dbTemplate.postType}:${dbTemplate.slug}`,
-          templateName: dbTemplate.slug,
-          sourceFile: `db:${dbTemplate.postType}/${dbTemplate.slug}`,
-          priority: dbTemplate.slug === componentPlan.fixedSlug ? 55 : 40,
-        });
-      }
-    }
-
-    for (const page of this.findRepresentativePagesForTemplate(
+    return buildPlanningSourceCandidates({
       componentPlan,
+      templateSource,
+      sourceMap,
       content,
-    )) {
-      pushCandidate({
-        source: page.content,
-        label: `db:page:${page.slug || page.id}`,
-        templateName: componentPlan.templateName,
-        sourceFile: `db:pages/${page.slug || page.id}`,
-        priority: 35,
-      });
-    }
-
-    const hasRichDbCandidate = candidates.some(
-      (c) => c.label.startsWith('db:') && c.source.trim().length > 0,
-    );
-    const hasAuthoritativeDbCandidate = candidates.some(
-      (c) =>
-        c.source.trim().length > 0 &&
-        this.isAuthoritativeDbPlanningSource(componentPlan, c.label),
-    );
-
-    // Keep repo-chain candidates (composed/processed) even when a DB candidate exists,
-    // since they carry structural layout information the DB page content alone lacks.
-    // Only filter raw repo: candidates (may contain raw PHP template syntax).
-    const filteredCandidates = hasAuthoritativeDbCandidate
-      ? candidates.filter((c) => c.label.startsWith('db:'))
-      : hasRichDbCandidate
-        ? candidates.filter((c) => !/^repo:/.test(c.label))
-        : candidates;
-
-    return filteredCandidates
-      .map((candidate) => ({
-        ...candidate,
-        richness:
-          this.scorePlanningSourceRichness(candidate.source) +
-          (this.isAuthoritativeDbPlanningSource(componentPlan, candidate.label)
-            ? 50000
-            : 0) +
-          (componentPlan.fixedSlug &&
-          candidate.label.startsWith('db:bound-page:')
-            ? 10000
-            : 0),
-      }))
-      .map((candidate) => ({
-        ...candidate,
-        selectionScore: candidate.richness + candidate.priority * 20,
-      }))
-      .sort((a, b) => {
-        if (
-          (b.selectionScore ?? Number.NEGATIVE_INFINITY) !==
-          (a.selectionScore ?? Number.NEGATIVE_INFINITY)
-        ) {
-          return (
-            (b.selectionScore ?? Number.NEGATIVE_INFINITY) -
-            (a.selectionScore ?? Number.NEGATIVE_INFINITY)
-          );
-        }
-        if (b.richness !== a.richness) return b.richness - a.richness;
-        if (b.priority !== a.priority) return b.priority - a.priority;
-        return b.source.length - a.source.length;
-      })
-      .map((candidate, index) => ({
-        ...candidate,
-        reason:
-          index === 0
-            ? `highest combined source selected (selectionScore=${candidate.selectionScore ?? candidate.richness}, richness=${candidate.richness}, priority=${candidate.priority})`
-            : `alternate candidate (selectionScore=${candidate.selectionScore ?? candidate.richness}, richness=${candidate.richness}, priority=${candidate.priority})`,
-      }));
-  }
-
-  private scorePlanningSourceRichness(source: string): number {
-    const trimmed = source.trim();
-    if (!trimmed) return 0;
-
-    let score = Math.min(80, Math.floor(trimmed.length / 120));
-    score += this.detectInteractiveWidgetsFromSource(trimmed).length * 25;
-    score += extractStaticImageSources(trimmed).length * 8;
-    score += (trimmed.match(/<!--\s*wp:/g) ?? []).length * 3;
-    score += (trimmed.match(/<img\b/gi) ?? []).length * 4;
-    score +=
-      (
-        trimmed.match(
-          /\b(core\/|wp:)(cover|columns|group|gallery|image|media-text|query|buttons?|heading|paragraph)\b/gi,
-        ) ?? []
-      ).length * 2;
-
-    try {
-      const nodes = wpBlocksToJson(trimmed);
-      const draftSections = mapWpNodesToDraftSections(nodes);
-      const distinctBlocks = new Set(
-        nodes.flatMap((node) => this.flattenBlockNames(node)),
-      );
-      score += draftSections.length * 40;
-      score += distinctBlocks.size * 4;
-      score += nodes.length * 2;
-    } catch {
-      // Best-effort scoring only.
-    }
-
-    return score;
-  }
-
-  private countDraftSectionsInSource(source: string): number {
-    try {
-      const nodes = wpBlocksToJson(source);
-      return mapWpNodesToDraftSections(nodes).length;
-    } catch {
-      return 0;
-    }
-  }
-
-  private extractHeadingTextsFromSource(source: string): string[] {
-    const collected = new Set<string>();
-    const pushText = (value: string | undefined) => {
-      const normalized = String(value ?? '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (normalized.length >= 3) collected.add(normalized);
-    };
-
-    try {
-      const visit = (node: WpNode) => {
-        if (/heading|site-title|post-title|query-title/i.test(node.block)) {
-          pushText(node.text);
-          pushText(node.html);
-          const contentValue =
-            typeof node.params?.content === 'string'
-              ? node.params.content
-              : undefined;
-          pushText(contentValue);
-        }
-        for (const child of node.children ?? []) visit(child);
-      };
-      for (const node of wpBlocksToJson(source)) visit(node);
-    } catch {
-      const matches = source.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi);
-      for (const match of matches) {
-        pushText(match[1]);
-      }
-    }
-
-    return [...collected].slice(0, 12);
+      repoManifest,
+      findRepoEntrySourceChain: (templateName, repoManifest) =>
+        this.findRepoEntrySourceChain(templateName, repoManifest),
+      inferSourceFile: (templateName, componentType) =>
+        inferFseSourceFile(templateName, componentType),
+      findRepresentativePagesForTemplate: (componentPlan, content) =>
+        this.findRepresentativePagesForTemplate(
+          componentPlan as ComponentPlan,
+          content,
+        ),
+      findRepresentativePostsForTemplate: (componentPlan, content) =>
+        this.findRepresentativePostsForTemplate(
+          componentPlan as ComponentPlan,
+          content,
+        ),
+    });
   }
 
   private findRepresentativePagesForTemplate(
@@ -4990,8 +7110,35 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return matches
       .sort((a, b) => {
         const byRichness =
-          this.scorePlanningSourceRichness(b.content) -
-          this.scorePlanningSourceRichness(a.content);
+          scorePlanningSourceRichness(b.content) -
+          scorePlanningSourceRichness(a.content);
+        if (byRichness !== 0) return byRichness;
+        return b.content.length - a.content.length;
+      })
+      .slice(0, 2);
+  }
+
+  private findRepresentativePostsForTemplate(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ) {
+    if (componentPlan.type !== 'page') return [];
+    if (!componentPlan.dataNeeds.includes('post-detail')) return [];
+    if (componentPlan.fixedSlug) return [];
+
+    const templateName = this.normalizeTemplateIdentifier(
+      componentPlan.templateName,
+    );
+    if (!/^(single|single-with-sidebar)$/.test(templateName)) {
+      return [];
+    }
+
+    return content.posts
+      .filter((post) => String(post.content ?? '').trim().length > 0)
+      .sort((a, b) => {
+        const byRichness =
+          scorePlanningSourceRichness(b.content) -
+          scorePlanningSourceRichness(a.content);
         if (byRichness !== 0) return byRichness;
         return b.content.length - a.content.length;
       })
@@ -5006,15 +7153,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .toLowerCase();
   }
 
-  private flattenBlockNames(node: WpNode): string[] {
-    return [
-      node.block,
-      ...(node.children ?? []).flatMap((child) =>
-        this.flattenBlockNames(child),
-      ),
-    ];
-  }
-
   private collectDraftCustomClassNames(
     draftSections?: SectionPlan[],
   ): string[] {
@@ -5022,108 +7160,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return [
       ...new Set(
         draftSections.flatMap((section) => section.customClassNames ?? []),
-      ),
-    ];
-  }
-
-  private extractCustomClassNamesFromSource(source: string): string[] {
-    try {
-      const parsed = JSON.parse(source);
-      return [...new Set(this.collectCustomClassNamesFromValue(parsed))];
-    } catch {
-      return [];
-    }
-  }
-
-  private detectInteractiveWidgetsFromSource(source: string): string[] {
-    const normalized = source.toLowerCase();
-    const hints = new Set<string>();
-    const hasMarker = (pattern: RegExp) => pattern.test(normalized);
-
-    if (
-      normalized.includes('"block":"uagb/') ||
-      normalized.includes('wp:uagb/') ||
-      normalized.includes('uagb-') ||
-      normalized.includes('spectra')
-    ) {
-      hints.add('spectra/uagb');
-    }
-    if (
-      hasMarker(
-        /(?:wp:|\"block\":\")(?:uagb\/(?:modal(?:-popup)?|popup)|kadence\/modal)/,
-      ) ||
-      hasMarker(/\b(?:wp-block-uagb-modal-popup|uagb-modal-popup)\b/)
-    ) {
-      hints.add('modal');
-    }
-    if (
-      hasMarker(
-        /(?:wp:|\"block\":\")(?:uagb\/(?:slider|content-slider|post-carousel|testimonials|team)|kadence\/(?:slider|carousel))/,
-      ) ||
-      hasMarker(/\b(?:swiper(?:-container|-wrapper)?|slick-slider)\b/)
-    ) {
-      hints.add('slider');
-    }
-    if (
-      hasMarker(
-        /(?:wp:|\"block\":\")(?:uagb\/(?:post-carousel|slider|content-slider)|kadence\/carousel)/,
-      ) ||
-      hasMarker(
-        /\b(?:swiper(?:-container|-wrapper)?|slick-slider|wp-block-kadence-carousel)\b/,
-      )
-    ) {
-      hints.add('carousel');
-    }
-    if (
-      hasMarker(
-        /(?:wp:|\"block\":\")(?:uagb\/(?:faq|content-toggle)|(?:core\/)?details)/,
-      ) ||
-      hasMarker(
-        /\b(?:wp-block-details|wp-block-uagb-faq|wp-block-uagb-content-toggle)\b/,
-      )
-    ) {
-      hints.add('accordion');
-    }
-    if (
-      hasMarker(/(?:wp:|\"block\":\")uagb\/tabs/) ||
-      hasMarker(/\b(?:wp-block-uagb-tabs|uagb-tabs__wrap)\b/)
-    ) {
-      hints.add('tabs');
-    }
-    if (
-      hasMarker(/\b(?:lightbox|data-lightbox|glightbox|fslightbox)\b/) &&
-      (hasMarker(
-        /(?:wp:|\"block\":\")(?:core\/gallery|core\/image|uagb\/image-gallery)/,
-      ) ||
-        hasMarker(/\b(?:wp-block-gallery|wp-block-image|uagb-image-gallery)\b/))
-    ) {
-      hints.add('lightbox');
-    }
-
-    return [...hints];
-  }
-
-  private collectCustomClassNamesFromValue(value: unknown): string[] {
-    if (!value) return [];
-    if (Array.isArray(value)) {
-      return value.flatMap((entry) =>
-        this.collectCustomClassNamesFromValue(entry),
-      );
-    }
-    if (typeof value !== 'object') return [];
-
-    const record = value as Record<string, unknown>;
-    const own = Array.isArray(record.customClassNames)
-      ? record.customClassNames
-          .filter((entry): entry is string => typeof entry === 'string')
-          .map((entry) => entry.trim())
-          .filter(Boolean)
-      : [];
-
-    return [
-      ...own,
-      ...Object.values(record).flatMap((entry) =>
-        this.collectCustomClassNamesFromValue(entry),
       ),
     ];
   }
@@ -5192,50 +7228,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return source.includes('<!-- wp:');
   }
 
-  private extractPlanningSourceOrigin(label: string): string {
-    const [origin] = label.split(':', 1);
-    return origin?.trim().toLowerCase() || 'unknown';
-  }
-
-  private isCompatibleSupplementalPlanningSource(
-    componentPlan: PlanResult[number],
-    preferredSource: PlanningSourceCandidate,
-    candidate: PlanningSourceCandidate,
-  ): boolean {
-    const normalize = (value: string | undefined): string =>
-      String(value ?? '')
-        .trim()
-        .toLowerCase();
-
-    const preferredTemplate = normalize(preferredSource.templateName);
-    const candidateTemplate = normalize(candidate.templateName);
-    if (!preferredTemplate || !candidateTemplate) return false;
-
-    // When the preferred source is any DB source, repo file sources must not
-    // supplement it. DB content is authoritative; mixing in repo file templates
-    // only injects empty structural nodes that pollute the draft section list.
-    if (
-      preferredSource.label.startsWith('db:') &&
-      /^repo[:-]/.test(candidate.label)
-    ) {
-      return false;
-    }
-
-    if (preferredTemplate === candidateTemplate) return true;
-
-    if (componentPlan.route === '/') {
-      const homeLikeTemplates = new Set(['front-page', 'home']);
-      if (
-        homeLikeTemplates.has(preferredTemplate) &&
-        homeLikeTemplates.has(candidateTemplate)
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   private isSharedLayoutBlockNode(node: WpNode): boolean {
     if (/^(header|footer|core\/header|core\/footer)$/i.test(node.block)) {
       return true;
@@ -5247,6 +7239,85 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return true;
     }
     return /^(navigation|site-title|site-tagline)$/i.test(node.block);
+  }
+
+  private filterOutSharedLayoutBlockNodes(
+    nodes: WpNode[],
+    hints?: string[],
+  ): WpNode[] {
+    let removedCount = 0;
+    const visit = (node: WpNode): WpNode | null => {
+      if (this.isSharedLayoutSubtree(node)) {
+        removedCount += 1;
+        return null;
+      }
+
+      const nextChildren = (node.children ?? [])
+        .map((child) => visit(child))
+        .filter((child): child is WpNode => child !== null);
+      if (nextChildren.length === (node.children?.length ?? 0)) {
+        return node;
+      }
+      const { children: _children, ...rest } = node;
+      return nextChildren.length > 0
+        ? { ...rest, children: nextChildren }
+        : rest;
+    };
+
+    const filtered = nodes
+      .map((node) => visit(node))
+      .filter((node): node is WpNode => node !== null);
+    if (removedCount > 0) {
+      hints?.push(
+        removedCount === 1
+          ? 'removed shared layout subtree from block tree'
+          : `removed ${removedCount} shared layout subtrees from block tree`,
+      );
+    }
+    return filtered;
+  }
+
+  private isSharedLayoutSubtree(node: WpNode): boolean {
+    if (this.isSharedLayoutBlockNode(node)) {
+      return true;
+    }
+
+    const summary = summarizeSharedLayoutSubtree(node);
+    if (summary.hasRouteOwnedContent) {
+      return false;
+    }
+
+    if (
+      summary.hasFooterClass &&
+      (summary.hasCopyrightCopy ||
+        summary.socialLinkCount > 0 ||
+        summary.linkLikeCount > 0 ||
+        summary.headingCount > 0)
+    ) {
+      return true;
+    }
+
+    if (
+      summary.hasCopyrightCopy &&
+      (summary.socialLinkCount > 0 ||
+        summary.linkLikeCount > 0 ||
+        summary.headingCount > 0)
+    ) {
+      return true;
+    }
+
+    const hasIdentity =
+      summary.kinds.has('site-logo') ||
+      summary.kinds.has('site-title') ||
+      summary.kinds.has('site-tagline');
+    const hasNavigation =
+      summary.kinds.has('navigation') || summary.kinds.has('navigation-link');
+
+    if (hasIdentity && (hasNavigation || summary.headingCount > 0)) {
+      return true;
+    }
+
+    return false;
   }
 
   private extractTemplateHints(source: string): string {
@@ -5277,12 +7348,12 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   ): string[] {
     const lines: string[] = [];
     const templateHints = this.extractTemplateHints(source);
-    const widgets = this.detectInteractiveWidgetsFromSource(source);
-    const headings = this.extractHeadingTextsFromSource(source);
+    const widgets = detectInteractiveWidgetsFromSource(source);
+    const headings = extractHeadingTextsFromSource(source);
     const imageCount = extractStaticImageSources(source).length;
-    const sectionCount = this.countDraftSectionsInSource(source);
-    const customClasses = this.extractCustomClassNamesFromSource(source);
-    const richness = this.scorePlanningSourceRichness(source);
+    const sectionCount = countDraftSectionsInSource(source);
+    const customClasses = extractCustomClassNamesFromSource(source);
+    const richness = scorePlanningSourceRichness(source);
 
     lines.push(`- Repo source richness: ${richness}`);
     if (templateHints) lines.push(`- Repo structure hints: ${templateHints}`);
@@ -5379,7 +7450,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         `- Matching DB pages: ${representativePages
           .map(
             (page) =>
-              `"${page.title}" (slug=${page.slug || page.id}, score=${this.scorePlanningSourceRichness(page.content)})`,
+              `"${page.title}" (slug=${page.slug || page.id}, score=${scorePlanningSourceRichness(page.content)})`,
           )
           .join(' | ')}`,
       );
@@ -5392,37 +7463,22 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     templateName: string,
     repoManifest?: RepoThemeManifest,
   ) {
-    const normalizedTemplate = this.normalizeTemplateIdentifier(templateName);
     if (!repoManifest) return undefined;
 
-    return repoManifest.structureHints.entrySourceChains.find((chain) => {
-      const entryName = basename(chain.entryFile)
-        .replace(/\.(php|html)$/i, '')
-        .toLowerCase();
-      if (entryName === normalizedTemplate) return true;
-
-      if (
-        normalizedTemplate === 'front-page' &&
-        ['front-page', 'home'].includes(entryName)
-      ) {
-        return true;
-      }
-      if (
-        normalizedTemplate === 'home' &&
-        ['front-page', 'home', 'index'].includes(entryName)
-      ) {
-        return true;
-      }
-
-      return false;
-    });
+    return repoManifest.structureHints.entrySourceChains.find((chain) =>
+      matchesRepoEntrySourceTemplate(templateName, chain.entryFile),
+    );
   }
 
   private collectAllowedImageSrcs(
-    planningSource: string,
+    planningSource: PlanningSourceContext | string,
     content: DbContentResult,
   ): string[] {
-    const result = new Set<string>(extractStaticImageSources(planningSource));
+    const promptSource =
+      typeof planningSource === 'string'
+        ? planningSource
+        : this.getPlanningSourcePromptSource(planningSource);
+    const result = new Set<string>(extractStaticImageSources(promptSource));
 
     const collectFromMarkup = (value?: string | null) => {
       if (!value?.trim()) return;
@@ -5432,8 +7488,8 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     };
 
     const collectDirectUrl = (value?: string | null) => {
-      if (typeof value !== 'string' || !value.trim()) return;
-      result.add(value.trim());
+      const canonical = canonicalizeThemeAssetReference(value);
+      if (canonical) result.add(canonical);
     };
 
     collectDirectUrl(content.siteInfo.logoUrl);
@@ -5459,6 +7515,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return [...result];
   }
 
+  private getPlanningSourcePromptSource(
+    planningSource?: PlanningSourceContext,
+  ): string {
+    return (
+      planningSource?.canonicalSource?.normalizedSource ??
+      planningSource?.source ??
+      ''
+    );
+  }
+
   private toComponentName(templateName: string): string {
     const name = templateName
       .replace(/\.(php|html)$/, '')
@@ -5466,47 +7532,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
       .join('');
     return /^\d/.test(name) ? `Page${name}` : name;
-  }
-
-  private toVisualDataNeeds(dataNeeds: string[]): DataNeed[] {
-    const ordered: DataNeed[] = [
-      'postDetail',
-      'pageDetail',
-      'comments',
-      'posts',
-      'pages',
-      'menus',
-      'siteInfo',
-      'footerLinks',
-    ];
-    const mapped = new Set<DataNeed>();
-
-    for (const need of dataNeeds) {
-      switch (need) {
-        case 'site-info':
-          mapped.add('siteInfo');
-          break;
-        case 'footer-links':
-          mapped.add('footerLinks');
-          break;
-        case 'post-detail':
-          mapped.add('postDetail');
-          break;
-        case 'page-detail':
-          mapped.add('pageDetail');
-          break;
-        case 'comments':
-          mapped.add('comments');
-          break;
-        case 'posts':
-        case 'pages':
-        case 'menus':
-          mapped.add(need);
-          break;
-      }
-    }
-
-    return ordered.filter((need) => mapped.has(need));
   }
 
   private formatSectionList(
@@ -5527,6 +7552,43 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
 
     return `[${labels.join(', ')}]`;
+  }
+
+  private formatPhaseCLog(message: string): string {
+    return `[${this.phaseCLogLabel}] ${message}`;
+  }
+
+  private formatPhaseCPlanSnapshot(input: {
+    componentPlan: PlanResult[number];
+    planningSourceLabel?: string;
+    surfacePlan?: PlannerSurfacePlan;
+    visualPlan?: Pick<
+      ComponentVisualPlan,
+      'sections' | 'renderMode' | 'deterministicAuthority'
+    >;
+  }): string {
+    const sectionList = this.formatSectionList(
+      input.visualPlan?.sections ?? [],
+    );
+    const visualMode = input.visualPlan?.renderMode ?? 'ai';
+    const deterministicAuthority =
+      input.visualPlan?.deterministicAuthority === true ? 'yes' : 'no';
+    const parts = [
+      `kind=${input.surfacePlan?.kind ?? 'unknown'}`,
+      `authority=${input.surfacePlan?.authority.level ?? 'unknown'}`,
+      `pageIntent=${input.surfacePlan?.pageIntent.kind ?? 'unknown'}`,
+      `source=${input.planningSourceLabel ?? input.componentPlan.planningSourceLabel ?? input.componentPlan.templateName}`,
+      `visualMode=${visualMode}`,
+      `deterministicAuthority=${deterministicAuthority}`,
+      `sections=${sectionList}`,
+    ];
+    if (input.componentPlan.fixedSlug) {
+      parts.push(`fixedSlug=${input.componentPlan.fixedSlug}`);
+    }
+    if (input.componentPlan.dataNeeds?.length) {
+      parts.push(`dataNeeds=${input.componentPlan.dataNeeds.join(',')}`);
+    }
+    return `"${input.componentPlan.componentName}": ${parts.join(' | ')}`;
   }
 
   private isRetryableVisualPlanError(error: unknown): boolean {

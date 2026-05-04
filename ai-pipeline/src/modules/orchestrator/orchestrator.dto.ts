@@ -135,8 +135,6 @@ export interface PipelineClientCaptureAttachmentDto {
   captureContext?: PipelineClientAttachmentCaptureContextDto;
   selection?: PipelineCaptureBBoxDto;
   geometry?: PipelineCaptureGeometryDto;
-  domTarget?: PipelineDomTargetDto;
-  targetNode?: PipelineCaptureTargetNodeDto;
   asset: PipelineClientCaptureAssetDto;
 }
 
@@ -167,8 +165,6 @@ export interface PipelineCaptureAttachmentDto {
   captureContext?: PipelineAttachmentCaptureContextDto;
   selection?: PipelineCaptureBBoxDto;
   geometry?: PipelineCaptureGeometryDto;
-  domTarget?: PipelineDomTargetDto;
-  targetNode?: PipelineCaptureTargetNodeDto;
 }
 
 export interface PipelineEditTargetHintDto {
@@ -310,6 +306,11 @@ export interface ApplyPendingEditRequestDto {
 }
 
 export interface SkipPendingEditRequestDto {
+  siteId: string;
+  jobId: string;
+}
+
+export interface SkipVisualCompareDto {
   siteId: string;
   jobId: string;
 }

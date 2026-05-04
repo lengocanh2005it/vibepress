@@ -7,8 +7,8 @@ const PNG = require("pngjs").PNG;
 const axios = require("axios");
 const xml2js = require("xml2js");
 
-const { PORT } = require("../config/constants");
 const { normalizeBaseUrl } = require("./textUtils");
+const { buildPublicUrlFromBase } = require("../utils/publicUrl");
 
 const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
@@ -266,6 +266,61 @@ function inferComponentHint(routePath, type) {
   return type === "page" ? "Page" : type === "post" ? "Single" : null;
 }
 
+function normalizeCompareTargets(compareTargets, wpBaseUrl, reactBaseUrl) {
+  const normalizedWpBase = normalizeBaseUrl(wpBaseUrl);
+  const normalizedReactBase = normalizeBaseUrl(reactBaseUrl);
+  const seen = new Set();
+  const normalized = [];
+
+  for (const target of Array.isArray(compareTargets) ? compareTargets : []) {
+    const wpUrl = String(target?.wpUrl || "").trim();
+    const reactUrl = String(target?.reactUrl || "").trim();
+    if (!wpUrl || !reactUrl) continue;
+
+    let resolvedWpUrl;
+    let resolvedReactUrl;
+    try {
+      resolvedWpUrl = new URL(wpUrl, normalizedWpBase).toString();
+      resolvedReactUrl = new URL(reactUrl, normalizedReactBase).toString();
+    } catch {
+      continue;
+    }
+
+    const route = normalizePathname(target?.route || resolvedReactUrl);
+    const slug = target?.slug || extractSlugFromUrl(target?.wpUrl || resolvedWpUrl);
+    const type = target?.type || inferPageType(resolvedWpUrl, normalizedWpBase);
+    const routeKey =
+      target?.routeKey ||
+      buildRouteKey({
+        reactUrl: resolvedReactUrl,
+        wpUrl: resolvedWpUrl,
+        type,
+        slug,
+      });
+    const componentHint =
+      target?.componentHint ||
+      target?.componentName ||
+      inferComponentHint(route, type);
+    const repairPriority = target?.repairPriority || (route === "/" ? "high" : "medium");
+    const dedupeKey = `${route}|${resolvedWpUrl}|${resolvedReactUrl}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    normalized.push({
+      wpUrl: resolvedWpUrl,
+      reactUrl: resolvedReactUrl,
+      route,
+      routeKey,
+      slug,
+      type,
+      componentHint,
+      repairPriority,
+    });
+  }
+
+  return normalized;
+}
+
 function cropImage(image, x, y, width, height) {
   const cropped = new PNG({ width, height });
   for (let row = 0; row < height; row++) {
@@ -374,6 +429,7 @@ function detectDiffRegions(diffImage, width, height) {
 
 function writeRegionArtifacts({
   runId,
+  artifactBaseUrl,
   baseImageA,
   baseImageB,
   diffImage,
@@ -392,9 +448,18 @@ function writeRegionArtifacts({
     return {
       ...region,
       cropArtifacts: {
-        imageA: `http://localhost:${PORT}/artifacts/${path.basename(cropAPath)}`,
-        imageB: `http://localhost:${PORT}/artifacts/${path.basename(cropBPath)}`,
-        diff: `http://localhost:${PORT}/artifacts/${path.basename(cropDiffPath)}`,
+        imageA: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropAPath)}`,
+        ),
+        imageB: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropBPath)}`,
+        ),
+        diff: buildPublicUrlFromBase(
+          artifactBaseUrl,
+          `/artifacts/${path.basename(cropDiffPath)}`,
+        ),
       },
     };
   });
@@ -633,6 +698,7 @@ function smartSample(allUrls, limits = SAMPLE_LIMITS) {
 async function compareWebVisuals({
   urlA,
   urlB,
+  artifactBaseUrl,
   fullPage = true,
   viewportWidth = 1440,
   viewportHeight = 900,
@@ -718,6 +784,7 @@ async function compareWebVisuals({
   const domComparison = compareDomStructure(domFreqA, domFreqB);
   const diffRegions = writeRegionArtifacts({
     runId,
+    artifactBaseUrl,
     baseImageA: normA,
     baseImageB: normB,
     diffImage,
@@ -737,9 +804,18 @@ async function compareWebVisuals({
     resolutionUsed: { width, height, maxWidth, maxHeight },
     navigationModes: { urlA: navigationModeA, urlB: navigationModeB },
     artifacts: {
-      imageA: `http://localhost:${PORT}/artifacts/${path.basename(imageAPath)}`,
-      imageB: `http://localhost:${PORT}/artifacts/${path.basename(imageBPath)}`,
-      diff: `http://localhost:${PORT}/artifacts/${path.basename(diffPath)}`,
+      imageA: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(imageAPath)}`,
+      ),
+      imageB: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(imageBPath)}`,
+      ),
+      diff: buildPublicUrlFromBase(
+        artifactBaseUrl,
+        `/artifacts/${path.basename(diffPath)}`,
+      ),
     },
     regions: diffRegions,
     domComparison,
@@ -766,40 +842,62 @@ async function compareWebVisuals({
 async function compareMultiplePages({
   wpBaseUrl,
   reactBaseUrl,
+  jobId,
+  mode,
+  routeEntries,
+  compareTargets,
+  artifactBaseUrl,
   sampleLimits = SAMPLE_LIMITS,
   fullPage = true,
   viewportWidth = 1440,
   viewportHeight = 900,
 }) {
-  // 1. Discover
-  console.log("🔍 Discovering URLs...");
-  const allUrls =
-    (await discoverFromSitemap(wpBaseUrl)) ||
-    (await discoverFromRestApi(wpBaseUrl));
+  const normalizedWpBase = normalizeBaseUrl(wpBaseUrl);
+  const normalizedReactBase = normalizeBaseUrl(reactBaseUrl);
+  const explicitTargets = normalizeCompareTargets(
+    compareTargets,
+    normalizedWpBase,
+    normalizedReactBase,
+  );
+  const usingExplicitTargets = explicitTargets.length > 0;
 
-  if (!allUrls?.length) {
-    throw new Error(
-      "Không tìm thấy URL nào. Kiểm tra sitemap hoặc WP REST API.",
+  let sampled = [];
+  if (usingExplicitTargets) {
+    console.log(
+      `🎯 Using ${explicitTargets.length} explicit compare target(s) from pipeline contract${mode ? ` [mode=${mode}]` : ""}${jobId ? ` [job=${jobId}]` : ""}`,
     );
-  }
+    sampled = explicitTargets;
+  } else {
+    // 1. Discover
+    console.log("🔍 Discovering URLs...");
+    const allUrls =
+      (await discoverFromSitemap(wpBaseUrl)) ||
+      (await discoverFromRestApi(wpBaseUrl));
 
-  // 2. Sample
-  console.log("📋 Smart sampling:");
-  const sampled = smartSample(allUrls, sampleLimits);
+    if (!allUrls?.length) {
+      throw new Error(
+        "Không tìm thấy URL nào. Kiểm tra sitemap hoặc WP REST API.",
+      );
+    }
+
+    // 2. Sample
+    console.log("📋 Smart sampling:");
+    sampled = smartSample(allUrls, sampleLimits);
+  }
 
   // 3. Compare từng cặp
   const results = [];
-  const normalizedWpBase = normalizeBaseUrl(wpBaseUrl);
-  const normalizedReactBase = normalizeBaseUrl(reactBaseUrl);
 
   for (const urlItem of sampled) {
-    const wpUrl = urlItem?.loc;
-    const reactUrl = mapWpUrlToReactUrl(
-      wpUrl,
-      normalizedWpBase,
-      normalizedReactBase,
-      urlItem.type,
-    );
+    const wpUrl = usingExplicitTargets ? urlItem?.wpUrl : urlItem?.loc;
+    const reactUrl = usingExplicitTargets
+      ? urlItem?.reactUrl
+      : mapWpUrlToReactUrl(
+          wpUrl,
+          normalizedWpBase,
+          normalizedReactBase,
+          urlItem.type,
+        );
 
     if (!wpUrl || !reactUrl) {
       const reason = !wpUrl
@@ -820,6 +918,7 @@ async function compareMultiplePages({
       const result = await compareWebVisuals({
         urlA: wpUrl,
         urlB: reactUrl,
+        artifactBaseUrl,
         fullPage,
         viewportWidth,
         viewportHeight,
@@ -827,18 +926,25 @@ async function compareMultiplePages({
 
       const accuracy = 100 - result.diffPercentage;
       const status = accuracy >= 90 ? "✅ PASS" : "⚠️  FAIL";
-      const reactPath = normalizePathname(reactUrl);
+      const reactPath = usingExplicitTargets
+        ? normalizePathname(urlItem.route || reactUrl)
+        : normalizePathname(reactUrl);
       const wpPath = normalizePathname(wpUrl);
-      const slug = urlItem?.slug || extractSlugFromUrl(wpUrl) || extractSlugFromUrl(reactUrl);
-      const routeKey = buildRouteKey({
-        reactUrl,
-        wpUrl,
-        type: urlItem.type,
-        slug,
-      });
-      const componentHint = inferComponentHint(reactPath, urlItem.type);
-      const repairPriority =
-        result.diffPercentage >= 20 || (result.regions?.[0]?.severity === "high")
+      const slug =
+        urlItem?.slug || extractSlugFromUrl(wpUrl) || extractSlugFromUrl(reactUrl);
+      const routeKey =
+        urlItem?.routeKey ||
+        buildRouteKey({
+          reactUrl,
+          wpUrl,
+          type: urlItem.type,
+          slug,
+        });
+      const componentHint =
+        urlItem?.componentHint || inferComponentHint(reactPath, urlItem.type);
+      const repairPriority = usingExplicitTargets
+        ? (urlItem?.repairPriority || "medium")
+        : result.diffPercentage >= 20 || (result.regions?.[0]?.severity === "high")
           ? "high"
           : result.diffPercentage >= 8
             ? "medium"
@@ -849,6 +955,7 @@ async function compareMultiplePages({
         type: urlItem.type,
         slug,
         routeKey,
+        route: reactPath,
         wpPath,
         reactPath,
         componentHint,

@@ -11,13 +11,19 @@ import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
+import { buildSurfacePlanRepairContextNote } from './prompts/component.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import {
+  collectSurfacePlanRequiredLiterals,
+  resolvePlannerSectionBlueprint,
+} from '../planner/planner-surface-plan.util.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
   wpBlocksToJsonWithSourceRefs,
   wpJsonToString,
+  inferTargetFromBlockName,
 } from '../../../common/utils/wp-block-to-json.js';
 import type { WpNode } from '../../../common/utils/wp-block-to-json.js';
 import { StyleResolverService } from '../../../common/style-resolver/style-resolver.service.js';
@@ -25,8 +31,18 @@ import type {
   ThemeInteractionTarget,
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
-import type { ComponentVisualPlan, SectionPlan } from './visual-plan.schema.js';
+import type {
+  BlockNode,
+  ComponentVisualPlan,
+  SectionPlan,
+} from './visual-plan.schema.js';
+import { shouldBypassAiGenerationForVisualPlan } from './visual-plan.schema.js';
 import { getComponentStrategy } from '../component-strategy.registry.js';
+import {
+  shouldBlockAiStructuralRewriteForRenderContract,
+  type ComponentRenderContract,
+} from '../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
 const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
@@ -72,6 +88,8 @@ export interface GeneratedComponent {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
+  renderContract?: ComponentRenderContract;
 }
 
 export interface ReactGenerateResult {
@@ -260,7 +278,7 @@ export class ReactGeneratorService {
             `${counter} Generating "${componentName}.tsx" → ${folder}/`,
           );
 
-          const t0 = Date.now();
+          const t0 = process.hrtime.bigint();
           const produced = await this.generateForTemplate({
             componentName,
             rawSource,
@@ -276,18 +294,19 @@ export class ReactGeneratorService {
             logPath,
             jobId,
           });
-          const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
           const codeChars = produced.reduce((s, c) => s + c.code.length, 0);
-          this.logger.log(
-            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-          );
-          await this.logToFile(
-            logPath,
-            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}s`,
-          );
           if (jobId) {
             await this.persistDraftComponents(jobId, produced);
           }
+          const elapsedMs = Number(process.hrtime.bigint() - t0) / 1_000_000;
+          const elapsed = this.formatElapsedMs(elapsedMs);
+          this.logger.log(
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}`,
+          );
+          await this.logToFile(
+            logPath,
+            `${counter} Done "${componentName}.tsx" — ${codeChars} chars, ${elapsed}`,
+          );
 
           return { i, produced };
         }),
@@ -309,6 +328,14 @@ export class ReactGeneratorService {
     await this.logToFile(logPath, summary);
 
     return { jobId, components, outDir: '' };
+  }
+
+  private formatElapsedMs(ms: number): string {
+    if (ms < 1000) {
+      return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)}ms`;
+    }
+    const seconds = ms / 1000;
+    return `${seconds < 10 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
   }
 
   // ── Per-template routing: single vs chunked ────────────────────────────────
@@ -386,9 +413,13 @@ export class ReactGeneratorService {
       const requiredCustomClassNames = this.collectCustomClassNamesFromNodes(
         filteredNodes ?? [],
       );
+      const nodeTargets = this.collectCustomClassTargetsFromNodes(
+        filteredNodes ?? [],
+      );
       const requiredCustomClassTargets = this.resolveRequiredCustomClassTargets(
         requiredCustomClassNames,
         tokens,
+        nodeTargets,
       );
       const code = this.codeGenerator.generateBlockFaithfulPartial({
         componentName,
@@ -465,6 +496,7 @@ export class ReactGeneratorService {
           requiredCustomClassTargets: this.resolveRequiredCustomClassTargets(
             result.component.requiredCustomClassNames,
             tokens,
+            this.collectCustomClassTargetsFromNodes(filteredNodes ?? []),
           ),
         }),
       ];
@@ -611,7 +643,11 @@ export class ReactGeneratorService {
     feedback: string;
     modelConfig?: { fixAgent?: string };
     logPath?: string;
-    fixMode?: 'full' | 'syntax-only';
+    fixMode?:
+      | 'full'
+      | 'syntax-only'
+      | 'visual-metrics-safe'
+      | 'edit-request-safe';
     visionImageUrls?: string[];
     visionContextNote?: string;
     tokenScope?: TokenScope;
@@ -629,33 +665,54 @@ export class ReactGeneratorService {
     } = input;
     const componentPlan = plan.find((p) => p.componentName === component.name);
     const fixAgentModel = modelConfig?.fixAgent ?? this.llmFactory.getModel();
-    const isProtectedDeterministicSharedPartial =
+    const effectiveRenderContract =
+      component.renderContract ?? componentPlan?.renderContract;
+    const isProtectedDeterministicAuthority =
       component.generationMode === 'deterministic' &&
-      /^(Header|Footer|Navigation|Nav)$/i.test(component.name);
+      shouldBypassAiGenerationForVisualPlan(component.visualPlan);
+    const isStrictRenderContractProtection =
+      shouldBlockAiStructuralRewriteForRenderContract(effectiveRenderContract);
 
-    if (isProtectedDeterministicSharedPartial && fixMode !== 'syntax-only') {
+    if (
+      (isProtectedDeterministicAuthority || isStrictRenderContractProtection) &&
+      fixMode !== 'syntax-only'
+    ) {
       this.logger.log(
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure`,
+        `[fixer] Skipping AI auto-fix for protected component "${component.name}" to preserve planner-owned/source-backed structure`,
       );
       await this.logToFile(
         logPath,
-        `[fixer] Skipping AI auto-fix for deterministic shared partial "${component.name}" to preserve block-faithful structure. Feedback: ${feedback}`,
+        `[fixer] Skipping AI auto-fix for protected component "${component.name}" to preserve planner-owned/source-backed structure. Feedback: ${feedback}`,
       );
       return this.attachPlanContext(component, componentPlan);
     }
 
     const effectiveFeedback =
       fixMode === 'syntax-only'
-        ? `Syntax-only repair for deterministic shared partial "${component.name}". Preserve the existing block-faithful structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
+        ? `Syntax-only repair for deterministic-authority component "${component.name}". Preserve the existing planner-owned structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
-    const visualPlanRepairNote = this.buildVisualPlanRepairNote(componentPlan);
-    const hardRegenerationNote = this.buildHardRegenerationRepairNote(
-      feedback,
-      componentPlan,
-    );
+    const approvedPlanRepairNote =
+      fixMode === 'full'
+        ? this.buildApprovedPlanRepairNote(componentPlan)
+        : undefined;
+    const visualMetricsSafeRepairNote =
+      fixMode === 'visual-metrics-safe'
+        ? this.buildVisualMetricsSafeRepairNote(componentPlan)
+        : undefined;
+    const editRequestSafeRepairNote =
+      fixMode === 'edit-request-safe'
+        ? this.buildEditRequestSafeRepairNote(componentPlan)
+        : undefined;
+    const hardRegenerationNote =
+      fixMode === 'full'
+        ? this.buildHardRegenerationRepairNote(feedback, componentPlan)
+        : undefined;
     const repairFeedback = [
       effectiveFeedback,
-      visualPlanRepairNote,
+      visualMetricsSafeRepairNote,
+      editRequestSafeRepairNote,
+      approvedPlanRepairNote,
+      this.buildComponentContractRepairNote(componentPlan),
       hardRegenerationNote,
     ]
       .filter(Boolean)
@@ -664,13 +721,21 @@ export class ReactGeneratorService {
     this.logger.log(
       fixMode === 'syntax-only'
         ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}"`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
+        : fixMode === 'visual-metrics-safe'
+          ? `[fixer] Auto-fixing visual metrics for component "${component.name}" with contract-safe mode`
+          : fixMode === 'edit-request-safe'
+            ? `[fixer] Auto-fixing approved user edit for component "${component.name}" with scoped safe mode`
+            : `[fixer] Auto-fixing component "${component.name}" based on review feedback`,
     );
     await this.logToFile(
       logPath,
       fixMode === 'syntax-only'
-        ? `[fixer] Auto-fixing syntax for protected deterministic shared partial "${component.name}": ${repairFeedback}`
-        : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${repairFeedback}`,
+        ? `[fixer] Auto-fixing syntax for protected deterministic-authority component "${component.name}": ${repairFeedback}`
+        : fixMode === 'visual-metrics-safe'
+          ? `[fixer] Auto-fixing visual metrics for component "${component.name}" with contract-safe mode: ${repairFeedback}`
+          : fixMode === 'edit-request-safe'
+            ? `[fixer] Auto-fixing approved user edit for component "${component.name}" with scoped safe mode: ${repairFeedback}`
+            : `[fixer] Auto-fixing component "${component.name}" based on review feedback: ${repairFeedback}`,
     );
 
     const fixedCode = await this.codeReviewer.selfFix(
@@ -687,6 +752,43 @@ export class ReactGeneratorService {
     return this.attachPlanContext(
       { ...component, code: fixedCode },
       componentPlan,
+    );
+  }
+
+  generateDeterministicFallbackComponent(input: {
+    component: GeneratedComponent;
+    plan: PlanResult;
+    hasSharedHeader?: boolean;
+    hasSharedFooter?: boolean;
+  }): GeneratedComponent | null {
+    const {
+      component,
+      plan,
+      hasSharedHeader = false,
+      hasSharedFooter = false,
+    } = input;
+    const componentPlan = plan.find(
+      (item) => item.componentName === component.name,
+    );
+    const effectivePlan = this.stripSharedLayoutSectionsFromPlan(
+      componentPlan,
+      hasSharedHeader,
+      hasSharedFooter,
+    );
+    if (!effectivePlan?.visualPlan) {
+      return null;
+    }
+
+    const code = this.codeGenerator.generate(effectivePlan.visualPlan);
+    return this.attachPlanContext(
+      {
+        ...component,
+        code,
+      },
+      effectivePlan,
+      {
+        generationMode: 'deterministic',
+      },
     );
   }
 
@@ -770,6 +872,8 @@ ${renders}
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
       visualPlan: component.visualPlan ?? componentPlan?.visualPlan,
+      surfacePlan: component.surfacePlan ?? componentPlan?.surfacePlan,
+      renderContract: component.renderContract ?? componentPlan?.renderContract,
       ...overrides,
     };
   }
@@ -787,13 +891,51 @@ ${renders}
     return [...result];
   }
 
-  private buildVisualPlanRepairNote(
+  private collectCustomClassTargetsFromNodes(
+    nodes: WpNode[],
+  ): Record<string, ThemeInteractionTarget> {
+    const targets: Record<string, ThemeInteractionTarget> = {};
+    const visit = (node: WpNode) => {
+      const target = inferTargetFromBlockName(node.block);
+      if (target) {
+        for (const className of node.customClassNames ?? []) {
+          const normalized = className.trim();
+          if (normalized && !targets[normalized]) {
+            targets[normalized] = target;
+          }
+        }
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    return targets;
+  }
+
+  private buildApprovedPlanRepairNote(
     componentPlan?: PlanResult[number],
   ): string | undefined {
-    const sections = componentPlan?.visualPlan?.sections ?? [];
+    const sections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
+    });
+    const blockTree =
+      componentPlan?.visualPlan?.blockTree ??
+      componentPlan?.surfacePlan?.sourceEvidence.blockTree ??
+      [];
     const palette = componentPlan?.visualPlan?.palette;
     const typography = componentPlan?.visualPlan?.typography;
-    if (sections.length === 0 && !palette && !typography) return undefined;
+    const surfacePlan = componentPlan?.surfacePlan;
+    const requiredLiterals = surfacePlan
+      ? collectSurfacePlanRequiredLiterals(surfacePlan)
+      : [];
+    if (
+      sections.length === 0 &&
+      blockTree.length === 0 &&
+      !surfacePlan &&
+      !palette &&
+      !typography
+    )
+      return undefined;
 
     const lines = sections.map((section, index) => {
       const parts = [
@@ -862,7 +1004,7 @@ ${renders}
 
     if (sections.length > 0) {
       blocks.push(
-        'Visual plan sections that must remain present in the repaired code:',
+        'Approved planner sections that must remain present in the repaired code:',
         ...lines,
         'Do not drop sections, CTA labels, images, or card bodies from this contract.',
       );
@@ -886,6 +1028,29 @@ ${renders}
           ),
         );
       }
+    }
+
+    if (surfacePlan) {
+      blocks.unshift(buildSurfacePlanRepairContextNote(surfacePlan));
+      if (requiredLiterals.length > 0) {
+        blocks.push(
+          '',
+          `Restore or retain these source-backed literals when they belong to the component shell/content: ${requiredLiterals
+            .slice(0, 10)
+            .map((literal) => JSON.stringify(literal))
+            .join(' | ')}`,
+        );
+      }
+    }
+
+    if (blockTree.length > 0) {
+      blocks.push(
+        '',
+        'Preserved WordPress block tree — structural contract:',
+        'Treat this block tree as the source of truth for wrapper order, group nesting, column ownership, sidebar shell placement, and template-part boundaries.',
+        'Do NOT flatten it into a simpler section stack during repair.',
+        ...this.summarizeBlockTreeForRepair(blockTree),
+      );
     }
 
     if (palette) {
@@ -919,6 +1084,153 @@ ${renders}
     return blocks.join('\n');
   }
 
+  private buildVisualMetricsSafeRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string {
+    const surfacePlan = componentPlan?.surfacePlan;
+    const approvedSections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan,
+    });
+    const lines = [
+      'VISUAL METRICS SAFE MODE:',
+      'This repair is ONLY for visual/UI alignment after screenshot metric diagnosis.',
+      'You may adjust className, inline style, spacing, wrappers, DOM nesting for presentational fidelity, and approved interactive behavior wiring.',
+      'Do NOT rewrite the component architecture from scratch.',
+      'Do NOT change route binding, fetch endpoints, main data source selection, or the component data contract.',
+      'Do NOT add or remove `useParams()`.',
+      'Do NOT change a fixed-slug component into a dynamic-slug component, and do NOT change a dynamic-slug component into a fixed-slug component.',
+      'Do NOT replace exact detail fetches with collection fetch + lookup.',
+      'Do NOT add or remove primary state variables such as `page`, `post`, `pages`, `posts`, `comments`, `menus`, `footerColumns`, or `siteInfo` unless the validator feedback explicitly says one is missing.',
+      'Do NOT introduce or remove top-level shared chrome such as `<header>`, `<footer>`, or global navigation in page components.',
+      'Keep the existing approved data/rendering mode intact. Focus the repair on styling, layout fidelity, wrapper structure, and UI behavior only.',
+    ];
+    if (surfacePlan) {
+      lines.push(
+        `Locked planner authority: ${surfacePlan.authority.level} (${surfacePlan.kind}; pageIntent=${surfacePlan.pageIntent.kind}).`,
+      );
+      if (surfacePlan.acceptance.mustKeep.length > 0) {
+        lines.push(
+          `Keep these source-backed anchors intact: ${surfacePlan.acceptance.mustKeep
+            .slice(0, 5)
+            .join(' | ')}`,
+        );
+      }
+      if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+        lines.push(
+          `Do not invent: ${surfacePlan.acceptance.mustNotInvent
+            .slice(0, 5)
+            .join(' | ')}`,
+        );
+      }
+    }
+    const normalizedNeeds = new Set(componentPlan?.dataNeeds ?? []);
+    const isDetailSourceBackedRoute =
+      normalizedNeeds.has('pageDetail') || normalizedNeeds.has('postDetail');
+
+    if (isDetailSourceBackedRoute) {
+      const approvedSectionCount = approvedSections.length;
+      lines.push(
+        'DETAIL ROUTE GUARDRAIL: this is a source-backed detail route. Preserve the approved/source-backed section structure instead of improvising new page composition.',
+      );
+      lines.push(
+        'Do NOT add, remove, merge, split, or reorder major sections unless the feedback explicitly identifies a missing approved/source-backed section that must be restored.',
+      );
+      lines.push(
+        'Do NOT rewrite source-backed body copy into new summaries, marketing prose, or synthetic filler. Keep section content bound to the approved source-backed content.',
+      );
+      if (componentPlan?.visualPlan?.blockTree?.length) {
+        lines.push(
+          'Do NOT alter preserved block-tree shell hierarchy on this detail route. Metrics repair may adjust spacing, sizing, and styling, but must not rewrite wrapper order, columns, or sidebar ownership.',
+        );
+      }
+      if (approvedSectionCount > 0) {
+        lines.push(
+          `Expected section coverage remains locked to the approved plan (${approvedSectionCount} section(s)). Visual repair must refine the existing section shells rather than collapsing the page into a different structure.`,
+        );
+      }
+    }
+
+    if (componentPlan?.route) {
+      lines.push(`Locked route contract: ${componentPlan.route}`);
+    }
+    if (componentPlan?.fixedSlug) {
+      lines.push(`Locked fixed slug: ${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan?.dataNeeds?.length) {
+      lines.push(`Locked data needs: ${componentPlan.dataNeeds.join(', ')}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  private summarizeBlockTreeForRepair(
+    nodes: ReadonlyArray<BlockNode>,
+    depth = 0,
+    lines: string[] = [],
+    limit = 12,
+  ): string[] {
+    for (const node of nodes) {
+      if (lines.length >= limit) break;
+      lines.push(
+        [
+          `${'  '.repeat(depth)}- ${node.kind}`,
+          node.sourceRef?.sourceNodeId
+            ? `sourceNodeId=${node.sourceRef.sourceNodeId}`
+            : null,
+          node.templatePartSlug
+            ? `templatePart=${node.templatePartSlug}`
+            : null,
+          node.columnWidth ? `columnWidth=${node.columnWidth}` : null,
+        ]
+          .filter(Boolean)
+          .join(' | '),
+      );
+      if (node.children?.length && lines.length < limit) {
+        this.summarizeBlockTreeForRepair(
+          node.children,
+          depth + 1,
+          lines,
+          limit,
+        );
+      }
+    }
+    if (depth === 0 && lines.length >= limit) {
+      lines.push('- ...');
+    }
+    return lines;
+  }
+
+  private buildEditRequestSafeRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string {
+    const lines = [
+      'EDIT REQUEST SAFE MODE:',
+      'This repair is applying an approved user edit or a follow-up refinement for that approved edit.',
+      'The user-requested local change is PRIMARY. Modify the exact target region or matched local section first.',
+      'Preserve unrelated sections, sibling regions, and surrounding component structure unless the request explicitly says to expand the change.',
+      'Do NOT rewrite the entire component from scratch unless the feedback explicitly allows a broader rewrite.',
+      'Do NOT change route binding, fetch endpoints, main data source selection, or the component data contract.',
+      'Do NOT add or remove `useParams()` unless the validator feedback explicitly requires it.',
+      'Do NOT replace exact detail fetches with collection fetch + lookup.',
+      'Do NOT add or remove top-level shared chrome such as `<header>`, `<footer>`, or global navigation in page components.',
+      'Do NOT move a local style/content change up to the outer section/container when the target evidence points to a child element like a button, heading, paragraph, card, or media node.',
+      'Prefer targeted presentation/content edits over broad restructuring.',
+    ];
+
+    if (componentPlan?.route) {
+      lines.push(`Locked route contract: ${componentPlan.route}`);
+    }
+    if (componentPlan?.fixedSlug) {
+      lines.push(`Locked fixed slug: ${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan?.dataNeeds?.length) {
+      lines.push(`Locked data needs: ${componentPlan.dataNeeds.join(', ')}`);
+    }
+
+    return lines.join('\n');
+  }
+
   private buildHardRegenerationRepairNote(
     feedback: string,
     componentPlan?: PlanResult[number],
@@ -927,23 +1239,43 @@ ${renders}
       return undefined;
     }
 
-    const sectionCount = componentPlan?.visualPlan?.sections?.length ?? 0;
+    const sectionCount = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
+    }).length;
+    const surfacePlan = componentPlan?.surfacePlan;
+    const requiredLiterals = surfacePlan
+      ? collectSurfacePlanRequiredLiterals(surfacePlan)
+      : [];
     const lines = [
       'HARD REGENERATION MODE:',
-      'The current component failed section coverage or visual-plan fidelity.',
-      'The current component failed its visual-plan obligations or contract fidelity.',
+      'The current component failed section coverage or planner-contract fidelity.',
+      'The current component failed its surface-plan / visual-plan obligations or contract fidelity.',
       'Do NOT patch only a small fragment of the broken code.',
-      'Rewrite the full component from scratch so it matches the approved visual plan again.',
+      'Rewrite the full component from scratch so it matches the approved planner contract again.',
       'Render every planned section in the original order.',
       'Do not keep a shortened skeleton that only preserves the first few sections.',
     ];
+    if (surfacePlan) {
+      lines.push(
+        `Planner authority remains locked to ${surfacePlan.authority.level} (${surfacePlan.kind}; pageIntent=${surfacePlan.pageIntent.kind}).`,
+      );
+    }
     if (sectionCount > 0) {
       lines.push(
         `Minimum expectation: restore all ${sectionCount} approved planned section(s), unless a section is explicitly untracked canonical body content in the contract.`,
       );
     }
+    if (requiredLiterals.length > 0) {
+      lines.push(
+        `Restore these source-backed literals where applicable: ${requiredLiterals
+          .slice(0, 8)
+          .map((literal) => JSON.stringify(literal))
+          .join(' | ')}`,
+      );
+    }
     lines.push(
-      'If the existing code conflicts with the approved plan, prefer the approved plan and rewrite the structure accordingly.',
+      'If the existing code conflicts with the approved plan, prefer the planner-owned surface plan first, then the execution-level visual plan, and rewrite the structure accordingly.',
     );
 
     return lines.join('\n');
@@ -953,10 +1285,102 @@ ${renders}
     const normalized = feedback.toLowerCase();
     return (
       normalized.includes('visual plan obligations violated') ||
+      normalized.includes('surface-plan source evidence violated') ||
       normalized.includes('required capability') ||
       normalized.includes('obligation "') ||
-      normalized.includes('sectionaudit:')
+      normalized.includes('sectionaudit:') ||
+      normalized.includes('rootcause=route-mapping-error') ||
+      normalized.includes('rootcause=data-binding-error') ||
+      normalized.includes('exact bound record via') ||
+      normalized.includes('must not include their own <header> tag')
     );
+  }
+
+  private buildComponentContractRepairNote(
+    componentPlan?: PlanResult[number],
+  ): string | undefined {
+    if (!componentPlan) return undefined;
+
+    const surfacePlan = componentPlan.surfacePlan;
+    const lines: string[] = [
+      'Approved component contract — MUST remain true after the repair:',
+      `- componentType=${componentPlan.type}`,
+      `- route=${componentPlan.route ?? 'unknown'}`,
+      `- isDetail=${componentPlan.isDetail === true ? 'yes' : 'no'}`,
+    ];
+
+    if (componentPlan.fixedSlug) {
+      lines.push(`- fixedSlug=${componentPlan.fixedSlug}`);
+    }
+    if (componentPlan.dataNeeds?.length) {
+      lines.push(`- dataNeeds=${componentPlan.dataNeeds.join(', ')}`);
+    }
+    if (surfacePlan) {
+      lines.push(`- plannerKind=${surfacePlan.kind}`);
+      lines.push(`- plannerAuthority=${surfacePlan.authority.level}`);
+      lines.push(`- pageIntent=${surfacePlan.pageIntent.kind}`);
+      lines.push(
+        `- sharedChromeOwnership=${surfacePlan.contract.sharedChromeOwnership}`,
+      );
+      if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+        lines.push(
+          `- mustNotInvent=${surfacePlan.acceptance.mustNotInvent
+            .slice(0, 6)
+            .join(' | ')}`,
+        );
+      }
+    }
+
+    if (componentPlan.type === 'page') {
+      lines.push(
+        '- This is a PAGE component. Do NOT render your own top-level `<header>`, `<footer>`, or site navigation chrome. The shared Layout wrapper already provides global navigation and footer.',
+      );
+    }
+
+    const normalizedNeeds = new Set(componentPlan.dataNeeds ?? []);
+    const fixedSlug = componentPlan.fixedSlug?.trim();
+
+    if (normalizedNeeds.has('pageDetail')) {
+      if (fixedSlug) {
+        lines.push(
+          `- Fetch the main record ONLY from \`/api/pages/${fixedSlug}\`. Do NOT use \`useParams()\` for the main record, do NOT use \`/api/pages/\${slug}\`, and do NOT fetch \`/api/pages\` for a lookup.`,
+        );
+      } else {
+        lines.push(
+          '- Fetch the main record from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
+        );
+      }
+    }
+
+    if (normalizedNeeds.has('postDetail')) {
+      if (fixedSlug) {
+        lines.push(
+          `- Fetch the main record ONLY from \`/api/posts/${fixedSlug}\`. Do NOT use \`useParams()\` for the main record, do NOT use \`/api/posts/\${slug}\`, and do NOT fetch \`/api/posts\` for a lookup.`,
+        );
+      } else {
+        lines.push(
+          '- Fetch the main record from `/api/posts/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/posts` + lookup.',
+        );
+      }
+    }
+
+    if (normalizedNeeds.has('comments')) {
+      if (fixedSlug) {
+        lines.push(
+          `- If comments are rendered for this fixed-bound detail view, use the bound slug \`${fixedSlug}\` consistently for comment fetch/submission endpoints as well.`,
+        );
+      } else if (componentPlan.isDetail) {
+        lines.push(
+          '- If comments are rendered for this detail view, keep the comments slug binding consistent with the main detail slug.',
+        );
+      }
+    }
+
+    lines.push(
+      '- If JSX references a collection/state variable such as `posts`, `pages`, `comments`, or `footerColumns`, ensure the matching `useState(...)` declaration and fetch assignment exist in the component before returning code.',
+    );
+
+    return lines.join('\n');
   }
 
   private restoreTrackedSectionMarkers(
@@ -1094,14 +1518,14 @@ ${renders}
   private resolveRequiredCustomClassTargets(
     requiredCustomClassNames: string[] | undefined,
     tokens?: ThemeTokens,
+    nodeInferredTargets?: Record<string, ThemeInteractionTarget>,
   ): Record<string, ThemeInteractionTarget> | undefined {
-    const precise = tokens?.interactions?.precise ?? [];
-    if (!requiredCustomClassNames?.length || precise.length === 0) {
-      return undefined;
-    }
+    const targetMap: Record<string, ThemeInteractionTarget> = {
+      ...(nodeInferredTargets ?? {}),
+    };
 
-    const targetMap: Record<string, ThemeInteractionTarget> = {};
-    for (const className of requiredCustomClassNames) {
+    const precise = tokens?.interactions?.precise ?? [];
+    for (const className of requiredCustomClassNames ?? []) {
       const normalized = className.trim();
       if (!normalized) continue;
       const match = precise.find((entry) => entry.className === normalized);
@@ -1116,13 +1540,11 @@ ${renders}
     componentPlan: PlanResult[number] | undefined,
     nodes: WpNode[] | undefined,
   ): boolean {
-    // Header/Footer are visually sensitive shared chrome. Let them go through
-    // the AI-assisted reviewer path so layout can stay closer to the original
-    // WordPress site, while validator rules still enforce the hard data contract.
-    if (/^(header|footer)$/i.test(componentName)) {
+    if (componentPlan?.visualPlan?.deterministicAuthority) {
       return false;
     }
-
+    // Shared chrome is more stable when we preserve the original WordPress
+    // wrapper/column/navigation tree directly instead of letting AI restyle it.
     return !!(
       componentPlan?.type === 'partial' &&
       /^(header|footer)/i.test(componentName) &&

@@ -3,6 +3,9 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const AUTOMATION_PUBLIC_BASE_URL = process.env.AUTOMATION_PUBLIC_BASE_URL
+  ? process.env.AUTOMATION_PUBLIC_BASE_URL.trim().replace(/\/+$/, '')
+  : '';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER || null;
 const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'MVP Bot';
@@ -46,6 +49,7 @@ const corsOptions = {
 module.exports = {
 	PORT,
 	CORS_ORIGIN,
+	AUTOMATION_PUBLIC_BASE_URL,
 	GITHUB_TOKEN,
 	GITHUB_OWNER,
 	GIT_AUTHOR_NAME,

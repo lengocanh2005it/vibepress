@@ -6,15 +6,43 @@ interface ComponentInfo {
   text: string;
   classes: string[];
   rect: { w: number; h: number };
+  viewport?: {
+    width: number;
+    height: number;
+    scrollX: number;
+    scrollY: number;
+    dpr: number;
+  };
+  document?: {
+    width: number;
+    height: number;
+  };
+  viewportRect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    coordinateSpace: 'iframe-viewport';
+  };
+  documentRect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    coordinateSpace: 'iframe-document';
+  };
+  normalizedRect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    coordinateSpace: 'iframe-document-normalized';
+  };
   source?: {
     file: string;
     line: number;
     column?: number;
   };
-  // Section identity — minimal DOM markers; resolve detailed metadata via ui-source-map
-  vpSourceNode?: string;
-  vpSectionKey?: string;
-  vpComponent?: string;
   // Child node targeting — describes the specific element clicked
   targetNodeRole?: string;
   targetElementTag?: string;
@@ -131,25 +159,6 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
   return undefined;
 }
 
-// ── data-vp-* section identity ────────────────────────────
-function getVpSectionData(el: Element): Pick<
-  ComponentInfo,
-  'vpSourceNode' | 'vpSectionKey' | 'vpComponent'
-> {
-  let current: Element | null = el;
-  while (current) {
-    if (current instanceof HTMLElement && current.dataset.vpSourceNode) {
-      return {
-        vpSourceNode: current.dataset.vpSourceNode || undefined,
-        vpSectionKey: current.dataset.vpSectionKey || undefined,
-        vpComponent: current.dataset.vpComponent || undefined,
-      };
-    }
-    current = current.parentElement;
-  }
-  return {};
-}
-
 // ── Target node role inference ────────────────────────────
 function inferNodeRole(el: Element): string {
   const tag = el.tagName.toLowerCase();
@@ -169,6 +178,15 @@ function inferNodeRole(el: Element): string {
   if (['p', 'span', 'label', 'small', 'strong', 'em'].includes(tag)) return 'text';
 
   return 'container';
+}
+
+function roundMetric(value: number, digits = 4): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function clampRatio(value: number): number {
+  return Math.min(Math.max(roundMetric(value), 0), 1);
 }
 
 export function startInspectorClient(): void {
@@ -243,7 +261,63 @@ export function startInspectorClient(): void {
 
     const r = e.target.getBoundingClientRect();
     const source = getSourceInfo(e.target);
-    const vpData = getVpSectionData(e.target);
+    const docEl = document.documentElement;
+    const body = document.body;
+    const viewport = {
+      width: Math.max(1, Math.round(window.innerWidth || docEl.clientWidth || 1)),
+      height: Math.max(
+        1,
+        Math.round(window.innerHeight || docEl.clientHeight || 1),
+      ),
+      scrollX: Math.max(0, Math.round(window.scrollX || 0)),
+      scrollY: Math.max(0, Math.round(window.scrollY || 0)),
+      dpr: Math.max(1, window.devicePixelRatio || 1),
+    };
+    const documentMetrics = {
+      width: Math.max(
+        viewport.width,
+        Math.round(
+          docEl.scrollWidth ||
+            body.scrollWidth ||
+            docEl.clientWidth ||
+            body.clientWidth ||
+            viewport.width,
+        ),
+      ),
+      height: Math.max(
+        viewport.height,
+        Math.round(
+          docEl.scrollHeight ||
+            body.scrollHeight ||
+            docEl.clientHeight ||
+            body.clientHeight ||
+            viewport.height,
+        ),
+      ),
+    };
+    const viewportRect = {
+      x: Math.max(0, roundMetric(r.left)),
+      y: Math.max(0, roundMetric(r.top)),
+      width: Math.max(1, roundMetric(r.width)),
+      height: Math.max(1, roundMetric(r.height)),
+      coordinateSpace: 'iframe-viewport' as const,
+    };
+    const documentRect = {
+      x: roundMetric(viewportRect.x + viewport.scrollX),
+      y: roundMetric(viewportRect.y + viewport.scrollY),
+      width: viewportRect.width,
+      height: viewportRect.height,
+      coordinateSpace: 'iframe-document' as const,
+    };
+    const normalizedRect = {
+      x: clampRatio(documentRect.x / Math.max(1, documentMetrics.width)),
+      y: clampRatio(documentRect.y / Math.max(1, documentMetrics.height)),
+      width: clampRatio(documentRect.width / Math.max(1, documentMetrics.width)),
+      height: clampRatio(
+        documentRect.height / Math.max(1, documentMetrics.height),
+      ),
+      coordinateSpace: 'iframe-document-normalized' as const,
+    };
 
     const payload: ComponentInfo = {
       component: getComponentName(e.target),
@@ -251,8 +325,12 @@ export function startInspectorClient(): void {
       text: (e.target as HTMLElement).innerText?.slice(0, 100) ?? '',
       classes: [...e.target.classList],
       rect: { w: Math.round(r.width), h: Math.round(r.height) },
+      viewport,
+      document: documentMetrics,
+      viewportRect,
+      documentRect,
+      normalizedRect,
       source,
-      ...vpData,
       targetNodeRole: inferNodeRole(e.target),
       targetElementTag: e.target.tagName.toLowerCase(),
       targetTextPreview: (e.target as HTMLElement).innerText?.slice(0, 120) ?? '',

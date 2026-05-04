@@ -8,21 +8,9 @@ import {
   type ReactVisualEditRouteEntry,
   type ReactVisualEditResult,
 } from "../services/AiService";
+import { captureRegion } from "../services/automationService";
 import { useInspector } from "../hooks/useInspector";
-
-interface SourceMapEntry {
-  sourceNodeId: string;
-  templateName?: string;
-  sourceFile?: string;
-  topLevelIndex?: number;
-  blockName?: string;
-  componentName?: string;
-  sectionKey?: string;
-  sectionComponentName?: string;
-  outputFilePath?: string;
-  startLine?: number;
-  endLine?: number;
-}
+import type { ComponentInfo } from "../types/inspector";
 
 type PipelineJobStatus =
   | "running"
@@ -69,6 +57,7 @@ interface RouteItem {
   label: string;
   route: string;
   pageUrl: string;
+  capturePageUrl: string;
   typeLabel: string;
   componentName?: string;
 }
@@ -108,13 +97,35 @@ const toPageUrl = (previewUrl: string, route: string) => {
   }
 };
 
+const roundMetric = (value: number, digits = 4) => {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+};
+
+const buildPreviewProxyUrl = (
+  pageUrl?: string | null,
+  siteId?: string | null,
+  previewVersion?: number,
+) => {
+  if (!pageUrl) return "";
+
+  const params = new URLSearchParams({ url: pageUrl });
+  if (siteId) params.set("siteId", siteId);
+  if (typeof previewVersion === "number") {
+    params.set("vpv", String(previewVersion));
+  }
+
+  return `/api/wp/proxy?${params.toString()}`;
+};
 
 const buildRouteItems = (
-  previewUrl?: string,
+  iframePreviewUrl?: string,
+  capturePreviewUrl?: string,
   metricsPages?: MetricPage[],
   routeEntries?: ReactVisualEditRouteEntry[],
 ) => {
-  if (!previewUrl) return [] as RouteItem[];
+  const iframeBaseUrl = iframePreviewUrl || capturePreviewUrl;
+  if (!iframeBaseUrl) return [] as RouteItem[];
   const map = new Map<string, RouteItem>();
 
   for (const page of metricsPages ?? []) {
@@ -123,7 +134,8 @@ const buildRouteItems = (
       id: `metrics:${route}`,
       label: page.slug === "/" || route === "/" ? "Home" : routeLabel(page.slug || route),
       route,
-      pageUrl: toPageUrl(previewUrl, route),
+      pageUrl: toPageUrl(iframeBaseUrl, route),
+      capturePageUrl: toPageUrl(capturePreviewUrl || iframeBaseUrl, route),
       typeLabel: page.type || "page",
     });
   }
@@ -136,7 +148,10 @@ const buildRouteItems = (
       id: existing?.id || `preview:${route}`,
       label: existing?.label || (route === "/" ? "Home" : routeLabel(entry.componentName || route)),
       route,
-      pageUrl: toPageUrl(previewUrl, route),
+      pageUrl: toPageUrl(iframeBaseUrl, route),
+      capturePageUrl:
+        existing?.capturePageUrl ||
+        toPageUrl(capturePreviewUrl || iframeBaseUrl, route),
       typeLabel: existing?.typeLabel || "route",
       componentName: entry.componentName,
     });
@@ -147,7 +162,8 @@ const buildRouteItems = (
       id: "preview:/",
       label: "Home",
       route: "/",
-      pageUrl: toPageUrl(previewUrl, "/"),
+      pageUrl: toPageUrl(iframeBaseUrl, "/"),
+      capturePageUrl: toPageUrl(capturePreviewUrl || iframeBaseUrl, "/"),
       typeLabel: "home",
     });
   }
@@ -157,6 +173,89 @@ const buildRouteItems = (
     if (b.route === "/") return 1;
     return a.route.localeCompare(b.route);
   });
+};
+
+const normalizeVisualEditText = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .replace(/\s+/g, " ");
+
+const detectUnsupportedVisualEditReason = (value: string) => {
+  const normalized = normalizeVisualEditText(value);
+  if (!normalized) return undefined;
+
+  if (
+    /\b(add|insert|create|introduce|implement|them|chen|tao moi|bo sung)\b/.test(normalized) &&
+    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(normalized)
+  ) {
+    return "add-section-or-component";
+  }
+
+  if (
+    /\b(replace|convert|switch|swap|thay the|doi thanh|chuyen thanh)\b/.test(normalized) &&
+    /\b(section|component|widget|layout block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
+  ) {
+    return "replace-section-or-component";
+  }
+
+  if (
+    /\b(remove|delete|drop|xoa|bo)\b/.test(normalized) &&
+    /\b(section|component|widget|block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
+  ) {
+    return "remove-section-or-component";
+  }
+
+  if (
+    /\b(font|typography|font-size|text size|line-height|letter-spacing|font weight|chu|co chu)\b/.test(normalized)
+  ) {
+    return "typography-change";
+  }
+
+  return undefined;
+};
+
+const isBroadVisualEditRequest = (value: string) =>
+  /\b(migrate|migration|full site|whole site|entire site|all pages|toan bo|toan site|toan website|ca trang)\b/.test(
+    normalizeVisualEditText(value),
+  );
+
+const isMeaningfulVisualEditPrompt = (value: string) => {
+  const normalized = normalizeVisualEditText(value);
+  if (normalized.length < 6) return false;
+  return ![
+    "hello",
+    "hi",
+    "test",
+    "ok",
+    "oke",
+    "fix this",
+    "change this",
+    "xin chao",
+    "chao",
+    "thu",
+    "sua cai nay",
+    "doi cai nay",
+  ].includes(normalized);
+};
+
+const getUnsupportedVisualEditMessage = (reason?: string) => {
+  switch (reason) {
+    case "add-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ trên app React hiện tại. Thêm section/widget/feature mới chưa được hỗ trợ ở đây.";
+    case "replace-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Thay nguyên section/component chưa được hỗ trợ ở đây.";
+    case "remove-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Xóa section/component chưa được hỗ trợ ở đây.";
+    case "typography-change":
+      return "Visual edit này hiện chưa hỗ trợ thay đổi typography đơn lẻ.";
+    default:
+      return "Yêu cầu visual edit chưa nằm trong phạm vi hỗ trợ.";
+  }
 };
 
 const VisualEditor: React.FC = () => {
@@ -170,6 +269,7 @@ const VisualEditor: React.FC = () => {
     isActive: inspectorActive,
     selectedComponent,
     toggle: toggleInspector,
+    clear: clearSelectedComponent,
   } = useInspector();
 
   const [statusData, setStatusData] = useState<PipelineStatusResponse | null>(null);
@@ -194,7 +294,6 @@ const VisualEditor: React.FC = () => {
       });
   }, [jobId]);
 
-  const [sourceMap, setSourceMap] = useState<SourceMapEntry[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState("");
   const [frameTitle, setFrameTitle] = useState("");
   const [loadedSrc, setLoadedSrc] = useState("");
@@ -204,7 +303,7 @@ const VisualEditor: React.FC = () => {
     {
       id: "intro",
       role: "system",
-      text: "Chọn route trong preview, dùng Inspector để chọn component, rồi nhập yêu cầu chỉnh sửa.",
+      text: "Chọn đúng route, click đúng element trong preview, rồi mô tả một chỉnh sửa cục bộ trên app React hiện tại.",
     },
   ]);
   const [canUndo, setCanUndo] = useState(false);
@@ -269,48 +368,14 @@ const VisualEditor: React.FC = () => {
   const [annotationComment, setAnnotationComment] = useState("");
   const [savedAnnotations, setSavedAnnotations] = useState<Array<{
     id: string;
-    component: import("../types/inspector").ComponentInfo;
+    component: ComponentInfo;
     comment: string;
     route: string;
     savedAt: string;
-    // Resolved từ ui-source-map bằng sourceNodeId
-    outputFilePath?: string;
-    startLine?: number;
-    endLine?: number;
   }>>([]);
 
   const previewUrl = statusData?.result?.previewUrl || state.previewUrl || "";
   const apiBaseUrl = statusData?.result?.apiBaseUrl || state.apiBaseUrl || "";
-
-  useEffect(() => {
-    if (!previewUrl) return;
-    let resolved = previewUrl;
-    try {
-      const parsed = new URL(previewUrl);
-      const isInternal =
-        parsed.hostname === "localhost" ||
-        parsed.hostname === "127.0.0.1" ||
-        parsed.hostname === "ai_pipeline";
-      if (isInternal && window.location.hostname !== "localhost") {
-        resolved = parsed.pathname + parsed.search + parsed.hash;
-      }
-    } catch { /* relative URL — use as-is */ }
-    const mapUrl = (resolved.endsWith("/") ? resolved : `${resolved}/`) + "ui-source-map.json";
-    fetch(mapUrl)
-      .then((r) => (r.ok ? (r.json() as Promise<SourceMapEntry[]>) : Promise.reject()))
-      .then(setSourceMap)
-      .catch(() => {});
-  }, [previewUrl]);
-
-  const sourceMapBySourceNode = useMemo(
-    () =>
-      new Map(
-        sourceMap
-          .filter((entry) => !!entry.sourceNodeId)
-          .map((entry) => [entry.sourceNodeId, entry] as const),
-      ),
-    [sourceMap],
-  );
 
   const resolvePreviewUrl = (url: string): string => {
     try {
@@ -334,10 +399,11 @@ const VisualEditor: React.FC = () => {
     () =>
       buildRouteItems(
         resolvedPreviewUrl,
+        previewUrl,
         statusData?.result?.metrics?.pages,
         statusData?.result?.routeEntries,
       ),
-    [resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries],
+    [previewUrl, resolvedPreviewUrl, statusData?.result?.metrics?.pages, statusData?.result?.routeEntries],
   );
 
   const effectiveRouteId = routes.some((r) => r.id === selectedRouteId)
@@ -346,6 +412,7 @@ const VisualEditor: React.FC = () => {
 
   const selectedRoute = routes.find((r) => r.id === effectiveRouteId) || routes[0] || null;
   const selectedPageUrl = selectedRoute?.pageUrl || resolvedPreviewUrl;
+  const selectedCapturePageUrl = selectedRoute?.capturePageUrl || previewUrl || selectedPageUrl;
   const frameSrc = selectedPageUrl;
   const frameLoading = loadedSrc !== frameSrc;
 
@@ -355,53 +422,97 @@ const VisualEditor: React.FC = () => {
     setFrameTitle(frameDocument.title || selectedRoute?.label || "React Preview");
   };
 
-  const selectedMapEntry = selectedComponent?.vpSourceNode
-    ? sourceMapBySourceNode.get(selectedComponent.vpSourceNode)
-    : undefined;
+  useEffect(() => {
+    clearSelectedComponent();
+  }, [clearSelectedComponent, frameSrc]);
 
-  const buildPayload = (): ReactVisualEditPayload => {
+  const buildAttachmentFromSelection = async () => {
+    if (!selectedComponent?.viewportRect || !selectedComponent.viewport) {
+      return undefined;
+    }
+
+    const now = new Date().toISOString();
+    const result = await captureRegion(
+      selectedCapturePageUrl,
+      buildPreviewProxyUrl(selectedCapturePageUrl, siteId),
+      {
+        x: selectedComponent.viewportRect.x,
+        y: selectedComponent.viewportRect.y,
+        width: selectedComponent.viewportRect.width,
+        height: selectedComponent.viewportRect.height,
+      },
+      prompt.trim(),
+      selectedComponent.viewport,
+    );
+
+    return {
+      id: `visual-edit-${Date.now()}`,
+      note: prompt.trim() || undefined,
+      sourcePageUrl: selectedCapturePageUrl,
+      captureContext: {
+        capturedAt: now,
+        iframeSrc: frameSrc,
+        viewport: selectedComponent.viewport,
+        page: {
+          url: selectedCapturePageUrl,
+          route: selectedRoute?.route || "/",
+          title: frameTitle || selectedRoute?.label,
+        },
+        document: selectedComponent.document,
+      },
+      selection: selectedComponent.documentRect,
+      geometry: {
+        viewportRect: selectedComponent.viewportRect,
+        documentRect: selectedComponent.documentRect,
+        normalizedRect: selectedComponent.normalizedRect,
+      },
+      asset: {
+        provider: result.asset?.provider ?? "local",
+        fileName: result.asset?.fileName ?? result.fileName,
+        publicUrl: result.asset?.url ?? result.filePath,
+        mimeType: result.asset?.mimeType as "image/png" | "image/jpeg" | "image/webp" | undefined,
+        width: result.asset?.width ?? Math.max(1, Math.round(selectedComponent.viewportRect.width)),
+        height: result.asset?.height ?? Math.max(1, Math.round(selectedComponent.viewportRect.height)),
+      },
+    };
+  };
+
+  const buildPayload = async (): Promise<ReactVisualEditPayload> => {
+    const attachment = await buildAttachmentFromSelection();
+    const componentName =
+      selectedComponent?.component?.trim() || selectedRoute?.componentName || undefined;
+    const sourceFile = selectedComponent?.source?.file?.trim() || undefined;
+    const targetLine =
+      selectedComponent?.targetStartLine ?? selectedComponent?.source?.line;
+
     return {
       prompt: prompt.trim() || undefined,
       language: /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(prompt)
         ? "vi"
         : "en",
       pageContext: {
-        reactUrl: selectedPageUrl,
+        reactUrl: selectedCapturePageUrl || selectedPageUrl,
         reactRoute: selectedRoute?.route || "/",
         iframeSrc: frameSrc,
         pageTitle: frameTitle || selectedRoute?.label,
+        viewport: selectedComponent?.viewport,
+        document: selectedComponent?.document,
       },
-      attachments: [],
+      attachments: attachment ? [attachment] : [],
       targetHint: {
         route: selectedRoute?.route || "/",
-        // Layer 2: DOM only provides minimal identity; detailed metadata resolves via ui-source-map
-        sourceNodeId: selectedComponent?.vpSourceNode,
-        sectionKey: selectedComponent?.vpSectionKey || selectedMapEntry?.sectionKey,
-        componentName:
-          selectedComponent?.vpComponent ||
-          selectedMapEntry?.componentName ||
-          selectedComponent?.component ||
-          selectedRoute?.componentName,
-        sectionComponentName: selectedMapEntry?.sectionComponentName,
-        templateName: selectedMapEntry?.templateName,
-        sourceFile: selectedMapEntry?.sourceFile,
-        // Layer 3: code location — from ui-source-map.json lookup
-        outputFilePath: selectedMapEntry?.outputFilePath,
-        startLine: selectedMapEntry?.startLine,
-        endLine: selectedMapEntry?.endLine,
-        // Child node targeting
+        componentName,
+        sourceFile,
+        outputFilePath: sourceFile,
+        startLine: targetLine,
+        endLine: targetLine,
         targetNodeRole: selectedComponent?.targetNodeRole,
         targetElementTag: selectedComponent?.targetElementTag,
         targetTextPreview: selectedComponent?.targetTextPreview,
         targetStartLine: selectedComponent?.targetStartLine,
       },
       constraints: {
-        // Khi user đã chọn element cụ thể, yêu cầu AI chỉ sửa vùng đó
-        preserveOutsideSelection: !!(
-          selectedComponent?.vpSourceNode ||
-          (selectedMapEntry?.startLine !== undefined &&
-            selectedMapEntry?.endLine !== undefined)
-        ),
+        preserveOutsideSelection: !!attachment,
         preserveDataContract: true,
         rerunFromScratch: false,
       },
@@ -410,7 +521,6 @@ const VisualEditor: React.FC = () => {
         frontendDir: statusData?.result?.frontendDir,
         previewUrl,
         apiBaseUrl,
-        uiSourceMapPath: statusData?.result?.uiSourceMapPath,
         routeEntries: statusData?.result?.routeEntries || [],
       },
     };
@@ -424,9 +534,6 @@ const VisualEditor: React.FC = () => {
       comment: annotationComment.trim(),
       route: selectedRoute?.route || "/",
       savedAt: new Date().toISOString(),
-      outputFilePath: selectedMapEntry?.outputFilePath,
-      startLine: selectedMapEntry?.startLine,
-      endLine: selectedMapEntry?.endLine,
     };
     setSavedAnnotations((prev) => [...prev, item]);
     console.log("[VisualEditor] Saved annotation:", item);
@@ -438,7 +545,64 @@ const VisualEditor: React.FC = () => {
     if (!prompt.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: `empty-${Date.now()}`, role: "assistant", text: "Hãy nhập yêu cầu trước khi gửi.", tone: "error" },
+        {
+          id: `empty-${Date.now()}`,
+          role: "assistant",
+          text: "Hãy mô tả một chỉnh sửa cục bộ rõ ràng, ví dụ đổi spacing, màu nền, màu chữ, hoặc nội dung trong vùng đã chọn.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+    if (!selectedComponent?.viewportRect || !selectedComponent?.viewport) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `missing-target-${Date.now()}`,
+          role: "assistant",
+          text: "Bật Inspector và click đúng element cần sửa trước khi gửi visual edit.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    if (!isMeaningfulVisualEditPrompt(prompt)) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `vague-${Date.now()}`,
+          role: "assistant",
+          text: "Yêu cầu còn quá mơ hồ. Hãy nói rõ thay đổi cục bộ cần làm trên element đã chọn.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    if (isBroadVisualEditRequest(prompt)) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `broad-${Date.now()}`,
+          role: "assistant",
+          text: "Luồng này chỉ sửa cục bộ trên app React đã generate. Nếu muốn migrate lại toàn site hoặc sửa rộng nhiều page, hãy dùng pipeline chính.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    const unsupportedReason = detectUnsupportedVisualEditReason(prompt);
+    if (unsupportedReason) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `unsupported-${Date.now()}`,
+          role: "assistant",
+          text: getUnsupportedVisualEditMessage(unsupportedReason),
+          tone: "error",
+        },
       ]);
       return;
     }
@@ -450,7 +614,8 @@ const VisualEditor: React.FC = () => {
     ]);
 
     try {
-      const res: ReactVisualEditResult = await submitReactVisualEdit(siteId, jobId, buildPayload());
+      const payload = await buildPayload();
+      const res: ReactVisualEditResult = await submitReactVisualEdit(siteId, jobId, payload);
       if (!res.accepted) {
         setMessages((prev) => [
           ...prev,
@@ -474,6 +639,16 @@ const VisualEditor: React.FC = () => {
             tone: "success",
           },
         ]);
+        if (res.result?.warnings?.length) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `warning-${Date.now()}`,
+              role: "assistant",
+              text: res.result?.warnings[0] ?? "",
+            },
+          ]);
+        }
         setCanUndo(true);
         setPrompt("");
         setTimeout(() => {
@@ -644,7 +819,9 @@ const VisualEditor: React.FC = () => {
             <div className="flex-none border-b border-[#ede4d8] px-5 py-4">
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">Inspector</p>
               <p className="mt-1 text-sm text-[#617067]">
-                {inspectorActive ? "Click vào element để xem thông tin." : "Bật Inspector rồi click vào element trong preview."}
+                {inspectorActive
+                  ? "Click vào đúng element cần sửa để lấy target metadata."
+                  : "Bật Inspector rồi click vào element trong preview React."}
               </p>
             </div>
 
@@ -677,17 +854,26 @@ const VisualEditor: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Section identity */}
-                  {selectedComponent.vpSourceNode && (
+                  {/* Target metadata */}
+                  {(selectedComponent.targetNodeRole || selectedComponent.documentRect || selectedComponent.normalizedRect) && (
                     <div className="px-4 py-3 border-t border-[#f0ebe3]">
-                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f] mb-1.5">Section</p>
-                      <p className="font-mono text-[11px] text-[#374151]">{selectedComponent.vpSourceNode}</p>
-                      {(selectedComponent.vpSectionKey || selectedMapEntry?.sectionKey) && (
-                        <p className="mt-0.5 text-[11px] text-[#6b7280]">
-                          key: <span className="font-semibold text-[#374151]">{selectedComponent.vpSectionKey || selectedMapEntry?.sectionKey}</span>
-                          {(selectedComponent.vpComponent || selectedMapEntry?.componentName) && (
-                            <span className="ml-1.5 text-[#9ca3af]">· {selectedComponent.vpComponent || selectedMapEntry?.componentName}</span>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f] mb-1.5">Target</p>
+                      {selectedComponent.targetNodeRole && (
+                        <p className="text-[11px] text-[#374151]">
+                          role: <span className="font-semibold">{selectedComponent.targetNodeRole}</span>
+                          {selectedComponent.targetElementTag && (
+                            <span className="ml-1.5 text-[#9ca3af]">· {selectedComponent.targetElementTag}</span>
                           )}
+                        </p>
+                      )}
+                      {selectedComponent.documentRect && (
+                        <p className="mt-0.5 font-mono text-[11px] text-[#6b7280]">
+                          doc rect: {Math.round(selectedComponent.documentRect.x)},{Math.round(selectedComponent.documentRect.y)} · {Math.round(selectedComponent.documentRect.width)}×{Math.round(selectedComponent.documentRect.height)}
+                        </p>
+                      )}
+                      {selectedComponent.normalizedRect && (
+                        <p className="mt-0.5 font-mono text-[11px] text-[#9ca3af]">
+                          normalized: {roundMetric(selectedComponent.normalizedRect.x, 3)}, {roundMetric(selectedComponent.normalizedRect.y, 3)}, {roundMetric(selectedComponent.normalizedRect.width, 3)}, {roundMetric(selectedComponent.normalizedRect.height, 3)}
                         </p>
                       )}
                     </div>
@@ -770,9 +956,12 @@ const VisualEditor: React.FC = () => {
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Yêu cầu AI chỉnh sửa (dựa trên element đã chọn)..."
+                placeholder="Ví dụ: Giảm padding của card này, đổi nền section sang be nhạt, hoặc sửa heading trong vùng đã chọn..."
                 className="h-20 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#3a6b57] focus:bg-white"
               />
+              <p className="mt-2 text-[11px] text-[#8b826f]">
+                Chỉ dùng ô này cho chỉnh sửa cục bộ trên element đã chọn: content, background, color, hoặc layout.
+              </p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={() => void handleSubmitRequest()}

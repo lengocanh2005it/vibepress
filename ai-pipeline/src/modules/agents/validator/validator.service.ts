@@ -6,6 +6,7 @@ import puppeteer, { type HTTPRequest, type Page } from 'puppeteer';
 import type { GeneratedComponent } from '../react-generator/react-generator.service.js';
 import type {
   BreadcrumbSection,
+  BlockNode,
   CardGridSection,
   CarouselSection,
   CommentsSection,
@@ -15,8 +16,12 @@ import type {
   NavbarSection,
   PageContentSection,
   PostContentSection,
+  PostFeaturedImageSection,
   PostListSection,
   PostMetaSection,
+  PostNavigationSection,
+  PostTitleSection,
+  PostTermsSection,
   SearchSection,
   SectionObligation,
   SectionPlan,
@@ -24,13 +29,22 @@ import type {
   TabsSection,
   AccordionSection,
 } from '../react-generator/visual-plan.schema.js';
+import { getVisualPlanRenderAuthority } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
+import type { ComponentRenderContract } from '../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
+import { collectSurfacePlanRequiredLiterals } from '../planner/planner-surface-plan.util.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
+import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
 import {
-  findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets,
-  normalizePlainTextPostMetaArchiveLinks as normalizeSharedPlainTextPostMetaArchiveLinks,
-  promotePlainTextPostMetaLinks as promoteSharedPlainTextPostMetaLinks,
-} from '../../../common/utils/post-meta-link.util.js';
+  appendUniqueClasses,
+  ensureReactRouterLinkImport,
+  findCanonicalTextLinkSnippetsWithoutHoverUnderline,
+  repairBrokenArbitraryValueClasses,
+  sanitizeTailwindClasses,
+  stripDebugStatements,
+} from './validator-code-hygiene.util.js';
 const VIRTUAL_ROOT = '/virtual-preview';
 const VIRTUAL_MAIN_FILE = `${VIRTUAL_ROOT}/src/main.tsx`;
 const VIRTUAL_APP_FILE = `${VIRTUAL_ROOT}/src/App.tsx`;
@@ -65,6 +79,8 @@ export interface CodeValidationContext {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
+  renderContract?: ComponentRenderContract;
 }
 
 export interface ComponentValidationFailure {
@@ -183,6 +199,8 @@ export class ValidatorService {
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
         visualPlan: comp.visualPlan,
+        surfacePlan: comp.surfacePlan,
+        renderContract: comp.renderContract,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
@@ -277,69 +295,14 @@ export class ValidatorService {
    * - Spaces after commas in `min()`/`max()`/`clamp()` inside arbitrary `[...]` classes
    * - `gap-10px`-style classes → `gap-[10px]`
    */
-  sanitizeTailwindClasses(raw: string): string {
-    let out = raw;
-    out = out.replace(/\[(min|max|clamp)\(([^[\]]*)\)\]/g, (_m, fn, inner) => {
-      const compact = String(inner).replace(/,\s+/g, ',');
-      return `[${fn}(${compact})]`;
-    });
-    out = out.replace(
-      /\b(gap|mt|mb|ml|mr|pt|pb|pl|pr|mx|my|px|py|m|p|w|h|text|leading|tracking|rounded(?:-[a-z]+)?|font|min-[wh]|max-[wh])-(\d[\d.]*)(px|rem|em|vh|vw|%)\b/g,
-      (_m, prefix, num, unit) => `${prefix}-[${num}${unit}]`,
-    );
-    return out;
-  }
-
-  stripDebugStatements(raw: string): string {
-    return raw
-      .split('\n')
-      .filter((line) => {
-        const trimmed = line.trim();
-        return !/^console\.(log|warn|error|info|debug)\s*\(/.test(trimmed);
-      })
-      .join('\n');
-  }
-
   sanitizeGeneratedCode(raw: string): string {
     let code = this.removeUnusedImports(raw);
-    code = this.sanitizeTailwindClasses(code);
-    code = this.repairBrokenArbitraryValueClasses(code);
-    code = this.stripDebugStatements(code);
-    code = this.normalizePlainTextPostMetaArchiveLinks(code);
-    code = this.promotePlainTextPostMetaLinks(code);
-    code = this.ensureHoverUnderlineOnCanonicalTextLinks(code);
-    code = this.ensureReactRouterLinkImport(code);
+    code = sanitizeTailwindClasses(code);
+    code = repairBrokenArbitraryValueClasses(code);
+    code = stripDebugStatements(code);
+    code = normalizeCanonicalPostMetaAndTextLinks(code);
+    code = ensureReactRouterLinkImport(code);
     return code;
-  }
-
-  private repairBrokenArbitraryValueClasses(raw: string): string {
-    const repairClassList = (classList: string) =>
-      classList
-        .split(/(\s+)/)
-        .map((token) => {
-          if (!token || /^\s+$/.test(token)) return token;
-          if (!token.includes('[') || token.includes(']')) return token;
-          if (!/-\[[^\]]+$/.test(token)) return token;
-          return `${token}]`;
-        })
-        .join('');
-
-    return raw
-      .replace(
-        /className="([^"]*)"/g,
-        (_match, classList: string) =>
-          `className="${repairClassList(classList)}"`,
-      )
-      .replace(
-        /className='([^']*)'/g,
-        (_match, classList: string) =>
-          `className='${repairClassList(classList)}'`,
-      )
-      .replace(
-        /className=\{`([^`]+)`\}/g,
-        (_match, classList: string) =>
-          `className={\`${repairClassList(classList)}\`}`,
-      );
   }
 
   /**
@@ -387,6 +350,43 @@ export class ValidatorService {
       return {
         isValid: false,
         error: visualPlanIssue,
+      };
+    }
+
+    const surfacePlanIssue = this.checkSurfacePlanObligations(
+      code,
+      context.surfacePlan,
+      context.componentName,
+    );
+    if (surfacePlanIssue) {
+      return {
+        isValid: false,
+        error: surfacePlanIssue,
+      };
+    }
+
+    const pixelLockedIssue = this.checkPixelLockedVisualPlanFidelity(
+      code,
+      context.visualPlan,
+      context.componentName,
+    );
+    if (pixelLockedIssue) {
+      return {
+        isValid: false,
+        error: pixelLockedIssue,
+      };
+    }
+
+    const renderContractIssue = this.checkRenderContractCoverage(
+      code,
+      context.renderContract,
+      context.componentName,
+      context.visualPlan,
+    );
+    if (renderContractIssue) {
+      return {
+        isValid: false,
+        error: renderContractIssue,
       };
     }
 
@@ -577,7 +577,7 @@ export class ValidatorService {
       );
     }
     const missingHoverUnderlineSnippets =
-      this.findCanonicalTextLinkSnippetsWithoutHoverUnderline(code);
+      findCanonicalTextLinkSnippetsWithoutHoverUnderline(code);
     if (missingHoverUnderlineSnippets.length > 0) {
       violations.push(
         `Visible navigation/content text links must underline on hover to match the WordPress-style interaction contract. Add \`hover:underline underline-offset-4\` to canonical text links. Offending snippet(s): ${missingHoverUnderlineSnippets.join(' | ')}`,
@@ -624,6 +624,30 @@ export class ValidatorService {
         (section) => section.type === 'carousel',
       )
     ) {
+      const requireCarouselArrows = context.visualPlan.sections.some(
+        (section) =>
+          section.type === 'carousel' &&
+          section.showArrows !== false &&
+          section.slides.length > 1,
+      );
+      const requireCarouselDots = context.visualPlan.sections.some(
+        (section) =>
+          section.type === 'carousel' &&
+          section.showDots !== false &&
+          section.slides.length > 1,
+      );
+      const carouselStructureIssue = this.findSpectraCarouselStructureViolation(
+        code,
+        {
+          requireArrows: requireCarouselArrows,
+          requireDots: requireCarouselDots,
+        },
+      );
+      if (carouselStructureIssue) {
+        violations.push(
+          `Carousel Spectra structure violated: ${carouselStructureIssue}. Preserve the plugin-faithful hierarchy \`uagb-slider-container > uagb-swiper > swiper-wrapper > swiper-slide\` instead of replacing it with a generic slider shell.`,
+        );
+      }
       if (this.rendersStaticCarouselTrack(code)) {
         violations.push(
           'Carousel section renders a static `.swiper-wrapper` without any active-slide transform. Bind the track to `activeCarousels[...]` (or equivalent state) so prev/next/dots move the carousel instead of stacking all slides.',
@@ -648,6 +672,12 @@ export class ValidatorService {
     if (
       context.visualPlan?.sections.some((section) => section.type === 'modal')
     ) {
+      const modalStructureIssue = this.findSpectraModalStructureViolation(code);
+      if (modalStructureIssue) {
+        violations.push(
+          `Modal Spectra structure violated: ${modalStructureIssue}. Keep the plugin-faithful modal hierarchy with \`uagb-spectra-button-wrapper\`, \`uagb-modal-trigger\`, \`uagb-modal-popup active\`, \`uagb-modal-popup-wrap\`, \`uagb-modal-popup-content\`, and \`uagb-modal-popup-close\`.`,
+        );
+      }
       const modalStateIssue = this.findInteractiveStateKeyMismatch(
         code,
         'openModals',
@@ -962,6 +992,32 @@ export class ValidatorService {
       }
     }
 
+    if (expectsPageDetail) {
+      const duplicatedPageSections = this.findDuplicatedPageDetailSections(
+        code,
+        context.visualPlan?.sections ?? [],
+      );
+      if (duplicatedPageSections.length > 0) {
+        violations.push(
+          `Page detail content duplication: component renders canonical page.content body and also renders additional source-backed section content (${duplicatedPageSections.join(', ')}). Use exactly one page-detail rendering mode: canonical page body OR decomposed approved sections, not both.`,
+        );
+      }
+    }
+
+    if (context.type === 'page' && /dangerouslySetInnerHTML/.test(code)) {
+      // post-content sections are explicitly allowed to render post body HTML via
+      // dangerouslySetInnerHTML — the validator's post-content field check accepts
+      // exactly that pattern. Only block it for pages that have no post-content section.
+      const hasPostContentSection = context.visualPlan?.sections?.some(
+        (s) => s.type === 'post-content',
+      );
+      if (!hasPostContentSection) {
+        violations.push(
+          'Page components must not use `dangerouslySetInnerHTML`. Render page/body rich text through structured JSX or the rich-text node helper instead.',
+        );
+      }
+    }
+
     // 13. <img> without alt attribute — accessibility + common AI mistake
     if (/<img\b(?![^>]*\balt\s*=)[^>]*>/s.test(code)) {
       violations.push(
@@ -1028,6 +1084,134 @@ export class ValidatorService {
     };
   }
 
+  private checkPixelLockedVisualPlanFidelity(
+    code: string,
+    visualPlan?: ComponentVisualPlan,
+    componentName?: string,
+  ): string | null {
+    if (!visualPlan) return null;
+    if (getVisualPlanRenderAuthority(visualPlan) !== 'deterministic-pixel') {
+      return null;
+    }
+
+    const issues: string[] = [];
+    const label = componentName ?? visualPlan.componentName;
+
+    if (visualPlan.renderMode !== 'block-centric') {
+      issues.push(
+        `Pixel-locked component "${label}" must stay on block-centric rendering.`,
+      );
+    }
+    if (!visualPlan.blockTree?.length) {
+      issues.push(
+        `Pixel-locked component "${label}" is missing its authoritative blockTree contract.`,
+      );
+    }
+    if (issues.length > 0) return issues.join('\n');
+
+    const importantKinds = this.collectImportantPixelLockedBlockKinds(
+      visualPlan.blockTree ?? [],
+    );
+    const columnWidths = this.collectPixelLockedColumnWidths(
+      visualPlan.blockTree ?? [],
+    );
+    const normalizedCode = this.normalizeForTextMatch(code);
+
+    if (importantKinds.has('site-logo') && !/siteInfo\?\.logoUrl/.test(code)) {
+      issues.push(
+        `Pixel-locked component "${label}" lost site logo binding (\`siteInfo?.logoUrl\`).`,
+      );
+    }
+    if (
+      importantKinds.has('site-title') &&
+      !/siteInfo\?\.siteName/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost site title binding (\`siteInfo?.siteName\`).`,
+      );
+    }
+    if (
+      importantKinds.has('site-tagline') &&
+      !/siteInfo\?\.blogDescription/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost site tagline binding (\`siteInfo?.blogDescription\`).`,
+      );
+    }
+    if (importantKinds.has('navigation') && !/<nav\b/.test(code)) {
+      issues.push(
+        `Pixel-locked component "${label}" lost required navigation wrapper markup.`,
+      );
+    }
+    if (importantKinds.has('search') && !/role="search"/.test(code)) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the source-backed search form.`,
+      );
+    }
+    if (
+      importantKinds.has('post-author-biography') &&
+      !/siteInfo\?\.blogDescription/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the author-biography/body text binding.`,
+      );
+    }
+    if (
+      importantKinds.has('categories') &&
+      !/(categoryMap|categorySlugs|\/category\/)/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the source-backed category list rendering.`,
+      );
+    }
+    if (
+      importantKinds.has('post-date') &&
+      !/(metaSource\.date|item\?\.date|new Date\(metaSource\.date\))/i.test(
+        code,
+      )
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the post date binding.`,
+      );
+    }
+    if (
+      importantKinds.has('post-author-name') &&
+      !/(metaSource\.author|authorSlug|item\?\.author)/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the post author binding.`,
+      );
+    }
+    if (
+      importantKinds.has('post-terms') &&
+      !/(metaSource\?\.categories|categorySlugs|metaSource\?\.tags)/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost the post terms binding.`,
+      );
+    }
+
+    for (const width of columnWidths) {
+      if (!normalizedCode.includes(width.toLowerCase())) {
+        issues.push(
+          `Pixel-locked component "${label}" lost source-backed column width "${width}".`,
+        );
+      }
+    }
+
+    if (
+      /^(header|navigation|nav)$/i.test(label) &&
+      this.hasResponsivePixelLockedNavigation(visualPlan.blockTree ?? []) &&
+      !/mobileMenuOpen/.test(code)
+    ) {
+      issues.push(
+        `Pixel-locked component "${label}" lost responsive navigation state required by the source navigation block.`,
+      );
+    }
+
+    return issues.length > 0 ? issues.join('\n') : null;
+  }
+
   checkInlineSectionFidelity(
     code: string,
     section: SectionPlan,
@@ -1052,6 +1236,420 @@ export class ValidatorService {
     return `Visual section contract violated:\n${[sectionAuditLine, ...detailLines].join('\n')}`;
   }
 
+  checkInlineSectionSyntax(rawCode: string): string | null {
+    const code = this.sanitizeGeneratedCode(rawCode).trim();
+    if (!code) return 'Empty section JSX output';
+
+    const jsxTagError = this.checkJsxTagBalance(code);
+    if (jsxTagError) return jsxTagError;
+
+    const tsxSyntaxError = this.checkTsxSyntax(code);
+    if (tsxSyntaxError) return tsxSyntaxError;
+
+    const braceDepth = this.balanceCount(code, '{', '}');
+    if (braceDepth !== 0) {
+      return `Unbalanced braces (depth: ${braceDepth})`;
+    }
+
+    const parenDepth = this.balanceCount(code, '(', ')');
+    if (parenDepth !== 0) {
+      return `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated inline JSX expression or handler.`;
+    }
+
+    const bracketDepth = this.balanceCount(code, '[', ']');
+    if (bracketDepth !== 0) {
+      return `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated inline array or expression.`;
+    }
+
+    return null;
+  }
+
+  private collectImportantPixelLockedBlockKinds(
+    nodes: readonly BlockNode[],
+  ): Set<string> {
+    const kinds = new Set<string>();
+    const visit = (items: readonly BlockNode[]) => {
+      for (const node of items) {
+        switch (node.kind) {
+          case 'site-logo':
+          case 'site-title':
+          case 'site-tagline':
+          case 'navigation':
+          case 'search':
+          case 'avatar':
+          case 'post-author-biography':
+          case 'categories':
+          case 'post-date':
+          case 'post-author-name':
+          case 'post-terms':
+            kinds.add(node.kind);
+            break;
+          default:
+            break;
+        }
+        if (node.children?.length) visit(node.children);
+      }
+    };
+    visit(nodes);
+    return kinds;
+  }
+
+  private collectPixelLockedColumnWidths(
+    nodes: readonly BlockNode[],
+  ): string[] {
+    const widths = new Set<string>();
+    const visit = (items: readonly BlockNode[]) => {
+      for (const node of items) {
+        const width = node.columnWidth?.trim();
+        if (width) widths.add(width);
+        if (node.children?.length) visit(node.children);
+      }
+    };
+    visit(nodes);
+    return [...widths];
+  }
+
+  private hasResponsivePixelLockedNavigation(
+    nodes: readonly BlockNode[],
+  ): boolean {
+    let found = false;
+    const visit = (items: readonly BlockNode[]) => {
+      for (const node of items) {
+        if (node.kind === 'navigation') {
+          const overlayMode = node.overlayMenu ?? 'mobile';
+          const isResponsive = node.isResponsive ?? true;
+          const orientation =
+            node.menuOrientation ??
+            (node.attrs?.layout as { orientation?: string } | undefined)
+              ?.orientation;
+          if (
+            isResponsive &&
+            overlayMode !== 'never' &&
+            orientation !== 'vertical'
+          ) {
+            found = true;
+            return;
+          }
+        }
+        if (node.children?.length) visit(node.children);
+        if (found) return;
+      }
+    };
+    visit(nodes);
+    return found;
+  }
+
+  private normalizeForTextMatch(value: string): string {
+    return value.toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  private checkRenderContractCoverage(
+    code: string,
+    renderContract?: ComponentRenderContract,
+    componentName?: string,
+    visualPlan?: ComponentVisualPlan,
+  ): string | null {
+    if (!renderContract) return null;
+    if (renderContract.structure.renderMode === 'fallback-section') return null;
+
+    const label =
+      componentName ??
+      visualPlan?.componentName ??
+      renderContract.sourceModel.templateName ??
+      'Component';
+    const strictBlockTree =
+      renderContract.structure.renderMode === 'block-tree';
+    const issues: string[] = [];
+    const normalizedCode = this.normalizeForTextMatch(code);
+    const semanticCoverageSourceNodeIds = strictBlockTree
+      ? []
+      : this.collectSemanticCoverageSourceNodeIds(
+          renderContract.fallback?.sections ?? visualPlan?.sections,
+        );
+    const auditSignals = this.collectRenderContractAuditSignals(
+      renderContract.sourceModel.blockTree,
+      {
+        skipCoveredContentSignals: !strictBlockTree,
+        semanticCoverageSourceNodeIds,
+      },
+    );
+    const textLimit = strictBlockTree ? 8 : 4;
+    const assetLimit = strictBlockTree ? 6 : 3;
+
+    for (const text of auditSignals.staticTexts.slice(0, textLimit)) {
+      if (!normalizedCode.includes(this.normalizeForTextMatch(text))) {
+        issues.push(
+          `Missing source-backed static text "${this.summarizeRenderContractValue(text)}".`,
+        );
+      }
+    }
+
+    for (const src of auditSignals.imageSources.slice(0, assetLimit)) {
+      if (!code.includes(src)) {
+        issues.push(
+          `Missing source-backed image src "${this.summarizeRenderContractValue(src)}".`,
+        );
+      }
+    }
+
+    for (const href of auditSignals.hrefs.slice(0, assetLimit)) {
+      if (!code.includes(href)) {
+        issues.push(
+          `Missing source-backed link target "${this.summarizeRenderContractValue(href)}".`,
+        );
+      }
+    }
+
+    if (
+      auditSignals.requiresNavigationShell &&
+      !/(<nav\b|role=["']navigation["'])/i.test(code)
+    ) {
+      issues.push('Missing required navigation wrapper for source navigation.');
+    }
+
+    if (
+      auditSignals.requiresSearchShell &&
+      !/(role=["']search["']|<form\b[^>]*\brole=["']search["'])/i.test(code)
+    ) {
+      issues.push('Missing required search wrapper for source search block.');
+    }
+
+    if (strictBlockTree) {
+      for (const width of auditSignals.columnWidths.slice(0, 4)) {
+        if (!normalizedCode.includes(width.toLowerCase())) {
+          issues.push(`Missing source-backed column width "${width}".`);
+        }
+      }
+    }
+
+    if (issues.length === 0) return null;
+    const detailLines = issues.slice(0, 8).map((issue) => `detail: ${issue}`);
+    return `Render contract coverage violated for "${label}":\n${[
+      `mode=${renderContract.structure.renderMode}`,
+      `sourceRootNodes=${renderContract.sourceModel.blockTree.length}`,
+      ...detailLines,
+    ].join('\n')}`;
+  }
+
+  private collectRenderContractAuditSignals(
+    nodes: readonly BlockNode[],
+    options?: {
+      skipCoveredContentSignals?: boolean;
+      semanticCoverageSourceNodeIds?: readonly string[];
+    },
+  ): {
+    staticTexts: string[];
+    imageSources: string[];
+    hrefs: string[];
+    columnWidths: string[];
+    requiresNavigationShell: boolean;
+    requiresSearchShell: boolean;
+  } {
+    const staticTexts = new Set<string>();
+    const imageSources = new Set<string>();
+    const hrefs = new Set<string>();
+    const columnWidths = new Set<string>();
+    let requiresNavigationShell = false;
+    let requiresSearchShell = false;
+    const semanticCoverageSourceNodeIds = new Set(
+      options?.semanticCoverageSourceNodeIds
+        ?.map((value) => value.trim())
+        .filter(Boolean) ?? [],
+    );
+
+    const visit = (node: BlockNode, dynamicBranch = false) => {
+      const currentBranchIsDynamic =
+        dynamicBranch || this.isDynamicRenderContractNode(node);
+      const nodeSemanticallyCovered =
+        options?.skipCoveredContentSignals === true &&
+        this.isRenderContractNodeSemanticallyCovered(
+          node,
+          semanticCoverageSourceNodeIds,
+        );
+
+      if (
+        node.kind === 'navigation' ||
+        node.blockName.toLowerCase() === 'core/navigation'
+      ) {
+        requiresNavigationShell = true;
+      }
+      if (
+        node.kind === 'search' ||
+        node.blockName.toLowerCase() === 'core/search'
+      ) {
+        requiresSearchShell = true;
+      }
+
+      const columnWidth = node.columnWidth?.trim();
+      if (columnWidth) {
+        columnWidths.add(columnWidth);
+      }
+
+      if (!currentBranchIsDynamic && !nodeSemanticallyCovered) {
+        const textCandidate = this.extractRenderContractStaticText(node);
+        if (textCandidate) {
+          staticTexts.add(textCandidate);
+        }
+
+        const src = node.src?.trim();
+        if (this.isStaticRenderContractAssetValue(src)) {
+          imageSources.add(src!);
+        }
+
+        const href = node.href?.trim();
+        if (this.isStaticRenderContractAssetValue(href)) {
+          hrefs.add(href!);
+        }
+      }
+
+      for (const child of node.children ?? []) {
+        visit(child, currentBranchIsDynamic);
+      }
+    };
+
+    for (const node of nodes) visit(node);
+
+    return {
+      staticTexts: [...staticTexts],
+      imageSources: [...imageSources],
+      hrefs: [...hrefs],
+      columnWidths: [...columnWidths],
+      requiresNavigationShell,
+      requiresSearchShell,
+    };
+  }
+
+  private collectSemanticCoverageSourceNodeIds(
+    sections: readonly SectionPlan[] | undefined,
+  ): string[] {
+    const sourceNodeIds = new Set<string>();
+    for (const section of sections ?? []) {
+      const push = (value?: string | null) => {
+        const normalized = value?.trim();
+        if (!normalized) return;
+        sourceNodeIds.add(normalized);
+      };
+      push(section.sourceRef?.sourceNodeId);
+      for (const value of section.obligation?.sourceEvidence?.sourceNodeIds ??
+        []) {
+        push(value);
+      }
+    }
+    return [...sourceNodeIds];
+  }
+
+  private isRenderContractNodeSemanticallyCovered(
+    node: BlockNode,
+    sourceNodeIds: ReadonlySet<string>,
+  ): boolean {
+    if (sourceNodeIds.size === 0) return false;
+    const nodeId = node.sourceRef?.sourceNodeId?.trim();
+    if (!nodeId) return false;
+    const parsedNodeId = this.parseRenderContractSourceNodeId(nodeId);
+    if (!parsedNodeId) return false;
+
+    for (const candidate of sourceNodeIds) {
+      const parsedCandidate = this.parseRenderContractSourceNodeId(candidate);
+      if (!parsedCandidate) continue;
+      if (parsedCandidate.scope !== parsedNodeId.scope) continue;
+      if (
+        parsedNodeId.path === parsedCandidate.path ||
+        parsedNodeId.path.startsWith(`${parsedCandidate.path}.`)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private parseRenderContractSourceNodeId(
+    value: string,
+  ): { scope: string; path: string } | null {
+    const segments = value
+      .split('::')
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length < 3) return null;
+    const scope = segments[0];
+    const path = segments.slice(2).join('::');
+    if (!scope || !path) return null;
+    return { scope, path };
+  }
+
+  private isDynamicRenderContractNode(node: BlockNode): boolean {
+    const sourceFile = node.sourceRef?.sourceFile?.toLowerCase() ?? '';
+    if (
+      sourceFile.startsWith('db:pages/') ||
+      sourceFile.startsWith('db:posts/') ||
+      sourceFile.startsWith('db:comments/')
+    ) {
+      return true;
+    }
+
+    switch (node.kind) {
+      case 'navigation':
+      case 'search':
+      case 'post-content':
+      case 'page-content':
+      case 'post-template':
+      case 'query':
+      case 'comments':
+      case 'latest-posts':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private extractRenderContractStaticText(node: BlockNode): string | null {
+    const values = [node.text, this.stripHtmlToPlainText(node.html)]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    for (const value of values) {
+      if (!this.isStaticRenderContractTextValue(value)) continue;
+      return this.normalizeForTextMatch(value);
+    }
+
+    return null;
+  }
+
+  private stripHtmlToPlainText(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const plainText = value
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    return plainText || undefined;
+  }
+
+  private isStaticRenderContractTextValue(value: string | undefined): boolean {
+    const normalized = value?.trim();
+    if (!normalized) return false;
+    if (normalized.length < 2 || normalized.length > 160) return false;
+    if (!/[A-Za-z0-9]/.test(normalized)) return false;
+    if (/[{}]|<\?|\$\{|\{\{/.test(normalized)) return false;
+    return true;
+  }
+
+  private isStaticRenderContractAssetValue(
+    value: string | undefined,
+  ): value is string {
+    const normalized = value?.trim();
+    if (!normalized) return false;
+    if (/[{}]|<\?|\$\{|\{\{/.test(normalized)) return false;
+    return true;
+  }
+
+  private summarizeRenderContractValue(value: string): string {
+    return value.length > 72 ? `${value.slice(0, 69)}...` : value;
+  }
+
   private auditSectionContractFidelity(
     code: string,
     section: SectionPlan,
@@ -1059,6 +1657,23 @@ export class ValidatorService {
     isInlineSection = false,
   ): string[] {
     const contract = this.buildSectionRenderContract(section, label);
+
+    // Sections sourced from a WordPress page or post content block (sourceRef.sourceFile
+    // starting with "db:pages/" or "db:posts/") must not require hardcoded content
+    // literals when the component renders them dynamically via page-content or
+    // post-content binding. prose-block already has this escape via
+    // satisfiesCanonicalPageContentBinding — extend it to all section types here so
+    // that card-grid columns blocks from page content don't block the metrics repair pass.
+    const sourceFile = section.sourceRef?.sourceFile ?? '';
+    if (
+      (sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/')) &&
+      (this.codeSatisfiesBindingRequirement(code, 'page-content') ||
+        this.codeSatisfiesBindingRequirement(code, 'post-content'))
+    ) {
+      return [];
+    }
+
     return this.auditRenderedSectionAgainstContract(
       code,
       contract,
@@ -1203,8 +1818,20 @@ export class ValidatorService {
       case 'post-content':
         this.populatePostContentContract(section, label, addBinding);
         break;
+      case 'post-title':
+        this.populatePostTitleContract(section, label, addBinding);
+        break;
+      case 'post-featured-image':
+        this.populatePostFeaturedImageContract(section, label, addBinding);
+        break;
       case 'post-meta':
         this.populatePostMetaContract(section, label, addBinding);
+        break;
+      case 'post-terms':
+        this.populatePostTermsContract(section, label, addBinding);
+        break;
+      case 'post-navigation':
+        this.populatePostNavigationContract(section, label, addBinding);
         break;
       case 'page-content':
         this.populatePageContentContract(section, label, addBinding);
@@ -1615,6 +2242,48 @@ export class ValidatorService {
     );
   }
 
+  private populatePostTitleContract(
+    _section: PostTitleSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addBinding(
+      'post-content',
+      `${label} post-title must render the current post title`,
+      [
+        {
+          name: 'title',
+          message: `${label} post-title is missing title rendering`,
+        },
+      ],
+    );
+  }
+
+  private populatePostFeaturedImageContract(
+    _section: PostFeaturedImageSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addBinding(
+      'post-content',
+      `${label} post-featured-image must render the current post featured image`,
+      [
+        {
+          name: 'featuredImage',
+          message: `${label} post-featured-image is missing featured image rendering`,
+        },
+      ],
+    );
+  }
+
   private populatePostMetaContract(
     section: PostMetaSection,
     label: string,
@@ -1650,6 +2319,66 @@ export class ValidatorService {
         fields,
       );
     }
+  }
+
+  private populatePostTermsContract(
+    section: PostTermsSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    const field = section.taxonomy === 'category' ? 'categories' : 'tags';
+    addBinding(
+      'post-content',
+      `${label} post-terms must render current post terms`,
+      [
+        {
+          name: field,
+          message:
+            field === 'categories'
+              ? `${label} post-terms is missing category rendering`
+              : `${label} post-terms is missing tag rendering`,
+        },
+      ],
+    );
+  }
+
+  private populatePostNavigationContract(
+    _section: PostNavigationSection,
+    label: string,
+    addBinding: (
+      kind: SectionBindingKind,
+      message: string,
+      fields?: Array<{ name: string; message: string }>,
+    ) => void,
+  ): void {
+    addBinding(
+      'post-content',
+      `${label} post-navigation must identify the current post`,
+      [
+        {
+          name: 'slug',
+          message: `${label} post-navigation is missing the current post slug`,
+        },
+      ],
+    );
+    addBinding(
+      'posts',
+      `${label} post-navigation must render from the posts collection`,
+      [
+        {
+          name: 'title',
+          message: `${label} post-navigation is missing previous/next post title rendering`,
+        },
+        {
+          name: 'slug',
+          message: `${label} post-navigation is missing previous/next post link rendering`,
+        },
+      ],
+    );
   }
 
   private populatePageContentContract(
@@ -1778,35 +2507,86 @@ export class ValidatorService {
     ) => void,
   ): void {
     addLiteral(section.title, `${label} lost sidebar title`);
-    if (section.showSiteInfo) {
-      addBinding(
-        'site-info',
-        `${label} sidebar is missing site info rendering`,
-      );
-    }
-    if (section.menuSlug) {
-      addBinding('menus', `${label} sidebar is missing menus rendering`, [
-        {
-          name: 'items',
-          message: `${label} sidebar is missing menu item rendering`,
-        },
-      ]);
-    }
-    if (section.showPages) {
-      addBinding('pages', `${label} sidebar is missing pages rendering`, [
-        {
-          name: 'title',
-          message: `${label} sidebar is missing page title rendering`,
-        },
-      ]);
-    }
-    if (section.showPosts) {
-      addBinding('posts', `${label} sidebar is missing posts rendering`, [
-        {
-          name: 'title',
-          message: `${label} sidebar is missing post title rendering`,
-        },
-      ]);
+    for (const widget of section.widgets ?? []) {
+      switch (widget.kind) {
+        case 'author-bio':
+          addLiteral(widget.title, `${label} author-bio widget lost title`);
+          addLiteral(
+            widget.description,
+            `${label} author-bio widget lost description`,
+          );
+          addBinding(
+            'posts',
+            `${label} author-bio widget is missing author rendering`,
+            [
+              {
+                name: 'author',
+                message: `${label} author-bio widget is missing author name rendering`,
+              },
+            ],
+          );
+          addBinding(
+            'site-info',
+            `${label} author-bio widget is missing supporting site info rendering`,
+          );
+          break;
+        case 'categories':
+          addLiteral(widget.title, `${label} categories widget lost title`);
+          addBinding(
+            'posts',
+            `${label} categories widget is missing category rendering`,
+            [
+              {
+                name: 'categories',
+                message: `${label} categories widget is missing category labels`,
+              },
+            ],
+          );
+          break;
+        case 'navigation':
+          addLiteral(widget.title, `${label} navigation widget lost title`);
+          addLiteral(
+            widget.description,
+            `${label} navigation widget lost description`,
+          );
+          addBinding(
+            'menus',
+            `${label} navigation widget is missing menus rendering`,
+            [
+              {
+                name: 'items',
+                message: `${label} navigation widget is missing menu item rendering`,
+              },
+            ],
+          );
+          break;
+        case 'pages-list':
+          addLiteral(widget.title, `${label} pages-list widget lost title`);
+          addBinding(
+            'pages',
+            `${label} pages-list widget is missing pages rendering`,
+            [
+              {
+                name: 'title',
+                message: `${label} pages-list widget is missing page title rendering`,
+              },
+            ],
+          );
+          break;
+        case 'recent-posts':
+          addLiteral(widget.title, `${label} recent-posts widget lost title`);
+          addBinding(
+            'posts',
+            `${label} recent-posts widget is missing posts rendering`,
+            [
+              {
+                name: 'title',
+                message: `${label} recent-posts widget is missing post title rendering`,
+              },
+            ],
+          );
+          break;
+      }
     }
   }
 
@@ -2022,6 +2802,177 @@ export class ValidatorService {
     return [...new Set(issues)];
   }
 
+  private findDuplicatedPageDetailSections(
+    code: string,
+    sections: SectionPlan[],
+  ): string[] {
+    if (!this.hasCanonicalPageContentRender(code)) return [];
+
+    const duplicates: string[] = [];
+
+    for (const section of sections) {
+      if (!this.isSourceBackedPageDetailCompanionSection(section)) continue;
+      const anchors = this.extractPageDetailSectionAnchors(section);
+      if (!this.sectionAnchorsIndicateRendered(code, anchors)) continue;
+      duplicates.push(section.debugKey ?? section.sectionKey ?? section.type);
+    }
+
+    return duplicates;
+  }
+
+  private hasCanonicalPageContentRender(code: string): boolean {
+    return (
+      /\b(?:page|item)\.content\b/.test(code) &&
+      /dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code)
+    );
+  }
+
+  private isSourceBackedPageDetailCompanionSection(
+    section: SectionPlan,
+  ): boolean {
+    if (
+      ![
+        'prose-block',
+        'media-text',
+        'card-grid',
+        'tabs',
+        'accordion',
+        'carousel',
+        'modal',
+      ].includes(section.type)
+    ) {
+      return false;
+    }
+
+    const sourceFiles = [
+      section.sourceRef?.sourceFile,
+      ...(section.obligation?.sourceEvidence?.sourceFiles ?? []),
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+
+    return sourceFiles.some(
+      (sourceFile) =>
+        sourceFile.startsWith('db:pages/') ||
+        sourceFile.startsWith('db:posts/'),
+    );
+  }
+
+  private extractPageDetailSectionAnchors(section: SectionPlan): string[] {
+    const anchors: string[] = [];
+    const push = (value?: string | null) => {
+      const normalized = value?.trim();
+      if (!normalized) return;
+      if (normalized.length < 2) return;
+      anchors.push(normalized);
+    };
+
+    const pushCtas = (ctas?: Array<{ text?: string | null } | undefined>) => {
+      for (const cta of ctas ?? []) {
+        push(cta?.text);
+      }
+    };
+
+    switch (section.type) {
+      case 'prose-block':
+        for (const segment of section.sourceSegments ?? []) {
+          switch (segment.type) {
+            case 'heading':
+              push(segment.text);
+              push(segment.html);
+              break;
+            case 'paragraph':
+              push(segment.text);
+              push(segment.html);
+              break;
+            case 'list':
+              for (const item of segment.items) push(item);
+              break;
+            case 'image':
+              push(segment.src);
+              push(segment.caption);
+              break;
+            case 'html':
+              push(segment.html);
+              break;
+          }
+        }
+        break;
+      case 'media-text':
+        push(section.heading);
+        push(section.body);
+        push(section.imageSrc);
+        for (const item of section.listItems ?? []) push(item);
+        pushCtas(section.ctas ?? (section.cta ? [section.cta] : []));
+        break;
+      case 'card-grid':
+        push(section.title);
+        push(section.subtitle);
+        for (const card of section.cards) {
+          push(card.heading);
+          push(card.body);
+          push(card.imageSrc);
+        }
+        break;
+      case 'tabs':
+        push(section.title);
+        for (const tab of section.tabs) {
+          push(tab.label);
+          push(tab.heading);
+          push(tab.body);
+          push(tab.imageSrc);
+          pushCtas(tab.cta ? [tab.cta] : []);
+        }
+        break;
+      case 'accordion':
+        push(section.title);
+        for (const item of section.items) {
+          push(item.heading);
+          push(item.body);
+        }
+        break;
+      case 'carousel':
+        for (const slide of section.slides) {
+          push(slide.heading);
+          push(slide.subheading);
+          push(slide.imageSrc);
+          pushCtas(slide.cta ? [slide.cta] : []);
+        }
+        break;
+      case 'modal':
+        push(section.triggerText);
+        push(section.heading);
+        push(section.body);
+        push(section.imageSrc);
+        pushCtas(section.ctas ?? (section.cta ? [section.cta] : []));
+        break;
+    }
+
+    return [...new Set(anchors)];
+  }
+
+  private sectionAnchorsIndicateRendered(
+    code: string,
+    anchors: string[],
+  ): boolean {
+    const matches = anchors.filter((anchor) =>
+      this.codeContainsLiteral(code, anchor),
+    );
+    if (matches.length === 0) return false;
+    if (matches.some((anchor) => this.isStrongSectionAnchor(anchor)))
+      return true;
+    return matches.length >= Math.min(2, anchors.length);
+  }
+
+  private isStrongSectionAnchor(value: string): boolean {
+    const normalized = value.trim();
+    if (!normalized) return false;
+    if (/\/wp-content\/uploads\//i.test(normalized)) return true;
+    if (normalized.length >= 48) return true;
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+    return wordCount >= 6;
+  }
+
   private codeSatisfiesCollectionItem(
     code: string,
     item: SectionContractCollectionItem,
@@ -2068,8 +3019,8 @@ export class ValidatorService {
     switch (kind) {
       case 'posts':
         return this.codeMatchesAnyPattern(code, [
-          /\bposts(?:\??\.)?(?:map|slice|filter|find)\s*\(/,
-          /\b(?:post|item)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?)\b/,
+          /\bposts(?:\??\.)?(?:map|slice|filter|find|findIndex)\s*\(/,
+          /\b(?:post|item|previousPost|nextPost)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?)\b/,
         ]);
       case 'pages':
         return this.codeMatchesAnyPattern(code, [
@@ -2113,11 +3064,12 @@ export class ValidatorService {
       case 'post-content':
         return this.codeMatchesAnyPattern(code, [
           /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
-          /\b[A-Za-z_$][\w$]*\.(?:content|title|date|author(?:Name)?|categories?|categorySlugs?)\b/,
+          /\b[A-Za-z_$][\w$]*\.(?:content|title|date|author(?:Name)?|categories?|categorySlugs?|featuredImage|tags)\b/,
         ]);
       case 'page-content':
         return this.codeMatchesAnyPattern(code, [
           /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
+          /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
           /\b[A-Za-z_$][\w$]*\.(?:content|title)\b/,
         ]);
     }
@@ -2132,25 +3084,35 @@ export class ValidatorService {
       case 'posts':
         switch (field) {
           case 'title':
-            return /\b(?:post|item)\.title\b/.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.title\b/.test(code);
           case 'slug':
-            return /\b(?:post|item)\.slug\b|<(?:Link|a)\b/i.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.slug\b|<(?:Link|a)\b/i.test(
+              code,
+            );
           case 'excerpt':
-            return /\b(?:post|item)\.excerpt\b|excerpt/i.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.excerpt\b|excerpt/i.test(
+              code,
+            );
           case 'author':
-            return /\b(?:post|item)\.author(?:Name)?\b/i.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.author(?:Name)?\b/i.test(
+              code,
+            );
           case 'date':
-            return /\b(?:post|item)\.date\b|<time\b/i.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.date\b|<time\b/i.test(
+              code,
+            );
           case 'categories':
-            return /\b(?:post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
+            return /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
               code,
             );
           case 'featuredImage':
-            return /\b(?:post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
+            return /\b(?:post|item|previousPost|nextPost)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,
             );
           case 'content':
-            return /\b(?:post|item)\.content\b/.test(code);
+            return /\b(?:post|item|previousPost|nextPost)\.content\b/.test(
+              code,
+            );
           default:
             return true;
         }
@@ -2221,9 +3183,16 @@ export class ValidatorService {
           case 'title':
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
-            return /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-              code,
+            return (
+              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
+                code,
+              ) ||
+              /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
+                code,
+              )
             );
+          case 'slug':
+            return /\b[A-Za-z_$][\w$]*\.slug\b/.test(code);
           case 'author':
             return /\b[A-Za-z_$][\w$]*\.author(?:Name)?\b/i.test(code);
           case 'date':
@@ -2232,6 +3201,10 @@ export class ValidatorService {
             return /\b[A-Za-z_$][\w$]*\.(?:categories|category|categorySlugs?)\b/i.test(
               code,
             );
+          case 'featuredImage':
+            return /\b[A-Za-z_$][\w$]*\.featuredImage\b|<img\b/i.test(code);
+          case 'tags':
+            return /\b[A-Za-z_$][\w$]*\.tags\b/i.test(code);
           default:
             return true;
         }
@@ -2240,8 +3213,13 @@ export class ValidatorService {
           case 'title':
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
-            return /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-              code,
+            return (
+              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
+                code,
+              ) ||
+              /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
+                code,
+              )
             );
           default:
             return true;
@@ -2256,21 +3234,12 @@ export class ValidatorService {
   ): boolean {
     switch (interaction.kind) {
       case 'modal': {
-        const hasTrigger = /\buagb-modal-trigger\b|<(?:button|a|Link)\b/i.test(
-          code,
-        );
-        const hasDialog =
-          /\buagb-modal-popup\b|\buagb-modal-popup-content\b|\brole\s*=\s*["']dialog["']|\baria-modal\s*=\s*(?:{?true}?|["']true["'])/i.test(
-            code,
-          );
-        const hasState =
-          /\bopenModal\b|\bopenModals\b|\bsetOpenModal\b|\bsetOpenModals\b|\bisModalOpen\b|\bsetIsModalOpen\b/.test(
-            code,
-          );
+        const structureIssue = this.findSpectraModalStructureViolation(code);
+        if (structureIssue) return false;
         if (isInlineSection) {
-          return hasTrigger && hasDialog;
+          return /\bopenModals\b|\bsetOpenModals\b/.test(code);
         }
-        return hasTrigger && hasDialog && hasState;
+        return true;
       }
       case 'tabs':
         return /(activeTab|setActiveTab|role=["']tab["']|tablist|tabs?\.map)/i.test(
@@ -2283,9 +3252,7 @@ export class ValidatorService {
       case 'carousel': {
         const minItems = Number(interaction.options?.minItems ?? 0);
         if (minItems <= 1) return true;
-        return /(activeCarousels|setActiveCarousels|swiper-slide|keen-slider|embla|currentSlide|setCurrentSlide)/i.test(
-          code,
-        );
+        return this.findSpectraCarouselStructureViolation(code) === null;
       }
       case 'comment-form':
         return /\bcomment-form\b/i.test(code) && /<textarea\b/i.test(code);
@@ -2345,6 +3312,37 @@ export class ValidatorService {
     ].join('\n')}`;
   }
 
+  private checkSurfacePlanObligations(
+    code: string,
+    surfacePlan?: PlannerSurfacePlan,
+    componentName?: string,
+  ): string | null {
+    if (!surfacePlan) return null;
+    if (surfacePlan.contract.componentType !== 'page') return null;
+    if (surfacePlan.contract.isDetail) return null;
+
+    const requiredLiterals = collectSurfacePlanRequiredLiterals(surfacePlan);
+    if (requiredLiterals.length === 0) return null;
+
+    const missing = requiredLiterals.filter(
+      (literal) => !this.codeContainsLiteral(code, literal),
+    );
+    if (missing.length === 0) return null;
+
+    const label = componentName ?? surfacePlan.componentName;
+    const mustKeep =
+      surfacePlan.acceptance.mustKeep.slice(0, 4).join(' | ') || 'none';
+    return `Surface-plan source evidence violated:
+component=${label}
+authority=${surfacePlan.authority.level}
+pageIntent=${surfacePlan.pageIntent.kind}
+mustKeep=${mustKeep}
+    missingSourceLiterals=${missing
+      .slice(0, 6)
+      .map((value) => JSON.stringify(value))
+      .join(' | ')}`;
+  }
+
   private buildSectionAuditLine(input: {
     label: string;
     section: SectionPlan;
@@ -2395,6 +3393,9 @@ export class ValidatorService {
       if (normalized.includes('body')) {
         kinds.add('body');
       }
+      if (normalized.includes('paragraph')) {
+        kinds.add('paragraph');
+      }
       if (normalized.includes('list item')) {
         kinds.add('list-item');
       }
@@ -2413,14 +3414,29 @@ export class ValidatorService {
       if (normalized.includes('site info')) {
         kinds.add('site-info');
       }
-      if (normalized.includes('menus')) {
+      if (
+        normalized.includes('menus rendering') ||
+        normalized.includes('missing menus')
+      ) {
         kinds.add('menus');
       }
-      if (normalized.includes('pages')) {
+      if (
+        normalized.includes('pages collection') ||
+        normalized.includes('pages rendering')
+      ) {
         kinds.add('pages');
       }
-      if (normalized.includes('posts')) {
+      if (
+        normalized.includes('posts collection') ||
+        normalized.includes('from the posts')
+      ) {
         kinds.add('posts');
+      }
+      if (
+        normalized.includes('post-navigation') ||
+        normalized.includes('post slug')
+      ) {
+        kinds.add('post-navigation');
       }
       if (normalized.includes('quote')) {
         kinds.add('quote');
@@ -2819,7 +3835,7 @@ export class ValidatorService {
       return openTag.replace(
         /\bclassName="([^"]*)"/,
         (_match, existingClasses: string) =>
-          `className="${this.appendUniqueClasses(existingClasses, className)}"`,
+          `className="${appendUniqueClasses(existingClasses, className)}"`,
       );
     }
 
@@ -3234,7 +4250,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   }
 
   private rendersStaticCarouselTrack(code: string): boolean {
-    return /\bswiper-wrapper\b/.test(code) && !/translateX\(/.test(code);
+    if (!/\bswiper-wrapper\b/.test(code) || /translateX\(/.test(code)) {
+      return false;
+    }
+    const hasStackedActiveSlides =
+      /\bswiper-slide\b[\s\S]{0,240}\babsolute inset-0\b/i.test(code) &&
+      /\bopacity:\s*\([^)]*activeCarousels\[/.test(code);
+    return !hasStackedActiveSlides;
   }
 
   private hasEmptySwiperControlButton(code: string): boolean {
@@ -3244,6 +4266,87 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         code,
       )
     );
+  }
+
+  private findSpectraModalStructureViolation(code: string): string | null {
+    if (!/\buagb-spectra-button-wrapper\b/.test(code)) {
+      return 'missing `uagb-spectra-button-wrapper` around the trigger';
+    }
+    if (
+      !/\buagb-modal-trigger\b/.test(code) ||
+      !/\buagb-modal-button-link\b/.test(code)
+    ) {
+      return 'missing Spectra trigger classes `uagb-modal-trigger uagb-modal-button-link`';
+    }
+    if (
+      /className\s*=\s*\{?["'`][^"'`]*\buagb-modal-trigger\b[^"'`]*\b(?:hidden|sr-only|invisible|opacity-0|pointer-events-none)\b/.test(
+        code,
+      ) ||
+      /\buagb-modal-trigger\b[\s\S]{0,220}style=\{\{[\s\S]{0,120}display\s*:\s*['"`]none['"`]/.test(
+        code,
+      )
+    ) {
+      return 'modal trigger is rendered with hidden/invisible styles';
+    }
+    if (
+      !/\buagb-modal-popup\b[\s\S]{0,120}\bactive\b|\bactive\b[\s\S]{0,120}\buagb-modal-popup\b/.test(
+        code,
+      )
+    ) {
+      return 'open popup overlay is missing the combined `uagb-modal-popup active` class';
+    }
+    if (!/\buagb-modal-popup-wrap\b/.test(code)) {
+      return 'missing `uagb-modal-popup-wrap` dialog shell';
+    }
+    if (!/\buagb-modal-popup-content\b/.test(code)) {
+      return 'missing `uagb-modal-popup-content` dialog body';
+    }
+    if (!/\buagb-modal-popup-close\b/.test(code)) {
+      return 'missing `uagb-modal-popup-close` close button';
+    }
+    if (!/\bsetOpenModals\b[\s\S]{0,240}\[[^\]]+\]\s*:\s*true/s.test(code)) {
+      return 'trigger does not clearly call `setOpenModals(... true)`';
+    }
+    if (!/\bsetOpenModals\b[\s\S]{0,240}\[[^\]]+\]\s*:\s*false/s.test(code)) {
+      return 'close path does not clearly call `setOpenModals(... false)`';
+    }
+    return null;
+  }
+
+  private findSpectraCarouselStructureViolation(
+    code: string,
+    options?: {
+      requireArrows?: boolean;
+      requireDots?: boolean;
+    },
+  ): string | null {
+    if (!/\buagb-slider-container\b/.test(code)) {
+      return 'missing `uagb-slider-container` wrapper';
+    }
+    if (!/\buagb-swiper\b/.test(code)) {
+      return 'missing `uagb-swiper` wrapper';
+    }
+    if (!/\bswiper-wrapper\b/.test(code)) {
+      return 'missing `swiper-wrapper` track container';
+    }
+    if (!/\bswiper-slide\b/.test(code)) {
+      return 'missing `swiper-slide` slide items';
+    }
+    if (!/\bactiveCarousels\b|\bsetActiveCarousels\b/.test(code)) {
+      return 'missing shared carousel state usage (`activeCarousels` / `setActiveCarousels`)';
+    }
+    if (options?.requireArrows) {
+      if (
+        !/\bswiper-button-prev\b/.test(code) ||
+        !/\bswiper-button-next\b/.test(code)
+      ) {
+        return 'missing `swiper-button-prev` / `swiper-button-next` controls';
+      }
+    }
+    if (options?.requireDots && !/\bswiper-pagination\b/.test(code)) {
+      return 'missing `swiper-pagination` dot container';
+    }
+    return null;
   }
 
   private findInteractiveStateKeyMismatch(
@@ -3287,93 +4390,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     );
   }
 
-  private findPlaceholderLinkSnippets(code: string, max = 3): string[] {
-    const snippets: string[] = [];
-    const tagPattern =
-      /<(?:Link|a)\b[^>]*(?:to|href)\s*=\s*(?:["']#["']|\{["']#["']\})[^>]*>[\s\S]*?<\/(?:Link|a)>/g;
-
-    for (const match of code.matchAll(tagPattern)) {
-      const raw = match[0]?.replace(/\s+/g, ' ').trim();
-      if (!raw) continue;
-      snippets.push(raw.length > 160 ? `${raw.slice(0, 157)}...` : raw);
-      if (snippets.length >= max) return snippets;
-    }
-
-    for (const line of code.split('\n')) {
-      const trimmed = line.trim();
-      if (/(?:\bto=|\bhref=)\s*(?:["']#["']|\{["']#["']\})/.test(trimmed)) {
-        snippets.push(
-          trimmed.length > 160 ? `${trimmed.slice(0, 157)}...` : trimmed,
-        );
-        if (snippets.length >= max) break;
-      }
-    }
-
-    return snippets;
-  }
-
-  private findCanonicalTextLinkSnippetsWithoutHoverUnderline(
-    code: string,
-    max = 3,
-  ): string[] {
-    const snippets: string[] = [];
-    const tagPattern = /<(?:Link|a)\b[\s\S]{0,400}?>/g;
-
-    for (const match of code.matchAll(tagPattern)) {
-      const raw = match[0]?.replace(/\s+/g, ' ').trim();
-      if (!raw || !/\bclassName=/.test(raw)) continue;
-      if (/hover:underline/.test(raw) || /\bno-underline\b/.test(raw)) continue;
-      const looksLikeButton =
-        /\bbg-\[/.test(raw) ||
-        (/\bpx-/.test(raw) && /\bpy-/.test(raw)) ||
-        /\bjustify-center\b/.test(raw);
-      if (looksLikeButton) continue;
-
-      const isCanonicalTextLink =
-        /\/(?:post|page|author|category|tag)\//.test(raw) ||
-        /\bitem\.url\b/.test(raw) ||
-        /\btoAppPath\(item\.url\)\b/.test(raw) ||
-        /\bhref=["']https?:\/\//.test(raw);
-      if (!isCanonicalTextLink) continue;
-
-      snippets.push(raw.length > 180 ? `${raw.slice(0, 177)}...` : raw);
-      if (snippets.length >= max) break;
-    }
-
-    return snippets;
-  }
-
-  private ensureHoverUnderlineOnCanonicalTextLinks(code: string): string {
-    return code.replace(/<(Link|a)\b[\s\S]{0,400}?>/g, (rawTag) => {
-      if (!/\bclassName="[^"]*"/.test(rawTag)) return rawTag;
-      if (/hover:underline/.test(rawTag) || /\bno-underline\b/.test(rawTag)) {
-        return rawTag;
-      }
-
-      const looksLikeButton =
-        /\bbg-\[/.test(rawTag) ||
-        (/\bpx-/.test(rawTag) && /\bpy-/.test(rawTag)) ||
-        /\bjustify-center\b/.test(rawTag);
-      if (looksLikeButton) return rawTag;
-
-      const isCanonicalTextLink =
-        /\/(?:post|page|author|category|tag)\//.test(rawTag) ||
-        /\bitem\.url\b/.test(rawTag) ||
-        /\btoAppPath\(item\.url\)\b/.test(rawTag) ||
-        /\bhref=["']https?:\/\//.test(rawTag);
-      if (!isCanonicalTextLink) return rawTag;
-
-      return rawTag.replace(
-        /\bclassName="([^"]*)"/,
-        (_match, classes: string) =>
-          `className="${this.appendUniqueClasses(
-            classes,
-            'hover:underline underline-offset-4',
-          )}"`,
-      );
-    });
-  }
-
   private findPlainTextPostMetaArchiveSnippets(
     code: string,
     max = 3,
@@ -3387,81 +4403,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
    * the safe no-slug fallback already emitted by promotePlainTextPostMetaLinks
    * and should NOT be flagged as a violation.
    */
-  private isWithinSlugTernaryFallback(code: string, offset: number): boolean {
-    // Look at up to 300 chars before the match for a slug ternary guard.
-    const before = code.slice(Math.max(0, offset - 600), offset);
-    return (
-      /\bauthorSlug\s*\?/.test(before) ||
-      /\bcategorySlugs(?:\?\.)?\s*\[\s*0\s*\]\s*\?/.test(before) ||
-      /\b(?:post|item|postDetail)\.author\s*&&/.test(before) ||
-      /\b(?:post|item|postDetail)\.categories(?:\?\.)?(?:\[0\])?\s*&&/.test(
-        before,
-      )
-    );
-  }
-
-  private promotePlainTextPostMetaLinks(code: string): string {
-    return promoteSharedPlainTextPostMetaLinks(code);
-  }
-
-  private normalizePlainTextPostMetaArchiveLinks(code: string): string {
-    return normalizeSharedPlainTextPostMetaArchiveLinks(code);
-  }
-
-  private isWithinHeadingTitleContext(code: string, offset: number): boolean {
-    const start = Math.max(0, offset - 220);
-    const end = Math.min(code.length, offset + 220);
-    const window = code.slice(start, end);
-    const before = code.slice(start, offset);
-    const openHeading = before.match(/<h[1-6]\b[^>]*>/gi);
-    const closeHeading = before.match(/<\/h[1-6]>/gi);
-    if ((openHeading?.length ?? 0) > (closeHeading?.length ?? 0)) {
-      return true;
-    }
-
-    return /\b(?:title|heading)\b/i.test(window);
-  }
-
-  private ensureReactRouterLinkImport(code: string): string {
-    if (!/<Link\b/.test(code)) return code;
-
-    const namedImportPattern =
-      /import\s*\{([^}]*)\}\s*from\s*['"]react-router-dom['"];?/;
-    if (namedImportPattern.test(code)) {
-      return code.replace(namedImportPattern, (_match, imported: string) => {
-        const next = this.appendUniqueClasses(
-          imported.replace(/\s+/g, ' '),
-          'Link',
-        )
-          .split(' ')
-          .filter(Boolean)
-          .join(', ');
-        return `import { ${next} } from 'react-router-dom';`;
-      });
-    }
-
-    const lines = code.split('\n');
-    const reactImportIndex = lines.findIndex((line) =>
-      /from\s*['"]react['"]/.test(line),
-    );
-    const importLine = `import { Link } from 'react-router-dom';`;
-    if (reactImportIndex !== -1) {
-      lines.splice(reactImportIndex + 1, 0, importLine);
-      return lines.join('\n');
-    }
-
-    lines.unshift(importLine);
-    return lines.join('\n');
-  }
-
-  private appendUniqueClasses(existing: string, addition: string): string {
-    return [
-      ...new Set(`${existing} ${addition}`.split(/[\s,]+/).filter(Boolean)),
-    ]
-      .join(' ')
-      .trim();
-  }
-
   private findTypeBody(
     code: string,
     typeName: string,

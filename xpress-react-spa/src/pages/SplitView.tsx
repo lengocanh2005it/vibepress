@@ -5,6 +5,7 @@ import {
   applyPendingEditRequest,
   runAiProcess,
   skipPendingEditRequest,
+  skipVisualCompare,
   type AiEditRequestPayload,
 } from "../services/AiService";
 import type {
@@ -29,6 +30,21 @@ interface DeferredEditUiState {
   previewStage?: "baseline" | "edited" | "final";
   editApprovalRequired?: boolean;
   editApplied?: boolean;
+}
+
+interface VisualCompareSkipUiState {
+  loading: boolean;
+  requested: boolean;
+  error: string | null;
+}
+
+interface CapturePreviewState {
+  src: string;
+  alt: string;
+  note?: string;
+  route?: string | null;
+  pageTitle?: string;
+  capturedAt?: string | null;
 }
 
 const SPLIT_VIEW_SESSION_KEY = "vp.splitView.lastRun";
@@ -740,6 +756,54 @@ const readPersistedSplitViewState = (): SplitViewLocationState => {
   }
 };
 
+const resolvePreviewBaseUrl = (previewUrl: string): string => {
+  try {
+    const parsed = new URL(previewUrl);
+    const isInternal =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "ai_pipeline";
+    const currentHost = window.location.hostname;
+    const isCurrentHostInternal =
+      currentHost === "localhost" ||
+      currentHost === "127.0.0.1" ||
+      currentHost === "ai_pipeline";
+
+    if (isInternal && !isCurrentHostInternal) {
+      return parsed.pathname + parsed.search + parsed.hash;
+    }
+  } catch {
+    // Relative preview URLs should be used as-is.
+  }
+
+  return previewUrl;
+};
+
+const WORKFLOW_STEP_ORDER = [
+  "1_repo_analyzer",
+  "2_theme_parser",
+  "3_normalizer",
+  "4_content_graph",
+  "5_planner",
+  "6_generator",
+  "7_api_builder",
+  "8_preview_builder",
+  "9_visual_compare",
+  "8b_edit_request",
+  "9b_post_edit_visual_validation",
+  "10_cleanup",
+  "11_done",
+  "system",
+] as const;
+
+const getWorkflowStepSortIndex = (stepName: string): number => {
+  const exactIndex = WORKFLOW_STEP_ORDER.indexOf(
+    stepName as (typeof WORKFLOW_STEP_ORDER)[number],
+  );
+  if (exactIndex >= 0) return exactIndex;
+  return WORKFLOW_STEP_ORDER.length + 1;
+};
+
 const SplitView: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -753,8 +817,12 @@ const SplitView: React.FC = () => {
   const sse = useSse(jobId || "");
   const [showMetrics, setShowMetrics] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [showSkipVisualCompareConfirm, setShowSkipVisualCompareConfirm] =
+    useState(false);
   const [selectedStepEvent, setSelectedStepEvent] =
     useState<PipelineProgressEvent | null>(null);
+  const [activeCapturePreview, setActiveCapturePreview] =
+    useState<CapturePreviewState | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
   const [deferredEditState, setDeferredEditState] = useState<DeferredEditUiState>({
@@ -773,6 +841,12 @@ const SplitView: React.FC = () => {
     loading: boolean;
     error: string | null;
   }>({ loading: false, error: null });
+  const [skipVisualCompareState, setSkipVisualCompareState] =
+    useState<VisualCompareSkipUiState>({
+      loading: false,
+      requested: false,
+      error: null,
+    });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -881,6 +955,10 @@ const SplitView: React.FC = () => {
     return parsed.toLocaleString();
   };
 
+  const openCapturePreview = (input: CapturePreviewState) => {
+    setActiveCapturePreview(input);
+  };
+
   const getStatusIcon = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
       case "done":
@@ -932,6 +1010,13 @@ const SplitView: React.FC = () => {
         .find((event) => event.status === "stopped") ?? null,
     [sse.allEvents],
   );
+  const failedEvent = useMemo(
+    () =>
+      [...sse.allEvents]
+        .reverse()
+        .find((event) => event.status === "error") ?? null,
+    [sse.allEvents],
+  );
   const latestPreviewEvent = useMemo(
     () =>
       [...sse.allEvents]
@@ -946,10 +1031,13 @@ const SplitView: React.FC = () => {
         .find((event) => Boolean(event.data?.metrics)) ?? null,
     [sse.allEvents],
   );
-  const latestEvent = sse.currentEvent;
   const previewData = latestPreviewEvent?.data;
   const previewUrl =
     previewData?.previewUrl ?? completionEvent?.data?.previewUrl;
+  const resolvedPreviewUrl = useMemo(
+    () => (previewUrl ? resolvePreviewBaseUrl(previewUrl) : ""),
+    [previewUrl],
+  );
   const previewStage =
     deferredEditState.previewStage ??
     previewData?.previewStage ??
@@ -967,10 +1055,7 @@ const SplitView: React.FC = () => {
       previewData?.editApplied ??
       completionEvent?.data?.editApplied,
   );
-  const metricsData =
-    deferredEditState.applied || editApplied
-      ? undefined
-      : latestMetricsEvent?.data?.metrics;
+  const metricsData = latestMetricsEvent?.data?.metrics;
   const metricsView = useMemo(
     () => normalizeMetricsPayload(metricsData),
     [metricsData],
@@ -982,19 +1067,30 @@ const SplitView: React.FC = () => {
       deferredEditState.loading ||
       deferredEditState.completed);
   const terminalStopMessage =
+    failedEvent?.message ??
     stoppedEvent?.message ??
     sse.error?.message ??
     "The AI pipeline was interrupted and this workflow has been stopped.";
   const hasStoppedWorkflow =
     sse.connectionState === "stopped" || Boolean(stoppedEvent);
+  const hasFailedWorkflow =
+    sse.connectionState === "error" || Boolean(failedEvent) || Boolean(sse.error);
   const isWorkflowStopped = !deleteState.done && hasStoppedWorkflow;
+  const isWorkflowFailed = !deleteState.done && hasFailedWorkflow;
+  const hasTerminalWorkflowFailure = isWorkflowStopped || isWorkflowFailed;
+  const terminalWorkflowTitle = isWorkflowFailed
+    ? "Pipeline Failed"
+    : "Pipeline Stopped";
+  const terminalWorkflowTitleVi = isWorkflowFailed
+    ? "Pipeline đã lỗi"
+    : "Pipeline đã dừng";
 
   const previewFrameSrc = useMemo(() => {
-    if (!previewUrl) return "";
-    const base = jobId ? `/preview/${jobId}/` : previewUrl;
+    if (!resolvedPreviewUrl) return "";
+    const base = resolvedPreviewUrl;
     const separator = base.includes("?") ? "&" : "?";
     return `${base}${separator}livePreview=${previewRefreshNonce}`;
-  }, [jobId, previewRefreshNonce, previewUrl]);
+  }, [previewRefreshNonce, resolvedPreviewUrl]);
 
   useEffect(() => {
     if (!previewUrl || !previewStage) return;
@@ -1013,33 +1109,29 @@ const SplitView: React.FC = () => {
     if (!previewStage) {
       return {
         badge: "Preparing",
-        title: "Preview is still being prepared",
-        description: "The preview will appear here as soon as it starts.",
+        title: "Preview is being assembled",
+        description:
+          "The frontend and preview API are still starting. The preview will appear here as soon as the baseline app is live.",
         badgeClass: "border-slate-300 bg-white text-slate-700",
       };
     }
 
     if (hasEditRequest && editApprovalRequired && !editApplied) {
       return {
-        badge: previewStage === "final" ? "Approval Needed" : "Baseline Live",
-        title:
-          previewStage === "final"
-            ? "Baseline preview is ready for approval"
-            : "You are viewing the baseline preview",
+        badge: "Awaiting Approval",
+        title: "Baseline preview is ready. The stored edit is waiting for your decision",
         description:
-          previewStage === "final"
-            ? "The WordPress site has already been migrated to React. Review this baseline preview first, then decide whether the stored edit request should be applied."
-            : "The WordPress site has already been migrated to React. The requested edit is stored separately and will only be applied after user approval.",
+          "The baseline WordPress-vs-React compare has finished. Review the baseline preview, then choose Apply or Skip for the stored user edit request.",
         badgeClass: "border-amber-300 bg-amber-50 text-amber-800",
       };
     }
 
     if (previewStage === "baseline") {
       return {
-        badge: "Preview Live",
-        title: "The preview is ready for inspection",
+        badge: "Baseline Live",
+        title: "Baseline preview is live",
         description:
-          "Frontend and backend preview servers are live while the pipeline continues with metrics and cleanup.",
+          "The React baseline preview is running while the pipeline finishes compare, validation, and cleanup steps.",
         badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
       };
     }
@@ -1047,9 +1139,9 @@ const SplitView: React.FC = () => {
     if (previewStage === "edited") {
       return {
         badge: "Edited Live",
-        title: "Requested edits are now visible",
+        title: "Approved edits are now visible",
         description:
-          "The running preview has been updated with the approved edit request.",
+          "The running preview has been updated with the approved user edit request. Post-edit validation is running now.",
         badgeClass: "border-sky-300 bg-sky-50 text-sky-800",
       };
     }
@@ -1057,18 +1149,18 @@ const SplitView: React.FC = () => {
     if (previewStage === "final" && editApplied) {
       return {
         badge: "Edited Final",
-        title: "Approved edits are now applied",
+        title: "Edited preview validation is complete",
         description:
-          "The baseline React preview has been updated with the approved user edits.",
+          "The approved edit survived post-edit validation and the workflow is complete.",
         badgeClass: "border-sky-300 bg-sky-50 text-sky-800",
       };
     }
 
     return {
-      badge: "Final Ready",
-      title: "The final baseline preview is ready",
+      badge: "Baseline Final",
+      title: "Baseline migration is complete",
       description:
-        "Pipeline execution is complete. You can inspect the baseline preview and then decide whether to apply the stored edit request.",
+        "The baseline preview has completed compare and validation. The workflow is done.",
       badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
     };
   }, [editApplied, editApprovalRequired, hasEditRequest, previewStage]);
@@ -1088,12 +1180,17 @@ const SplitView: React.FC = () => {
     setRerunState({ loading: false, error: null });
   }, [jobId]);
 
+  const isPipelineCompleted =
+    sse.connectionState === "completed" || Boolean(completionEvent);
+  const isWorkflowTerminal =
+    isPipelineCompleted || hasTerminalWorkflowFailure || deleteState.done;
+
   useEffect(() => {
     if (!deferredEditState.loading || !deferredEditState.decision) return;
 
     if (
       deferredEditState.decision === "apply" &&
-      (editApplied || previewStage === "edited" || previewStage === "final")
+      (editApplied || previewStage === "edited")
     ) {
       setDeferredEditState((prev) => ({
         ...prev,
@@ -1105,6 +1202,27 @@ const SplitView: React.FC = () => {
         previewStage: previewStage ?? "edited",
         editApprovalRequired: false,
         editApplied: true,
+      }));
+      return;
+    }
+
+    // Pipeline finished but the approved edit required no code changes.
+    // Resolve loading without claiming edit was applied.
+    if (
+      deferredEditState.decision === "apply" &&
+      isPipelineCompleted &&
+      !editApplied
+    ) {
+      setDeferredEditState((prev) => ({
+        ...prev,
+        loading: false,
+        applied: false,
+        completed: true,
+        dismissed: true,
+        error: null,
+        previewStage: previewStage ?? "baseline",
+        editApprovalRequired: false,
+        editApplied: false,
       }));
       return;
     }
@@ -1131,13 +1249,9 @@ const SplitView: React.FC = () => {
     deferredEditState.loading,
     editApplied,
     editApprovalRequired,
+    isPipelineCompleted,
     previewStage,
   ]);
-
-  const isPipelineCompleted =
-    sse.connectionState === "completed" || Boolean(completionEvent);
-  const isWorkflowTerminal =
-    isPipelineCompleted || isWorkflowStopped || deleteState.done;
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1233,6 +1347,17 @@ const SplitView: React.FC = () => {
     setShowStopConfirm(false);
   };
 
+  const openSkipVisualCompareConfirm = () => {
+    if (skipVisualCompareState.loading) return;
+    setSkipVisualCompareState((prev) => ({ ...prev, error: null }));
+    setShowSkipVisualCompareConfirm(true);
+  };
+
+  const closeSkipVisualCompareConfirm = () => {
+    if (skipVisualCompareState.loading) return;
+    setShowSkipVisualCompareConfirm(false);
+  };
+
   const handleDeletePipeline = async () => {
     setDeleteState({ loading: true, done: false });
     try {
@@ -1242,6 +1367,49 @@ const SplitView: React.FC = () => {
       setShowStopConfirm(false);
     } catch {
       setDeleteState({ loading: false, done: false });
+    }
+  };
+
+  const handleSkipVisualCompare = async () => {
+    if (!jobId || !siteId || skipVisualCompareState.loading) return;
+
+    setSkipVisualCompareState({
+      loading: true,
+      requested: false,
+      error: null,
+    });
+
+    try {
+      const response = await skipVisualCompare(siteId, jobId);
+      if (!response.accepted) {
+        setSkipVisualCompareState({
+          loading: false,
+          requested: false,
+          error:
+            response.error ||
+            "The baseline visual compare could not be skipped.",
+        });
+        return;
+      }
+
+      setSkipVisualCompareState({
+        loading: false,
+        requested: true,
+        error: null,
+      });
+      setShowSkipVisualCompareConfirm(false);
+    } catch (error) {
+      const message =
+        error instanceof AiProcessError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Failed to skip the baseline visual compare.";
+      setSkipVisualCompareState({
+        loading: false,
+        requested: false,
+        error: message,
+      });
     }
   };
 
@@ -1356,11 +1524,14 @@ const SplitView: React.FC = () => {
 
     const editStepName = "8b_edit_request";
     const existingEditStep = stepMap.get(editStepName);
+    const compareIsDone = stepMap.get("9_visual_compare")?.status === "done";
     if (
       existingEditStep ||
-      hasEditRequest ||
       deferredEditState.loading ||
-      deferredEditState.completed
+      deferredEditState.completed ||
+      Boolean(deferredEditState.error) ||
+      (hasEditRequest && editApprovalRequired && compareIsDone) ||
+      (hasEditRequest && editApplied)
     ) {
       const optimisticStatus: PipelineProgressEvent["status"] =
         deferredEditState.loading
@@ -1388,10 +1559,10 @@ const SplitView: React.FC = () => {
         status: optimisticStatus,
         percent:
           deferredEditState.loading
-            ? Math.max(existingEditStep?.percent ?? 0, 88)
+            ? Math.max(existingEditStep?.percent ?? 0, 90)
             : deferredEditState.completed
               ? 100
-              : existingEditStep?.percent ?? 80,
+              : existingEditStep?.percent ?? 90,
         message: optimisticMessage,
         data: existingEditStep?.data,
       });
@@ -1411,9 +1582,7 @@ const SplitView: React.FC = () => {
           : event,
       )
       .sort((a, b) => {
-        const stepA = parseInt(a.step.split("_")[0]) || 0;
-        const stepB = parseInt(b.step.split("_")[0]) || 0;
-        return stepA - stepB;
+        return getWorkflowStepSortIndex(a.step) - getWorkflowStepSortIndex(b.step);
       });
   }, [
     deferredEditState.completed,
@@ -1426,6 +1595,39 @@ const SplitView: React.FC = () => {
     sse.allEvents,
     terminalStopMessage,
   ]);
+  const visualCompareStep = useMemo(
+    () =>
+      stepStatuses.find((event) => event.step === "9_visual_compare") ?? null,
+    [stepStatuses],
+  );
+  const isVisualCompareRunning = visualCompareStep?.status === "running";
+  const canSkipVisualCompare =
+    Boolean(jobId) &&
+    Boolean(siteId) &&
+    isVisualCompareRunning &&
+    !deleteState.done &&
+    !hasTerminalWorkflowFailure;
+
+  useEffect(() => {
+    if (isVisualCompareRunning) return;
+    setShowSkipVisualCompareConfirm(false);
+    setSkipVisualCompareState((prev) => ({
+      ...prev,
+      loading: false,
+      requested: false,
+    }));
+  }, [isVisualCompareRunning]);
+
+  const latestEvent = useMemo(() => {
+    const activeStep =
+      [...stepStatuses]
+        .reverse()
+        .find((event) => event.status === "running") ??
+      [...stepStatuses]
+        .reverse()
+        .find((event) => event.status === "pending");
+    return activeStep ?? sse.currentEvent;
+  }, [sse.currentEvent, stepStatuses]);
 
   useEffect(() => {
     if (!selectedStepEvent) return;
@@ -1498,7 +1700,7 @@ const SplitView: React.FC = () => {
               >
                 {connectionBadge.label}
               </span>
-              {isWorkflowStopped && !deleteState.done && (
+              {hasTerminalWorkflowFailure && !deleteState.done && (
                 <button
                   onClick={handleResendRequest}
                   disabled={rerunState.loading || !siteId}
@@ -1515,20 +1717,39 @@ const SplitView: React.FC = () => {
                   {rerunState.loading ? "Resending..." : "Resend Request"}
                 </button>
               )}
-              {sse.isConnected && !deleteState.done && !isWorkflowStopped && (
-                <button
-                  onClick={openStopConfirm}
-                  disabled={deleteState.loading}
-                  className="text-xs font-mono px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                >
-                  <span
-                    className="material-symbols-outlined text-xs"
-                    style={{ fontSize: 13 }}
+              {sse.isConnected && !deleteState.done && !hasTerminalWorkflowFailure && (
+                <>
+                  {canSkipVisualCompare && (
+                    <button
+                      onClick={openSkipVisualCompareConfirm}
+                      disabled={skipVisualCompareState.loading}
+                      className="text-xs font-mono px-2.5 py-1.5 rounded bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <span
+                        className="material-symbols-outlined text-xs"
+                        style={{ fontSize: 13 }}
+                      >
+                        skip_next
+                      </span>
+                      {skipVisualCompareState.loading
+                        ? "Skipping compare..."
+                        : "Skip compare"}
+                    </button>
+                  )}
+                  <button
+                    onClick={openStopConfirm}
+                    disabled={deleteState.loading}
+                    className="text-xs font-mono px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                   >
-                    stop_circle
-                  </span>
-                  {deleteState.loading ? "Stopping..." : "Stop"}
-                </button>
+                    <span
+                      className="material-symbols-outlined text-xs"
+                      style={{ fontSize: 13 }}
+                    >
+                      stop_circle
+                    </span>
+                    {deleteState.loading ? "Stopping..." : "Stop"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -1582,10 +1803,22 @@ const SplitView: React.FC = () => {
               Workflow error: {sse.error.message}
             </div>
           )}
-          {isWorkflowStopped && (
+          {skipVisualCompareState.error && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+              Skip compare failed: {skipVisualCompareState.error}
+            </div>
+          )}
+          {skipVisualCompareState.requested && isVisualCompareRunning && (
+            <div className="rounded-xl border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900">
+              Skip compare has been requested. The backend will leave the
+              current metric task at the next safe checkpoint and continue to
+              the next pipeline stage.
+            </div>
+          )}
+          {hasTerminalWorkflowFailure && (
             <div className="rounded-xl border border-red-300/70 bg-red-50 p-4 text-red-900">
               <p className="text-[11px] uppercase tracking-[0.18em] text-red-500/80">
-                Pipeline Stopped
+                {terminalWorkflowTitle}
               </p>
               <p className="mt-2 text-sm text-red-900">{terminalStopMessage}</p>
               <div className="mt-4 flex items-center gap-3">
@@ -1671,7 +1904,7 @@ const SplitView: React.FC = () => {
                 </span>
                 {metricsView && (
                   <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
-                    Metrics Ready
+                    Compare Ready
                   </span>
                 )}
               </div>
@@ -1723,12 +1956,12 @@ const SplitView: React.FC = () => {
                         {deferredEditState.loading
                           ? deferredEditState.decision === "skip"
                             ? "Continuing with the baseline preview…"
-                            : "Applying the stored edit request…"
+                            : "Applying the approved edit request…"
                           : deferredEditState.completed
                             ? deferredEditState.decision === "skip"
-                              ? "Baseline preview confirmed"
-                              : "Approved edits applied"
-                            : "Apply the stored edit request?"}
+                              ? "Baseline preview kept"
+                              : "Approved edits are live"
+                            : "Review and apply the stored edit request?"}
                       </p>
                       <p className="mt-1 text-xs leading-5 text-slate-600">
                         {deferredEditState.loading
@@ -1737,9 +1970,9 @@ const SplitView: React.FC = () => {
                             : "The backend has resumed the pipeline and is now applying the approved edit request to the running preview."
                           : deferredEditState.completed
                             ? deferredEditState.decision === "skip"
-                              ? "The user chose to continue with the baseline preview. Requested edit handling is complete."
-                              : "The approved edit request has been accepted and applied to the live preview."
-                            : "You are currently viewing the baseline React migration. The requested edits have not been applied yet."}
+                              ? "The user chose to keep the baseline preview. Requested edit handling is complete."
+                              : "The approved edit request has been applied to the live preview and the pipeline is validating the edited result."
+                            : "You are currently viewing the baseline React migration after compare. The stored edit request has not been applied yet."}
                       </p>
                       {!deferredEditState.completed && (
                         <div className="mt-3 space-y-3">
@@ -1773,7 +2006,15 @@ const SplitView: React.FC = () => {
                               </span>
                             </div>
                             {pendingEditCaptures.length > 0 ? (
-                              <div className="mt-3 space-y-3">
+                              <div className="mt-3">
+                                <div className="mb-3 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                                  <span>
+                                    Click any thumbnail to open a larger preview.
+                                  </span>
+                                  <span>{pendingEditCaptures.length} reference(s)</span>
+                                </div>
+                                <div className="max-h-[38rem] overflow-y-auto pr-1">
+                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                                 {pendingEditCaptures.map((capture, index) => {
                                 const imageSrc = resolveCaptureImageUrl(
                                   capture.asset?.publicUrl,
@@ -1801,32 +2042,60 @@ const SplitView: React.FC = () => {
                                 return (
                                   <div
                                     key={capture.id}
-                                    className="overflow-hidden rounded-2xl border border-amber-100 bg-[#fffaf2]"
+                                    className="overflow-hidden rounded-2xl border border-amber-100 bg-[#fffaf2] shadow-sm"
                                   >
-                                    <div className="flex gap-3 p-3">
-                                      <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#f6e8cf]">
+                                    <div className="relative">
                                         {imageSrc ? (
-                                          <img
-                                            src={imageSrc}
-                                            alt={
-                                              capture.note ||
-                                              `capture-${capture.id}`
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              openCapturePreview({
+                                                src: imageSrc,
+                                                alt:
+                                                  capture.note ||
+                                                  `capture-${capture.id}`,
+                                                note: capture.note,
+                                                route: pageRoute,
+                                                pageTitle,
+                                                capturedAt: capturedAtLabel,
+                                              })
                                             }
-                                            className="h-full w-full object-cover"
-                                          />
+                                            className="group relative block h-48 w-full overflow-hidden bg-[#f6e8cf] transition hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                                          >
+                                            <img
+                                              src={imageSrc}
+                                              alt={
+                                                capture.note ||
+                                                `capture-${capture.id}`
+                                              }
+                                              className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
+                                            />
+                                            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/75 via-black/15 to-transparent px-3 py-3 text-white">
+                                              <div className="min-w-0">
+                                                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/80">
+                                                  Capture {index + 1}
+                                                </p>
+                                                <p className="truncate text-xs font-medium">
+                                                  {pageTitle || pageRoute}
+                                                </p>
+                                              </div>
+                                              <span className="material-symbols-outlined text-[16px]">
+                                                open_in_full
+                                              </span>
+                                            </div>
+                                          </button>
                                         ) : (
-                                          <span className="material-symbols-outlined text-[20px] text-amber-700">
-                                            image
-                                          </span>
+                                          <div className="flex h-48 w-full items-center justify-center overflow-hidden bg-[#f6e8cf]">
+                                            <span className="material-symbols-outlined text-[20px] text-amber-700">
+                                              image
+                                            </span>
+                                          </div>
                                         )}
                                       </div>
-                                      <div className="min-w-0 flex-1">
+                                      <div className="space-y-3 p-3">
                                         <div className="flex flex-wrap items-center gap-2">
                                           <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-700">
                                             Capture {index + 1}
-                                          </span>
-                                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
-                                            {pageRoute}
                                           </span>
                                           {tagName ? (
                                             <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
@@ -1834,19 +2103,22 @@ const SplitView: React.FC = () => {
                                             </span>
                                           ) : null}
                                         </div>
-                                        <p className="mt-2 text-sm font-semibold leading-5 text-slate-900">
+                                        <p className="line-clamp-2 text-sm font-semibold leading-5 text-slate-900">
                                           {capture.note ||
                                             "No capture note was provided."}
                                         </p>
-                                        {pageTitle ? (
-                                          <p className="mt-1 text-[11px] text-slate-500">
-                                            Page: {pageTitle}
+                                        <div className="space-y-1 text-[11px] text-slate-500">
+                                          <p className="truncate">
+                                            {pageTitle ? `Page: ${pageTitle}` : pageRoute}
                                           </p>
-                                        ) : null}
+                                          {pageTitle ? (
+                                            <p className="truncate">{pageRoute}</p>
+                                          ) : null}
+                                        </div>
                                         {(nearestHeading ||
                                           selector ||
                                           capturedAtLabel) && (
-                                          <div className="mt-2 rounded-xl bg-white px-3 py-2 text-[11px] leading-5 text-slate-600">
+                                          <div className="rounded-xl bg-white px-3 py-2 text-[11px] leading-5 text-slate-600">
                                             {nearestHeading ? (
                                               <p>
                                                 Nearest heading:{" "}
@@ -1865,11 +2137,12 @@ const SplitView: React.FC = () => {
                                             ) : null}
                                           </div>
                                         )}
-                                      </div>
                                     </div>
                                   </div>
                                 );
                                 })}
+                                </div>
+                                </div>
                               </div>
                             ) : (
                               <p className="mt-3 text-[11px] text-slate-500">
@@ -1937,7 +2210,7 @@ const SplitView: React.FC = () => {
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  onClick={() => window.open(jobId ? `/preview/${jobId}/` : previewUrl, "_blank")}
+                  onClick={() => window.open(resolvedPreviewUrl, "_blank")}
                   className={`${actionButtonClass} border-teal-800 bg-teal-700 text-white hover:bg-teal-800 focus-visible:ring-teal-500`}
                 >
                   Open Preview
@@ -1969,9 +2242,11 @@ const SplitView: React.FC = () => {
                     ? "Agent Stream Connecting"
                     : sse.connectionState === "completed"
                       ? "Agent Stream Completed"
+                      : sse.connectionState === "error"
+                        ? "Agent Stream Failed"
                       : sse.connectionState === "stopped"
                         ? "Agent Stream Stopped"
-                      : "Agent Stream Offline"}
+                        : "Agent Stream Offline"}
             </span>
             <span className="flex items-center gap-1">
               {sse.progress}% Workflow Progress
@@ -1980,7 +2255,9 @@ const SplitView: React.FC = () => {
           <div className="text-xs text-primary font-bold">
             {completionEvent
               ? "WORKFLOW COMPLETE"
-              : isWorkflowStopped
+              : isWorkflowFailed
+                ? "WORKFLOW FAILED"
+                : isWorkflowStopped
                 ? "WORKFLOW STOPPED"
                 : "AGENTS WORKING"}
           </div>
@@ -2052,7 +2329,7 @@ const SplitView: React.FC = () => {
                 Quay về trang dự án
               </button>
             </div>
-          ) : isWorkflowStopped ? (
+          ) : hasTerminalWorkflowFailure ? (
             <div className="max-w-lg text-center space-y-4">
               <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto">
                 <span
@@ -2062,7 +2339,7 @@ const SplitView: React.FC = () => {
                   stop_circle
                 </span>
               </div>
-              <p className="text-on-surface font-medium">Pipeline đã dừng</p>
+              <p className="text-on-surface font-medium">{terminalWorkflowTitleVi}</p>
               <p className="text-sm text-on-surface-variant">
                 {terminalStopMessage}
               </p>
@@ -2095,11 +2372,11 @@ const SplitView: React.FC = () => {
                   >
                     {previewStatus.badge}
                   </span>
-                  {metricsView && (
-                    <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
-                      Metrics Ready
-                    </span>
-                  )}
+                    {metricsView && (
+                      <span className="inline-flex items-center rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-800">
+                        Compare Ready
+                      </span>
+                    )}
                 </div>
                 <p className="mt-2 text-sm font-semibold text-slate-900">
                   {previewStatus.title}
@@ -2186,6 +2463,75 @@ const SplitView: React.FC = () => {
         </div>
       )}
 
+      {showSkipVisualCompareConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={closeSkipVisualCompareConfirm}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-outline-variant/40 bg-surface shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 border-b border-outline-variant/30 px-6 py-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-700">
+                <span
+                  className="material-symbols-outlined"
+                  style={{ fontVariationSettings: "'FILL' 1" }}
+                >
+                  skip_next
+                </span>
+              </div>
+              <div className="min-w-0">
+                <h2 className="font-headline text-lg font-semibold text-on-surface">
+                  Bỏ qua bước so sánh metric?
+                </h2>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  Pipeline sẽ dừng bước baseline visual compare và metric-based
+                  repair, rồi chuyển thẳng sang bước tiếp theo với preview hiện
+                  tại.
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                Dùng khi bước compare đang chạy quá lâu. Preview hiện tại sẽ
+                được giữ nguyên; chỉ phần so sánh và sửa theo metric bị bỏ qua.
+              </div>
+              {skipVisualCompareState.error && (
+                <p className="mt-3 text-sm text-red-700">
+                  {skipVisualCompareState.error}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 pb-6">
+              <button
+                onClick={closeSkipVisualCompareConfirm}
+                disabled={skipVisualCompareState.loading}
+                className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={() => void handleSkipVisualCompare()}
+                disabled={skipVisualCompareState.loading}
+                className="inline-flex items-center gap-2 rounded-xl border border-amber-700 bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span
+                  className={`material-symbols-outlined text-[18px] ${
+                    skipVisualCompareState.loading ? "animate-spin" : ""
+                  }`}
+                >
+                  {skipVisualCompareState.loading ? "progress_activity" : "skip_next"}
+                </span>
+                {skipVisualCompareState.loading
+                  ? "Đang bỏ qua..."
+                  : "Xác nhận bỏ qua"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectedStepEvent &&
         (() => {
           const details = selectedStepEvent.data?.stepDetails;
@@ -2233,7 +2579,7 @@ const SplitView: React.FC = () => {
                         <p className="mt-2 text-sm leading-6 text-slate-600">
                           {details?.summary ||
                             selectedStepEvent.message ||
-                            "This workflow step does not expose extra structured details yet."}
+                            "This workflow step has no extra structured details yet."}
                         </p>
                       </div>
                     </div>
@@ -2341,7 +2687,7 @@ const SplitView: React.FC = () => {
                         </div>
 
                         {details.captures.length > 0 ? (
-                          <div className="mt-5 grid gap-4 md:grid-cols-2">
+                          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                             {details.captures.map((capture) => {
                               const imageSrc = resolveCaptureImageUrl(
                                 capture.imageUrl,
@@ -2355,16 +2701,43 @@ const SplitView: React.FC = () => {
                                   key={capture.id}
                                   className="overflow-hidden rounded-[22px] border border-[#eadfce] bg-[#fcfaf6]"
                                 >
-                                  <div className="flex h-56 items-center justify-center bg-[#f2e8da]">
+                                  <div className="relative flex h-56 items-center justify-center bg-[#f2e8da]">
                                     {imageSrc ? (
-                                      <img
-                                        src={imageSrc}
-                                        alt={
-                                          capture.note ||
-                                          `capture-${capture.id}`
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          openCapturePreview({
+                                            src: imageSrc,
+                                            alt:
+                                              capture.note ||
+                                              `capture-${capture.id}`,
+                                            note: capture.note,
+                                            route:
+                                              capture.pageRoute ||
+                                              capture.sourcePageUrl,
+                                            pageTitle: capture.pageTitle,
+                                            capturedAt: capturedAtLabel,
+                                          })
                                         }
-                                        className="h-full w-full object-contain"
-                                      />
+                                        className="group h-full w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                                      >
+                                        <img
+                                          src={imageSrc}
+                                          alt={
+                                            capture.note ||
+                                            `capture-${capture.id}`
+                                          }
+                                          className="h-full w-full object-contain transition duration-200 group-hover:scale-[1.02]"
+                                        />
+                                        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/70 to-transparent px-3 py-3 text-white">
+                                          <span className="text-[10px] font-semibold uppercase tracking-[0.16em]">
+                                            Click to enlarge
+                                          </span>
+                                          <span className="material-symbols-outlined text-[18px]">
+                                            open_in_full
+                                          </span>
+                                        </div>
+                                      </button>
                                     ) : (
                                       <div className="px-6 text-center text-sm text-slate-500">
                                         This capture does not expose an image
@@ -2441,6 +2814,67 @@ const SplitView: React.FC = () => {
           view={metricsView}
           onClose={() => setShowMetrics(false)}
         />
+      )}
+      {activeCapturePreview && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onClick={() => setActiveCapturePreview(null)}
+        >
+          <div
+            className="relative w-full max-w-6xl overflow-hidden rounded-[28px] border border-white/15 bg-[#111111] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setActiveCapturePreview(null)}
+              className="absolute right-4 top-4 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white transition hover:bg-black/65"
+            >
+              <span className="material-symbols-outlined text-[20px]">close</span>
+            </button>
+            <div className="grid max-h-[90vh] min-h-[22rem] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="flex min-h-[18rem] items-center justify-center bg-black px-4 py-4">
+                <img
+                  src={activeCapturePreview.src}
+                  alt={activeCapturePreview.alt}
+                  className="max-h-[80vh] w-auto max-w-full rounded-2xl object-contain"
+                />
+              </div>
+              <div className="flex flex-col gap-4 bg-[#171717] px-5 py-5 text-white/88">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/45">
+                    Capture Preview
+                  </p>
+                  <p className="mt-3 text-base font-semibold leading-6 text-white">
+                    {activeCapturePreview.note || "No capture note provided."}
+                  </p>
+                </div>
+                <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm leading-6">
+                  {activeCapturePreview.pageTitle ? (
+                    <p>
+                      <span className="text-white/45">Page:</span>{" "}
+                      {activeCapturePreview.pageTitle}
+                    </p>
+                  ) : null}
+                  {activeCapturePreview.route ? (
+                    <p className="break-all">
+                      <span className="text-white/45">Route:</span>{" "}
+                      {activeCapturePreview.route}
+                    </p>
+                  ) : null}
+                  {activeCapturePreview.capturedAt ? (
+                    <p>
+                      <span className="text-white/45">Captured at:</span>{" "}
+                      {activeCapturePreview.capturedAt}
+                    </p>
+                  ) : null}
+                </div>
+                <p className="text-xs text-white/45">
+                  Press outside the modal or use the close button to return to the workflow view.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
       {showMetrics && metricsView?.kind === "audit" && (
         <AuditMetricsModal
