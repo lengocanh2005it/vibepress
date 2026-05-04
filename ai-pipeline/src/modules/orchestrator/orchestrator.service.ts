@@ -3220,6 +3220,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
             siteId,
             jobId,
             logPath,
+            previewUrl: preview.previewUrl,
           });
         if (migrationNotification) {
           state.result = {
@@ -4140,10 +4141,11 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     siteId: string;
     jobId: string;
     logPath?: string;
+    previewUrl?: string;
   }): Promise<{
     requested: boolean;
     endpoint: string;
-    payload: { site_id: string; job_id: string };
+    payload: { site_id: string; job_id: string; preview_url?: string };
     responsePreview?: string;
     error?: string;
   } | null> {
@@ -4165,6 +4167,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     const payload = {
       site_id: input.siteId,
       job_id: input.jobId,
+      ...(input.previewUrl ? { preview_url: input.previewUrl } : {}),
     };
 
     try {

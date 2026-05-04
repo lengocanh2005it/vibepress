@@ -8,7 +8,8 @@ const GITHUB_OWNER = process.env.GITHUB_OWNER || null;
 const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'MVP Bot';
 const GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'mvp-bot@example.com';
 const AI_PIPELINE_PORT = process.env.AI_PIPELINE_PORT || '3001';
-const AI_PIPELINE_URL = `http://localhost:${AI_PIPELINE_PORT}`;
+const AI_PIPELINE_HOST = process.env.AI_PIPELINE_HOST || 'localhost';
+const AI_PIPELINE_URL = `http://${AI_PIPELINE_HOST}:${AI_PIPELINE_PORT}`;
 // VPS deploy
 const VPS_HOST = process.env.VPS_HOST || null;
 const VPS_USER = process.env.VPS_USER || null;

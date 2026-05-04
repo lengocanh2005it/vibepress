@@ -5,28 +5,21 @@ const { query, queryOne } = require('../db/mysql');
 const { uploadCaptureAsset } = require('../services/imageUploadService');
 const { AI_PIPELINE_URL, UPLOAD_ROOT } = require('../config/constants');
 
-async function captureMigrationThumbnail(migrationId, jobId) {
+async function captureMigrationThumbnail(migrationId, jobId, previewUrl) {
   let browser;
   try {
-    const previewRes = await fetch(`${AI_PIPELINE_URL}/pipeline/start-preview`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId }),
-    });
-    if (!previewRes.ok) {
-      console.warn(`[Migration] thumbnail: start-preview HTTP ${previewRes.status} job=${jobId}`);
-      return;
-    }
-    const { previewUrl } = await previewRes.json();
     if (!previewUrl) {
-      console.warn(`[Migration] thumbnail: no previewUrl returned job=${jobId}`);
+      console.warn(`[Migration] thumbnail: no previewUrl for job=${jobId}`);
       return;
     }
+    const absolutePreviewUrl = previewUrl.startsWith('http')
+      ? previewUrl
+      : `${AI_PIPELINE_URL}${previewUrl}`;
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto(previewUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(absolutePreviewUrl, { waitUntil: 'networkidle', timeout: 30000 });
 
     const filename = `thumbnail_${jobId}.png`;
     const localPath = path.join(UPLOAD_ROOT, 'captures', filename);
@@ -51,7 +44,7 @@ async function captureMigrationThumbnail(migrationId, jobId) {
 }
 
 async function createMigration(req, res) {
-  const { site_id, job_id } = req.body;
+  const { site_id, job_id, preview_url } = req.body;
   console.log(`[Migration] POST /migrations body=`, req.body);
 
   if (!site_id || !job_id) {
@@ -67,7 +60,7 @@ async function createMigration(req, res) {
     const migration = await queryOne('SELECT * FROM react_migrations WHERE id = ?', [result.insertId]);
     console.log(`[Migration] Đã tạo migration id=${result.insertId} site=${site_id} job=${job_id}`);
     res.status(201).json(migration);
-    captureMigrationThumbnail(result.insertId, job_id);
+    captureMigrationThumbnail(result.insertId, job_id, preview_url);
   } catch (err) {
     console.error(`[Migration] createMigration lỗi:`, err);
     return res.status(500).json({ error: 'Lỗi khi lưu migration', detail: err.message });
