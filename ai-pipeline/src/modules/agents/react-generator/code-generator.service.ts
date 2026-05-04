@@ -577,7 +577,38 @@ export class CodeGeneratorService {
         }
       }
     }
+    // Block tree nodes (hybrid/block-centric render) also reference data vars
+    // that are not visible in plan.sections — scan them so useState is always emitted.
+    if (plan.blockTree?.length) {
+      this.collectBlockTreeDataNeeds(plan.blockTree, needs);
+    }
     return Array.from(needs);
+  }
+
+  private collectBlockTreeDataNeeds(
+    nodes: BlockNode[],
+    needs: Set<DataNeed>,
+  ): void {
+    for (const node of nodes) {
+      switch (node.kind) {
+        case 'avatar':
+        case 'categories':
+        case 'query':
+        case 'latest-posts':
+          needs.add('posts');
+          needs.add('siteInfo');
+          break;
+        case 'post-author-biography':
+          needs.add('siteInfo');
+          break;
+        case 'navigation':
+          needs.add('menus');
+          break;
+      }
+      if (node.children?.length) {
+        this.collectBlockTreeDataNeeds(node.children, needs);
+      }
+    }
   }
 
   // ── Imports ───────────────────────────────────────────────────────────────
@@ -4839,6 +4870,22 @@ ${cards}
       undefined,
       'lg',
     );
+    const supplementalImageMarkup =
+      s.supplementalImages && s.supplementalImages.length > 0
+        ? `              <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+                  ${s.supplementalImages
+                    .map((image) => {
+                      const imageClassName = this.appendOptionalCustomClasses(
+                        'h-auto max-h-8 w-auto object-contain',
+                        image.customClassNames,
+                      );
+                      return `<img src={resolveAsset(${JSON.stringify(
+                        image.src,
+                      )})} alt=${JSON.stringify(image.alt ?? '')} className="${imageClassName}" />`;
+                    })
+                    .join('\n                  ')}
+                </div>`
+        : '';
     const copyrightMarkup = s.copyright
       ? `<p className="text-sm text-[${p.textMuted}] mt-8 pt-8 border-t border-black/10"${descriptionStyle}>{${JSON.stringify(s.copyright)}}</p>`
       : '';
@@ -4857,10 +4904,10 @@ ${cards}
             </div>
             ${hasSpacerColumn ? '<div className="hidden md:block" aria-hidden="true" />' : ''}
             <div className="min-w-0">
-              <div className="grid ${menuGridClass} items-start gap-8">
-                {(() => {
-                  const displayFooterColumns = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);
-                  return displayFooterColumns.map((column, columnIndex) => (
+               <div className="grid ${menuGridClass} items-start gap-8">
+                 {(() => {
+                   const displayFooterColumns = footerColumns.filter((column) => Array.isArray(column.links) && column.links.length > 0);
+                   return displayFooterColumns.map((column, columnIndex) => (
                     <div key={column.heading ?? columnIndex} className="flex min-w-0 flex-col gap-3">
                       <h3 className="font-semibold text-[${tc}]"${columnHeadingStyle}>{column.heading}</h3>
                       <nav className="flex flex-col gap-2">
@@ -4877,13 +4924,14 @@ ${cards}
                         ))}
                       </nav>
                     </div>
-                  ));
-                })()}
-              </div>
-            </div>
-          </div>
-          ${copyrightMarkup}
-        </div>
+                   ));
+                 })()}
+               </div>
+${supplementalImageMarkup}
+             </div>
+           </div>
+           ${copyrightMarkup}
+         </div>
       </footer>`;
   }
 

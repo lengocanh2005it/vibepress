@@ -1287,14 +1287,38 @@ function validateSectionDetailed(
         };
       }
       if (![2, 3, 4].includes(raw.columns)) raw.columns = 3;
-      // Ensure each card has heading + body strings
-      raw.cards = (raw.cards as any[]).filter(
-        (c) => c && typeof c.heading === 'string' && typeof c.body === 'string',
-      );
+      // Ensure each card has heading
+      raw.cards = (raw.cards as any[])
+        .map((c) => {
+          if (!c || typeof c !== 'object') return null;
+          const heading =
+            typeof c.heading === 'string' && c.heading.trim()
+              ? c.heading.trim()
+              : typeof c.title === 'string' && c.title.trim()
+                ? c.title.trim()
+                : typeof c.label === 'string' && c.label.trim()
+                  ? c.label.trim()
+                  : '';
+          const body =
+            typeof c.body === 'string' && c.body.trim()
+              ? c.body.trim()
+              : typeof c.description === 'string' && c.description.trim()
+                ? c.description.trim()
+                : typeof c.content === 'string' && c.content.trim()
+                  ? c.content.trim()
+                  : typeof c.text === 'string' && c.text.trim()
+                    ? c.text.trim()
+                    : '';
+          if (!heading) return null;
+          c.heading = heading;
+          c.body = body;
+          return c;
+        })
+        .filter(Boolean);
       if (raw.cards.length === 0) {
         return {
           section: null,
-          reason: 'card-grid.cards has no valid {heading, body} items',
+          reason: 'card-grid.cards has no valid heading items',
         };
       }
       break;
@@ -1630,15 +1654,18 @@ function validateSectionDetailed(
                   ? item.text.trim()
                   : typeof item.answer === 'string' && item.answer.trim()
                     ? item.answer.trim()
-                    : '';
-          if (!heading || !body) return null;
+                    : typeof item.description === 'string' &&
+                        item.description.trim()
+                      ? item.description.trim()
+                      : '';
+          if (!heading) return null;
           return { heading, body };
         })
         .filter(Boolean);
       if (raw.items.length === 0) {
         return {
           section: null,
-          reason: 'accordion.items has no valid {heading, body} items',
+          reason: 'accordion.items has no valid heading items',
         };
       }
       if (typeof raw.allowMultiple !== 'boolean') raw.allowMultiple = false;

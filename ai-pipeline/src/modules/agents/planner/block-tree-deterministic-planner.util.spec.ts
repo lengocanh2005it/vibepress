@@ -204,3 +204,125 @@ describe('block-tree deterministic listing shells', () => {
     expect(plan?.layout.sidebarScope).toBe('all-content');
   });
 });
+
+describe('block-tree deterministic shared partials', () => {
+  const sharedBaseInput = {
+    content: {
+      menus: [],
+      pages: [],
+      posts: [],
+    } as any,
+    tokens: undefined,
+    globalPalette: {
+      background: '#ffffff',
+      surface: '#f5f5f5',
+      text: '#111111',
+      textMuted: '#666666',
+      accent: '#000000',
+      accentText: '#ffffff',
+      dark: '#000000',
+      darkText: '#ffffff',
+    },
+    globalTypography: {
+      headingFamily: 'inherit',
+      bodyFamily: 'inherit',
+      h1: 'text-4xl',
+      h2: 'text-3xl',
+      h3: 'text-2xl',
+      body: 'text-base',
+      small: 'text-sm',
+      buttonRadius: 'rounded',
+    },
+    deriveComponentLayout: () => ({
+      containerClass: 'max-w-6xl mx-auto w-full',
+      blockGap: 'gap-12',
+      includes: [],
+    }),
+    buildRichBoundPageDetailSections: () => undefined,
+    buildBoundPageContentFallbackSection: () => ({
+      type: 'page-content' as const,
+      showTitle: true,
+    }),
+  };
+
+  it('keeps search widgets inside deterministic sidebar partial sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'sidebar',
+        componentName: 'Sidebar',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['posts'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            { kind: 'search', blockName: 'search' },
+            { kind: 'latest-posts', blockName: 'latest-posts' },
+            { kind: 'categories', blockName: 'categories' },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'sidebar',
+      widgets: [
+        { kind: 'search' },
+        { kind: 'categories' },
+        { kind: 'recent-posts' },
+      ],
+    });
+  });
+
+  it('keeps static footer images in deterministic footer partial sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'footer',
+        componentName: 'Footer',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'footer-links'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'columns',
+              blockName: 'columns',
+              children: [
+                { kind: 'column', blockName: 'column', columnWidth: '45%' },
+              ],
+            },
+            {
+              kind: 'image',
+              blockName: 'image',
+              src: 'theme-asset:/assets/images/arrow-up.png',
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'footer',
+      supplementalImages: [
+        {
+          src: 'theme-asset:/assets/images/arrow-up.png',
+        },
+      ],
+    });
+  });
+});

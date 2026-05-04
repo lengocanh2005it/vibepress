@@ -2735,8 +2735,16 @@ ${fontEntries}
     if (!viteRunning) {
       this.logger.log(`[startPreviewForJob] Attaching dependencies...`);
       await Promise.all([
-        this.attachTemplateDependencies(TEMPLATE_DIR, frontendDir, 'react-preview'),
-        this.attachTemplateDependencies(SERVER_TEMPLATE_DIR, serverDir, 'express-server'),
+        this.attachTemplateDependencies(
+          TEMPLATE_DIR,
+          frontendDir,
+          'react-preview',
+        ),
+        this.attachTemplateDependencies(
+          SERVER_TEMPLATE_DIR,
+          serverDir,
+          'express-server',
+        ),
       ]);
       this.spawnDevServer(frontendDir);
       this.spawnDevServer(serverDir);
