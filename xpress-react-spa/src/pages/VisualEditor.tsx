@@ -25,6 +25,7 @@ interface MetricPage {
   url: string | null;
   slug: string;
   type: string;
+  label?: string;
 }
 
 interface PipelineStatusResponse {
@@ -133,7 +134,7 @@ const buildRouteItems = (
     const route = normalizeRoute(page.url || "/");
     map.set(route, {
       id: `metrics:${route}`,
-      label: page.slug === "/" || route === "/" ? "Home" : routeLabel(page.slug || route),
+      label: page.slug === "/" || route === "/" ? "Home" : (page.label || routeLabel(page.slug || route)),
       route,
       pageUrl: toPageUrl(iframeBaseUrl, route),
       capturePageUrl: toPageUrl(capturePreviewUrl || iframeBaseUrl, route),
@@ -299,7 +300,15 @@ const VisualEditor: React.FC = () => {
             .then((res: { pages?: Array<{ slug: string; link: string; title: string }> }) => {
               const pages = res.pages ?? [];
               setWpFallbackPages(
-                pages.map((p) => ({ url: p.link, slug: p.title || p.slug || "", type: "page" })),
+                pages.map((p) => {
+                  const slug = p.slug || "";
+                  return {
+                    url: slug === "" ? "/" : `/page/${slug}`,
+                    slug,
+                    type: "page",
+                    label: p.title || undefined,
+                  };
+                }),
               );
             })
             .catch(() => {});
