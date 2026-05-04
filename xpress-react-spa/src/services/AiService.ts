@@ -169,8 +169,11 @@ export interface ReactVisualEditPayload extends AiEditRequestPayload {
         componentName?: string;
         templateName?: string;
         sourceFile?: string;
+        outputFilePath?: string;
         sectionIndex?: number;
         sectionType?: string;
+        startLine?: number;
+        endLine?: number;
         targetNodeRole?: string;
         targetElementTag?: string;
         targetTextPreview?: string;

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, writeFile } from 'fs/promises';
-import { isAbsolute, join, resolve } from 'path';
+import { basename, isAbsolute, join, resolve } from 'path';
 import type {
   PipelineEditTargetHintDto,
   PipelineReactVisualEditRequestDto,
@@ -11,6 +11,7 @@ import {
 } from '../../edit-request/edit-operation.util.js';
 import type { ComponentPlan, PlanResult } from '../planner/planner.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import { ValidatorService } from '../validator/validator.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import { ReactGeneratorService } from './react-generator.service.js';
 
@@ -38,7 +39,10 @@ export class ReactVisualEditService {
     Array<{ filePath: string; code: string }>
   >();
 
-  constructor(private readonly reactGenerator: ReactGeneratorService) {}
+  constructor(
+    private readonly reactGenerator: ReactGeneratorService,
+    private readonly validator: ValidatorService,
+  ) {}
 
   private saveBackup(jobId: string, filePath: string, code: string): void {
     if (!this.backupStore.has(jobId)) this.backupStore.set(jobId, []);
@@ -49,13 +53,15 @@ export class ReactVisualEditService {
     code: string,
     hint?: PipelineEditTargetHintDto,
   ): { snippet: string; startLine: number; endLine: number } | undefined {
-    if (hint?.startLine === undefined || hint?.endLine === undefined)
-      return undefined;
+    const anchorLine = hint?.targetStartLine ?? hint?.startLine;
+    if (anchorLine === undefined) return undefined;
     const lines = code.split('\n');
     const total = lines.length;
     const CONTEXT = 15;
-    const from = Math.max(0, hint.startLine - 1 - CONTEXT);
-    const to = Math.min(total - 1, hint.endLine - 1 + CONTEXT);
+    const startLine = Math.max(1, Math.round(anchorLine));
+    const endLine = Math.max(startLine, Math.round(hint?.endLine ?? startLine));
+    const from = Math.max(0, startLine - 1 - CONTEXT);
+    const to = Math.min(total - 1, endLine - 1 + CONTEXT);
     const snippet = lines.slice(from, to + 1).join('\n');
     return { snippet, startLine: from + 1, endLine: to + 1 };
   }
@@ -124,9 +130,24 @@ export class ReactVisualEditService {
       logPath,
     });
 
+    if (
+      normalizeCodeForComparison(fixed.code) ===
+      normalizeCodeForComparison(currentCode)
+    ) {
+      throw new Error(
+        `Visual edit for "${componentName}" did not produce a material code change in the targeted component.`,
+      );
+    }
+
+    const validatedCode = this.validateEditedComponent({
+      component,
+      componentPlan,
+      code: fixed.code,
+    });
+
     this.saveBackup(input.jobId, filePath, currentCode);
 
-    await writeFile(filePath, fixed.code, 'utf-8');
+    await writeFile(filePath, validatedCode, 'utf-8');
 
     this.logger.log(
       `[visual-edit] "${componentName}" ✓ written to ${filePath}`,
@@ -169,6 +190,13 @@ export class ReactVisualEditService {
       if (entry) return entry.componentName;
     }
 
+    const hintedFile =
+      targetHint?.outputFilePath?.trim() || targetHint?.sourceFile?.trim();
+    if (hintedFile) {
+      const fileName = basename(hintedFile).replace(/\.(t|j)sx?$/i, '');
+      if (fileName) return fileName;
+    }
+
     return undefined;
   }
 
@@ -193,15 +221,51 @@ export class ReactVisualEditService {
     targetHint?: PipelineEditTargetHintDto,
   ): string {
     const hintedPath = targetHint?.outputFilePath?.trim();
-    if (!hintedPath) {
-      return this.deriveFilePath(frontendDir, componentName);
+    if (hintedPath) {
+      if (isAbsolute(hintedPath)) {
+        return hintedPath;
+      }
+      return resolve(frontendDir, hintedPath);
     }
 
-    if (isAbsolute(hintedPath)) {
-      return hintedPath;
+    const sourceFile = targetHint?.sourceFile?.trim();
+    if (sourceFile) {
+      if (isAbsolute(sourceFile)) {
+        return sourceFile;
+      }
+      return resolve(frontendDir, sourceFile);
     }
 
-    return resolve(frontendDir, hintedPath);
+    return this.deriveFilePath(frontendDir, componentName);
+  }
+
+  private validateEditedComponent(input: {
+    component: GeneratedComponent;
+    componentPlan?: ComponentPlan;
+    code: string;
+  }): string {
+    const { component, componentPlan, code } = input;
+    const candidate: GeneratedComponent = {
+      ...component,
+      code,
+      type: componentPlan?.type ?? component.type,
+      route: componentPlan?.route ?? component.route,
+      isDetail: componentPlan?.isDetail ?? component.isDetail,
+      fixedSlug: componentPlan?.fixedSlug ?? component.fixedSlug,
+      dataNeeds: componentPlan?.dataNeeds ?? component.dataNeeds,
+      requiredCustomClassNames:
+        componentPlan?.customClassNames ?? component.requiredCustomClassNames,
+      visualPlan: componentPlan?.visualPlan ?? component.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan ?? component.surfacePlan,
+      renderContract: componentPlan?.renderContract ?? component.renderContract,
+    };
+    const validation = this.validator.collectValidationIssues([candidate]);
+    if (validation.failures.length > 0) {
+      throw new Error(
+        `Visual edit produced invalid component code: ${validation.failures[0].error}`,
+      );
+    }
+    return validation.components[0]?.code ?? code;
   }
 
   private buildFeedback(
@@ -339,6 +403,10 @@ export class ReactVisualEditService {
       'Apply the visual edit as described by the attached context.'
     );
   }
+}
+
+function normalizeCodeForComparison(code: string): string {
+  return code.replace(/\r\n/g, '\n').trim();
 }
 
 function buildInstructionText(

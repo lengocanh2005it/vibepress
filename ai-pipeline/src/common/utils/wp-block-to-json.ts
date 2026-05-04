@@ -54,7 +54,7 @@ export interface WpNode {
  * Entry point: parse full template markup into a JSON array of WpNode.
  */
 export function wpBlocksToJson(markup: string): WpNode[] {
-  return parseBlocks(markup.trim());
+  return parseBlocks(normalizeWordPressPhpMarkup(markup).trim());
 }
 
 export function wpBlocksToJsonWithSourceRefs(input: {
@@ -62,7 +62,7 @@ export function wpBlocksToJsonWithSourceRefs(input: {
   templateName: string;
   sourceFile: string;
 }): WpNode[] {
-  const nodes = parseBlocks(input.markup.trim());
+  const nodes = parseBlocks(normalizeWordPressPhpMarkup(input.markup).trim());
   return annotateSourceRefs(nodes, {
     templateName: input.templateName,
     sourceFile: input.sourceFile,
@@ -86,6 +86,42 @@ export function ensureWpNodesHaveSourceRefs(input: {
  */
 export function wpJsonToString(nodes: WpNode[]): string {
   return JSON.stringify(stripParams(nodes));
+}
+
+function normalizeWordPressPhpMarkup(raw: string): string {
+  return String(raw ?? '')
+    .replace(/<\?php\s*\/\*\*[\s\S]*?\*\/\s*\?>/g, '')
+    .replace(
+      /<\?php\s+(?:echo\s+)?esc_html_x\s*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1[\s\S]*?\?>/g,
+      '$2',
+    )
+    .replace(
+      /<\?php\s+(?:echo\s+)?(?:esc_html__|esc_attr__|esc_html_e|esc_attr_e|esc_html|esc_attr|__|_e)\s*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1[\s\S]*?\?>/g,
+      '$2',
+    )
+    .replace(
+      /esc_html_x\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_html__\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_attr__\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /esc_attr_e\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*,[\s\S]*?\)/g,
+      '$2',
+    )
+    .replace(
+      /<\?php\s+echo\s+(['"`])((?:\\.|(?!\1)[\s\S])*?)\1\s*;\s*\?>/g,
+      '$2',
+    )
+    .replace(/<\?php[\s\S]*?\?>/g, '')
+    .replace(/<\?php[^>]*$/gm, '')
+    .replace(/\\(['"`])/g, '$1');
 }
 
 const BASE_USEFUL_PARAM_KEYS = new Set([
@@ -733,6 +769,11 @@ function buildNode(
       if (params?.minHeight)
         coverExtras.minHeight = normalizeCssLength(params.minHeight);
     }
+    const detailsExtras: Partial<WpNode> = {};
+    if (blockName === 'details' || blockName === 'core/details') {
+      const summaryText = extractDetailsSummaryText(innerMarkup);
+      if (summaryText) detailsExtras.text = summaryText;
+    }
     return compact({
       block: blockName,
       params,
@@ -744,6 +785,7 @@ function buildNode(
           }
         : {}),
       ...coverExtras,
+      ...detailsExtras,
       children,
     });
   }
@@ -918,6 +960,14 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   }
 
   return customClassNames.length ? { customClassNames } : {};
+}
+
+function extractDetailsSummaryText(html: string): string | undefined {
+  const summaryMatch = String(html ?? '').match(
+    /<summary[^>]*>([\s\S]*?)<\/summary>/i,
+  );
+  const summaryText = summaryMatch ? stripTags(summaryMatch[1]) : '';
+  return summaryText.trim() || undefined;
 }
 
 export function stripTags(html: string): string {

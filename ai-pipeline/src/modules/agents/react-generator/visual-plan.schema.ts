@@ -292,6 +292,10 @@ export interface CardGridSection extends BaseSection {
   type: 'card-grid';
   title?: string;
   subtitle?: string;
+  cta?: SectionCta;
+  ctas?: SectionCta[];
+  ctaStyle?: SectionButtonStyle;
+  secondaryCtaStyle?: SectionButtonStyle;
   titleCustomClassNames?: string[];
   subtitleCustomClassNames?: string[];
   titleStyle?: TypographyStyle;
@@ -448,6 +452,8 @@ export interface ProseBlockSection extends BaseSection {
 export interface SearchSection extends BaseSection {
   type: 'search';
   title?: string;
+  cta?: SectionCta;
+  ctas?: SectionCta[];
 }
 
 export interface SidebarLinkItem {
@@ -456,6 +462,12 @@ export interface SidebarLinkItem {
 }
 
 export type SidebarWidget =
+  | {
+      kind: 'search';
+      title?: string;
+      placeholder?: string;
+      buttonLabel?: string;
+    }
   | {
       kind: 'author-bio';
       title?: string;
@@ -998,6 +1010,7 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
     case 'sidebar':
       const sidebarRequired = new Set<SectionCapability>();
       for (const widget of section.widgets) {
+        if (widget.kind === 'search') sidebarRequired.add('search-input');
         if (widget.kind === 'author-bio') {
           sidebarRequired.add('posts');
           sidebarRequired.add('site-info');

@@ -83,8 +83,8 @@ export class DbContentService {
       pages,
       menus,
       dbNavigations,
-      dbTemplates,
-      dbGlobalStyles,
+      rawDbTemplates,
+      rawDbGlobalStyles,
       customCssEntries,
       readingSettings,
       taxonomies,
@@ -104,6 +104,15 @@ export class DbContentService {
       this.wpQuery.getRuntimeFeatures(connectionString),
       this.wpQuery.getMediaAttachments(connectionString),
     ]);
+    const activeThemeChain = this.collectActiveThemeChain(siteInfo);
+    const dbTemplates = this.filterThemeScopedRows(
+      rawDbTemplates,
+      activeThemeChain,
+    );
+    const dbGlobalStyles = this.filterThemeScopedRows(
+      rawDbGlobalStyles,
+      activeThemeChain,
+    );
     const enrichedReadingSettings = this.materializeReadingSettings(
       readingSettings,
       pages,
@@ -114,6 +123,15 @@ export class DbContentService {
       siteInfo,
       runtimeFeatures,
     });
+
+    if (
+      dbTemplates.length !== rawDbTemplates.length ||
+      dbGlobalStyles.length !== rawDbGlobalStyles.length
+    ) {
+      this.logger.log(
+        `Filtered theme-scoped DB artifacts to active theme chain [${activeThemeChain.join(', ') || '(none)'}]: templates ${rawDbTemplates.length} -> ${dbTemplates.length}, globalStyles ${rawDbGlobalStyles.length} -> ${dbGlobalStyles.length}`,
+      );
+    }
 
     this.logger.log(
       `Extracted: ${posts.length} posts, ${pages.length} pages, ${menus.length} menus, ${dbNavigations.length} db navigations, ` +
@@ -195,5 +213,31 @@ export class DbContentService {
     }
 
     return WpQueryService.parseGlobalStylesContent(preferred.content);
+  }
+
+  private collectActiveThemeChain(siteInfo: WpSiteInfo): string[] {
+    return [...new Set([siteInfo.activeTheme, siteInfo.templateTheme])]
+      .map((entry) => this.normalizeThemeSlug(entry))
+      .filter((entry): entry is string => entry.length > 0);
+  }
+
+  private filterThemeScopedRows<T extends { themeSlug?: string | null }>(
+    rows: T[],
+    activeThemeChain: string[],
+  ): T[] {
+    if (activeThemeChain.length === 0) {
+      return rows;
+    }
+    const activeSet = new Set(activeThemeChain);
+    return rows.filter((row) => {
+      const themeSlug = this.normalizeThemeSlug(row.themeSlug);
+      return !themeSlug || activeSet.has(themeSlug);
+    });
+  }
+
+  private normalizeThemeSlug(value?: string | null): string {
+    return String(value ?? '')
+      .trim()
+      .toLowerCase();
   }
 }

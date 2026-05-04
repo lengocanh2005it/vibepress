@@ -32,6 +32,10 @@ export class AutomationSiteCompareProvider {
         wpBaseUrl: input.wpBaseUrl,
         reactFeUrl: input.reactFeUrl,
         reactBeUrl: input.reactBeUrl,
+        jobId: input.jobId,
+        mode: input.mode,
+        routeEntries: input.routeEntries,
+        compareTargets: input.compareTargets,
       }),
     );
 

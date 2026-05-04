@@ -1907,8 +1907,10 @@ export default ${componentName};`;
 
     switch (node.kind) {
       case 'group':
-      case 'cover':
         return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${styleAttr}>${children}</${tagName}>`;
+
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
 
       case 'columns': {
         const columnsStyle = this.blockNodeStyleAttr(node, {
@@ -1941,7 +1943,7 @@ export default ${componentName};`;
         return `${indent}<p${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</p>`;
 
       case 'image':
-        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}"${this.blockNodeClassAttr(node)}${styleAttr} />`;
+        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.blockNodeClassAttr(node)}${styleAttr} />`;
 
       case 'navigation':
         return this.renderBlockTreeNavigation(node, ctx, componentName, depth);
@@ -2343,8 +2345,9 @@ ${indent}) : null}`;
 
     switch (node.kind) {
       case 'group':
-      case 'cover':
         return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>${children}</${tagName}>`;
+      case 'cover':
+        return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
       case 'columns':
         return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(
           node,
@@ -2648,6 +2651,19 @@ ${indent}) : null}`;
       'sidebar',
       'postmeta',
     ].includes(normalizedName);
+  }
+
+  private buildBlockTreeCoverStyleAttr(node: BlockNode): string {
+    const baseStyle = this.blockNodeStyleAttr(node, {
+      position: node.src ? 'relative' : undefined,
+      overflow: node.src ? 'hidden' : undefined,
+    });
+    if (!node.src) return baseStyle;
+
+    const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
+      node.src,
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    return this.mergeStyleAttrs(baseStyle, backgroundStyle);
   }
 
   // ── Section dispatcher ────────────────────────────────────────────────────
@@ -3770,19 +3786,24 @@ ${indent}) : null}`;
                   : ''
               }`;
 
+    const featuredImageMarkup = s.showFeaturedImage
+      ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}`
+      : '';
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding, gap: postListLayout.itemGap }, false, ctx)}>
-              ${s.showFeaturedImage ? `{post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}` : ''}
+              ${featuredImageMarkup}
               ${postListLayout.itemLayout === 'title-meta-inline' && hasMeta ? titleMetaRow : stackedContent}
             </article>`
       : postListLayout.itemLayout === 'title-meta-inline' && hasMeta
         ? `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${featuredImageMarkup}
                ${titleMetaRow}
                ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
-             </article>`
+              </article>`
         : `            <article key={post.id} className="${isEditorialList ? `flex flex-col ${s.showDividers ? 'border-t' : ''} py-6 md:py-8` : 'flex flex-col py-4'}"${articleStyle}>
+               ${featuredImageMarkup}
                ${stackedContent}
-             </article>`;
+              </article>`;
 
     return `      {/* Post List */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
@@ -4469,7 +4490,7 @@ ${postCard}
           c.imageCustomClassNames,
         );
         return `          <div className="${cardClassName}"${cardStyle}>
-            ${c.imageSrc ? `<img src="${c.imageSrc}" alt="${c.imageAlt ?? ''}" className="${cardImageClassName}" loading="lazy"${cardImageStyle} />` : ''}
+            ${c.imageSrc ? `<img src={resolveAsset("${c.imageSrc}")} alt="${c.imageAlt ?? ''}" className="${cardImageClassName}" loading="lazy"${cardImageStyle} />` : ''}
             ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none" aria-hidden="true">*</span>` : ''}
             ${c.heading ? `<h3 className="${cardHeadingClassName}"${cardHeadingStyle}>${c.heading}</h3>` : ''}
             ${c.body ? `<p${cardBodyClassName ? ` className="${cardBodyClassName}"` : ''}${cardBodyStyle}>${c.body}</p>` : ''}
@@ -4492,13 +4513,28 @@ ${postCard}
              ${hasAsteriskStyle ? `<span className="is-style-asterisk text-[1.5rem] leading-none select-none ${hasCenteredIntro ? 'mb-2' : 'mb-3'}" aria-hidden="true">*</span>` : ''}
              ${s.title ? `<h2 className="${introTitleClassName}"${titleStyle}>${s.title}</h2>` : ''}
              ${s.subtitle ? `<p className="${introSubtitleClassName}"${subtitleStyle}>${s.subtitle}</p>` : ''}
-           </div>`
+            </div>`
+        : '';
+    const ctas = this.resolveSectionCtas(s);
+    const ctaGroup =
+      ctas.length > 0
+        ? this.renderButtonCtaGroup(ctas, ctx, {
+            align:
+              sectionAlign === 'center'
+                ? 'center'
+                : sectionAlign === 'right'
+                  ? 'end'
+                  : 'start',
+            ctaStyle: s.ctaStyle,
+            secondaryCtaStyle: s.secondaryCtaStyle,
+          })
         : '';
 
     return `      {/* Card Grid */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${this.sectionContainerClass(s, ctx, 'shell')}">
 ${intro}
+${ctaGroup}
           <div className="grid ${colClass} gap-6 ${gridJustifyClass}"${this.buildSectionGapStyleAttr(s)}>
 ${cards}
           </div>
@@ -5125,6 +5161,9 @@ ${this.renderProseBlockInner(s, ctx)}
     const bg = s.background ?? p.background;
     const tc = s.textColor ?? p.text;
     const sectionStyle = this.buildSectionStyleAttr(s);
+    const presentation = this.resolveSectionPresentation(s, {
+      container: 'shell',
+    });
     const titleStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc },
@@ -5157,14 +5196,20 @@ ${this.renderProseBlockInner(s, ctx)}
     );
     const shouldRenderResults =
       s.obligation?.required?.includes('posts') === true;
+    const cta = this.renderButtonCtaGroup(this.resolveSectionCtas(s), ctx, {
+      align: this.presentationJustifyValue(presentation.justify),
+      ctaStyle: s.ctaStyle,
+      secondaryCtaStyle: s.secondaryCtaStyle,
+    });
     return `      {/* Search */}
       <section className="bg-[${bg}] ${py} w-full"${sectionStyle}>
         <div className="${l.containerClass}">
-          ${s.title ? `<h2 className="${t.h2} font-normal text-[${tc}] mb-6"${titleStyle}>${s.title}</h2>` : ''}
-          <form className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
+          ${s.title ? `<h2 className="${this.appendStyledTextAlignClass(`${t.h2} font-normal text-[${tc}] mb-6`, undefined, presentation.textAlign)}"${titleStyle}>${s.title}</h2>` : ''}
+          <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
             <input type="search" placeholder="Search..." className="flex-1 ${t.buttonRadius}"${searchControlStyle} />
             <button type="submit" className="bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>Search</button>
           </form>
+          ${cta}
           ${
             shouldRenderResults
               ? `<div className="mt-8 flex flex-col gap-4"${this.buildSectionGapStyleAttr(s)}>
@@ -5611,9 +5656,38 @@ ${titleBlock}${widgetBlocks}          </div>`;
       this.pickBlockStyle(ctx, 'navigation'),
       this.pickBlockStyle(ctx, 'paragraph'),
     );
+    const searchControlStyle = this.buildMergedBlockStyleAttr(
+      ctx,
+      {
+        color: p.text,
+        backgroundColor: 'transparent',
+        borderColor: 'rgb(0 0 0 / 0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        padding: '0.625rem 1rem',
+      },
+      false,
+      this.pickBlockStyle(ctx, 'search'),
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const linkClass = this.textLinkClass(p.text, p.accent, 'text-sm');
 
     switch (widget.kind) {
+      case 'search': {
+        const placeholder = JSON.stringify(widget.placeholder ?? 'Search...');
+        const buttonLabel = widget.buttonLabel ?? 'Search';
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+`
+    : ''
+}              <form role="search" className="flex gap-2" onSubmit={(event) => event.preventDefault()}>
+                <input type="search" placeholder=${placeholder} className="min-w-0 flex-1 ${t.buttonRadius}"${searchControlStyle} />
+                <button type="submit" className="bg-[${p.accent}] px-4 py-2 text-[${p.accentText}] ${t.buttonRadius} hover:opacity-90"${this.buttonStyleAttr(ctx)}>${buttonLabel}</button>
+              </form>
+            </section>`;
+      }
       case 'author-bio': {
         const descriptionExpr = widget.description
           ? JSON.stringify(widget.description)
@@ -5838,6 +5912,12 @@ ${
 ${children}
 ${indent}</div>`;
       }
+      case 'cover': {
+        const styleAttr = this.buildWpCoverStyleAttr(node, ctx);
+        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+${children}
+${indent}</div>`;
+      }
       case 'columns': {
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
@@ -5987,7 +6067,7 @@ ${indent}</a>`;
             height: node.height ? `${node.height}px` : undefined,
           },
         );
-        return `${indent}<img src="${node.src ?? ''}" alt="${node.alt ?? ''}"${this.buildWpNodeClassAttr(node)}${styleAttr} />`;
+        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.buildWpNodeClassAttr(node)}${styleAttr} />`;
       }
       case 'search': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -6238,6 +6318,23 @@ ${indent}</ul>`;
       ...this.wpNodeToStyleMap(node),
       ...extra,
     });
+  }
+
+  private buildWpCoverStyleAttr(node: WpNode, ctx: RenderCtx): string {
+    const baseStyle = this.buildWpNodeStyleAttr(
+      node,
+      this.pickBlockStyle(ctx, 'cover', 'group'),
+      {
+        position: node.src ? 'relative' : undefined,
+        overflow: node.src ? 'hidden' : undefined,
+      },
+    );
+    if (!node.src) return baseStyle;
+
+    const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
+      node.src,
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    return this.mergeStyleAttrs(baseStyle, backgroundStyle);
   }
 
   private buildWpNodeClassAttr(node: WpNode, base: string = ''): string {

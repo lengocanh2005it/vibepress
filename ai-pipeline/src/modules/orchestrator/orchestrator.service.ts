@@ -44,10 +44,15 @@ import { PlannerService } from '../agents/planner/planner.service.js';
 import type { PreviewBuilderResult } from '../agents/preview-builder/preview-builder.service.js';
 import { PreviewBuilderService } from '../agents/preview-builder/preview-builder.service.js';
 import { SectionManifestService } from '../agents/preview-builder/section-manifest.service.js';
+import {
+  buildSurfacePlanRegressionSnapshot,
+  resolvePlannerSectionBlueprint,
+} from '../agents/planner/planner-surface-plan.util.js';
 import { GeneratedCodeReviewService } from '../agents/react-generator/generated-code-review.service.js';
 import type { ReactGenerateResult } from '../agents/react-generator/react-generator.service.js';
 import { ReactGeneratorService } from '../agents/react-generator/react-generator.service.js';
 import { SectionEditService } from '../agents/react-generator/section-edit.service.js';
+import { ReactVisualEditContractService } from '../agents/react-generator/react-visual-edit-contract.service.js';
 import { ReactVisualEditService } from '../agents/react-generator/react-visual-edit.service.js';
 import type {
   RepoAnalyzeResult,
@@ -70,7 +75,10 @@ import { getComponentStrategy } from '../agents/component-strategy.registry.js';
 import { SqlService } from '../sql/sql.service.js';
 import { WpQueryService } from '../sql/wp-query.service.js';
 import { SiteCompareService } from '../site-compare/site-compare.service.js';
-import type { SiteCompareMetrics } from '../site-compare/site-compare.types.js';
+import type {
+  SiteCompareMetrics,
+  SiteCompareTarget,
+} from '../site-compare/site-compare.types.js';
 import { SiteCompareVisualDiagnosisService } from '../site-compare/visual-diagnosis.service.js';
 import type {
   PostEditVisualValidationResult,
@@ -207,6 +215,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     private readonly planReviewer: PlanReviewerService,
     private readonly reactGenerator: ReactGeneratorService,
     private readonly sectionEdit: SectionEditService,
+    private readonly reactVisualEditContract: ReactVisualEditContractService,
     private readonly reactVisualEdit: ReactVisualEditService,
     private readonly generatedCodeReview: GeneratedCodeReviewService,
     private readonly apiBuilder: ApiBuilderService,
@@ -471,6 +480,24 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
 
     try {
+      const contract = this.reactVisualEditContract.validate({
+        editRequest,
+        plan: jobResult.plan,
+        routeEntries,
+      });
+      if (
+        contract.resolvedComponentName &&
+        !editRequest.targetHint?.componentName?.trim()
+      ) {
+        editRequest = {
+          ...editRequest,
+          targetHint: {
+            ...editRequest.targetHint,
+            componentName: contract.resolvedComponentName,
+          },
+        };
+      }
+
       const editResult = await this.reactVisualEdit.applyEdit({
         jobId: body.jobId,
         frontendDir,
@@ -485,7 +512,15 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         jobId: body.jobId,
         siteId: body.siteId,
         logPath,
-        result: editResult,
+        result: {
+          ...editResult,
+          warnings: Array.from(
+            new Set([
+              ...(contract.warnings ?? []),
+              ...(editResult.warnings ?? []),
+            ]),
+          ),
+        },
       };
     } catch (err) {
       const message =
@@ -2899,6 +2934,9 @@ export default function ${component.name}() {
             jobId,
             mode: compareMode,
             routeEntries: preview.routeEntries,
+            preview,
+            plan: reviewResult.plan,
+            content,
           });
           if (compareResult.warnings?.length) {
             for (const warning of compareResult.warnings) {
@@ -3407,6 +3445,9 @@ export default function ${component.name}() {
                   jobId,
                   mode: 'edited',
                   routeEntries: preview.routeEntries,
+                  preview,
+                  plan: reviewResult.plan,
+                  content,
                 });
                 if (compareResult.warnings?.length) {
                   for (const warning of compareResult.warnings) {
@@ -3590,6 +3631,9 @@ export default function ${component.name}() {
                       jobId,
                       mode: 'edited',
                       routeEntries: preview.routeEntries,
+                      preview,
+                      plan: reviewResult.plan,
+                      content,
                     });
                     if (roundCompareResult.warnings?.length) {
                       for (const warning of roundCompareResult.warnings) {
@@ -4803,13 +4847,365 @@ export default function ${component.name}() {
     reactBeUrl: string;
     jobId: string;
     mode: 'baseline' | 'edited';
-    routeEntries?: unknown[];
+    routeEntries?: PreviewBuilderResult['routeEntries'];
+    preview: PreviewBuilderResult;
+    plan: PlanResult;
+    content: DbContentResult;
   }): Promise<{
     metrics?: SiteCompareMetrics;
     warnings?: string[];
     provider: 'automation';
   }> {
-    return this.siteCompareService.compare(input);
+    const compareTargets = this.buildSiteCompareTargets({
+      wpBaseUrl: input.wpBaseUrl,
+      reactFeUrl: input.reactFeUrl,
+      preview: input.preview,
+      plan: input.plan,
+      content: input.content,
+    });
+
+    return this.siteCompareService.compare({
+      ...input,
+      compareTargets,
+    });
+  }
+
+  private buildSiteCompareTargets(input: {
+    wpBaseUrl: string;
+    reactFeUrl: string;
+    preview: PreviewBuilderResult;
+    plan: PlanResult;
+    content: DbContentResult;
+  }): SiteCompareTarget[] {
+    const componentPlans = new Map(
+      input.plan.map((component) => [component.componentName, component]),
+    );
+    const targets: SiteCompareTarget[] = [];
+    const seen = new Set<string>();
+
+    for (const entry of input.preview.routeEntries) {
+      if (this.isCatchAllPreviewRoute(entry)) continue;
+      const route = this.normalizeComparableRoute(entry.route);
+      if (!route) continue;
+
+      const expanded = this.expandSiteCompareTargetsForRouteEntry({
+        entry,
+        route,
+        componentPlan: componentPlans.get(entry.componentName),
+        wpBaseUrl: input.wpBaseUrl,
+        reactFeUrl: input.reactFeUrl,
+        content: input.content,
+      });
+
+      for (const target of expanded) {
+        const dedupeKey = `${target.wpUrl}::${target.reactUrl}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        targets.push(target);
+      }
+    }
+
+    return targets;
+  }
+
+  private expandSiteCompareTargetsForRouteEntry(input: {
+    entry: PreviewBuilderResult['routeEntries'][number];
+    route: string;
+    componentPlan?: PlanResult[number];
+    wpBaseUrl: string;
+    reactFeUrl: string;
+    content: DbContentResult;
+  }): SiteCompareTarget[] {
+    const { entry, route, componentPlan, wpBaseUrl, reactFeUrl, content } =
+      input;
+    const targets: SiteCompareTarget[] = [];
+    const type = this.inferCompareTargetType({ route, componentPlan });
+    const componentHint = componentPlan?.componentName ?? entry.componentName;
+    const repairPriority =
+      route === '/' || type === 'post' || type === 'page' ? 'high' : 'medium';
+
+    const pushTarget = (
+      concreteRoute: string,
+      wpPath: string,
+      slug?: string,
+    ) => {
+      const reactUrl = this.buildAbsoluteCompareUrl(reactFeUrl, concreteRoute);
+      const wpUrl = this.buildAbsoluteCompareUrl(wpBaseUrl, wpPath);
+      if (!reactUrl || !wpUrl) return;
+
+      targets.push({
+        wpUrl,
+        reactUrl,
+        route: concreteRoute,
+        routeKey: this.buildCompareRouteKey({
+          route: concreteRoute,
+          slug,
+          type,
+          componentName: entry.componentName,
+        }),
+        slug,
+        type,
+        componentName: entry.componentName,
+        componentHint,
+        repairPriority,
+      });
+    };
+
+    if (!route.includes(':')) {
+      const wpPath = this.resolveWordPressComparePath({
+        route,
+        componentPlan,
+        content,
+        slug:
+          componentPlan?.fixedSlug ??
+          this.extractSlugFromComparableRoute(route),
+      });
+      if (wpPath) {
+        pushTarget(
+          route,
+          wpPath,
+          this.extractSlugFromComparableRoute(route) ?? undefined,
+        );
+      }
+      return targets;
+    }
+
+    const expandFromSlugs = (slugs: string[]) => {
+      for (const slug of slugs.slice(0, 5)) {
+        const concreteRoute = route.replace(/:[^/]+/g, slug);
+        const wpPath = this.resolveWordPressComparePath({
+          route,
+          componentPlan,
+          content,
+          slug,
+        });
+        if (wpPath) pushTarget(concreteRoute, wpPath, slug);
+      }
+    };
+
+    if (componentPlan?.fixedSlug) {
+      expandFromSlugs([componentPlan.fixedSlug]);
+      return targets;
+    }
+
+    if (/^\/post\/:[^/]+$/i.test(route)) {
+      expandFromSlugs(content.posts.map((post) => post.slug).filter(Boolean));
+      return targets;
+    }
+
+    if (/^\/page\/:[^/]+$/i.test(route)) {
+      expandFromSlugs(content.pages.map((page) => page.slug).filter(Boolean));
+      return targets;
+    }
+
+    if (/^\/category\/:[^/]+$/i.test(route)) {
+      expandFromSlugs(
+        (
+          content.taxonomies.find(
+            (taxonomy) => taxonomy.taxonomy === 'category',
+          )?.terms ?? []
+        )
+          .map((term) => term.slug)
+          .filter(Boolean),
+      );
+      return targets;
+    }
+
+    if (/^\/tag\/:[^/]+$/i.test(route)) {
+      expandFromSlugs(
+        (
+          content.taxonomies.find(
+            (taxonomy) => taxonomy.taxonomy === 'post_tag',
+          )?.terms ?? []
+        )
+          .map((term) => term.slug)
+          .filter(Boolean),
+      );
+      return targets;
+    }
+
+    if (/^\/author\/:[^/]+$/i.test(route)) {
+      expandFromSlugs([
+        ...new Set(
+          content.posts.map((post) => post.authorSlug).filter(Boolean),
+        ),
+      ]);
+      return targets;
+    }
+
+    const fallbackSource = this.hasCompareDataNeed(componentPlan, 'postdetail')
+      ? content.posts.map((post) => post.slug)
+      : this.hasCompareDataNeed(componentPlan, 'pagedetail')
+        ? content.pages.map((page) => page.slug)
+        : [];
+    expandFromSlugs(fallbackSource.filter(Boolean));
+
+    return targets;
+  }
+
+  private resolveWordPressComparePath(input: {
+    route: string;
+    componentPlan?: PlanResult[number];
+    content: DbContentResult;
+    slug?: string | null;
+  }): string | null {
+    const route = this.normalizeComparableRoute(input.route);
+    if (!route) return null;
+    const slug = input.slug?.trim() || null;
+
+    if (route === '/') return '/';
+
+    if (route === '/blog') {
+      const postsPageSlug =
+        input.content.readingSettings.pageForPosts?.slug?.trim();
+      return postsPageSlug ? `/${postsPageSlug}` : route;
+    }
+
+    if (
+      /^\/(category|tag|author)\/:[^/]+$/i.test(route) ||
+      /^\/(category|tag|author)\/[^/]+$/i.test(route)
+    ) {
+      const prefix = route.split('/').filter(Boolean)[0];
+      const resolvedSlug = slug ?? this.extractSlugFromComparableRoute(route);
+      return resolvedSlug ? `/${prefix}/${resolvedSlug}` : null;
+    }
+
+    if (/^\/page\/:[^/]+$/i.test(route) || /^\/page\/[^/]+$/i.test(route)) {
+      const resolvedSlug = slug ?? this.extractSlugFromComparableRoute(route);
+      return resolvedSlug ? `/${resolvedSlug}` : null;
+    }
+
+    if (/^\/post\/:[^/]+$/i.test(route) || /^\/post\/[^/]+$/i.test(route)) {
+      const resolvedSlug = slug ?? this.extractSlugFromComparableRoute(route);
+      return resolvedSlug ? `/${resolvedSlug}` : null;
+    }
+
+    if (slug && this.hasCompareDataNeed(input.componentPlan, 'postdetail')) {
+      return `/${slug}`;
+    }
+
+    if (slug && this.hasCompareDataNeed(input.componentPlan, 'pagedetail')) {
+      return `/${slug}`;
+    }
+
+    if (
+      slug &&
+      this.hasCompareDataNeed(input.componentPlan, 'categorydetail')
+    ) {
+      return `/category/${slug}`;
+    }
+
+    if (route.includes(':') && slug) {
+      return route.replace(/:[^/]+/g, slug);
+    }
+
+    if (input.componentPlan?.fixedSlug && route !== '/') {
+      return `/${input.componentPlan.fixedSlug}`;
+    }
+
+    return route;
+  }
+
+  private buildAbsoluteCompareUrl(
+    baseUrl: string,
+    route: string,
+  ): string | null {
+    const normalizedRoute = this.normalizeComparableRoute(route);
+    if (!normalizedRoute) return null;
+    const normalizedBase = baseUrl.trim();
+    if (!normalizedBase) return null;
+    try {
+      const base = normalizedBase.endsWith('/')
+        ? normalizedBase
+        : `${normalizedBase}/`;
+      return new URL(normalizedRoute, base).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private extractSlugFromComparableRoute(route?: string | null): string | null {
+    const normalizedRoute = this.normalizeComparableRoute(route);
+    if (
+      !normalizedRoute ||
+      normalizedRoute === '/' ||
+      normalizedRoute.includes(':')
+    ) {
+      return null;
+    }
+    const segments = normalizedRoute.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+    if (
+      ['page', 'post', 'category', 'tag', 'author'].includes(
+        segments[0] ?? '',
+      ) &&
+      segments.length >= 2
+    ) {
+      return segments[1] ?? null;
+    }
+    return segments[segments.length - 1] ?? null;
+  }
+
+  private buildCompareRouteKey(input: {
+    route: string;
+    slug?: string;
+    type?: string;
+    componentName?: string;
+  }): string {
+    return [
+      input.componentName?.trim() || 'UnknownComponent',
+      input.type?.trim() || 'page',
+      this.normalizeComparableRoute(input.route) || '/',
+      input.slug?.trim() || '',
+    ]
+      .filter(Boolean)
+      .join('::');
+  }
+
+  private inferCompareTargetType(input: {
+    route: string;
+    componentPlan?: PlanResult[number];
+  }): string {
+    const route = this.normalizeComparableRoute(input.route) ?? '/';
+
+    if (route === '/') return 'home';
+    if (route === '/search') return 'search';
+    if (route === '/blog') return 'posts-index';
+    if (route === '/archive') return 'archive';
+    if (
+      /^\/category\//i.test(route) ||
+      this.hasCompareDataNeed(input.componentPlan, 'categorydetail')
+    ) {
+      return 'category';
+    }
+    if (/^\/tag\//i.test(route)) return 'tag';
+    if (/^\/author\//i.test(route)) return 'author';
+    if (
+      /^\/post\//i.test(route) ||
+      this.hasCompareDataNeed(input.componentPlan, 'postdetail')
+    ) {
+      return 'post';
+    }
+    if (
+      /^\/page\//i.test(route) ||
+      this.hasCompareDataNeed(input.componentPlan, 'pagedetail')
+    ) {
+      return 'page';
+    }
+    return 'page';
+  }
+
+  private hasCompareDataNeed(
+    componentPlan: PlanResult[number] | undefined,
+    target: 'postdetail' | 'pagedetail' | 'categorydetail',
+  ): boolean {
+    return (componentPlan?.dataNeeds ?? []).some(
+      (need) =>
+        need
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z]/g, '') === target,
+    );
   }
 
   private async notifyAutomationMigrationCompleted(input: {
@@ -5506,18 +5902,39 @@ export default function ${component.name}() {
     const pages = this.collectAutomationComparePages(metrics);
     const overall =
       metrics && typeof metrics === 'object'
-        ? ((metrics as { overall?: Record<string, unknown> }).overall ?? {})
+        ? ((metrics as { summary?: { overall?: Record<string, unknown> } })
+            .summary?.overall ??
+          (metrics as { overall?: Record<string, unknown> }).overall ??
+          {})
         : {};
-    const failingRoutes = Array.isArray(
+    const failingRoutes = [
+      ...new Set(
+        pages
+          .filter(
+            (page) =>
+              page?.visual?.status === '⚠️  FAIL' ||
+              page?.content?.status === 'FAIL' ||
+              page?.content?.status === 'MISSING',
+          )
+          .map(
+            (page) =>
+              this.normalizeComparableRoute(page.route) ??
+              this.normalizeComparableRoute(page.visual?.reactPath) ??
+              'unknown',
+          ),
+      ),
+    ];
+    const repairNeededRaw = (overall as { repairNeeded?: unknown })
+      .repairNeeded;
+    const repairNeeded =
+      typeof repairNeededRaw === 'boolean'
+        ? repairNeededRaw
+        : failingRoutes.length > 0;
+    const declaredFailingRouteCount = this.coerceFiniteNumber(
       (overall as { failingRoutes?: unknown }).failingRoutes,
-    )
-      ? ((overall as { failingRoutes?: string[] }).failingRoutes ?? [])
-      : [];
-    const repairNeeded = this.coerceFiniteNumber(
-      (overall as { repairNeeded?: unknown }).repairNeeded,
     );
     const lines: string[] = [
-      `[Automation Compare] stage=${stage} pages=${pages.length} failingRoutes=${failingRoutes.length} repairNeeded=${repairNeeded ?? 'unknown'}`,
+      `[Automation Compare] stage=${stage} pages=${pages.length} failingRoutes=${failingRoutes.length}${declaredFailingRouteCount !== null ? ` declaredFailingRoutes=${declaredFailingRouteCount}` : ''} repairNeeded=${repairNeeded}`,
     ];
 
     if (failingRoutes.length > 0) {
@@ -6368,6 +6785,14 @@ export default function ${component.name}() {
     if (componentPlan.planningSourceLabel) {
       lines.push(`Planning source label: ${componentPlan.planningSourceLabel}`);
     }
+    const surfaceSnapshot = buildSurfacePlanRegressionSnapshot(
+      componentPlan.surfacePlan,
+    );
+    if (surfaceSnapshot) {
+      lines.push(
+        `Surface plan: kind=${surfaceSnapshot.kind} | authority=${surfaceSnapshot.authority} | intent=${surfaceSnapshot.pageIntent} | clusters=${surfaceSnapshot.clusterKinds.join(', ') || 'none'} | widgets=${surfaceSnapshot.widgetKinds.join(', ') || 'none'}`,
+      );
+    }
     if (componentPlan.visualPlan?.sections?.length) {
       lines.push(
         `Visual plan sections: ${componentPlan.visualPlan.sections
@@ -6376,9 +6801,20 @@ export default function ${component.name}() {
           .join(' || ')}`,
       );
     }
-    if (componentPlan.draftSections?.length) {
+    const plannerSections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan.visualPlan,
+      surfacePlan: componentPlan.surfacePlan,
+    });
+    if (!componentPlan.visualPlan?.sections?.length && plannerSections.length) {
       lines.push(
-        `Draft sections: ${componentPlan.draftSections
+        `Planner section blueprint: ${plannerSections
+          .map((section) => this.summarizePlanSection(section))
+          .filter(Boolean)
+          .join(' || ')}`,
+      );
+    } else if (componentPlan.draftSections?.length) {
+      lines.push(
+        `Compatibility draft sections: ${componentPlan.draftSections
           .map((section) => this.summarizePlanSection(section))
           .filter(Boolean)
           .join(' || ')}`,

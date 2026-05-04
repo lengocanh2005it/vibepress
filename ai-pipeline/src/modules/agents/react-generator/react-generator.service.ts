@@ -11,9 +11,14 @@ import { PhpParseResult } from '../php-parser/php-parser.service.js';
 import { BlockParseResult } from '../block-parser/block-parser.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { buildPlanPrompt } from './prompts/plan.prompt.js';
+import { buildSurfacePlanRepairContextNote } from './prompts/component.prompt.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import { CodeGeneratorService } from './code-generator.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import {
+  collectSurfacePlanRequiredLiterals,
+  resolvePlannerSectionBlueprint,
+} from '../planner/planner-surface-plan.util.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import {
   wpBlocksToJsonWithSourceRefs,
@@ -37,6 +42,7 @@ import {
   shouldBlockAiStructuralRewriteForRenderContract,
   type ComponentRenderContract,
 } from '../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
 
 // Classic templates can stay on the normal single-component path up to this size.
 const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
@@ -82,6 +88,7 @@ export interface GeneratedComponent {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
   renderContract?: ComponentRenderContract;
 }
 
@@ -684,9 +691,9 @@ export class ReactGeneratorService {
       fixMode === 'syntax-only'
         ? `Syntax-only repair for deterministic-authority component "${component.name}". Preserve the existing planner-owned structure, layout, data flow, and markup intent. Fix only syntax / TSX structure / parser issues needed to satisfy the validator.\n\n${feedback}`
         : feedback;
-    const visualPlanRepairNote =
+    const approvedPlanRepairNote =
       fixMode === 'full'
-        ? this.buildVisualPlanRepairNote(componentPlan)
+        ? this.buildApprovedPlanRepairNote(componentPlan)
         : undefined;
     const visualMetricsSafeRepairNote =
       fixMode === 'visual-metrics-safe'
@@ -704,7 +711,7 @@ export class ReactGeneratorService {
       effectiveFeedback,
       visualMetricsSafeRepairNote,
       editRequestSafeRepairNote,
-      visualPlanRepairNote,
+      approvedPlanRepairNote,
       this.buildComponentContractRepairNote(componentPlan),
       hardRegenerationNote,
     ]
@@ -865,6 +872,7 @@ ${renders}
         : component.dataNeeds,
       type: componentPlan?.type ?? component.type,
       visualPlan: component.visualPlan ?? componentPlan?.visualPlan,
+      surfacePlan: component.surfacePlan ?? componentPlan?.surfacePlan,
       renderContract: component.renderContract ?? componentPlan?.renderContract,
       ...overrides,
     };
@@ -903,16 +911,27 @@ ${renders}
     return targets;
   }
 
-  private buildVisualPlanRepairNote(
+  private buildApprovedPlanRepairNote(
     componentPlan?: PlanResult[number],
   ): string | undefined {
-    const sections = componentPlan?.visualPlan?.sections ?? [];
-    const blockTree = componentPlan?.visualPlan?.blockTree ?? [];
+    const sections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
+    });
+    const blockTree =
+      componentPlan?.visualPlan?.blockTree ??
+      componentPlan?.surfacePlan?.sourceEvidence.blockTree ??
+      [];
     const palette = componentPlan?.visualPlan?.palette;
     const typography = componentPlan?.visualPlan?.typography;
+    const surfacePlan = componentPlan?.surfacePlan;
+    const requiredLiterals = surfacePlan
+      ? collectSurfacePlanRequiredLiterals(surfacePlan)
+      : [];
     if (
       sections.length === 0 &&
       blockTree.length === 0 &&
+      !surfacePlan &&
       !palette &&
       !typography
     )
@@ -985,7 +1004,7 @@ ${renders}
 
     if (sections.length > 0) {
       blocks.push(
-        'Visual plan sections that must remain present in the repaired code:',
+        'Approved planner sections that must remain present in the repaired code:',
         ...lines,
         'Do not drop sections, CTA labels, images, or card bodies from this contract.',
       );
@@ -1007,6 +1026,19 @@ ${renders}
             (s) =>
               `  - ${s.type}${(s.debugKey ?? s.sectionKey) ? ` (debugKey=${s.debugKey ?? s.sectionKey})` : ''} — must remain as an interactive ${s.type} component`,
           ),
+        );
+      }
+    }
+
+    if (surfacePlan) {
+      blocks.unshift(buildSurfacePlanRepairContextNote(surfacePlan));
+      if (requiredLiterals.length > 0) {
+        blocks.push(
+          '',
+          `Restore or retain these source-backed literals when they belong to the component shell/content: ${requiredLiterals
+            .slice(0, 10)
+            .map((literal) => JSON.stringify(literal))
+            .join(' | ')}`,
         );
       }
     }
@@ -1055,6 +1087,11 @@ ${renders}
   private buildVisualMetricsSafeRepairNote(
     componentPlan?: PlanResult[number],
   ): string {
+    const surfacePlan = componentPlan?.surfacePlan;
+    const approvedSections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan,
+    });
     const lines = [
       'VISUAL METRICS SAFE MODE:',
       'This repair is ONLY for visual/UI alignment after screenshot metric diagnosis.',
@@ -1068,15 +1105,31 @@ ${renders}
       'Do NOT introduce or remove top-level shared chrome such as `<header>`, `<footer>`, or global navigation in page components.',
       'Keep the existing approved data/rendering mode intact. Focus the repair on styling, layout fidelity, wrapper structure, and UI behavior only.',
     ];
+    if (surfacePlan) {
+      lines.push(
+        `Locked planner authority: ${surfacePlan.authority.level} (${surfacePlan.kind}; pageIntent=${surfacePlan.pageIntent.kind}).`,
+      );
+      if (surfacePlan.acceptance.mustKeep.length > 0) {
+        lines.push(
+          `Keep these source-backed anchors intact: ${surfacePlan.acceptance.mustKeep
+            .slice(0, 5)
+            .join(' | ')}`,
+        );
+      }
+      if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+        lines.push(
+          `Do not invent: ${surfacePlan.acceptance.mustNotInvent
+            .slice(0, 5)
+            .join(' | ')}`,
+        );
+      }
+    }
     const normalizedNeeds = new Set(componentPlan?.dataNeeds ?? []);
     const isDetailSourceBackedRoute =
       normalizedNeeds.has('pageDetail') || normalizedNeeds.has('postDetail');
 
     if (isDetailSourceBackedRoute) {
-      const approvedSectionCount =
-        componentPlan?.visualPlan?.sections?.length ??
-        componentPlan?.draftSections?.length ??
-        0;
+      const approvedSectionCount = approvedSections.length;
       lines.push(
         'DETAIL ROUTE GUARDRAIL: this is a source-backed detail route. Preserve the approved/source-backed section structure instead of improvising new page composition.',
       );
@@ -1186,23 +1239,43 @@ ${renders}
       return undefined;
     }
 
-    const sectionCount = componentPlan?.visualPlan?.sections?.length ?? 0;
+    const sectionCount = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
+    }).length;
+    const surfacePlan = componentPlan?.surfacePlan;
+    const requiredLiterals = surfacePlan
+      ? collectSurfacePlanRequiredLiterals(surfacePlan)
+      : [];
     const lines = [
       'HARD REGENERATION MODE:',
-      'The current component failed section coverage or visual-plan fidelity.',
-      'The current component failed its visual-plan obligations or contract fidelity.',
+      'The current component failed section coverage or planner-contract fidelity.',
+      'The current component failed its surface-plan / visual-plan obligations or contract fidelity.',
       'Do NOT patch only a small fragment of the broken code.',
-      'Rewrite the full component from scratch so it matches the approved visual plan again.',
+      'Rewrite the full component from scratch so it matches the approved planner contract again.',
       'Render every planned section in the original order.',
       'Do not keep a shortened skeleton that only preserves the first few sections.',
     ];
+    if (surfacePlan) {
+      lines.push(
+        `Planner authority remains locked to ${surfacePlan.authority.level} (${surfacePlan.kind}; pageIntent=${surfacePlan.pageIntent.kind}).`,
+      );
+    }
     if (sectionCount > 0) {
       lines.push(
         `Minimum expectation: restore all ${sectionCount} approved planned section(s), unless a section is explicitly untracked canonical body content in the contract.`,
       );
     }
+    if (requiredLiterals.length > 0) {
+      lines.push(
+        `Restore these source-backed literals where applicable: ${requiredLiterals
+          .slice(0, 8)
+          .map((literal) => JSON.stringify(literal))
+          .join(' | ')}`,
+      );
+    }
     lines.push(
-      'If the existing code conflicts with the approved plan, prefer the approved plan and rewrite the structure accordingly.',
+      'If the existing code conflicts with the approved plan, prefer the planner-owned surface plan first, then the execution-level visual plan, and rewrite the structure accordingly.',
     );
 
     return lines.join('\n');
@@ -1212,6 +1285,7 @@ ${renders}
     const normalized = feedback.toLowerCase();
     return (
       normalized.includes('visual plan obligations violated') ||
+      normalized.includes('surface-plan source evidence violated') ||
       normalized.includes('required capability') ||
       normalized.includes('obligation "') ||
       normalized.includes('sectionaudit:') ||
@@ -1227,6 +1301,7 @@ ${renders}
   ): string | undefined {
     if (!componentPlan) return undefined;
 
+    const surfacePlan = componentPlan.surfacePlan;
     const lines: string[] = [
       'Approved component contract — MUST remain true after the repair:',
       `- componentType=${componentPlan.type}`,
@@ -1239,6 +1314,21 @@ ${renders}
     }
     if (componentPlan.dataNeeds?.length) {
       lines.push(`- dataNeeds=${componentPlan.dataNeeds.join(', ')}`);
+    }
+    if (surfacePlan) {
+      lines.push(`- plannerKind=${surfacePlan.kind}`);
+      lines.push(`- plannerAuthority=${surfacePlan.authority.level}`);
+      lines.push(`- pageIntent=${surfacePlan.pageIntent.kind}`);
+      lines.push(
+        `- sharedChromeOwnership=${surfacePlan.contract.sharedChromeOwnership}`,
+      );
+      if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+        lines.push(
+          `- mustNotInvent=${surfacePlan.acceptance.mustNotInvent
+            .slice(0, 6)
+            .join(' | ')}`,
+        );
+      }
     }
 
     if (componentPlan.type === 'page') {

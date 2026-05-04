@@ -174,6 +174,89 @@ const buildRouteItems = (
   });
 };
 
+const normalizeVisualEditText = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .replace(/\s+/g, " ");
+
+const detectUnsupportedVisualEditReason = (value: string) => {
+  const normalized = normalizeVisualEditText(value);
+  if (!normalized) return undefined;
+
+  if (
+    /\b(add|insert|create|introduce|implement|them|chen|tao moi|bo sung)\b/.test(normalized) &&
+    /\b(section|component|widget|feature|module|carousel|slider|modal|popup|tabs|accordion|faq|newsletter|form|chat|chatbot)\b/.test(normalized)
+  ) {
+    return "add-section-or-component";
+  }
+
+  if (
+    /\b(replace|convert|switch|swap|thay the|doi thanh|chuyen thanh)\b/.test(normalized) &&
+    /\b(section|component|widget|layout block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
+  ) {
+    return "replace-section-or-component";
+  }
+
+  if (
+    /\b(remove|delete|drop|xoa|bo)\b/.test(normalized) &&
+    /\b(section|component|widget|block|hero|banner|carousel|slider|modal|tabs|accordion|faq)\b/.test(normalized)
+  ) {
+    return "remove-section-or-component";
+  }
+
+  if (
+    /\b(font|typography|font-size|text size|line-height|letter-spacing|font weight|chu|co chu)\b/.test(normalized)
+  ) {
+    return "typography-change";
+  }
+
+  return undefined;
+};
+
+const isBroadVisualEditRequest = (value: string) =>
+  /\b(migrate|migration|full site|whole site|entire site|all pages|toan bo|toan site|toan website|ca trang)\b/.test(
+    normalizeVisualEditText(value),
+  );
+
+const isMeaningfulVisualEditPrompt = (value: string) => {
+  const normalized = normalizeVisualEditText(value);
+  if (normalized.length < 6) return false;
+  return ![
+    "hello",
+    "hi",
+    "test",
+    "ok",
+    "oke",
+    "fix this",
+    "change this",
+    "xin chao",
+    "chao",
+    "thu",
+    "sua cai nay",
+    "doi cai nay",
+  ].includes(normalized);
+};
+
+const getUnsupportedVisualEditMessage = (reason?: string) => {
+  switch (reason) {
+    case "add-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ trên app React hiện tại. Thêm section/widget/feature mới chưa được hỗ trợ ở đây.";
+    case "replace-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Thay nguyên section/component chưa được hỗ trợ ở đây.";
+    case "remove-section-or-component":
+      return "Visual edit này chỉ hỗ trợ chỉnh cục bộ. Xóa section/component chưa được hỗ trợ ở đây.";
+    case "typography-change":
+      return "Visual edit này hiện chưa hỗ trợ thay đổi typography đơn lẻ.";
+    default:
+      return "Yêu cầu visual edit chưa nằm trong phạm vi hỗ trợ.";
+  }
+};
+
 const VisualEditor: React.FC = () => {
   const location = useLocation();
   const state = (location.state ?? {}) as LocationState;
@@ -219,7 +302,7 @@ const VisualEditor: React.FC = () => {
     {
       id: "intro",
       role: "system",
-      text: "Chọn route trong preview, dùng Inspector để chọn component, rồi nhập yêu cầu chỉnh sửa.",
+      text: "Chọn đúng route, click đúng element trong preview, rồi mô tả một chỉnh sửa cục bộ trên app React hiện tại.",
     },
   ]);
   const [canUndo, setCanUndo] = useState(false);
@@ -338,6 +421,12 @@ const VisualEditor: React.FC = () => {
 
   const buildPayload = async (): Promise<ReactVisualEditPayload> => {
     const attachment = await buildAttachmentFromSelection();
+    const componentName =
+      selectedComponent?.component?.trim() || selectedRoute?.componentName || undefined;
+    const sourceFile = selectedComponent?.source?.file?.trim() || undefined;
+    const targetLine =
+      selectedComponent?.targetStartLine ?? selectedComponent?.source?.line;
+
     return {
       prompt: prompt.trim() || undefined,
       language: /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(prompt)
@@ -354,7 +443,11 @@ const VisualEditor: React.FC = () => {
       attachments: attachment ? [attachment] : [],
       targetHint: {
         route: selectedRoute?.route || "/",
-        sourceFile: selectedComponent?.source?.file,
+        componentName,
+        sourceFile,
+        outputFilePath: sourceFile,
+        startLine: targetLine,
+        endLine: targetLine,
         targetNodeRole: selectedComponent?.targetNodeRole,
         targetElementTag: selectedComponent?.targetElementTag,
         targetTextPreview: selectedComponent?.targetTextPreview,
@@ -394,7 +487,12 @@ const VisualEditor: React.FC = () => {
     if (!prompt.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: `empty-${Date.now()}`, role: "assistant", text: "Hãy nhập yêu cầu trước khi gửi.", tone: "error" },
+        {
+          id: `empty-${Date.now()}`,
+          role: "assistant",
+          text: "Hãy mô tả một chỉnh sửa cục bộ rõ ràng, ví dụ đổi spacing, màu nền, màu chữ, hoặc nội dung trong vùng đã chọn.",
+          tone: "error",
+        },
       ]);
       return;
     }
@@ -404,7 +502,47 @@ const VisualEditor: React.FC = () => {
         {
           id: `missing-target-${Date.now()}`,
           role: "assistant",
-          text: "Bật Inspector và click đúng vùng cần sửa trước khi gửi.",
+          text: "Bật Inspector và click đúng element cần sửa trước khi gửi visual edit.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    if (!isMeaningfulVisualEditPrompt(prompt)) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `vague-${Date.now()}`,
+          role: "assistant",
+          text: "Yêu cầu còn quá mơ hồ. Hãy nói rõ thay đổi cục bộ cần làm trên element đã chọn.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    if (isBroadVisualEditRequest(prompt)) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `broad-${Date.now()}`,
+          role: "assistant",
+          text: "Luồng này chỉ sửa cục bộ trên app React đã generate. Nếu muốn migrate lại toàn site hoặc sửa rộng nhiều page, hãy dùng pipeline chính.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    const unsupportedReason = detectUnsupportedVisualEditReason(prompt);
+    if (unsupportedReason) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `unsupported-${Date.now()}`,
+          role: "assistant",
+          text: getUnsupportedVisualEditMessage(unsupportedReason),
           tone: "error",
         },
       ]);
@@ -443,6 +581,16 @@ const VisualEditor: React.FC = () => {
             tone: "success",
           },
         ]);
+        if (res.result?.warnings?.length) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `warning-${Date.now()}`,
+              role: "assistant",
+              text: res.result?.warnings[0] ?? "",
+            },
+          ]);
+        }
         setCanUndo(true);
         setPrompt("");
         setTimeout(() => {
@@ -589,7 +737,9 @@ const VisualEditor: React.FC = () => {
             <div className="flex-none border-b border-[#ede4d8] px-5 py-4">
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#8b826f]">Inspector</p>
               <p className="mt-1 text-sm text-[#617067]">
-                {inspectorActive ? "Click vào element để xem thông tin." : "Bật Inspector rồi click vào element trong preview."}
+                {inspectorActive
+                  ? "Click vào đúng element cần sửa để lấy target metadata."
+                  : "Bật Inspector rồi click vào element trong preview React."}
               </p>
             </div>
 
@@ -724,9 +874,12 @@ const VisualEditor: React.FC = () => {
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Yêu cầu AI chỉnh sửa (dựa trên element đã chọn)..."
+                placeholder="Ví dụ: Giảm padding của card này, đổi nền section sang be nhạt, hoặc sửa heading trong vùng đã chọn..."
                 className="h-20 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#3a6b57] focus:bg-white"
               />
+              <p className="mt-2 text-[11px] text-[#8b826f]">
+                Chỉ dùng ô này cho chỉnh sửa cục bộ trên element đã chọn: content, background, color, hoặc layout.
+              </p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={() => void handleSubmitRequest()}

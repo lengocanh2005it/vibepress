@@ -13,6 +13,8 @@ import type {
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import type { ComponentRenderContract } from '../../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../../planner/planner-surface-plan.schema.js';
+import { collectSurfacePlanRequiredLiterals } from '../../planner/planner-surface-plan.util.js';
 import { WpMenu, WpSiteInfo } from '../../../sql/wp-query.service.js';
 import { DbContentResult } from '../../db-content/db-content.service.js';
 import type {
@@ -112,6 +114,7 @@ export interface ComponentPromptContext {
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   sourceBackedAuxiliaryLabels?: string[];
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
   renderContract?: ComponentRenderContract;
 }
 
@@ -1411,6 +1414,7 @@ export function buildPlanContextNote(
     requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
     sourceBackedAuxiliaryLabels?: string[];
     visualPlan?: ComponentVisualPlan;
+    surfacePlan?: PlannerSurfacePlan;
     renderContract?: ComponentRenderContract;
   },
   componentName?: string,
@@ -1614,6 +1618,154 @@ export function buildPlanContextNote(
     );
     lines.push(
       '- Do NOT rename, omit, hash, or replace those custom classes with new invented ones. Keep them intact, and only add minimal helper classes when the runtime truly needs them.',
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export function buildSurfacePlanContextNote(
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!surfacePlan) return '';
+
+  const lines: string[] = [
+    '## Surface-plan authority',
+    `Surface-plan kind: \`${surfacePlan.kind}\``,
+    `Authority: \`${surfacePlan.authority.level}\` (${surfacePlan.authority.reason})`,
+    `Page intent: \`${surfacePlan.pageIntent.kind}\` (confidence ${surfacePlan.pageIntent.confidence})`,
+    `Shared chrome ownership: \`${surfacePlan.contract.sharedChromeOwnership}\``,
+    'Treat this as the planner-owned composition policy. The visual plan below is the execution-layer blueprint and must stay inside these source-backed boundaries.',
+  ];
+
+  if (surfacePlan.authority.level === 'strict') {
+    lines.push(
+      'Strict authority: do not substitute section families, reorder major clusters, or recompose wrappers beyond what the approved visual plan already encodes.',
+    );
+  } else if (surfacePlan.authority.level === 'guided') {
+    lines.push(
+      'Guided authority: light wrapper/layout recomposition is allowed only if the same source-backed headings, widgets, and content clusters survive intact.',
+    );
+  } else {
+    lines.push(
+      'Free authority: implementation can be looser, but the approved source evidence and route/data contract must still remain recognizable.',
+    );
+  }
+
+  if (surfacePlan.acceptance.mustKeep.length > 0) {
+    lines.push(
+      `Must keep: ${surfacePlan.acceptance.mustKeep.slice(0, 6).join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+    lines.push(
+      `Must not invent: ${surfacePlan.acceptance.mustNotInvent
+        .slice(0, 6)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mayRecompose.length > 0) {
+    lines.push(
+      `May recompose: ${surfacePlan.acceptance.mayRecompose
+        .slice(0, 5)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.primaryHeadings.length > 0) {
+    lines.push(
+      `Primary source headings: ${surfacePlan.sourceEvidence.primaryHeadings
+        .slice(0, 6)
+        .map((heading) => JSON.stringify(heading))
+        .join(', ')}`,
+    );
+  }
+  if (
+    surfacePlan.contract.sharedChromeOwnership === 'self' &&
+    surfacePlan.sourceEvidence.navigationLabels?.length
+  ) {
+    lines.push(
+      `Source navigation labels: ${surfacePlan.sourceEvidence.navigationLabels
+        .slice(0, 8)
+        .map((label) => JSON.stringify(label))
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.widgets.length > 0) {
+    lines.push(
+      `Source widgets: ${surfacePlan.sourceEvidence.widgets
+        .map((widget) =>
+          widget.required ? `${widget.kind} (required)` : widget.kind,
+        )
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.compositionHints.keepAdjacentClusterPairs.length > 0) {
+    lines.push(
+      `Keep adjacent cluster pairs: ${surfacePlan.compositionHints.keepAdjacentClusterPairs
+        .slice(0, 4)
+        .map((pair) => `${pair[0]} -> ${pair[1]}`)
+        .join(' | ')}`,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export function buildSurfacePlanRepairContextNote(
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!surfacePlan) return '';
+
+  const requiredLiterals = collectSurfacePlanRequiredLiterals(surfacePlan);
+  const lines: string[] = [
+    '### Surface-plan repair contract',
+    `- kind=${surfacePlan.kind}`,
+    `- authority=${surfacePlan.authority.level}`,
+    `- pageIntent=${surfacePlan.pageIntent.kind}`,
+    `- sharedChromeOwnership=${surfacePlan.contract.sharedChromeOwnership}`,
+  ];
+
+  if (surfacePlan.acceptance.mustKeep.length > 0) {
+    lines.push(
+      `- mustKeep=${surfacePlan.acceptance.mustKeep.slice(0, 6).join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mustNotInvent.length > 0) {
+    lines.push(
+      `- mustNotInvent=${surfacePlan.acceptance.mustNotInvent
+        .slice(0, 6)
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.acceptance.mayRecompose.length > 0) {
+    lines.push(
+      `- mayRecompose=${surfacePlan.acceptance.mayRecompose
+        .slice(0, 5)
+        .join(' | ')}`,
+    );
+  }
+  if (requiredLiterals.length > 0) {
+    lines.push(
+      `- restoreOrKeepSourceLiterals=${requiredLiterals
+        .map((literal) => JSON.stringify(literal))
+        .join(' | ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.widgets.length > 0) {
+    lines.push(
+      `- requiredWidgets=${surfacePlan.sourceEvidence.widgets
+        .map((widget) =>
+          widget.required ? `${widget.kind}:required` : widget.kind,
+        )
+        .join(', ')}`,
+    );
+  }
+  if (surfacePlan.sourceEvidence.representativeBindings?.length) {
+    lines.push(
+      `- representativeBindings=${surfacePlan.sourceEvidence.representativeBindings
+        .slice(0, 4)
+        .map((binding) => `${binding.kind}:${binding.slug ?? binding.id}`)
+        .join(' | ')}`,
     );
   }
 
@@ -2154,6 +2306,13 @@ function buildCompactSectionSummary(
         break;
       case 'search':
         pushPlanTextPart(parts, 'title', section.title);
+        parts.push('semanticShell=<form role="search">');
+        parts.push('inputType=search');
+        if (section.obligation?.required?.length) {
+          parts.push(
+            `requiredCapabilities=${section.obligation.required.join('|')}`,
+          );
+        }
         break;
       case 'comments':
         parts.push(`showForm=${section.showForm}`);
@@ -2189,13 +2348,16 @@ function buildCompactSectionSummary(
 export function buildVisualPlanContextNote(
   visualPlan?: ComponentVisualPlan,
   componentName?: string,
+  surfacePlan?: PlannerSurfacePlan,
 ): string {
   if (!visualPlan) return '';
 
   const lines: string[] = [
     '## Approved visual plan from previous stage',
-    'Treat this plan as the primary code generation blueprint.',
-    'Preserve section order, required data dependencies, and the overall layout unless the template/data grounding above proves a field is impossible.',
+    surfacePlan
+      ? 'Treat this plan as the execution-layer blueprint for the planner-owned surface plan above.'
+      : 'Treat this plan as the approved execution blueprint for code generation.',
+    'Preserve section order, required data dependencies, and the overall layout unless the planner-owned surface-plan authority above explicitly permits light recomposition without losing source-backed evidence.',
     'Do NOT reinterpret this into a prettier or more modern layout. Preserve the original WordPress look and structure.',
   ];
 
@@ -2252,7 +2414,7 @@ export function buildVisualPlanContextNote(
       '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
     );
     lines.push(
-      '⛔ For every `search` section, render the approved search widget/result block exactly as contracted. If the approved section only carries `search-input`, you MUST render a real search form/input and MUST NOT replace it with comment filtering, author filler, or promotional content.',
+      '⛔ For every `search` section, render the approved search widget/result block exactly as contracted. If the approved section only carries `search-input`, you MUST render a real `<form role="search">` with a real search input and MUST NOT replace it with comment filtering, author filler, or promotional content.',
     );
     lines.push(
       '⛔ Only render post-result rows/cards inside a `search` section when the approved section contract explicitly requires `posts`. If the approved contract is just a sidebar/site search widget, keep it as an input/form widget only.',
@@ -2523,7 +2685,12 @@ export function buildComponentPrompt(
     : '';
   const planContext = [
     buildPlanContextNote(componentPlan, componentName),
-    buildVisualPlanContextNote(componentPlan?.visualPlan, componentName),
+    buildSurfacePlanContextNote(componentPlan?.surfacePlan),
+    buildVisualPlanContextNote(
+      componentPlan?.visualPlan,
+      componentName,
+      componentPlan?.surfacePlan,
+    ),
     buildFullFileVisualPlanBehaviorChecklist(componentPlan?.visualPlan),
     buildFullFileLiteralChecklist(componentPlan?.visualPlan),
     repoContext,
@@ -2769,6 +2936,8 @@ function buildFullFileLiteralChecklist(
             `- ${label} requiredCapabilities: ${section.obligation.required.join(', ')}`,
           );
         }
+        lines.push(`- ${label} semanticShell: "<form role=\\"search\\">"`);
+        lines.push(`- ${label} inputType: "search"`);
         break;
       case 'prose-block':
         lines.push(
@@ -2941,9 +3110,11 @@ Render ONLY the JSX for the blocks in the template source below.`;
   const planContext = [
     sectionContextNote,
     buildPlanContextNote(input.componentPlan, input.parentName),
+    buildSurfacePlanContextNote(input.componentPlan?.surfacePlan),
     buildVisualPlanContextNote(
       input.componentPlan?.visualPlan,
       input.parentName,
+      input.componentPlan?.surfacePlan,
     ),
     sourceTrackingNote,
     repoContext,
@@ -3043,6 +3214,7 @@ When this section renders post-list/archive/search/recent-post meta:
           }
         : undefined,
       input.componentName,
+      input.componentPlan?.surfacePlan,
     ),
     input.content
       ? buildDataGroundingNote(input.content, {
@@ -3138,6 +3310,14 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '- If `itemLayout=title-meta-inline`, keep the title and metadata on the same horizontal row on desktop, allowing only responsive wrap on narrow widths.',
         '- If `metaLayout=inline`, keep date / author / category in one metadata row; if `metaLayout=stacked`, render them vertically.',
         '- Preserve approved `metaAlign`, `metaSeparator`, `itemGap`, and `metaGap` values when they are present.',
+      ].join('\n');
+    case 'search':
+      return [
+        '## Section behavior contract',
+        '- Render a real semantic search wrapper: use `<form role="search">` for the search shell, not a generic `<div>`.',
+        '- The search control itself must include a real `<input type="search" ... />` inside that form.',
+        '- If the approved contract only requires `search-input`, keep this section as an input/form widget only and do not invent result cards, comment filters, author bio copy, or promotional content here.',
+        '- Only render result rows/cards inside this section when its approved obligation explicitly requires `posts`.',
       ].join('\n');
     case 'carousel':
       return [

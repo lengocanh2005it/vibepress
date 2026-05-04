@@ -97,10 +97,8 @@ import {
   shouldBypassCoverageAuditForBlockTreeListingPlan,
   shouldShortCircuitBlockTreeVisualPlan,
 } from './block-tree-deterministic-planner.util.js';
-import {
-  buildPlanningSourceCandidates,
-  pickInvestigativePlanningSource,
-} from './planning-source-policy.util.js';
+import { summarizeSharedLayoutSubtree } from './shared-layout-subtree.util.js';
+import { buildPlanningSourceCandidates } from './planning-source-policy.util.js';
 import {
   buildLayoutAnalysisComponentEntry,
   createLayoutAnalysisArtifact,
@@ -115,6 +113,14 @@ import {
   buildComponentRenderContract,
   type ComponentRenderContract,
 } from './render-contract.schema.js';
+import type {
+  PlannerAuthorityLevel,
+  PlannerClusterKind,
+  PlannerPageIntentKind,
+  PlannerSourceFactsSummary,
+  PlannerSurfacePlan,
+  PlannerWidgetKind,
+} from './planner-surface-plan.schema.js';
 import {
   buildRepoRouteHints,
   inferDeterministicRouteContract,
@@ -141,6 +147,8 @@ export interface ComponentPlan {
   fixedSlug?: string;
   fixedPageId?: number | string;
   fixedTitle?: string;
+  /** Evidence-guided surface brief for page/home/post composition. */
+  surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
   visualPlan?: ComponentVisualPlan;
   /** Canonical source-preserving render contract derived from blockTree. */
@@ -163,6 +171,7 @@ export type PlanResult = ComponentPlan[];
 @Injectable()
 export class PlannerService {
   private readonly logger = new Logger(PlannerService.name);
+  private readonly phaseCLogLabel = 'Phase C: Surface+Visual Plan';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
   private readonly tokenTracker = new TokenTracker();
 
@@ -387,13 +396,17 @@ export class PlannerService {
 
     if (skipVisualPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] Skipped visual plan generation (${includeVisualPlans ? 'minimalVisualPlan=true' : 'deferred until after plan review'}), plan only includes data/contract`,
+        this.formatPhaseCLog(
+          `Skipped visual plan generation (${includeVisualPlans ? 'minimalVisualPlan=true' : 'deferred until after plan review'}), plan only includes route/data contract`,
+        ),
       );
       return enriched;
     }
 
     this.logger.log(
-      `[Phase C: AI Visual Sections] Generating visual plans for ${enriched.length} components (palette + typography from theme tokens)`,
+      this.formatPhaseCLog(
+        `Generating visual plans for ${enriched.length} components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
+      ),
     );
 
     return this.buildVisualPlans(
@@ -422,7 +435,9 @@ export class PlannerService {
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
     if (skipVisualPlan) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] Skipped visual plan generation (minimalVisualPlan=true), plan only includes data/contract`,
+        this.formatPhaseCLog(
+          'Skipped visual plan generation (minimalVisualPlan=true), plan only includes route/data contract',
+        ),
       );
       return plan;
     }
@@ -444,7 +459,9 @@ export class PlannerService {
     const concretizedPlan = this.materializeConcretePagePlans(plan, content);
 
     this.logger.log(
-      `[Phase C: AI Visual Sections] Generating visual plans for ${concretizedPlan.length} reviewed components (palette + typography from theme tokens)`,
+      this.formatPhaseCLog(
+        `Generating visual plans for ${concretizedPlan.length} reviewed components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
+      ),
     );
 
     return this.buildVisualPlans(
@@ -516,13 +533,17 @@ export class PlannerService {
       }
 
       this.logger.log(
-        `[Phase C: AI Visual Sections] Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+        this.formatPhaseCLog(
+          `Batch ${Math.floor(batchStart / concurrency) + 1}/${Math.ceil(plan.length / concurrency)} done`,
+        ),
       );
     }
 
     const withPlan = result.filter((c) => c.visualPlan).length;
     this.logger.log(
-      `[Phase C: AI Visual Sections] Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
+      this.formatPhaseCLog(
+        `Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
+      ),
     );
 
     return result;
@@ -587,8 +608,24 @@ export class PlannerService {
         },
         repoManifest,
       );
+      const deterministicSurfacePlan = this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        visualPlan: visualPlanWithRepoDefaults,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      });
       this.logger.log(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": deterministic visual plan ✓ ${this.formatSectionList(deterministicPlan.sections)}`,
+        this.formatPhaseCLog(
+          `deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+            componentPlan,
+            planningSourceLabel: `deterministic:${componentPlan.templateName}`,
+            surfacePlan: deterministicSurfacePlan,
+            visualPlan: visualPlanWithRepoDefaults,
+          })}`,
+        ),
       );
       return {
         ...componentPlan,
@@ -601,6 +638,7 @@ export class PlannerService {
         planningSourceSummary:
           'Deterministic visual-plan path; no AI source synthesis needed.',
         visualPlan: visualPlanWithRepoDefaults,
+        surfacePlan: deterministicSurfacePlan,
         renderContract: buildComponentRenderContract({
           componentName: componentPlan.componentName,
           templateName: componentPlan.templateName,
@@ -623,7 +661,9 @@ export class PlannerService {
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
       this.logger.log(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+        this.formatPhaseCLog(
+          `"${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+        ),
       );
       return {
         ...componentPlan,
@@ -671,10 +711,53 @@ export class PlannerService {
         });
       if (
         earlyBlockTreeVisualPlan &&
-        this.shouldShortCircuitBlockTreeVisualPlan(componentPlan)
+        this.shouldShortCircuitBlockTreeVisualPlan(
+          componentPlan,
+          draftBlockTree,
+        )
       ) {
+        const earlyBlockTreeSurfacePlan = this.buildSurfacePlanForComponent({
+          componentPlan,
+          content,
+          planningSource,
+          draftSections: earlyBlockTreeVisualPlan.sections,
+          draftBlockTree,
+          visualPlan: {
+            ...earlyBlockTreeVisualPlan,
+            renderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          detectedCustomClassNames,
+          sourceWidgetHints,
+          hasSharedLayoutPartials,
+          globalPalette,
+          globalTypography,
+          tokens,
+        });
         this.logger.log(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": block-tree deterministic visual plan ✓ ${this.formatSectionList(earlyBlockTreeVisualPlan.sections)}`,
+          this.formatPhaseCLog(
+            `block-tree deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+              componentPlan,
+              planningSourceLabel:
+                planningSource.sourceLabel ??
+                `block-tree:${componentPlan.templateName}`,
+              surfacePlan: earlyBlockTreeSurfacePlan,
+              visualPlan: {
+                ...earlyBlockTreeVisualPlan,
+                renderMode: earlyBlockTreeVisualPlan.renderMode ?? 'hybrid',
+              },
+            })}`,
+          ),
         );
         return {
           ...componentPlan,
@@ -706,6 +789,7 @@ export class PlannerService {
               : {}),
             ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
           },
+          surfacePlan: earlyBlockTreeSurfacePlan,
           renderContract: buildComponentRenderContract({
             componentName: componentPlan.componentName,
             templateName: componentPlan.templateName,
@@ -742,8 +826,48 @@ export class PlannerService {
           globalTypography,
         });
       if (blockTreeVisualPlan) {
+        const blockTreeSurfacePlan = this.buildSurfacePlanForComponent({
+          componentPlan,
+          content,
+          planningSource,
+          draftSections: blockTreeVisualPlan.sections,
+          draftBlockTree,
+          visualPlan: {
+            ...blockTreeVisualPlan,
+            renderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+            ...(componentPlan.fixedSlug
+              ? {
+                  pageBinding: {
+                    id: componentPlan.fixedPageId,
+                    slug: componentPlan.fixedSlug,
+                    title: componentPlan.fixedTitle,
+                    route: componentPlan.route ?? undefined,
+                  },
+                }
+              : {}),
+            ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
+          },
+          detectedCustomClassNames,
+          sourceWidgetHints,
+          hasSharedLayoutPartials,
+          globalPalette,
+          globalTypography,
+          tokens,
+        });
         this.logger.log(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": block-tree deterministic visual plan ✓ ${this.formatSectionList(blockTreeVisualPlan.sections)}`,
+          this.formatPhaseCLog(
+            `block-tree deterministic plan ✓ ${this.formatPhaseCPlanSnapshot({
+              componentPlan,
+              planningSourceLabel:
+                planningSource.sourceLabel ??
+                `block-tree:${componentPlan.templateName}`,
+              surfacePlan: blockTreeSurfacePlan,
+              visualPlan: {
+                ...blockTreeVisualPlan,
+                renderMode: blockTreeVisualPlan.renderMode ?? 'hybrid',
+              },
+            })}`,
+          ),
         );
         return {
           ...componentPlan,
@@ -775,6 +899,7 @@ export class PlannerService {
               : {}),
             ...(draftBlockTree?.length ? { blockTree: draftBlockTree } : {}),
           },
+          surfacePlan: blockTreeSurfacePlan,
           renderContract: buildComponentRenderContract({
             componentName: componentPlan.componentName,
             templateName: componentPlan.templateName,
@@ -802,6 +927,17 @@ export class PlannerService {
       sourceWidgetHints = detectInteractiveWidgetsFromSource(
         this.getPlanningSourcePromptSource(planningSource),
       );
+      const augmentedDraftSections = this.augmentDraftSectionsWithSourceWidgets(
+        {
+          draftSections,
+          planningSource,
+          sourceWidgetHints,
+          componentName: componentPlan.componentName,
+        },
+      );
+      if (augmentedDraftSections) {
+        draftSections = augmentedDraftSections;
+      }
       let visualContract: VisualPlanContract = {
         componentType: componentPlan.type,
         route: componentPlan.route,
@@ -811,6 +947,19 @@ export class PlannerService {
         sourceBackedAuxiliaryLabels,
         requiredSourceWidgets: sourceWidgetHints,
       };
+      let surfacePlan = this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        planningSource,
+        draftSections,
+        draftBlockTree,
+        detectedCustomClassNames,
+        sourceWidgetHints,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      });
 
       const buildPromptArtifacts = (extraContextNote?: string) => {
         const activePlanningSource = planningSource;
@@ -833,6 +982,7 @@ export class PlannerService {
           sourceAnalysis: activePlanningSource.sourceAnalysis,
           sourceBackedAuxiliaryLabels,
           sourceWidgetHints,
+          surfacePlan,
           draftSections,
           editRequestContextNote: [
             buildEditRequestContextNote(scopedEditRequest, {
@@ -856,6 +1006,7 @@ export class PlannerService {
         planningSource,
         draftSections,
         draftBlockTree,
+        surfacePlan,
         detectedCustomClassNames,
         sourceBackedAuxiliaryLabels,
         sourceWidgetHints,
@@ -870,6 +1021,7 @@ export class PlannerService {
         planningSource = nextState.planningSource;
         draftSections = nextState.draftSections;
         draftBlockTree = nextState.draftBlockTree;
+        surfacePlan = nextState.surfacePlan;
         detectedCustomClassNames = nextState.detectedCustomClassNames;
         sourceBackedAuxiliaryLabels = nextState.sourceBackedAuxiliaryLabels;
         sourceWidgetHints = nextState.sourceWidgetHints;
@@ -903,6 +1055,8 @@ export class PlannerService {
             scopedEditRequest,
             visualDataNeeds,
             hasSharedLayoutPartials,
+            globalPalette,
+            globalTypography,
             currentState: repairState,
             previousReason: lastReason,
             previousDropped: lastDropped,
@@ -914,8 +1068,23 @@ export class PlannerService {
           userPrompt = repairAttempt.userPrompt;
           this.logger.log(
             repairAttempt.sourceChanged
-              ? `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 repair context: ${repairAttempt.previousSourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'}`
-              : `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 self-heal: ${repairAttempt.diagnosis.summary}`,
+              ? this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" attempt 2 repair context: ${repairAttempt.previousSourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'} | diagnosis=${repairAttempt.diagnosis.summary}`,
+                )
+              : this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" attempt 2 self-heal: diagnosis=${repairAttempt.diagnosis.summary} | ${this.formatPhaseCPlanSnapshot(
+                    {
+                      componentPlan,
+                      planningSourceLabel: planningSource.sourceLabel,
+                      surfacePlan,
+                      visualPlan: {
+                        sections: draftSections ?? [],
+                        renderMode: 'section-centric',
+                        deterministicAuthority: false,
+                      },
+                    },
+                  )}`,
+                ),
           );
         }
 
@@ -934,7 +1103,9 @@ export class PlannerService {
           try {
             if (transportAttempt > 1) {
               this.logger.log(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
+                ),
               );
             }
             const completion = await this.requestVisualPlanCompletion({
@@ -957,7 +1128,9 @@ export class PlannerService {
               throw err;
             }
             this.logger.warn(
-              `[Phase C: AI Visual Sections] "${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
+              this.formatPhaseCLog(
+                `"${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
+              ),
             );
             await this.delay(1200 * transportAttempt);
           }
@@ -1001,7 +1174,9 @@ export class PlannerService {
             lastDropped = ` | degenerateSections: ${degenerateSections.join('; ')}`;
             if (attempt < 2) {
               this.logger.warn(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                ),
               );
             }
             continue;
@@ -1053,14 +1228,29 @@ export class PlannerService {
             lastDropped = ` | qualityIssues: ${qualityIssues.join('; ')}`;
             if (attempt < 2) {
               this.logger.warn(
-                `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                this.formatPhaseCLog(
+                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                ),
               );
             }
             visualPlan = undefined;
             continue;
           }
           this.logger.log(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}": ${parsed.sections.length} sections ✓ (attempt ${attempt}) ${this.formatSectionList(parsed.sections)}`,
+            this.formatPhaseCLog(
+              `accepted AI visual plan ✓ (attempt ${attempt}) ${this.formatPhaseCPlanSnapshot(
+                {
+                  componentPlan,
+                  planningSourceLabel: planningSource?.sourceLabel,
+                  surfacePlan,
+                  visualPlan: {
+                    sections: parsed.sections,
+                    renderMode: 'section-centric',
+                    deterministicAuthority: false,
+                  },
+                },
+              )}`,
+            ),
           );
           break;
         }
@@ -1074,7 +1264,9 @@ export class PlannerService {
 
         if (attempt < 2) {
           this.logger.warn(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+            this.formatPhaseCLog(
+              `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+            ),
           );
         }
       }
@@ -1088,7 +1280,9 @@ export class PlannerService {
           )
         ) {
           this.logger.warn(
-            `[Phase C: AI Visual Sections] "${componentPlan.componentName}" attempt 2 did not yield a valid plan: ${lastReason}${lastDropped} — escalating to Phase C.5 investigate/replan`,
+            this.formatPhaseCLog(
+              `"${componentPlan.componentName}" attempt 2 did not yield a valid plan: ${lastReason}${lastDropped} — escalating to Phase C.5 investigate/replan`,
+            ),
           );
           const investigateResult =
             await this.visualRepair.investigateAndReplanVisualPlan({
@@ -1123,12 +1317,16 @@ export class PlannerService {
 
       if (!visualPlan) {
         this.logger.warn(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}" plan parse failed: ${lastReason}${lastDropped} — generator will fallback to D3${this.formatRawOutput(lastRaw)}`,
+          this.formatPhaseCLog(
+            `"${componentPlan.componentName}" plan parse failed: ${lastReason}${lastDropped} — generator will fallback to D3${this.formatRawOutput(lastRaw)}`,
+          ),
         );
       }
     } catch (err: any) {
       this.logger.warn(
-        `[Phase C: AI Visual Sections] "${componentPlan.componentName}" error: ${err?.message} — generator will fallback to D3`,
+        this.formatPhaseCLog(
+          `"${componentPlan.componentName}" error: ${err?.message} — generator will fallback to D3`,
+        ),
       );
     }
 
@@ -1178,9 +1376,1330 @@ export class PlannerService {
       ...(planningSource?.sourceAnalysis
         ? { planningSourceSummary: planningSource.sourceAnalysis }
         : {}),
+      surfacePlan: this.buildSurfacePlanForComponent({
+        componentPlan,
+        content,
+        planningSource,
+        draftSections: finalizedDraftSections,
+        draftBlockTree,
+        visualPlan: finalizedVisualPlan,
+        detectedCustomClassNames,
+        sourceWidgetHints,
+        hasSharedLayoutPartials,
+        globalPalette,
+        globalTypography,
+        tokens,
+      }),
       visualPlan: finalizedVisualPlan,
       ...(renderContract ? { renderContract } : {}),
     };
+  }
+
+  private buildSurfacePlanForComponent(input: {
+    componentPlan: PlanResult[number];
+    content: DbContentResult;
+    planningSource?: PlanningSourceContext;
+    draftSections?: SectionPlan[];
+    draftBlockTree?: BlockNode[];
+    visualPlan?: ComponentVisualPlan;
+    detectedCustomClassNames?: string[];
+    sourceWidgetHints?: string[];
+    hasSharedLayoutPartials: boolean;
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+    tokens: ThemeTokens | undefined;
+  }): PlannerSurfacePlan | undefined {
+    const { componentPlan } = input;
+    if (componentPlan.type !== 'page') return undefined;
+
+    const sections = input.draftSections?.length
+      ? input.draftSections
+      : input.visualPlan?.sections;
+    const authority = this.buildSurfacePlanAuthority({
+      componentPlan,
+      visualPlan: input.visualPlan,
+      draftBlockTree: input.draftBlockTree,
+      draftSections: sections,
+    });
+    const sourceEvidence = this.buildSurfacePlanSourceEvidence({
+      componentPlan,
+      content: input.content,
+      planningSource: input.planningSource,
+      draftBlockTree: input.draftBlockTree,
+      draftSections: sections,
+      visualPlan: input.visualPlan,
+      detectedCustomClassNames: input.detectedCustomClassNames ?? [],
+      sourceWidgetHints: input.sourceWidgetHints ?? [],
+    });
+    const pageIntent = {
+      kind: this.inferSurfacePlanIntentKind({
+        componentPlan,
+        sourceEvidence,
+        sections,
+      }),
+      confidence:
+        sourceEvidence.contentClusters.length > 0
+          ? 0.86
+          : sections && sections.length > 0
+            ? 0.8
+            : input.draftBlockTree?.length
+              ? 0.72
+              : 0.6,
+    } as const;
+    const designEvidence = this.buildSurfacePlanDesignEvidence({
+      sections,
+      pageIntent: pageIntent.kind,
+      customClassNames: sourceEvidence.customClassNames,
+      sourceEvidence,
+      globalPalette: input.globalPalette,
+      globalTypography: input.globalTypography,
+      tokens: input.tokens,
+    });
+    const compositionHints = this.buildSurfacePlanCompositionHints(
+      sourceEvidence.contentClusters,
+      pageIntent.kind,
+    );
+    const acceptance = this.buildSurfacePlanAcceptance({
+      componentPlan,
+      authorityLevel: authority.level,
+      pageIntent: pageIntent.kind,
+      sourceEvidence,
+    });
+    const sharedChromeOwnership: 'layout' | 'self' =
+      input.hasSharedLayoutPartials ? 'layout' : 'self';
+    const base = {
+      kind: 'standard-page' as const,
+      componentName: componentPlan.componentName,
+      templateName: componentPlan.templateName,
+      contract: {
+        route: componentPlan.route,
+        dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
+        isDetail: componentPlan.isDetail,
+        componentType: componentPlan.type,
+        sharedChromeOwnership,
+      },
+      authority,
+      pageIntent,
+      sourceEvidence,
+      designEvidence,
+      compositionHints,
+      acceptance,
+      debug:
+        sections?.length || input.draftBlockTree?.length
+          ? {
+              ...(sections?.length
+                ? {
+                    legacyDraftSections: sections.map((section) => ({
+                      ...section,
+                    })),
+                  }
+                : {}),
+            }
+          : undefined,
+    };
+
+    if (this.isHomeLikeComponentPlan(componentPlan)) {
+      const openingKinds = new Set(
+        sourceEvidence.contentClusters
+          .slice(0, 2)
+          .map((cluster) => cluster.kind),
+      );
+      const heroLikeCluster = sourceEvidence.contentClusters.find(
+        (cluster) => cluster.kind === 'hero-like' || cluster.kind === 'opening',
+      );
+      const feedCluster = sourceEvidence.contentClusters.find(
+        (cluster) => cluster.kind === 'posts-feed',
+      );
+      const trustSignalKinds = new Set(['testimonials', 'logo-cloud', 'stats']);
+      return {
+        ...base,
+        kind: 'home-page',
+        homeMode: this.inferHomeMode(
+          componentPlan,
+          sourceEvidence.contentClusters,
+        ),
+        heroEvidence: {
+          headingPresent: sourceEvidence.primaryHeadings.length > 0,
+          primaryCtaPresent: sourceEvidence.contentClusters.some(
+            (cluster) => (cluster.ctaEvidence?.length ?? 0) > 0,
+          ),
+          mediaPresent: sourceEvidence.primaryImages.length > 0,
+          backgroundMediaPresent:
+            heroLikeCluster?.kind === 'hero-like' &&
+            (heroLikeCluster.imageEvidence?.length ?? 0) > 0,
+          sourceRef: heroLikeCluster?.sourceRef,
+        },
+        feedEvidence: {
+          kind: feedCluster ? 'posts' : 'none',
+          required:
+            !!feedCluster ||
+            toVisualDataNeeds(componentPlan.dataNeeds).includes('posts'),
+          sourceRef: feedCluster?.sourceRef,
+        },
+        brandEvidence: {
+          siteTitleProminence: openingKinds.has('opening') ? 'high' : 'medium',
+          logoProminence: input.hasSharedLayoutPartials ? 'medium' : 'low',
+          taglineProminence: openingKinds.has('hero-like') ? 'medium' : 'low',
+          trustSignalsPresent: sourceEvidence.contentClusters.some((cluster) =>
+            trustSignalKinds.has(cluster.kind),
+          ),
+          sourceRef: heroLikeCluster?.sourceRef,
+        },
+        homepageRules: {
+          preserveOpeningImpact:
+            openingKinds.has('hero-like') || openingKinds.has('opening'),
+          preserveBrandFirstRead: true,
+          preserveEditorialFlow: !!feedCluster,
+          allowHeroToRecompose: authority.level !== 'strict',
+          allowFeedSectionToMove: authority.level === 'free',
+        },
+      };
+    }
+
+    if (this.isPostDetailComponentPlan(componentPlan)) {
+      const sectionTypes = new Set(
+        sections?.map((section) => section.type) ?? [],
+      );
+      const metaIndex =
+        sections?.findIndex((section) => section.type === 'post-meta') ?? -1;
+      const titleIndex =
+        sections?.findIndex((section) => section.type === 'post-title') ?? -1;
+      const featuredIndex =
+        sections?.findIndex(
+          (section) => section.type === 'post-featured-image',
+        ) ?? -1;
+      const hasSidebar =
+        sourceEvidence.wrapperFacts.some((fact) => fact.kind === 'sidebar') ||
+        sectionTypes.has('sidebar');
+      return {
+        ...base,
+        kind: 'post-detail',
+        postMeta: {
+          titleRequired: true,
+          featuredImageRequired: sectionTypes.has('post-featured-image'),
+          publishDatePresent: sectionTypes.has('post-meta'),
+          authorPresent: sectionTypes.has('post-meta'),
+          categoryOrTagPresent:
+            sectionTypes.has('post-meta') || sectionTypes.has('post-terms'),
+          commentsPresent:
+            sectionTypes.has('comments') ||
+            toVisualDataNeeds(componentPlan.dataNeeds).includes('comments'),
+          postNavigationPresent: sectionTypes.has('post-navigation'),
+        },
+        postBody: {
+          proseDensity:
+            sourceEvidence.contentClusters.filter(
+              (cluster) =>
+                cluster.kind === 'article-body' || cluster.kind === 'prose',
+            ).length > 1
+              ? 'heavy'
+              : sourceEvidence.primaryHeadings.length > 1
+                ? 'medium'
+                : 'light',
+          bodyHasImages: sourceEvidence.primaryImages.length > 0,
+          bodyHasGallery: sourceEvidence.widgets.some(
+            (widget) => widget.kind === 'gallery',
+          ),
+          bodyHasLists: sourceEvidence.contentClusters.some(
+            (cluster) => cluster.kind === 'feature-list',
+          ),
+          bodyHasQuotes: sourceEvidence.contentClusters.some(
+            (cluster) => cluster.kind === 'testimonials',
+          ),
+          bodyHasTables: false,
+        },
+        postLayout: {
+          shell: hasSidebar
+            ? 'with-sidebar'
+            : designEvidence.spacingRhythm.density === 'airy'
+              ? 'narrow-article'
+              : 'full-width',
+          metaPlacement:
+            metaIndex !== -1 && titleIndex !== -1 && metaIndex < titleIndex
+              ? 'above-title'
+              : metaIndex !== -1 && titleIndex !== -1
+                ? 'below-title'
+                : 'mixed',
+          featuredImagePlacement:
+            featuredIndex === -1
+              ? 'none'
+              : titleIndex !== -1 && featuredIndex < titleIndex
+                ? 'before-title'
+                : titleIndex !== -1
+                  ? 'after-title'
+                  : 'inside-body',
+          authorBoxPlacement: sectionTypes.has('comments')
+            ? 'after-comments'
+            : sourceEvidence.contentClusters.some(
+                  (cluster) => cluster.kind === 'author-box',
+                )
+              ? 'after-body'
+              : 'none',
+        },
+        articleRules: {
+          preserveReadingFlow: true,
+          preserveSemanticMeta: true,
+          preserveCommentsCapability: toVisualDataNeeds(
+            componentPlan.dataNeeds,
+          ).includes('comments'),
+          forbidLandingPageRecomposition: true,
+        },
+      };
+    }
+
+    return base;
+  }
+
+  private buildSurfacePlanAuthority(input: {
+    componentPlan: PlanResult[number];
+    visualPlan?: ComponentVisualPlan;
+    draftBlockTree?: BlockNode[];
+    draftSections?: SectionPlan[];
+  }) {
+    const preserveExactBlockStructure =
+      input.visualPlan?.deterministicAuthority === true ||
+      input.visualPlan?.renderAuthority === 'deterministic-pixel' ||
+      input.visualPlan?.renderAuthority === 'deterministic-structure';
+    const hasStructureEvidence =
+      (input.draftBlockTree?.length ?? 0) > 0 ||
+      (input.draftSections?.length ?? 0) > 0;
+    const level: PlannerAuthorityLevel = preserveExactBlockStructure
+      ? 'strict'
+      : this.isHomeLikeComponentPlan(input.componentPlan) ||
+          this.isPostDetailComponentPlan(input.componentPlan) ||
+          input.componentPlan.isDetail ||
+          hasStructureEvidence
+        ? 'guided'
+        : 'free';
+    const reason =
+      level === 'strict'
+        ? 'Deterministic render authority already exists for this surface.'
+        : level === 'guided'
+          ? 'Preserve route-owned evidence and grouping while allowing composition changes.'
+          : 'Low-constraint page surface; composition may adapt more freely.';
+    return {
+      level,
+      reason,
+      allowSectionTypeSubstitution: level !== 'strict',
+      allowReorderWithinGroups: level === 'free',
+      allowWrapperRecomposition: level !== 'strict',
+      preserveExactBlockStructure,
+    };
+  }
+
+  private inferSurfacePlanIntentKind(input: {
+    componentPlan: PlanResult[number];
+    sourceEvidence: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      contentClusters: Array<{ kind: PlannerClusterKind }>;
+      representativeBindings?: Array<{ kind: 'page' | 'post' }>;
+      navigationLabels?: string[];
+      paragraphSnippets?: string[];
+      primaryHeadings: string[];
+      widgets: Array<{ kind: PlannerWidgetKind }>;
+    };
+    sections?: SectionPlan[];
+  }): PlannerPageIntentKind {
+    const template = input.componentPlan.templateName.toLowerCase();
+    const route = input.componentPlan.route ?? '';
+    const dataNeeds = new Set(
+      toVisualDataNeeds(input.componentPlan.dataNeeds).map((need) =>
+        String(need).toLowerCase(),
+      ),
+    );
+    const sectionTypes = new Set(
+      input.sections?.map((section) => section.type) ?? [],
+    );
+    const clusterKinds = new Set(
+      input.sourceEvidence.contentClusters.map((cluster) => cluster.kind),
+    );
+    const sourceFacts = input.sourceEvidence.sourceFacts;
+    if (this.isHomeLikeComponentPlan(input.componentPlan)) {
+      if (
+        dataNeeds.has('posts') &&
+        (sectionTypes.has('post-list') ||
+          clusterKinds.has('posts-feed') ||
+          sourceFacts?.hasQuery)
+      ) {
+        return template === 'front-page'
+          ? 'homepage-hybrid'
+          : 'homepage-content';
+      }
+      return 'homepage-brand';
+    }
+    if (this.isPostDetailComponentPlan(input.componentPlan)) {
+      return 'article';
+    }
+    if (
+      sectionTypes.has('post-list') ||
+      sectionTypes.has('search') ||
+      clusterKinds.has('posts-feed') ||
+      input.sourceEvidence.widgets.some((widget) => widget.kind === 'query') ||
+      sourceFacts?.hasQuery
+    ) {
+      return 'directory';
+    }
+    if (
+      sectionTypes.has('card-grid') &&
+      (sectionTypes.has('hero') || sectionTypes.has('cover'))
+    ) {
+      return 'service';
+    }
+    if (
+      clusterKinds.has('form') &&
+      clusterKinds.has('cta') &&
+      (clusterKinds.has('hero-like') || clusterKinds.has('opening'))
+    ) {
+      return 'landing';
+    }
+    if (
+      input.sourceEvidence.navigationLabels &&
+      input.sourceEvidence.navigationLabels.length >= 4 &&
+      input.sourceEvidence.paragraphSnippets &&
+      input.sourceEvidence.paragraphSnippets.length <= 2
+    ) {
+      return 'directory';
+    }
+    if (sectionTypes.has('hero') || sectionTypes.has('cover')) {
+      return 'landing';
+    }
+    if (
+      input.sourceEvidence.representativeBindings?.some(
+        (binding) => binding.kind === 'page',
+      ) &&
+      input.sourceEvidence.primaryHeadings.length <= 2 &&
+      (input.sourceEvidence.paragraphSnippets?.length ?? 0) >= 2
+    ) {
+      return 'minimal-prose';
+    }
+    if (input.componentPlan.isDetail && route.startsWith('/page/')) {
+      return 'minimal-prose';
+    }
+    return 'editorial';
+  }
+
+  private buildSurfacePlanSourceEvidence(input: {
+    componentPlan: PlanResult[number];
+    content: DbContentResult;
+    planningSource?: PlanningSourceContext;
+    draftBlockTree?: BlockNode[];
+    draftSections?: SectionPlan[];
+    visualPlan?: ComponentVisualPlan;
+    detectedCustomClassNames: string[];
+    sourceWidgetHints: string[];
+  }) {
+    const promptSource = this.getPlanningSourcePromptSource(
+      input.planningSource,
+    );
+    const paragraphSnippets = extractParagraphTextsFromSource(promptSource);
+    const navigationLabels = extractNavigationLinkItemsFromSource(
+      promptSource,
+    ).map((link) => link.label);
+    const sourceFacts = input.planningSource?.canonicalSource?.sourceFacts;
+    const headingTexts =
+      input.planningSource?.canonicalSource?.headingTexts ??
+      extractHeadingTextsFromSource(promptSource);
+    const primaryImages =
+      input.planningSource?.canonicalSource?.assetRefs ??
+      extractStaticImageSources(promptSource);
+    const contentClusters = this.buildSurfacePlanContentClusters(
+      input.draftSections ?? input.visualPlan?.sections,
+      input.componentPlan,
+    );
+    const widgetHints = [
+      ...input.sourceWidgetHints,
+      ...(input.planningSource?.canonicalSource?.interactiveWidgets ?? []),
+    ];
+    const representativeBindings = this.buildSurfacePlanRepresentativeBindings(
+      input.componentPlan,
+      input.content,
+    );
+    const evidenceNotes = this.buildSurfacePlanEvidenceNotes({
+      componentPlan: input.componentPlan,
+      sourceFacts,
+      contentClusters,
+      paragraphSnippets,
+      navigationLabels,
+      representativeBindings,
+    });
+    return {
+      planningSourceLabel: input.planningSource?.sourceLabel,
+      planningSourceFile: input.planningSource?.sourceFile,
+      ...(input.draftBlockTree?.length
+        ? { blockTree: input.draftBlockTree }
+        : {}),
+      ...(sourceFacts ? { sourceFacts } : {}),
+      primaryHeadings: this.dedupeStringList(headingTexts).slice(0, 8),
+      primaryImages: this.dedupeStringList(primaryImages).slice(0, 8),
+      ...(paragraphSnippets.length
+        ? {
+            paragraphSnippets: this.dedupeStringList(paragraphSnippets).slice(
+              0,
+              6,
+            ),
+          }
+        : {}),
+      ...(navigationLabels.length
+        ? {
+            navigationLabels: this.dedupeStringList(navigationLabels).slice(
+              0,
+              8,
+            ),
+          }
+        : {}),
+      customClassNames: this.dedupeStringList([
+        ...input.detectedCustomClassNames,
+        ...(input.planningSource?.canonicalSource?.customClassNames ?? []),
+      ]).slice(0, 20),
+      contentClusters,
+      wrapperFacts: this.buildSurfacePlanWrapperFacts(
+        input.draftSections ?? input.visualPlan?.sections,
+        input.planningSource,
+      ),
+      widgets: this.buildSurfacePlanWidgetEvidence(
+        widgetHints,
+        input.componentPlan,
+      ),
+      ...(representativeBindings.length ? { representativeBindings } : {}),
+      ...(evidenceNotes.length ? { evidenceNotes } : {}),
+    };
+  }
+
+  private buildSurfacePlanDesignEvidence(input: {
+    sections?: SectionPlan[];
+    pageIntent: PlannerPageIntentKind;
+    customClassNames: string[];
+    sourceEvidence?: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      paragraphSnippets?: string[];
+      navigationLabels?: string[];
+    };
+    globalPalette: ColorPalette;
+    globalTypography: TypographyTokens;
+    tokens: ThemeTokens | undefined;
+  }) {
+    const density = this.inferSurfacePlanDensity(input.sections);
+    const rhythmHints = [
+      density === 'airy'
+        ? 'Favor generous breathing room between primary clusters.'
+        : density === 'compact'
+          ? 'Keep section spacing efficient and editorially tight.'
+          : 'Balance separation between clusters without over-expanding the page.',
+    ];
+    if (
+      input.sections?.some(
+        (section) => section.type === 'hero' || section.type === 'cover',
+      )
+    ) {
+      rhythmHints.push('Preserve a visually distinct opening block.');
+    }
+    if (input.sections?.some((section) => section.type === 'post-list')) {
+      rhythmHints.push(
+        'Listing/feed regions may be denser than the opening section.',
+      );
+    }
+    if (input.sourceEvidence?.sourceFacts?.hasSidebarTemplatePart) {
+      rhythmHints.push(
+        'Preserve a primary content column with a complementary side rail.',
+      );
+    }
+    if ((input.sourceEvidence?.navigationLabels?.length ?? 0) >= 5) {
+      rhythmHints.push(
+        'Navigation-heavy source suggests a more structured, utility-forward rhythm.',
+      );
+    }
+    return {
+      importantClassNames: input.customClassNames.slice(0, 12),
+      spacingRhythm: {
+        density,
+        rhythmHints,
+      },
+      visualToneHints: this.buildSurfacePlanToneHints(
+        input.pageIntent,
+        input.sections,
+        input.sourceEvidence,
+      ),
+      tokens: {
+        palette: input.globalPalette,
+        typography: input.globalTypography,
+        blockStyles: input.tokens?.blockStyles,
+      },
+    };
+  }
+
+  private buildSurfacePlanCompositionHints(
+    clusters: Array<{
+      id: string;
+      kind: PlannerClusterKind;
+      importance: string;
+    }>,
+    pageIntent: PlannerPageIntentKind,
+  ) {
+    const macroOrder = clusters.map((cluster) => cluster.id);
+    const preferredGrouping: string[][] = [];
+    const keepAdjacentClusterPairs: Array<[string, string]> = [];
+    for (let index = 0; index < clusters.length; index++) {
+      const current = clusters[index];
+      const next = clusters[index + 1];
+      if (!current) continue;
+      preferredGrouping.push([current.id]);
+      if (
+        next &&
+        current.importance === 'high' &&
+        next.importance === 'high' &&
+        current.kind !== 'posts-feed'
+      ) {
+        keepAdjacentClusterPairs.push([current.id, next.id]);
+      }
+    }
+    return {
+      macroOrder,
+      preferredGrouping,
+      keepAdjacentClusterPairs,
+      mayCollapseClusters: clusters
+        .filter((cluster) => cluster.importance === 'low')
+        .map((cluster) => cluster.id)
+        .slice(0, 4),
+      mayExpandClusters: clusters
+        .filter((cluster) =>
+          ['feature-list', 'gallery', 'posts-feed', 'article-body'].includes(
+            cluster.kind,
+          ),
+        )
+        .map((cluster) => cluster.id)
+        .slice(0, pageIntent.startsWith('homepage') ? 3 : 2),
+    };
+  }
+
+  private buildSurfacePlanAcceptance(input: {
+    componentPlan: PlanResult[number];
+    authorityLevel: PlannerAuthorityLevel;
+    pageIntent: PlannerPageIntentKind;
+    sourceEvidence: {
+      primaryHeadings: string[];
+      widgets: Array<{ kind: PlannerWidgetKind; required: boolean }>;
+      contentClusters: Array<{ kind: PlannerClusterKind; importance: string }>;
+    };
+  }) {
+    const mustKeep = [
+      ...input.sourceEvidence.primaryHeadings
+        .slice(0, 2)
+        .map((heading) => `Preserve source heading: "${heading}"`),
+      ...input.sourceEvidence.widgets
+        .filter((widget) => widget.required)
+        .map((widget) => `Preserve source widget: ${widget.kind}`),
+      ...input.sourceEvidence.contentClusters
+        .filter((cluster) => cluster.importance === 'high')
+        .slice(0, 4)
+        .map(
+          (cluster) =>
+            `Preserve ${cluster.kind} cluster in the final composition`,
+        ),
+    ];
+    const mustNotInvent = [
+      'Do not invent extra shared chrome inside the page body.',
+      'Do not add out-of-contract dynamic data requirements.',
+      ...(input.pageIntent === 'article'
+        ? ['Do not reframe the article as a marketing landing page.']
+        : []),
+    ];
+    const mayRecompose = [
+      input.authorityLevel === 'strict'
+        ? 'Keep the block structure fixed.'
+        : 'Section taxonomy may change if the same source-backed evidence survives.',
+      input.pageIntent.startsWith('homepage')
+        ? 'Opening brand composition may adapt if headline, CTA, and feed intent remain visible.'
+        : 'Wrapper composition may adapt while preserving route-owned evidence.',
+    ];
+    return {
+      mustKeep: this.dedupeStringList(mustKeep).slice(0, 8),
+      mustNotInvent: this.dedupeStringList(mustNotInvent).slice(0, 6),
+      mayRecompose: this.dedupeStringList(mayRecompose).slice(0, 6),
+    };
+  }
+
+  private buildSurfacePlanContentClusters(
+    sections: SectionPlan[] | undefined,
+    componentPlan: PlanResult[number],
+  ) {
+    if (!sections?.length) return [];
+    const clusters = sections.map((section, index) => {
+      const kind = this.mapSurfacePlanClusterKind(
+        section,
+        componentPlan,
+        index,
+      );
+      const sourceRef = section.sourceRef
+        ? {
+            sourceNodeId: section.sourceRef.sourceNodeId,
+            sourceFile: section.sourceRef.sourceFile,
+            templateName: section.sourceRef.templateName,
+            blockName: section.sourceRef.blockName,
+          }
+        : undefined;
+      const importance: 'high' | 'medium' | 'low' =
+        index < 2 ||
+        kind === 'posts-feed' ||
+        kind === 'article-body' ||
+        kind === 'cta'
+          ? 'high'
+          : kind === 'comments' || kind === 'post-navigation'
+            ? 'medium'
+            : section.sourceRef
+              ? 'medium'
+              : 'low';
+      return {
+        id: section.debugKey ?? section.sectionKey ?? `${kind}-${index + 1}`,
+        kind,
+        importance,
+        ...(sourceRef ? { sourceRef } : {}),
+        ...(this.extractSurfacePlanSectionTexts(section).length
+          ? {
+              textEvidence: this.extractSurfacePlanSectionTexts(section).slice(
+                0,
+                4,
+              ),
+            }
+          : {}),
+        ...(this.extractSurfacePlanSectionImages(section).length
+          ? {
+              imageEvidence: this.extractSurfacePlanSectionImages(
+                section,
+              ).slice(0, 4),
+            }
+          : {}),
+        ...(this.extractSurfacePlanSectionCtas(section).length
+          ? {
+              ctaEvidence: this.extractSurfacePlanSectionCtas(section).slice(
+                0,
+                3,
+              ),
+            }
+          : {}),
+        ...(this.extractSurfacePlanItemCountHint(section)
+          ? { itemCountHint: this.extractSurfacePlanItemCountHint(section) }
+          : {}),
+        ...(section.customClassNames?.length
+          ? { customClassNames: section.customClassNames.slice(0, 6) }
+          : {}),
+      };
+    });
+    return this.normalizeSurfacePlanClusters(clusters);
+  }
+
+  private buildSurfacePlanWrapperFacts(
+    sections: SectionPlan[] | undefined,
+    planningSource?: PlanningSourceContext,
+  ) {
+    const facts: Array<{
+      id: string;
+      kind:
+        | 'stack'
+        | 'contained-group'
+        | 'full-bleed'
+        | 'two-column'
+        | 'three-column'
+        | 'sidebar'
+        | 'article-shell';
+      importance: 'high' | 'medium';
+      hints?: string[];
+    }> = [];
+    const pushFact = (
+      id: string,
+      kind:
+        | 'stack'
+        | 'contained-group'
+        | 'full-bleed'
+        | 'two-column'
+        | 'three-column'
+        | 'sidebar'
+        | 'article-shell',
+      importance: 'high' | 'medium',
+      hint?: string,
+    ) => {
+      if (facts.some((fact) => fact.kind === kind)) return;
+      facts.push({
+        id,
+        kind,
+        importance,
+        ...(hint ? { hints: [hint] } : {}),
+      });
+    };
+
+    pushFact(
+      'stack-root',
+      'stack',
+      'high',
+      'Preserve top-to-bottom page flow.',
+    );
+
+    for (const section of sections ?? []) {
+      switch (section.type) {
+        case 'media-text':
+          pushFact(
+            'two-column',
+            'two-column',
+            'high',
+            'Source contains a split content block.',
+          );
+          break;
+        case 'sidebar':
+          pushFact(
+            'sidebar',
+            'sidebar',
+            'high',
+            'Sidebar layout exists in source.',
+          );
+          break;
+        case 'hero':
+        case 'cover':
+          pushFact(
+            'full-bleed-opening',
+            'full-bleed',
+            'medium',
+            'Opening section may need stronger edge-to-edge treatment.',
+          );
+          break;
+        case 'card-grid': {
+          const cards = (section as { cards?: unknown[] }).cards ?? [];
+          if (cards.length >= 3) {
+            pushFact(
+              'three-column-grid',
+              'three-column',
+              'medium',
+              'Multi-card region likely benefits from repeated columns.',
+            );
+          } else {
+            pushFact(
+              'contained-group',
+              'contained-group',
+              'medium',
+              'Grouped feature content should stay visually associated.',
+            );
+          }
+          break;
+        }
+        case 'post-content':
+        case 'page-content':
+        case 'prose-block':
+          pushFact(
+            'article-shell',
+            'article-shell',
+            'medium',
+            'Reading-focused shell should preserve content hierarchy.',
+          );
+          break;
+      }
+    }
+
+    if (planningSource?.canonicalSource?.sourceFacts.hasSidebarTemplatePart) {
+      pushFact(
+        'sidebar-source-fact',
+        'sidebar',
+        'high',
+        'Sidebar template part exists.',
+      );
+    }
+    if (planningSource?.canonicalSource?.sourceFacts.hasNavigation) {
+      pushFact(
+        'contained-navigation',
+        'contained-group',
+        'medium',
+        'Source includes navigation-driven grouping that should read as one system.',
+      );
+    }
+    if (planningSource?.canonicalSource?.sourceFacts.hasQuery) {
+      pushFact(
+        'feed-shell',
+        'contained-group',
+        'medium',
+        'Query/feed blocks should keep a coherent listing shell.',
+      );
+    }
+
+    return facts;
+  }
+
+  private buildSurfacePlanWidgetEvidence(
+    widgetHints: string[],
+    componentPlan: PlanResult[number],
+  ) {
+    const entries = this.dedupeStringList(widgetHints)
+      .map((hint) => this.mapSurfacePlanWidgetKind(hint))
+      .filter((kind): kind is PlannerWidgetKind => !!kind)
+      .map((kind) => ({
+        kind,
+        required: true,
+      }));
+
+    if (
+      this.isPostDetailComponentPlan(componentPlan) &&
+      toVisualDataNeeds(componentPlan.dataNeeds).includes('comments') &&
+      !entries.some((entry) => entry.kind === 'comments')
+    ) {
+      entries.push({ kind: 'comments', required: true });
+    }
+
+    return entries;
+  }
+
+  private buildSurfacePlanRepresentativeBindings(
+    componentPlan: PlanResult[number],
+    content: DbContentResult,
+  ) {
+    const representativePages = this.findRepresentativePagesForTemplate(
+      componentPlan,
+      content,
+    ).map((page) => ({
+      kind: 'page' as const,
+      id: page.id,
+      slug: page.slug,
+      title: page.title,
+      template: page.template ?? null,
+    }));
+    const representativePosts = this.findRepresentativePostsForTemplate(
+      componentPlan,
+      content,
+    ).map((post) => ({
+      kind: 'post' as const,
+      id: post.id,
+      slug: post.slug,
+      title: post.title,
+      template: null,
+    }));
+    return [...representativePages, ...representativePosts].slice(0, 3);
+  }
+
+  private buildSurfacePlanEvidenceNotes(input: {
+    componentPlan: PlanResult[number];
+    sourceFacts?: PlannerSourceFactsSummary;
+    contentClusters: Array<{ kind: PlannerClusterKind; importance: string }>;
+    paragraphSnippets: string[];
+    navigationLabels: string[];
+    representativeBindings: Array<{ kind: 'page' | 'post'; title: string }>;
+  }): string[] {
+    const notes: string[] = [];
+    const highPriorityClusters = input.contentClusters.filter(
+      (cluster) => cluster.importance === 'high',
+    ).length;
+    if (input.sourceFacts?.hasQuery) {
+      notes.push(
+        'Source contains a query/listing pattern that should remain visually legible.',
+      );
+    }
+    if (input.sourceFacts?.hasComments) {
+      notes.push(
+        'Source includes comments capability; preserve a discussion affordance.',
+      );
+    }
+    if (input.sourceFacts?.hasNavigation && input.componentPlan.route === '/') {
+      notes.push(
+        'Homepage source mixes navigational identity with route-owned content.',
+      );
+    }
+    if (input.navigationLabels.length >= 5) {
+      notes.push(
+        'Source exposes many navigation labels; avoid collapsing all utility links into a single CTA.',
+      );
+    }
+    if (highPriorityClusters >= 4) {
+      notes.push(
+        'Source contains several high-priority clusters; maintain clear macro-order.',
+      );
+    }
+    if (input.paragraphSnippets.length >= 3) {
+      notes.push('Paragraph-rich source suggests an editorial reading rhythm.');
+    }
+    if (input.representativeBindings.length > 0) {
+      notes.push(
+        `Representative content sampled from ${input.representativeBindings
+          .map((binding) => `"${binding.title}"`)
+          .join(', ')}.`,
+      );
+    }
+    return notes.slice(0, 6);
+  }
+
+  private normalizeSurfacePlanClusters(
+    clusters: Array<{
+      id: string;
+      kind: PlannerClusterKind;
+      importance: 'high' | 'medium' | 'low';
+      sourceRef?: {
+        sourceNodeId?: string;
+        sourceFile?: string;
+        templateName?: string;
+        blockName?: string;
+      };
+      textEvidence?: string[];
+      imageEvidence?: string[];
+      ctaEvidence?: string[];
+      itemCountHint?: number;
+      customClassNames?: string[];
+    }>,
+  ) {
+    const normalized: typeof clusters = [];
+    for (const cluster of clusters) {
+      const previous = normalized[normalized.length - 1];
+      const proseLike =
+        cluster.kind === 'prose' || cluster.kind === 'article-body';
+      if (
+        previous &&
+        previous.kind === cluster.kind &&
+        proseLike &&
+        (previous.textEvidence?.length ?? 0) < 6
+      ) {
+        previous.textEvidence = this.dedupeStringList([
+          ...(previous.textEvidence ?? []),
+          ...(cluster.textEvidence ?? []),
+        ]).slice(0, 6);
+        previous.imageEvidence = this.dedupeStringList([
+          ...(previous.imageEvidence ?? []),
+          ...(cluster.imageEvidence ?? []),
+        ]).slice(0, 4);
+        previous.ctaEvidence = this.dedupeStringList([
+          ...(previous.ctaEvidence ?? []),
+          ...(cluster.ctaEvidence ?? []),
+        ]).slice(0, 3);
+        previous.customClassNames = this.dedupeStringList([
+          ...(previous.customClassNames ?? []),
+          ...(cluster.customClassNames ?? []),
+        ]).slice(0, 6);
+        previous.itemCountHint = Math.max(
+          previous.itemCountHint ?? 0,
+          cluster.itemCountHint ?? 0,
+        );
+        continue;
+      }
+      normalized.push({ ...cluster });
+    }
+    return normalized;
+  }
+
+  private mapSurfacePlanClusterKind(
+    section: SectionPlan,
+    componentPlan: PlanResult[number],
+    index: number,
+  ): PlannerClusterKind {
+    switch (section.type) {
+      case 'hero':
+      case 'cover':
+        return index === 0 ? 'hero-like' : 'opening';
+      case 'card-grid':
+      case 'tabs':
+      case 'accordion':
+        return section.type === 'accordion' ? 'faq' : 'feature-list';
+      case 'media-text':
+        return 'split-content';
+      case 'post-list':
+      case 'search':
+        return 'posts-feed';
+      case 'newsletter':
+        return 'form';
+      case 'testimonial':
+        return 'testimonials';
+      case 'carousel':
+        return 'gallery';
+      case 'comments':
+        return 'comments';
+      case 'post-navigation':
+        return 'post-navigation';
+      case 'post-meta':
+        return 'article-meta';
+      case 'post-content':
+      case 'page-content':
+      case 'prose-block':
+        return this.isPostDetailComponentPlan(componentPlan)
+          ? 'article-body'
+          : 'prose';
+      case 'post-title':
+      case 'post-featured-image':
+        return 'opening';
+      case 'sidebar':
+        return 'related-posts';
+      default:
+        return index === 0 ? 'opening' : 'cta';
+    }
+  }
+
+  private extractSurfacePlanSectionTexts(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cleaned) values.add(cleaned);
+    };
+
+    switch (section.type) {
+      case 'hero':
+      case 'cover':
+        push(section.heading);
+        push(section.subheading);
+        break;
+      case 'media-text':
+        push(section.heading);
+        push(section.body);
+        (section.listItems ?? []).forEach(push);
+        break;
+      case 'card-grid':
+        push(section.title);
+        push(section.subtitle);
+        (section.cards ?? []).forEach((card) => {
+          push(card.heading);
+          push(card.body);
+        });
+        break;
+      case 'prose-block':
+        (section.sourceSegments ?? []).forEach((segment) => {
+          if ('text' in segment) push(segment.text);
+          if ('html' in segment) push(segment.html);
+        });
+        break;
+      case 'accordion':
+        (section.items ?? []).forEach((item) => {
+          push(item.heading);
+          push(item.body);
+        });
+        break;
+      case 'tabs':
+        (section.tabs ?? []).forEach((tab) => {
+          push(tab.label);
+          push(tab.heading);
+          push(tab.body);
+        });
+        break;
+      case 'modal':
+        push(section.triggerText);
+        push(section.heading);
+        push(section.body);
+        break;
+      default:
+        push((section as { title?: string }).title);
+        push((section as { heading?: string }).heading);
+    }
+
+    return [...values];
+  }
+
+  private extractSurfacePlanSectionImages(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '').trim();
+      if (cleaned) values.add(cleaned);
+    };
+    switch (section.type) {
+      case 'hero':
+        push(section.image?.src);
+        break;
+      case 'cover':
+        push(section.imageSrc);
+        break;
+      case 'media-text':
+        push(section.imageSrc);
+        break;
+      case 'card-grid':
+        (section.cards ?? []).forEach((card) => push(card.imageSrc));
+        break;
+      case 'carousel':
+        (section.slides ?? []).forEach((slide) => push(slide.imageSrc));
+        break;
+      case 'modal':
+        push(section.imageSrc);
+        break;
+      case 'post-featured-image':
+        push((section as { imageSrc?: string }).imageSrc);
+        break;
+    }
+    return [...values];
+  }
+
+  private extractSurfacePlanSectionCtas(section: SectionPlan): string[] {
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      const cleaned = String(value ?? '').trim();
+      if (cleaned) values.add(cleaned);
+    };
+    if ('cta' in section && section.cta) {
+      push(section.cta.text);
+      push(section.cta.link);
+    }
+    if ('ctas' in section && Array.isArray(section.ctas)) {
+      section.ctas.forEach((cta) => {
+        push(cta?.text);
+        push(cta?.link);
+      });
+    }
+    if (section.type === 'newsletter') {
+      push(section.buttonText);
+    }
+    if (section.type === 'modal') {
+      push(section.triggerText);
+    }
+    return [...values];
+  }
+
+  private extractSurfacePlanItemCountHint(
+    section: SectionPlan,
+  ): number | undefined {
+    switch (section.type) {
+      case 'card-grid':
+        return section.cards?.length || undefined;
+      case 'carousel':
+        return section.slides?.length || undefined;
+      case 'accordion':
+        return section.items?.length || undefined;
+      case 'tabs':
+        return section.tabs?.length || undefined;
+      case 'media-text':
+        return section.listItems?.length || undefined;
+      default:
+        return undefined;
+    }
+  }
+
+  private inferSurfacePlanDensity(
+    sections: SectionPlan[] | undefined,
+  ): 'compact' | 'balanced' | 'airy' {
+    if (!sections?.length) return 'balanced';
+    const hasLargeOpening = sections.some(
+      (section) => section.type === 'hero' || section.type === 'cover',
+    );
+    const proseHeavy = sections.filter(
+      (section) =>
+        section.type === 'prose-block' ||
+        section.type === 'post-content' ||
+        section.type === 'page-content',
+    ).length;
+    if (hasLargeOpening && sections.length <= 4) return 'airy';
+    if (sections.length >= 7 || proseHeavy >= 2) return 'compact';
+    return 'balanced';
+  }
+
+  private buildSurfacePlanToneHints(
+    pageIntent: PlannerPageIntentKind,
+    sections: SectionPlan[] | undefined,
+    sourceEvidence?: {
+      sourceFacts?: PlannerSourceFactsSummary;
+      paragraphSnippets?: string[];
+      navigationLabels?: string[];
+    },
+  ): string[] {
+    const hints = new Set<string>();
+    switch (pageIntent) {
+      case 'homepage-brand':
+      case 'homepage-hybrid':
+        hints.add('brand-forward');
+        hints.add('high-contrast opening hierarchy');
+        break;
+      case 'homepage-content':
+        hints.add('editorial homepage');
+        break;
+      case 'article':
+        hints.add('reading-first article presentation');
+        break;
+      case 'landing':
+        hints.add('campaign-style lead section');
+        break;
+      case 'service':
+        hints.add('service-oriented content grouping');
+        break;
+      default:
+        hints.add('source-faithful visual rhythm');
+    }
+    if (sections?.some((section) => section.type === 'media-text')) {
+      hints.add('asymmetric split-content moments');
+    }
+    if (sections?.some((section) => section.type === 'card-grid')) {
+      hints.add('repeated card-based content grouping');
+    }
+    if (sourceEvidence?.sourceFacts?.hasQuery) {
+      hints.add('content-discovery surface');
+    }
+    if ((sourceEvidence?.paragraphSnippets?.length ?? 0) >= 3) {
+      hints.add('editorial copy-led pacing');
+    }
+    if ((sourceEvidence?.navigationLabels?.length ?? 0) >= 5) {
+      hints.add('utility-rich navigation vocabulary');
+    }
+    return [...hints].slice(0, 5);
+  }
+
+  private mapSurfacePlanWidgetKind(
+    hint: string,
+  ): PlannerWidgetKind | undefined {
+    const normalized = hint.trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized.includes('search')) return 'search';
+    if (normalized.includes('comment')) return 'comments';
+    if (normalized.includes('gallery')) return 'gallery';
+    if (normalized.includes('tab')) return 'tabs';
+    if (normalized.includes('accordion')) return 'accordion';
+    if (normalized.includes('modal') || normalized.includes('popup'))
+      return 'modal';
+    if (normalized.includes('slider') || normalized.includes('carousel'))
+      return 'slider';
+    if (normalized.includes('nav') || normalized.includes('menu'))
+      return 'navigation';
+    if (normalized.includes('newsletter') || normalized.includes('subscribe')) {
+      return 'newsletter';
+    }
+    if (normalized.includes('query') || normalized.includes('post-list'))
+      return 'query';
+    return undefined;
+  }
+
+  private isHomeLikeComponentPlan(componentPlan: PlanResult[number]): boolean {
+    const template = componentPlan.templateName.toLowerCase();
+    return (
+      componentPlan.route === '/' ||
+      template === 'front-page' ||
+      template === 'frontend-page' ||
+      template === 'home' ||
+      template === 'index'
+    );
+  }
+
+  private isPostDetailComponentPlan(
+    componentPlan: PlanResult[number],
+  ): boolean {
+    const needs = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
+    return (
+      componentPlan.isDetail === true &&
+      (needs.has('postDetail') ||
+        componentPlan.templateName.toLowerCase().startsWith('single') ||
+        (componentPlan.route ?? '').startsWith('/post/'))
+    );
+  }
+
+  private inferHomeMode(
+    componentPlan: PlanResult[number],
+    clusters: Array<{ kind: PlannerClusterKind }>,
+  ): 'front-page' | 'posts-index' | 'hybrid-home' {
+    const template = componentPlan.templateName.toLowerCase();
+    const hasFeed = clusters.some((cluster) => cluster.kind === 'posts-feed');
+    if (template === 'front-page' || template === 'frontend-page') {
+      return hasFeed ? 'hybrid-home' : 'front-page';
+    }
+    if (template === 'home' || template === 'index') {
+      return hasFeed ? 'posts-index' : 'hybrid-home';
+    }
+    return hasFeed ? 'hybrid-home' : 'front-page';
+  }
+
+  private dedupeStringList(values: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(normalized);
+    }
+    return result;
   }
 
   private async requestVisualPlanCompletion(input: {
@@ -2760,6 +4279,21 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           componentPlan as PlanResult[number],
           tokens,
         ),
+      buildSurfacePlanForComponent: (input) =>
+        this.buildSurfacePlanForComponent({
+          componentPlan: input.componentPlan as PlanResult[number],
+          content: input.content,
+          planningSource: input.planningSource,
+          draftSections: input.draftSections,
+          draftBlockTree: input.draftBlockTree,
+          visualPlan: input.visualPlan,
+          detectedCustomClassNames: input.detectedCustomClassNames,
+          sourceWidgetHints: input.sourceWidgetHints,
+          hasSharedLayoutPartials: input.hasSharedLayoutPartials,
+          globalPalette: input.globalPalette,
+          globalTypography: input.globalTypography,
+          tokens: input.tokens,
+        }),
       collectDraftCustomClassNames: (draftSections) =>
         this.collectDraftCustomClassNames(draftSections),
       detectInteractiveWidgetsFromSource: (source) =>
@@ -2814,14 +4348,18 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     const effectiveDraft = contract
       ? sanitizeSectionsForContract(draftSections, contract).sections
       : draftSections;
+    const mergeMode = this.shouldUseLightDraftMerge(contract)
+      ? 'light'
+      : 'full';
     return sections.map((section, index) =>
-      this.mergeDraftSection(section, effectiveDraft[index]),
+      this.mergeDraftSection(section, effectiveDraft[index], mergeMode),
     );
   }
 
   private mergeDraftSection(
     section: SectionPlan,
     draft?: SectionPlan,
+    mergeMode: 'light' | 'full' = 'full',
   ): SectionPlan {
     if (!draft) return section;
     // Always carry debug/source trace fields regardless of type
@@ -2835,20 +4373,40 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       };
     }
 
-    const mergedBase = {
+    const traceBase = {
       ...section,
       ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
       ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
-      ...(draft.background ? { background: draft.background } : {}),
-      ...(draft.textColor ? { textColor: draft.textColor } : {}),
-      ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
-      ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
-      ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+      ...(draft.customClassNames?.length
+        ? {
+            customClassNames: this.dedupeStringList([
+              ...(section.customClassNames ?? []),
+              ...draft.customClassNames,
+            ]),
+          }
+        : {}),
+      ...(draft.obligation && !section.obligation
+        ? { obligation: draft.obligation }
+        : {}),
     };
+    const mergedBase =
+      mergeMode === 'light'
+        ? traceBase
+        : {
+            ...traceBase,
+            ...(draft.background ? { background: draft.background } : {}),
+            ...(draft.textColor ? { textColor: draft.textColor } : {}),
+            ...(draft.paddingStyle ? { paddingStyle: draft.paddingStyle } : {}),
+            ...(draft.marginStyle ? { marginStyle: draft.marginStyle } : {}),
+            ...(draft.gapStyle ? { gapStyle: draft.gapStyle } : {}),
+          };
 
     switch (section.type) {
       case 'navbar': {
         const navbarDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           menuSlug: navbarDraft.menuSlug ?? section.menuSlug,
@@ -2879,6 +4437,15 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       case 'footer': {
         const footerDraft = draft as any;
         const footerSection = section as any;
+        if (mergeMode === 'light') {
+          return {
+            ...mergedBase,
+            menuColumns:
+              (footerDraft.menuColumns?.length ?? 0) > 0
+                ? footerDraft.menuColumns
+                : footerSection.menuColumns,
+          } as SectionPlan;
+        }
         return {
           ...mergedBase,
           menuColumns:
@@ -2904,6 +4471,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       }
       case 'hero': {
         const heroDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           ...(heroDraft.headingStyle
@@ -2916,6 +4486,12 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       }
       case 'cover': {
         const coverDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return {
+            ...mergedBase,
+            minHeight: coverDraft.minHeight ?? section.minHeight,
+          } as SectionPlan;
+        }
         return {
           ...mergedBase,
           minHeight: coverDraft.minHeight ?? section.minHeight,
@@ -2940,13 +4516,16 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         return {
           ...mergedBase,
           cards: mergedCards,
-          ...(cardGridDraft.columnWidths
+          ...(mergeMode === 'full' && cardGridDraft.columnWidths
             ? { columnWidths: cardGridDraft.columnWidths }
             : {}),
         } as SectionPlan;
       }
       case 'media-text': {
         const mediaTextDraft = draft as typeof section;
+        if (mergeMode === 'light') {
+          return mergedBase as SectionPlan;
+        }
         return {
           ...mergedBase,
           ...(mediaTextDraft.columnWidths
@@ -2992,7 +4571,8 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
         return {
           ...mergedBase,
           items: draftItems.length > aiItems.length ? draftItems : aiItems,
-          ...(typeof accordionDraft.allowMultiple === 'boolean'
+          ...(mergeMode === 'full' &&
+          typeof accordionDraft.allowMultiple === 'boolean'
             ? { allowMultiple: accordionDraft.allowMultiple }
             : {}),
         } as SectionPlan;
@@ -3015,6 +4595,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       : draftSections;
 
     if (!effectiveDraft.length) return sections;
+    if (this.shouldSkipFullDraftInjection(contract)) {
+      return sections;
+    }
 
     // AI-generated sections never carry debugKey/sectionKey (those come from the
     // draft mapper). Using key-based matching would always see an empty coveredKeys
@@ -3044,6 +4627,14 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
       `[Visual Plan] "${componentName}": injecting ${toInject.length} missing draft section(s) not generated by AI: ${toInject.map((s) => s.debugKey ?? s.sectionKey ?? s.type).join(', ')}`,
     );
     return [...sections, ...toInject];
+  }
+
+  private shouldUseLightDraftMerge(contract?: VisualPlanContract): boolean {
+    return contract?.componentType === 'page';
+  }
+
+  private shouldSkipFullDraftInjection(contract?: VisualPlanContract): boolean {
+    return contract?.componentType === 'page';
   }
 
   private applyRepoInteractiveDefaults(
@@ -3455,7 +5046,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       });
       if (!coverageAudit.ok) {
         this.logger.warn(
-          `[Phase C: AI Visual Sections] "${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+          this.formatPhaseCLog(
+            `"${componentPlan.componentName}": rejected low-coverage draft sections from ${planningSource?.sourceLabel ?? componentPlan.templateName} (${coverageAudit.reason})`,
+          ),
         );
         return undefined;
       }
@@ -3463,6 +5056,108 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return filteredSections;
     } catch {
       return undefined;
+    }
+  }
+
+  private augmentDraftSectionsWithSourceWidgets(input: {
+    draftSections?: SectionPlan[];
+    planningSource?: PlanningSourceContext;
+    sourceWidgetHints?: string[];
+    componentName: string;
+  }): SectionPlan[] | undefined {
+    const baseSections = input.draftSections ? [...input.draftSections] : [];
+    const hints = new Set(input.sourceWidgetHints ?? []);
+    if (hints.size === 0) {
+      return input.draftSections;
+    }
+
+    const widgetSectionTypes = new Map<string, SectionPlan['type']>([
+      ['accordion', 'accordion'],
+      ['tabs', 'tabs'],
+      ['modal', 'modal'],
+      ['slider', 'carousel'],
+      ['carousel', 'carousel'],
+    ]);
+
+    const missingHints = [...hints].filter((hint) => {
+      const sectionType = widgetSectionTypes.get(hint);
+      return (
+        sectionType &&
+        !baseSections.some((section) => section.type === sectionType)
+      );
+    });
+    if (missingHints.length === 0) {
+      return input.draftSections;
+    }
+
+    const resolvedNodes =
+      input.planningSource?.canonicalSource?.resolvedNodes ?? [];
+    if (resolvedNodes.length === 0) {
+      return input.draftSections;
+    }
+
+    const injected: SectionPlan[] = [];
+    const visit = (node: WpNode) => {
+      for (const hint of [...missingHints]) {
+        if (!this.matchesRequiredWidgetHint(node, hint)) continue;
+        const expectedType = widgetSectionTypes.get(hint);
+        if (!expectedType) continue;
+        const mappedSections = this.filterDegenerateDraftSections(
+          mapWpNodesToDraftSections([node]),
+        );
+        const recovered = mappedSections.find(
+          (section) => section.type === expectedType,
+        );
+        if (!recovered) continue;
+        baseSections.push(recovered);
+        injected.push(recovered);
+        missingHints.splice(missingHints.indexOf(hint), 1);
+        break;
+      }
+      if (missingHints.length === 0) return;
+      for (const child of node.children ?? []) {
+        visit(child);
+        if (missingHints.length === 0) return;
+      }
+    };
+
+    for (const node of resolvedNodes) {
+      visit(node);
+      if (missingHints.length === 0) break;
+    }
+
+    if (injected.length > 0) {
+      this.logger.warn(
+        this.formatPhaseCLog(
+          `"${input.componentName}": injected ${injected.length} nested source widget fallback section(s): ${injected
+            .map(
+              (section) =>
+                section.debugKey ?? section.sectionKey ?? section.type,
+            )
+            .join(', ')}`,
+        ),
+      );
+    }
+
+    return injected.length > 0 ? baseSections : input.draftSections;
+  }
+
+  private matchesRequiredWidgetHint(node: WpNode, hint: string): boolean {
+    const block = String(node.block ?? '')
+      .trim()
+      .toLowerCase();
+    switch (hint) {
+      case 'accordion':
+        return /\b(accordion|faq|content-toggle|toggle|details)\b/.test(block);
+      case 'tabs':
+        return /\btabs\b/.test(block);
+      case 'modal':
+        return /\b(modal|popup|dialog)\b/.test(block);
+      case 'slider':
+      case 'carousel':
+        return /\b(slider|carousel)\b/.test(block);
+      default:
+        return false;
     }
   }
 
@@ -3541,8 +5236,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
   private shouldShortCircuitBlockTreeVisualPlan(
     componentPlan: PlanResult[number],
+    draftBlockTree?: BlockNode[],
   ): boolean {
-    return shouldShortCircuitBlockTreeVisualPlan(componentPlan);
+    return shouldShortCircuitBlockTreeVisualPlan(componentPlan, draftBlockTree);
   }
 
   private shouldUseLosslessPlanningDraft(
@@ -4722,358 +6418,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
-  private pickInvestigativePlanningSource(input: {
-    componentPlan: PlanResult[number];
-    sourceMap: Map<string, string>;
-    content: DbContentResult;
-    repoManifest?: RepoThemeManifest;
-    currentPlanningSource?: PlanningSourceContext;
-    previousReason: string;
-  }): PlanningSourceCandidate | null {
-    const {
-      componentPlan,
-      sourceMap,
-      content,
-      repoManifest,
-      currentPlanningSource,
-      previousReason,
-    } = input;
-    return pickInvestigativePlanningSource({
-      componentPlan,
-      sourceMap,
-      content,
-      repoManifest,
-      templateSource: currentPlanningSource?.source ?? '',
-      currentPlanningSource,
-      previousReason,
-      findRepoEntrySourceChain: (templateName, repoManifest) =>
-        this.findRepoEntrySourceChain(templateName, repoManifest),
-      inferSourceFile: (templateName, componentType) =>
-        inferFseSourceFile(templateName, componentType),
-      findRepresentativePagesForTemplate: (componentPlan, content) =>
-        this.findRepresentativePagesForTemplate(
-          componentPlan as ComponentPlan,
-          content,
-        ),
-      findRepresentativePostsForTemplate: (componentPlan, content) =>
-        this.findRepresentativePostsForTemplate(
-          componentPlan as ComponentPlan,
-          content,
-        ),
-    });
-  }
-
-  private async investigateAndReplanVisualPlan(input: {
-    componentPlan: PlanResult[number];
-    sourceMap: Map<string, string>;
-    content: DbContentResult;
-    tokens: ThemeTokens | undefined;
-    globalPalette: ColorPalette;
-    globalTypography: TypographyTokens;
-    repoManifest: RepoThemeManifest | undefined;
-    modelName: string;
-    logPath?: string;
-    scopedEditRequest: PipelineEditRequestDto | undefined;
-    visualDataNeeds: DataNeed[];
-    hasSharedLayoutPartials: boolean;
-    previousPlanningSource?: PlanningSourceContext;
-    previousDraftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
-    previousReason: string;
-    previousDropped: string;
-    previousRaw: string;
-  }): Promise<{
-    visualPlan?: ComponentVisualPlan;
-    planningSource: PlanningSourceContext;
-    draftSections?: ReturnType<typeof mapWpNodesToDraftSections>;
-    detectedCustomClassNames: string[];
-    sourceBackedAuxiliaryLabels: string[];
-    sourceWidgetHints: string[];
-    allowedImageSrcs: string[];
-    lastReason: string;
-    lastDropped: string;
-    lastRaw: string;
-  }> {
-    const {
-      componentPlan,
-      sourceMap,
-      content,
-      tokens,
-      globalPalette,
-      globalTypography,
-      repoManifest,
-      modelName,
-      logPath,
-      scopedEditRequest,
-      visualDataNeeds,
-      hasSharedLayoutPartials,
-      previousPlanningSource,
-      previousReason,
-      previousDropped,
-      previousRaw,
-    } = input;
-
-    const chosenCandidate = this.pickInvestigativePlanningSource({
-      componentPlan,
-      sourceMap,
-      content,
-      repoManifest,
-      currentPlanningSource: previousPlanningSource,
-      previousReason,
-    });
-
-    const planningSource = chosenCandidate
-      ? this.buildPlanningSourceContextFromResolvedSource(
-          componentPlan,
-          chosenCandidate,
-          hasSharedLayoutPartials,
-          tokens,
-        )
-      : (previousPlanningSource ??
-        this.buildPlanningSourceContext(
-          componentPlan,
-          sourceMap.get(componentPlan.templateName) ?? '',
-          sourceMap,
-          content,
-          hasSharedLayoutPartials,
-          tokens,
-          repoManifest,
-        ));
-
-    this.logger.log(
-      `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" investigating source ${previousPlanningSource?.sourceLabel ?? 'unknown'} -> ${planningSource.sourceLabel ?? 'unknown'}`,
-    );
-
-    const draftSections = this.buildDraftSectionsForPlanningSource(
-      planningSource,
-      componentPlan,
-      tokens,
-    );
-    const detectedCustomClassNames =
-      this.collectDraftCustomClassNames(draftSections);
-    const sourceBackedAuxiliaryLabels = mergeAuxiliaryLabels(
-      planningSource.sourceBackedAuxiliaryLabels,
-      ...(componentPlan.type === 'partial'
-        ? [extractAuxiliaryLabelsFromSections(draftSections)]
-        : []),
-    );
-    const sourceWidgetHints = detectInteractiveWidgetsFromSource(
-      this.getPlanningSourcePromptSource(planningSource),
-    );
-    const visualContract = {
-      componentType: componentPlan.type,
-      route: componentPlan.route,
-      isDetail: componentPlan.isDetail,
-      dataNeeds: visualDataNeeds,
-      stripLayoutChrome: componentPlan.type === 'page',
-      sourceBackedAuxiliaryLabels,
-      requiredSourceWidgets: sourceWidgetHints,
-    } as const;
-    const allowedImageSrcs = this.collectAllowedImageSrcs(
-      planningSource,
-      content,
-    );
-    const investigationContext = this.buildVisualPlanRetryInvestigationContext({
-      componentPlan,
-      planningSource,
-      sourceMap,
-      content,
-      repoManifest,
-      draftSections,
-      sourceWidgetHints,
-      allowedImageSrcs,
-      reason: `${previousReason}${previousDropped}`,
-    });
-    const c5Note = [
-      'Phase C.5 investigation is active because the previous visual plan could not be parsed.',
-      `Previous failure: ${previousReason}${previousDropped}`,
-      'Use the newly selected source and deterministic draft below to repair the plan instead of repeating the same structure.',
-      investigationContext,
-    ].join('\n');
-    const { systemPrompt, userPrompt } = buildVisualPlanPrompt({
-      componentName: componentPlan.componentName,
-      templateSource: this.getPlanningSourcePromptSource(planningSource),
-      content,
-      tokens,
-      repoManifest,
-      componentType: componentPlan.type,
-      route: componentPlan.route,
-      isDetail: componentPlan.isDetail,
-      dataNeeds: visualDataNeeds,
-      sourceAnalysis: planningSource.sourceAnalysis,
-      sourceBackedAuxiliaryLabels,
-      sourceWidgetHints,
-      draftSections,
-      editRequestContextNote: [
-        buildEditRequestContextNote(scopedEditRequest, {
-          audience: 'visual-plan',
-          componentName: componentPlan.componentName,
-          route: componentPlan.route,
-        }),
-        c5Note,
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-    });
-
-    let lastRaw = previousRaw;
-    let lastReason = previousReason;
-    let lastDropped = previousDropped;
-    let completionReceived = false;
-    let inTok = 0;
-    let outTok = 0;
-    let lastTransportError = '';
-    const maxTransportRetries = 3;
-
-    for (
-      let transportAttempt = 1;
-      transportAttempt <= maxTransportRetries;
-      transportAttempt++
-    ) {
-      try {
-        if (transportAttempt > 1) {
-          this.logger.log(
-            `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" request retry ${transportAttempt}/${maxTransportRetries}`,
-          );
-        }
-        const completion = await this.requestVisualPlanCompletion({
-          model: modelName,
-          systemPrompt,
-          userPrompt,
-          maxTokens: 4096,
-        });
-        lastRaw = completion.text;
-        inTok = completion.inputTokens;
-        outTok = completion.outputTokens;
-        completionReceived = true;
-        break;
-      } catch (err: any) {
-        lastTransportError = err?.message ?? String(err);
-        if (
-          !this.isRetryableVisualPlanError(err) ||
-          transportAttempt >= maxTransportRetries
-        ) {
-          break;
-        }
-        this.logger.warn(
-          `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" transient request error on attempt ${transportAttempt}/${maxTransportRetries}: ${lastTransportError} — retrying`,
-        );
-        await this.delay(1200 * transportAttempt);
-      }
-    }
-
-    if (!completionReceived) {
-      return {
-        planningSource,
-        draftSections,
-        detectedCustomClassNames,
-        sourceBackedAuxiliaryLabels,
-        sourceWidgetHints,
-        allowedImageSrcs,
-        lastReason: lastTransportError || previousReason,
-        lastDropped: previousDropped,
-        lastRaw,
-      };
-    }
-
-    const tokenLogPath = TokenTracker.getTokenLogPath(logPath);
-    if (tokenLogPath) {
-      await this.tokenTracker.track(
-        modelName,
-        inTok,
-        outTok,
-        `${componentPlan.componentName}:visual-plan:c5`,
-        {
-          scope: scopedEditRequest ? 'edit-request' : 'base',
-        },
-      );
-    }
-
-    const parsedResult = parseVisualPlanDetailed(
-      lastRaw,
-      componentPlan.componentName,
-      {
-        allowedImageSrcs,
-        contract: visualContract,
-        draftSections,
-      },
-    );
-    if (parsedResult.plan) {
-      const layout = this.deriveComponentLayout(
-        tokens,
-        componentPlan.componentName,
-        componentPlan.isDetail === true && componentPlan.route !== '/',
-      );
-      const visualPlan = this.applyRepoInteractiveDefaults(
-        {
-          ...parsedResult.plan,
-          dataNeeds: toVisualDataNeeds(componentPlan.dataNeeds),
-          ...(componentPlan.fixedSlug
-            ? {
-                pageBinding: {
-                  id: componentPlan.fixedPageId,
-                  slug: componentPlan.fixedSlug,
-                  title: componentPlan.fixedTitle,
-                  route: componentPlan.route ?? undefined,
-                },
-              }
-            : {}),
-          palette: globalPalette,
-          typography: globalTypography,
-          layout,
-          blockStyles: tokens?.blockStyles,
-          sections: this.injectMissingDraftSections(
-            this.mergeDraftSectionPresentation(
-              parsedResult.plan.sections,
-              draftSections,
-              visualContract,
-            ),
-            draftSections,
-            visualContract,
-            componentPlan.componentName,
-          ),
-        },
-        repoManifest,
-      );
-      this.logger.log(
-        `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" replan succeeded with ${parsedResult.plan.sections.length} sections`,
-      );
-      return {
-        visualPlan,
-        planningSource,
-        draftSections,
-        detectedCustomClassNames,
-        sourceBackedAuxiliaryLabels,
-        sourceWidgetHints,
-        allowedImageSrcs,
-        lastReason: '',
-        lastDropped: '',
-        lastRaw,
-      };
-    }
-
-    lastReason =
-      parsedResult.diagnostic?.reason ??
-      'unknown investigate/replan parse failure';
-    lastDropped = parsedResult.diagnostic?.droppedSections?.length
-      ? ` | droppedSections: ${parsedResult.diagnostic.droppedSections.join('; ')}`
-      : '';
-    this.logger.warn(
-      `[Phase C.5: Investigate/Replan] "${componentPlan.componentName}" replan failed: ${lastReason}${lastDropped}${this.formatRawOutput(lastRaw)}`,
-    );
-
-    return {
-      planningSource,
-      draftSections,
-      detectedCustomClassNames,
-      sourceBackedAuxiliaryLabels,
-      sourceWidgetHints,
-      allowedImageSrcs,
-      lastReason,
-      lastDropped,
-      lastRaw,
-    };
-  }
-
   private ensureStandardTemplates(
     templates: Array<{ name: string; html?: string; markup?: string }>,
     themeType: 'classic' | 'fse',
@@ -5938,9 +7282,28 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return true;
     }
 
-    const summary = this.summarizeWpNodeSubtree(node);
+    const summary = summarizeSharedLayoutSubtree(node);
     if (summary.hasRouteOwnedContent) {
       return false;
+    }
+
+    if (
+      summary.hasFooterClass &&
+      (summary.hasCopyrightCopy ||
+        summary.socialLinkCount > 0 ||
+        summary.linkLikeCount > 0 ||
+        summary.headingCount > 0)
+    ) {
+      return true;
+    }
+
+    if (
+      summary.hasCopyrightCopy &&
+      (summary.socialLinkCount > 0 ||
+        summary.linkLikeCount > 0 ||
+        summary.headingCount > 0)
+    ) {
+      return true;
     }
 
     const hasIdentity =
@@ -5955,64 +7318,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     return false;
-  }
-
-  private summarizeWpNodeSubtree(node: WpNode): {
-    kinds: Set<string>;
-    headingCount: number;
-    hasRouteOwnedContent: boolean;
-  } {
-    const kinds = new Set<string>();
-    let headingCount = 0;
-    let hasRouteOwnedContent = false;
-    const routeOwnedKinds = new Set([
-      'query',
-      'query-title',
-      'query-no-results',
-      'query-pagination',
-      'post-template',
-      'post-title',
-      'post-content',
-      'post-excerpt',
-      'post-featured-image',
-      'post-date',
-      'post-author-name',
-      'post-terms',
-      'post-navigation',
-      'comments',
-      'search',
-      'latest-posts',
-      'page-list',
-      'archives',
-    ]);
-
-    const visit = (current: WpNode) => {
-      const kind = this.normalizeWpNodeBlockKind(current.block);
-      if (kind) {
-        kinds.add(kind);
-      }
-      if (kind === 'heading') {
-        headingCount += 1;
-      }
-      if (routeOwnedKinds.has(kind)) {
-        hasRouteOwnedContent = true;
-      }
-      for (const child of current.children ?? []) {
-        visit(child);
-      }
-    };
-
-    visit(node);
-    return { kinds, headingCount, hasRouteOwnedContent };
-  }
-
-  private normalizeWpNodeBlockKind(block: string | undefined): string {
-    const normalized = String(block ?? '')
-      .trim()
-      .toLowerCase();
-    if (!normalized) return '';
-    const slashIndex = normalized.lastIndexOf('/');
-    return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
   }
 
   private extractTemplateHints(source: string): string {
@@ -6247,6 +7552,43 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     });
 
     return `[${labels.join(', ')}]`;
+  }
+
+  private formatPhaseCLog(message: string): string {
+    return `[${this.phaseCLogLabel}] ${message}`;
+  }
+
+  private formatPhaseCPlanSnapshot(input: {
+    componentPlan: PlanResult[number];
+    planningSourceLabel?: string;
+    surfacePlan?: PlannerSurfacePlan;
+    visualPlan?: Pick<
+      ComponentVisualPlan,
+      'sections' | 'renderMode' | 'deterministicAuthority'
+    >;
+  }): string {
+    const sectionList = this.formatSectionList(
+      input.visualPlan?.sections ?? [],
+    );
+    const visualMode = input.visualPlan?.renderMode ?? 'ai';
+    const deterministicAuthority =
+      input.visualPlan?.deterministicAuthority === true ? 'yes' : 'no';
+    const parts = [
+      `kind=${input.surfacePlan?.kind ?? 'unknown'}`,
+      `authority=${input.surfacePlan?.authority.level ?? 'unknown'}`,
+      `pageIntent=${input.surfacePlan?.pageIntent.kind ?? 'unknown'}`,
+      `source=${input.planningSourceLabel ?? input.componentPlan.planningSourceLabel ?? input.componentPlan.templateName}`,
+      `visualMode=${visualMode}`,
+      `deterministicAuthority=${deterministicAuthority}`,
+      `sections=${sectionList}`,
+    ];
+    if (input.componentPlan.fixedSlug) {
+      parts.push(`fixedSlug=${input.componentPlan.fixedSlug}`);
+    }
+    if (input.componentPlan.dataNeeds?.length) {
+      parts.push(`dataNeeds=${input.componentPlan.dataNeeds.join(',')}`);
+    }
+    return `"${input.componentPlan.componentName}": ${parts.join(' | ')}`;
   }
 
   private isRetryableVisualPlanError(error: unknown): boolean {

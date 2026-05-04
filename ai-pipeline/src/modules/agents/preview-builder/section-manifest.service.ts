@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import type { PlanResult } from '../planner/planner.service.js';
+import { resolvePlannerSectionBlueprint } from '../planner/planner-surface-plan.util.js';
 import type { PreviewRouteEntry } from './preview-builder.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import type { PipelineCaptureNormalizedBBoxDto } from '../../orchestrator/orchestrator.dto.js';
@@ -42,7 +43,10 @@ export class SectionManifestService {
     const entries: SectionManifestEntry[] = [];
 
     for (const planEntry of plan) {
-      const sections = planEntry.visualPlan?.sections;
+      const sections = resolvePlannerSectionBlueprint({
+        visualPlan: planEntry.visualPlan,
+        surfacePlan: planEntry.surfacePlan,
+      });
       if (!sections?.length) continue;
 
       const n = sections.length;

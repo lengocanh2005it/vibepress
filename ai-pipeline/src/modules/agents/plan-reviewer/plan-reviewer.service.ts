@@ -345,13 +345,16 @@ export class PlanReviewerService {
         next.route.includes(':slug') &&
         !policy.isDetail
       ) {
+        const normalizedRoute = this.stripDynamicSegments(
+          policy.route ?? next.route,
+        );
         this.pushWarning(
           warnings,
           warningCodes,
           'route_normalized',
-          `Template "${next.templateName}" route "${next.route}" → normalized to "${policy.route}" because this template is not a detail route`,
+          `Template "${next.templateName}" route "${next.route}" → normalized to "${normalizedRoute}" because this template is not a detail route`,
         );
-        next = { ...next, route: policy.route };
+        next = { ...next, route: normalizedRoute };
       } else if (next.type === 'page' && !next.route) {
         this.pushWarning(
           warnings,
@@ -374,6 +377,11 @@ export class PlanReviewerService {
 
       return next;
     });
+  }
+
+  private stripDynamicSegments(route: string): string {
+    const normalized = route.replace(/\/:[A-Za-z_][A-Za-z0-9_-]*/g, '').trim();
+    return normalized || '/';
   }
 
   private alignDataNeeds(

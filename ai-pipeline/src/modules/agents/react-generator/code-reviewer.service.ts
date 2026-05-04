@@ -23,6 +23,7 @@ import {
   buildComponentRepoChainNote,
   buildInlineSectionPrompt,
   buildSectionPrompt,
+  buildSurfacePlanRepairContextNote,
   buildSpectraContractPromptNote,
   type ComponentPromptContext,
 } from './prompts/component.prompt.js';
@@ -47,6 +48,10 @@ import type {
   ThemeTokens,
 } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
+import {
+  collectSurfacePlanRequiredLiterals,
+  resolvePlannerSectionBlueprint,
+} from '../planner/planner-surface-plan.util.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import type {
@@ -1343,6 +1348,11 @@ export class CodeReviewerService {
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
       visualPlan: resolvedVisualPlan,
+      surfacePlan:
+        'surfacePlan' in (componentPlan ?? {})
+          ? (componentPlan as PlanResult[number] | ComponentPromptContext)
+              ?.surfacePlan
+          : undefined,
       renderContract:
         'renderContract' in (componentPlan ?? {})
           ? (componentPlan as PlanResult[number] | ComponentPromptContext)
@@ -1370,6 +1380,7 @@ export class CodeReviewerService {
       type: componentPlan?.type,
       isSubComponent,
       visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
       renderContract: componentPlan?.renderContract,
       allowedRelativeImports: componentPlan?.visualPlan?.layout.includes ?? [],
       requiredCustomClassNames:
@@ -1488,6 +1499,15 @@ export class CodeReviewerService {
     }
     const normalizedNeeds = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
     const signals = this.getVisualPlanSectionSignals(componentPlan);
+    const defaultRichPageAssemblyCandidate = Boolean(
+      !componentPlan.isDetail &&
+      signals.sections.length >= 2 &&
+      !signals.lowComplexityOnly &&
+      (signals.richSectionCount >= 1 ||
+        signals.sourceBackedSectionCount >= 2 ||
+        signals.distinctTypes.size >= 2 ||
+        normalizedNeeds.has('posts')),
+    );
 
     if (
       componentPlan.visualPlan.blockTree?.length &&
@@ -1499,14 +1519,16 @@ export class CodeReviewerService {
         !signals.hasPageContent &&
         !signals.hasPostContent &&
         !signals.lowComplexityOnly &&
-        signals.sections.length >= 6 &&
-        signals.richSectionCount >= 3 &&
-        signals.sourceBackedSectionCount >= 3;
+        (signals.sections.length >= 3 || defaultRichPageAssemblyCandidate) &&
+        (signals.richSectionCount >= 1 ||
+          signals.mediaHeavySectionCount >= 1 ||
+          signals.sourceBackedSectionCount >= 2 ||
+          normalizedNeeds.has('posts'));
       if (allowHybridSectionAssembly) {
         return {
           enabled: true,
           reason:
-            'hybrid block-tree landing page prefers section assembly for content retention',
+            'hybrid block-tree page prefers section assembly for content retention',
         };
       }
       return {
@@ -1596,6 +1618,14 @@ export class CodeReviewerService {
       return {
         enabled: false,
         reason: 'page-content wrapper is simpler as full-file',
+      };
+    }
+
+    if (defaultRichPageAssemblyCandidate) {
+      return {
+        enabled: true,
+        reason:
+          'page visual plan defaults to section assembly to isolate source-backed regions',
       };
     }
 
@@ -2444,14 +2474,14 @@ export class CodeReviewerService {
       lines.push(spectraContractNote);
     }
 
-    const visualPlanChecklist = this.buildVisualPlanRetryChecklist(
+    const approvedPlanChecklist = this.buildApprovedPlanRetryChecklist(
       input.componentPlan,
       input.lastError,
       input.componentName,
     );
-    if (visualPlanChecklist) {
+    if (approvedPlanChecklist) {
       lines.push('');
-      lines.push(visualPlanChecklist);
+      lines.push(approvedPlanChecklist);
     }
 
     lines.push('');
@@ -2467,7 +2497,7 @@ export class CodeReviewerService {
     const compact = error.replace(/\s+/g, ' ').trim();
     // Use a larger limit for fidelity errors so all lost fields are visible to the AI
     const limit =
-      /visual plan obligations violated|lost media-text|lost card/i.test(
+      /visual plan obligations violated|surface-plan source evidence violated|lost media-text|lost card/i.test(
         compact,
       )
         ? 2000
@@ -2659,6 +2689,22 @@ export class CodeReviewerService {
           'Do NOT omit, truncate, or replace these with placeholders. Hardcode the exact value from the approved visual plan.',
         );
       }
+    }
+
+    if (
+      /search wrapper|source search block|role=["']search["']|search-input/.test(
+        compact,
+      )
+    ) {
+      instructions.push(
+        'Restore a real semantic search shell in the failing section: render `<form role="search">` instead of a generic wrapper.',
+      );
+      instructions.push(
+        'Inside that form, keep a real `<input type="search" ... />` and a submit button. Do not replace the search block with comments, author bio, promo copy, or unrelated filters.',
+      );
+      instructions.push(
+        'If the approved section only requires `search-input`, keep it as a search widget only; render search results elsewhere only when a separate approved post-list/results section exists.',
+      );
     }
 
     if (
@@ -3902,44 +3948,53 @@ export class CodeReviewerService {
       .trim();
   }
 
-  private buildVisualPlanRetryChecklist(
+  private buildApprovedPlanRetryChecklist(
     componentPlan: ComponentPromptContext | undefined,
     error: string | undefined,
     componentName: string,
   ): string {
+    const sections = resolvePlannerSectionBlueprint({
+      visualPlan: componentPlan?.visualPlan,
+      surfacePlan: componentPlan?.surfacePlan,
+    });
+    const surfacePlan = componentPlan?.surfacePlan;
+    const hasPlannerBlockTree = Boolean(
+      componentPlan?.visualPlan?.blockTree?.length ||
+      surfacePlan?.sourceEvidence.blockTree?.length,
+    );
     if (
-      !componentPlan?.visualPlan?.sections?.length ||
-      !/visual plan obligations violated|required capability/i.test(error ?? '')
+      (sections.length === 0 && !surfacePlan) ||
+      !/visual plan obligations violated|required capability|surface-plan source evidence violated|obligation "/i.test(
+        error ?? '',
+      )
     ) {
       return '';
     }
 
     const lines = [
-      '### Visual plan sections to preserve exactly',
+      `### Approved planner contract for ${componentName}`,
+      ...(surfacePlan ? [buildSurfacePlanRepairContextNote(surfacePlan)] : []),
+      '### Approved plan sections to preserve exactly',
       'If a section below includes blueprint style or layout fields such as presentation, ctaStyle, secondaryCtaStyle, cardStyle, quoteStyle, authorStyle, imageRadius, imageAspectRatio, triggerStyle, slideHeight, dotsColor, arrowColor, arrowBackground, width, height, activeTab, variant, tabAlign, allowMultiple, enableToggle, defaultOpenItems, itemLayout, metaLayout, metaAlign, metaSeparator, itemGap, or metaGap, preserve and re-apply those exact values.',
       'Do not replace approved blueprint styles with prettier defaults, palette fallbacks, or generic token-based classes when the plan already provides exact visual values.',
       'If the approved plan includes source `customClassNames` on the section itself, CTA/link elements, images, card wrappers, avatar elements, or nested text nodes such as headings, quotes, subtitles, tab panels, accordion bodies, and modal copy, preserve those exact class tokens on the corresponding rendered JSX elements. Do not collapse them onto the wrong wrapper or delete them during fixes.',
-      ...(componentPlan.visualPlan.blockTree?.length
+      ...(hasPlannerBlockTree
         ? [
             'The approved plan also includes a preserved WordPress `blockTree`. Treat it as the structural source of truth for wrapper order, columns/column ownership, template-part boundaries, and sidebar shell placement.',
             'Do NOT flatten block wrappers into a simpler section stack during repair. Keep group nesting, main/aside ownership, and source-backed shell spacing intact while repairing the JSX.',
           ]
         : []),
-      ...(componentPlan.visualPlan.sections.some(
-        (section) => section.type === 'cover',
-      )
+      ...(sections.some((section) => section.type === 'cover')
         ? [
             'For important screenshot/composite cover imagery, preserve the full asset by default. Prefer object-contain or another non-cropping treatment unless the approved source is clearly intentionally cropped.',
           ]
         : []),
-      ...(componentPlan.visualPlan.sections.some(
-        (section) => section.type === 'carousel',
-      )
+      ...(sections.some((section) => section.type === 'carousel')
         ? [
             'If a carousel uses drag/swipe helpers or guard utilities, they must be attached to the rendered slider shell. Do not leave carousel interaction helpers declared but unused.',
           ]
         : []),
-      ...componentPlan.visualPlan.sections.map((section, index) => {
+      ...sections.map((section, index) => {
         const parts = [
           `- section ${index + 1}: type=${section.type}`,
           (section.debugKey ?? section.sectionKey)
@@ -4601,6 +4656,9 @@ export class CodeReviewerService {
     repoManifest?: RepoThemeManifest,
   ): string {
     const parts = [`${reason}: ${lastError ?? 'Unknown validation error.'}`];
+    const requiredLiterals = componentPlan?.surfacePlan
+      ? collectSurfacePlanRequiredLiterals(componentPlan.surfacePlan)
+      : [];
     const fixedSlug = componentPlan?.fixedSlug?.trim();
     if (fixedSlug) {
       const boundEndpoint = componentPlan?.dataNeeds?.includes('postDetail')
@@ -4619,7 +4677,15 @@ export class CodeReviewerService {
       }
       parts.push(bindingLines.join('\n'));
     }
-    const checklist = this.buildVisualPlanRetryChecklist(
+    if (requiredLiterals.length > 0) {
+      parts.push(
+        `Source literal reminders: ${requiredLiterals
+          .slice(0, 8)
+          .map((literal) => JSON.stringify(literal))
+          .join(' | ')}`,
+      );
+    }
+    const checklist = this.buildApprovedPlanRetryChecklist(
       componentPlan,
       lastError,
       componentName,

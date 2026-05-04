@@ -32,6 +32,8 @@ import type {
 import { getVisualPlanRenderAuthority } from '../react-generator/visual-plan.schema.js';
 import type { ThemeInteractionTarget } from '../block-parser/block-parser.service.js';
 import type { ComponentRenderContract } from '../planner/render-contract.schema.js';
+import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.js';
+import { collectSurfacePlanRequiredLiterals } from '../planner/planner-surface-plan.util.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
 import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
@@ -77,6 +79,7 @@ export interface CodeValidationContext {
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   visualPlan?: ComponentVisualPlan;
+  surfacePlan?: PlannerSurfacePlan;
   renderContract?: ComponentRenderContract;
 }
 
@@ -196,6 +199,7 @@ export class ValidatorService {
         requiredCustomClassNames: comp.requiredCustomClassNames,
         requiredCustomClassTargets: comp.requiredCustomClassTargets,
         visualPlan: comp.visualPlan,
+        surfacePlan: comp.surfacePlan,
         renderContract: comp.renderContract,
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
@@ -346,6 +350,18 @@ export class ValidatorService {
       return {
         isValid: false,
         error: visualPlanIssue,
+      };
+    }
+
+    const surfacePlanIssue = this.checkSurfacePlanObligations(
+      code,
+      context.surfacePlan,
+      context.componentName,
+    );
+    if (surfacePlanIssue) {
+      return {
+        isValid: false,
+        error: surfacePlanIssue,
       };
     }
 
@@ -1345,8 +1361,17 @@ export class ValidatorService {
       renderContract.structure.renderMode === 'block-tree';
     const issues: string[] = [];
     const normalizedCode = this.normalizeForTextMatch(code);
+    const semanticCoverageSourceNodeIds = strictBlockTree
+      ? []
+      : this.collectSemanticCoverageSourceNodeIds(
+          renderContract.fallback?.sections ?? visualPlan?.sections,
+        );
     const auditSignals = this.collectRenderContractAuditSignals(
       renderContract.sourceModel.blockTree,
+      {
+        skipCoveredContentSignals: !strictBlockTree,
+        semanticCoverageSourceNodeIds,
+      },
     );
     const textLimit = strictBlockTree ? 8 : 4;
     const assetLimit = strictBlockTree ? 6 : 3;
@@ -1406,7 +1431,13 @@ export class ValidatorService {
     ].join('\n')}`;
   }
 
-  private collectRenderContractAuditSignals(nodes: readonly BlockNode[]): {
+  private collectRenderContractAuditSignals(
+    nodes: readonly BlockNode[],
+    options?: {
+      skipCoveredContentSignals?: boolean;
+      semanticCoverageSourceNodeIds?: readonly string[];
+    },
+  ): {
     staticTexts: string[];
     imageSources: string[];
     hrefs: string[];
@@ -1420,10 +1451,21 @@ export class ValidatorService {
     const columnWidths = new Set<string>();
     let requiresNavigationShell = false;
     let requiresSearchShell = false;
+    const semanticCoverageSourceNodeIds = new Set(
+      options?.semanticCoverageSourceNodeIds
+        ?.map((value) => value.trim())
+        .filter(Boolean) ?? [],
+    );
 
     const visit = (node: BlockNode, dynamicBranch = false) => {
       const currentBranchIsDynamic =
         dynamicBranch || this.isDynamicRenderContractNode(node);
+      const nodeSemanticallyCovered =
+        options?.skipCoveredContentSignals === true &&
+        this.isRenderContractNodeSemanticallyCovered(
+          node,
+          semanticCoverageSourceNodeIds,
+        );
 
       if (
         node.kind === 'navigation' ||
@@ -1443,7 +1485,7 @@ export class ValidatorService {
         columnWidths.add(columnWidth);
       }
 
-      if (!currentBranchIsDynamic) {
+      if (!currentBranchIsDynamic && !nodeSemanticallyCovered) {
         const textCandidate = this.extractRenderContractStaticText(node);
         if (textCandidate) {
           staticTexts.add(textCandidate);
@@ -1475,6 +1517,64 @@ export class ValidatorService {
       requiresNavigationShell,
       requiresSearchShell,
     };
+  }
+
+  private collectSemanticCoverageSourceNodeIds(
+    sections: readonly SectionPlan[] | undefined,
+  ): string[] {
+    const sourceNodeIds = new Set<string>();
+    for (const section of sections ?? []) {
+      const push = (value?: string | null) => {
+        const normalized = value?.trim();
+        if (!normalized) return;
+        sourceNodeIds.add(normalized);
+      };
+      push(section.sourceRef?.sourceNodeId);
+      for (const value of section.obligation?.sourceEvidence?.sourceNodeIds ??
+        []) {
+        push(value);
+      }
+    }
+    return [...sourceNodeIds];
+  }
+
+  private isRenderContractNodeSemanticallyCovered(
+    node: BlockNode,
+    sourceNodeIds: ReadonlySet<string>,
+  ): boolean {
+    if (sourceNodeIds.size === 0) return false;
+    const nodeId = node.sourceRef?.sourceNodeId?.trim();
+    if (!nodeId) return false;
+    const parsedNodeId = this.parseRenderContractSourceNodeId(nodeId);
+    if (!parsedNodeId) return false;
+
+    for (const candidate of sourceNodeIds) {
+      const parsedCandidate = this.parseRenderContractSourceNodeId(candidate);
+      if (!parsedCandidate) continue;
+      if (parsedCandidate.scope !== parsedNodeId.scope) continue;
+      if (
+        parsedNodeId.path === parsedCandidate.path ||
+        parsedNodeId.path.startsWith(`${parsedCandidate.path}.`)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private parseRenderContractSourceNodeId(
+    value: string,
+  ): { scope: string; path: string } | null {
+    const segments = value
+      .split('::')
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length < 3) return null;
+    const scope = segments[0];
+    const path = segments.slice(2).join('::');
+    if (!scope || !path) return null;
+    return { scope, path };
   }
 
   private isDynamicRenderContractNode(node: BlockNode): boolean {
@@ -3210,6 +3310,37 @@ export class ValidatorService {
       ...sectionAuditLines.slice(0, 6),
       ...detailLines,
     ].join('\n')}`;
+  }
+
+  private checkSurfacePlanObligations(
+    code: string,
+    surfacePlan?: PlannerSurfacePlan,
+    componentName?: string,
+  ): string | null {
+    if (!surfacePlan) return null;
+    if (surfacePlan.contract.componentType !== 'page') return null;
+    if (surfacePlan.contract.isDetail) return null;
+
+    const requiredLiterals = collectSurfacePlanRequiredLiterals(surfacePlan);
+    if (requiredLiterals.length === 0) return null;
+
+    const missing = requiredLiterals.filter(
+      (literal) => !this.codeContainsLiteral(code, literal),
+    );
+    if (missing.length === 0) return null;
+
+    const label = componentName ?? surfacePlan.componentName;
+    const mustKeep =
+      surfacePlan.acceptance.mustKeep.slice(0, 4).join(' | ') || 'none';
+    return `Surface-plan source evidence violated:
+component=${label}
+authority=${surfacePlan.authority.level}
+pageIntent=${surfacePlan.pageIntent.kind}
+mustKeep=${mustKeep}
+    missingSourceLiterals=${missing
+      .slice(0, 6)
+      .map((value) => JSON.stringify(value))
+      .join(' | ')}`;
   }
 
   private buildSectionAuditLine(input: {

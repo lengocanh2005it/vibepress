@@ -3,6 +3,7 @@ import type { ThemeTokens } from '../../block-parser/block-parser.service.js';
 import type { RepoThemeManifest } from '../../repo-analyzer/repo-analyzer.service.js';
 import { buildRepoManifestContextNote } from '../../repo-analyzer/repo-manifest-context.js';
 import { extractStaticImageSources } from '../../../../common/utils/theme-asset.util.js';
+import type { PlannerSurfacePlan } from '../../planner/planner-surface-plan.schema.js';
 import type {
   ColorPalette,
   ComponentVisualPlan,
@@ -33,6 +34,7 @@ export function buildVisualPlanPrompt(input: {
   sourceAnalysis?: string;
   sourceBackedAuxiliaryLabels?: string[];
   sourceWidgetHints?: string[];
+  surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed ordered draft sections from WpNodeToSectionsMapper. When present,
    *  AI must preserve this order and only fill in missing content fields. */
   draftSections?: SectionPlan[];
@@ -51,6 +53,7 @@ export function buildVisualPlanPrompt(input: {
     sourceAnalysis,
     sourceBackedAuxiliaryLabels,
     sourceWidgetHints,
+    surfacePlan,
     draftSections,
     editRequestContextNote,
   } = input;
@@ -250,7 +253,7 @@ prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|pa
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
-sidebar:      { title?, widgets: [{ kind: author-bio|categories|navigation|pages-list|recent-posts, ... }], maxItems? }
+sidebar:      { title?, widgets: [{ kind: search|author-bio|categories|navigation|pages-list|recent-posts, ... }], maxItems? }
 modal:        { triggerText?, triggerStyle?, heading?, headingStyle?, body?, bodyStyle?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
 tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
@@ -262,7 +265,8 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - Treat the selected WordPress source, theme files under \`themes/**\`, and interactive plugin contracts from \`plugins/ultimate-addons-for-gutenberg\` / Spectra as the primary source of truth. Prefer extracting exact structure from those sources over inferring a cleaner or more generic composition.
 - When repo hints expose concrete wrapper classes, variant names, item classes, alignment classes, or widget attr keys from Spectra/UAGB plugin source, preserve that same widget family in the plan instead of collapsing it into generic hero/card/media-text sections.
 - If theme or plugin source is sparse, keep the plan sparse. Do NOT compensate by inventing extra wrapper sections, promo rows, centered hero treatments, or broader containers.
-- When a "## Detected section order" block is present in the user message: treat its "sections" array as the AUTHORITATIVE order. Fill in content fields but do NOT reorder or remove sections.
+- When a "## Surface plan" block is present in the user message: treat it as the PRIMARY planning brief for page-level composition. Follow its contract, authority policy, source evidence, composition hints, and acceptance rules before applying any fallback heuristics.
+- When a "## Detected section order" block is present in the user message: for strict/non-page flows, treat its "sections" array as the authoritative order. For guided page flows, treat it as deterministic source evidence/fallback that should preserve source-backed section identity and widgets even when light wrapper recomposition is allowed by the surface plan authority.
 - When deterministic draft sections are provided, keep a 1:1 mapping between draft entries and output \`sections\` entries whenever adjacent draft entries have different \`debugKey\`/legacy \`sectionKey\` labels or different \`sourceRef.sourceNodeId\`.
 - If a deterministic draft section is \`prose-block\`, preserve its \`sourceSegments\` literally and in order. Do NOT summarize them into a shorter hero/cover/media-text replacement.
 - Do NOT merge two adjacent draft sections into one \`hero\`, \`cover\`, or \`media-text\` section just because they look visually related.
@@ -291,7 +295,7 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - When \`pageDetail\` is in dataNeeds: the WordPress page API exposes \`id, title, content, slug, parentId, menuOrder, template, featuredImage\`. Do not plan UI that requires post-only fields (author, categories, tags, date, excerpt, comments) on **pages** — those apply to posts only.
 - The approved component contract is authoritative. Do NOT invent sections or data access outside that contract.
 - If the approved component type is \`page\`, NEVER emit \`navbar\` or \`footer\` sections. Shared site chrome belongs to dedicated layout partials, not pages.
-- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must stay content-only. Use only widget kinds like \`pages-list\`, \`recent-posts\`, or \`categories\`. Do NOT use \`author-bio\` or \`navigation\` for page sidebars.
+- If the approved component type is \`page\` and you emit a \`sidebar\` section, that sidebar must stay content-only. Use only widget kinds like \`search\`, \`pages-list\`, \`recent-posts\`, or \`categories\`. Do NOT use \`author-bio\` or \`navigation\` for page sidebars.
 - For page/listing/body components, do NOT add trailing utility/footer/sidebar-like sections or headings such as ${formatInventedAuxiliarySectionLabels()} unless that EXACT label is already source-backed in the scoped template source or deterministic draft sections supplied in the user prompt.
 - Emit \`post-content\` only when the approved dataNeeds include \`postDetail\`. Emit \`page-content\` only when the approved dataNeeds include \`pageDetail\`.
 - Emit \`comments\` only when the approved dataNeeds include \`postDetail\` or \`comments\`.
@@ -310,7 +314,8 @@ carousel:     { slides: [{ heading?, subheading?, imageSrc?, imageAlt?, cta? }],
 - For Spectra/UAGB widgets, prefer exact source attrs and plugin contract cues over generic defaults. Examples: preserve slider arrows/dots/autoplay/effect, modal width/height/overlay-close behavior, tabs variant/alignment, accordion toggle rules, and source-backed inner wrappers.
 - Output ONLY valid JSON — no markdown fences, no explanation.`;
 
-  const draftHint = buildDraftSectionsHint(draftSections);
+  const surfacePlanHint = buildSurfacePlanHint(surfacePlan);
+  const draftHint = buildDraftSectionsHint(draftSections, surfacePlan);
 
   const userPrompt = `## Component to plan: ${componentName}
 
@@ -324,7 +329,7 @@ ${palette}
 
 ${imageHints}
 
-${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}${draftHint ? `${draftHint}\n\n` : ''}## Template source
+${editRequestContextNote ? `${editRequestContextNote}\n\n` : ''}${surfacePlanHint ? `${surfacePlanHint}\n\n` : ''}${draftHint ? `${draftHint}\n\n` : ''}## Template source
 
 ${templateSource}
 
@@ -337,23 +342,143 @@ Return a single valid JSON object matching ComponentVisualPlan. No markdown, no 
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function buildDraftSectionsHint(draftSections?: SectionPlan[]): string {
-  if (!draftSections || draftSections.length === 0) return '';
+function buildSurfacePlanHint(surfacePlan?: PlannerSurfacePlan): string {
+  if (!surfacePlan) return '';
+
+  const compactPlan = {
+    kind: surfacePlan.kind,
+    contract: surfacePlan.contract,
+    authority: surfacePlan.authority,
+    pageIntent: surfacePlan.pageIntent,
+    sourceEvidence: {
+      planningSourceLabel: surfacePlan.sourceEvidence.planningSourceLabel,
+      planningSourceFile: surfacePlan.sourceEvidence.planningSourceFile,
+      sourceFacts: surfacePlan.sourceEvidence.sourceFacts,
+      primaryHeadings: surfacePlan.sourceEvidence.primaryHeadings.slice(0, 6),
+      primaryImages: surfacePlan.sourceEvidence.primaryImages.slice(0, 6),
+      paragraphSnippets: surfacePlan.sourceEvidence.paragraphSnippets?.slice(
+        0,
+        4,
+      ),
+      navigationLabels: surfacePlan.sourceEvidence.navigationLabels?.slice(
+        0,
+        8,
+      ),
+      contentClusters: surfacePlan.sourceEvidence.contentClusters
+        .slice(0, 10)
+        .map((cluster) => ({
+          id: cluster.id,
+          kind: cluster.kind,
+          importance: cluster.importance,
+          itemCountHint: cluster.itemCountHint,
+          sourceRef: cluster.sourceRef,
+          textEvidence: cluster.textEvidence?.slice(0, 3),
+          imageEvidence: cluster.imageEvidence?.slice(0, 2),
+          ctaEvidence: cluster.ctaEvidence?.slice(0, 2),
+          customClassNames: cluster.customClassNames?.slice(0, 6),
+        })),
+      wrapperFacts: surfacePlan.sourceEvidence.wrapperFacts
+        .slice(0, 8)
+        .map((wrapper) => ({
+          id: wrapper.id,
+          kind: wrapper.kind,
+          importance: wrapper.importance,
+          sourceRef: wrapper.sourceRef,
+          hints: wrapper.hints?.slice(0, 4),
+          customClassNames: wrapper.customClassNames?.slice(0, 6),
+        })),
+      widgets: surfacePlan.sourceEvidence.widgets.map((widget) => ({
+        kind: widget.kind,
+        required: widget.required,
+        sourceRef: widget.sourceRef,
+        customClassNames: widget.customClassNames?.slice(0, 6),
+      })),
+      representativeBindings:
+        surfacePlan.sourceEvidence.representativeBindings?.slice(0, 4),
+      evidenceNotes: surfacePlan.sourceEvidence.evidenceNotes?.slice(0, 8),
+      blockTreeNodeCount: surfacePlan.sourceEvidence.blockTree?.length,
+    },
+    designEvidence: {
+      importantClassNames: surfacePlan.designEvidence.importantClassNames.slice(
+        0,
+        12,
+      ),
+      spacingRhythm: surfacePlan.designEvidence.spacingRhythm,
+      visualToneHints: surfacePlan.designEvidence.visualToneHints.slice(0, 8),
+      tokens: {
+        palette: surfacePlan.designEvidence.tokens.palette,
+        typography: surfacePlan.designEvidence.tokens.typography,
+        hasBlockStyles: Boolean(surfacePlan.designEvidence.tokens.blockStyles),
+      },
+    },
+    compositionHints: surfacePlan.compositionHints,
+    acceptance: surfacePlan.acceptance,
+    ...(surfacePlan.kind === 'home-page'
+      ? {
+          heroEvidence: surfacePlan.heroEvidence,
+          feedEvidence: surfacePlan.feedEvidence,
+          brandEvidence: surfacePlan.brandEvidence,
+          homepageRules: surfacePlan.homepageRules,
+        }
+      : {}),
+    ...(surfacePlan.kind === 'post-detail'
+      ? {
+          postMeta: surfacePlan.postMeta,
+          postBody: surfacePlan.postBody,
+          postLayout: surfacePlan.postLayout,
+          articleRules: surfacePlan.articleRules,
+        }
+      : {}),
+  };
 
   const lines = [
-    '## Detected section order (deterministic, from WordPress block tree)',
-    'The following sections were detected in the EXACT order they appear in the WordPress template.',
-    'You MUST preserve this order in the `sections` array.',
-    'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
-    'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
-    'You MUST NOT reorder, merge, split, or drop sections from this list.',
-    'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
-    'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
+    '## Surface plan (primary evidence-guided brief)',
+    'Treat this surface plan as the primary blueprint for section families, wrapper composition, and what must stay source-backed.',
+    `Authority level: \`${surfacePlan.authority.level}\` (${surfacePlan.authority.reason})`,
+    `Page intent: \`${surfacePlan.pageIntent.kind}\` (confidence ${surfacePlan.pageIntent.confidence})`,
+    'Follow `acceptance.mustKeep` and `acceptance.mustNotInvent` strictly. Use `acceptance.mayRecompose` only within the authority policy.',
+    'If legacy draft sections below feel more rigid than this surface plan, prefer the surface plan for page-level composition while still preserving source-backed section identity, widgets, and content evidence.',
     '',
     '```json',
-    JSON.stringify(draftSections, null, 2),
+    JSON.stringify(compactPlan, null, 2),
     '```',
   ];
+
+  return lines.join('\n');
+}
+
+function buildDraftSectionsHint(
+  draftSections?: SectionPlan[],
+  surfacePlan?: PlannerSurfacePlan,
+): string {
+  if (!draftSections || draftSections.length === 0) return '';
+
+  const strictDraftOrder =
+    !surfacePlan ||
+    surfacePlan.contract.componentType !== 'page' ||
+    surfacePlan.authority.level === 'strict';
+
+  const lines = strictDraftOrder
+    ? [
+        '## Detected section order (deterministic, from WordPress block tree)',
+        'The following sections were detected in the EXACT order they appear in the WordPress template.',
+        'You MUST preserve this order in the `sections` array.',
+        'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+        'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
+        'You MUST NOT reorder, merge, split, or drop sections from this list.',
+        'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
+        'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section.',
+      ]
+    : [
+        '## Legacy draft sections (deterministic evidence / fallback)',
+        'These draft sections are a deterministic extraction from the WordPress source.',
+        'For page-level planning, treat the surface plan above as the primary brief and use this draft list as section-by-section evidence and fallback structure.',
+        'Keep a strong 1:1 correspondence when a draft entry clearly maps to a source-backed section, widget, or unique `sourceRef.sourceNodeId`.',
+        'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into the matching output section. Do NOT replace them with palette defaults.',
+        'You SHOULD NOT drop source-backed sections or merge adjacent entries with different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId` unless the surface plan authority clearly permits light recomposition and the same evidence survives in the final output.',
+        'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section unless one shared source wrapper proves that relationship.',
+      ];
+  lines.push('', '```json', JSON.stringify(draftSections, null, 2), '```');
   return lines.join('\n');
 }
 
@@ -912,6 +1037,25 @@ function sanitizeSidebarWidgets(rawWidgets: unknown): SidebarWidget[] {
         ? (rawWidget as { description: string }).description.trim()
         : undefined;
     switch (kind) {
+      case 'search': {
+        const placeholder =
+          typeof (rawWidget as { placeholder?: unknown }).placeholder ===
+          'string'
+            ? (rawWidget as { placeholder: string }).placeholder.trim()
+            : undefined;
+        const buttonLabel =
+          typeof (rawWidget as { buttonLabel?: unknown }).buttonLabel ===
+          'string'
+            ? (rawWidget as { buttonLabel: string }).buttonLabel.trim()
+            : undefined;
+        widgets.push({
+          kind,
+          ...(title ? { title } : {}),
+          ...(placeholder ? { placeholder } : {}),
+          ...(buttonLabel ? { buttonLabel } : {}),
+        });
+        break;
+      }
       case 'author-bio':
         widgets.push({
           kind,
@@ -1474,7 +1618,9 @@ function validateSectionDetailed(
                 ? item.label.trim()
                 : typeof item.title === 'string' && item.title.trim()
                   ? item.title.trim()
-                  : '';
+                  : typeof item.question === 'string' && item.question.trim()
+                    ? item.question.trim()
+                    : '';
           const body =
             typeof item.body === 'string' && item.body.trim()
               ? item.body.trim()
@@ -1482,7 +1628,9 @@ function validateSectionDetailed(
                 ? item.content.trim()
                 : typeof item.text === 'string' && item.text.trim()
                   ? item.text.trim()
-                  : '';
+                  : typeof item.answer === 'string' && item.answer.trim()
+                    ? item.answer.trim()
+                    : '';
           if (!heading || !body) return null;
           return { heading, body };
         })
@@ -1785,6 +1933,7 @@ export function sanitizeSectionsForContract(
         let changed = false;
         const allowedWidgets = (next.widgets ?? []).filter(
           (widget) =>
+            widget.kind === 'search' ||
             widget.kind === 'pages-list' ||
             widget.kind === 'recent-posts' ||
             widget.kind === 'categories',

@@ -202,18 +202,21 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
   if (
     componentPlan.type === 'page' &&
     componentPlan.isDetail !== true &&
-    isEligibleBlockTreeListingTemplate(componentPlan)
+    isEligibleBlockTreeListingTemplate(componentPlan, draftBlockTree)
   ) {
-    const sections = buildBlockTreeDrivenListingSections({
+    const result = buildBlockTreeDrivenListingSections({
       componentPlan,
       draftBlockTree,
       draftSections,
+      content,
+      layout,
     });
-    if (sections?.length) {
+    if (result?.sections?.length) {
       return {
         ...base,
         ...authorityDecorators,
-        sections,
+        layout: result.layout ?? layout,
+        sections: result.sections,
       };
     }
   }
@@ -243,7 +246,11 @@ export function shouldBypassCoverageAuditForBlockTreeListingPlan(
   componentPlan: BlockTreePlannerComponentPlan,
   sections: SectionPlan[],
 ): boolean {
-  if (!isEligibleBlockTreeListingTemplate(componentPlan)) {
+  if (
+    componentPlan.type !== 'page' ||
+    componentPlan.isDetail === true ||
+    !toVisualDataNeeds(componentPlan.dataNeeds).includes('posts')
+  ) {
     return false;
   }
   return sections.some(
@@ -253,10 +260,11 @@ export function shouldBypassCoverageAuditForBlockTreeListingPlan(
 
 export function shouldShortCircuitBlockTreeVisualPlan(
   componentPlan: BlockTreePlannerComponentPlan,
+  draftBlockTree?: BlockNode[],
 ): boolean {
   return (
     isEligibleBlockTreeSharedPartial(componentPlan) ||
-    isEligibleBlockTreeListingTemplate(componentPlan) ||
+    isEligibleBlockTreeListingTemplate(componentPlan, draftBlockTree) ||
     isEligibleTransactionalTemplateByName(componentPlan) ||
     isEligibleTransactionalByComponentName(componentPlan)
   );
@@ -419,18 +427,41 @@ function slugifyLabel(value: string): string {
 
 function isEligibleBlockTreeListingTemplate(
   componentPlan: BlockTreePlannerComponentPlan,
+  draftBlockTree?: BlockNode[],
 ): boolean {
   if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
+    return false;
+  }
+  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+  if (!dataNeeds.includes('posts')) {
     return false;
   }
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
-  if (!['archive', 'index', 'search'].includes(normalizedTemplate)) {
+  if (['archive', 'index', 'search'].includes(normalizedTemplate)) {
+    return true;
+  }
+
+  if (!draftBlockTree?.length) {
     return false;
   }
-  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
-  return dataNeeds.includes('posts');
+
+  const shell = inspectDetailShellFromBlockTree(draftBlockTree);
+  if (!shell.hasSidebar) {
+    return false;
+  }
+
+  const mainNodes = collectBlockNodesInOrder(
+    draftBlockTree,
+    shell.sidebarColumnSourceNodeId
+      ? new Set([shell.sidebarColumnSourceNodeId])
+      : undefined,
+  );
+
+  return mainNodes.some((node) =>
+    ['query', 'latest-posts'].includes(node.kind),
+  );
 }
 
 function isEligibleBlockTreeTransactionalTemplate(
@@ -607,10 +638,14 @@ function buildTransactionalFallbackProseSection(
   draftBlockTree: BlockNode[],
 ): ProseBlockSection | undefined {
   const segments = collectTransactionalSourceSegments(draftBlockTree);
-  if (segments.length === 0) return undefined;
+  const fallbackSegments =
+    segments.length > 0
+      ? segments
+      : buildTransactionalPlaceholderSegments(draftBlockTree);
+  if (fallbackSegments.length === 0) return undefined;
 
   const sourceRef =
-    segments.find((segment) => segment.sourceRef)?.sourceRef ??
+    fallbackSegments.find((segment) => segment.sourceRef)?.sourceRef ??
     collectBlockNodesInOrder(draftBlockTree).find((node) => node.sourceRef)
       ?.sourceRef;
   const customClassNames = Array.from(
@@ -624,12 +659,64 @@ function buildTransactionalFallbackProseSection(
   return {
     type: 'prose-block',
     shellVariant: 'wide',
-    sourceSegments: segments,
+    sourceSegments: fallbackSegments,
     ...(sourceRef ? { sourceRef } : {}),
     ...(customClassNames.length > 0 ? { customClassNames } : {}),
     debugKey: 'commerce-flow-0',
     sectionKey: 'commerce-flow-0',
   };
+}
+
+function buildTransactionalPlaceholderSegments(
+  nodes: BlockNode[],
+): SourceSegment[] {
+  const transactionalNodes = collectBlockNodesInOrder(nodes).filter((node) =>
+    /^woocommerce\/(cart|checkout|my-account|order-pay|order-received)(?:$|-)/i.test(
+      node.blockName,
+    ),
+  );
+  if (transactionalNodes.length === 0) return [];
+
+  const labels = Array.from(
+    new Set(
+      transactionalNodes
+        .map((node) => humanizeTransactionalBlockName(node.blockName))
+        .filter((label): label is string => Boolean(label)),
+    ),
+  ).slice(0, 6);
+  if (labels.length === 0) return [];
+
+  return labels.map((label, index) => {
+    const sourceRef = transactionalNodes[index]?.sourceRef;
+    if (index === 0) {
+      return {
+        type: 'heading',
+        text: label,
+        level: 2,
+        ...(sourceRef ? { sourceRef } : {}),
+      } satisfies SourceSegment;
+    }
+    return {
+      type: 'paragraph',
+      text: label,
+      html: label,
+      ...(sourceRef ? { sourceRef } : {}),
+    } satisfies SourceSegment;
+  });
+}
+
+function humanizeTransactionalBlockName(blockName: string): string | null {
+  const normalized = String(blockName ?? '')
+    .trim()
+    .toLowerCase();
+  if (!normalized.startsWith('woocommerce/')) return null;
+  const slug = normalized.replace(/^woocommerce\//, '');
+  const label = slug
+    .replace(/-block$/i, '')
+    .replace(/-/g, ' ')
+    .trim();
+  if (!label) return null;
+  return label.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function collectTransactionalSourceSegments(
@@ -744,7 +831,9 @@ function buildBlockTreeDrivenListingSections(input: {
   componentPlan: BlockTreePlannerComponentPlan;
   draftBlockTree: BlockNode[];
   draftSections?: SectionPlan[];
-}): SectionPlan[] | undefined {
+  content: DbContentResult;
+  layout: LayoutTokens;
+}): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
   const { componentPlan, draftBlockTree, draftSections } = input;
   if (!draftBlockTree.length) {
     return undefined;
@@ -753,7 +842,13 @@ function buildBlockTreeDrivenListingSections(input: {
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
-  const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
+  const shell = inspectDetailShellFromBlockTree(draftBlockTree);
+  const orderedNodes = collectBlockNodesInOrder(
+    draftBlockTree,
+    shell.sidebarColumnSourceNodeId
+      ? new Set([shell.sidebarColumnSourceNodeId])
+      : undefined,
+  );
   const queryNode = orderedNodes.find((node) =>
     ['query', 'latest-posts'].includes(node.kind),
   );
@@ -765,6 +860,13 @@ function buildBlockTreeDrivenListingSections(input: {
   const patternNodes = orderedNodes.filter((node) => node.kind === 'pattern');
 
   const sections: SectionPlan[] = [];
+  const leadCoverSections = (draftSections ?? []).filter(
+    (section): section is Extract<SectionPlan, { type: 'cover' }> =>
+      section.type === 'cover' &&
+      !sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId),
+  );
+  sections.push(...leadCoverSections);
+
   const searchSection = draftSections?.find(
     (section): section is SearchSection => section.type === 'search',
   );
@@ -806,7 +908,34 @@ function buildBlockTreeDrivenListingSections(input: {
     );
   }
 
-  return sections.length > 0 ? sections : undefined;
+  if (shell.sidebarNodes?.length) {
+    sections.push(
+      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
+        paddingStyle: shell.shellPaddingStyle,
+        marginStyle: shell.shellMarginStyle,
+        gapStyle: shell.shellGapStyle,
+        sourceRef: shell.shellSourceRef,
+        customClassNames: shell.shellCustomClassNames,
+      }),
+    );
+  }
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return {
+    sections,
+    layout: shell.hasSidebar
+      ? {
+          ...input.layout,
+          contentLayout:
+            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
+          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
+          sidebarScope: 'all-content',
+        }
+      : input.layout,
+  };
 }
 
 function buildBlockTreeDrivenListingSearchSection(input: {
@@ -879,6 +1008,31 @@ function pickFirstBlockSourceRef(
     if (node?.sourceRef) return node.sourceRef;
   }
   return undefined;
+}
+
+function sectionBelongsToSourceSubtree(
+  section: SectionPlan,
+  sourceNodeIdPrefix?: string,
+): boolean {
+  if (!sourceNodeIdPrefix?.trim()) {
+    return false;
+  }
+
+  const matchesPrefix = (value: string | undefined): boolean =>
+    typeof value === 'string' && value.startsWith(sourceNodeIdPrefix);
+
+  if (
+    matchesPrefix(section.sourceRef?.sourceNodeId) ||
+    matchesPrefix(section.sourceRef?.parentSourceNodeId)
+  ) {
+    return true;
+  }
+
+  return (
+    section.obligation?.sourceEvidence?.sourceNodeIds?.some((value) =>
+      matchesPrefix(value),
+    ) ?? false
+  );
 }
 
 function buildBlockTreeDrivenPostDetailSections(input: {

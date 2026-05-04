@@ -687,7 +687,7 @@ function mapNode(node: WpNode, siblings: WpNode[]): SectionPlan[] {
   }
 
   // Accordion / FAQ / content-toggle: preserve panel headings + bodies
-  if (/\b(accordion|faq|content-toggle|toggle)\b/.test(block)) {
+  if (isAccordionLikeBlockName(block)) {
     return toMappedSections(mapAccordionLike(node), node);
   }
 
@@ -966,6 +966,11 @@ function mapGroup(node: WpNode, _siblings: WpNode[]): SectionPlan[] {
   if (metadataName.includes('testimonial') || isLikelyTestimonialGroup(node)) {
     const testimonial = buildTestimonialFromGroup(node, children);
     if (testimonial) return toMappedSections(testimonial, node);
+  }
+
+  const accordionSection = buildAccordionFromGroup(node, children);
+  if (accordionSection) {
+    return toMappedSections(accordionSection, node);
   }
 
   // If any UAGB interactive block (slider/modal/tabs) is nested anywhere in the
@@ -2036,20 +2041,20 @@ function decodeBasicHtmlEntities(value: string): string {
 }
 
 function mapAccordionLike(node: WpNode): AccordionSection | null {
-  const panelChildren = (node.children ?? []).filter((child) =>
-    /\b(accordion|faq|content-toggle|toggle)\b/.test(child.block),
-  );
-  const sourcePanels =
-    panelChildren.length > 0 ? panelChildren : (node.children ?? []);
+  const sourcePanels = collectAccordionPanelNodes(node);
 
   const items = sourcePanels
     .map((panel) => {
       const flat = flattenChildren(panel);
+      const detailsNode = isAccordionLikeBlockName(panel.block)
+        ? panel
+        : flat.find((c) => isAccordionLikeBlockName(c.block));
       const headingNode = flat.find(
         (c) => c.block === 'core/heading' || c.block === 'heading',
       );
       const heading =
         headingNode?.text ??
+        detailsNode?.text ??
         (panel.params?.title as string | undefined) ??
         (panel.params?.heading as string | undefined) ??
         (panel.params?.label as string | undefined) ??
@@ -2101,7 +2106,12 @@ function mapAccordionLike(node: WpNode): AccordionSection | null {
 
   if (items.length === 0) return null;
 
+  const titleNode = findFirstByBlock(node.children ?? [], [
+    'core/heading',
+    'heading',
+  ]);
   const title =
+    titleNode?.text ??
     (node.params?.title as string | undefined) ??
     (node.params?.heading as string | undefined);
   const allowMultiple =
@@ -2136,6 +2146,40 @@ function mapAccordionLike(node: WpNode): AccordionSection | null {
     ...(defaultOpenItems ? { defaultOpenItems } : {}),
     ...(variant ? { variant } : {}),
   };
+}
+
+function buildAccordionFromGroup(
+  node: WpNode,
+  children: WpNode[],
+): AccordionSection | null {
+  const metadataName = String(
+    (node.params?.metadata as Record<string, string> | undefined)?.name ?? '',
+  ).toLowerCase();
+  const panelNodes = collectAccordionPanelNodes(node);
+  const hasHint =
+    /\b(accordion|faq|details|content-toggle|toggle)\b/.test(metadataName) ||
+    panelNodes.length >= 2;
+  if (!hasHint || panelNodes.length === 0) return null;
+  if (!children.some((child) => hasAccordionPanelDescendant(child)))
+    return null;
+  return mapAccordionLike(node);
+}
+
+function collectAccordionPanelNodes(node: WpNode): WpNode[] {
+  const panels: WpNode[] = [];
+  const visit = (candidate: WpNode) => {
+    if (isAccordionLikeBlockName(candidate.block)) {
+      panels.push(candidate);
+      return;
+    }
+    for (const child of candidate.children ?? []) {
+      visit(child);
+    }
+  };
+  for (const child of node.children ?? []) {
+    visit(child);
+  }
+  return panels;
 }
 
 function mapUagbModal(node: WpNode): ModalSection | null {
@@ -3351,6 +3395,21 @@ function findFirstByBlock(nodes: WpNode[], blocks: string[]): WpNode | null {
     }
   }
   return null;
+}
+
+function isAccordionLikeBlockName(block?: string): boolean {
+  return /\b(accordion|faq|content-toggle|toggle|details)\b/.test(
+    String(block ?? '')
+      .trim()
+      .toLowerCase(),
+  );
+}
+
+function hasAccordionPanelDescendant(node: WpNode): boolean {
+  if (isAccordionLikeBlockName(node.block)) return true;
+  return (node.children ?? []).some((child) =>
+    hasAccordionPanelDescendant(child),
+  );
 }
 
 function isSpacerBlock(block: string): boolean {
