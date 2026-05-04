@@ -16,7 +16,7 @@ interface Migration {
 }
 
 function fallback(id: string) {
-  return `https://picsum.photos/seed/${id}/800/450`;
+  return `https://picsum.photos/seed/${id}/1600/900`;
 }
 
 function formatDate(iso: string) {
