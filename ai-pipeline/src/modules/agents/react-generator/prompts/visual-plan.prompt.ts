@@ -1289,16 +1289,20 @@ function validateSectionDetailed(
       if (![2, 3, 4].includes(raw.columns)) raw.columns = 3;
       // Ensure each card has heading
       raw.cards = (raw.cards as any[])
-        .map((c) => {
+        .map((c, idx) => {
           if (!c || typeof c !== 'object') return null;
-          const heading =
+          let heading =
             typeof c.heading === 'string' && c.heading.trim()
               ? c.heading.trim()
               : typeof c.title === 'string' && c.title.trim()
                 ? c.title.trim()
                 : typeof c.label === 'string' && c.label.trim()
                   ? c.label.trim()
-                  : '';
+                  : typeof c.name === 'string' && c.name.trim()
+                    ? c.name.trim()
+                    : typeof c.header === 'string' && c.header.trim()
+                      ? c.header.trim()
+                      : '';
           const body =
             typeof c.body === 'string' && c.body.trim()
               ? c.body.trim()
@@ -1309,7 +1313,10 @@ function validateSectionDetailed(
                   : typeof c.text === 'string' && c.text.trim()
                     ? c.text.trim()
                     : '';
-          if (!heading) return null;
+          if (!heading) {
+            if (c.imageSrc || body) heading = `Card ${idx + 1}`;
+            else return null;
+          }
           c.heading = heading;
           c.body = body;
           return c;
@@ -1633,9 +1640,12 @@ function validateSectionDetailed(
         };
       }
       raw.items = (raw.items as any[])
-        .map((item) => {
+        .map((item, idx) => {
+          if (typeof item === 'string') {
+            return { heading: item.trim() || `FAQ ${idx + 1}`, body: '' };
+          }
           if (!item || typeof item !== 'object') return null;
-          const heading =
+          let heading =
             typeof item.heading === 'string' && item.heading.trim()
               ? item.heading.trim()
               : typeof item.label === 'string' && item.label.trim()
@@ -1644,7 +1654,11 @@ function validateSectionDetailed(
                   ? item.title.trim()
                   : typeof item.question === 'string' && item.question.trim()
                     ? item.question.trim()
-                    : '';
+                    : typeof item.header === 'string' && item.header.trim()
+                      ? item.header.trim()
+                      : typeof item.name === 'string' && item.name.trim()
+                        ? item.name.trim()
+                        : '';
           const body =
             typeof item.body === 'string' && item.body.trim()
               ? item.body.trim()
@@ -1658,7 +1672,11 @@ function validateSectionDetailed(
                         item.description.trim()
                       ? item.description.trim()
                       : '';
-          if (!heading) return null;
+          if (!heading) {
+            if (body)
+              heading = body.length > 30 ? body.substring(0, 30) + '...' : body;
+            else heading = `FAQ ${idx + 1}`;
+          }
           return { heading, body };
         })
         .filter(Boolean);

@@ -190,6 +190,126 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('>Find</button>');
   });
 
+  it('does not fetch shared chrome data for block-tree content widgets on page components', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'heading',
+              text: 'Latest Posts',
+              level: 2,
+            },
+            {
+              kind: 'latest-posts',
+            },
+            {
+              kind: 'heading',
+              text: 'Categories',
+              level: 2,
+            },
+            {
+              kind: 'categories',
+            },
+            {
+              kind: 'avatar',
+            },
+            {
+              kind: 'navigation',
+              children: [
+                {
+                  kind: 'navigation-link',
+                  text: 'About',
+                  href: '/about',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("fetch('/api/posts')");
+    expect(code).not.toContain("fetch('/api/site-info')");
+    expect(code).not.toContain("fetch('/api/menus')");
+    expect(code).toContain('Latest Posts');
+    expect(code).toContain('Categories');
+  });
+
+  it('renders block-tree avatars without a siteInfo fallback', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'avatar',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("posts.find((post) => post.author)?.author ?? '?'");
+    expect(code).not.toContain('siteInfo?.siteName');
+  });
+
+  it('sources deterministic navbar links from the primary menu fallback chain', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Header',
+      sections: [
+        {
+          type: 'navbar',
+          menuSlug: 'main-menu',
+          showSiteLogo: true,
+          showSiteTitle: true,
+          orientation: 'horizontal',
+          isResponsive: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("menu.location === 'primary'");
+    expect(code).toContain("menu.slug === 'primary'");
+    expect(code).toContain("menu.slug === 'main-menu'");
+  });
+
+  it('emits asset and app-path helpers for deterministic footer sections', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Footer',
+      sections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+          supplementalImages: [
+            {
+              src: 'theme-asset:/assets/images/arrow-up.png',
+              alt: 'Back to top',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('const resolveAsset = (src: string) => {');
+    expect(code).toContain('const toAppPath = (url?: string) => {');
+    expect(code).toContain('const isInternalPath = (url?: string) => {');
+  });
+
   it('renders supplemental footer images from deterministic footer sections', () => {
     const plan = {
       ...basePlan,
