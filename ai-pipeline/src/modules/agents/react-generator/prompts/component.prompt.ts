@@ -530,7 +530,7 @@ function buildForbiddenBehaviorNote(input: {
 
   if (input.type === 'page') {
     lines.push(
-      '- Do NOT render shared site chrome (`<header>`, navigation bar, `<footer>`, site logo/title, footer columns) inside this page component.',
+      '- Do NOT render shared site chrome (`<header>`, navigation bar, site-level `<footer>`, site logo/title, footer columns) inside this page component. Semantic nested `<header>`/`<footer>` elements are allowed when they belong to page content rather than global layout.',
     );
     lines.push(
       '- Do NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` just to rebuild shared layout chrome inside a page component.',

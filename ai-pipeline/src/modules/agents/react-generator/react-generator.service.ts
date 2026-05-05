@@ -77,6 +77,7 @@ export interface GeneratedComponent {
   route?: string | null;
   isDetail?: boolean;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   // When true, preview-builder must NOT create a route for this component.
@@ -889,6 +890,8 @@ ${renders}
       route: componentPlan?.route ?? component.route,
       isDetail: componentPlan?.isDetail ?? component.isDetail,
       fixedSlug: componentPlan?.fixedSlug ?? component.fixedSlug,
+      runtimeRenderer:
+        componentPlan?.runtimeRenderer ?? component.runtimeRenderer,
       dataNeeds: componentPlan?.dataNeeds
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
@@ -1314,7 +1317,13 @@ ${renders}
       normalized.includes('rootcause=route-mapping-error') ||
       normalized.includes('rootcause=data-binding-error') ||
       normalized.includes('exact bound record via') ||
-      normalized.includes('must not include their own <header> tag')
+      normalized.includes('must not include their own <header> tag') ||
+      normalized.includes(
+        'must not render their own shared site `<header>` chrome',
+      ) ||
+      normalized.includes(
+        'must not render their own shared site `<footer>` chrome',
+      )
     );
   }
 

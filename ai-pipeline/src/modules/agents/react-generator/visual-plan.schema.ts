@@ -203,6 +203,10 @@ interface BaseSection {
   secondaryCtaStyle?: SectionButtonStyle;
   presentation?: SectionPresentation;
   sourceSegments?: SourceSegment[];
+  /** Set by planner (PR3+). Controls generator strategy for this section.
+   *  'section-assembly' = generate this section independently, retry only this section on failure.
+   *  'full-file' = generate entire component file as one unit (default when absent). */
+  generationMode?: 'full-file' | 'section-assembly';
 }
 
 export interface NavbarSection extends BaseSection {
@@ -630,6 +634,22 @@ export type SectionPlan =
   | TabsSection
   | AccordionSection
   | CarouselSection;
+
+/**
+ * Optional chunk-level metadata attached to sections after the chunk-labeling
+ * stage (PR2+). Planner sets these fields; generator reads them to decide
+ * per-section generation mode and retry scope.
+ */
+export interface SectionChunkMeta {
+  /** Which ChunkPlan(s) this section was composed from. */
+  chunkIds?: string[];
+  /** Semantic label assigned by AI chunk-labeling (e.g. "hero", "projects", "services"). */
+  semanticKind?: string;
+  /** AI confidence score for the semantic label (0–1). */
+  confidence?: number;
+  /** Generation strategy: full-file = one-shot page TSX; section-assembly = per-section codegen. */
+  generationMode?: 'full-file' | 'section-assembly';
+}
 
 /**
  * Typography tokens derived from theme.json / style.css.

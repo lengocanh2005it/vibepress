@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { basename, extname } from 'path';
+import { readFileSync, existsSync } from 'fs';
+import { basename, extname, join } from 'path';
 
 type RuntimeParsedBlock = {
   blockName: string;
@@ -1017,8 +1018,87 @@ function collectRuntimeSectionsAndBindings(
   };
 }
 
+function stripPhpPatternHeader(markup: string): string {
+  const firstBlockIndex = markup.search(/<!--\s*wp:/i);
+  return firstBlockIndex > 0 ? markup.slice(firstBlockIndex) : markup;
+}
+
+function expandTemplateMarkup(
+  markup: string,
+  postContent: string,
+  themeDir: string,
+  seen: Set<string>,
+  depth = 0,
+): string {
+  if (depth > 5) return markup;
+
+  markup = markup.replace(/<!--\s*wp:template-part\s+\{[^}]*\}\s*\/-->/gi, '');
+
+  markup = markup.replace(
+    /<!--\s*wp:pattern\s+(\{[^}]*\})\s*\/-->/gi,
+    (_full, attrsRaw: string) => {
+      try {
+        const attrs = JSON.parse(attrsRaw) as { slug?: unknown };
+        const slug = String(attrs.slug ?? '').trim();
+        if (!slug || seen.has(slug)) return '';
+        const patternName = slug.includes('/') ? slug.split('/').slice(1).join('/') : slug;
+        for (const ext of ['.php', '.html']) {
+          const patternPath = join(themeDir, 'patterns', `${patternName}${ext}`);
+          if (existsSync(patternPath)) {
+            const raw = readFileSync(patternPath, 'utf-8');
+            const cleaned = stripPhpPatternHeader(raw);
+            const nextSeen = new Set(seen);
+            nextSeen.add(slug);
+            return expandTemplateMarkup(cleaned, postContent, themeDir, nextSeen, depth + 1);
+          }
+        }
+        return '';
+      } catch {
+        return '';
+      }
+    },
+  );
+
+  markup = markup.replace(
+    /<!--\s*wp:post-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+    postContent,
+  );
+  markup = markup.replace(
+    /<!--\s*wp:page-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+    postContent,
+  );
+
+  return markup;
+}
+
+function resolvePageTemplate(row: any): string {
+  const themeDir = process.env.THEME_DIR?.trim();
+  const postContent = String(row.post_content ?? '');
+  if (!themeDir) return postContent;
+
+  const templateSlug = String(row.template ?? '').trim();
+  const candidates = templateSlug
+    ? [`${templateSlug}.html`, 'page.html']
+    : ['page.html'];
+
+  for (const fileName of candidates) {
+    const templatePath = join(themeDir, 'templates', fileName);
+    if (existsSync(templatePath)) {
+      try {
+        const templateMarkup = readFileSync(templatePath, 'utf-8');
+        const resolved = expandTemplateMarkup(templateMarkup, postContent, themeDir, new Set());
+        if (resolved.trim()) return resolved;
+      } catch {
+        // fall through to next candidate
+      }
+    }
+  }
+
+  return postContent;
+}
+
 export function buildRuntimePlanFromPageRow(row: any) {
-  const markup = String(row.post_content ?? '');
+  const markup = resolvePageTemplate(row);
   const blocks = parseRuntimeBlocks(markup);
   const blockTree = blocks.map((block, index) =>
     buildRuntimeBlockNode(block, `root.${index + 1}`),
@@ -1042,6 +1122,7 @@ export function buildRuntimePlanFromPageRow(row: any) {
       kind: 'page-post-content',
       template: String(row.template ?? '').trim() || 'default',
       slug: String(row.post_name ?? '').trim(),
+      templateExpanded: Boolean(process.env.THEME_DIR?.trim()),
       sourceSummary:
         blockTree.length > 0
           ? `runtime block tree with ${blockTree.length} root node(s)`

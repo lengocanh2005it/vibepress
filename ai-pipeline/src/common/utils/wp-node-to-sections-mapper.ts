@@ -11,6 +11,7 @@
  * unless the underlying source structure explicitly contradicts the draft.
  */
 
+import type { ChunkPlan, ChunkStructuralKind } from '../types/chunk.schema.js';
 import type { WpNode } from './wp-block-to-json.js';
 import type {
   SectionPlan,
@@ -3184,11 +3185,12 @@ function buildHeroFromChildren(
   children: WpNode[],
 ): HeroSection {
   const flat = flattenChildren({ children } as WpNode);
-  const h = flat.find(
-    (c) =>
-      (c.block === 'core/heading' || c.block === 'heading') &&
-      (c.level === 1 || c.level === 2),
-  );
+  const h =
+    flat.find(
+      (c) =>
+        (c.block === 'core/heading' || c.block === 'heading') &&
+        (c.level === 1 || c.level === 2),
+    ) ?? flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
   const p = flat.find(
     (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
@@ -3627,6 +3629,137 @@ function buildSectionCta(node: WpNode): SectionCta {
       ? { customClassNames: uniqueClassNames(node.customClassNames) }
       : {}),
   };
+}
+
+// ── Chunk builder ───────────────────────────────────────────────────────────
+//
+// Deterministic chunker: WpNode[] → ChunkPlan[]
+//
+// Splits the top-level node list into independent structural chunks before AI
+// labeling. Each chunk is one logical section of the page (e.g. banner,
+// projects, services). AI receives one chunk at a time and only answers
+// "what semantic kind is this?" — it cannot reorder, merge, or drop chunks.
+
+/**
+ * Main public entry point. Converts a flat WpNode[] (page source) into an
+ * ordered array of ChunkPlans, one per structural subtree.
+ */
+export function buildPlannerChunksFromNodes(nodes: WpNode[]): ChunkPlan[] {
+  const groups = splitTopLevelChunkCandidates(nodes);
+  return groups.map((group, index) => buildChunkPlanFromNodes(group, index));
+}
+
+/**
+ * Splits top-level WpNodes into chunk groups.
+ *
+ * Default: each top-level node → its own chunk.
+ * Escape hatch: a core/group that contains ONLY semantic boundary nodes is
+ * unwrapped so each child becomes its own chunk (avoids grouping unrelated
+ * sections under one opaque wrapper).
+ */
+export function splitTopLevelChunkCandidates(nodes: WpNode[]): WpNode[][] {
+  const result: WpNode[][] = [];
+  for (const node of nodes) {
+    if (isSpacerBlock(node.block) || isSeparatorBlock(node.block)) continue;
+
+    // Escape hatch: transparent group wrapper holding only semantic nodes
+    if (
+      (node.block === 'core/group' || node.block === 'group') &&
+      node.children?.length &&
+      node.children.every(
+        (child) =>
+          isSpacerBlock(child.block) ||
+          isSeparatorBlock(child.block) ||
+          isSemanticChunkBoundaryNode(child),
+      )
+    ) {
+      for (const child of node.children) {
+        if (!isSpacerBlock(child.block) && !isSeparatorBlock(child.block)) {
+          result.push([child]);
+        }
+      }
+      continue;
+    }
+
+    result.push([node]);
+  }
+  return result;
+}
+
+/**
+ * Returns true when a node represents a strong semantic chunk boundary:
+ * pattern, template-part, columns, cover, query, or major uagb containers.
+ * Inner core/group nodes do NOT qualify — they stay inside their parent chunk.
+ */
+export function isSemanticChunkBoundaryNode(node: WpNode): boolean {
+  const block = node.block;
+  return (
+    block === 'core/pattern' ||
+    block === 'pattern' ||
+    block === 'core/template-part' ||
+    block === 'template-part' ||
+    block === 'core/columns' ||
+    block === 'columns' ||
+    block === 'core/cover' ||
+    block === 'cover' ||
+    block === 'core/query' ||
+    block === 'query' ||
+    block === 'uagb/container' ||
+    block === 'uagb/section'
+  );
+}
+
+function buildChunkPlanFromNodes(nodes: WpNode[], index: number): ChunkPlan {
+  const primary = nodes[0];
+  const structuralKind = resolveChunkStructuralKind(primary);
+  const chunkId = `chunk-${index + 1}-${structuralKind}`;
+
+  const allDescendants = nodes.flatMap((n) => [n, ...flattenChildren(n)]);
+  const blockNames = [
+    ...new Set(allDescendants.map((n) => n.block).filter(Boolean)),
+  ];
+  const wrapperClassNames = uniqueClassNames(primary?.customClassNames ?? []);
+  const draftSections = deduplicateSectionKeys(mapNodes(nodes, nodes));
+
+  return {
+    chunkId,
+    order: index,
+    structuralKind,
+    sourceRef: {
+      ...(primary?.sourceRef?.sourceNodeId
+        ? { sourceNodeId: primary.sourceRef.sourceNodeId }
+        : {}),
+      ...(primary?.sourceRef?.templateName
+        ? { templateName: primary.sourceRef.templateName }
+        : {}),
+      ...(primary?.sourceRef?.sourceFile
+        ? { sourceFile: primary.sourceRef.sourceFile }
+        : {}),
+      topLevelIndex: index,
+      ...(primary?.block ? { blockName: primary.block } : {}),
+    },
+    blockNames,
+    wrapperClassNames,
+    ...(primary?.html ? { rawHtml: primary.html.slice(0, 500) } : {}),
+    draftSections,
+  };
+}
+
+function resolveChunkStructuralKind(
+  node: WpNode | undefined,
+): ChunkStructuralKind {
+  if (!node) return 'misc';
+  const block = node.block;
+  if (block === 'core/pattern' || block === 'pattern') return 'pattern';
+  if (block === 'core/template-part' || block === 'template-part')
+    return 'template-part';
+  if (block === 'core/group' || block === 'group') return 'group';
+  if (block === 'core/columns' || block === 'columns') return 'columns';
+  if (block === 'core/cover' || block === 'cover') return 'cover';
+  if (block === 'core/query' || block === 'query') return 'query';
+  if (block === 'uagb/container') return 'uagb-container';
+  if (block === 'uagb/section') return 'uagb-section';
+  return 'misc';
 }
 
 function buildSectionCtas(nodes: WpNode[]): SectionCta[] {

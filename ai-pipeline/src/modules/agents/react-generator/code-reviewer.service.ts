@@ -200,6 +200,7 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'sidebar',
   'prose-block',
   'card-grid',
+  'media-text',
   'carousel',
   'modal',
   'tabs',
@@ -1504,6 +1505,19 @@ export class CodeReviewerService {
     if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
     }
+
+    // PR4: honor planner-annotated generationMode (set by PR3 for home-like components).
+    // When ≥2 sections carry 'section-assembly', bypass heuristic scoring entirely.
+    const plannerAnnotated = componentPlan.visualPlan.sections.filter(
+      (s) => s.generationMode === 'section-assembly',
+    );
+    if (plannerAnnotated.length >= 2) {
+      return {
+        enabled: true,
+        reason: `planner-annotated section-assembly (${plannerAnnotated.length}/${componentPlan.visualPlan.sections.length} sections)`,
+      };
+    }
+
     const normalizedNeeds = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
     const signals = this.getVisualPlanSectionSignals(componentPlan);
     const complexAiFirstPageCandidate = this.isComplexAiFirstPageCandidate(
@@ -1717,6 +1731,14 @@ export class CodeReviewerService {
     componentName: string,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (
+      componentPlan?.visualPlan?.sections.some(
+        (section): section is Extract<SectionPlan, { type: 'accordion' }> =>
+          section.type === 'accordion',
+      )
+    ) {
+      return true;
+    }
     const normalizedNeeds = new Set(
       toVisualDataNeeds(componentPlan?.dataNeeds),
     );

@@ -18,7 +18,9 @@ import {
 import {
   mapWpNodesToDraftSections,
   mapWpNodesToLosslessPageSections,
+  buildPlannerChunksFromNodes,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import type { ChunkPlan } from '../../../common/types/chunk.schema.js';
 import {
   mapWpNodesToBlockTree,
   type BlockNode,
@@ -75,6 +77,7 @@ import type {
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
+  composeSectionsFromChunkPlans,
   type CanonicalPlanningSource,
   type PlanningSourceCandidate,
   type PlanningSourceContext,
@@ -82,6 +85,10 @@ import {
   type PlannerVisualPlanRepairState,
   type PlannerVisualRepairDelegate,
 } from './planner-visual-repair.service.js';
+import {
+  buildChunkLabelingPrompt,
+  parseChunkLabelingResponse,
+} from './chunk-labeling.prompt.js';
 import {
   countDraftSectionsInSource,
   detectInteractiveWidgetsFromSource,
@@ -432,6 +439,7 @@ export class PlannerService {
     modelName?: string,
     repoManifest?: RepoThemeManifest,
     editRequest?: PipelineEditRequestDto,
+    logPath?: string,
   ): Promise<PlanResult> {
     const skipVisualPlan =
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
@@ -474,7 +482,7 @@ export class PlannerService {
       repoManifest,
       editRequest,
       resolvedModel,
-      undefined,
+      logPath,
     );
   }
 
@@ -818,14 +826,22 @@ export class PlannerService {
           }),
         };
       }
-      // Deterministically parse the WordPress block tree to get an ordered
-      // draft of sections. This is injected into the prompt as a hard-ordered
-      // skeleton so AI only needs to fill in content, not infer layout order.
-      draftSections = this.buildDraftSectionsForPlanningSource(
+      // Chunk-label then compose draft sections (PR2).
+      // Falls back to the deterministic mapper if chunking yields nothing.
+      const composedSections = await this.labelAndComposeChunks(
         planningSource,
         componentPlan,
         tokens,
+        modelName,
+        logPath,
       );
+      draftSections =
+        composedSections ??
+        this.buildDraftSectionsForPlanningSource(
+          planningSource,
+          componentPlan,
+          tokens,
+        );
       const blockTreeVisualPlan =
         this.buildBlockTreeDrivenVisualPlanForComponent({
           componentPlan,
@@ -5126,6 +5142,117 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return filteredSections;
     } catch {
       return undefined;
+    }
+  }
+
+  // ── Chunk labeling + composition (PR2) ────────────────────────────────────
+
+  private async labelAndComposeChunks(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlanResult[number],
+    tokens: ThemeTokens | undefined,
+    modelName: string,
+    logPath: string | undefined,
+  ): Promise<ReturnType<typeof mapWpNodesToDraftSections> | undefined> {
+    const rawChunks = this.buildChunkPlansForPlanningSource(
+      planningSource,
+      componentPlan,
+      tokens,
+    );
+    if (rawChunks.length === 0) return undefined;
+
+    const labeledChunks = await this.labelChunksWithAi(rawChunks, modelName);
+
+    if (logPath) {
+      void this.writeArtifact(
+        logPath,
+        `plan.chunks.${componentPlan.componentName}.json`,
+        {
+          componentName: componentPlan.componentName,
+          generatedAt: new Date().toISOString(),
+          chunkCount: labeledChunks.length,
+          chunks: labeledChunks,
+        },
+      );
+    }
+
+    const composed = composeSectionsFromChunkPlans(labeledChunks);
+    if (composed.length === 0) return undefined;
+
+    // PR3: annotate sections for home-like components so generator can use
+    // per-section codegen and targeted retry (PR4 reads this field).
+    if (this.isHomeLikeComponentPlan(componentPlan)) {
+      return composed.map((section) => ({
+        ...section,
+        generationMode: 'section-assembly' as const,
+      }));
+    }
+
+    return composed;
+  }
+
+  private async labelChunksWithAi(
+    chunks: ChunkPlan[],
+    modelName: string,
+  ): Promise<ChunkPlan[]> {
+    try {
+      const { systemPrompt, userPrompt } = buildChunkLabelingPrompt(chunks);
+      const { text } = await this.requestVisualPlanCompletion({
+        model: modelName,
+        systemPrompt,
+        userPrompt,
+        maxTokens: 1024,
+      });
+      const results = parseChunkLabelingResponse(text, chunks);
+      const resultIndex = new Map(results.map((r) => [r.chunkId, r]));
+      return chunks.map((chunk) => {
+        const label = resultIndex.get(chunk.chunkId);
+        if (!label) return chunk;
+        return {
+          ...chunk,
+          aiLabel: {
+            semanticKind: label.semanticKind,
+            suggestedSectionType: label.suggestedSectionType,
+            mergeHint: label.mergeHint,
+            confidence: label.confidence,
+            ...(label.rationale ? { rationale: label.rationale } : {}),
+          },
+        };
+      });
+    } catch {
+      return chunks;
+    }
+  }
+
+  // ── Chunk plan builder (shared by PR1 artifact + PR2 labeling) ────────────
+
+  private buildChunkPlansForPlanningSource(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlanResult[number],
+    tokens: ThemeTokens | undefined,
+  ): ChunkPlan[] {
+    try {
+      const nodes = planningSource?.canonicalSource?.resolvedNodes?.length
+        ? planningSource.canonicalSource.resolvedNodes
+        : this.styleResolver.resolve(
+            this.parsePlanningSourceNodes({
+              source: planningSource?.source ?? '',
+              templateName:
+                planningSource?.sourceTemplateName ??
+                componentPlan.templateName,
+              sourceFile:
+                planningSource?.sourceFile ??
+                inferFseSourceFile(
+                  componentPlan.templateName,
+                  componentPlan.type,
+                ),
+            }),
+            tokens,
+          );
+      if (nodes.length === 0) return [];
+      return buildPlannerChunksFromNodes(nodes);
+    } catch {
+      return [];
     }
   }
 

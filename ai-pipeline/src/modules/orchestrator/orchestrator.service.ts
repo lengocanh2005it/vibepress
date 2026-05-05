@@ -547,15 +547,12 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
   }
 
-  private async readPersistedVisualEditContext(jobId: string): Promise<
-    | {
-        previewDir: string;
-        frontendDir: string;
-        uiSourceMapPath?: string;
-        routeEntries?: Array<{ route: string; componentName: string }>;
-      }
-    | null
-  > {
+  private async readPersistedVisualEditContext(jobId: string): Promise<{
+    previewDir: string;
+    frontendDir: string;
+    uiSourceMapPath?: string;
+    routeEntries?: Array<{ route: string; componentName: string }>;
+  } | null> {
     const previewDir = join('./temp/generated', jobId);
     const frontendDir = join(previewDir, 'frontend');
 
@@ -586,7 +583,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
   ): Promise<Array<{ route: string; componentName: string }>> {
     const fromManifest = await this.sectionManifest.readManifest(previewDir);
     if (fromManifest?.length) {
-      const deduped = new Map<string, { route: string; componentName: string }>();
+      const deduped = new Map<
+        string,
+        { route: string; componentName: string }
+      >();
       for (const entry of fromManifest) {
         const route = entry.route?.trim();
         const componentName = entry.componentName?.trim();
@@ -1917,6 +1917,8 @@ export default function ${component.name}() {
             review.plan,
             resolvedModels.planning,
             repoResult.themeManifest,
+            undefined,
+            logPath,
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
@@ -2015,6 +2017,8 @@ export default function ${component.name}() {
               review.plan,
               resolvedModels.planning,
               repoResult.themeManifest,
+              undefined,
+              logPath,
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,

@@ -194,6 +194,7 @@ export class ValidatorService {
         route: comp.route,
         isDetail: comp.isDetail,
         fixedSlug: comp.fixedSlug,
+        runtimeRenderer: comp.runtimeRenderer,
         dataNeeds: comp.dataNeeds,
         type: comp.type,
         isSubComponent: comp.isSubComponent,
@@ -441,35 +442,9 @@ export class ValidatorService {
       return { isValid: false, error: tsxSyntaxError };
     }
 
-    // 6. Unbalanced braces — truncated output
-    let depth = 0;
-    for (const char of code) {
-      if (char === '{') depth++;
-      else if (char === '}') depth--;
-    }
-    if (depth !== 0) {
-      return { isValid: false, error: `Unbalanced braces (depth: ${depth})` };
-    }
+    // TS already parsed successfully, so avoid delimiter-count heuristics here.
 
-    // 6b. Unbalanced parentheses — truncated return() or missing closing paren
-    const parenDepth = this.balanceCount(code, '(', ')');
-    if (parenDepth !== 0) {
-      return {
-        isValid: false,
-        error: `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated \`return (\` block or missing closing paren.`,
-      };
-    }
-
-    // 6c. Unbalanced square brackets — truncated array or destructuring
-    const bracketDepth = this.balanceCount(code, '[', ']');
-    if (bracketDepth !== 0) {
-      return {
-        isValid: false,
-        error: `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated array literal or destructuring expression.`,
-      };
-    }
-
-    // 6d. Multiple export default — AI sometimes duplicates the component
+    // 6. Multiple export default — AI sometimes duplicates the component
     const exportDefaultCount = (code.match(/\bexport\s+default\b/g) ?? [])
       .length;
     if (exportDefaultCount > 1) {
@@ -730,10 +705,10 @@ export class ValidatorService {
     }
 
     if (isPageComponent) {
-      const redundantTagMatch = code.match(/<(header|footer)\b/i);
-      if (redundantTagMatch) {
+      const redundantSharedChromeTag = this.findRedundantSharedChromeTag(code);
+      if (redundantSharedChromeTag) {
         violations.push(
-          `Layout contract violated: page components must NOT include their own \`<${redundantTagMatch[1]}>\` tag. Global navigation and footer are provided by the shared Layout wrapper.`,
+          `Layout contract violated: page components must NOT render their own shared site \`<${redundantSharedChromeTag}>\` chrome. Semantic nested \`<header>\`/\`<footer>\` elements are allowed, but global site navigation/footer belongs to the shared Layout wrapper.`,
         );
       }
       if (this.fetchesSharedChromeData(code)) {
@@ -1251,21 +1226,6 @@ export class ValidatorService {
 
     const tsxSyntaxError = this.checkTsxSyntax(code);
     if (tsxSyntaxError) return tsxSyntaxError;
-
-    const braceDepth = this.balanceCount(code, '{', '}');
-    if (braceDepth !== 0) {
-      return `Unbalanced braces (depth: ${braceDepth})`;
-    }
-
-    const parenDepth = this.balanceCount(code, '(', ')');
-    if (parenDepth !== 0) {
-      return `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated inline JSX expression or handler.`;
-    }
-
-    const bracketDepth = this.balanceCount(code, '[', ']');
-    if (bracketDepth !== 0) {
-      return `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated inline array or expression.`;
-    }
 
     return null;
   }
@@ -4146,6 +4106,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         return importPath;
       }
 
+      if (
+        context.runtimeRenderer === 'runtime-page' &&
+        importPath === '../runtime/runtime-contract'
+      ) {
+        continue;
+      }
+
       const basename = importPath
         .replace(/^\.\/|^\.\.\//, '')
         .split('/')
@@ -4391,6 +4358,33 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return /fetch\(\s*['"`]\/api\/(?:site-info|menus|footer-links)\b/.test(
       code,
     );
+  }
+
+  private findRedundantSharedChromeTag(
+    code: string,
+  ): 'header' | 'footer' | null {
+    if (
+      /<header\b/i.test(code) &&
+      (/<nav\b/i.test(code) ||
+        this.fetchesSharedChromeData(code) ||
+        this.usesSharedChromeData(code) ||
+        /No menus available/i.test(code))
+    ) {
+      return 'header';
+    }
+
+    if (
+      /<footer\b/i.test(code) &&
+      (this.fetchesSharedChromeData(code) ||
+        this.usesSharedChromeData(code) ||
+        /All rights reserved|©|&copy;|footer[-\s]links|social[-\s]links/i.test(
+          code,
+        ))
+    ) {
+      return 'footer';
+    }
+
+    return null;
   }
 
   private usesSharedChromeData(code: string): boolean {
