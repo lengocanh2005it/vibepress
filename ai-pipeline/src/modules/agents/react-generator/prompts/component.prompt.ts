@@ -548,7 +548,9 @@ function buildForbiddenBehaviorNote(input: {
     );
   }
   if (!input.dataNeeds.includes('pageDetail')) {
-    lines.push('- Do NOT fetch `/api/pages/${slug}` or `/api/runtime/pages/${slug}` in this component.');
+    lines.push(
+      '- Do NOT fetch `/api/pages/${slug}` or `/api/runtime/pages/${slug}` in this component.',
+    );
   }
   if (!input.dataNeeds.includes('pageDetail') || !input.fixedSlug) {
     lines.push(
@@ -3168,12 +3170,12 @@ Render ONLY the JSX for the blocks in the template source below.`;
 - The parent component route is slug-based.
 - Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
 - If you need detail data in this section, fetch ${
-          isSingle
-            ? '`GET /api/posts/:slug`'
-            : input.componentPlan?.runtimeRenderer === 'runtime-page'
-              ? '`GET /api/runtime/pages/:slug`'
-              : '`GET /api/pages/:slug`'
-        } by slug. Never fetch the full list and pick index 0.
+            isSingle
+              ? '`GET /api/posts/:slug`'
+              : input.componentPlan?.runtimeRenderer === 'runtime-page'
+                ? '`GET /api/runtime/pages/:slug`'
+                : '`GET /api/pages/:slug`'
+          } by slug. Never fetch the full list and pick index 0.
 - Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
       : '';
 

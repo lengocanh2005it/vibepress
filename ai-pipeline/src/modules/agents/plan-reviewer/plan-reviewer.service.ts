@@ -663,7 +663,7 @@ export class PlanReviewerService {
     warningCodes: PlanReviewWarningCode[],
   ): void {
     const missing = plan
-      .filter((c) => !c.visualPlan)
+      .filter((c) => !c.visualPlan && c.runtimeRenderer !== 'runtime-page')
       .map((c) => c.componentName);
     if (missing.length > 0) {
       this.pushWarning(
