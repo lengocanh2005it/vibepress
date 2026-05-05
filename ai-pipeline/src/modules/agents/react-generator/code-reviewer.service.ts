@@ -188,6 +188,9 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
   'post-featured-image',
 ]);
 
+// Keep deterministic inline assembly limited to low-risk, content-structural
+// sections. Rich marketing/interactive sections need AI section generation to
+// preserve heading/body/cta/styling fidelity.
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'post-content',
   'post-title',
@@ -199,12 +202,6 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'comments',
   'sidebar',
   'prose-block',
-  'card-grid',
-  'media-text',
-  'carousel',
-  'modal',
-  'tabs',
-  'accordion',
 ]);
 
 /**
@@ -1506,6 +1503,18 @@ export class CodeReviewerService {
       return { enabled: false, reason: 'not eligible' };
     }
 
+    const pinnedSectionAssemblyComponent = Boolean(
+      /^(FrontPage|Home|TemplateAbout|TemplateContact|TemplateServices)$/i.test(
+        componentName,
+      ) && componentPlan.visualPlan.sections.length >= 1,
+    );
+    if (pinnedSectionAssemblyComponent) {
+      return {
+        enabled: true,
+        reason: 'component is pinned to section assembly',
+      };
+    }
+
     // PR4: honor planner-annotated generationMode (set by PR3 for home-like components).
     // When ≥2 sections carry 'section-assembly', bypass heuristic scoring entirely.
     const plannerAnnotated = componentPlan.visualPlan.sections.filter(
@@ -1735,6 +1744,14 @@ export class CodeReviewerService {
       componentPlan?.visualPlan?.sections.some(
         (section): section is Extract<SectionPlan, { type: 'accordion' }> =>
           section.type === 'accordion',
+      )
+    ) {
+      return true;
+    }
+    if (
+      componentPlan?.visualPlan?.sections.some(
+        (section) =>
+          section.type === 'post-list' && section.resource === 'products',
       )
     ) {
       return true;
@@ -2826,7 +2843,9 @@ export class CodeReviewerService {
           ? 'pageDetail'
           : need === 'post-detail'
             ? 'postDetail'
-            : need,
+            : need === 'product-detail'
+              ? 'productDetail'
+              : need,
       ),
     );
     const instructions = [
@@ -2847,6 +2866,11 @@ export class CodeReviewerService {
       if (normalizedDataNeeds.has('postDetail')) {
         instructions.push(
           `Fetch the main record only from \`/api/posts/${fixedSlug}\`, not \`/api/posts/\${slug}\` and not \`/api/posts\` + lookup.`,
+        );
+      }
+      if (normalizedDataNeeds.has('productDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/post-types/product/${fixedSlug}\`, not \`/api/post-types/product/\${slug}\` and not \`/api/post-types/product/posts\` + lookup.`,
         );
       }
     }
@@ -3797,6 +3821,11 @@ export class CodeReviewerService {
           lines.push(
             `- Card ${cardIndex + 1} body: ${JSON.stringify(card.body)}`,
           );
+          if (card.imageSrc) {
+            lines.push(
+              `- Card ${cardIndex + 1} image src (use exactly, do not omit): ${JSON.stringify(card.imageSrc)}`,
+            );
+          }
         });
         break;
       case 'accordion':
@@ -4089,7 +4118,44 @@ export class CodeReviewerService {
         }
         break;
       case 'hero':
+        if (
+          'image' in section &&
+          (section as { image?: { src?: string } }).image?.src
+        ) {
+          lines.push(
+            `- Keep image src exactly (do not omit): ${JSON.stringify((section as { image: { src: string } }).image.src)}`,
+          );
+        }
+        if ('heading' in section && section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if ('subheading' in section && section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        if ('cta' in section && section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if ('ctas' in section && Array.isArray(section.ctas)) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
       case 'cover':
+        if ('imageSrc' in section && section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly (do not omit): ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
         if ('heading' in section && section.heading) {
           lines.push(
             `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
@@ -4142,6 +4208,11 @@ export class CodeReviewerService {
         if (section.authorTitle) {
           lines.push(
             `- Keep author title exactly: ${JSON.stringify(section.authorTitle)}`,
+          );
+        }
+        if (section.authorAvatar) {
+          lines.push(
+            `- Keep author avatar src exactly (do not omit): ${JSON.stringify(section.authorAvatar)}`,
           );
         }
         break;
@@ -4916,9 +4987,11 @@ export class CodeReviewerService {
     if (fixedSlug) {
       const boundEndpoint = componentPlan?.dataNeeds?.includes('postDetail')
         ? `/api/posts/${fixedSlug}`
-        : componentPlan?.dataNeeds?.includes('pageDetail')
-          ? `/api/pages/${fixedSlug}`
-          : undefined;
+        : componentPlan?.dataNeeds?.includes('productDetail')
+          ? `/api/post-types/product/${fixedSlug}`
+          : componentPlan?.dataNeeds?.includes('pageDetail')
+            ? `/api/pages/${fixedSlug}`
+            : undefined;
       const bindingLines = [
         `Fixed slug binding: \`${fixedSlug}\`.`,
         'Do not import or call `useParams()`.',

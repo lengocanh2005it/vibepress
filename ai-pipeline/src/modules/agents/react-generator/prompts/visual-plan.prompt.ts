@@ -93,7 +93,7 @@ This is a migration plan, NOT a redesign brief.
 \`\`\`typescript
 interface ComponentVisualPlan {
   componentName: string;
-  dataNeeds: Array<'siteInfo' | 'footerLinks' | 'posts' | 'pages' | 'menus' | 'postDetail' | 'pageDetail' | 'comments'>;
+  dataNeeds: Array<'siteInfo' | 'footerLinks' | 'posts' | 'products' | 'pages' | 'menus' | 'postDetail' | 'productDetail' | 'pageDetail' | 'comments'>;
   palette: {
     background: string;  // hex
     surface: string;     // card backgrounds hex
@@ -463,7 +463,7 @@ function buildDraftSectionsHint(
         '## Detected section order (deterministic, from WordPress block tree)',
         'The following sections were detected in the EXACT order they appear in the WordPress template.',
         'You MUST preserve this order in the `sections` array.',
-        'You MAY fill in missing content fields (headings, image srcs, menu slugs, cta text) from the template source and site context.',
+        'You MUST preserve all existing content fields already set in each draft section (heading, subheading, title, subtitle, body, card headings and bodies) — copy them verbatim into your output. You MAY fill in content fields that are absent (null or missing) in the draft, using the template source and site context.',
         'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into your output section. Do NOT replace them with palette defaults.',
         'You MUST NOT reorder, merge, split, or drop sections from this list.',
         'If two adjacent draft sections have different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId`, they must stay as two separate output sections.',
@@ -474,6 +474,7 @@ function buildDraftSectionsHint(
         'These draft sections are a deterministic extraction from the WordPress source.',
         'For page-level planning, treat the surface plan above as the primary brief and use this draft list as section-by-section evidence and fallback structure.',
         'Keep a strong 1:1 correspondence when a draft entry clearly maps to a source-backed section, widget, or unique `sourceRef.sourceNodeId`.',
+        'You MUST preserve all existing content fields already set in each draft section (heading, subheading, title, subtitle, body, card headings and bodies) — copy them verbatim into your output. You MAY fill in content fields that are absent (null or missing) in the draft.',
         'You MUST preserve all styling fields already set in each draft section (`background`, `textColor`, `paddingStyle`, `marginStyle`, `gapStyle`, `shadow`, `border`, `ctaStyle`, `cardStyle`, `presentation`) — copy them verbatim into the matching output section. Do NOT replace them with palette defaults.',
         'You SHOULD NOT drop source-backed sections or merge adjacent entries with different `debugKey`/legacy `sectionKey` labels or different `sourceRef.sourceNodeId` unless the surface plan authority clearly permits light recomposition and the same evidence survives in the final output.',
         'Do NOT transform a text-only draft section plus a later image-owning draft section into one split hero/media-text section unless one shared source wrapper proves that relationship.',
@@ -806,9 +807,11 @@ const VALID_DATA_NEEDS = new Set<string>([
   'siteInfo',
   'footerLinks',
   'posts',
+  'products',
   'pages',
   'menus',
   'postDetail',
+  'productDetail',
   'pageDetail',
   'comments',
 ]);
@@ -1909,6 +1912,7 @@ export function sanitizeSectionsForContract(
   const adjustments: string[] = [];
   const allowedNeeds = new Set(contract.dataNeeds ?? []);
   const allowPostDetail = allowedNeeds.has('postDetail');
+  const allowProductDetail = allowedNeeds.has('productDetail');
   const allowPageDetail = allowedNeeds.has('pageDetail');
   const allowStaticSourceProse =
     contract.componentType === 'page' &&
@@ -1965,10 +1969,11 @@ export function sanitizeSectionsForContract(
           section.type === 'post-featured-image' ||
           section.type === 'post-terms' ||
           section.type === 'post-navigation') &&
-        !allowPostDetail
+        !allowPostDetail &&
+        !allowProductDetail
       ) {
         adjustments.push(
-          `removed ${section.type} section because contract does not allow postDetail`,
+          `removed ${section.type} section because contract does not allow postDetail/productDetail`,
         );
         return null;
       }

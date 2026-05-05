@@ -289,6 +289,67 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('wp-block-navigation-item__content');
   });
 
+  it('renders block-centric headers from the preserved block tree instead of the semantic navbar abstraction', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Header',
+      dataNeeds: ['siteInfo', 'menus'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'navbar',
+          menuSlug: 'primary',
+          showSiteLogo: false,
+          showSiteTitle: true,
+          orientation: 'horizontal',
+          isResponsive: true,
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          domId: 'sticky-header',
+          customClassNames: ['wp-block-group', 'has-primary-background-color'],
+          children: [
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+              overlayMenu: 'mobile',
+              isResponsive: true,
+            },
+            {
+              kind: 'buttons',
+              blockName: 'buttons',
+              customClassNames: ['header-btn'],
+              children: [
+                {
+                  kind: 'button',
+                  blockName: 'button',
+                  text: 'Get Started',
+                  href: '#',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('id="sticky-header"');
+    expect(code).toContain('has-primary-background-color');
+    expect(code).toContain('header-btn');
+    expect(code).toContain('Get Started');
+    expect(code).toContain('<Link to="/"');
+  });
+
   it('emits asset and app-path helpers for deterministic footer sections', () => {
     const plan = {
       ...basePlan,
@@ -340,6 +401,66 @@ describe('CodeGeneratorService', () => {
       'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
     );
     expect(code).toContain('Back to top');
+  });
+
+  it('renders block-centric footers from the preserved block tree instead of the semantic footer abstraction', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Footer',
+      dataNeeds: ['siteInfo', 'footerLinks'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['pg-footer-center-row'],
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: "Let's Work Together",
+            },
+            {
+              kind: 'social-links',
+              blockName: 'social-links',
+              children: [
+                {
+                  kind: 'social-link',
+                  blockName: 'social-link',
+                  text: 'Facebook',
+                  href: '#',
+                },
+              ],
+            },
+            {
+              kind: 'buttons',
+              blockName: 'buttons',
+              children: [
+                {
+                  kind: 'button',
+                  blockName: 'button',
+                  text: 'Contact',
+                  href: '#',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('pg-footer-center-row');
+    expect(code).toContain("Let's Work Together");
+    expect(code).toContain('Facebook');
+    expect(code).toContain('Contact');
   });
 
   it('renders scroll-top hook markup for deterministic footer sections', () => {

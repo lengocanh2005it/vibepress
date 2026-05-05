@@ -710,7 +710,7 @@ export class PlannerVisualRepairService {
       pushCategory('json-format');
     }
     if (
-      /lost |droppedsections|preserve every source-backed section/.test(
+      /lost |droppedsections|preserve every source-backed section|was dropped in visual plan/.test(
         combined,
       )
     ) {
@@ -1130,7 +1130,7 @@ export class PlannerVisualRepairService {
     }
     if (diagnosis.categories.includes('content-drop')) {
       lines.push(
-        '- Do not drop headings, bodies, CTA copy, or source-backed section nodes from the deterministic draft.',
+        '- Do not drop or replace headings, subheadings, titles, subtitles, body copy, CTA text, or any other content field already set in the deterministic draft sections. Copy those fields verbatim — do not paraphrase, summarise, or omit them.',
       );
     }
     if (diagnosis.categories.includes('json-format')) {

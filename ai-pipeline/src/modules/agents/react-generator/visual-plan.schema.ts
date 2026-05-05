@@ -12,9 +12,11 @@ export type DataNeed =
   | 'siteInfo'
   | 'footerLinks'
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'postDetail'
+  | 'productDetail'
   | 'pageDetail'
   | 'comments';
 
@@ -27,6 +29,7 @@ export type SectionCapability =
   | 'slides'
   | 'cards'
   | 'posts'
+  | 'products'
   | 'menus'
   | 'pages'
   | 'site-info'
@@ -57,7 +60,7 @@ export interface SectionContentRequirements {
 export interface SectionObligation {
   role: string;
   required: SectionCapability[];
-  minItems?: Partial<Record<'slides' | 'cards' | 'posts', number>>;
+  minItems?: Partial<Record<'slides' | 'cards' | 'posts' | 'products', number>>;
   sourceEvidence?: SectionSourceEvidence;
   contentRequirements?: SectionContentRequirements;
 }
@@ -272,12 +275,15 @@ export interface PostListSection extends BaseSection {
   type: 'post-list';
   title?: string;
   titleCustomClassNames?: string[];
+  resource?: 'posts' | 'products';
   layout: 'list' | 'grid-2' | 'grid-3';
   showDate: boolean;
   showAuthor: boolean;
   showCategory: boolean;
   showExcerpt: boolean;
   showFeaturedImage: boolean;
+  showPrice?: boolean;
+  showButton?: boolean;
   itemLayout?: 'title-meta-inline' | 'stacked';
   metaLayout?: 'inline' | 'stacked';
   metaAlign?: 'start' | 'end';
@@ -891,19 +897,24 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
           requireImageIfSourceHasImage: !!section.imageSrc,
         },
       };
-    case 'post-list':
+    case 'post-list': {
+      const collectionCapability: SectionCapability =
+        section.resource === 'products' ? 'products' : 'posts';
+      const minItemsKey =
+        section.resource === 'products' ? 'products' : 'posts';
       return {
         role: 'post-list',
         required: [
           ...(section.title ? (['heading'] as SectionCapability[]) : []),
-          'posts',
+          collectionCapability,
         ],
-        minItems: { posts: 1 },
+        minItems: { [minItemsKey]: 1 },
         sourceEvidence,
         contentRequirements: {
           requireTitle: !!section.title,
         },
       };
+    }
     case 'card-grid':
       return {
         role: 'card-grid',

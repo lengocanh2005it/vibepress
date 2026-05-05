@@ -119,6 +119,68 @@ describe('mapWpNodesToDraftSections', () => {
     });
   });
 
+  it('maps Woo product term aliases on post-terms blocks', () => {
+    const markup = `
+<!-- wp:post-terms {"term":"product_cat","prefix":"Category: "} /-->
+<!-- wp:post-terms {"term":"product_tag","prefix":"Tags: "} /-->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+    const categoryTerms = sections.find(
+      (section) =>
+        section.type === 'post-terms' && section.taxonomy === 'category',
+    );
+    const tagTerms = sections.find(
+      (section) =>
+        section.type === 'post-terms' && section.taxonomy === 'post_tag',
+    );
+
+    expect(categoryTerms).toMatchObject({
+      type: 'post-terms',
+      taxonomy: 'category',
+      prefix: 'Category:',
+    });
+    expect(tagTerms).toMatchObject({
+      type: 'post-terms',
+      taxonomy: 'post_tag',
+      prefix: 'Tags:',
+    });
+  });
+
+  it('avoids blog-meta defaults for Woo related products queries', () => {
+    const markup = `
+<!-- wp:group -->
+<div class="wp-block-group">
+  <!-- wp:query {"namespace":"woocommerce/related-products"} -->
+  <div class="wp-block-query">
+    <!-- wp:post-template {"className":"products-block-post-template","layout":{"type":"grid","columnCount":"4"},"__woocommerceNamespace":"woocommerce/product-query/product-template"} -->
+    <!-- wp:woocommerce/product-image {"isDescendentOfQueryLoop":true} /-->
+    <!-- wp:post-title {"level":3} /-->
+    <!-- wp:woocommerce/product-price {"isDescendentOfQueryLoop":true} /-->
+    <!-- wp:woocommerce/product-button {"isDescendentOfQueryLoop":true} /-->
+    <!-- /wp:post-template -->
+  </div>
+  <!-- /wp:query -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+    const postList = sections.find((section) => section.type === 'post-list');
+
+    expect(postList).toMatchObject({
+      type: 'post-list',
+      layout: 'grid-3',
+      showDate: false,
+      showAuthor: false,
+      showCategory: false,
+      showExcerpt: false,
+      showFeaturedImage: true,
+    });
+  });
+
   it('collapses repeated testimonial group cards into one card-grid section', () => {
     const markup = `
 <!-- wp:group -->

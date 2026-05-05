@@ -180,8 +180,8 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
   if (
     componentPlan.type === 'page' &&
     componentPlan.isDetail === true &&
-    dataNeeds.includes('postDetail') &&
-    /^(single|single-with-sidebar)$/.test(normalizedTemplate)
+    (dataNeeds.includes('postDetail') || dataNeeds.includes('productDetail')) &&
+    /^(single|single-with-sidebar|single-product)$/.test(normalizedTemplate)
   ) {
     const result = buildBlockTreeDrivenPostDetailSections({
       componentPlan,
@@ -249,7 +249,9 @@ export function shouldBypassCoverageAuditForBlockTreeListingPlan(
   if (
     componentPlan.type !== 'page' ||
     componentPlan.isDetail === true ||
-    !toVisualDataNeeds(componentPlan.dataNeeds).includes('posts')
+    !toVisualDataNeeds(componentPlan.dataNeeds).some((need) =>
+      ['posts', 'products'].includes(need),
+    )
   ) {
     return false;
   }
@@ -301,21 +303,46 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
     (section) => section.type === 'navbar' || section.type === 'footer',
   );
   if (explicitChromeSections.length > 0) {
-    return explicitChromeSections.map((section) => {
+    const mappedSections = explicitChromeSections.map((section) => {
+      if (
+        section.type === 'navbar' &&
+        /^(header|navigation|nav)$/.test(normalizedName)
+      ) {
+        return decorateNavbarSectionFromBlockTree(
+          section,
+          orderedNodes,
+          content,
+        );
+      }
       if (section.type === 'footer' && /^footer$/.test(normalizedName)) {
         return decorateFooterSectionFromBlockTree(section, orderedNodes);
       }
       return section;
     });
+    return mappedSections.filter(
+      (section): section is NavbarSection | FooterSection => section !== null,
+    );
   }
 
   if (/^(header|navigation|nav)$/.test(normalizedName)) {
     const navigationNode = orderedNodes.find(
       (node) => node.kind === 'navigation',
     );
+    const siteLogoNode = orderedNodes.find((node) => node.kind === 'site-logo');
+    const siteTitleNode = orderedNodes.find(
+      (node) => node.kind === 'site-title',
+    );
+    const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+    const stickySignalNode = orderedNodes.find(isStickyChromeNode);
+    const sourceNode =
+      navigationNode ??
+      siteLogoNode ??
+      siteTitleNode ??
+      stickySignalNode ??
+      orderedNodes.find((node) => node.sourceRef);
     const section: NavbarSection = {
       type: 'navbar',
-      sticky: false,
+      sticky: Boolean(stickySignalNode),
       menuSlug: content.menus[0]?.slug ?? 'primary',
       orientation:
         navigationNode?.menuOrientation ??
@@ -323,15 +350,20 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
         'horizontal',
       overlayMenu: navigationNode?.overlayMenu ?? 'mobile',
       isResponsive: navigationNode?.isResponsive ?? true,
-      ...(navigationNode?.sourceRef
-        ? { sourceRef: navigationNode.sourceRef }
-        : {}),
+      showSiteLogo: Boolean(siteLogoNode),
+      showSiteTitle: Boolean(siteTitleNode),
+      ...(siteLogoNode?.width ? { logoWidth: `${siteLogoNode.width}px` } : {}),
+      ...(cta ? { cta } : {}),
+      ...(sourceNode?.sourceRef ? { sourceRef: sourceNode.sourceRef } : {}),
       debugKey: 'navbar-0',
     };
     return [section];
   }
 
   if (/^footer$/.test(normalizedName)) {
+    if (!shouldBuildDeterministicFooterFromBlockTree(orderedNodes)) {
+      return [];
+    }
     const footerColumnsNode = orderedNodes.find(
       (node) => node.kind === 'columns',
     );
@@ -385,6 +417,52 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
   return [];
 }
 
+function decorateNavbarSectionFromBlockTree(
+  section: NavbarSection,
+  orderedNodes: BlockNode[],
+  content: DbContentResult,
+): NavbarSection {
+  const navigationNode = orderedNodes.find(
+    (node) => node.kind === 'navigation',
+  );
+  const siteLogoNode = orderedNodes.find((node) => node.kind === 'site-logo');
+  const siteTitleNode = orderedNodes.find((node) => node.kind === 'site-title');
+  const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+  const stickySignalNode = orderedNodes.find(isStickyChromeNode);
+
+  return {
+    ...section,
+    menuSlug: section.menuSlug?.trim() || content.menus[0]?.slug || 'primary',
+    orientation:
+      section.orientation ??
+      navigationNode?.menuOrientation ??
+      readLayoutOrientation(navigationNode) ??
+      'horizontal',
+    overlayMenu:
+      section.overlayMenu ??
+      navigationNode?.overlayMenu ??
+      ((section.orientation ?? readLayoutOrientation(navigationNode)) ===
+      'vertical'
+        ? 'never'
+        : 'mobile'),
+    isResponsive: section.isResponsive ?? navigationNode?.isResponsive ?? true,
+    sticky: section.sticky || Boolean(stickySignalNode),
+    showSiteLogo: section.showSiteLogo ?? Boolean(siteLogoNode),
+    showSiteTitle: section.showSiteTitle ?? Boolean(siteTitleNode),
+    ...(section.logoWidth
+      ? {}
+      : siteLogoNode?.width
+        ? { logoWidth: `${siteLogoNode.width}px` }
+        : {}),
+    ...(section.cta ? {} : cta ? { cta } : {}),
+    ...(section.sourceRef
+      ? {}
+      : navigationNode?.sourceRef
+        ? { sourceRef: navigationNode.sourceRef }
+        : {}),
+  };
+}
+
 function inferFooterMenuColumnsFromBlockTree(
   nodes: BlockNode[],
 ): FooterSection['menuColumns'] {
@@ -405,6 +483,41 @@ function inferFooterMenuColumnsFromBlockTree(
     });
   }
   return result;
+}
+
+function shouldBuildDeterministicFooterFromBlockTree(
+  orderedNodes: BlockNode[],
+): boolean {
+  const hasBrandSignal = orderedNodes.some((node) =>
+    ['site-logo', 'site-title', 'site-tagline'].includes(node.kind),
+  );
+  const hasMenuColumns =
+    inferFooterMenuColumnsFromBlockTree(orderedNodes).length > 0;
+  const hasColumnsShell = orderedNodes.some((node) => node.kind === 'columns');
+  const hasSupplementalImages =
+    collectFooterSupplementalImagesFromBlockTree(orderedNodes).length > 0;
+  const hasScrollTopHook =
+    collectFooterScrollTopTriggerClassNamesFromBlockTree(orderedNodes).length >
+    0;
+  const hasMeaningfulFooterContent = orderedNodes.some((node) =>
+    [
+      'heading',
+      'paragraph',
+      'navigation',
+      'buttons',
+      'button',
+      'social-links',
+      'social-link',
+    ].includes(node.kind),
+  );
+  return (
+    hasBrandSignal ||
+    hasMenuColumns ||
+    hasColumnsShell ||
+    hasSupplementalImages ||
+    hasScrollTopHook ||
+    hasMeaningfulFooterContent
+  );
 }
 
 function decorateFooterSectionFromBlockTree(
@@ -504,6 +617,37 @@ function mergeFooterSupplementalImages(
   return merged;
 }
 
+function inferNavbarCtaFromBlockTree(
+  nodes: BlockNode[],
+): NavbarSection['cta'] | undefined {
+  const ctaNode = nodes.find(
+    (node) =>
+      node.kind === 'button' &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+  if (!ctaNode?.text?.trim()) return undefined;
+  return {
+    text: ctaNode.text.trim(),
+    link: ctaNode.href?.trim() || '#',
+    style: 'button',
+    ...(ctaNode.customClassNames?.length
+      ? {
+          customClassNames: Array.from(new Set(ctaNode.customClassNames)),
+        }
+      : {}),
+  };
+}
+
+function isStickyChromeNode(node: BlockNode): boolean {
+  if (typeof node.domId === 'string' && /sticky/i.test(node.domId)) {
+    return true;
+  }
+  return (node.customClassNames ?? []).some((className) =>
+    /sticky/i.test(className),
+  );
+}
+
 function containsKind(node: BlockNode, kind: string): boolean {
   if (node.kind === kind) return true;
   return (node.children ?? []).some((child) => containsKind(child, kind));
@@ -534,13 +678,17 @@ function isEligibleBlockTreeListingTemplate(
     return false;
   }
   const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
-  if (!dataNeeds.includes('posts')) {
+  if (!dataNeeds.some((need) => ['posts', 'products'].includes(need))) {
     return false;
   }
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
-  if (['archive', 'index', 'search'].includes(normalizedTemplate)) {
+  if (
+    ['archive', 'archive-product', 'index', 'search'].includes(
+      normalizedTemplate,
+    )
+  ) {
     return true;
   }
 
@@ -1078,8 +1226,12 @@ function buildBlockTreeDrivenListingFallbackSection(
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
+  const isProductListing =
+    normalizedTemplate === 'archive-product' ||
+    toVisualDataNeeds(componentPlan.dataNeeds).includes('products');
   return {
     type: 'post-list',
+    ...(isProductListing ? { resource: 'products' as const } : {}),
     ...(normalizedTemplate === 'index' ? { title: 'Posts' } : {}),
     layout: 'grid-3',
     showDate: normalizedTemplate === 'index',
@@ -1087,6 +1239,7 @@ function buildBlockTreeDrivenListingFallbackSection(
     showCategory: normalizedTemplate === 'search',
     showExcerpt: true,
     showFeaturedImage: true,
+    ...(isProductListing ? { showPrice: true, showButton: true } : {}),
     itemLayout: 'stacked',
     metaLayout: 'inline',
     metaAlign: 'start',
@@ -1096,8 +1249,8 @@ function buildBlockTreeDrivenListingFallbackSection(
     sectionKey: 'post-list-0',
     obligation: {
       role: 'post-list',
-      required: ['posts'],
-      minItems: { posts: 1 },
+      required: [isProductListing ? 'products' : 'posts'],
+      minItems: isProductListing ? { products: 1 } : { posts: 1 },
     },
   };
 }
@@ -1219,7 +1372,10 @@ function buildBlockTreeDrivenPostDetailSections(input: {
     showTitle: !stats.titleNode,
     showAuthor: !stats.hasMetaSection && stats.hasAuthor,
     showDate: !stats.hasMetaSection && stats.hasDate,
-    showCategories: !stats.hasMetaSection && stats.hasCategoryTerms,
+    showCategories:
+      !stats.hasMetaSection &&
+      stats.hasCategoryTerms &&
+      !stats.categoryTermsNode,
     ...(stats.postContentNode.sourceRef
       ? { sourceRef: stats.postContentNode.sourceRef }
       : {}),
@@ -1231,20 +1387,38 @@ function buildBlockTreeDrivenPostDetailSections(input: {
   };
   sections.push(postContentSection);
 
-  if (stats.termsNode && stats.hasTagTerms) {
+  if (stats.categoryTermsNode) {
     const section: PostTermsSection = {
       type: 'post-terms',
-      taxonomy: stats.termsTaxonomy ?? 'post_tag',
-      separator: stats.termsSeparator,
+      taxonomy: 'category',
+      separator: stats.categoryTermsSeparator,
       layout: 'inline',
-      ...(stats.termsNode.sourceRef
-        ? { sourceRef: stats.termsNode.sourceRef }
+      ...(stats.categoryTermsNode.sourceRef
+        ? { sourceRef: stats.categoryTermsNode.sourceRef }
         : {}),
-      ...(stats.termsNode.customClassNames?.length
-        ? { customClassNames: [...stats.termsNode.customClassNames] }
+      ...(stats.categoryTermsNode.customClassNames?.length
+        ? { customClassNames: [...stats.categoryTermsNode.customClassNames] }
         : {}),
       debugKey: 'post-terms-0',
       sectionKey: 'post-terms-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.tagTermsNode) {
+    const section: PostTermsSection = {
+      type: 'post-terms',
+      taxonomy: stats.tagTermsTaxonomy ?? 'post_tag',
+      separator: stats.tagTermsSeparator,
+      layout: 'inline',
+      ...(stats.tagTermsNode.sourceRef
+        ? { sourceRef: stats.tagTermsNode.sourceRef }
+        : {}),
+      ...(stats.tagTermsNode.customClassNames?.length
+        ? { customClassNames: [...stats.tagTermsNode.customClassNames] }
+        : {}),
+      debugKey: stats.categoryTermsNode ? 'post-terms-1' : 'post-terms-0',
+      sectionKey: stats.categoryTermsNode ? 'post-terms-1' : 'post-terms-0',
     };
     sections.push(section);
   }
@@ -1476,6 +1650,7 @@ function collectBlockNodesInOrder(
   for (const node of nodes) {
     visit(node);
   }
+
   return collected;
 }
 
@@ -1489,9 +1664,11 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   featuredImageNode?: BlockNode;
   metaNode?: BlockNode;
   postContentNode?: BlockNode;
-  termsNode?: BlockNode;
-  termsTaxonomy?: 'category' | 'post_tag' | 'tag';
-  termsSeparator?: string;
+  categoryTermsNode?: BlockNode;
+  categoryTermsSeparator?: string;
+  tagTermsNode?: BlockNode;
+  tagTermsTaxonomy?: 'post_tag' | 'tag';
+  tagTermsSeparator?: string;
   commentsNode?: BlockNode;
   postNavigationNode?: BlockNode;
 } {
@@ -1499,7 +1676,8 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   let featuredImageNode: BlockNode | undefined;
   let metaNode: BlockNode | undefined;
   let postContentNode: BlockNode | undefined;
-  let termsNode: BlockNode | undefined;
+  let categoryTermsNode: BlockNode | undefined;
+  let tagTermsNode: BlockNode | undefined;
   let commentsNode: BlockNode | undefined;
   let postNavigationNode: BlockNode | undefined;
   let hasAuthor = false;
@@ -1507,8 +1685,9 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   let hasCategoryTerms = false;
   let hasTagTerms = false;
   let hasMetaSection = false;
-  let termsTaxonomy: 'category' | 'post_tag' | 'tag' | undefined;
-  let termsSeparator: string | undefined;
+  let categoryTermsSeparator: string | undefined;
+  let tagTermsTaxonomy: 'post_tag' | 'tag' | undefined;
+  let tagTermsSeparator: string | undefined;
 
   for (const node of nodes) {
     switch (node.kind) {
@@ -1539,16 +1718,16 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
         break;
       case 'post-terms': {
         const taxonomy = normalizePostTermsTaxonomy(node);
+        const separator = readStringBlockAttr(node, 'separator');
         if (taxonomy === 'category') {
           hasCategoryTerms = true;
-          if (hasMetaSection && !termsNode) {
-            termsNode = node;
-          }
+          categoryTermsNode ??= node;
+          categoryTermsSeparator ??= separator;
         } else {
           hasTagTerms = true;
-          termsNode ??= node;
-          termsTaxonomy = taxonomy;
-          termsSeparator ??= readStringBlockAttr(node, 'separator');
+          tagTermsNode ??= node;
+          tagTermsTaxonomy = taxonomy;
+          tagTermsSeparator ??= separator;
         }
         break;
       }
@@ -1574,9 +1753,11 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
     featuredImageNode,
     metaNode,
     postContentNode,
-    termsNode,
-    termsTaxonomy,
-    termsSeparator,
+    categoryTermsNode,
+    categoryTermsSeparator,
+    tagTermsNode,
+    tagTermsTaxonomy,
+    tagTermsSeparator,
     commentsNode,
     postNavigationNode,
   };
@@ -1709,7 +1890,8 @@ function normalizePostTermsTaxonomy(
   node: BlockNode,
 ): 'category' | 'post_tag' | 'tag' {
   const taxonomy = readStringBlockAttr(node, 'term');
-  if (taxonomy === 'category') return 'category';
+  if (taxonomy === 'category' || taxonomy === 'product_cat') return 'category';
+  if (taxonomy === 'product_tag') return 'post_tag';
   if (taxonomy === 'tag') return 'tag';
   return 'post_tag';
 }

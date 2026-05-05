@@ -153,3 +153,37 @@ describe('ValidatorService render-contract coverage', () => {
     expect(issue).toContain('theme-asset:/assets/images/must-keep.jpg');
   });
 });
+
+describe('ValidatorService Woo endpoint guards', () => {
+  const service = new ValidatorService({} as ConfigService);
+
+  it('does not treat the products collection endpoint as a product-detail fetch', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useEffect, useState } from 'react';
+
+        type Product = { slug: string };
+
+        export default function ArchiveProduct() {
+          const [products, setProducts] = useState<Product[]>([]);
+
+          useEffect(() => {
+            void fetch('/api/post-types/product/posts?page=1&perPage=10')
+              .then((res) => res.json())
+              .then((data) => setProducts(Array.isArray(data) ? data : []));
+          }, []);
+
+          return <section>{products.length}</section>;
+        }
+      `,
+      {
+        componentName: 'ArchiveProduct',
+        type: 'page',
+        dataNeeds: ['products'],
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+});

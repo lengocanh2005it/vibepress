@@ -5326,7 +5326,12 @@ export default function ${component.name}() {
   }): Promise<{
     requested: boolean;
     endpoint: string;
-    payload: { site_id: string; job_id: string; preview_url?: string; user_id?: string };
+    payload: {
+      site_id: string;
+      job_id: string;
+      preview_url?: string;
+      user_id?: string;
+    };
     responsePreview?: string;
     error?: string;
   } | null> {

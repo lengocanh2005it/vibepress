@@ -486,6 +486,8 @@ ${component.code}
         return 'footer-links';
       case 'postDetail':
         return 'post-detail';
+      case 'productDetail':
+        return 'product-detail';
       case 'pageDetail':
         return 'page-detail';
       default:

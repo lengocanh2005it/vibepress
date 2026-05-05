@@ -520,7 +520,17 @@ async function serializePost(
   prefix: string,
   r: any,
 ) {
-  return {
+  const isProduct = String(r.post_type ?? '').toLowerCase() === 'product';
+  const categories = isProduct
+    ? splitTermList(r.product_categories)
+    : splitTermList(r.blog_categories ?? r.categories);
+  const categorySlugs = isProduct
+    ? splitTermList(r.product_category_slugs)
+    : splitTermList(r.blog_category_slugs ?? r.category_slugs);
+  const tags = isProduct
+    ? splitTermList(r.product_tags)
+    : splitTermList(r.blog_tags ?? r.tags);
+  const base = {
     id: r.ID,
     title: r.post_title,
     content: await normalizeRichContent(conn, prefix, r.post_content),
@@ -531,10 +541,19 @@ async function serializePost(
     date: formatDate(r.post_date),
     author: r.author_name ?? '',
     authorSlug: r.author_slug ?? '',
-    categories: splitTermList(r.categories),
-    categorySlugs: splitTermList(r.category_slugs),
-    tags: splitTermList(r.tags),
+    categories,
+    categorySlugs,
+    tags,
     featuredImage: localizeWpUploadAssetUrl(r.featured_image ?? null),
+  };
+  if (!isProduct) {
+    return base;
+  }
+  return {
+    ...base,
+    price: String(r.product_price ?? '').trim(),
+    buttonText: String(r.product_button_text ?? 'View product').trim(),
+    buttonUrl: String(r.product_button_url ?? `/product/${r.post_name}`).trim(),
   };
 }
 
@@ -1018,11 +1037,18 @@ app.get('/api/posts', async (req, res) => {
               u.display_name AS author_name,
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
-              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
-              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
-              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
+              ${taxonomyNamesSubquery(prefix, 'category')} AS blog_categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS blog_category_slugs,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS blog_tags,
+              ${taxonomyNamesSubquery(prefix, 'product_cat')} AS product_categories,
+              ${taxonomySlugsSubquery(prefix, 'product_cat')} AS product_category_slugs,
+              ${taxonomyNamesSubquery(prefix, 'product_tag')} AS product_tags,
+              price.meta_value AS product_price,
+              'View product' AS product_button_text,
+              CONCAT('/product/', p.post_name) AS product_button_url
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}postmeta\` price ON price.post_id = p.ID AND price.meta_key = '_price'
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
        WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter}
@@ -1053,11 +1079,18 @@ app.get('/api/posts/:slug', async (req, res) => {
               u.display_name AS author_name,
               u.user_nicename AS author_slug,
               img.guid AS featured_image,
-              ${taxonomyNamesSubquery(prefix, 'category')} AS categories,
-              ${taxonomySlugsSubquery(prefix, 'category')} AS category_slugs,
-              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS tags
+              ${taxonomyNamesSubquery(prefix, 'category')} AS blog_categories,
+              ${taxonomySlugsSubquery(prefix, 'category')} AS blog_category_slugs,
+              ${taxonomyNamesSubquery(prefix, 'post_tag')} AS blog_tags,
+              ${taxonomyNamesSubquery(prefix, 'product_cat')} AS product_categories,
+              ${taxonomySlugsSubquery(prefix, 'product_cat')} AS product_category_slugs,
+              ${taxonomyNamesSubquery(prefix, 'product_tag')} AS product_tags,
+              price.meta_value AS product_price,
+              'View product' AS product_button_text,
+              CONCAT('/product/', p.post_name) AS product_button_url
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}postmeta\` price ON price.post_id = p.ID AND price.meta_key = '_price'
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
        WHERE p.post_name = ? AND p.post_status = 'publish' ${typeFilter} LIMIT 1`,

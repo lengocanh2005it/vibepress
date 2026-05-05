@@ -281,6 +281,106 @@ describe('block-tree deterministic shared partials', () => {
     });
   });
 
+  it('derives header logo/title visibility and CTA from the shared partial block tree', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'header',
+        componentName: 'Header',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'menus'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          domId: 'sticky-header',
+          children: [
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+              overlayMenu: 'mobile',
+              isResponsive: true,
+            },
+            {
+              kind: 'button',
+              blockName: 'button',
+              text: 'Get Started',
+              href: '#',
+              customClassNames: ['is-style-fill'],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'navbar',
+      sticky: true,
+      showSiteLogo: false,
+      showSiteTitle: true,
+      cta: {
+        text: 'Get Started',
+        link: '#',
+        style: 'button',
+      },
+    });
+  });
+
+  it('preserves explicit site logo width in deterministic header partial sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'header',
+        componentName: 'Header',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'menus'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'site-logo',
+              blockName: 'site-logo',
+              width: 60,
+            },
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'navbar',
+      showSiteLogo: true,
+      showSiteTitle: true,
+      logoWidth: '60px',
+    });
+  });
+
   it('keeps static footer images in deterministic footer partial sections', () => {
     const plan = buildBlockTreeDrivenVisualPlanForComponent({
       ...sharedBaseInput,
@@ -362,5 +462,161 @@ describe('block-tree deterministic shared partials', () => {
       type: 'footer',
       scrollTopTriggerClassNames: ['profolio-fse-scroll-top'],
     });
+  });
+
+  it('keeps marketing-heavy footers on the deterministic block-tree path', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'footer',
+        componentName: 'Footer',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'footer-links'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: "Let's Work Together",
+            },
+            {
+              kind: 'paragraph',
+              blockName: 'paragraph',
+              text: 'Marketing footer intro',
+            },
+            {
+              kind: 'social-links',
+              blockName: 'social-links',
+              children: [
+                {
+                  kind: 'social-link',
+                  blockName: 'social-link',
+                  href: '#',
+                  text: 'Facebook',
+                },
+              ],
+            },
+            {
+              kind: 'button',
+              blockName: 'button',
+              text: 'Contact',
+              href: '#',
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.renderMode).toBe('block-centric');
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'footer',
+    });
+  });
+});
+
+describe('block-tree deterministic post detail terms', () => {
+  const detailBaseInput = {
+    content: {
+      menus: [],
+      pages: [],
+      posts: [],
+    } as any,
+    tokens: undefined,
+    globalPalette: {
+      background: '#ffffff',
+      surface: '#f5f5f5',
+      text: '#111111',
+      textMuted: '#666666',
+      accent: '#000000',
+      accentText: '#ffffff',
+      dark: '#000000',
+      darkText: '#ffffff',
+    },
+    globalTypography: {
+      headingFamily: 'inherit',
+      bodyFamily: 'inherit',
+      h1: 'text-4xl',
+      h2: 'text-3xl',
+      h3: 'text-2xl',
+      body: 'text-base',
+      small: 'text-sm',
+      buttonRadius: 'rounded',
+    },
+    deriveComponentLayout: () => ({
+      containerClass: 'max-w-6xl mx-auto w-full',
+      blockGap: 'gap-12',
+      includes: [],
+    }),
+    buildRichBoundPageDetailSections: () => undefined,
+    buildBoundPageContentFallbackSection: () => ({
+      type: 'page-content' as const,
+      showTitle: true,
+    }),
+  };
+
+  it('preserves separate product category and tag term blocks without folding categories into post-content', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan: {
+        templateName: 'single',
+        componentName: 'SingleProductLike',
+        type: 'page' as const,
+        route: '/single-product-like',
+        dataNeeds: ['post-detail'],
+        isDetail: true,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'post-title',
+          blockName: 'post-title',
+        },
+        {
+          kind: 'post-content',
+          blockName: 'post-content',
+        },
+        {
+          kind: 'post-terms',
+          blockName: 'post-terms',
+          attrs: {
+            term: 'product_cat',
+            prefix: 'Category: ',
+          },
+        },
+        {
+          kind: 'post-terms',
+          blockName: 'post-terms',
+          attrs: {
+            term: 'product_tag',
+            prefix: 'Tags: ',
+          },
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toMatchObject([
+      {
+        type: 'post-title',
+      },
+      {
+        type: 'post-content',
+        showCategories: false,
+      },
+      {
+        type: 'post-terms',
+        taxonomy: 'category',
+      },
+      {
+        type: 'post-terms',
+        taxonomy: 'post_tag',
+      },
+    ]);
   });
 });

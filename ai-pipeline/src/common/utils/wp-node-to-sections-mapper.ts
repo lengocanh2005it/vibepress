@@ -1119,8 +1119,33 @@ function mapQuery(node: WpNode): PostListSection {
     ['core/post-excerpt', 'post-excerpt'].includes(child.block),
   );
   const hasFeaturedImageBlock = templateNodes.some((child) =>
-    ['core/post-featured-image', 'post-featured-image'].includes(child.block),
+    [
+      'core/post-featured-image',
+      'post-featured-image',
+      'woocommerce/product-image',
+    ].includes(child.block),
   );
+  const hasCommerceProductCardBlock = templateNodes.some((child) =>
+    [
+      'woocommerce/product-price',
+      'woocommerce/product-button',
+      'woocommerce/product-rating',
+    ].includes(child.block),
+  );
+  const hasProductPriceBlock = templateNodes.some((child) =>
+    ['woocommerce/product-price'].includes(child.block),
+  );
+  const hasProductButtonBlock = templateNodes.some((child) =>
+    ['woocommerce/product-button'].includes(child.block),
+  );
+  const isProductQuery =
+    String(node.params?.query?.postType ?? '').toLowerCase() === 'product' ||
+    String(node.params?.namespace ?? '')
+      .toLowerCase()
+      .includes('woocommerce/product-query') ||
+    String(postTemplate?.params?.__woocommerceNamespace ?? '')
+      .toLowerCase()
+      .includes('woocommerce/product-query');
   const separatorNode = templateNodes.find((child) =>
     ['core/separator', 'separator'].includes(child.block),
   );
@@ -1162,6 +1187,7 @@ function mapQuery(node: WpNode): PostListSection {
   const isMinimalTitleOnlyTemplate =
     !hasExcerptBlock &&
     !hasFeaturedImageBlock &&
+    !hasCommerceProductCardBlock &&
     !hasAuthorBlock &&
     !hasDateBlock &&
     !hasTermsBlock;
@@ -1199,6 +1225,7 @@ function mapQuery(node: WpNode): PostListSection {
 
   return {
     type: 'post-list',
+    ...(isProductQuery ? { resource: 'products' as const } : {}),
     layout,
     showDate: isMinimalTitleOnlyTemplate
       ? true
@@ -1217,6 +1244,8 @@ function mapQuery(node: WpNode): PostListSection {
       node.params?.displayFeaturedImage,
       hasFeaturedImageBlock,
     ),
+    ...(isProductQuery && hasProductPriceBlock ? { showPrice: true } : {}),
+    ...(isProductQuery && hasProductButtonBlock ? { showButton: true } : {}),
     itemLayout,
     metaLayout,
     metaAlign,
@@ -1564,9 +1593,9 @@ function mapPostFeaturedImage(node: WpNode): PostFeaturedImageSection {
 function mapPostTerms(node: WpNode): PostTermsSection {
   const term = String(node.params?.term ?? '').toLowerCase();
   const taxonomy: PostTermsSection['taxonomy'] =
-    term === 'category'
+    term === 'category' || term === 'product_cat'
       ? 'category'
-      : term === 'post_tag' || term === 'tag'
+      : term === 'post_tag' || term === 'tag' || term === 'product_tag'
         ? 'post_tag'
         : undefined;
 

@@ -50,6 +50,7 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
+  PRODUCT_INTERFACE,
   RUNTIME_PAGE_PLAN_INTERFACE,
   RUNTIME_PAGE_RESPONSE_INTERFACE,
   RUNTIME_PAGE_SECTION_INTERFACE,
@@ -104,6 +105,18 @@ export class CodeGeneratorService {
     // sections rendered — prevents missing useState when AI omits a data need.
     const effectiveDataNeeds = this.deriveDataNeeds(plan);
     const effectivePlan = { ...plan, dataNeeds: effectiveDataNeeds };
+
+    if (this.shouldUseBlockFaithfulPlanRenderer(effectivePlan)) {
+      return this.generateBlockFaithfulPartial({
+        componentName: effectivePlan.componentName,
+        nodes: this.convertBlockTreeToWpNodes(effectivePlan.blockTree ?? []),
+        dataNeeds: effectivePlan.dataNeeds as string[],
+        palette: effectivePlan.palette,
+        typography: effectivePlan.typography,
+        layout: effectivePlan.layout,
+        blockStyles: effectivePlan.blockStyles,
+      });
+    }
 
     const needsRouter = this.needsRouter(effectivePlan);
     const needsParams = this.needsParams(effectivePlan);
@@ -547,6 +560,8 @@ export class CodeGeneratorService {
           needs.add('footerLinks');
           break;
         case 'post-list':
+          needs.add(section.resource === 'products' ? 'products' : 'posts');
+          break;
         case 'search':
           needs.add('posts');
           break;
@@ -554,14 +569,22 @@ export class CodeGeneratorService {
         case 'comments':
         case 'post-title':
         case 'post-featured-image':
-          needs.add('postDetail');
+          needs.add(
+            plan.dataNeeds.includes('productDetail')
+              ? 'productDetail'
+              : 'postDetail',
+          );
           break;
         case 'post-meta':
         case 'post-terms':
           break;
         case 'post-navigation':
-          needs.add('postDetail');
-          needs.add('posts');
+          needs.add(
+            plan.dataNeeds.includes('productDetail')
+              ? 'productDetail'
+              : 'postDetail',
+          );
+          needs.add(plan.dataNeeds.includes('products') ? 'products' : 'posts');
           break;
         case 'page-content':
         case 'prose-block':
@@ -668,6 +691,12 @@ export class CodeGeneratorService {
       push(POST_INTERFACE);
     }
     if (
+      plan.dataNeeds.includes('products') ||
+      plan.dataNeeds.includes('productDetail')
+    ) {
+      push(PRODUCT_INTERFACE);
+    }
+    if (
       plan.dataNeeds.includes('pages') ||
       plan.dataNeeds.includes('pageDetail')
     ) {
@@ -683,6 +712,12 @@ export class CodeGeneratorService {
     }
     if (plan.sections.some((section) => section.type === 'post-meta')) {
       push(POST_INTERFACE);
+      if (
+        plan.dataNeeds.includes('products') ||
+        plan.dataNeeds.includes('productDetail')
+      ) {
+        push(PRODUCT_INTERFACE);
+      }
       push(PAGE_INTERFACE);
     }
     if (plan.dataNeeds.includes('menus')) {
@@ -728,12 +763,17 @@ export class CodeGeneratorService {
     if (plan.pageBinding?.slug) return false;
     return (
       plan.dataNeeds.includes('postDetail') ||
+      plan.dataNeeds.includes('productDetail') ||
       plan.dataNeeds.includes('pageDetail')
     );
   }
 
   private needsPagination(plan: ComponentVisualPlan): boolean {
-    if (!plan.dataNeeds.includes('posts')) return false;
+    if (
+      !plan.dataNeeds.includes('posts') &&
+      !plan.dataNeeds.includes('products')
+    )
+      return false;
     return /^(archive|index|search|blog)/i.test(plan.componentName);
   }
 
@@ -877,8 +917,8 @@ export class CodeGeneratorService {
 
     if (hasPostMetaSection) {
       lines.push(`interface ${componentName}Props {`);
-      lines.push(`  item?: Post | Page | null;`);
-      lines.push(`  post?: Post | null;`);
+      lines.push(`  item?: Post | Product | Page | null;`);
+      lines.push(`  post?: Post | Product | null;`);
       lines.push(`  className?: string;`);
       lines.push(`}`);
       lines.push('');
@@ -886,7 +926,7 @@ export class CodeGeneratorService {
         `const ${componentName}: React.FC<${componentName}Props> = ({ item, post, className }) => {`,
       );
       lines.push(
-        `  const metaSource: Post | null = post ?? (item && 'date' in item ? (item as Post) : null);`,
+        `  const metaSource: Post | Product | null = post ?? (item && 'date' in item ? (item as Post | Product) : null);`,
       );
     } else {
       lines.push(`const ${componentName}: React.FC = () => {`);
@@ -1014,6 +1054,31 @@ export class CodeGeneratorService {
       }
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
     }
+    if (dataNeeds.includes('products')) {
+      if (needsPostsPagination) {
+        lines.push(
+          `  const [searchParams, setSearchParams] = useSearchParams();`,
+        );
+        lines.push(
+          `  const currentPage = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);`,
+        );
+        lines.push(`  const perPage = 10;`);
+        lines.push(`  const [totalPages, setTotalPages] = useState(1);`);
+        lines.push(`  const updatePage = (nextPage: number) => {`);
+        lines.push(
+          `    const safePage = Math.min(Math.max(nextPage, 1), Math.max(totalPages, 1));`,
+        );
+        lines.push(`    const nextParams = new URLSearchParams(searchParams);`);
+        lines.push(`    if (safePage <= 1) nextParams.delete('page');`);
+        lines.push(`    else nextParams.set('page', String(safePage));`);
+        lines.push(`    setSearchParams(nextParams);`);
+        lines.push(
+          `    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });`,
+        );
+        lines.push(`  };`);
+      }
+      lines.push(`  const [products, setProducts] = useState<Product[]>([]);`);
+    }
     if (dataNeeds.includes('pages'))
       lines.push(`  const [pages, setPages] = useState<Page[]>([]);`);
     if (dataNeeds.includes('menus'))
@@ -1112,6 +1177,13 @@ export class CodeGeneratorService {
     }
     if (dataNeeds.includes('postDetail')) {
       lines.push(`  const [item, setItem] = useState<Post | null>(null);`);
+      if (fixedSlug) {
+        lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
+      } else {
+        lines.push(`  const { slug } = useParams<{ slug: string }>();`);
+      }
+    } else if (dataNeeds.includes('productDetail')) {
+      lines.push(`  const [item, setItem] = useState<Product | null>(null);`);
       if (fixedSlug) {
         lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
       } else {
@@ -1315,6 +1387,21 @@ export class CodeGeneratorService {
         );
       }
     }
+    if (dataNeeds.includes('products')) {
+      if (needsPostsPagination) {
+        fetches.push(
+          `fetch(\`/api/post-types/product/posts?page=\${currentPage}&perPage=\${perPage}\`)`,
+        );
+        setters.push(
+          `const productsData = await res${fetches.length - 1}.json(); setProducts(Array.isArray(productsData) ? productsData : []); setTotalPages(Number(res${fetches.length - 1}.headers.get('X-WP-TotalPages') ?? '1'));`,
+        );
+      } else {
+        fetches.push(`fetch('/api/post-types/product/posts')`);
+        setters.push(
+          `const productsData = await res${fetches.length - 1}.json(); setProducts(Array.isArray(productsData) ? productsData : []);`,
+        );
+      }
+    }
     if (dataNeeds.includes('pages')) {
       fetches.push(`fetch('/api/pages')`);
       setters.push(`setPages(await res${fetches.length - 1}.json());`);
@@ -1343,6 +1430,20 @@ export class CodeGeneratorService {
       );
       lines.push(`        setItem(await detailRes.json());`);
       if (needsComments) lines.push(`        await fetchComments();`);
+    }
+    if (dataNeeds.includes('productDetail')) {
+      lines.push(
+        `        if (!slug) throw new Error('Product slug is required');`,
+      );
+      lines.push(
+        fixedSlug
+          ? `        const detailRes = await fetch(${JSON.stringify(`/api/post-types/product/${fixedSlug}`)});`
+          : `        const detailRes = await fetch(\`/api/post-types/product/\${slug}\`);`,
+      );
+      lines.push(
+        `        if (!detailRes.ok) throw new Error('Product not found');`,
+      );
+      lines.push(`        setItem(await detailRes.json());`);
     }
     if (dataNeeds.includes('pageDetail')) {
       lines.push(
@@ -1389,7 +1490,11 @@ export class CodeGeneratorService {
     lines.push(`    };`);
     lines.push(`    fetchData();`);
 
-    if (dataNeeds.includes('postDetail') || dataNeeds.includes('pageDetail')) {
+    if (
+      dataNeeds.includes('postDetail') ||
+      dataNeeds.includes('productDetail') ||
+      dataNeeds.includes('pageDetail')
+    ) {
       lines.push(`  }, [slug]);`);
     } else if (dataNeeds.includes('posts') && needsPostsPagination) {
       lines.push(`  }, [currentPage]);`);
@@ -2774,14 +2879,87 @@ ${indent}) : null}`;
   ): boolean {
     if (plan.renderMode !== 'block-centric') return false;
     const normalizedName = plan.componentName.trim().toLowerCase();
-    return [
-      'header',
-      'navigation',
-      'nav',
-      'footer',
-      'sidebar',
-      'postmeta',
-    ].includes(normalizedName);
+    if (['header', 'navigation', 'nav'].includes(normalizedName)) {
+      // Header-like shared partials should preserve the original WordPress
+      // wrapper hierarchy/classes in block-centric mode. Falling back to the
+      // semantic navbar abstraction loses theme-specific structure.
+      return false;
+    }
+    return ['footer', 'sidebar', 'postmeta'].includes(normalizedName);
+  }
+
+  private shouldUseBlockFaithfulPlanRenderer(
+    plan: ComponentVisualPlan,
+  ): boolean {
+    if (plan.renderMode !== 'block-centric' || !(plan.blockTree?.length ?? 0)) {
+      return false;
+    }
+    const normalizedName = plan.componentName.trim().toLowerCase();
+    return ['header', 'navigation', 'nav', 'footer'].includes(normalizedName);
+  }
+
+  private convertBlockTreeToWpNodes(nodes: BlockNode[]): WpNode[] {
+    return nodes.map((node) => this.convertBlockTreeNodeToWpNode(node));
+  }
+
+  private convertBlockTreeNodeToWpNode(node: BlockNode): WpNode {
+    return {
+      block: node.blockName || node.kind,
+      ...(node.sourceRef ? { sourceRef: node.sourceRef } : {}),
+      ...(node.attrs ? { params: node.attrs } : {}),
+      ...(node.customClassNames?.length
+        ? { customClassNames: [...node.customClassNames] }
+        : {}),
+      ...(node.domId ? { domId: node.domId } : {}),
+      ...(typeof node.text === 'string' ? { text: node.text } : {}),
+      ...(typeof node.level === 'number' ? { level: node.level } : {}),
+      ...(typeof node.src === 'string' ? { src: node.src } : {}),
+      ...(typeof node.alt === 'string' ? { alt: node.alt } : {}),
+      ...(typeof node.width === 'number' ? { width: node.width } : {}),
+      ...(typeof node.height === 'number' ? { height: node.height } : {}),
+      ...(typeof node.href === 'string' ? { href: node.href } : {}),
+      ...(typeof node.html === 'string' ? { html: node.html } : {}),
+      ...(typeof node.bgColor === 'string' ? { bgColor: node.bgColor } : {}),
+      ...(typeof node.textColor === 'string'
+        ? { textColor: node.textColor }
+        : {}),
+      ...(typeof node.borderRadius === 'string'
+        ? { borderRadius: node.borderRadius }
+        : {}),
+      ...(typeof node.gap === 'string' ? { gap: node.gap } : {}),
+      ...(node.padding ? { padding: { ...node.padding } } : {}),
+      ...(node.margin ? { margin: { ...node.margin } } : {}),
+      ...(typeof node.minHeight === 'string'
+        ? { minHeight: node.minHeight }
+        : {}),
+      ...(typeof node.overlayColor === 'string'
+        ? { overlayColor: node.overlayColor }
+        : {}),
+      ...(typeof node.columnWidth === 'string'
+        ? { columnWidth: node.columnWidth }
+        : {}),
+      ...(typeof node.textAlign === 'string'
+        ? { textAlign: node.textAlign }
+        : {}),
+      ...(typeof node.justifyContent === 'string'
+        ? { justifyContent: node.justifyContent }
+        : {}),
+      ...(typeof node.align === 'string' ? { align: node.align } : {}),
+      ...(node.menuOrientation
+        ? { menuOrientation: node.menuOrientation }
+        : {}),
+      ...(node.overlayMenu ? { overlayMenu: node.overlayMenu } : {}),
+      ...(typeof node.isResponsive === 'boolean'
+        ? { isResponsive: node.isResponsive }
+        : {}),
+      ...(typeof node.fontFamily === 'string'
+        ? { fontFamily: node.fontFamily }
+        : {}),
+      ...(node.typography ? { typography: { ...node.typography } } : {}),
+      ...(node.children?.length
+        ? { children: this.convertBlockTreeToWpNodes(node.children) }
+        : {}),
+    };
   }
 
   private buildBlockTreeCoverStyleAttr(node: BlockNode): string {
@@ -3862,6 +4040,9 @@ ${indent}) : null}`;
     py: string,
   ): string {
     const { p, t, l } = ctx;
+    const isProductList = s.resource === 'products';
+    const collectionName = isProductList ? 'products' : 'posts';
+    const detailRouteBase = isProductList ? '/product' : '/post';
     const cardStylePreset = this.pickBlockStyle(ctx, 'group', 'column');
     const imageStyle = this.pickBlockStyle(ctx, 'image', 'gallery');
     const sectionStyle = this.buildSectionStyleAttr(s);
@@ -3915,46 +4096,58 @@ ${indent}) : null}`;
       s.titleCustomClassNames,
       'left',
     );
+    const productPriceMarkup =
+      isProductList && s.showPrice
+        ? `              {post.price ? <p className="text-sm font-medium text-[${tc}]">{post.price}</p> : null}`
+        : '';
+    const productButtonMarkup =
+      isProductList && s.showButton
+        ? `              <Link to={post.buttonUrl || \`${detailRouteBase}/\${post.slug}\`} className="inline-flex w-fit items-center justify-center border border-black/15 px-4 py-2 text-sm transition-colors hover:bg-black hover:text-white">
+                {post.buttonText || 'View product'}
+              </Link>`
+        : '';
     const titleMetaRow = hasMeta
       ? isEditorialList
         ? `              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-8"${titleMetaRowStyle}>
                  <div className="min-w-0 md:flex-1"${titleColumnStyle}>
-                   <Link to={\`/post/\${post.slug}\`} className="${editorialTitleClass}"${titleStyle}>{post.title}</Link>
-                 </div>
-                 <div className="w-full md:flex-none md:pt-1"${metaColumnStyle}>
-                   ${this.postMeta(s, ctx, {
-                     inlineItem: true,
-                     editorialCompact: true,
-                     metaLayout: postListLayout.metaLayout,
-                     metaAlign: postListLayout.metaAlign,
-                     metaSeparator: postListLayout.metaSeparator,
-                     metaGap: postListLayout.metaGap,
-                   })}
-                 </div>
-               </div>`
-        : `              <div className="${titleMetaRowClass}"${titleMetaRowStyle}>
-                 <Link to={\`/post/\${post.slug}\`} className="${this.postListInlineTitleClass(tc, p.accent, postListLayout)}"${titleStyle}>{post.title}</Link>
-                 ${this.postMeta(s, ctx, {
-                   inlineItem: true,
-                   metaLayout: postListLayout.metaLayout,
-                   metaAlign: postListLayout.metaAlign,
-                   metaSeparator: postListLayout.metaSeparator,
-                   metaGap: postListLayout.metaGap,
-                 })}
-               </div>`
-      : `              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>`;
-    const stackedContent = `              <Link to={\`/post/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
-              ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
-              ${
-                hasMeta
-                  ? this.postMeta(s, ctx, {
+                    <Link to={\`${detailRouteBase}/\${post.slug}\`} className="${editorialTitleClass}"${titleStyle}>{post.title}</Link>
+                  </div>
+                  <div className="w-full md:flex-none md:pt-1"${metaColumnStyle}>
+                    ${this.postMeta(s, ctx, {
+                      inlineItem: true,
+                      editorialCompact: true,
                       metaLayout: postListLayout.metaLayout,
                       metaAlign: postListLayout.metaAlign,
                       metaSeparator: postListLayout.metaSeparator,
                       metaGap: postListLayout.metaGap,
-                    })
-                  : ''
-              }`;
+                    })}
+                  </div>
+                </div>`
+        : `              <div className="${titleMetaRowClass}"${titleMetaRowStyle}>
+                  <Link to={\`${detailRouteBase}/\${post.slug}\`} className="${this.postListInlineTitleClass(tc, p.accent, postListLayout)}"${titleStyle}>{post.title}</Link>
+                  ${this.postMeta(s, ctx, {
+                    inlineItem: true,
+                    metaLayout: postListLayout.metaLayout,
+                    metaAlign: postListLayout.metaAlign,
+                    metaSeparator: postListLayout.metaSeparator,
+                    metaGap: postListLayout.metaGap,
+                  })}
+                </div>`
+      : `              <Link to={\`${detailRouteBase}/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>`;
+    const stackedContent = `              <Link to={\`${detailRouteBase}/\${post.slug}\`} className="${this.textLinkClass(tc, p.accent, 'text-lg font-medium')}"${titleStyle}>{post.title}</Link>
+               ${productPriceMarkup}
+               ${s.showExcerpt ? `<p className="text-sm"${excerptStyle}>{post.excerpt}</p>` : ''}
+               ${
+                 hasMeta
+                   ? this.postMeta(s, ctx, {
+                       metaLayout: postListLayout.metaLayout,
+                       metaAlign: postListLayout.metaAlign,
+                       metaSeparator: postListLayout.metaSeparator,
+                       metaGap: postListLayout.metaGap,
+                     })
+                   : ''
+               }
+               ${productButtonMarkup}`;
 
     const featuredImageMarkup = s.showFeaturedImage
       ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}`
@@ -3980,7 +4173,7 @@ ${indent}) : null}`;
         <div className="${l.containerClass}">
           ${s.title ? `<h2 className="${sectionTitleClassName}"${titleStyle}>${s.title}</h2>` : ''}
           <div className="${gridClass}"${this.buildSectionGapStyleAttr(s)}>
-            {posts.map(post => (
+            {${collectionName}.map(post => (
 ${postCard}
             ))}
           </div>

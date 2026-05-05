@@ -1196,17 +1196,28 @@ export class PlannerService {
           const degenerateSections = this.describeDegenerateSections(
             parsed.sections,
           );
+          const filteredParsedSections =
+            degenerateSections.length > 0
+              ? this.filterDegenerateDraftSections(parsed.sections)
+              : parsed.sections;
           if (degenerateSections.length > 0) {
             lastReason = 'visual plan contains degenerate sections';
             lastDropped = ` | degenerateSections: ${degenerateSections.join('; ')}`;
-            if (attempt < 2) {
-              this.logger.warn(
-                this.formatPhaseCLog(
-                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
-                ),
-              );
+            if (filteredParsedSections.length === 0) {
+              if (attempt < 2) {
+                this.logger.warn(
+                  this.formatPhaseCLog(
+                    `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                  ),
+                );
+              }
+              continue;
             }
-            continue;
+            this.logger.debug(
+              this.formatPhaseCLog(
+                `"${componentPlan.componentName}" dropped ${degenerateSections.length} degenerate visual-plan section(s) before contract assembly${lastDropped}`,
+              ),
+            );
           }
 
           const layout = this.deriveComponentLayout(
@@ -1234,7 +1245,7 @@ export class PlannerService {
               blockStyles: tokens?.blockStyles,
               sections: this.injectMissingDraftSections(
                 this.mergeDraftSectionPresentation(
-                  parsed.sections,
+                  filteredParsedSections,
                   draftSections,
                   visualContract,
                 ),
@@ -1583,7 +1594,10 @@ export class PlannerService {
       };
     }
 
-    if (this.isPostDetailComponentPlan(componentPlan)) {
+    if (
+      this.isPostDetailComponentPlan(componentPlan) ||
+      this.isProductDetailComponentPlan(componentPlan)
+    ) {
       const sectionTypes = new Set(
         sections?.map((section) => section.type) ?? [],
       );
@@ -1694,6 +1708,7 @@ export class PlannerService {
       ? 'strict'
       : this.isHomeLikeComponentPlan(input.componentPlan) ||
           this.isPostDetailComponentPlan(input.componentPlan) ||
+          this.isProductDetailComponentPlan(input.componentPlan) ||
           input.componentPlan.isDetail ||
           hasStructureEvidence
         ? 'guided'
@@ -1754,7 +1769,10 @@ export class PlannerService {
       }
       return 'homepage-brand';
     }
-    if (this.isPostDetailComponentPlan(input.componentPlan)) {
+    if (
+      this.isPostDetailComponentPlan(input.componentPlan) ||
+      this.isProductDetailComponentPlan(input.componentPlan)
+    ) {
       return 'article';
     }
     if (
@@ -2260,7 +2278,8 @@ export class PlannerService {
       }));
 
     if (
-      this.isPostDetailComponentPlan(componentPlan) &&
+      (this.isPostDetailComponentPlan(componentPlan) ||
+        this.isProductDetailComponentPlan(componentPlan)) &&
       toVisualDataNeeds(componentPlan.dataNeeds).includes('comments') &&
       !entries.some((entry) => entry.kind === 'comments')
     ) {
@@ -2436,7 +2455,8 @@ export class PlannerService {
       case 'post-content':
       case 'page-content':
       case 'prose-block':
-        return this.isPostDetailComponentPlan(componentPlan)
+        return this.isPostDetailComponentPlan(componentPlan) ||
+          this.isProductDetailComponentPlan(componentPlan)
           ? 'article-body'
           : 'prose';
       case 'post-title':
@@ -2697,6 +2717,18 @@ export class PlannerService {
       (needs.has('postDetail') ||
         componentPlan.templateName.toLowerCase().startsWith('single') ||
         (componentPlan.route ?? '').startsWith('/post/'))
+    );
+  }
+
+  private isProductDetailComponentPlan(
+    componentPlan: PlanResult[number],
+  ): boolean {
+    const needs = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
+    return (
+      componentPlan.isDetail === true &&
+      (needs.has('productDetail') ||
+        componentPlan.templateName.toLowerCase().startsWith('single-product') ||
+        (componentPlan.route ?? '').startsWith('/product/'))
     );
   }
 
@@ -3466,7 +3498,21 @@ export class PlannerService {
         templateBase.includes('sidebar');
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'frontend-page';
-      const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
+      const isWooProductTemplate =
+        templateBase === 'archive-product' ||
+        templateBase === 'single-product' ||
+        source.includes('"postType":"product"') ||
+        source.includes('"postType": "product"') ||
+        source.includes('woocommerce/product-query') ||
+        source.includes('woocommerce/related-products') ||
+        source.includes('term":"product_cat"') ||
+        source.includes('term":"product_tag"');
+      const detailNeed = isPageTemplate
+        ? 'page-detail'
+        : isWooProductTemplate
+          ? 'product-detail'
+          : 'post-detail';
+      const listingNeed = isWooProductTemplate ? 'products' : 'posts';
 
       // FSE block theme
       if (
@@ -3479,7 +3525,7 @@ export class PlannerService {
           else needs.add('menus');
         }
       if (source.includes('wp:query') || source.includes('"query"'))
-        needs.add('posts');
+        needs.add(listingNeed);
       if (
         source.includes('wp:post-content') ||
         source.includes('"post-content"')
@@ -3498,21 +3544,21 @@ export class PlannerService {
           source.includes('wp:avatar') ||
           source.includes('"avatar"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
         needs.add('site-info');
       }
       if (
         isSidebarLike &&
         (source.includes('wp:categories') || source.includes('"categories"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
       }
       if (
         isSidebarLike &&
         (source.includes('wp:latest-posts') ||
           source.includes('"latest-posts"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
       }
 
       // Classic PHP theme
@@ -3525,7 +3571,7 @@ export class PlannerService {
           if (isFooterPartial) needs.add('footer-links');
           else needs.add('menus');
         }
-      if (source.includes('{/* WP: loop start */}')) needs.add('posts');
+      if (source.includes('{/* WP: loop start */}')) needs.add(listingNeed);
       if (
         source.includes('{/* WP: post.content') ||
         source.includes('{/* WP: post.title')
@@ -3785,10 +3831,12 @@ export class PlannerService {
   private orderPlannerDataNeeds(dataNeeds: string[]): string[] {
     const order = [
       'post-detail',
+      'product-detail',
       'page-detail',
       'categoryDetail',
       'comments',
       'posts',
+      'products',
       'pages',
       'menus',
       'site-info',
@@ -3929,14 +3977,15 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "products" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "product-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
+- "product-detail" → ONLY for Woo single-product templates (route /product/:slug)
 - "page-detail"  → ONLY for true page-detail templates or exact bound DB pages
 - Page templates MUST use "page-detail" — NEVER "post-detail"
-- Static custom templates MUST NOT keep "post-detail" or "page-detail" unless they are truly singular/detail routes
-- Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
-- Archive / listing pages use "posts", not "post-detail"
+- Static custom templates MUST NOT keep "post-detail", "product-detail", or "page-detail" unless they are truly singular/detail routes
+- Partial components (type "partial") MUST NOT include "post-detail", "product-detail", or "page-detail"
+- Archive / listing pages use "posts" or "products", not detail data needs
 - Dedicated Header / Navigation partials may include "menus"
 - Dedicated Footer partials should use "footer-links" for footer columns and may include "site-info" for brand/title/tagline
 - Ordinary page components MUST NOT request "menus", "site-info", or "footer-links" just because the original WordPress template referenced shared header/footer chrome.
@@ -4915,7 +4964,7 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - isDetail must be true when route contains :slug
 - Custom templates without clear singular/detail evidence should stay static (\`/template-name\`), not \`/template-name/:slug\`
 - Do not keep \`post-detail\` or \`page-detail\` on static custom templates
-- Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
+- Valid dataNeeds values: posts, products, pages, menus, site-info, footer-links, post-detail, product-detail, page-detail, comments, categoryDetail
 - description must stay specific and source-backed; mention major layout/widgets when visible
 
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
@@ -5440,37 +5489,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
   private shouldUseLosslessPlanningDraft(
     componentPlan: PlanResult[number],
-    nodes: WpNode[],
+    _nodes: WpNode[],
   ): boolean {
-    if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
-      return false;
-    }
-
-    const TRANSACTIONAL_NAMES = [
-      'cart',
-      'checkout',
-      'my-account',
-      'order-pay',
-      'order-received',
-    ];
-
-    const normalizedTemplate = this.normalizeTemplateIdentifier(
-      componentPlan.templateName,
-    );
-    if (TRANSACTIONAL_NAMES.includes(normalizedTemplate)) {
-      return true;
-    }
-
-    const normalizedComponentName = componentPlan.componentName
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '');
-    if (TRANSACTIONAL_NAMES.includes(normalizedComponentName)) {
-      return true;
-    }
-
-    return this.containsTransactionalCommerceBlocks(nodes);
+    // Partials (header/footer/sidebar) use deterministic rendering — not lossless draft.
+    if (componentPlan.type !== 'page') return false;
+    // Detail pages (single-post, single-page) use their own section builders — not lossless draft.
+    if (componentPlan.isDetail === true) return false;
+    // All general pages use the lossless mapper to preserve full block-tree context
+    // (group headers, labels, container text) so that every source-backed text node
+    // is available to the visual planner and can satisfy the render contract.
+    return true;
   }
 
   private containsTransactionalCommerceBlocks(nodes: WpNode[]): boolean {

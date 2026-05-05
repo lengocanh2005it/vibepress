@@ -26,6 +26,13 @@ export const POST_FIELDS = [
   'featuredImage',
 ] as const;
 
+export const PRODUCT_FIELDS = [
+  ...POST_FIELDS,
+  'price',
+  'buttonText',
+  'buttonUrl',
+] as const;
+
 export const PAGE_BACKEND_FIELDS = [
   'id',
   'title',
@@ -88,6 +95,7 @@ export const COMMENT_SUBMISSION_FIELDS = [
 ] as const;
 
 export const POST_INTERFACE = `interface Post { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; authorSlug: string; categories: string[]; categorySlugs: string[]; tags: string[]; featuredImage: string | null; }`;
+export const PRODUCT_INTERFACE = `interface Product { id: number; title: string; content: string; excerpt: string; slug: string; type: string; status: string; date: string; author: string; authorSlug: string; categories: string[]; categorySlugs: string[]; tags: string[]; featuredImage: string | null; price: string; buttonText: string; buttonUrl: string; }`;
 export const PAGE_INTERFACE = `interface Page { id: number; title: string; content: string; slug: string; parentId: number; menuOrder: number; template: string; featuredImage: string | null; }`;
 export const SITE_INFO_INTERFACE = `interface SiteInfo { siteUrl: string; siteName: string; blogDescription: string; logoUrl: string | null; adminEmail: string; language: string; }`;
 export const MENU_ITEM_INTERFACE = `interface MenuItem { id: number; title: string; url: string; order: number; parentId: number; target: string | null; }`;
@@ -135,6 +143,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 ### Entity fields
 - SiteInfo: ${formatFieldList(SITE_INFO_FIELDS)}
 - Post: ${formatFieldList(POST_FIELDS)}
+- Product from \`/api/post-types/product/*\`: ${formatFieldList(PRODUCT_FIELDS)}
 - Page for React usage: ${formatFieldList(PAGE_FRONTEND_FIELDS)}
 - Menu: ${formatFieldList(MENU_FIELDS)}
 - MenuItem: ${formatFieldList(MENU_ITEM_FIELDS)}
@@ -148,6 +157,7 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - Do NOT rename \`siteInfo.siteName/siteUrl/blogDescription\` into \`name/url/description\`.
 - Pages may use ${formatFieldList(PAGE_FRONTEND_FIELDS)}, but still must NOT use post-only fields such as \`author\`, \`categories\`, \`tags\`, \`date\`, \`excerpt\`, or comments.
 - \`post.content\` and \`page.content\` are normalized HTML strings: WordPress asset URLs are rewritten, Gutenberg comments are stripped, and common dynamic blocks are rendered to HTML where possible.
+- Products fetched from \`/api/post-types/product/*\` use flat fields; render \`product.price\`, \`product.buttonText\`, and \`product.buttonUrl\` directly.
 - Paginated post-list endpoints return flat \`Post[]\` plus WP-style response headers: \`X-WP-Total\`, \`X-WP-TotalPages\`, \`X-WP-CurrentPage\`, \`X-WP-PerPage\`.
 - Use \`post.authorSlug\` for author archive links; \`post.author\` is display text only.
 - Use \`post.categorySlugs[index]\` with \`post.categories[index]\` for category archive links when \`/category/:slug\` is available.
@@ -217,6 +227,22 @@ export function buildFlatRestSchemaNote(availableVariables: string): string {
       '- Pagination helpers available alongside `posts`: `currentPage: number`, `totalPages: number`, `updatePage(nextPage: number): void`.',
       '- Use `currentPage` and `totalPages` to render pagination UI; call `updatePage(nextPage)` to change pages.',
       '- Invalid examples inside loops: `post.title.node`, `post.categories.nodes`, `node.title.rendered`.',
+    );
+  }
+
+  if (availableVariables.includes('`product: Product | null`')) {
+    lines.push(
+      `- \`product\` fields: ${formatFieldList(PRODUCT_FIELDS)}.`,
+      '- Valid examples: `product.title`, `product.price`, `product.buttonText`, `product.buttonUrl`, `product.featuredImage`.',
+      '- Invalid examples: `product.price.rendered`, `product.node.title`, `product.button.url`.',
+    );
+  }
+
+  if (availableVariables.includes('`products: Product[]`')) {
+    lines.push(
+      `- Inside \`products.map(product => ...)\`, \`product\` uses fields: ${formatFieldList(PRODUCT_FIELDS)}.`,
+      '- Pagination helpers available alongside `products`: `currentPage: number`, `totalPages: number`, `updatePage(nextPage: number): void`.',
+      '- Valid examples inside loops: `product.price`, `product.buttonUrl`, `product.buttonText`, `product.categories[0]`.',
     );
   }
 

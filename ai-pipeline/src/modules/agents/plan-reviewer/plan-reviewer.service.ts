@@ -55,11 +55,13 @@ type RoutePolicy = DeterministicRouteContract;
 
 const VALID_DATA_NEEDS = new Set<PlanDataNeed>([
   'posts',
+  'products',
   'pages',
   'menus',
   'site-info',
   'footer-links',
   'post-detail',
+  'product-detail',
   'page-detail',
   'comments',
   'categoryDetail',
@@ -138,6 +140,7 @@ export class PlanReviewerService {
       repoManifest,
     );
     this.validateDraftSectionFidelity(reviewed, errors);
+    this.validateDraftLiteralCoverage(reviewed, errors);
 
     const pages = reviewed.filter((c) => c.type === 'page').length;
     const partials = reviewed.filter((c) => c.type === 'partial').length;
@@ -280,7 +283,10 @@ export class PlanReviewerService {
 
       if (next.type === 'partial') {
         const detailNeeds = next.dataNeeds.filter(
-          (need) => need === 'post-detail' || need === 'page-detail',
+          (need) =>
+            need === 'post-detail' ||
+            need === 'product-detail' ||
+            need === 'page-detail',
         );
         if (next.route !== null) {
           this.pushWarning(
@@ -310,7 +316,10 @@ export class PlanReviewerService {
           next = {
             ...next,
             dataNeeds: next.dataNeeds.filter(
-              (need) => need !== 'post-detail' && need !== 'page-detail',
+              (need) =>
+                need !== 'post-detail' &&
+                need !== 'product-detail' &&
+                need !== 'page-detail',
             ),
           };
         }
@@ -415,6 +424,7 @@ export class PlanReviewerService {
 
       if (policy.type === 'partial') {
         needs.delete('post-detail');
+        needs.delete('product-detail');
         needs.delete('page-detail');
       }
       for (const disallowedNeed of policy.disallowedDetailDataNeeds) {
@@ -1394,10 +1404,12 @@ export class PlanReviewerService {
   private orderPlanDataNeeds(dataNeeds: PlanDataNeed[]): PlanDataNeed[] {
     const order: PlanDataNeed[] = [
       'post-detail',
+      'product-detail',
       'page-detail',
       'categoryDetail',
       'comments',
       'posts',
+      'products',
       'pages',
       'menus',
       'site-info',
@@ -1411,5 +1423,91 @@ export class PlanReviewerService {
     const sortedA = [...valuesA].sort();
     const sortedB = [...valuesB].sort();
     return sortedA.every((value, index) => value === sortedB[index]);
+  }
+
+  // Plan completeness gate: verify that key text literals present in draft
+  // sections are not silently dropped by the AI visual planner.
+  // Runs after validateDraftSectionFidelity so section count/type issues are
+  // already caught. Only checks non-detail pages — partials and detail pages
+  // have their own contract paths.
+  private validateDraftLiteralCoverage(
+    plan: PlanResult,
+    errors: string[],
+  ): void {
+    for (const item of plan) {
+      if (item.type !== 'page' || item.isDetail === true) continue;
+      if (!item.draftSections?.length || !item.visualPlan?.sections?.length)
+        continue;
+
+      const expectedDraft = this.getContractExpectedDraftSections(item);
+      if (!expectedDraft.length) continue;
+
+      const visualSections = item.visualPlan.sections;
+
+      for (let i = 0; i < expectedDraft.length; i++) {
+        const draft = expectedDraft[i];
+        const visual = visualSections[i];
+        // Missing section is already caught by validateDraftSectionFidelity.
+        if (!visual) continue;
+
+        const dropped = this.findDroppedSectionLiterals(draft, visual);
+        for (const literal of dropped) {
+          errors.push(
+            `Component "${item.componentName}" section ${i + 1} (${draft.type}): ` +
+              `source-backed text "${literal}" was dropped in visual plan — ` +
+              `visual planner must preserve all draft literals`,
+          );
+        }
+      }
+    }
+  }
+
+  // Returns draft literals (heading/subheading/title/subtitle) that are absent
+  // from the visual section's full text content.
+  private findDroppedSectionLiterals(
+    draft: SectionPlan,
+    visual: SectionPlan,
+  ): string[] {
+    const draftLiterals = this.extractKeyLiterals(draft);
+    if (draftLiterals.length === 0) return [];
+    const visualText = this.flattenSectionText(visual).toLowerCase();
+    return draftLiterals.filter(
+      (literal) => !visualText.includes(literal.toLowerCase()),
+    );
+  }
+
+  // Extracts heading/subheading/title/subtitle — the fields most likely to
+  // carry group-header text that the lossless mapper preserves but an AI
+  // visual planner can drop. Skips dynamic bindings and very short strings.
+  private extractKeyLiterals(section: SectionPlan): string[] {
+    const results: string[] = [];
+    const s = section as unknown as Record<string, unknown>;
+    for (const field of ['heading', 'subheading', 'title', 'subtitle']) {
+      const value = s[field];
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed.length < 3) continue;
+      if (/\{[a-zA-Z0-9_.]+\}/.test(trimmed)) continue; // dynamic binding
+      results.push(trimmed);
+    }
+    return results;
+  }
+
+  // Recursively flattens all string values from a section into a single string.
+  private flattenSectionText(section: SectionPlan): string {
+    const parts: string[] = [];
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string') {
+        parts.push(value);
+      } else if (Array.isArray(value)) {
+        for (const item of value) collect(item);
+      } else if (value !== null && typeof value === 'object') {
+        for (const v of Object.values(value as Record<string, unknown>)) {
+          collect(v);
+        }
+      }
+    };
+    collect(section);
+    return parts.join(' ');
   }
 }
