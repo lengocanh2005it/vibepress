@@ -561,7 +561,7 @@ function DashboardView({ preset }: { preset: WpPresetDetail }) {
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+
 const TemplateStore: React.FC = () => {
   const [view, setView] = useState<View>("landing");
   const [deployStep, setDeployStep] = useState(0);
