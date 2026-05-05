@@ -140,6 +140,25 @@ async function getMigrationById(req, res) {
   }
 }
 
+async function getMigrationByJobId(req, res) {
+  const { jobId } = req.params;
+  try {
+    const migration = await queryOne(
+      `SELECT rm.*, s.site_name, s.site_url
+       FROM react_migrations rm
+       LEFT JOIN wp_sites s ON s.site_id = rm.site_id
+       WHERE rm.job_id = ?
+       LIMIT 1`,
+      [jobId],
+    );
+    if (!migration) return res.status(404).json({ error: 'Không tìm thấy migration' });
+    return res.json(migration);
+  } catch (err) {
+    console.error(`[Migration] getMigrationByJobId lỗi:`, err);
+    return res.status(500).json({ error: 'Lỗi khi lấy migration', detail: err.message });
+  }
+}
+
 async function deleteMigration(req, res) {
   const { id } = req.params;
   try {
@@ -155,4 +174,4 @@ async function deleteMigration(req, res) {
   }
 }
 
-module.exports = { createMigration, updateMigration, getAllMigrations, getMigrationsBySite, getMigrationById, deleteMigration };
+module.exports = { createMigration, updateMigration, getAllMigrations, getMigrationsBySite, getMigrationById, getMigrationByJobId, deleteMigration };

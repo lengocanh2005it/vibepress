@@ -349,6 +349,18 @@ const VisualEditor: React.FC = () => {
   const [canUndo, setCanUndo] = useState(false);
   const [isUndoing, setIsUndoing] = useState(false);
 
+  const [effectiveDeployedUrl, setEffectiveDeployedUrl] = useState<string | null>(state.deployedUrl ?? null);
+
+  useEffect(() => {
+    if (!jobId) return;
+    fetch(`/api/migrations/job/${jobId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m: { deployed_url?: string | null } | null) => {
+        if (m?.deployed_url) setEffectiveDeployedUrl(m.deployed_url);
+      })
+      .catch(() => {});
+  }, [jobId]);
+
   const [publishState, setPublishState] = useState<{
     loading: boolean;
     frontendUrl: string | null;
@@ -374,6 +386,7 @@ const VisualEditor: React.FC = () => {
       const data = await res.json() as { success: boolean; frontendUrl?: string; githubUrl?: string; error?: string };
       if (!res.ok || !data.success) throw new Error(data.error || 'Publish failed');
       setPublishState({ loading: false, frontendUrl: data.frontendUrl ?? null, error: null });
+      setEffectiveDeployedUrl(data.frontendUrl ?? null);
     } catch (err) {
       setPublishState({ loading: false, frontendUrl: null, error: err instanceof Error ? err.message : 'Unknown error' });
     }
@@ -839,11 +852,11 @@ const VisualEditor: React.FC = () => {
               {/* Actions */}
               <div className="flex shrink-0 items-center gap-2">
                 {/* Đã deploy → Visit Site + Redeploy */}
-                {state.deployedUrl ? (
+                {effectiveDeployedUrl ? (
                   <div className="flex flex-col items-end gap-0.5">
                     <div className="flex items-center gap-2">
                       <a
-                        href={state.deployedUrl}
+                        href={effectiveDeployedUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
