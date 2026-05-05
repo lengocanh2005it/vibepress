@@ -5,6 +5,7 @@ import type {
   ColorPalette,
   CommentsSection,
   ComponentVisualPlan,
+  CoverSection,
   FooterSection,
   LayoutTokens,
   NavbarSection,
@@ -1132,7 +1133,17 @@ function buildBlockTreeDrivenListingSections(input: {
       section.type === 'cover' &&
       !sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId),
   );
-  sections.push(...leadCoverSections);
+  if (leadCoverSections.length > 0) {
+    sections.push(...leadCoverSections);
+  } else {
+    const synthesizedLeadCover = buildListingLeadCoverSection(
+      draftBlockTree,
+      shell.sidebarColumnSourceNodeId,
+    );
+    if (synthesizedLeadCover) {
+      sections.push(synthesizedLeadCover);
+    }
+  }
 
   const searchSection = draftSections?.find(
     (section): section is SearchSection => section.type === 'search',
@@ -1273,6 +1284,59 @@ function buildBlockTreeDrivenListingFallbackSection(
   };
 }
 
+function buildListingLeadCoverSection(
+  draftBlockTree: BlockNode[],
+  excludedSourceNodeIdPrefix?: string,
+): CoverSection | undefined {
+  const coverNode = draftBlockTree.find(
+    (node) =>
+      node.kind === 'cover' &&
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix),
+  );
+  if (!coverNode?.src?.trim()) {
+    return undefined;
+  }
+
+  const coverDescendants = collectBlockNodesInOrder([coverNode]);
+  const headingNode = coverDescendants.find(
+    (node) =>
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix) &&
+      ['heading', 'query-title'].includes(node.kind) &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+  const paragraphNode = coverDescendants.find(
+    (node) =>
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix) &&
+      node.kind === 'paragraph' &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+
+  return {
+    type: 'cover',
+    imageSrc: coverNode.src,
+    dimRatio:
+      typeof coverNode.attrs?.dimRatio === 'number' ? coverNode.attrs.dimRatio : 50,
+    minHeight: normalizeCoverCssLength(coverNode.minHeight) ?? '400px',
+    contentAlign:
+      coverNode.textAlign === 'left' || coverNode.textAlign === 'right'
+        ? coverNode.textAlign
+        : 'center',
+    ...(headingNode?.text?.trim() ? { heading: headingNode.text.trim() } : {}),
+    ...(paragraphNode?.text?.trim()
+      ? { subheading: paragraphNode.text.trim() }
+      : {}),
+    ...(coverNode.overlayColor ? { overlayColor: coverNode.overlayColor } : {}),
+    ...(coverNode.sourceRef ? { sourceRef: coverNode.sourceRef } : {}),
+    ...(coverNode.customClassNames?.length
+      ? { customClassNames: [...new Set(coverNode.customClassNames)] }
+      : {}),
+    debugKey: 'cover-0',
+    sectionKey: 'cover-0',
+  };
+}
+
 function pickFirstBlockSourceRef(
   ...nodes: Array<BlockNode | undefined>
 ): BlockNode['sourceRef'] | undefined {
@@ -1305,6 +1369,26 @@ function sectionBelongsToSourceSubtree(
       matchesPrefix(value),
     ) ?? false
   );
+}
+
+function nodeBelongsToSourceSubtree(
+  node: BlockNode,
+  sourceNodeIdPrefix?: string,
+): boolean {
+  if (!sourceNodeIdPrefix?.trim()) {
+    return false;
+  }
+  const sourceNodeId = node.sourceRef?.sourceNodeId;
+  return (
+    typeof sourceNodeId === 'string' && sourceNodeId.startsWith(sourceNodeIdPrefix)
+  );
+}
+
+function normalizeCoverCssLength(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
 }
 
 function buildBlockTreeDrivenPostDetailSections(input: {

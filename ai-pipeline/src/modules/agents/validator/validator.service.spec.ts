@@ -152,6 +152,97 @@ describe('ValidatorService render-contract coverage', () => {
 
     expect(issue).toContain('theme-asset:/assets/images/must-keep.jpg');
   });
+
+  it('ignores generic listing labels for hybrid listing surfaces', () => {
+    const renderContract = {
+      version: 1,
+      sourceModel: {
+        kind: 'block-tree',
+        blockTree: [
+          {
+            kind: 'cover',
+            blockName: 'core/cover',
+            sourceRef: {
+              sourceNodeId: 'index::cover::1',
+            },
+            children: [
+              {
+                kind: 'heading',
+                blockName: 'core/heading',
+                text: 'News',
+                sourceRef: {
+                  sourceNodeId: 'index::heading::1.0',
+                },
+                children: [],
+              },
+            ],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: {
+              sourceNodeId: 'index::group::2',
+            },
+            children: [
+              {
+                kind: 'heading',
+                blockName: 'core/heading',
+                text: 'Latest Posts',
+                sourceRef: {
+                  sourceNodeId: 'index::heading::2.0',
+                },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+      structure: {
+        renderMode: 'hybrid',
+        sharedChrome: {},
+        subtreeBindings: [],
+      },
+      preserveRules,
+      fallback: {
+        reason: 'listing surface coverage test',
+        sections: [
+          {
+            type: 'post-list',
+            layout: 'grid-3',
+            showDate: true,
+            showAuthor: true,
+            showCategory: false,
+            showExcerpt: true,
+            showFeaturedImage: true,
+            itemLayout: 'stacked',
+            metaLayout: 'inline',
+            metaAlign: 'start',
+          },
+        ],
+      },
+    } as unknown as ComponentRenderContract;
+
+    const issue = (
+      service as unknown as {
+        checkRenderContractCoverage: (
+          code: string,
+          renderContract?: ComponentRenderContract,
+          componentName?: string,
+          visualPlan?: ComponentVisualPlan,
+        ) => string | null;
+      }
+    ).checkRenderContractCoverage(
+      '<section><h2>Posts</h2></section>',
+      renderContract,
+      'Index',
+      {
+        componentName: 'Index',
+        sections: renderContract.fallback?.sections ?? [],
+      } as ComponentVisualPlan,
+    );
+
+    expect(issue).toBeNull();
+  });
 });
 
 describe('ValidatorService Woo endpoint guards', () => {

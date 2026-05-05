@@ -203,6 +203,63 @@ describe('block-tree deterministic listing shells', () => {
     expect(plan?.layout.contentLayout).toBe('sidebar-right');
     expect(plan?.layout.sidebarScope).toBe('all-content');
   });
+
+  it('synthesizes the lead cover from block-tree evidence when draft sections omit it', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...baseInput,
+      draftSections: [
+        {
+          type: 'post-list',
+          layout: 'list',
+          showDate: true,
+          showAuthor: true,
+          showCategory: false,
+          showExcerpt: true,
+          showFeaturedImage: true,
+          sourceRef: {
+            sourceNodeId: 'blog-right-sidebar::query::3.0.0.0',
+            templateName: 'blog-right-sidebar',
+            sourceFile: 'templates/blog-right-sidebar.html',
+            topLevelIndex: 3,
+            parentSourceNodeId: 'blog-right-sidebar::column::3.0.0',
+            blockName: 'query',
+          },
+        },
+      ] as ComponentVisualPlan['sections'],
+      draftBlockTree: [
+        {
+          ...draftBlockTree[0],
+          src: 'theme-asset:/assets/images/banner.jpg',
+          attrs: { dimRatio: 80 },
+          minHeight: '250px',
+          overlayColor: '#000',
+          textAlign: 'center',
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: 'News',
+              sourceRef: {
+                sourceNodeId: 'blog-right-sidebar::heading::2.0',
+                templateName: 'blog-right-sidebar',
+                sourceFile: 'templates/blog-right-sidebar.html',
+                topLevelIndex: 2,
+                parentSourceNodeId: 'blog-right-sidebar::cover::2',
+                blockName: 'heading',
+              },
+            },
+          ],
+        },
+        draftBlockTree[1],
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'cover',
+      heading: 'News',
+      imageSrc: 'theme-asset:/assets/images/banner.jpg',
+    });
+  });
 });
 
 describe('block-tree deterministic shared partials', () => {

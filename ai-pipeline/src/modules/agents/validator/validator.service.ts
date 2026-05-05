@@ -1380,10 +1380,15 @@ export class ValidatorService {
         semanticCoverageSourceNodeIds,
       },
     );
+    const staticTexts = this.filterRenderContractStaticTexts(
+      auditSignals.staticTexts,
+      renderContract,
+      visualPlan,
+    );
     const textLimit = strictBlockTree ? 8 : 4;
     const assetLimit = strictBlockTree ? 6 : 3;
 
-    for (const text of auditSignals.staticTexts.slice(0, textLimit)) {
+    for (const text of staticTexts.slice(0, textLimit)) {
       if (!normalizedCode.includes(this.normalizeForTextMatch(text))) {
         issues.push(
           `Missing source-backed static text "${this.summarizeRenderContractValue(text)}".`,
@@ -1436,6 +1441,32 @@ export class ValidatorService {
       `sourceRootNodes=${renderContract.sourceModel.blockTree.length}`,
       ...detailLines,
     ].join('\n')}`;
+  }
+
+  private filterRenderContractStaticTexts(
+    staticTexts: readonly string[],
+    renderContract: ComponentRenderContract,
+    visualPlan?: ComponentVisualPlan,
+  ): string[] {
+    if (renderContract.structure.renderMode !== 'hybrid') {
+      return [...staticTexts];
+    }
+    const sections =
+      visualPlan?.sections ?? renderContract.fallback?.sections ?? [];
+    const isListingSurface = sections.some(
+      (section) =>
+        section.type === 'post-list' ||
+        section.type === 'search' ||
+        section.type === 'sidebar',
+    );
+    if (!isListingSurface) {
+      return [...staticTexts];
+    }
+
+    const genericListingLabels = new Set(['news', 'latest posts']);
+    return staticTexts.filter(
+      (text) => !genericListingLabels.has(this.normalizeForTextMatch(text)),
+    );
   }
 
   private collectRenderContractAuditSignals(
