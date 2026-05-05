@@ -168,6 +168,9 @@ export interface ReactVisualEditPayload extends AiEditRequestPayload {
         route?: string | null;
         componentName?: string;
         templateName?: string;
+        sourceNodeId?: string;
+        sectionKey?: string;
+        sectionComponentName?: string;
         sourceFile?: string;
         outputFilePath?: string;
         sectionIndex?: number;

@@ -475,6 +475,10 @@ const VisualEditor: React.FC = () => {
   const selectedCapturePageUrl = selectedRoute?.capturePageUrl || previewUrl || selectedPageUrl;
   const frameSrc = selectedPageUrl;
   const frameLoading = loadedSrc !== frameSrc;
+  const isRuntimeRouteSelection =
+    selectedRoute?.componentName === "RuntimePage" ||
+    selectedComponent?.runtimeComponent === "RuntimePage" ||
+    selectedComponent?.component?.trim() === "RuntimePage";
 
   const refreshFrameMeta = () => {
     const frameDocument = iframeRef.current?.contentDocument;
@@ -562,6 +566,9 @@ const VisualEditor: React.FC = () => {
       targetHint: {
         route: selectedRoute?.route || "/",
         componentName,
+        sourceNodeId: selectedComponent?.sourceNodeId,
+        sectionKey: selectedComponent?.sectionKey,
+        sectionType: selectedComponent?.sectionType,
         sourceFile,
         outputFilePath: sourceFile,
         startLine: targetLine,
@@ -581,6 +588,7 @@ const VisualEditor: React.FC = () => {
         frontendDir: statusData?.result?.frontendDir,
         previewUrl,
         apiBaseUrl,
+        uiSourceMapPath: statusData?.result?.uiSourceMapPath,
         routeEntries: statusData?.result?.routeEntries || [],
       },
     };
@@ -661,6 +669,20 @@ const VisualEditor: React.FC = () => {
           id: `unsupported-${Date.now()}`,
           role: "assistant",
           text: getUnsupportedVisualEditMessage(unsupportedReason),
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+
+    if (isRuntimeRouteSelection) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `runtime-page-${Date.now()}`,
+          role: "assistant",
+          text:
+            "Element này đang thuộc RuntimePage renderer. Visual edit cục bộ hiện chưa an toàn vì sẽ dễ sửa vào renderer chung `RuntimePage.tsx` và ảnh hưởng mọi runtime page. Inspector đã ghi nhận sourceNodeId/sectionKey để debug, nhưng để sửa page-specific thì nên quay lại pipeline/runtime parser.",
           tone: "error",
         },
       ]);

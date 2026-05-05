@@ -117,6 +117,48 @@ export function InspectorPanel({ info, onClear }: Props) {
         </div>
       )}
 
+      {(info.runtimeComponent || info.sourceNodeId || info.sectionKey || info.sectionType) && (
+        <div className="rounded-[12px] border border-[#ede4d8] bg-[#fdfaf6] px-4 py-3">
+          <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b826f]">
+            Runtime
+          </span>
+          {info.runtimeComponent && (
+            <p className="mt-1.5 text-[11px] text-[#374151]">
+              component: <span className="font-semibold">{info.runtimeComponent}</span>
+            </p>
+          )}
+          {info.runtimeSlug && (
+            <p className="mt-0.5 text-[11px] text-[#374151]">
+              slug: <span className="font-semibold">{info.runtimeSlug}</span>
+            </p>
+          )}
+          {(info.runtimeMode || info.runtimeFidelity || info.runtimeSafe) && (
+            <p className="mt-0.5 text-[11px] text-[#6b7280]">
+              {[
+                info.runtimeMode ? `mode=${info.runtimeMode}` : null,
+                info.runtimeFidelity ? `fidelity=${info.runtimeFidelity}` : null,
+                info.runtimeSafe ? `safe=${info.runtimeSafe}` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
+          {info.sectionType && (
+            <p className="mt-1.5 text-[11px] text-[#374151]">
+              section: <span className="font-semibold">{info.sectionType}</span>
+              {info.sectionKey ? (
+                <span className="font-mono text-[#6b7280]"> · {info.sectionKey}</span>
+              ) : null}
+            </p>
+          )}
+          {info.sourceNodeId && (
+            <p className="mt-0.5 break-all font-mono text-[11px] text-[#6b7280]">
+              sourceNodeId: {info.sourceNodeId}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* CSS classes */}
       {info.classes.length > 0 && (
         <div>
