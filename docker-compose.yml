@@ -75,6 +75,7 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - app
       - ai_pipeline
@@ -83,6 +84,7 @@ services:
     volumes:
       - /var/www/sites:/var/www/sites:ro
       - /var/nginx-sites:/etc/nginx/conf.d/sites
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 
 volumes:
   mysql_data:
