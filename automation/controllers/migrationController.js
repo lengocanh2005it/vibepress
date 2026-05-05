@@ -44,7 +44,8 @@ async function captureMigrationThumbnail(migrationId, jobId, previewUrl) {
 }
 
 async function createMigration(req, res) {
-  const { site_id, job_id, preview_url } = req.body;
+  const { site_id, job_id, preview_url, user_id: bodyUserId } = req.body;
+  const user_id = req.user?.id ?? bodyUserId ?? null;
   console.log(`[Migration] POST /migrations body=`, req.body);
 
   if (!site_id || !job_id) {
@@ -54,8 +55,8 @@ async function createMigration(req, res) {
 
   try {
     const result = await query(
-      `INSERT INTO react_migrations (site_id, job_id) VALUES (?, ?)`,
-      [site_id, job_id],
+      `INSERT INTO react_migrations (user_id, site_id, job_id) VALUES (?, ?, ?)`,
+      [user_id, site_id, job_id],
     );
     const migration = await queryOne('SELECT * FROM react_migrations WHERE id = ?', [result.insertId]);
     console.log(`[Migration] Đã tạo migration id=${result.insertId} site=${site_id} job=${job_id}`);
@@ -100,12 +101,15 @@ async function updateMigration(req, res) {
 }
 
 async function getAllMigrations(req, res) {
+  const user_id = req.user?.id ?? null;
   try {
     const migrations = await query(
       `SELECT rm.*, s.site_name, s.site_url
        FROM react_migrations rm
        LEFT JOIN wp_sites s ON s.site_id = rm.site_id
+       WHERE rm.user_id = ?
        ORDER BY rm.created_at DESC`,
+      [user_id],
     );
     return res.json(migrations);
   } catch (err) {

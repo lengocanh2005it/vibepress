@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ExternalLink, FolderOpen } from "lucide-react";
 import TopNav from "../components/TopNav";
+import { useUser } from "../context/UserContext";
 
 interface Migration {
   id: string;
@@ -29,6 +30,7 @@ function formatDate(iso: string) {
 
 export default function ReactProjects() {
   const navigate = useNavigate();
+  const { token } = useUser();
   const [items, setItems] = useState<Migration[]>([]);
   const [active, setActive] = useState<Migration | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,14 +67,16 @@ export default function ReactProjects() {
   };
 
   useEffect(() => {
-    fetch("/api/migrations")
+    fetch("/api/migrations", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then((r) => r.json())
       .then((data: Migration[]) => {
         setItems(data);
         setActive(data[0] ?? null);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [token]);
 
   return (
     <div className="min-h-screen bg-[#faf6f0] text-[#2e3230] antialiased">

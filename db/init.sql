@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS `captures` (
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `react_migrations` (
   `id`              INT            NOT NULL AUTO_INCREMENT,
+  `user_id`         VARCHAR(36)        NULL  COMMENT 'Owner user',
   `site_id`         VARCHAR(64)    NOT NULL,
   `job_id`          VARCHAR(64)    NOT NULL  COMMENT 'jobId từ ai-pipeline, dùng để restart preview',
   `github_repo_url` VARCHAR(512)       NULL  COMMENT 'URL GitHub repo, cập nhật sau khi push',
@@ -140,6 +141,8 @@ CREATE TABLE IF NOT EXISTS `react_migrations` (
   `updated_at`      DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_react_migrations_site_id` (`site_id`),
+  KEY `idx_react_migrations_user_id` (`user_id`),
   UNIQUE KEY `uq_react_migrations_job_id` (`job_id`),
-  CONSTRAINT `fk_react_migrations_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE
+  CONSTRAINT `fk_react_migrations_site` FOREIGN KEY (`site_id`) REFERENCES `wp_sites` (`site_id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_react_migrations_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
