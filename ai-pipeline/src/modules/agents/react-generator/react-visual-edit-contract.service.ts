@@ -11,7 +11,7 @@ import type { PlanResult } from '../planner/planner.service.js';
 
 export interface ReactVisualEditContractValidationInput {
   editRequest: PipelineReactVisualEditRequestDto;
-  plan: PlanResult;
+  plan?: PlanResult;
   routeEntries?: PipelinePreviewRouteEntryDto[];
 }
 
@@ -27,6 +27,8 @@ export class ReactVisualEditContractService {
   validate(
     input: ReactVisualEditContractValidationInput,
   ): ReactVisualEditContractValidationResult {
+    const plan = input.plan ?? [];
+    const hasPlan = plan.length > 0;
     const normalizedRequest = normalizeRequest(input.editRequest);
     const instructionText = buildInstructionText(normalizedRequest);
     const warnings: string[] = [];
@@ -123,26 +125,36 @@ export class ReactVisualEditContractService {
     }
 
     if (resolvedComponentName) {
-      const matchedComponent = input.plan.find(
-        (component) => component.componentName === resolvedComponentName,
-      );
-      if (!matchedComponent) {
-        throw new Error(
-          `The requested visual edit targets component "${resolvedComponentName}", but that component was not found in the generated plan.`,
+      if (hasPlan) {
+        const matchedComponent = plan.find(
+          (component) => component.componentName === resolvedComponentName,
+        );
+        if (!matchedComponent) {
+          throw new Error(
+            `The requested visual edit targets component "${resolvedComponentName}", but that component was not found in the generated plan.`,
+          );
+        }
+      } else {
+        warnings.push(
+          'Generated plan is unavailable for this reopened job. The backend will rely on the selected component/file hints instead.',
         );
       }
     } else if (route) {
-      const matchedRoute = input.plan.some(
-        (component) => normalizeRoute(component.route) === route,
-      );
-      if (!matchedRoute && !sourceFile && !outputFilePath) {
+      const matchedRoute = hasPlan
+        ? plan.some((component) => normalizeRoute(component.route) === route)
+        : false;
+      if (hasPlan && !matchedRoute && !sourceFile && !outputFilePath) {
         throw new Error(
           `The requested visual edit points at route "${route}", but no generated page component could be matched to that route.`,
         );
       }
-      if (!matchedRoute) {
+      if (hasPlan && !matchedRoute) {
         warnings.push(
           `The route "${route}" was not found in the planner output. The backend will rely on the source-file hint instead.`,
+        );
+      } else if (!hasPlan) {
+        warnings.push(
+          `Generated plan is unavailable for route "${route}". The backend will resolve the edit using the selected component, route map, and file hints.`,
         );
       }
     }

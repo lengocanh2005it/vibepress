@@ -112,7 +112,7 @@ export class OrchestratorController {
   }
 
   @Get('status/:jobId')
-  status(@Param('jobId') jobId: string) {
+  async status(@Param('jobId') jobId: string) {
     return this.orchestratorService.getStatus(jobId);
   }
 
