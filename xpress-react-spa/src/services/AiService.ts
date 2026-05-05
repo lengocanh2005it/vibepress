@@ -219,6 +219,7 @@ export class AiProcessError extends Error {
 export const runAiProcess = async (
     siteId: string,
     editRequest?: AiEditRequestPayload,
+    userId?: string,
 ) => {
     try {
         const response = await fetch(`${import.meta.env.VITE_BACKEND_AI_URL}/pipeline/run`, {
@@ -226,7 +227,7 @@ export const runAiProcess = async (
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ siteId, editRequest })
+            body: JSON.stringify({ siteId, editRequest, ...(userId ? { userId } : {}) })
         });
         if (!response.ok) {
             let errorPayload: any = null;

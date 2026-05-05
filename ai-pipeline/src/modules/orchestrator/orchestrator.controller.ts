@@ -35,7 +35,7 @@ export class OrchestratorController {
     const resolvedEditRequest = await this.editRequestFacade.resolveOrThrow(
       body.editRequest,
     );
-    return this.orchestratorService.run(siteId, resolvedEditRequest);
+    return this.orchestratorService.run(siteId, resolvedEditRequest, body.userId);
   }
 
   @Post('react-visual-edit')

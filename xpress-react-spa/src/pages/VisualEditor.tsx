@@ -10,7 +10,6 @@ import {
 } from "../services/AiService";
 import { captureRegion } from "../services/automationService";
 import { useInspector } from "../hooks/useInspector";
-import type { ComponentInfo } from "../types/inspector";
 
 type PipelineJobStatus =
   | "running"
@@ -349,6 +348,18 @@ const VisualEditor: React.FC = () => {
   const [canUndo, setCanUndo] = useState(false);
   const [isUndoing, setIsUndoing] = useState(false);
 
+  const [effectiveDeployedUrl, setEffectiveDeployedUrl] = useState<string | null>(state.deployedUrl ?? null);
+
+  useEffect(() => {
+    if (!jobId) return;
+    fetch(`/api/migrations/job/${jobId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m: { deployed_url?: string | null } | null) => {
+        if (m?.deployed_url) setEffectiveDeployedUrl(m.deployed_url);
+      })
+      .catch(() => {});
+  }, [jobId]);
+
   const [publishState, setPublishState] = useState<{
     loading: boolean;
     frontendUrl: string | null;
@@ -374,6 +385,7 @@ const VisualEditor: React.FC = () => {
       const data = await res.json() as { success: boolean; frontendUrl?: string; githubUrl?: string; error?: string };
       if (!res.ok || !data.success) throw new Error(data.error || 'Publish failed');
       setPublishState({ loading: false, frontendUrl: data.frontendUrl ?? null, error: null });
+      setEffectiveDeployedUrl(data.frontendUrl ?? null);
     } catch (err) {
       setPublishState({ loading: false, frontendUrl: null, error: err instanceof Error ? err.message : 'Unknown error' });
     }
@@ -421,15 +433,6 @@ const VisualEditor: React.FC = () => {
     }
     void handlePublish(slug);
   };
-  const [annotationComment, setAnnotationComment] = useState("");
-  const [savedAnnotations, setSavedAnnotations] = useState<Array<{
-    id: string;
-    component: ComponentInfo;
-    comment: string;
-    route: string;
-    savedAt: string;
-  }>>([]);
-
   const previewUrl = statusData?.result?.previewUrl || state.previewUrl || "";
   const apiBaseUrl = statusData?.result?.apiBaseUrl || state.apiBaseUrl || "";
 
@@ -592,20 +595,6 @@ const VisualEditor: React.FC = () => {
         routeEntries: statusData?.result?.routeEntries || [],
       },
     };
-  };
-
-  const handleSaveAnnotation = () => {
-    if (!selectedComponent) return;
-    const item = {
-      id: `annotation-${Date.now()}`,
-      component: selectedComponent,
-      comment: annotationComment.trim(),
-      route: selectedRoute?.route || "/",
-      savedAt: new Date().toISOString(),
-    };
-    setSavedAnnotations((prev) => [...prev, item]);
-    console.log("[VisualEditor] Saved annotation:", item);
-    setAnnotationComment("");
   };
 
   const handleSubmitRequest = async () => {
@@ -839,11 +828,11 @@ const VisualEditor: React.FC = () => {
               {/* Actions */}
               <div className="flex shrink-0 items-center gap-2">
                 {/* Đã deploy → Visit Site + Redeploy */}
-                {state.deployedUrl ? (
+                {effectiveDeployedUrl ? (
                   <div className="flex flex-col items-end gap-0.5">
                     <div className="flex items-center gap-2">
                       <a
-                        href={state.deployedUrl}
+                        href={effectiveDeployedUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
@@ -1012,47 +1001,6 @@ const VisualEditor: React.FC = () => {
                 <div className="rounded-[20px] border border-dashed border-[#ddd2c4] bg-white px-4 py-8 text-center">
                   <p className="text-[13px] text-[#9ca3af]">Chưa chọn element nào</p>
                   <p className="mt-1 text-[11px] text-[#b4ada4]">Bật Inspector và click vào element trong preview</p>
-                </div>
-              )}
-
-              {/* Comment input */}
-              <div className="rounded-[20px] border border-[#e6dece] bg-white p-4">
-                <label className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8a7a62]">Ghi chú</label>
-                <textarea
-                  value={annotationComment}
-                  onChange={(e) => setAnnotationComment(e.target.value)}
-                  placeholder="Nhập ghi chú hoặc yêu cầu chỉnh sửa cho element này..."
-                  className="mt-2 h-24 w-full resize-none rounded-[14px] border border-[#e7dfd2] bg-[#fcfaf6] px-3 py-2.5 text-sm text-[#243129] outline-none transition focus:border-[#6366f1] focus:bg-white"
-                />
-                <button
-                  onClick={handleSaveAnnotation}
-                  disabled={!selectedComponent}
-                  className="mt-2.5 w-full rounded-full bg-[#6366f1] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#4f46e5] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Lưu annotation
-                </button>
-              </div>
-
-              {/* Saved annotations list */}
-              {savedAnnotations.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#8b826f] px-1">
-                    Đã lưu ({savedAnnotations.length})
-                  </p>
-                  {savedAnnotations.map((item) => (
-                    <div key={item.id} className="rounded-[16px] border border-[#e7dfd3] bg-white px-4 py-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[12px] font-semibold text-[#6366f1]">{item.component.component}</span>
-                        <code className="rounded bg-[#efe7d8] px-1.5 py-0.5 text-[9px] font-bold text-[#7f6846]">
-                          {item.component.tag.toLowerCase()}
-                        </code>
-                      </div>
-                      <p className="mt-0.5 text-[10px] text-[#9ca3af]">{item.route}</p>
-                      {item.comment && (
-                        <p className="mt-1.5 text-[12px] text-[#374151] leading-5">"{item.comment}"</p>
-                      )}
-                    </div>
-                  ))}
                 </div>
               )}
 

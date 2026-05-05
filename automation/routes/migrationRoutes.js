@@ -5,15 +5,18 @@ const {
   getAllMigrations,
   getMigrationsBySite,
   getMigrationById,
+  getMigrationByJobId,
   deleteMigration,
 } = require('../controllers/migrationController');
+const { requireAuth } = require('../middlewares/authMiddleware');
 
 const router = express.Router();
 
 router.post('/migrations', createMigration);
 router.patch('/migrations/:id', updateMigration);
-router.get('/migrations', getAllMigrations);
+router.get('/migrations', requireAuth, getAllMigrations);
 router.get('/migrations/site/:siteId', getMigrationsBySite);
+router.get('/migrations/job/:jobId', getMigrationByJobId);
 router.get('/migrations/:id', getMigrationById);
 router.delete('/migrations/:id', deleteMigration);
 

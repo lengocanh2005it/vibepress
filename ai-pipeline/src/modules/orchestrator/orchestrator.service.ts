@@ -261,6 +261,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
   async run(
     siteId: string,
     editRequestContext?: ResolvedEditRequestContext,
+    userId?: string,
   ): Promise<{ jobId: string }> {
     const response = await lastValueFrom(
       this.httpService.get(
@@ -331,6 +332,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       dto,
       state,
       editRequestContext,
+      userId,
     ).catch((err) => {
       if (err instanceof PipelineControlError) {
         void this.finalizeControlledTermination(jobId, state, err);
@@ -1440,6 +1442,7 @@ export default function ${component.name}() {
     dto: RunPipelineDto,
     state: PipelineStatus,
     editRequestContext?: ResolvedEditRequestContext,
+    userId?: string,
   ): Promise<void> {
     // ── Init structured run summary ───────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
@@ -4028,6 +4031,7 @@ export default function ${component.name}() {
             jobId,
             logPath,
             previewUrl: preview.previewUrl,
+            userId,
           });
         if (migrationNotification) {
           this.updateStateResult(state, {
@@ -5318,10 +5322,11 @@ export default function ${component.name}() {
     jobId: string;
     logPath?: string;
     previewUrl?: string;
+    userId?: string;
   }): Promise<{
     requested: boolean;
     endpoint: string;
-    payload: { site_id: string; job_id: string; preview_url?: string };
+    payload: { site_id: string; job_id: string; preview_url?: string; user_id?: string };
     responsePreview?: string;
     error?: string;
   } | null> {
@@ -5344,6 +5349,7 @@ export default function ${component.name}() {
       site_id: input.siteId,
       job_id: input.jobId,
       ...(input.previewUrl ? { preview_url: input.previewUrl } : {}),
+      ...(input.userId ? { user_id: input.userId } : {}),
     };
 
     try {

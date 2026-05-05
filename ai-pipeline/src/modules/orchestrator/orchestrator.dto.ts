@@ -266,6 +266,7 @@ export type PipelineIncomingEditRequestDto =
 
 export interface RunPipelineRequestDto {
   siteId: string;
+  userId?: string;
   editRequest?: PipelineIncomingEditRequestDto;
 }
 

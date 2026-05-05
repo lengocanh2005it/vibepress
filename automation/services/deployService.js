@@ -137,10 +137,13 @@ async function deployFrontendToVps({ workDir, siteDir, backendPort }) {
   const domain = cleanDomain ? `${siteDir}.${cleanDomain}` : null;
 
   console.log(`[VPS-Frontend] Building site=${siteDir}...`);
-  await execAsync('npm install', {
-    cwd: frontendDir,
-    env: { ...process.env, VITE_BASE: '/', VITE_API_BASE: '/api' },
-  });
+  const hasNodeModules = await fse.pathExists(path.join(frontendDir, 'node_modules'));
+  if (!hasNodeModules) {
+    await execAsync('npm install', {
+      cwd: frontendDir,
+      env: { ...process.env, VITE_BASE: '/', VITE_API_BASE: '/api' },
+    });
+  }
   await execAsync('npm run build', {
     cwd: frontendDir,
     env: { ...process.env, VITE_BASE: '/', VITE_API_BASE: '/api' },
@@ -302,21 +305,14 @@ async function pushToGit({ jobId, repoName, branch = 'main' }) {
   // 1. Tạo GitHub repo
   const repo = await createGithubRepo(finalRepoName);
 
-  // 2. Copy generated code → workDir
-  const workDir = path.join(TEMP_ROOT, `deploy_${jobId}`);
-  await fse.remove(workDir);
-  await fse.copy(generatedDir, workDir);
-  console.log(`[PushToGit] Copied to: ${workDir}`);
-
-  // 3. Push lên GitHub
+  // 2. Push lên GitHub
   const commitSha = await initAndPush({
-    workDir,
+    workDir: generatedDir,
     repoCloneUrl: repo.cloneUrl,
     branch,
     message: `feat: initial React migration [jobId=${jobId}]`,
   });
 
-  await fse.remove(workDir);
   console.log(`\n[PushToGit] ── Done — GitHub: ${repo.htmlUrl} ──────────`);
 
   return {
@@ -360,44 +356,33 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   console.log(`\n[Deploy] Step 1 — Create GitHub repo`);
   const repo = await createGithubRepo(finalRepoName);
 
-  console.log(`\n[Deploy] Step 2 — Copy generated files`);
-  const workDir = path.join(TEMP_ROOT, `deploy_${jobId}`);
-  await fse.remove(workDir);
-  await fse.copy(generatedDir, workDir);
-  console.log(`[Deploy] Copied to: ${workDir}`);
+  console.log(`\n[Deploy] Step 2 — Push to GitHub`);
+  const commitSha = await initAndPush({
+    workDir: generatedDir,
+    repoCloneUrl: repo.cloneUrl,
+    branch,
+    message: `feat: initial React migration [jobId=${jobId}]`,
+  });
 
-  let result;
-  try {
-    console.log(`\n[Deploy] Step 3 — Push to GitHub`);
-    const commitSha = await initAndPush({
-      workDir,
-      repoCloneUrl: repo.cloneUrl,
-      branch,
-      message: `feat: initial React migration [jobId=${jobId}]`,
-    });
+  console.log(`\n[Deploy] Step 3 — Deploy backend to VPS`);
+  const { backendPort } = await deployBackendToVps({ workDir: generatedDir, siteDir: finalRepoName, dbCreds: finalDbCreds });
 
-    console.log(`\n[Deploy] Step 4 — Deploy backend to VPS`);
-    const { backendPort } = await deployBackendToVps({ workDir, siteDir: finalRepoName, dbCreds: finalDbCreds });
+  console.log(`\n[Deploy] Step 4 — Deploy frontend to VPS`);
+  const { frontendUrl } = await deployFrontendToVps({ workDir: generatedDir, siteDir: finalRepoName, backendPort });
 
-    console.log(`\n[Deploy] Step 5 — Deploy frontend to VPS`);
-    const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: finalRepoName, backendPort });
+  const result = {
+    jobId,
+    repoName: finalRepoName,
+    githubUrl: repo.htmlUrl,
+    frontendUrl,
+    backendPort,
+    commitSha,
+  };
 
-    result = {
-      jobId,
-      repoName: finalRepoName,
-      githubUrl: repo.htmlUrl,
-      frontendUrl,
-      backendPort,
-      commitSha,
-    };
-
-    console.log(`\n[Deploy] ── Done ────────────────────────────────────────`);
-    console.log(`  GitHub   : ${repo.htmlUrl}`);
-    console.log(`  Frontend : ${frontendUrl}`);
-    console.log(`  Backend  : port ${backendPort}`);
-  } finally {
-    await fse.remove(workDir).catch(() => {});
-  }
+  console.log(`\n[Deploy] ── Done ────────────────────────────────────────`);
+  console.log(`  GitHub   : ${repo.htmlUrl}`);
+  console.log(`  Frontend : ${frontendUrl}`);
+  console.log(`  Backend  : port ${backendPort}`);
 
   return result;
 }
@@ -413,29 +398,21 @@ async function redeployFrontend({ jobId, repoName, branch = 'main' }) {
     throw new Error(`Generated directory not found for jobId: ${jobId}`);
   }
 
-  const workDir = path.join(TEMP_ROOT, `redeploy_${jobId}`);
-  await fse.remove(workDir);
-  await fse.copy(generatedDir, workDir);
+  console.log(`\n[Redeploy] Step 1 — Push delta to GitHub`);
+  const repo = await createGithubRepo(repoName);
+  await initAndPush({
+    workDir: generatedDir,
+    repoCloneUrl: repo.cloneUrl,
+    branch,
+    message: `fix: visual edit update [jobId=${jobId}]`,
+  });
 
-  try {
-    console.log(`\n[Redeploy] Step 1 — Push delta to GitHub`);
-    const repo = await createGithubRepo(repoName);
-    await initAndPush({
-      workDir,
-      repoCloneUrl: repo.cloneUrl,
-      branch,
-      message: `fix: visual edit update [jobId=${jobId}]`,
-    });
+  console.log(`\n[Redeploy] Step 2 — Build & upload frontend`);
+  const backendPort = sitePort(repoName);
+  const { frontendUrl } = await deployFrontendToVps({ workDir: generatedDir, siteDir: repoName, backendPort });
 
-    console.log(`\n[Redeploy] Step 2 — Build & upload frontend`);
-    const backendPort = sitePort(repoName);
-    const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: repoName, backendPort });
-
-    console.log(`\n[Redeploy] ── Done — Frontend: ${frontendUrl} ────────────`);
-    return { jobId, repoName, githubUrl: repo.htmlUrl, frontendUrl };
-  } finally {
-    await fse.remove(workDir).catch(() => {});
-  }
+  console.log(`\n[Redeploy] ── Done — Frontend: ${frontendUrl} ────────────`);
+  return { jobId, repoName, githubUrl: repo.htmlUrl, frontendUrl };
 }
 
 module.exports = { deployFullStack, pushToGit, redeployFrontend };

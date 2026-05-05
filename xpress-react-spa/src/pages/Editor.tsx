@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useUser } from "../context/UserContext";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import {
@@ -373,6 +374,7 @@ const getChatInputPlaceholder = (language: SupportedLanguage) =>
 const Editor: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useUser();
   const siteUrl: string = location.state?.siteUrl || "";
   const siteId: string = location.state?.siteId || "";
 
@@ -776,7 +778,7 @@ const Editor: React.FC = () => {
 
     console.log("Sending AI request with body:", requestBody);
     try {
-      const data = await runAiProcess(siteId, requestBody);
+      const data = await runAiProcess(siteId, requestBody, user?.id);
 
       setChatInput("");
       setChatCaptures([]);
