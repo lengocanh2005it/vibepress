@@ -2486,6 +2486,7 @@ export class PlannerService {
         push(section.subheading);
         break;
       case 'media-text':
+        push(section.subtitle);
         push(section.heading);
         push(section.body);
         (section.listItems ?? []).forEach(push);
@@ -4666,6 +4667,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           ...(mediaTextDraft.columnWidths
             ? { columnWidths: mediaTextDraft.columnWidths }
             : {}),
+          ...(mediaTextDraft.subtitleStyle
+            ? { subtitleStyle: mediaTextDraft.subtitleStyle }
+            : {}),
           ...(mediaTextDraft.headingStyle
             ? { headingStyle: mediaTextDraft.headingStyle }
             : {}),
@@ -6486,6 +6490,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         );
       case 'media-text':
         return (
+          !hasText(section.subtitle) &&
           !hasText(section.heading) &&
           !hasText(section.body) &&
           !hasText(section.imageSrc) &&
@@ -6563,6 +6568,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       case 'media-text':
         return [
           section.type,
+          normalize(section.subtitle),
           normalize(section.heading),
           normalize(section.body),
           normalize(section.imageSrc),

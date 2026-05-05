@@ -2159,6 +2159,7 @@ export class ValidatorService {
     addLiteral: (value: string | undefined, message: string) => void,
   ): void {
     addLiteral(section.imageSrc, `${label} lost media-text image src`);
+    addLiteral(section.subtitle, `${label} lost media-text subtitle`);
     addLiteral(section.heading, `${label} lost media-text heading`);
     addLiteral(section.body, `${label} lost media-text body`);
     for (const item of section.listItems ?? []) {
@@ -2931,6 +2932,7 @@ export class ValidatorService {
         }
         break;
       case 'media-text':
+        push(section.subtitle);
         push(section.heading);
         push(section.body);
         push(section.imageSrc);
@@ -3140,8 +3142,10 @@ export class ValidatorService {
               code,
             );
           case 'categories':
-            return /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
-              code,
+            return (
+              /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
+                code,
+              ) || this.codeUsesDerivedCategoryCollection(code)
             );
           case 'featuredImage':
             return /\b(?:post|item|previousPost|nextPost)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
@@ -3180,8 +3184,10 @@ export class ValidatorService {
           case 'date':
             return /\b(?:product|post|item)\.date\b|<time\b/i.test(code);
           case 'categories':
-            return /\b(?:product|post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
-              code,
+            return (
+              /\b(?:product|post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
+                code,
+              ) || this.codeUsesDerivedCategoryCollection(code)
             );
           case 'featuredImage':
             return /\b(?:product|post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
@@ -3296,6 +3302,14 @@ export class ValidatorService {
             return true;
         }
     }
+  }
+
+  private codeUsesDerivedCategoryCollection(code: string): boolean {
+    return this.codeMatchesAnyPattern(code, [
+      /\b(?:categoryMap|categoryItems|topCategories|categoriesWithCount)\b/,
+      /\b(?:category|cat)\.(?:name|slug|count)\b/i,
+      /Array\.from\(\s*[A-Za-z_$][\w$]*\.(?:entries|values)\(\)\s*\)/,
+    ]);
   }
 
   private codeSatisfiesInteractionRequirement(

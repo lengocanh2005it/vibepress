@@ -186,6 +186,7 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     const result = buildBlockTreeDrivenPostDetailSections({
       componentPlan,
       draftBlockTree,
+      draftSections,
       content,
       layout,
     });
@@ -266,6 +267,7 @@ export function shouldShortCircuitBlockTreeVisualPlan(
 ): boolean {
   return (
     isEligibleBlockTreeSharedPartial(componentPlan) ||
+    isEligibleBlockTreeDetailTemplate(componentPlan) ||
     isEligibleBlockTreeListingTemplate(componentPlan, draftBlockTree) ||
     isEligibleTransactionalTemplateByName(componentPlan) ||
     isEligibleTransactionalByComponentName(componentPlan)
@@ -278,6 +280,22 @@ function isEligibleBlockTreeSharedPartial(
   if (componentPlan.type !== 'partial') return false;
   return /^(header|footer|navigation|nav|sidebar|postmeta)$/i.test(
     componentPlan.componentName,
+  );
+}
+
+function isEligibleBlockTreeDetailTemplate(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'page' || componentPlan.isDetail !== true) {
+    return false;
+  }
+  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  return (
+    (dataNeeds.includes('postDetail') || dataNeeds.includes('productDetail')) &&
+    /^(single|single-with-sidebar|single-product)$/.test(normalizedTemplate)
   );
 }
 
@@ -1292,10 +1310,13 @@ function sectionBelongsToSourceSubtree(
 function buildBlockTreeDrivenPostDetailSections(input: {
   componentPlan: BlockTreePlannerComponentPlan;
   draftBlockTree: BlockNode[];
+  draftSections?: SectionPlan[];
   content: DbContentResult;
   layout: LayoutTokens;
 }): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
   const shell = inspectDetailShellFromBlockTree(input.draftBlockTree);
+  const dataNeeds = toVisualDataNeeds(input.componentPlan.dataNeeds);
+  const isProductDetail = dataNeeds.includes('productDetail');
   const mainNodes = collectBlockNodesInOrder(
     input.draftBlockTree,
     shell.sidebarColumnSourceNodeId
@@ -1303,9 +1324,23 @@ function buildBlockTreeDrivenPostDetailSections(input: {
       : undefined,
   );
   const stats = collectPostDetailBlockStats(mainNodes);
-  if (!stats.postContentNode) return undefined;
+  const primaryContentNode =
+    stats.postContentNode ??
+    (isProductDetail
+      ? (stats.productDetailsNode ?? stats.excerptNode ?? stats.metaNode)
+      : undefined);
+  if (!stats.titleNode && !primaryContentNode) return undefined;
 
   const sections: SectionPlan[] = [];
+  const leadSections = (input.draftSections ?? []).filter((section) => {
+    if (
+      sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId)
+    ) {
+      return false;
+    }
+    return section.type === 'cover' || section.type === 'breadcrumb';
+  });
+  sections.push(...leadSections);
 
   if (stats.featuredImageNode) {
     const section: PostFeaturedImageSection = {
@@ -1376,11 +1411,11 @@ function buildBlockTreeDrivenPostDetailSections(input: {
       !stats.hasMetaSection &&
       stats.hasCategoryTerms &&
       !stats.categoryTermsNode,
-    ...(stats.postContentNode.sourceRef
-      ? { sourceRef: stats.postContentNode.sourceRef }
+    ...(primaryContentNode?.sourceRef
+      ? { sourceRef: primaryContentNode.sourceRef }
       : {}),
-    ...(stats.postContentNode.customClassNames?.length
-      ? { customClassNames: [...stats.postContentNode.customClassNames] }
+    ...(primaryContentNode?.customClassNames?.length
+      ? { customClassNames: [...primaryContentNode.customClassNames] }
       : {}),
     debugKey: 'post-content-0',
     sectionKey: 'post-content-0',
@@ -1450,6 +1485,15 @@ function buildBlockTreeDrivenPostDetailSections(input: {
       sectionKey: 'post-navigation-0',
     };
     sections.push(section);
+  }
+
+  const relatedCollectionSections = (input.draftSections ?? []).filter(
+    (section): section is PostListSection =>
+      section.type === 'post-list' &&
+      !sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId),
+  );
+  for (const section of relatedCollectionSections) {
+    sections.push({ ...section });
   }
 
   if (shell.sidebarNodes?.length) {
@@ -1664,6 +1708,8 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   featuredImageNode?: BlockNode;
   metaNode?: BlockNode;
   postContentNode?: BlockNode;
+  excerptNode?: BlockNode;
+  productDetailsNode?: BlockNode;
   categoryTermsNode?: BlockNode;
   categoryTermsSeparator?: string;
   tagTermsNode?: BlockNode;
@@ -1676,6 +1722,8 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   let featuredImageNode: BlockNode | undefined;
   let metaNode: BlockNode | undefined;
   let postContentNode: BlockNode | undefined;
+  let excerptNode: BlockNode | undefined;
+  let productDetailsNode: BlockNode | undefined;
   let categoryTermsNode: BlockNode | undefined;
   let tagTermsNode: BlockNode | undefined;
   let commentsNode: BlockNode | undefined;
@@ -1716,6 +1764,12 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
       case 'post-content':
         postContentNode ??= node;
         break;
+      case 'post-excerpt':
+        excerptNode ??= node;
+        break;
+      case 'product-details':
+        productDetailsNode ??= node;
+        break;
       case 'post-terms': {
         const taxonomy = normalizePostTermsTaxonomy(node);
         const separator = readStringBlockAttr(node, 'separator');
@@ -1753,6 +1807,8 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
     featuredImageNode,
     metaNode,
     postContentNode,
+    excerptNode,
+    productDetailsNode,
     categoryTermsNode,
     categoryTermsSeparator,
     tagTermsNode,

@@ -619,4 +619,200 @@ describe('block-tree deterministic post detail terms', () => {
       },
     ]);
   });
+
+  it('short-circuits Woo single-product templates and preserves related products as a products post-list', () => {
+    const componentPlan = {
+      templateName: 'single-product',
+      componentName: 'SingleProduct',
+      type: 'page' as const,
+      route: '/product/:slug',
+      dataNeeds: ['product-detail', 'products'],
+      isDetail: true,
+    };
+
+    const draftSections: ComponentVisualPlan['sections'] = [
+      {
+        type: 'cover',
+        imageSrc: 'theme-asset:/assets/images/banner.jpg',
+        dimRatio: 90,
+        minHeight: '232px',
+        contentAlign: 'center',
+        sourceRef: {
+          sourceNodeId: 'single-product::cover::0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          blockName: 'cover',
+        },
+      },
+      {
+        type: 'breadcrumb',
+        sourceRef: {
+          sourceNodeId: 'single-product::breadcrumbs::0.2.0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          parentSourceNodeId: 'single-product::group::0.2',
+          blockName: 'woocommerce/breadcrumbs',
+        },
+      },
+      {
+        type: 'post-list',
+        resource: 'products',
+        title: 'Related Products',
+        layout: 'grid-3',
+        showDate: false,
+        showAuthor: false,
+        showCategory: false,
+        showExcerpt: false,
+        showFeaturedImage: true,
+        showPrice: true,
+        showButton: true,
+        sourceRef: {
+          sourceNodeId: 'single-product::query::1.1.2.0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 1,
+          parentSourceNodeId: 'single-product::related-products::1.1.2',
+          blockName: 'query',
+        },
+      },
+    ];
+
+    const draftBlockTree: BlockNode[] = [
+      {
+        kind: 'cover',
+        blockName: 'cover',
+        sourceRef: {
+          sourceNodeId: 'single-product::cover::0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          blockName: 'cover',
+        },
+        children: [
+          {
+            kind: 'breadcrumbs',
+            blockName: 'woocommerce/breadcrumbs',
+            sourceRef: {
+              sourceNodeId: 'single-product::breadcrumbs::0.2.0',
+              templateName: 'single-product',
+              sourceFile: 'patterns/single-product.php',
+              topLevelIndex: 0,
+              parentSourceNodeId: 'single-product::group::0.2',
+              blockName: 'woocommerce/breadcrumbs',
+            },
+          },
+        ],
+      },
+      {
+        kind: 'group',
+        blockName: 'group',
+        children: [
+          {
+            kind: 'columns',
+            blockName: 'columns',
+            children: [
+              {
+                kind: 'column',
+                blockName: 'column',
+                children: [
+                  {
+                    kind: 'product-image-gallery',
+                    blockName: 'woocommerce/product-image-gallery',
+                  },
+                ],
+              },
+              {
+                kind: 'column',
+                blockName: 'column',
+                children: [
+                  {
+                    kind: 'post-title',
+                    blockName: 'post-title',
+                  },
+                  {
+                    kind: 'post-excerpt',
+                    blockName: 'post-excerpt',
+                  },
+                  {
+                    kind: 'product-meta',
+                    blockName: 'woocommerce/product-meta',
+                    children: [
+                      {
+                        kind: 'post-terms',
+                        blockName: 'post-terms',
+                        attrs: {
+                          term: 'product_cat',
+                          prefix: 'Category: ',
+                        },
+                      },
+                      {
+                        kind: 'post-terms',
+                        blockName: 'post-terms',
+                        attrs: {
+                          term: 'product_tag',
+                          prefix: 'Tags: ',
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            kind: 'product-details',
+            blockName: 'woocommerce/product-details',
+          },
+          {
+            kind: 'related-products',
+            blockName: 'woocommerce/related-products',
+            children: [
+              {
+                kind: 'query',
+                blockName: 'query',
+                sourceRef: {
+                  sourceNodeId: 'single-product::query::1.1.2.0',
+                  templateName: 'single-product',
+                  sourceFile: 'patterns/single-product.php',
+                  topLevelIndex: 1,
+                  parentSourceNodeId: 'single-product::related-products::1.1.2',
+                  blockName: 'query',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    expect(
+      shouldShortCircuitBlockTreeVisualPlan(componentPlan, draftBlockTree),
+    ).toBe(true);
+
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan,
+      draftSections,
+      draftBlockTree,
+    });
+
+    expect(plan?.sections).toMatchObject([
+      { type: 'cover' },
+      { type: 'breadcrumb' },
+      { type: 'post-title' },
+      { type: 'post-content', showTitle: false },
+      { type: 'post-terms', taxonomy: 'category' },
+      { type: 'post-terms', taxonomy: 'post_tag' },
+      {
+        type: 'post-list',
+        resource: 'products',
+        title: 'Related Products',
+        showFeaturedImage: true,
+        showPrice: true,
+        showButton: true,
+      },
+    ]);
+  });
 });

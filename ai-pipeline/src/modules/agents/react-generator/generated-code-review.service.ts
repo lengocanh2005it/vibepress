@@ -421,7 +421,7 @@ ${component.code}
           return `- cover heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
         if (section.type === 'media-text') {
-          return `- media-text heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
+          return `- media-text subtitle="${section.subtitle ?? ''}" heading="${section.heading ?? ''}" image="${section.imageSrc}"`;
         }
         if (section.type === 'modal') {
           return `- modal trigger="${section.triggerText ?? ''}" heading="${section.heading ?? ''}"`;

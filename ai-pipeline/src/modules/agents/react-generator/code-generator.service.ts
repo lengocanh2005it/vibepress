@@ -4938,6 +4938,11 @@ ${cards}
       { baseColor: tc, typography: s.headingStyle },
       this.pickBlockStyle(ctx, 'heading'),
     );
+    const subtitleStyle = this.buildTextTokenStyleAttr(
+      ctx,
+      { baseColor: tc, typography: s.subtitleStyle },
+      this.pickBlockStyle(ctx, 'paragraph'),
+    );
     const bodyStyle = this.buildTextTokenStyleAttr(
       ctx,
       { baseColor: tc, typography: s.bodyStyle },
@@ -4970,12 +4975,18 @@ ${cards}
       s.headingCustomClassNames,
       presentation.textAlign,
     );
+    const mediaSubtitleClassName = this.appendStyledTextAlignClass(
+      t.small,
+      s.subtitleCustomClassNames,
+      presentation.textAlign,
+    );
     const mediaBodyClassName = this.appendStyledTextAlignClass(
       '',
       s.bodyCustomClassNames,
       presentation.textAlign,
     );
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
+            ${s.subtitle ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>${s.subtitle}</p>` : ''}
             ${s.heading ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
             ${s.body ? `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>` : ''}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? (ctx.avoidDangerouslySetInnerHTML ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />`) : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}

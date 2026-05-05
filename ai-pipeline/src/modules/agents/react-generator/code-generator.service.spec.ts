@@ -115,6 +115,32 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('to="/"');
   });
 
+  it('renders media-text subtitles before the main heading/body copy', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'FrontPage',
+      sections: [
+        {
+          type: 'media-text',
+          imageSrc: 'theme-asset:/assets/images/banner-image.png',
+          imageAlt: 'Julia Henderson',
+          imagePosition: 'right',
+          subtitle: 'About Me',
+          heading: 'Welcome To My Profile I am Julia Henderson',
+          body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo.',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('>About Me</p>');
+    expect(code).toContain('>Welcome To My Profile I am Julia Henderson</h2>');
+    expect(code.indexOf('>About Me</p>')).toBeLessThan(
+      code.indexOf('>Welcome To My Profile I am Julia Henderson</h2>'),
+    );
+  });
+
   it('resolves theme asset images inside card-grid sections', () => {
     const plan = {
       ...basePlan,

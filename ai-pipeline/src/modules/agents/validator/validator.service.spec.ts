@@ -187,3 +187,73 @@ describe('ValidatorService Woo endpoint guards', () => {
     expect(result.error).toBeUndefined();
   });
 });
+
+describe('ValidatorService derived collection bindings', () => {
+  const service = new ValidatorService({} as ConfigService);
+
+  it('accepts sidebar category labels derived from the posts collection', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useState } from 'react';
+        import { Link } from 'react-router-dom';
+
+        export default function BlogRightSidebar() {
+          const [posts] = useState<any[]>([]);
+          const categoryItems = (() => {
+            const map = new Map<string, { slug: string; count: number }>();
+            posts.forEach((post) => {
+              (post.categories ?? []).forEach((cat, idx) => {
+                const slug = post.categorySlugs?.[idx] ?? '';
+                const prev = map.get(cat);
+                map.set(cat, {
+                  slug: prev?.slug || slug,
+                  count: (prev?.count ?? 0) + 1,
+                });
+              });
+            });
+            return Array.from(map.entries()).map(([name, data]) => ({
+              name,
+              slug: data.slug,
+              count: data.count,
+            }));
+          })();
+
+          return (
+            <section>
+              <h3>Popular Categories</h3>
+              <ul>
+                {categoryItems.map((category) => (
+                  <li key={category.slug || category.name}>
+                    <Link
+                      to={'/category/' + category.slug}
+                      className="hover:underline underline-offset-4"
+                    >
+                      {category.name}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          );
+        }
+      `,
+      {
+        componentName: 'BlogRightSidebar',
+        type: 'page',
+        dataNeeds: ['posts'],
+        visualPlan: {
+          componentName: 'BlogRightSidebar',
+          sections: [
+            {
+              type: 'sidebar',
+              widgets: [{ kind: 'categories', title: 'Popular Categories' }],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+});

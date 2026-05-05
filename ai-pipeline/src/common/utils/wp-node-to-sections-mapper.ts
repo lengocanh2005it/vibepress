@@ -3160,11 +3160,14 @@ function buildCardGridCardFromGroup(node: WpNode): {
   const primaryParagraphText = primaryParagraph
     ? extractNodeText(primaryParagraph)
     : '';
-  const bodyParagraphs = paragraphNodes.filter((candidate) => {
-    if (headingNode) return true;
-    return candidate !== primaryParagraph;
-  });
+  const { subtitleNode, bodyParagraphs } = splitMediaTextParagraphNodes(
+    paragraphNodes,
+    headingNode,
+  );
   const bodyText = extractRichTextFromNodes(bodyParagraphs);
+  const firstBodyParagraph = bodyParagraphs.find((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
 
   const heading = headingText || primaryParagraphText;
   const body = bodyText || '';
@@ -3173,8 +3176,16 @@ function buildCardGridCardFromGroup(node: WpNode): {
   }
 
   return {
+    ...(subtitleNode ? { subtitle: extractNodeRichText(subtitleNode) } : {}),
     heading,
     body,
+    ...(extractStyleVariantClassNames(subtitleNode?.customClassNames).length
+      ? {
+          subtitleCustomClassNames: extractStyleVariantClassNames(
+            subtitleNode?.customClassNames,
+          ),
+        }
+      : {}),
     ...(extractStyleVariantClassNames(
       (headingNode ?? primaryParagraph)?.customClassNames,
     ).length
@@ -3184,13 +3195,16 @@ function buildCardGridCardFromGroup(node: WpNode): {
           ),
         }
       : {}),
-    ...(extractStyleVariantClassNames(bodyParagraphs[0]?.customClassNames)
+    ...(extractStyleVariantClassNames(firstBodyParagraph?.customClassNames)
       .length
       ? {
           bodyCustomClassNames: extractStyleVariantClassNames(
-            bodyParagraphs[0]?.customClassNames,
+            firstBodyParagraph?.customClassNames,
           ),
         }
+      : {}),
+    ...(subtitleNode?.typography || subtitleNode?.fontFamily
+      ? { subtitleStyle: toTypographyStyle(subtitleNode) }
       : {}),
     ...(imageNode?.src
       ? {
@@ -3405,9 +3419,6 @@ function buildMediaTextFromColumns(
   const h = textFlat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
   );
-  const p = textFlat.find(
-    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
-  );
   const listItems = textFlat
     .filter((c) => c.block === 'core/list-item' || c.block === 'list-item')
     .map((c) => c.html ?? c.text ?? '')
@@ -3428,7 +3439,15 @@ function buildMediaTextFromColumns(
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
+  const paragraphNodes = textFlat.filter(
+    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+  );
+  const { subtitleNode, bodyParagraphs } = splitMediaTextParagraphNodes(
+    paragraphNodes,
+    h,
+  );
   if (h?.text) s.heading = h.text;
+  if (subtitleNode) s.subtitle = extractNodeRichText(subtitleNode);
   const mediaHeadingCustomClassNames = extractStyleVariantClassNames(
     h?.customClassNames,
   );
@@ -3436,15 +3455,29 @@ function buildMediaTextFromColumns(
     s.headingCustomClassNames = mediaHeadingCustomClassNames;
   }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  const richBody = extractRichTextFromNodes(textFlat);
+  const richBody = extractRichTextFromNodes(bodyParagraphs);
   if (richBody) s.body = richBody;
+  const mediaSubtitleCustomClassNames = extractStyleVariantClassNames(
+    subtitleNode?.customClassNames,
+  );
+  if (mediaSubtitleCustomClassNames.length > 0) {
+    s.subtitleCustomClassNames = mediaSubtitleCustomClassNames;
+  }
+  if (subtitleNode?.typography || subtitleNode?.fontFamily) {
+    s.subtitleStyle = toTypographyStyle(subtitleNode);
+  }
+  const firstBodyParagraph = bodyParagraphs.find((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
   const mediaBodyCustomClassNames = extractStyleVariantClassNames(
-    p?.customClassNames,
+    firstBodyParagraph?.customClassNames,
   );
   if (mediaBodyCustomClassNames.length > 0) {
     s.bodyCustomClassNames = mediaBodyCustomClassNames;
   }
-  if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
+  if (firstBodyParagraph?.typography || firstBodyParagraph?.fontFamily) {
+    s.bodyStyle = toTypographyStyle(firstBodyParagraph);
+  }
   if (listItems.length > 0) s.listItems = listItems;
   applySectionCtas(s, textFlat);
   return s;
@@ -4108,6 +4141,72 @@ function extractRichTextFromNodes(nodes: WpNode[]): string {
     .map((node) => extractNodeRichText(node))
     .filter(Boolean);
   return texts.join('\n');
+}
+
+function splitMediaTextParagraphNodes(
+  paragraphNodes: WpNode[],
+  headingNode?: WpNode | null,
+): {
+  subtitleNode?: WpNode;
+  bodyParagraphs: WpNode[];
+} {
+  const contentfulParagraphs = paragraphNodes.filter((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
+  const firstParagraph = contentfulParagraphs[0];
+  if (!firstParagraph) {
+    return { bodyParagraphs: [] };
+  }
+
+  if (!headingNode) {
+    return {
+      bodyParagraphs: paragraphNodes.filter(
+        (candidate) => candidate !== firstParagraph,
+      ),
+    };
+  }
+
+  const remainingParagraphs = contentfulParagraphs.slice(1);
+  if (
+    shouldPromoteMediaTextSubtitle(firstParagraph, remainingParagraphs) ===
+    false
+  ) {
+    return { bodyParagraphs: paragraphNodes };
+  }
+
+  return {
+    subtitleNode: firstParagraph,
+    bodyParagraphs: paragraphNodes.filter(
+      (candidate) => candidate !== firstParagraph,
+    ),
+  };
+}
+
+function shouldPromoteMediaTextSubtitle(
+  firstParagraph: WpNode,
+  remainingParagraphs: WpNode[],
+): boolean {
+  if (remainingParagraphs.length === 0) return false;
+
+  const firstText = extractNodeText(firstParagraph).replace(/\s+/g, ' ').trim();
+  if (!firstText) return false;
+
+  const remainingText = stripInlineHtml(
+    extractRichTextFromNodes(remainingParagraphs),
+  );
+  if (!remainingText) return false;
+
+  const wordCount = firstText.split(/\s+/).filter(Boolean).length;
+  const charCount = firstText.length;
+  const remainingLength = remainingText.length;
+  const hasTerminalPunctuation = /[.!?।۔。！？]$/.test(firstText);
+
+  return (
+    wordCount <= 8 &&
+    charCount <= 64 &&
+    remainingLength >= Math.max(40, charCount * 2) &&
+    (!hasTerminalPunctuation || charCount <= 24)
+  );
 }
 
 function stripInlineHtml(html: string): string {

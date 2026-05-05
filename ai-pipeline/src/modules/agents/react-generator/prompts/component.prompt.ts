@@ -2170,6 +2170,7 @@ function buildCompactSectionSummary(
         break;
       case 'media-text':
         parts.push(`imagePosition=${section.imagePosition}`);
+        pushPlanTextPart(parts, 'subtitle', section.subtitle);
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'body', section.body, 240);
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
@@ -3051,6 +3052,11 @@ function buildFullFileLiteralChecklist(
         });
         break;
       case 'media-text':
+        if (section.subtitle) {
+          lines.push(
+            `- ${label} subtitle: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
         if (section.heading) {
           lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
         }
@@ -3557,6 +3563,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       }
       if (section.heading) {
         lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if (section.subtitle) {
+        lines.push(`- subtitle: ${JSON.stringify(section.subtitle)}`);
       }
       if (section.body) {
         lines.push(`- body: ${JSON.stringify(section.body)}`);
@@ -4142,6 +4151,7 @@ function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
       }
       break;
     case 'media-text':
+      add(section.subtitleCustomClassNames);
       add(section.headingCustomClassNames);
       add(section.bodyCustomClassNames);
       add(section.imageCustomClassNames);

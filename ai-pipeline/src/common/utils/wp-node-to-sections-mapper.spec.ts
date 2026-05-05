@@ -350,4 +350,50 @@ describe('mapWpNodesToDraftSections', () => {
       ],
     });
   });
+
+  it('preserves short eyebrow paragraphs as media-text subtitles instead of flattening them into body', () => {
+    const markup = `
+<!-- wp:columns -->
+<div class="wp-block-columns">
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:heading -->
+    <h2>Welcome To My Profile I am Julia Henderson</h2>
+    <!-- /wp:heading -->
+    <!-- wp:paragraph {"style":{"typography":{"fontWeight":"700","textTransform":"uppercase","letterSpacing":"1px"}}} -->
+    <p>About Me</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:paragraph -->
+    <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient.</p>
+    <!-- /wp:paragraph -->
+  </div>
+  <!-- /wp:column -->
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:image -->
+    <figure class="wp-block-image"><img src="/banner-image.png" alt="Julia Henderson" /></figure>
+    <!-- /wp:image -->
+  </div>
+  <!-- /wp:column -->
+</div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/banner-image.png',
+      heading: 'Welcome To My Profile I am Julia Henderson',
+      subtitle: 'About Me',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient.',
+      subtitleStyle: {
+        fontWeight: '700',
+        letterSpacing: '1px',
+        textTransform: 'uppercase',
+      },
+    });
+  });
 });

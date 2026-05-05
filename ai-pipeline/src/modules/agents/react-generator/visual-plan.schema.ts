@@ -333,10 +333,13 @@ export interface MediaTextSection extends BaseSection {
   imageAspectRatio?: string; // e.g. "16/9" | "1/1"
   imageCustomClassNames?: string[];
   columnWidths?: string[];
+  subtitle?: string;
   heading?: string;
   body?: string;
+  subtitleCustomClassNames?: string[];
   headingCustomClassNames?: string[];
   bodyCustomClassNames?: string[];
+  subtitleStyle?: TypographyStyle;
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];

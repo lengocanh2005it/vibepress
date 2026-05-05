@@ -4083,6 +4083,11 @@ export class CodeReviewerService {
             `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
           );
         }
+        if (section.subtitle) {
+          lines.push(
+            `- Keep subtitle exactly: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
         if (section.heading) {
           lines.push(
             `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
@@ -4573,6 +4578,11 @@ export class CodeReviewerService {
               : null,
           );
           parts.push(
+            section.subtitle
+              ? `subtitle=${JSON.stringify(section.subtitle)}`
+              : null,
+          );
+          parts.push(
             section.heading
               ? `heading=${JSON.stringify(section.heading)}`
               : null,
@@ -4914,6 +4924,7 @@ export class CodeReviewerService {
         }
         break;
       case 'media-text':
+        add(section.subtitleCustomClassNames);
         add(section.headingCustomClassNames);
         add(section.bodyCustomClassNames);
         add(section.imageCustomClassNames);
