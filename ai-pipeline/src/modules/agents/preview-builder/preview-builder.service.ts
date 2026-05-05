@@ -1222,8 +1222,16 @@ ${fontEntries}
   ): SourceMotionBridgeConfig {
     const sourceMotionPattern =
       /\bwow\b[\s\S]{0,400}\banimate__[\w-]+\b|\banimate__[\w-]+\b[\s\S]{0,400}\bwow\b/;
+    const stickyHeaderPattern =
+      /\bid="sticky-header"\b|\bid=\{"sticky-header"\}/;
+    const scrollTopPattern = /\bprofolio-fse-scroll-top\b/;
     const generatedSignalPresent = components.some((component) =>
       sourceMotionPattern.test(component.code),
+    );
+    const generatedThemeInteractionPresent = components.some(
+      (component) =>
+        stickyHeaderPattern.test(component.code) ||
+        scrollTopPattern.test(component.code),
     );
     const styleFiles = this.collectSourceMotionManifestFiles(
       repoManifest,
@@ -1236,11 +1244,20 @@ ${fontEntries}
     const noteSignals = [
       ...(repoManifest?.sourceOfTruth.notes ?? []),
       ...(repoManifest?.themes.flatMap((theme) => theme.themeNotes) ?? []),
-    ].filter((note) => /(wow|animate\.css|animate css|animate__)/i.test(note));
+    ].filter((note) =>
+      /(wow|animate\.css|animate css|animate__|sticky-header|jquery-sticky|scroll-top|scroll to top)/i.test(
+        note,
+      ),
+    );
 
     const reasons: string[] = [];
     if (generatedSignalPresent) {
       reasons.push('generated code preserves wow/animate__ classes');
+    }
+    if (generatedThemeInteractionPresent) {
+      reasons.push(
+        'generated code preserves sticky-header / scroll-top theme hooks',
+      );
     }
     if (styleFiles.length > 0) {
       reasons.push(`repo motion stylesheet(s): ${styleFiles.join(', ')}`);
@@ -1250,7 +1267,7 @@ ${fontEntries}
     }
     if (noteSignals.length > 0) {
       reasons.push(
-        'theme profile/source-of-truth notes mention wow/animate.css',
+        'theme profile/source-of-truth notes mention motion/sticky/scroll interactions',
       );
     }
 

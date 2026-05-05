@@ -1507,14 +1507,6 @@ ${renders}
     return -1;
   }
 
-  private buildSectionTrackingAttrs(
-    _section: SectionPlan,
-    _componentName: string,
-    _sectionKeyOverride?: string,
-  ): string {
-    return '';
-  }
-
   private resolveRequiredCustomClassTargets(
     requiredCustomClassNames: string[] | undefined,
     tokens?: ThemeTokens,
@@ -1540,14 +1532,19 @@ ${renders}
     componentPlan: PlanResult[number] | undefined,
     nodes: WpNode[] | undefined,
   ): boolean {
-    if (componentPlan?.visualPlan?.deterministicAuthority) {
+    const isSharedPartial = componentPlan?.type === 'partial';
+    const isHeaderPartial = isSharedPartial && /^header/i.test(componentName);
+    const isFooterPartial = isSharedPartial && /^footer/i.test(componentName);
+    if (componentPlan?.visualPlan?.deterministicAuthority && !isHeaderPartial) {
       return false;
     }
     // Shared chrome is more stable when we preserve the original WordPress
     // wrapper/column/navigation tree directly instead of letting AI restyle it.
+    // For Header specifically, even deterministic-authority plans benefit from
+    // block-faithful rendering because theme nav hover, spacing, and wrapper
+    // fidelity are highly dependent on the original block hierarchy/classes.
     return !!(
-      componentPlan?.type === 'partial' &&
-      /^(header|footer)/i.test(componentName) &&
+      (isHeaderPartial || isFooterPartial) &&
       nodes &&
       nodes.length > 0
     );

@@ -12,6 +12,7 @@ export interface WpNode {
   sourceRef?: SourceRef;
   params?: Record<string, any>;
   customClassNames?: string[];
+  domId?: string;
   // Extracted content from inner HTML
   text?: string;
   level?: number; // headings: 1-6
@@ -565,6 +566,9 @@ function parseBlocks(markup: string): WpNode[] {
             block: 'navigation-link',
             text: params.label as string,
             href: canonicalizeThemeAssetReference(params.url as string) || '#',
+            ...(normalizeDomId(params?.anchor)
+              ? { domId: normalizeDomId(params?.anchor) }
+              : {}),
           }),
         );
       } else {
@@ -572,6 +576,9 @@ function parseBlocks(markup: string): WpNode[] {
           compact({
             block: blockName,
             params,
+            ...(normalizeDomId(params?.anchor)
+              ? { domId: normalizeDomId(params?.anchor) }
+              : {}),
             ...(blockName === 'site-logo' && params?.width
               ? { width: Number(params.width) }
               : {}),
@@ -734,6 +741,8 @@ function buildNode(
   params: Record<string, any> | undefined,
   innerMarkup: string,
 ): WpNode {
+  const domId =
+    normalizeDomId(params?.anchor) ?? extractDomIdFromMarkup(innerMarkup);
   const hasNestedBlocks = /<!-- wp:[a-z]/.test(innerMarkup);
   const modalSyntheticChildren = isUagbModalBlock(blockName)
     ? extractUagbModalTriggerChildren(innerMarkup)
@@ -777,6 +786,7 @@ function buildNode(
     return compact({
       block: blockName,
       params,
+      ...(domId ? { domId } : {}),
       ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
         ? {
             customClassNames: extractUsefulCustomClassNamesFromParam(
@@ -836,6 +846,7 @@ function buildNode(
       return compact({
         block: blockName,
         params,
+        ...(domId ? { domId } : {}),
         ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
           ? {
               customClassNames: extractUsefulCustomClassNamesFromParam(
@@ -960,6 +971,21 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
   }
 
   return customClassNames.length ? { customClassNames } : {};
+}
+
+function normalizeDomId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+}
+
+function extractDomIdFromMarkup(markup: string): string | undefined {
+  const openingTagMatch = String(markup ?? '').match(
+    /^\s*<([a-z0-9:-]+)\b([^>]*)>/i,
+  );
+  if (!openingTagMatch?.[2]) return undefined;
+  const idMatch = openingTagMatch[2].match(/\bid=(['"])(.*?)\1/i);
+  return normalizeDomId(idMatch?.[2]);
 }
 
 function extractDetailsSummaryText(html: string): string | undefined {

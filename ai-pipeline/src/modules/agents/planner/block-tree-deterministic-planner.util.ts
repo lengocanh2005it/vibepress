@@ -295,15 +295,19 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
   content: DbContentResult;
 }): SectionPlan[] {
   const { componentPlan, draftBlockTree, draftSections, content } = input;
+  const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
+  const normalizedName = componentPlan.componentName.toLowerCase();
   const explicitChromeSections = (draftSections ?? []).filter(
     (section) => section.type === 'navbar' || section.type === 'footer',
   );
   if (explicitChromeSections.length > 0) {
-    return explicitChromeSections;
+    return explicitChromeSections.map((section) => {
+      if (section.type === 'footer' && /^footer$/.test(normalizedName)) {
+        return decorateFooterSectionFromBlockTree(section, orderedNodes);
+      }
+      return section;
+    });
   }
-
-  const orderedNodes = collectBlockNodesInOrder(draftBlockTree);
-  const normalizedName = componentPlan.componentName.toLowerCase();
 
   if (/^(header|navigation|nav)$/.test(normalizedName)) {
     const navigationNode = orderedNodes.find(
@@ -331,24 +335,9 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
     const footerColumnsNode = orderedNodes.find(
       (node) => node.kind === 'columns',
     );
-    const supplementalImages = orderedNodes
-      .filter(
-        (node) =>
-          node.kind === 'image' &&
-          typeof node.src === 'string' &&
-          node.src.trim(),
-      )
-      .map((node) => ({
-        src: node.src!.trim(),
-        ...(node.alt?.trim() ? { alt: node.alt.trim() } : {}),
-        ...(node.customClassNames?.length
-          ? { customClassNames: [...new Set(node.customClassNames)] }
-          : {}),
-      }));
     const section: FooterSection = {
       type: 'footer',
       menuColumns: inferFooterMenuColumnsFromBlockTree(orderedNodes),
-      ...(supplementalImages.length > 0 ? { supplementalImages } : {}),
       showSiteLogo: orderedNodes.some((node) => node.kind === 'site-logo'),
       showSiteTitle: orderedNodes.some((node) => node.kind === 'site-title'),
       showTagline: orderedNodes.some((node) => node.kind === 'site-tagline'),
@@ -364,7 +353,7 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
         : {}),
       debugKey: 'footer-0',
     };
-    return [section];
+    return [decorateFooterSectionFromBlockTree(section, orderedNodes)];
   }
 
   if (/^postmeta$/.test(normalizedName)) {
@@ -416,6 +405,103 @@ function inferFooterMenuColumnsFromBlockTree(
     });
   }
   return result;
+}
+
+function decorateFooterSectionFromBlockTree(
+  section: FooterSection,
+  orderedNodes: BlockNode[],
+): FooterSection {
+  const supplementalImages =
+    collectFooterSupplementalImagesFromBlockTree(orderedNodes);
+  const scrollTopTriggerClassNames =
+    collectFooterScrollTopTriggerClassNamesFromBlockTree(orderedNodes);
+
+  return {
+    ...section,
+    menuColumns:
+      section.menuColumns.length > 0
+        ? section.menuColumns
+        : inferFooterMenuColumnsFromBlockTree(orderedNodes),
+    ...(section.columnWidths?.length
+      ? {}
+      : {
+          columnWidths: orderedNodes
+            .find((node) => node.kind === 'columns')
+            ?.children?.map((child) => child.columnWidth?.trim())
+            .filter((value): value is string => !!value),
+        }),
+    ...(supplementalImages.length > 0
+      ? {
+          supplementalImages: mergeFooterSupplementalImages(
+            section.supplementalImages ?? [],
+            supplementalImages,
+          ),
+        }
+      : {}),
+    ...(scrollTopTriggerClassNames.length > 0 &&
+    !(section.scrollTopTriggerClassNames?.length ?? 0)
+      ? { scrollTopTriggerClassNames }
+      : {}),
+    showSiteLogo:
+      section.showSiteLogo ??
+      orderedNodes.some((node) => node.kind === 'site-logo'),
+    showSiteTitle:
+      section.showSiteTitle ??
+      orderedNodes.some((node) => node.kind === 'site-title'),
+    showTagline:
+      section.showTagline ??
+      orderedNodes.some((node) => node.kind === 'site-tagline'),
+  };
+}
+
+function collectFooterSupplementalImagesFromBlockTree(
+  nodes: BlockNode[],
+): NonNullable<FooterSection['supplementalImages']> {
+  return nodes
+    .filter(
+      (node) =>
+        node.kind === 'image' &&
+        typeof node.src === 'string' &&
+        node.src.trim(),
+    )
+    .map((node) => ({
+      src: node.src!.trim(),
+      ...(node.alt?.trim() ? { alt: node.alt.trim() } : {}),
+      ...(node.customClassNames?.length
+        ? { customClassNames: [...new Set(node.customClassNames)] }
+        : {}),
+    }));
+}
+
+function collectFooterScrollTopTriggerClassNamesFromBlockTree(
+  nodes: BlockNode[],
+): string[] {
+  const classes = nodes
+    .filter(
+      (node) =>
+        node.kind === 'paragraph' &&
+        (node.customClassNames ?? []).some((className) =>
+          /scroll-top/i.test(className),
+        ),
+    )
+    .flatMap((node) => node.customClassNames ?? []);
+  return Array.from(new Set(classes));
+}
+
+function mergeFooterSupplementalImages(
+  existing: NonNullable<FooterSection['supplementalImages']>,
+  inferred: NonNullable<FooterSection['supplementalImages']>,
+): NonNullable<FooterSection['supplementalImages']> {
+  const merged = [...existing];
+  const seen = new Set(existing.map((image) => image.src));
+
+  for (const image of inferred) {
+    if (seen.has(image.src)) continue;
+    seen.add(image.src);
+    merged.push(image);
+  }
+
+  return merged;
 }
 
 function containsKind(node: BlockNode, kind: string): boolean {
