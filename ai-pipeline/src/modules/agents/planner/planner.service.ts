@@ -461,16 +461,14 @@ export class PlannerService {
     const globalTypography = this.deriveGlobalTypography(tokens);
     const resolvedModel = modelName ?? this.llmFactory.getModel();
 
-    const concretizedPlan = this.materializeConcretePagePlans(plan, content);
-
     this.logger.log(
       this.formatPhaseCLog(
-        `Generating visual plans for ${concretizedPlan.length} reviewed components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
+        `Generating visual plans for ${plan.length} reviewed components (theme tokens stay deterministic; surfacePlan drives composition policy)`,
       ),
     );
 
     return this.buildVisualPlans(
-      concretizedPlan,
+      plan,
       sourceMap,
       content,
       tokens,
