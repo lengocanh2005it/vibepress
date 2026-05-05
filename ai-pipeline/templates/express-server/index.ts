@@ -722,6 +722,143 @@ function extractRuntimeInfoBoxCard(
   };
 }
 
+function extractRuntimeBoxSpacing(
+  value: Record<string, any> | undefined,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const result: Record<string, string> = {};
+  for (const key of ['top', 'right', 'bottom', 'left'] as const) {
+    const raw = value[key];
+    if (typeof raw === 'string' && raw.trim()) result[key] = raw.trim();
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function extractRuntimeBlockGap(
+  value: unknown,
+): string | { x?: string; y?: string } | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const x = typeof raw.left === 'string' ? raw.left.trim() : undefined;
+  const y = typeof raw.top === 'string' ? raw.top.trim() : undefined;
+  return x || y ? { ...(x ? { x } : {}), ...(y ? { y } : {}) } : undefined;
+}
+
+function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) {
+  const spacing = block.attrs?.style?.spacing;
+  const typography = block.attrs?.style?.typography;
+  const dimensions = block.attrs?.style?.dimensions;
+  const colors: Record<string, string> = {};
+  if (typeof block.attrs?.textColor === 'string' && block.attrs.textColor.trim()) {
+    colors.text = block.attrs.textColor.trim();
+  }
+  if (
+    typeof block.attrs?.backgroundColor === 'string' &&
+    block.attrs.backgroundColor.trim()
+  ) {
+    colors.background = block.attrs.backgroundColor.trim();
+  }
+  const styleSpec: Record<string, any> = {
+    ...(classNames.length ? { classNames } : {}),
+    ...(Object.keys(colors).length > 0 ? { colors } : {}),
+    ...(spacing
+      ? {
+          spacing: {
+            ...(extractRuntimeBoxSpacing(spacing.margin) ? { margin: extractRuntimeBoxSpacing(spacing.margin) } : {}),
+            ...(extractRuntimeBoxSpacing(spacing.padding)
+              ? { padding: extractRuntimeBoxSpacing(spacing.padding) }
+              : {}),
+            ...(extractRuntimeBlockGap(spacing.blockGap)
+              ? { blockGap: extractRuntimeBlockGap(spacing.blockGap) }
+              : {}),
+          },
+        }
+      : {}),
+    ...(typography && typeof typography === 'object'
+      ? {
+          typography: {
+            ...(typeof typography.fontSize === 'string' && typography.fontSize.trim()
+              ? { fontSize: typography.fontSize.trim() }
+              : {}),
+            ...(typeof typography.lineHeight === 'string' &&
+            typography.lineHeight.trim()
+              ? { lineHeight: typography.lineHeight.trim() }
+              : {}),
+            ...(typeof typography.fontStyle === 'string' &&
+            typography.fontStyle.trim()
+              ? { fontWeight: typography.fontStyle.trim() }
+              : {}),
+            ...(typeof typography.textAlign === 'string' &&
+            typography.textAlign.trim()
+              ? { textAlign: typography.textAlign.trim() }
+              : {}),
+          },
+        }
+      : {}),
+    ...(dimensions && typeof dimensions === 'object'
+      ? {
+          dimensions: {
+            ...(typeof dimensions.minHeight === 'string' &&
+            dimensions.minHeight.trim()
+              ? { minHeight: dimensions.minHeight.trim() }
+              : {}),
+          },
+        }
+      : {}),
+  };
+
+  if (
+    styleSpec.spacing &&
+    Object.keys(styleSpec.spacing).length === 0
+  ) {
+    delete styleSpec.spacing;
+  }
+  if (
+    styleSpec.typography &&
+    Object.keys(styleSpec.typography).length === 0
+  ) {
+    delete styleSpec.typography;
+  }
+  if (
+    styleSpec.dimensions &&
+    Object.keys(styleSpec.dimensions).length === 0
+  ) {
+    delete styleSpec.dimensions;
+  }
+
+  return Object.keys(styleSpec).length > 0 ? styleSpec : undefined;
+}
+
+function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
+  const layout = block.attrs?.layout;
+  const result: Record<string, any> = {};
+  if (layout && typeof layout === 'object') {
+    if (typeof layout.type === 'string' && layout.type.trim()) {
+      result.kind = layout.type.trim();
+    }
+    if (typeof layout.justifyContent === 'string' && layout.justifyContent.trim()) {
+      result.justifyContent = layout.justifyContent.trim();
+    }
+    if (
+      typeof layout.verticalAlignment === 'string' &&
+      layout.verticalAlignment.trim()
+    ) {
+      result.alignItems = layout.verticalAlignment.trim();
+    }
+    if (typeof layout.orientation === 'string' && layout.orientation.trim()) {
+      result.orientation = layout.orientation.trim();
+    }
+  }
+  if (typeof block.attrs?.align === 'string' && block.attrs.align.trim()) {
+    result.align = block.attrs.align.trim();
+  }
+  if (typeof block.attrs?.width === 'string' && block.attrs.width.trim()) {
+    result.columnWidth = block.attrs.width.trim();
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function buildRuntimeBlockNode(
   block: RuntimeParsedBlock,
   path: string,
@@ -734,11 +871,35 @@ function buildRuntimeBlockNode(
   const classNames = extractRuntimeClassNames(block.attrs, innerHtml);
   const attrs =
     Object.keys(block.attrs).length > 0 ? { ...block.attrs } : undefined;
+  const styleSpec = buildRuntimeStyleSpec(block, classNames);
+  const layoutSpec = buildRuntimeLayoutSpec(block);
+  const wrapperTag =
+    block.blockName === 'core/cover'
+      ? 'section'
+      : block.blockName === 'core/columns'
+        ? 'section'
+        : block.blockName === 'core/column'
+          ? 'div'
+          : undefined;
   const node: Record<string, any> = {
+    nodeId: path,
     kind,
     blockName: block.blockName,
     sourceRef: { sourceNodeId: path },
     ...(attrs ? { attrs } : {}),
+    ...(styleSpec ? { style: styleSpec } : {}),
+    ...(layoutSpec ? { layout: layoutSpec } : {}),
+    ...((wrapperTag || block.blockName === 'core/cover')
+      ? {
+          wrapper: {
+            ...(wrapperTag ? { tagName: wrapperTag } : {}),
+            ...(typeof block.attrs.anchor === 'string' && block.attrs.anchor.trim()
+              ? { domId: block.attrs.anchor.trim() }
+              : {}),
+            preserveWrapper: true,
+          },
+        }
+      : {}),
     ...(classNames.length ? { customClassNames: classNames } : {}),
     ...(typeof block.attrs.anchor === 'string' && block.attrs.anchor.trim()
       ? { domId: block.attrs.anchor.trim() }
@@ -853,9 +1014,15 @@ function collectRuntimeSectionsAndBindings(
     );
     if (directInfoBoxes.length >= 2) {
       const debugKey = `runtime-card-grid-${++counter}`;
+      const sectionId = `runtime-section-${counter}`;
       sections.push({
+        id: sectionId,
         type: 'card-grid',
         debugKey,
+        sectionKey: sectionId,
+        sourceNodeId: path,
+        blockName: block.blockName,
+        sourceRef: { sourceNodeId: path },
         columns: Math.min(Math.max(directInfoBoxes.length, 1), 4),
         title:
           extractFirstMatch(
@@ -867,6 +1034,15 @@ function collectRuntimeSectionsAndBindings(
             rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim())),
             /<p[^>]*>([\s\S]*?)<\/p>/i,
           ) ?? undefined,
+        ...(buildRuntimeLayoutSpec(block) ? { layout: buildRuntimeLayoutSpec(block) } : {}),
+        ...(buildRuntimeStyleSpec(block, extractRuntimeClassNames(block.attrs, block.innerHtml))
+          ? {
+              style: buildRuntimeStyleSpec(
+                block,
+                extractRuntimeClassNames(block.attrs, block.innerHtml),
+              ),
+            }
+          : {}),
         cards: directInfoBoxes.map((child, index) =>
           extractRuntimeInfoBoxCard(child, index),
         ),
@@ -878,6 +1054,7 @@ function collectRuntimeSectionsAndBindings(
         preserveWrapper: true,
         preserveChildrenOrder: true,
         childCount: directInfoBoxes.length,
+        sectionId,
         sectionDebugKey: debugKey,
       });
       block.children
@@ -888,9 +1065,15 @@ function collectRuntimeSectionsAndBindings(
 
     if (block.blockName === 'uagb/tabs') {
       const debugKey = `runtime-tabs-${++counter}`;
+      const sectionId = `runtime-section-${counter}`;
       sections.push({
+        id: sectionId,
         type: 'tabs',
         debugKey,
+        sectionKey: sectionId,
+        sourceNodeId: path,
+        blockName: block.blockName,
+        sourceRef: { sourceNodeId: path },
         tabs: block.children.map((child, index) => ({
           heading:
             String(child.attrs.heading ?? child.attrs.title ?? '').trim() ||
@@ -910,13 +1093,20 @@ function collectRuntimeSectionsAndBindings(
         preserveWrapper: true,
         preserveChildrenOrder: true,
         childCount: block.children.length,
+        sectionId,
         sectionDebugKey: debugKey,
       });
     } else if (block.blockName === 'uagb/slider') {
       const debugKey = `runtime-carousel-${++counter}`;
+      const sectionId = `runtime-section-${counter}`;
       sections.push({
+        id: sectionId,
         type: 'carousel',
         debugKey,
+        sectionKey: sectionId,
+        sourceNodeId: path,
+        blockName: block.blockName,
+        sourceRef: { sourceNodeId: path },
         slides: block.children.map((child, index) => ({
           heading:
             extractFirstMatch(child.innerHtml, /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
@@ -935,6 +1125,7 @@ function collectRuntimeSectionsAndBindings(
         preserveWrapper: true,
         preserveChildrenOrder: true,
         childCount: block.children.length,
+        sectionId,
         sectionDebugKey: debugKey,
       });
     } else if (
@@ -942,9 +1133,15 @@ function collectRuntimeSectionsAndBindings(
       block.blockName === 'uagb/content-toggle'
     ) {
       const debugKey = `runtime-accordion-${++counter}`;
+      const sectionId = `runtime-section-${counter}`;
       sections.push({
+        id: sectionId,
         type: 'accordion',
         debugKey,
+        sectionKey: sectionId,
+        sourceNodeId: path,
+        blockName: block.blockName,
+        sourceRef: { sourceNodeId: path },
         items: block.children.map((child, index) => ({
           heading:
             String(
@@ -964,13 +1161,20 @@ function collectRuntimeSectionsAndBindings(
         preserveWrapper: true,
         preserveChildrenOrder: true,
         childCount: block.children.length,
+        sectionId,
         sectionDebugKey: debugKey,
       });
     } else if (block.blockName === 'uagb/info-box') {
       const debugKey = `runtime-card-grid-${++counter}`;
+      const sectionId = `runtime-section-${counter}`;
       sections.push({
+        id: sectionId,
         type: 'card-grid',
         debugKey,
+        sectionKey: sectionId,
+        sourceNodeId: path,
+        blockName: block.blockName,
+        sourceRef: { sourceNodeId: path },
         columns: 1,
         cards: [extractRuntimeInfoBoxCard(block, 0)],
       });
@@ -981,6 +1185,7 @@ function collectRuntimeSectionsAndBindings(
         preserveWrapper: true,
         preserveChildrenOrder: true,
         childCount: block.children.length,
+        sectionId,
         sectionDebugKey: debugKey,
       });
     }
@@ -1006,7 +1211,7 @@ function buildRuntimePlanFromPageRow(row: any) {
   const runtimeSignals = collectRuntimeSectionsAndBindings(blocks);
   const hasInteractiveSections = runtimeSignals.sections.length > 0;
   return {
-    version: 1,
+    version: 2,
     mode:
       blockTree.length === 0
         ? 'page-content'
@@ -1029,7 +1234,7 @@ function buildRuntimePlanFromPageRow(row: any) {
       safeForRuntime: runtimeSignals.unsupportedBlocks.length === 0,
       unsupportedBlocks: runtimeSignals.unsupportedBlocks,
     },
-    dataNeeds: ['pageDetail'],
+    dataNeeds: ['page-detail'],
     sections: runtimeSignals.sections,
     blockTree,
     subtreeBindings: runtimeSignals.bindings,
