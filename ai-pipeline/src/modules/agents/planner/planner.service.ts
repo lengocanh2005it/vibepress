@@ -114,7 +114,6 @@ import {
   type ComponentRenderContract,
 } from './render-contract.schema.js';
 import {
-  classifyConcretePageForRuntime,
   isDefaultRuntimePageTemplateCandidate,
 } from './runtime-page-policy.util.js';
 import type {
@@ -3665,6 +3664,7 @@ export class PlannerService {
     const usedComponentNames = new Set<string>();
     let materializedCount = 0;
     let runtimeBackedGenericCount = 0;
+    let runtimeBackedPageCount = 0;
 
     for (const item of plan) {
       if (item.fixedSlug || !this.shouldExpandConcretePages(item)) {
@@ -3678,50 +3678,14 @@ export class PlannerService {
         isDefaultRuntimePageTemplateCandidate(item);
 
       if (runtimeTemplateCandidate) {
-        const classifiedPages = matchedPages.map((page) => ({
-          page,
-          classification: classifyConcretePageForRuntime(page),
-        }));
-        const runtimePages = classifiedPages
-          .filter((entry) => entry.classification.strategy === 'runtime')
-          .map((entry) => entry.page);
-        const dedicatedPages = classifiedPages
-          .filter((entry) => entry.classification.strategy === 'dedicated')
-          .map((entry) => entry.page);
         const genericRuntimeItem = this.buildRuntimePageBasePlan(
           item,
-          runtimePages.length,
+          matchedPages.length,
         );
         result.push(genericRuntimeItem);
         usedComponentNames.add(genericRuntimeItem.componentName);
         runtimeBackedGenericCount += 1;
-
-        for (const page of dedicatedPages) {
-          const route = this.buildConcretePageRoute(page, content);
-          const componentName = this.buildConcretePageComponentName(
-            page,
-            route,
-            usedComponentNames,
-          );
-          result.push({
-            ...item,
-            componentName,
-            route,
-            isDetail: true,
-            fixedSlug: page.slug,
-            fixedPageId: page.id,
-            fixedTitle: page.title,
-            runtimeRenderer: undefined,
-            description: this.buildConcretePageDescription(item, page, route),
-            visualPlan: undefined,
-            planningSourceLabel: undefined,
-            planningSourceReason: undefined,
-            planningSourceFile: undefined,
-            planningSourceSummary: undefined,
-          });
-          usedComponentNames.add(componentName);
-          materializedCount += 1;
-        }
+        runtimeBackedPageCount += matchedPages.length;
         continue;
       }
 
@@ -3764,7 +3728,11 @@ export class PlannerService {
           ? `materialized ${materializedCount} exact page component(s)`
           : null,
         runtimeBackedGenericCount > 0
-          ? `kept ${runtimeBackedGenericCount} runtime-backed generic page route(s)`
+          ? `kept ${runtimeBackedGenericCount} runtime-backed generic page route(s)${
+              runtimeBackedPageCount > 0
+                ? ` covering ${runtimeBackedPageCount} DB page(s)`
+                : ''
+            }`
           : null,
       ]
         .filter(Boolean)
@@ -3779,7 +3747,7 @@ export class PlannerService {
 
   private buildRuntimePageBasePlan(
     item: PlanResult[number],
-    runtimeSafePageCount: number,
+    runtimeBackedPageCount: number,
   ): PlanResult[number] {
     return {
       ...item,
@@ -3798,8 +3766,8 @@ export class PlannerService {
       planningSourceReason: 'generic runtime page route',
       planningSourceFile: 'templates/react-preview/src/pages/RuntimePage.tsx',
       planningSourceSummary:
-        runtimeSafePageCount > 0
-          ? `Default page route kept generic for ${runtimeSafePageCount} runtime-safe DB page(s); complex pages still materialize as fixed components.`
+        runtimeBackedPageCount > 0
+          ? `Default page route kept generic for ${runtimeBackedPageCount} DB page(s) through the runtime page endpoint.`
           : 'Default page route kept generic so newly added WordPress pages can render through the runtime page endpoint.',
       description:
         'Generic runtime-rendered WordPress page route backed by /api/runtime/pages/:slug.',
