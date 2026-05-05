@@ -23,6 +23,7 @@ app.get('/api', (_req, res) => {
       '/api/site-info',
       '/api/posts',
       '/api/pages',
+      '/api/runtime/pages/:slug',
       '/api/menus',
       '/api/footer-links',
       '/api/taxonomies',
@@ -576,6 +577,465 @@ async function serializePageRows(
   return result;
 }
 
+type RuntimeParsedBlock = {
+  blockName: string;
+  attrs: Record<string, any>;
+  innerHtml: string;
+  children: RuntimeParsedBlock[];
+};
+
+function parseRuntimeBlocks(markup: string): RuntimeParsedBlock[] {
+  const root: RuntimeParsedBlock = {
+    blockName: '__root__',
+    attrs: {},
+    innerHtml: '',
+    children: [],
+  };
+  const stack: RuntimeParsedBlock[] = [root];
+  const tokenPattern =
+    /<!--\s*(\/?)wp:([a-z0-9-]+(?:\/[a-z0-9-]+)?)(?:\s+(\{[\s\S]*?\}))?\s*(\/)?-->/gi;
+  let lastIndex = 0;
+
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(markup)) !== null) {
+    const before = markup.slice(lastIndex, match.index);
+    if (before) {
+      stack[stack.length - 1].innerHtml += before;
+    }
+
+    const isClosing = match[1] === '/';
+    const blockName = normalizeRuntimeBlockName(match[2]);
+    const attrs = parseBlockAttrs(match[3]);
+    const isSelfClosing =
+      !isClosing && (match[4] === '/' || /\/-->\s*$/.test(match[0]));
+
+    if (isClosing) {
+      if (stack.length > 1) stack.pop();
+    } else {
+      const block: RuntimeParsedBlock = {
+        blockName,
+        attrs,
+        innerHtml: '',
+        children: [],
+      };
+      stack[stack.length - 1].children.push(block);
+      if (!isSelfClosing) stack.push(block);
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  const trailing = markup.slice(lastIndex);
+  if (trailing) {
+    stack[stack.length - 1].innerHtml += trailing;
+  }
+
+  return root.children;
+}
+
+function normalizeRuntimeBlockName(blockName: string): string {
+  const normalized = String(blockName ?? '').trim().toLowerCase();
+  if (!normalized) return 'core/group';
+  return normalized.includes('/') ? normalized : `core/${normalized}`;
+}
+
+function stripAllHtml(html: string | null | undefined): string {
+  return decodeHtmlEntities(
+    String(html ?? '')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+}
+
+function extractFirstMatch(
+  html: string,
+  pattern: RegExp,
+  group = 1,
+): string | undefined {
+  const match = pattern.exec(html);
+  return match?.[group] ? String(match[group]).trim() : undefined;
+}
+
+function extractRuntimeClassNames(
+  attrs: Record<string, any>,
+  innerHtml: string,
+): string[] {
+  const collected = new Set<string>();
+  const pushClassNames = (raw: string | null | undefined) => {
+    if (!raw) return;
+    for (const entry of String(raw).split(/\s+/)) {
+      const normalized = entry.trim();
+      if (normalized) collected.add(normalized);
+    }
+  };
+
+  pushClassNames(typeof attrs.className === 'string' ? attrs.className : null);
+  pushClassNames(
+    extractFirstMatch(innerHtml, /\bclass=(["'])([^"']+)\1/i, 2) ?? null,
+  );
+  return [...collected];
+}
+
+function extractRuntimeInfoBoxCard(
+  block: RuntimeParsedBlock,
+  index: number,
+): Record<string, any> {
+  const html = rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim()));
+  const attrs = block.attrs ?? {};
+  return {
+    heading:
+      String(
+        attrs.headingTitle ??
+          attrs.title ??
+          attrs.heading ??
+          attrs.prefixTitle ??
+          '',
+      ).trim() ||
+      extractFirstMatch(html, /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
+      extractFirstMatch(html, /<strong[^>]*>([\s\S]*?)<\/strong>/i) ||
+      `Card ${index + 1}`,
+    body:
+      String(
+        attrs.infoTitle ??
+          attrs.infoText ??
+          attrs.description ??
+          attrs.body ??
+          '',
+      ).trim() ||
+      extractFirstMatch(html, /<p[^>]*>([\s\S]*?)<\/p>/i) ||
+      '',
+    imageSrc:
+      localizeWpUploadAssetUrl(
+        (typeof attrs.imageUrl === 'string' && attrs.imageUrl.trim()) ||
+          extractFirstMatch(html, /\bsrc=(["'])([^"']+)\1/i, 2),
+      ) ??
+      ((typeof attrs.imageUrl === 'string' && attrs.imageUrl.trim()) ||
+        extractFirstMatch(html, /\bsrc=(["'])([^"']+)\1/i, 2)),
+    imageAlt:
+      (typeof attrs.imageAlt === 'string' && attrs.imageAlt.trim()) ||
+      extractFirstMatch(html, /\balt=(["'])([^"']*)\1/i, 2),
+    href:
+      (typeof attrs.link === 'string' && attrs.link.trim()) ||
+      extractFirstMatch(html, /\bhref=(["'])([^"']+)\1/i, 2),
+  };
+}
+
+function buildRuntimeBlockNode(
+  block: RuntimeParsedBlock,
+  path: string,
+): Record<string, any> {
+  const kind = block.blockName.split('/').pop() || 'group';
+  const innerHtml = block.innerHtml.trim();
+  const childNodes = block.children.map((child, index) =>
+    buildRuntimeBlockNode(child, `${path}.${index + 1}`),
+  );
+  const classNames = extractRuntimeClassNames(block.attrs, innerHtml);
+  const attrs =
+    Object.keys(block.attrs).length > 0 ? { ...block.attrs } : undefined;
+  const node: Record<string, any> = {
+    kind,
+    blockName: block.blockName,
+    sourceRef: { sourceNodeId: path },
+    ...(attrs ? { attrs } : {}),
+    ...(classNames.length ? { customClassNames: classNames } : {}),
+    ...(typeof block.attrs.anchor === 'string' && block.attrs.anchor.trim()
+      ? { domId: block.attrs.anchor.trim() }
+      : {}),
+    ...(childNodes.length ? { children: childNodes } : {}),
+  };
+
+  const headingLevel =
+    Number(block.attrs.level ?? 0) ||
+    Number(extractFirstMatch(innerHtml, /<h([1-6])\b/i));
+  const src =
+    (typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
+    extractFirstMatch(innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2);
+  const alt =
+    (typeof block.attrs.alt === 'string' && block.attrs.alt.trim()) ||
+    extractFirstMatch(innerHtml, /\balt=(["'])([^"']*)\1/i, 2);
+  const href =
+    (typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
+    extractFirstMatch(innerHtml, /\bhref=(["'])([^"']+)\1/i, 2);
+  const htmlText = innerHtml ? rewriteInternalLinks(rewriteWpContentAssetUrls(innerHtml)) : '';
+  const text = stripAllHtml(innerHtml);
+
+  if (
+    [
+      'core/heading',
+      'core/paragraph',
+      'core/list-item',
+      'core/site-title',
+      'core/site-tagline',
+      'uagb/advanced-heading',
+    ].includes(block.blockName)
+  ) {
+    if (htmlText) node.html = htmlText;
+    if (text) node.text = text;
+  }
+
+  if (block.blockName === 'core/heading' && headingLevel > 0) {
+    node.level = Math.max(1, Math.min(6, headingLevel));
+  }
+
+  if (
+    [
+      'core/image',
+      'core/cover',
+      'core/site-logo',
+      'uagb/info-box',
+      'uagb/slider-child',
+    ].includes(block.blockName) &&
+    src
+  ) {
+    node.src = localizeWpUploadAssetUrl(src) ?? src;
+    if (alt) node.alt = alt;
+  }
+
+  if (
+    [
+      'core/button',
+      'core/navigation-link',
+      'uagb/icon-list',
+    ].includes(block.blockName) &&
+    href
+  ) {
+    node.href = href;
+    if (text) node.text = text;
+  }
+
+  if (
+    ['core/group', 'core/columns', 'core/column', 'uagb/container', 'uagb/section'].includes(
+      block.blockName,
+    ) &&
+    typeof block.attrs.backgroundColor === 'string'
+  ) {
+    node.bgColor = block.attrs.backgroundColor;
+  }
+
+  return node;
+}
+
+function collectRuntimeSectionsAndBindings(
+  blocks: RuntimeParsedBlock[],
+): {
+  sections: Array<Record<string, any>>;
+  bindings: Array<Record<string, any>>;
+  unsupportedBlocks: string[];
+} {
+  const sections: Array<Record<string, any>> = [];
+  const bindings: Array<Record<string, any>> = [];
+  const unsupportedBlocks = new Set<string>();
+  let counter = 0;
+  const supportedInteractive = new Set([
+    'uagb/tabs',
+    'uagb/tabs-child',
+    'uagb/slider',
+    'uagb/slider-child',
+    'uagb/faq',
+    'uagb/faq-child',
+    'uagb/content-toggle',
+    'uagb/info-box',
+    'uagb/container',
+    'uagb/section',
+    'uagb/advanced-heading',
+    'uagb/icon-list',
+  ]);
+
+  const visit = (block: RuntimeParsedBlock, path: string) => {
+    if (block.blockName.startsWith('uagb/') && !supportedInteractive.has(block.blockName)) {
+      unsupportedBlocks.add(block.blockName);
+    }
+
+    const directInfoBoxes = block.children.filter(
+      (child) => child.blockName === 'uagb/info-box',
+    );
+    if (directInfoBoxes.length >= 2) {
+      const debugKey = `runtime-card-grid-${++counter}`;
+      sections.push({
+        type: 'card-grid',
+        debugKey,
+        columns: Math.min(Math.max(directInfoBoxes.length, 1), 4),
+        title:
+          extractFirstMatch(
+            rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim())),
+            /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i,
+          ) ?? undefined,
+        subtitle:
+          extractFirstMatch(
+            rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim())),
+            /<p[^>]*>([\s\S]*?)<\/p>/i,
+          ) ?? undefined,
+        cards: directInfoBoxes.map((child, index) =>
+          extractRuntimeInfoBoxCard(child, index),
+        ),
+      });
+      bindings.push({
+        nodeId: path,
+        blockName: block.blockName,
+        renderer: 'card-grid',
+        preserveWrapper: true,
+        preserveChildrenOrder: true,
+        childCount: directInfoBoxes.length,
+        sectionDebugKey: debugKey,
+      });
+      block.children
+        .filter((child) => child.blockName !== 'uagb/info-box')
+        .forEach((child, index) => visit(child, `${path}.${index + 1}`));
+      return;
+    }
+
+    if (block.blockName === 'uagb/tabs') {
+      const debugKey = `runtime-tabs-${++counter}`;
+      sections.push({
+        type: 'tabs',
+        debugKey,
+        tabs: block.children.map((child, index) => ({
+          heading:
+            String(child.attrs.heading ?? child.attrs.title ?? '').trim() ||
+            extractFirstMatch(child.innerHtml, /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
+            `Tab ${index + 1}`,
+          body: rewriteInternalLinks(rewriteWpContentAssetUrls(child.innerHtml.trim())),
+          imageSrc: localizeWpUploadAssetUrl(
+            extractFirstMatch(child.innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2),
+          ) ?? extractFirstMatch(child.innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2),
+          imageAlt: extractFirstMatch(child.innerHtml, /\balt=(["'])([^"']*)\1/i, 2),
+        })),
+      });
+      bindings.push({
+        nodeId: path,
+        blockName: block.blockName,
+        renderer: 'tabs',
+        preserveWrapper: true,
+        preserveChildrenOrder: true,
+        childCount: block.children.length,
+        sectionDebugKey: debugKey,
+      });
+    } else if (block.blockName === 'uagb/slider') {
+      const debugKey = `runtime-carousel-${++counter}`;
+      sections.push({
+        type: 'carousel',
+        debugKey,
+        slides: block.children.map((child, index) => ({
+          heading:
+            extractFirstMatch(child.innerHtml, /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
+            `Slide ${index + 1}`,
+          body: rewriteInternalLinks(rewriteWpContentAssetUrls(child.innerHtml.trim())),
+          imageSrc: localizeWpUploadAssetUrl(
+            extractFirstMatch(child.innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2),
+          ) ?? extractFirstMatch(child.innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2),
+          imageAlt: extractFirstMatch(child.innerHtml, /\balt=(["'])([^"']*)\1/i, 2),
+        })),
+      });
+      bindings.push({
+        nodeId: path,
+        blockName: block.blockName,
+        renderer: 'carousel',
+        preserveWrapper: true,
+        preserveChildrenOrder: true,
+        childCount: block.children.length,
+        sectionDebugKey: debugKey,
+      });
+    } else if (
+      block.blockName === 'uagb/faq' ||
+      block.blockName === 'uagb/content-toggle'
+    ) {
+      const debugKey = `runtime-accordion-${++counter}`;
+      sections.push({
+        type: 'accordion',
+        debugKey,
+        items: block.children.map((child, index) => ({
+          heading:
+            String(
+              child.attrs.question ??
+                child.attrs.heading ??
+                child.attrs.title ??
+                '',
+            ).trim() ||
+            `Item ${index + 1}`,
+          body: rewriteInternalLinks(rewriteWpContentAssetUrls(child.innerHtml.trim())),
+        })),
+      });
+      bindings.push({
+        nodeId: path,
+        blockName: block.blockName,
+        renderer: 'accordion',
+        preserveWrapper: true,
+        preserveChildrenOrder: true,
+        childCount: block.children.length,
+        sectionDebugKey: debugKey,
+      });
+    } else if (block.blockName === 'uagb/info-box') {
+      const debugKey = `runtime-card-grid-${++counter}`;
+      sections.push({
+        type: 'card-grid',
+        debugKey,
+        columns: 1,
+        cards: [extractRuntimeInfoBoxCard(block, 0)],
+      });
+      bindings.push({
+        nodeId: path,
+        blockName: block.blockName,
+        renderer: 'card-grid',
+        preserveWrapper: true,
+        preserveChildrenOrder: true,
+        childCount: block.children.length,
+        sectionDebugKey: debugKey,
+      });
+    }
+
+    block.children.forEach((child, index) => visit(child, `${path}.${index + 1}`));
+  };
+
+  blocks.forEach((block, index) => visit(block, `root.${index + 1}`));
+
+  return {
+    sections,
+    bindings,
+    unsupportedBlocks: [...unsupportedBlocks],
+  };
+}
+
+function buildRuntimePlanFromPageRow(row: any) {
+  const markup = String(row.post_content ?? '');
+  const blocks = parseRuntimeBlocks(markup);
+  const blockTree = blocks.map((block, index) =>
+    buildRuntimeBlockNode(block, `root.${index + 1}`),
+  );
+  const runtimeSignals = collectRuntimeSectionsAndBindings(blocks);
+  const hasInteractiveSections = runtimeSignals.sections.length > 0;
+  return {
+    version: 1,
+    mode:
+      blockTree.length === 0
+        ? 'page-content'
+        : hasInteractiveSections
+          ? 'hybrid'
+          : 'block-centric',
+    fidelity: runtimeSignals.unsupportedBlocks.length > 0 ? 'best-effort' : 'strict-structure',
+    layoutFamily: 'default-page',
+    source: {
+      kind: 'page-post-content',
+      template:
+        String(row.template ?? '').trim() || 'default',
+      slug: String(row.post_name ?? '').trim(),
+      sourceSummary:
+        blockTree.length > 0
+          ? `runtime block tree with ${blockTree.length} root node(s)`
+          : 'page-content fallback',
+    },
+    support: {
+      safeForRuntime: runtimeSignals.unsupportedBlocks.length === 0,
+      unsupportedBlocks: runtimeSignals.unsupportedBlocks,
+    },
+    dataNeeds: ['pageDetail'],
+    sections: runtimeSignals.sections,
+    blockTree,
+    subtreeBindings: runtimeSignals.bindings,
+  };
+}
+
 async function getConn() {
   return createConnection({
     host: process.env.DB_HOST || 'localhost',
@@ -591,15 +1051,161 @@ process.on('unhandledRejection', (err: any) => {
   console.error(`[DB Error] ${code ?? 'Unknown'}: ${err?.message ?? err}`);
 });
 
+let cachedTablePrefix: string | null = null;
+
 async function getPrefix(
   conn: Awaited<ReturnType<typeof getConn>>,
 ): Promise<string> {
+  if (cachedTablePrefix) return cachedTablePrefix;
+
   const [rows] = await conn.query<any[]>(
     `SELECT table_name AS tableName FROM information_schema.tables
-     WHERE table_schema = DATABASE() AND table_name LIKE '%options' LIMIT 1`,
+     WHERE table_schema = DATABASE() AND table_name LIKE '%options'
+     ORDER BY table_name ASC`,
   );
-  if (!rows.length) return 'wp_';
-  return rows[0].tableName.replace(/options$/, '');
+  if (!rows.length) {
+    cachedTablePrefix = 'wp_';
+    return cachedTablePrefix;
+  }
+
+  const candidates = (
+    await Promise.all(
+      rows
+        .map((row) => String(row.tableName ?? '').trim())
+        .filter((tableName) => /options$/i.test(tableName))
+        .map((tableName) => inspectOptionsTableCandidate(conn, tableName)),
+    )
+  ).filter((candidate) => candidate !== null);
+
+  if (candidates.length === 0) {
+    cachedTablePrefix = 'wp_';
+    return cachedTablePrefix;
+  }
+
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (Number(b.hasThemeMods) !== Number(a.hasThemeMods)) {
+      return Number(b.hasThemeMods) - Number(a.hasThemeMods);
+    }
+    if (Number(b.isRootLike) !== Number(a.isRootLike)) {
+      return Number(b.isRootLike) - Number(a.isRootLike);
+    }
+    if (a.prefix.length !== b.prefix.length) {
+      return a.prefix.length - b.prefix.length;
+    }
+    return a.tableName.localeCompare(b.tableName);
+  });
+
+  const best = candidates[0];
+  cachedTablePrefix = best?.prefix || 'wp_';
+
+  if (candidates.length > 1 && best) {
+    console.warn(
+      `[DB Prefix] Selected "${best.prefix}" from "${best.tableName}" (score=${best.score}). Candidates: ${candidates
+        .map(
+          (candidate) =>
+            `${candidate.tableName}[score=${candidate.score},stylesheet=${candidate.stylesheet || '(empty)'},template=${candidate.template || '(empty)'}]`,
+        )
+        .join(', ')}`,
+    );
+  }
+
+  return cachedTablePrefix;
+}
+
+async function inspectOptionsTableCandidate(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  tableName: string,
+): Promise<{
+  tableName: string;
+  prefix: string;
+  stylesheet: string;
+  template: string;
+  hasThemeMods: boolean;
+  isRootLike: boolean;
+  score: number;
+} | null> {
+  try {
+    const prefix = tableName.replace(/options$/i, '');
+    const keys = ['stylesheet', 'template', 'siteurl', 'home', 'blogname'];
+    const [rows] = await conn.query<any[]>(
+      `SELECT option_name, option_value FROM \`${tableName}\`
+       WHERE option_name IN (${keys.map(() => '?').join(',')})`,
+      keys,
+    );
+
+    const optionMap = new Map<string, string>();
+    for (const row of rows) {
+      optionMap.set(
+        String(row.option_name ?? ''),
+        String(row.option_value ?? '').trim(),
+      );
+    }
+
+    const stylesheet = optionMap.get('stylesheet') ?? '';
+    const template = optionMap.get('template') ?? '';
+    const siteUrl = optionMap.get('siteurl') ?? '';
+    const home = optionMap.get('home') ?? '';
+    const blogName = optionMap.get('blogname') ?? '';
+    const isRootLike = !/\d+_$/.test(prefix);
+
+    let hasThemeMods = false;
+    if (stylesheet) {
+      const [[modsRow]] = await conn.query<any[]>(
+        `SELECT 1 AS present FROM \`${tableName}\` WHERE option_name = ? LIMIT 1`,
+        [`theme_mods_${stylesheet}`],
+      );
+      hasThemeMods = Boolean(modsRow?.present);
+    }
+
+    let score = 0;
+    if (stylesheet) score += 6;
+    if (template) score += 6;
+    if (siteUrl) score += 4;
+    if (home) score += 3;
+    if (blogName) score += 1;
+    if (hasThemeMods) score += 4;
+    if (isRootLike) score += 1;
+    if (stylesheet && template && stylesheet === template) score += 1;
+
+    return {
+      tableName,
+      prefix,
+      stylesheet,
+      template,
+      hasThemeMods,
+      isRootLike,
+      score,
+    };
+  } catch (error: any) {
+    console.warn(
+      `[DB Prefix] Failed to inspect "${tableName}": ${error?.message ?? error}`,
+    );
+    return null;
+  }
+}
+
+async function logResolvedDatabaseContext(): Promise<void> {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [[dbRow]] = await conn.query<any[]>(
+      `SELECT DATABASE() AS dbName`,
+    );
+    const dbName =
+      String(dbRow?.dbName ?? '').trim() ||
+      process.env.DB_NAME ||
+      'wordpress';
+    console.log(
+      `[DB Prefix] using database "${dbName}" with prefix "${prefix}"`,
+    );
+  } catch (error: any) {
+    console.warn(
+      `[DB Prefix] failed to resolve runtime database context: ${error?.message ?? error}`,
+    );
+  } finally {
+    await conn.end();
+  }
 }
 
 function phpUnserializeSimple(input: string): Record<string, any> | null {
@@ -1071,6 +1677,32 @@ app.get('/api/posts/:slug', async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(await serializePost(conn, prefix, rows[0]));
+  } finally {
+    await conn.end();
+  }
+});
+
+app.get('/api/runtime/pages/:slug', async (req, res) => {
+  const conn = await getConn();
+  try {
+    const prefix = await getPrefix(conn);
+    const [rows] = await conn.query<any[]>(
+      `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
+              COALESCE(pm.meta_value, '') AS template,
+              img.guid AS featured_image
+       FROM \`${prefix}posts\` p
+       LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'
+       LEFT JOIN \`${prefix}postmeta\` thumb ON thumb.post_id = p.ID AND thumb.meta_key = '_thumbnail_id'
+       LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
+       WHERE p.post_type = 'page' AND p.post_status = 'publish' AND p.post_name = ? LIMIT 1`,
+      [req.params.slug],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const row = rows[0];
+    res.json({
+      page: await serializePage(conn, prefix, row),
+      runtimePlan: buildRuntimePlanFromPageRow(row),
+    });
   } finally {
     await conn.end();
   }
@@ -1865,6 +2497,7 @@ app.get('/api/footer-links', async (req, res) => {
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`API server running on http://localhost:${PORT}`),
-);
+app.listen(PORT, () => {
+  console.log(`API server running on http://localhost:${PORT}`);
+  void logResolvedDatabaseContext();
+});

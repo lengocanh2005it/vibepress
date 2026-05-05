@@ -283,6 +283,10 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain("menu.location === 'primary'");
     expect(code).toContain("menu.slug === 'primary'");
     expect(code).toContain("menu.slug === 'main-menu'");
+    expect(code).toContain('wp-block-navigation');
+    expect(code).toContain('wp-block-navigation__container');
+    expect(code).toContain('wp-block-navigation-item');
+    expect(code).toContain('wp-block-navigation-item__content');
   });
 
   it('emits asset and app-path helpers for deterministic footer sections', () => {
@@ -336,5 +340,44 @@ describe('CodeGeneratorService', () => {
       'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
     );
     expect(code).toContain('Back to top');
+  });
+
+  it('renders scroll-top hook markup for deterministic footer sections', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Footer',
+      sections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+          scrollTopTriggerClassNames: ['profolio-fse-scroll-top'],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('<p className="profolio-fse-scroll-top" />');
+  });
+
+  it('preserves WordPress wrapper ids in block-faithful partial rendering', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'group',
+          domId: 'sticky-header',
+          children: [
+            {
+              block: 'paragraph',
+              text: 'Header content',
+            },
+          ],
+        },
+      ],
+      dataNeeds: [],
+    });
+
+    expect(code).toContain('<div id="sticky-header"');
   });
 });

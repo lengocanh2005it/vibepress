@@ -108,6 +108,7 @@ export class GenerationContractAuditService {
       (item) => item.componentName === component.name,
     );
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
+    const runtimeRenderer = contract?.runtimeRenderer ?? null;
     const dataNeeds = new Set(
       (contract?.dataNeeds ?? component.dataNeeds ?? []).map((need) =>
         this.normalizeDataNeed(need),
@@ -202,7 +203,9 @@ export class GenerationContractAuditService {
       !hasFetch((fetch) =>
         fixedSlug
           ? fetch.path === `/api/pages/${fixedSlug}`
-          : /^\/api\/pages\/:param$/.test(fetch.normalizedPath),
+          : runtimeRenderer === 'runtime-page'
+            ? /^\/api\/runtime\/pages\/:param$/.test(fetch.normalizedPath)
+            : /^\/api\/pages\/:param$/.test(fetch.normalizedPath),
       )
     ) {
       warnings.push({
@@ -210,7 +213,9 @@ export class GenerationContractAuditService {
         componentName: component.name,
         message: fixedSlug
           ? `Plan declares fixed-slug \`pageDetail\` for "${fixedSlug}" but generated code does not fetch \`/api/pages/${fixedSlug}\`.`
-          : 'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
+          : runtimeRenderer === 'runtime-page'
+            ? 'Plan declares runtime `pageDetail` but generated code does not fetch `/api/runtime/pages/${slug}`.'
+            : 'Plan declares `pageDetail` but generated code does not fetch `/api/pages/${slug}`.',
       });
     }
 

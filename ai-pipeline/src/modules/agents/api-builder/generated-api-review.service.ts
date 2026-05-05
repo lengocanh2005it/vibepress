@@ -223,7 +223,7 @@ ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n
 - custom post types detected: ${cptSlugs.length > 0 ? cptSlugs.join(', ') : '(none)'}
 - intentionally excluded dedicated CPT routes: ${excludedCptSlugs.length > 0 ? excludedCptSlugs.join(', ') : '(none)'}
 - These excluded integrations are intentionally served only through the generic static endpoints already present in the template. Do NOT require or suggest dedicated /api/products... routes for them.
-- Generic detail endpoints such as \`/api/posts/:slug\` and \`/api/pages/:slug\` are valid for frontend route flavors like \`/single/:slug\` or \`/single-with-sidebar/:slug\` unless the contract explicitly requires a fixed slug or a distinct payload shape.
+- Generic detail endpoints such as \`/api/posts/:slug\`, \`/api/pages/:slug\`, and \`/api/runtime/pages/:slug\` are valid when they match the approved frontend contract for the route flavor and payload shape.
 - content counts:
   - posts: ${content.posts.length}
   - pages: ${content.pages.length}

@@ -213,6 +213,7 @@ export class GeneratedCodeReviewService {
     const type = contract?.type ?? component.type ?? 'page';
     const isDetail = contract?.isDetail ?? component.isDetail ?? false;
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
+    const runtimeRenderer = contract?.runtimeRenderer ?? null;
     const description = contract?.description ?? '(none)';
     const visualSectionTypes =
       contract?.visualPlan?.sections.map((section) => section.type) ?? [];
@@ -255,7 +256,11 @@ Rules:
 - Known app routes are authoritative. Do NOT flag a route/link as risky if it matches one of the known routes below.
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
-- A generic backend detail endpoint such as \`/api/posts/:slug\` or \`/api/pages/:slug\` is acceptable for route flavors like \`/single-with-sidebar/:slug\` unless the approved contract explicitly requires a distinct payload shape or a fixed bound slug.
+- ${
+  runtimeRenderer === 'runtime-page'
+    ? 'For this runtime-page contract, the main page-detail fetch must use `/api/runtime/pages/:slug`. Do flag `/api/pages/${slug}` as legacy drift for the main record fetch.'
+    : 'A generic backend detail endpoint such as `/api/posts/:slug` or `/api/pages/:slug` is acceptable for route flavors like `/single-with-sidebar/:slug` unless the approved contract explicitly requires a distinct payload shape or a fixed bound slug.'
+}
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].
@@ -267,6 +272,7 @@ Approved contract:
 - route: ${route ?? 'null'}
 - isDetail: ${String(isDetail)}
 - fixedSlug: ${fixedSlug ?? 'null'}
+- runtimeRenderer: ${runtimeRenderer ?? 'null'}
 - dataNeeds: ${dataNeeds.length > 0 ? dataNeeds.join(', ') : '(none)'}
 - description: ${description}
 - approved visual sections: ${visualSections}
@@ -283,6 +289,7 @@ ${this.buildApiContractLines(
   visualSectionTypes,
   isArchive,
   fixedSlug,
+  runtimeRenderer,
 )}
 
 Generated TSX:
@@ -297,6 +304,7 @@ ${component.code}
     visualSectionTypes: string[],
     isArchive = false,
     fixedSlug?: string | null,
+    runtimeRenderer?: string | null,
   ): string {
     const normalized = new Set(
       dataNeeds.map((value) => this.normalizeDataNeed(value)),
@@ -319,7 +327,9 @@ ${component.code}
       lines.push(
         fixedSlug
           ? `- /api/pages/${fixedSlug} only for this fixed-bound page-detail route`
-          : '- /api/pages/${slug} only for page-detail routes',
+          : runtimeRenderer === 'runtime-page'
+            ? '- /api/runtime/pages/${slug} only for runtime-page routes'
+            : '- /api/pages/${slug} only for page-detail routes',
       );
     }
     if (normalized.has('categoryDetail') || isArchive) {
@@ -1149,6 +1159,7 @@ ${component.code}
       'materially redesigns the approved page-detail layout',
       'approved page-detail body is not the main preserved wordpress layout',
       'main content should be rendered from `/api/pages/',
+      'main content should be rendered from `/api/runtime/pages/',
       'approved fixed page detail',
       'jsx/tsx structure is likely broken',
       'jsx',

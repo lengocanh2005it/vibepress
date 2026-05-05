@@ -15,6 +15,7 @@ export interface BlockNode {
   sourceRef?: SourceRef;
   attrs?: Record<string, unknown>;
   customClassNames?: string[];
+  domId?: string;
   text?: string;
   level?: number;
   src?: string;
@@ -73,6 +74,7 @@ function mapWpNodeToBlockNode(node: WpNode): BlockNode {
     ...(node.customClassNames?.length
       ? { customClassNames: [...node.customClassNames] }
       : {}),
+    ...(typeof node.domId === 'string' ? { domId: node.domId } : {}),
     ...(typeof node.text === 'string' ? { text: node.text } : {}),
     ...(typeof node.level === 'number' ? { level: node.level } : {}),
     ...(typeof node.src === 'string' ? { src: node.src } : {}),

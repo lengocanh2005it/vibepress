@@ -50,6 +50,12 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
+  RUNTIME_PAGE_PLAN_INTERFACE,
+  RUNTIME_PAGE_RESPONSE_INTERFACE,
+  RUNTIME_PAGE_SECTION_INTERFACE,
+  RUNTIME_PAGE_SOURCE_INTERFACE,
+  RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE,
+  RUNTIME_PAGE_SUPPORT_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
@@ -412,24 +418,24 @@ export class CodeGeneratorService {
       );
       lines.push('        return (');
       lines.push(
-        '          <li key={item.id} className={vertical ? "flex flex-col gap-2" : "relative"}>',
+        `          <li key={item.id} className={vertical ? "${this.navigationItemClass(true)}" : "${this.navigationItemClass(false)}"}>`,
       );
       lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
-        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.opacityLinkClass()}">`,
+        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.opacityLinkClass())}">`,
       );
       lines.push('                {item.title}');
       lines.push('              </Link>');
       lines.push('            ) : (');
       lines.push(
-        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.opacityLinkClass()}">`,
+        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.opacityLinkClass())}">`,
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
       lines.push('            )}');
       lines.push('            {hasChildren ? (');
       lines.push(
-        '              <ul className={vertical ? "pl-4 flex flex-col gap-2" : "pl-4 mt-2 flex flex-col gap-2"}>',
+        `              <ul className={vertical ? "${this.navigationSubmenuClass(true)}" : "${this.navigationSubmenuClass(false)}"}>`,
       );
       lines.push('                {renderMenuItems(items, item.id, true)}');
       lines.push('              </ul>');
@@ -666,6 +672,14 @@ export class CodeGeneratorService {
       plan.dataNeeds.includes('pageDetail')
     ) {
       push(PAGE_INTERFACE);
+      if (plan.runtimeRenderer === 'runtime-page') {
+        push(RUNTIME_PAGE_SOURCE_INTERFACE);
+        push(RUNTIME_PAGE_SUPPORT_INTERFACE);
+        push(RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE);
+        push(RUNTIME_PAGE_SECTION_INTERFACE);
+        push(RUNTIME_PAGE_PLAN_INTERFACE);
+        push(RUNTIME_PAGE_RESPONSE_INTERFACE);
+      }
     }
     if (plan.sections.some((section) => section.type === 'post-meta')) {
       push(POST_INTERFACE);
@@ -818,6 +832,7 @@ export class CodeGeneratorService {
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
     const fixedSlug = plan.pageBinding?.slug;
+    const isRuntimePage = plan.runtimeRenderer === 'runtime-page';
     const needsPostsPagination = this.needsPagination(plan);
     const hasPostMetaSection = plan.sections.some(
       (section) => section.type === 'post-meta',
@@ -1336,12 +1351,21 @@ export class CodeGeneratorService {
       lines.push(
         fixedSlug
           ? `        const detailRes = await fetch(${JSON.stringify(`/api/pages/${fixedSlug}`)});`
-          : `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
+          : isRuntimePage
+            ? `        const detailRes = await fetch(\`/api/runtime/pages/\${slug}\`);`
+            : `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
       );
       lines.push(
         `        if (!detailRes.ok) throw new Error('Page not found');`,
       );
-      lines.push(`        setItem(await detailRes.json());`);
+      if (isRuntimePage && !fixedSlug) {
+        lines.push(
+          `        const detailData = (await detailRes.json()) as RuntimePageResponse;`,
+        );
+        lines.push(`        setItem(detailData.page);`);
+      } else {
+        lines.push(`        setItem(await detailRes.json());`);
+      }
     }
 
     if (fetches.length > 0) {
@@ -1453,7 +1477,12 @@ export class CodeGeneratorService {
       lines.push(`      void pollTrackedComments();`);
       lines.push(`    }, 15000);`);
       lines.push(``);
-      lines.push(`    void pollTrackedComments();`);
+      lines.push(
+        `    // The initial tracked-comments sync already ran in the companion effect.`,
+      );
+      lines.push(
+        `    // Avoid issuing an immediate duplicate /api/comments/submissions request here.`,
+      );
       lines.push(``);
       lines.push(`    return () => {`);
       lines.push(`      cancelled = true;`);
@@ -3073,6 +3102,35 @@ ${indent}) : null}`;
       : baseClassName;
   }
 
+  private navigationRootClass(extra = ''): string {
+    return this.appendUniqueClasses('wp-block-navigation', extra);
+  }
+
+  private navigationListClass(isVertical: boolean, extra = ''): string {
+    return this.appendUniqueClasses(
+      'wp-block-navigation__container list-none p-0 m-0',
+      `${isVertical ? 'flex flex-col gap-2' : 'flex flex-wrap items-center gap-4'} ${extra}`.trim(),
+    );
+  }
+
+  private navigationItemClass(isVertical: boolean, extra = ''): string {
+    return this.appendUniqueClasses(
+      'wp-block-navigation-item wp-block-navigation-link',
+      `${isVertical ? 'flex flex-col gap-2' : 'relative'} ${extra}`.trim(),
+    );
+  }
+
+  private navigationLinkClass(extra = ''): string {
+    return this.appendUniqueClasses('wp-block-navigation-item__content', extra);
+  }
+
+  private navigationSubmenuClass(isVertical: boolean, extra = ''): string {
+    return this.appendUniqueClasses(
+      'wp-block-navigation__submenu-container list-none m-0',
+      `${isVertical ? 'pl-4 flex flex-col gap-2' : 'pl-4 mt-2 flex flex-col gap-2'} ${extra}`.trim(),
+    );
+  }
+
   private appendStyledTextAlignClass(
     baseClassName: string,
     customClassNames: string[] | undefined,
@@ -3503,8 +3561,8 @@ ${indent}) : null}`;
       overlayMode === 'always'
         ? 'hidden'
         : isResponsiveNav
-          ? 'hidden md:flex items-center gap-6'
-          : `flex items-center gap-6 ${s.orientation === 'vertical' ? 'flex-col items-start' : ''}`.trim();
+          ? 'hidden md:block'
+          : 'block';
     const mobileButtonClass =
       overlayMode === 'always'
         ? 'flex flex-col gap-[5px] p-2'
@@ -3513,8 +3571,8 @@ ${indent}) : null}`;
           : '';
     const mobilePanelClass =
       overlayMode === 'always'
-        ? 'flex flex-col gap-1 pb-4 border-t border-black/10'
-        : 'md:hidden flex flex-col gap-1 pb-4 border-t border-black/10';
+        ? 'wp-block-navigation__responsive-container flex flex-col gap-1 pb-4 border-t border-black/10'
+        : 'wp-block-navigation__responsive-container md:hidden flex flex-col gap-1 pb-4 border-t border-black/10';
     const showSiteLogo = s.showSiteLogo !== false;
     const showSiteTitle = s.showSiteTitle !== false;
     const logoStyle = this.buildMergedBlockStyleAttr(
@@ -3542,26 +3600,34 @@ ${indent}) : null}`;
       : '';
 
     const navItems = `((menus.find((menu) => menu.location === 'primary') ?? menus.find((menu) => menu.slug === 'primary') ?? menus.find((menu) => menu.slug === '${s.menuSlug}') ?? menus[0])?.items ?? []).filter((item) => item.parentId === 0)`;
-    const renderNavItem = (extraClass = '') =>
-      `(isInternalPath(item.url) ? (
-                    <Link key={item.id} to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}"${navLinkStyle}>
-                      {item.title}
-                    </Link>
-                  ) : (
-                    <a key={item.id} href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.textLinkClass(tc, p.accent)}${extraClass}"${navLinkStyle}>
-                      {item.title}
-                    </a>
-                  ))`;
+    const desktopListClass = this.navigationListClass(
+      s.orientation === 'vertical',
+    );
+    const mobileListClass = this.navigationListClass(true, 'w-full');
+    const renderNavItem = (vertical = false, extraLinkClass = '') =>
+      `<li key={item.id} className="${this.navigationItemClass(vertical)}">
+                    {isInternalPath(item.url) ? (
+                      <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent), extraLinkClass))}"${navLinkStyle}>
+                        {item.title}
+                      </Link>
+                    ) : (
+                      <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent), extraLinkClass))}"${navLinkStyle}>
+                        {item.title}
+                      </a>
+                    )}
+                  </li>`;
 
     return `      {/* Navbar */}
       <header className="${sticky}bg-[${bg}] border-b border-black/10 w-full"${sectionStyle}>
         <div className="${l.containerClass}">
           <div className="flex items-center justify-between py-4"${this.buildSectionGapStyleAttr(s)}>
             ${brandMarkup}
-            <nav className="${desktopNavClass}">
-              {${navItems}?.map(item => (
-                  ${renderNavItem()}
-                ))}
+            <nav className="${this.navigationRootClass(desktopNavClass)}">
+              <ul className="${desktopListClass}">
+                {${navItems}?.map(item => (
+                    ${renderNavItem(s.orientation === 'vertical')}
+                  ))}
+              </ul>
             </nav>
             <div className="flex items-center gap-4">${cta}
               ${
@@ -3582,10 +3648,12 @@ ${indent}) : null}`;
             </div>
           </div>
           {${mobileButtonClass ? 'mobileMenuOpen' : 'false'} && (
-            <nav className="${mobilePanelClass}">
-              {${navItems}?.map(item => (
-                  ${renderNavItem(' block py-2 px-2')}
-                ))}
+            <nav className="${this.navigationRootClass(mobilePanelClass)}">
+              <ul className="${mobileListClass}">
+                {${navItems}?.map(item => (
+                    ${renderNavItem(true, 'block py-2 px-2')}
+                  ))}
+              </ul>
             </nav>
           )}
         </div>
@@ -4960,6 +5028,11 @@ ${cards}
     const copyrightMarkup = s.copyright
       ? `<p className="text-sm text-[${p.textMuted}] mt-8 pt-8 border-t border-black/10"${descriptionStyle}>{${JSON.stringify(s.copyright)}}</p>`
       : '';
+    const scrollTopHookMarkup =
+      s.scrollTopTriggerClassNames && s.scrollTopTriggerClassNames.length > 0
+        ? `
+        <p className="${Array.from(new Set(s.scrollTopTriggerClassNames)).join(' ')}" />`
+        : '';
 
     return `      {/* Footer */}
       <footer className="bg-[${bg}] border-t border-black/10 w-full"${sectionStyle}>
@@ -5000,10 +5073,11 @@ ${cards}
                </div>
 ${supplementalImageMarkup}
              </div>
-           </div>
-           ${copyrightMarkup}
-         </div>
-      </footer>`;
+            </div>
+            ${copyrightMarkup}
+          </div>
+${scrollTopHookMarkup}
+       </footer>`;
   }
 
   private renderPostContent(
@@ -6027,13 +6101,13 @@ ${
           this.pickBlockStyle(ctx, 'group'),
           this.buildWpLayoutStyle(node),
         );
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
       case 'cover': {
         const styleAttr = this.buildWpCoverStyleAttr(node, ctx);
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6043,7 +6117,7 @@ ${indent}</div>`;
           this.pickBlockStyle(ctx, 'columns', 'group'),
           this.buildWpColumnsStyle(node),
         );
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6060,7 +6134,7 @@ ${indent}</div>`;
               }
             : {},
         );
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6071,32 +6145,32 @@ ${indent}</div>`;
         const hasUsableHref = href.length > 0 && href !== '#';
         const nestedChildren =
           node.children?.length && node.children.some((child) => child.block)
-            ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true)}`
+            ? `\n${this.renderBlockFaithfulNavigationChildren(node.children, ctx, state, depth + 1, true, true)}`
             : '';
-        return `${indent}<li className="relative">
+        return `${indent}<li className="${this.navigationItemClass(false)}">
 ${
   hasUsableHref
     ? `${childIndent}{isInternalPath(${JSON.stringify(href)}) ? (
- ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeAttrs(node, this.navigationLinkClass())}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </Link>
 ${childIndent}) : (
- ${childIndent}  <a href="${href}"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
+ ${childIndent}  <a href="${href}"${this.buildWpNodeAttrs(node, this.navigationLinkClass())}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}    ${node.text ?? href}
 ${childIndent}  </a>
 ${childIndent})}`
-    : `${childIndent}<a href="#"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)}>
+    : `${childIndent}<a href="#"${this.buildWpNodeAttrs(node, this.navigationLinkClass())}${this.buildWpNodeStyleAttr(node)}>
 ${childIndent}  ${node.text ?? ''}
 ${childIndent}</a>`
 }${nestedChildren}
 ${indent}</li>`;
       }
       case 'site-title':
-        return `${indent}<Link to="/"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
+        return `${indent}<Link to="/"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-title', 'heading'))}>
 ${childIndent}{siteInfo?.siteName}
 ${indent}</Link>`;
       case 'site-tagline':
-        return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
+        return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'site-tagline', 'paragraph'))}>
 ${childIndent}{siteInfo?.blogDescription}
 ${indent}</p>`;
       case 'site-logo': {
@@ -6112,7 +6186,7 @@ ${indent}</p>`;
           width ? { width, maxWidth: '100%' } : {},
         );
         return `${indent}{${logoSrcExpr} ? (
- ${childIndent}<Link to="/"${this.buildWpNodeClassAttr(node)}${styleAttr}>
+ ${childIndent}<Link to="/"${this.buildWpNodeAttrs(node)}${styleAttr}>
  ${childIndent}  <img src={${logoSrcExpr}} alt={siteInfo?.siteName ?? 'Site logo'} />
 ${childIndent}</Link>
 ${indent}) : null}`;
@@ -6122,22 +6196,22 @@ ${indent}) : null}`;
         const tag = `h${level}`;
         if (node.html && !node.text) {
           if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
+            return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
           }
-          return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
-        return `${indent}<${tag}${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
+        return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
 ${childIndent}${node.text ?? ''}
 ${indent}</${tag}>`;
       }
       case 'paragraph': {
         if (node.html && !node.text) {
           if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
+            return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
           }
-          return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
-        return `${indent}<p${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
+        return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
 ${childIndent}${node.text ?? ''}
 ${indent}</p>`;
       }
@@ -6152,7 +6226,7 @@ ${indent}</p>`;
             gap: node.gap ?? '0.75rem',
           },
         );
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6165,15 +6239,15 @@ ${indent}</div>`;
         );
         return hasUsableHref
           ? `${indent}{isInternalPath(${JSON.stringify(href)}) ? (
- ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeClassAttr(node)}${styleAttr}>
+ ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</Link>
 ${indent}) : (
- ${childIndent}<a href="${href}"${this.buildWpNodeClassAttr(node)}${styleAttr}>
+ ${childIndent}<a href="${href}"${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</a>
 ${indent})}`
-          : `${indent}<a href="#"${this.buildWpNodeClassAttr(node)}${styleAttr}>
+          : `${indent}<a href="#"${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${childIndent}${node.text ?? ''}
 ${indent}</a>`;
       }
@@ -6186,7 +6260,7 @@ ${indent}</a>`;
             height: node.height ? `${node.height}px` : undefined,
           },
         );
-        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.buildWpNodeClassAttr(node)}${styleAttr} />`;
+        return `${indent}<img src={resolveAsset(${JSON.stringify(node.src ?? '')})} alt="${node.alt ?? ''}"${this.buildWpNodeAttrs(node)}${styleAttr} />`;
       }
       case 'search': {
         const styleAttr = this.buildWpNodeStyleAttr(
@@ -6198,7 +6272,7 @@ ${indent}</a>`;
             gap: node.gap ?? '0.5rem',
           },
         );
-        return `${indent}<form role="search"${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<form role="search"${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${childIndent}<input type="search" placeholder="Search..." className="min-w-0 flex-1 border border-black/20 bg-transparent px-3 py-2" />
 ${childIndent}<button type="submit" className="border border-black/20 px-4 py-2">Search</button>
 ${indent}</form>`;
@@ -6214,7 +6288,7 @@ ${indent}</form>`;
             gap: node.gap ?? '0.75rem',
           },
         );
-        return `${indent}<div${this.buildWpNodeClassAttr(node)}${styleAttr}>
+        return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
 ${indent}</div>`;
       }
@@ -6222,15 +6296,15 @@ ${indent}</div>`;
         const service = String(node.params?.service ?? node.text ?? 'Social');
         const href = String(node.params?.url ?? node.href ?? '').trim();
         return href && href !== '#'
-          ? `${indent}<a href="${href}"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          ? `${indent}<a href="${href}"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
 ${indent}</a>`
-          : `${indent}<a href="#"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
+          : `${indent}<a href="#"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}${service}
 ${indent}</a>`;
       }
       case 'separator':
-        return `${indent}<hr${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node)} />`;
+        return `${indent}<hr${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node)} />`;
       case 'spacer': {
         const height = this.normalizeCssLength(
           String(
@@ -6239,22 +6313,22 @@ ${indent}</a>`;
               '2rem',
           ),
         );
-        return `${indent}<div aria-hidden="true"${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
+        return `${indent}<div aria-hidden="true"${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, undefined, { height })} />`;
       }
       default: {
         if (children) {
-          return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>
+          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>
 ${children}
 ${indent}</div>`;
         }
         if (node.html) {
           if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
+            return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
           }
-          return `${indent}<div${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
         }
         if (node.text) {
-          return `${indent}<span${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
+          return `${indent}<span${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
         }
         return '';
       }
@@ -6290,29 +6364,28 @@ ${indent}</div>`;
       isResponsive: node.isResponsive,
     });
     const hintTitles = this.extractNavigationHintTitles(node);
-    const listClass = isVertical
-      ? 'flex flex-col gap-2'
-      : 'flex flex-wrap items-center gap-4';
+    const listClass = this.navigationListClass(isVertical);
     const fallbackMarkup = this.renderBlockFaithfulNavigationChildren(
       node.children ?? [],
       ctx,
       state,
       depth + 1,
       isVertical,
+      false,
     );
     if (state.componentKind === 'footer') {
       const footerColumnVar = `resolveFooterColumn(${JSON.stringify(hintTitles)}, ${menuIndex})`;
-      return `${indent}<nav${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+      return `${indent}<nav${this.buildWpNodeAttrs(node, this.navigationRootClass())}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${footerColumnVar} ? (
 ${indent}    <ul className="${listClass}">
 ${indent}      {(${footerColumnVar}.links ?? []).map((link, linkIndex) => (
-${indent}        <li key={\`\${${footerColumnVar}.heading ?? 'footer'}-\${link.label}-\${linkIndex}\`} className="flex flex-col gap-2">
+${indent}        <li key={\`\${${footerColumnVar}.heading ?? 'footer'}-\${link.label}-\${linkIndex}\`} className="${this.navigationItemClass(true)}">
 ${indent}          {isInternalPath(link.url) ? (
-${indent}            <Link to={toAppPath(link.url)} className="${this.opacityLinkClass()}">
+${indent}            <Link to={toAppPath(link.url)} className="${this.navigationLinkClass(this.opacityLinkClass())}">
 ${indent}              {link.label}
 ${indent}            </Link>
 ${indent}          ) : (
-${indent}            <a href={link.url} className="${this.opacityLinkClass()}">
+${indent}            <a href={link.url} className="${this.navigationLinkClass(this.opacityLinkClass())}">
 ${indent}              {link.label}
 ${indent}            </a>
 ${indent}          )}
@@ -6345,7 +6418,7 @@ ${indent}</nav>`;
           ? 'absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50'
           : 'md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50';
       return `${indent}<>
-${indent}  <nav${this.buildWpNodeClassAttr(node, desktopNavClass)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+ ${indent}  <nav${this.buildWpNodeAttrs(node, this.navigationRootClass(desktopNavClass))}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}    {${menuVar} ? (
 ${indent}      <ul className="${listClass}">
 ${indent}        {renderMenuItems(${menuVar}.items, 0, false)}
@@ -6366,10 +6439,10 @@ ${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" vi
 ${indent}    )}
 ${indent}  </button>
 ${indent}  {mobileMenuOpen && (
-${indent}    <nav className="${mobilePanelClass}">
+${indent}    <nav className="${this.navigationRootClass(mobilePanelClass)}">
 ${indent}      <div className="${ctx.l.containerClass} py-3">
 ${indent}        {${menuVar} ? (
-${indent}          <ul className="flex flex-col gap-1">
+${indent}          <ul className="${this.navigationListClass(true)}">
 ${indent}            {renderMenuItems(${menuVar}.items, 0, true)}
 ${indent}          </ul>
 ${indent}        ) : (
@@ -6380,7 +6453,7 @@ ${indent}    </nav>
 ${indent}  )}
 ${indent}</>`;
     }
-    return `${indent}<nav${this.buildWpNodeClassAttr(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+    return `${indent}<nav${this.buildWpNodeAttrs(node, this.navigationRootClass())}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
 ${indent}    <ul className="${listClass}">
 ${indent}      {renderMenuItems(${menuVar}.items, 0, ${isVertical ? 'true' : 'false'})}
@@ -6397,11 +6470,12 @@ ${indent}</nav>`;
     state: BlockFaithfulRenderState,
     depth: number,
     isVertical: boolean,
+    isSubmenu = false,
   ): string {
     const indent = '  '.repeat(depth);
-    const listClass = isVertical
-      ? 'flex flex-col gap-2'
-      : 'flex flex-wrap items-center gap-4';
+    const listClass = isSubmenu
+      ? this.navigationSubmenuClass(isVertical)
+      : this.navigationListClass(isVertical);
     const items = nodes
       .map((child) =>
         this.renderBlockFaithfulNode(child, ctx, state, depth + 1),
@@ -6459,6 +6533,15 @@ ${indent}</ul>`;
   private buildWpNodeClassAttr(node: WpNode, base: string = ''): string {
     const className = this.mergeWpNodeClassName(base, node);
     return className ? ` className="${className}"` : '';
+  }
+
+  private buildWpNodeIdAttr(node: WpNode): string {
+    const domId = node.domId?.trim();
+    return domId ? ` id="${domId.replace(/"/g, '&quot;')}"` : '';
+  }
+
+  private buildWpNodeAttrs(node: WpNode, base: string = ''): string {
+    return `${this.buildWpNodeIdAttr(node)}${this.buildWpNodeClassAttr(node, base)}`;
   }
 
   private mergeWpNodeClassName(base: string, node: WpNode): string {

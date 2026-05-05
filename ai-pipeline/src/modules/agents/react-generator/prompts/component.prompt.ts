@@ -110,6 +110,7 @@ export interface ComponentPromptContext {
   fixedSlug?: string;
   fixedTitle?: string;
   fixedPageId?: number | string;
+  runtimeRenderer?: 'runtime-page';
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
   sourceBackedAuxiliaryLabels?: string[];
@@ -411,6 +412,7 @@ function buildAllowedEndpointsNote(input: {
   visualPlan?: ComponentVisualPlan;
   componentName?: string;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
 }): string {
   const lines = ['## Allowed runtime data for this component'];
   const allowed = new Set<string>();
@@ -430,8 +432,13 @@ function buildAllowedEndpointsNote(input: {
     allowed.add('GET /api/posts/${slug}');
   if (input.dataNeeds.includes('postDetail') && input.fixedSlug)
     allowed.add(`GET /api/posts/${input.fixedSlug}`);
-  if (input.dataNeeds.includes('pageDetail') && routeHasParams)
-    allowed.add('GET /api/pages/${slug}');
+  if (input.dataNeeds.includes('pageDetail') && routeHasParams) {
+    allowed.add(
+      input.runtimeRenderer === 'runtime-page'
+        ? 'GET /api/runtime/pages/${slug}'
+        : 'GET /api/pages/${slug}',
+    );
+  }
   if (input.dataNeeds.includes('pageDetail') && input.fixedSlug)
     allowed.add(`GET /api/pages/${input.fixedSlug}`);
   if (input.dataNeeds.includes('comments') && routeHasParams) {
@@ -513,6 +520,7 @@ function buildForbiddenBehaviorNote(input: {
   dataNeeds: string[];
   route?: string | null;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
   visualPlan?: { sections?: Array<{ type: string }> } | null;
 }): string {
   const lines = ['## Forbidden behavior'];
@@ -540,7 +548,7 @@ function buildForbiddenBehaviorNote(input: {
     );
   }
   if (!input.dataNeeds.includes('pageDetail')) {
-    lines.push('- Do NOT fetch `/api/pages/${slug}` in this component.');
+    lines.push('- Do NOT fetch `/api/pages/${slug}` or `/api/runtime/pages/${slug}` in this component.');
   }
   if (!input.dataNeeds.includes('pageDetail') || !input.fixedSlug) {
     lines.push(
@@ -638,6 +646,7 @@ function buildScopedApiContractNote(input: {
   route?: string | null;
   componentName?: string;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
 }): string {
   const lines = [
     `## Canonical API contract — relevant subset from \`${API_CONTRACT_SOURCE_PATH}\``,
@@ -676,7 +685,11 @@ function buildScopedApiContractNote(input: {
     entityLines.push(`- Page: ${formatContractFields(PAGE_FRONTEND_FIELDS)}`);
   }
   if (needs.includes('pageDetail') && routeHasParams) {
-    endpoints.add('GET /api/pages/${slug} -> Page');
+    endpoints.add(
+      input.runtimeRenderer === 'runtime-page'
+        ? 'GET /api/runtime/pages/${slug} -> RuntimePageResponse'
+        : 'GET /api/pages/${slug} -> Page',
+    );
   }
   if (needs.includes('pageDetail') && input.fixedSlug) {
     endpoints.add(`GET /api/pages/${input.fixedSlug} -> Page`);
@@ -1410,6 +1423,7 @@ export function buildPlanContextNote(
     fixedSlug?: string;
     fixedTitle?: string;
     fixedPageId?: number | string;
+    runtimeRenderer?: 'runtime-page';
     requiredCustomClassNames?: string[];
     requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
     sourceBackedAuxiliaryLabels?: string[];
@@ -1455,6 +1469,7 @@ export function buildPlanContextNote(
       visualPlan: plan.visualPlan,
       componentName,
       fixedSlug: plan.fixedSlug,
+      runtimeRenderer: plan.runtimeRenderer,
     }),
   );
   lines.push('');
@@ -1464,6 +1479,7 @@ export function buildPlanContextNote(
       dataNeeds: normalizedDataNeeds,
       route: plan.route,
       fixedSlug: plan.fixedSlug,
+      runtimeRenderer: plan.runtimeRenderer,
       visualPlan: plan.visualPlan,
     }),
   );
@@ -1482,13 +1498,17 @@ export function buildPlanContextNote(
       plan.fixedSlug
         ? `Detail data contract: fetch the specific page with \`/api/pages/${plan.fixedSlug}\` and render that exact record.`
         : routeHasParams
-          ? 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
+          ? plan.runtimeRenderer === 'runtime-page'
+            ? 'Detail data contract: fetch the specific page with `/api/runtime/pages/${slug}` and render that record, not the full pages list.'
+            : 'Detail data contract: fetch the specific page with `/api/pages/${slug}` and render that record, not the full pages list.'
           : 'Data contract: this component does not own a slug route. Do NOT fabricate page detail by fetching `/api/pages` and picking an item by index, title, or guesswork.',
     );
     lines.push(
       plan.fixedSlug
         ? `⛔ API endpoint contract: \`/api/pages/${plan.fixedSlug}\` is mandatory for the main record. Do NOT replace it with \`/api/pages/\${slug}\` and do NOT replace it with \`/api/pages\` + index lookup.`
-        : '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
+        : plan.runtimeRenderer === 'runtime-page'
+          ? '⛔ API endpoint contract: `/api/runtime/pages/${slug}` is mandatory for the main record on this runtime-page route. Do NOT replace it with `/api/pages/${slug}` and do NOT replace it with `/api/pages` + index lookup.'
+          : '⛔ API endpoint contract: `/api/pages/${slug}` is mandatory for the main record. Do NOT replace it with `/api/pages` + index lookup.',
     );
     lines.push(
       '⛔ Page Detail Contract: a page has NO `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`. Use page fields from the approved contract only.',
@@ -2733,7 +2753,13 @@ ${
 - Import \`useParams\` from \`react-router-dom\`
 - Read the slug from URL: \`const { slug } = useParams<{ slug: string }>()\`
 - Fetch the specific ${isSingle ? 'post' : 'page'} by slug:
-  - ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'}
+  - ${
+    isSingle
+      ? '`GET /api/posts/:slug`'
+      : componentPlan?.runtimeRenderer === 'runtime-page'
+        ? '`GET /api/runtime/pages/:slug`'
+        : '`GET /api/pages/:slug`'
+  }
 - If the response is null/404, show a "Not found" message
 - Do NOT fetch the full list and pick index 0 — always use the slug from URL
 ${
@@ -2757,6 +2783,7 @@ ${
         route: componentPlan?.route,
         componentName,
         fixedSlug: componentPlan?.fixedSlug,
+        runtimeRenderer: componentPlan?.runtimeRenderer,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
@@ -3140,7 +3167,13 @@ Render ONLY the JSX for the blocks in the template source below.`;
         : `## Detail route context for this section
 - The parent component route is slug-based.
 - Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
-- If you need detail data in this section, fetch ${isSingle ? '`GET /api/posts/:slug`' : '`GET /api/pages/:slug`'} by slug. Never fetch the full list and pick index 0.
+- If you need detail data in this section, fetch ${
+          isSingle
+            ? '`GET /api/posts/:slug`'
+            : input.componentPlan?.runtimeRenderer === 'runtime-page'
+              ? '`GET /api/runtime/pages/:slug`'
+              : '`GET /api/pages/:slug`'
+        } by slug. Never fetch the full list and pick index 0.
 - Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
       : '';
 
@@ -3152,6 +3185,7 @@ Render ONLY the JSX for the blocks in the template source below.`;
         route: input.componentPlan?.route,
         componentName: input.parentName,
         fixedSlug: input.componentPlan?.fixedSlug,
+        runtimeRenderer: input.componentPlan?.runtimeRenderer,
       }),
     )
     .replace('{{menuContext}}', menuContextNote)
@@ -3205,6 +3239,7 @@ When this section renders post-list/archive/search/recent-post meta:
       route: input.componentPlan?.route,
       componentName: input.componentName,
       fixedSlug: input.componentPlan?.fixedSlug,
+      runtimeRenderer: input.componentPlan?.runtimeRenderer,
     }),
     buildVisualPlanContextNote(
       input.componentPlan?.visualPlan

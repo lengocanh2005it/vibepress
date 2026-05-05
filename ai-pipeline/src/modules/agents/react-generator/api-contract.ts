@@ -97,6 +97,14 @@ export const TERM_INTERFACE = `interface Term { id: number; name: string; slug: 
 export const COMMENT_INTERFACE = `interface Comment { id: number; author: string; date: string; content: string; parentId: number; userId: number; }`;
 export const COMMENT_SUBMISSION_INTERFACE = `interface CommentSubmission extends Comment { moderationStatus: 'approved' | 'pending' | 'spam' | 'trash'; }`;
 export const FOOTER_COLUMN_INTERFACE = `interface FooterColumn { heading: string; links: Array<{ label: string; url: string }>; }`;
+export const RUNTIME_PAGE_SOURCE_INTERFACE = `interface RuntimePageSource { kind: 'page-post-content' | 'template' | 'template-chain'; template: string; slug: string; sourceSummary?: string; }`;
+export const RUNTIME_PAGE_SUPPORT_INTERFACE = `interface RuntimePageSupport { safeForRuntime: boolean; unsupportedBlocks: string[]; }`;
+export const RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE = `interface RuntimePageSubtreeBinding { nodeId: string; blockName: string; renderer: string; preserveWrapper: boolean; preserveChildrenOrder: boolean; childCount?: number; sectionDebugKey?: string; }`;
+export const RUNTIME_PAGE_SECTION_INTERFACE = `interface RuntimePageSection { type: string; debugKey?: string; sectionKey?: string; title?: string; subtitle?: string; body?: string; imageSrc?: string; imageAlt?: string; columns?: number; cards?: Array<Record<string, unknown>>; items?: Array<Record<string, unknown>>; slides?: Array<Record<string, unknown>>; tabs?: Array<Record<string, unknown>>; }`;
+export const RUNTIME_PAGE_PLAN_INTERFACE =
+  `interface RuntimePagePlan { version: 1; mode: 'block-centric' | 'hybrid' | 'page-content'; fidelity: 'strict-structure' | 'best-effort'; layoutFamily?: string; source: RuntimePageSource; support: RuntimePageSupport; dataNeeds: string[]; sections: RuntimePageSection[]; blockTree: Array<Record<string, unknown>>; subtreeBindings?: RuntimePageSubtreeBinding[]; }`;
+export const RUNTIME_PAGE_RESPONSE_INTERFACE =
+  `interface RuntimePageResponse { page: Page; runtimePlan: RuntimePagePlan; }`;
 
 function formatFieldList(fields: readonly string[]): string {
   return fields.map((field) => `\`${field}\``).join(', ');
@@ -112,7 +120,8 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - \`GET /api/posts\` → Post[] (optional \`?author=<nicename>\`, \`?type=<post-type|all>\`, \`?page=<n>\`, \`?perPage=<n>\`)
 - \`GET /api/posts/:slug\` → Post (optional \`?type=<post-type|all>\`)
 - \`GET /api/pages\` → Page[]
-- \`GET /api/pages/:slug\` → Page
+- \`GET /api/pages/:slug\` → Page (dedicated page-detail path)
+- \`GET /api/runtime/pages/:slug\` → RuntimePageResponse (runtime-page path only when planner opts in)
 - \`GET /api/post-types\` → PostTypeSummary[]
 - \`GET /api/post-types/:postType/posts\` → Post[] (supports \`?page=<n>\`, \`?perPage=<n>\`)
 - \`GET /api/post-types/:postType/:slug\` → Post
@@ -148,6 +157,31 @@ Use ONLY this runtime data shape. WordPress template structure is for layout fid
 - Use \`menu.items[].target\` when rendering anchors; when it is \`"_blank"\`, also set \`rel="noopener noreferrer"\`.
 - Comments use \`comment.author\`, not \`comment.author_name\` or avatar fields.
 - If a comment form exists, submit via \`POST /api/comments\` and poll \`/api/comments/submissions\` for moderation status.`;
+}
+
+export function buildExperimentalRuntimePageContractNote(): string {
+  return `## Runtime page contract — planner-gated
+
+Use this only when the planner/generator explicitly opts into the runtime-rendered page path for a component.
+
+### Proposed endpoint
+- \`GET /api/runtime/pages/:slug\` → RuntimePageResponse
+
+### Interfaces
+- ${PAGE_INTERFACE}
+- ${RUNTIME_PAGE_SOURCE_INTERFACE}
+- ${RUNTIME_PAGE_SUPPORT_INTERFACE}
+- ${RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE}
+- ${RUNTIME_PAGE_SECTION_INTERFACE}
+- ${RUNTIME_PAGE_PLAN_INTERFACE}
+- ${RUNTIME_PAGE_RESPONSE_INTERFACE}
+
+### Contract intent
+- \`runtimePlan.blockTree\` is the structural source of truth for wrapper order, nesting, columns, and section placement.
+- \`runtimePlan.sections\` is an overlay for behavior/data-rich regions such as tabs, accordion, carousel, card-grid, modal, and prose clusters.
+- \`runtimePlan.subtreeBindings[].sectionDebugKey\` links a structural subtree to a semantic section overlay when hybrid rendering is required.
+- \`runtimePlan.support.safeForRuntime = false\` means the page should stay on a dedicated per-page component path instead of generic runtime rendering.
+- Unsupported plugin blocks must be surfaced via \`runtimePlan.support.unsupportedBlocks\`; do NOT silently flatten them into generic prose.`;
 }
 
 /**

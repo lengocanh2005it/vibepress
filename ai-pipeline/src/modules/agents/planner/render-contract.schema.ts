@@ -59,6 +59,12 @@ export function isStrictBlockTreeRenderContract(
 export function shouldPreferDeterministicGenerationForRenderContract(
   contract: ComponentRenderContract | undefined,
 ): boolean {
+  return contract?.structure.renderMode === 'block-tree';
+}
+
+export function isDeterministicFallbackEligibleForRenderContract(
+  contract: ComponentRenderContract | undefined,
+): boolean {
   return (
     contract?.structure.renderMode === 'block-tree' ||
     contract?.structure.renderMode === 'hybrid'

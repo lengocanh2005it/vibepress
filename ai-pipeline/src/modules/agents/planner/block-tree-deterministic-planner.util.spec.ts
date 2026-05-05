@@ -325,4 +325,42 @@ describe('block-tree deterministic shared partials', () => {
       ],
     });
   });
+
+  it('keeps profolio-fse scroll-top hook classes in deterministic footer partial sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'footer',
+        componentName: 'Footer',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'footer-links'],
+        isDetail: false,
+      },
+      draftSections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+        },
+      ],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'paragraph',
+              blockName: 'paragraph',
+              customClassNames: ['profolio-fse-scroll-top'],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'footer',
+      scrollTopTriggerClassNames: ['profolio-fse-scroll-top'],
+    });
+  });
 });

@@ -1,4 +1,15 @@
 export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
+  #sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 999;
+  }
+
+  .profolio-fse-scroll-top {
+    display: none;
+    cursor: pointer;
+  }
+
   .wow {
     will-change: opacity, transform;
     backface-visibility: hidden;
@@ -142,6 +153,10 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
 export function buildSourceMotionBootstrapTs(): string {
   return String.raw`const SOURCE_MOTION_SELECTOR =
   '.wow.animate__animated, .wow[class*="animate__"]';
+const SOURCE_STICKY_HEADER_SELECTOR = '#sticky-header';
+const SOURCE_SCROLL_TOP_SELECTOR = '.profolio-fse-scroll-top';
+const SOURCE_THEME_INTERACTION_SELECTOR =
+  SOURCE_STICKY_HEADER_SELECTOR + ', ' + SOURCE_SCROLL_TOP_SELECTOR;
 
 function startSourceMotionBridge() {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
@@ -232,6 +247,69 @@ function startSourceMotionBridge() {
   );
 }
 
+function startSourceThemeInteractionBridge() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  const applyStickyHeader = () => {
+    document
+      .querySelectorAll<HTMLElement>(SOURCE_STICKY_HEADER_SELECTOR)
+      .forEach((element) => {
+        element.style.position = 'sticky';
+        element.style.top = '0';
+        if (!element.style.zIndex) {
+          element.style.zIndex = '999';
+        }
+      });
+  };
+
+  const bindScrollTop = (element: HTMLElement) => {
+    if (element.dataset.vpScrollTopBound === '1') return;
+    element.dataset.vpScrollTopBound = '1';
+    element.addEventListener('click', (event) => {
+      event.preventDefault();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  };
+
+  const getScrollTopElements = () =>
+    Array.from(document.querySelectorAll<HTMLElement>(SOURCE_SCROLL_TOP_SELECTOR));
+
+  const updateScrollTopVisibility = () => {
+    const shouldShow = window.scrollY > 100;
+    for (const element of getScrollTopElements()) {
+      bindScrollTop(element);
+      element.style.display = shouldShow ? 'block' : 'none';
+    }
+  };
+
+  const handleScroll = () => {
+    updateScrollTopVisibility();
+  };
+
+  applyStickyHeader();
+  updateScrollTopVisibility();
+  window.addEventListener('scroll', handleScroll, { passive: true });
+
+  const mutationObserver = new MutationObserver(() => {
+    applyStickyHeader();
+    updateScrollTopVisibility();
+  });
+
+  mutationObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      window.removeEventListener('scroll', handleScroll);
+      mutationObserver.disconnect();
+    },
+    { once: true },
+  );
+}
+
 export function watchForSourceMotionSignals() {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
@@ -243,10 +321,12 @@ export function watchForSourceMotionSignals() {
     started = true;
     signalObserver?.disconnect();
     startSourceMotionBridge();
+    startSourceThemeInteractionBridge();
   };
 
   const hasSignal = () =>
-    !!document.querySelector<HTMLElement>(SOURCE_MOTION_SELECTOR);
+    !!document.querySelector<HTMLElement>(SOURCE_MOTION_SELECTOR) ||
+    !!document.querySelector<HTMLElement>(SOURCE_THEME_INTERACTION_SELECTOR);
 
   const check = () => {
     if (!hasSignal()) return;

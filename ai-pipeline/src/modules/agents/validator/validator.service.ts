@@ -71,6 +71,7 @@ export interface CodeValidationContext {
   route?: string | null;
   isDetail?: boolean;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   isSubComponent?: boolean;
@@ -535,6 +536,7 @@ export class ValidatorService {
       context.isDetail === true || expectsPostDetail || expectsPageDetail;
     const fixedSlug = context.fixedSlug?.trim();
     const hasFixedSlug = Boolean(fixedSlug);
+    const isRuntimePage = context.runtimeRenderer === 'runtime-page';
     const routeHasParams = /:[A-Za-z_]/.test(context.route ?? '');
     const allowsArchiveAliasParams =
       /^Archive$/i.test(context.componentName ?? '') &&
@@ -956,12 +958,16 @@ export class ValidatorService {
         expectsPageDetail &&
         !(hasFixedSlug
           ? this.matchesExactDetailFetch(code, 'pages', fixedSlug!)
-          : this.matchesDetailFetch(code, 'pages'))
+          : isRuntimePage
+            ? this.matchesRuntimePageDetailFetch(code)
+            : this.matchesDetailFetch(code, 'pages'))
       ) {
         violations.push(
           hasFixedSlug
             ? `Page detail component must fetch the exact bound record via \`/api/pages/${fixedSlug}\`.`
-            : 'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
+            : isRuntimePage
+              ? 'Runtime-page component must fetch the record via `/api/runtime/pages/${slug}` (or equivalent string concatenation with `slug`).'
+              : 'Page detail component must fetch the record via `/api/pages/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
       if (
@@ -4245,6 +4251,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       new RegExp(
         String.raw`fetch\(\s*\`/api/${escapedResource}/${escapedSlug}\``,
       ),
+    ];
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
+  private matchesRuntimePageDetailFetch(code: string): boolean {
+    const patterns = [
+      /fetch\(\s*\`\/api\/runtime\/pages\/\$\{[^}]*(?:slug)[^}]*\}\`/,
+      /fetch\(\s*['"]\/api\/runtime\/pages\/['"]\s*\+/,
+      /fetch\(\s*['"]\/api\/runtime\/pages\/\$\{[^}]*(?:slug)[^}]*\}['"]/,
     ];
     return patterns.some((pattern) => pattern.test(code));
   }

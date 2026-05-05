@@ -33,6 +33,7 @@ import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postproce
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
+  isDeterministicFallbackEligibleForRenderContract,
   isStrictBlockTreeRenderContract,
   shouldPreferDeterministicGenerationForRenderContract,
 } from '../planner/render-contract.schema.js';
@@ -481,7 +482,7 @@ export class CodeReviewerService {
 
         const prefersDeterministicPlan =
           strategy.deterministicFirst ||
-          this.shouldPreferDeterministicPlan(componentPlan);
+          this.shouldPreferDeterministicPlan(componentPlan, componentName);
         if (prefersDeterministicPlan) {
           const deterministicFirst = await this.tryDeterministicPlan(
             componentName,
@@ -755,7 +756,7 @@ export class CodeReviewerService {
             );
             const prefersDeterministicPlan =
               strategy.deterministicFirst ||
-              this.shouldPreferDeterministicPlan(componentPlan);
+              this.shouldPreferDeterministicPlan(componentPlan, componentName);
             if (prefersDeterministicPlan) {
               const deterministicFirst = await this.tryDeterministicPlan(
                 componentName,
@@ -1344,6 +1345,11 @@ export class CodeReviewerService {
       fixedSlug: componentPlan?.fixedSlug,
       fixedTitle: componentPlan?.fixedTitle,
       fixedPageId: componentPlan?.fixedPageId,
+      runtimeRenderer:
+        'runtimeRenderer' in (componentPlan ?? {})
+          ? (componentPlan as PlanResult[number] | ComponentPromptContext)
+              ?.runtimeRenderer
+          : undefined,
       dataNeeds,
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
@@ -1376,6 +1382,7 @@ export class CodeReviewerService {
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
       fixedSlug: componentPlan?.fixedSlug,
+      runtimeRenderer: componentPlan?.runtimeRenderer,
       dataNeeds: componentPlan?.dataNeeds,
       type: componentPlan?.type,
       isSubComponent,
@@ -1499,6 +1506,12 @@ export class CodeReviewerService {
     }
     const normalizedNeeds = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
     const signals = this.getVisualPlanSectionSignals(componentPlan);
+    const complexAiFirstPageCandidate = this.isComplexAiFirstPageCandidate(
+      componentPlan,
+      componentName,
+      signals,
+      normalizedNeeds,
+    );
     const defaultRichPageAssemblyCandidate = Boolean(
       !componentPlan.isDetail &&
       signals.sections.length >= 2 &&
@@ -1524,11 +1537,28 @@ export class CodeReviewerService {
           signals.mediaHeavySectionCount >= 1 ||
           signals.sourceBackedSectionCount >= 2 ||
           normalizedNeeds.has('posts'));
+      const allowComplexBlockTreeSectionAssembly = Boolean(
+        componentPlan.visualPlan.renderMode === 'hybrid' &&
+        complexAiFirstPageCandidate &&
+        componentPlan.visualPlan.layout.sidebarScope !== 'all-content' &&
+        signals.sections.length >= 3 &&
+        (signals.richSectionCount >= 1 ||
+          signals.mediaHeavySectionCount >= 1 ||
+          signals.sourceBackedSectionCount >= 2 ||
+          signals.hasPageContent),
+      );
       if (allowHybridSectionAssembly) {
         return {
           enabled: true,
           reason:
             'hybrid block-tree page prefers section assembly for content retention',
+        };
+      }
+      if (allowComplexBlockTreeSectionAssembly) {
+        return {
+          enabled: true,
+          reason:
+            'complex homepage/page template prefers section assembly before deterministic fallback',
         };
       }
       return {
@@ -1615,6 +1645,13 @@ export class CodeReviewerService {
     }
 
     if (hasOnlyContentWrapper) {
+      if (complexAiFirstPageCandidate && signals.sections.length >= 3) {
+        return {
+          enabled: true,
+          reason:
+            'complex homepage/page template keeps page-content inside section assembly',
+        };
+      }
       return {
         enabled: false,
         reason: 'page-content wrapper is simpler as full-file',
@@ -1677,8 +1714,23 @@ export class CodeReviewerService {
 
   private shouldPreferDeterministicPlan(
     componentPlan: ComponentPromptContext | undefined,
+    componentName: string,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    const normalizedNeeds = new Set(
+      toVisualDataNeeds(componentPlan?.dataNeeds),
+    );
+    const signals = this.getVisualPlanSectionSignals(componentPlan);
+    if (
+      this.isComplexAiFirstPageCandidate(
+        componentPlan,
+        componentName,
+        signals,
+        normalizedNeeds,
+      )
+    ) {
+      return false;
+    }
     if (
       shouldPreferDeterministicGenerationForRenderContract(
         componentPlan?.renderContract,
@@ -1723,10 +1775,177 @@ export class CodeReviewerService {
   ): boolean {
     return (
       componentPlan?.type === 'partial' ||
-      shouldPreferDeterministicGenerationForRenderContract(
+      isDeterministicFallbackEligibleForRenderContract(
         componentPlan?.renderContract,
       )
     );
+  }
+
+  private isComplexAiFirstPageCandidate(
+    componentPlan:
+      | ComponentPromptContext
+      | ReviewInput['componentPlan']
+      | undefined,
+    componentName: string,
+    signals?: ReturnType<CodeReviewerService['getVisualPlanSectionSignals']>,
+    normalizedNeeds?: Set<string>,
+  ): boolean {
+    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan)
+      return false;
+    if (componentPlan.visualPlan.renderMode === 'block-centric') return false;
+
+    const planSignals =
+      signals ?? this.getVisualPlanSectionSignals(componentPlan);
+    const needs =
+      normalizedNeeds ?? new Set(toVisualDataNeeds(componentPlan.dataNeeds));
+    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
+    const blockTreeSignals = this.collectBlockTreeComplexitySignals(
+      componentPlan.visualPlan.blockTree ?? [],
+    );
+    const homeLike =
+      componentPlan.route === '/' ||
+      ['front-page', 'frontend-page', 'home', 'index'].includes(templateName) ||
+      /^(FrontPage|Home)$/i.test(componentName);
+    const fixedPageLike =
+      /^PagePage/i.test(componentName) ||
+      templateName.startsWith('page-') ||
+      (componentPlan.isDetail === true && needs.has('pageDetail'));
+    const templateDrivenLanding =
+      /^template-/.test(templateName) ||
+      [
+        'templateabout',
+        'templatecontact',
+        'templateservices',
+        'templateportfolio',
+        'templatelanding',
+      ].includes(templateName.replace(/[^a-z]/g, '')) ||
+      /^PagePage/i.test(componentName);
+    const structurallyRich =
+      planSignals.sections.length >= 4 ||
+      planSignals.richSectionCount >= 2 ||
+      planSignals.mediaHeavySectionCount >= 2 ||
+      planSignals.distinctTypes.size >= 3 ||
+      planSignals.sourceBackedSectionCount >= 3;
+    const blockTreeRich =
+      blockTreeSignals.nodeCount >= 14 ||
+      blockTreeSignals.maxDepth >= 4 ||
+      blockTreeSignals.wrapperNodeCount >= 6 ||
+      blockTreeSignals.mediaNodeCount >= 4 ||
+      blockTreeSignals.interactiveOrPluginNodeCount >= 1 ||
+      blockTreeSignals.markerClassCount >= 2;
+    const visuallySensitiveThemeStructure =
+      blockTreeSignals.interactiveOrPluginNodeCount >= 1 ||
+      blockTreeSignals.markerClassCount >= 2 ||
+      blockTreeSignals.iconOrLogoAssetCount >= 3 ||
+      (blockTreeSignals.mediaNodeCount >= 3 &&
+        blockTreeSignals.wrapperNodeCount >= 4);
+    const sourceCompressionRisk = Boolean(
+      blockTreeSignals.sourceBackedNodeCount >= 10 &&
+      planSignals.sections.length > 0 &&
+      blockTreeSignals.sourceBackedNodeCount >= planSignals.sections.length * 3,
+    );
+    const complexityConfirmed =
+      structurallyRich ||
+      blockTreeRich ||
+      visuallySensitiveThemeStructure ||
+      sourceCompressionRisk;
+
+    return (
+      complexityConfirmed &&
+      (homeLike || fixedPageLike || templateDrivenLanding) &&
+      componentPlan.visualPlan.layout.sidebarScope !== 'all-content'
+    );
+  }
+
+  private collectBlockTreeComplexitySignals(nodes: BlockNode[]): {
+    nodeCount: number;
+    maxDepth: number;
+    sourceBackedNodeCount: number;
+    wrapperNodeCount: number;
+    mediaNodeCount: number;
+    interactiveOrPluginNodeCount: number;
+    markerClassCount: number;
+    iconOrLogoAssetCount: number;
+  } {
+    const markerClasses = new Set<string>();
+    let nodeCount = 0;
+    let maxDepth = 0;
+    let sourceBackedNodeCount = 0;
+    let wrapperNodeCount = 0;
+    let mediaNodeCount = 0;
+    let interactiveOrPluginNodeCount = 0;
+    let iconOrLogoAssetCount = 0;
+
+    const visit = (entries: BlockNode[], depth: number) => {
+      if (entries.length === 0) return;
+      if (depth > maxDepth) maxDepth = depth;
+      for (const node of entries) {
+        nodeCount += 1;
+        if (node.sourceRef?.sourceNodeId) sourceBackedNodeCount += 1;
+        if (
+          [
+            'group',
+            'columns',
+            'column',
+            'cover',
+            'spacer',
+            'separator',
+          ].includes(node.kind)
+        ) {
+          wrapperNodeCount += 1;
+        }
+        if (
+          [
+            'image',
+            'gallery',
+            'media-text',
+            'post-featured-image',
+            'cover',
+          ].includes(node.kind) ||
+          typeof node.src === 'string'
+        ) {
+          mediaNodeCount += 1;
+        }
+        if (
+          /^uagb\//i.test(node.blockName) ||
+          ['accordion', 'carousel', 'modal', 'tabs', 'slider'].includes(
+            node.kind,
+          )
+        ) {
+          interactiveOrPluginNodeCount += 1;
+        }
+        if (
+          typeof node.src === 'string' &&
+          /(icon|logo|figma|wordpress|photoshop|illustrator|after-effects)/i.test(
+            node.src,
+          )
+        ) {
+          iconOrLogoAssetCount += 1;
+        }
+        for (const className of node.customClassNames ?? []) {
+          if (
+            /(uagb-|wow\b|animate__|is-style-|sticky-sidebar|r-pad|wp-block-cover__inner-container)/i.test(
+              className,
+            )
+          ) {
+            markerClasses.add(className);
+          }
+        }
+        visit(node.children ?? [], depth + 1);
+      }
+    };
+
+    visit(nodes, 1);
+    return {
+      nodeCount,
+      maxDepth,
+      sourceBackedNodeCount,
+      wrapperNodeCount,
+      mediaNodeCount,
+      interactiveOrPluginNodeCount,
+      markerClassCount: markerClasses.size,
+      iconOrLogoAssetCount,
+    };
   }
 
   private getVisualPlanSectionSignals(
@@ -2042,12 +2261,20 @@ export class CodeReviewerService {
     logPath?: string,
     label = 'visual plan',
   ): Promise<{ code: string; isValid: boolean; error?: string }> {
-    let code = this.codeGenerator.generate(visualPlan);
+    const effectiveVisualPlan =
+      validationContext.runtimeRenderer === 'runtime-page'
+        ? {
+            ...visualPlan,
+            runtimeRenderer: validationContext.runtimeRenderer,
+          }
+        : visualPlan;
+    let code = this.codeGenerator.generate(effectiveVisualPlan);
     const check = this.validator.checkCodeStructure(code, {
       ...validationContext,
-      dataNeeds: validationContext.dataNeeds ?? visualPlan.dataNeeds,
+      dataNeeds: validationContext.dataNeeds ?? effectiveVisualPlan.dataNeeds,
       allowedRelativeImports:
-        validationContext.allowedRelativeImports ?? visualPlan.layout.includes,
+        validationContext.allowedRelativeImports ??
+        effectiveVisualPlan.layout.includes,
     });
     if (check.fixedCode) code = check.fixedCode;
 
@@ -2817,9 +3044,10 @@ export class CodeReviewerService {
     }
 
     const sections = componentPlan.visualPlan.sections ?? [];
-    const frame = this.codeGenerator.generateSectionAssemblyFrame(
-      componentPlan.visualPlan,
-    );
+    const frame = this.codeGenerator.generateSectionAssemblyFrame({
+      ...componentPlan.visualPlan,
+      runtimeRenderer: componentPlan.runtimeRenderer,
+    });
     const availableVariables = this.buildSectionAssemblyAvailableVariables(
       this.frameGenerator.describeVariables({
         type: componentPlan.type ?? 'page',
@@ -3139,7 +3367,10 @@ export class CodeReviewerService {
         const deterministicCode = this.normalizeInlineSectionOutput(
           this.postProcessCode(
             this.codeGenerator.generateDeterministicInlineSection(
-              componentPlan.visualPlan,
+              {
+                ...componentPlan.visualPlan,
+                runtimeRenderer: componentPlan.runtimeRenderer,
+              },
               sectionIndex,
             ),
           ),
