@@ -7,6 +7,7 @@ interface UseInspectorReturn {
   selectedComponent: ComponentInfo | null;
   toggle: () => void;
   clear: () => void;
+  syncWithIframe: () => void;
 }
 
 export function useInspector(): UseInspectorReturn {
@@ -16,6 +17,7 @@ export function useInspector(): UseInspectorReturn {
 
   useEffect(() => {
     const handler = (e: MessageEvent<InspectorMessage>) => {
+      if (e.source !== iframeRef.current?.contentWindow) return;
       if (e.data?.type === "INSPECTOR_DATA") {
         setSelectedComponent(e.data.payload);
       }
@@ -40,5 +42,9 @@ export function useInspector(): UseInspectorReturn {
     setSelectedComponent(null);
   }, []);
 
-  return { iframeRef, isActive, selectedComponent, toggle, clear };
+  const syncWithIframe = useCallback(() => {
+    sendToIframe(isActive ? "INSPECTOR_ENABLE" : "INSPECTOR_DISABLE");
+  }, [isActive, sendToIframe]);
+
+  return { iframeRef, isActive, selectedComponent, toggle, clear, syncWithIframe };
 }

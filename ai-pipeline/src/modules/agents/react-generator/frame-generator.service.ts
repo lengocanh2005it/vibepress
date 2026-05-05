@@ -26,6 +26,7 @@ export interface FrameOptions {
   isDetail: boolean;
   route?: string | null;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
 }
 
 /**
@@ -50,7 +51,15 @@ export class FrameGeneratorService {
    * FRAME_PLACEHOLDER where the AI JSX block should be inserted.
    */
   generateFrame(options: FrameOptions): string {
-    const { componentName, type, dataNeeds, isDetail, route, fixedSlug } =
+    const {
+      componentName,
+      type,
+      dataNeeds,
+      isDetail,
+      route,
+      fixedSlug,
+      runtimeRenderer,
+    } =
       options;
     const needs = this.normalizeNeeds(dataNeeds);
     const usesRouteParams =
@@ -201,6 +210,7 @@ export class FrameGeneratorService {
       isFooter,
       isArchive,
       fixedSlug,
+      runtimeRenderer,
     });
 
     if (fetches.length > 0) {
@@ -366,6 +376,7 @@ export class FrameGeneratorService {
     isFooter: boolean;
     isArchive: boolean;
     fixedSlug?: string;
+    runtimeRenderer?: 'runtime-page';
   }): Array<{ setter: string; url: string }> {
     const fetches: Array<{ setter: string; url: string }> = [];
 
@@ -398,7 +409,9 @@ export class FrameGeneratorService {
         setter: 'setPage',
         url: flags.fixedSlug
           ? JSON.stringify(`/api/pages/${flags.fixedSlug}`)
-          : '`/api/pages/${slug}`',
+          : flags.runtimeRenderer === 'runtime-page'
+            ? '`/api/runtime/pages/${slug}`'
+            : '`/api/pages/${slug}`',
       });
     } else if (flags.hasPages) {
       fetches.push({ setter: 'setPages', url: `'/api/pages'` });

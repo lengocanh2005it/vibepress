@@ -33,7 +33,7 @@ export function buildCptRoutesPrompt(
   return `You are an Express.js expert extending an existing Express server.
 
 The server already has: getConn(), getPrefix(conn), formatDate() helpers and routes for
-/api/site-info, /api/posts, /api/posts/:slug, /api/pages, /api/pages/:slug,
+/api/site-info, /api/posts, /api/posts/:slug, /api/pages, /api/pages/:slug, /api/runtime/pages/:slug,
 /api/menus, /api/footer-links, /api/taxonomies, /api/taxonomies/:taxonomy,
 /api/taxonomies/:taxonomy/:term/posts,
  /api/comments GET (?postId= or ?slug=), /api/comments/submissions GET (?postId= or ?slug=, clientToken),

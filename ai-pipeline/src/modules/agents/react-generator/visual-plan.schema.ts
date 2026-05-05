@@ -689,6 +689,7 @@ export interface VisualPlanLockPolicy {
 export interface ComponentVisualPlan {
   componentName: string;
   dataNeeds: DataNeed[];
+  runtimeRenderer?: 'runtime-page';
   /** When this component is bound to one exact WordPress page, fetch by this slug instead of URL params. */
   pageBinding?: {
     id?: number | string;

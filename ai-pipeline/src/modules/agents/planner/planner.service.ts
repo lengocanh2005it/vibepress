@@ -113,6 +113,10 @@ import {
   buildComponentRenderContract,
   type ComponentRenderContract,
 } from './render-contract.schema.js';
+import {
+  classifyConcretePageForRuntime,
+  isDefaultRuntimePageTemplateCandidate,
+} from './runtime-page-policy.util.js';
 import type {
   PlannerAuthorityLevel,
   PlannerClusterKind,
@@ -147,6 +151,7 @@ export interface ComponentPlan {
   fixedSlug?: string;
   fixedPageId?: number | string;
   fixedTitle?: string;
+  runtimeRenderer?: 'runtime-page';
   /** Evidence-guided surface brief for page/home/post composition. */
   surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
@@ -660,21 +665,36 @@ export class PlannerService {
       };
     }
     if (this.shouldSkipAiVisualPlan(componentPlan)) {
+      const skipSummary =
+        componentPlan.runtimeRenderer === 'runtime-page'
+          ? `"${componentPlan.componentName}": skipped AI visual plan (built-in runtime page renderer owns structure at runtime)`
+          : `"${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`;
       this.logger.log(
         this.formatPhaseCLog(
-          `"${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`,
+          skipSummary,
         ),
       );
       return {
         ...componentPlan,
-        planningSourceLabel: `repo:${componentPlan.templateName}`,
-        planningSourceReason: 'visual plan skipped for standard partial',
-        planningSourceFile: inferFseSourceFile(
-          componentPlan.templateName,
-          componentPlan.type,
-        ),
+        planningSourceLabel:
+          componentPlan.runtimeRenderer === 'runtime-page'
+            ? 'runtime:page-detail'
+            : `repo:${componentPlan.templateName}`,
+        planningSourceReason:
+          componentPlan.runtimeRenderer === 'runtime-page'
+            ? 'visual plan skipped for built-in runtime page renderer'
+            : 'visual plan skipped for standard partial',
+        planningSourceFile:
+          componentPlan.runtimeRenderer === 'runtime-page'
+            ? 'templates/react-preview/src/pages/RuntimePage.tsx'
+            : inferFseSourceFile(
+                componentPlan.templateName,
+                componentPlan.type,
+              ),
         planningSourceSummary:
-          'AI visual-plan stage skipped for standard partial without section schema.',
+          componentPlan.runtimeRenderer === 'runtime-page'
+            ? 'Runtime page uses a built-in renderer and the /api/runtime/pages/:slug endpoint instead of a precomputed visual plan.'
+            : 'AI visual-plan stage skipped for standard partial without section schema.',
         visualPlan: undefined,
       };
     }
@@ -2867,6 +2887,7 @@ export class PlannerService {
   }
 
   private shouldSkipAiVisualPlan(componentPlan: PlanResult[number]): boolean {
+    if (componentPlan.runtimeRenderer === 'runtime-page') return true;
     if (componentPlan.type !== 'partial') return false;
     return getComponentStrategy(componentPlan.componentName).skipAiVisualPlan;
   }
@@ -3645,6 +3666,7 @@ export class PlannerService {
     const result: PlanResult = [];
     const usedComponentNames = new Set<string>();
     let materializedCount = 0;
+    let runtimeBackedGenericCount = 0;
 
     for (const item of plan) {
       if (item.fixedSlug || !this.shouldExpandConcretePages(item)) {
@@ -3654,6 +3676,57 @@ export class PlannerService {
       }
 
       const matchedPages = this.findConcretePagesForTemplate(item, content);
+      const runtimeTemplateCandidate =
+        isDefaultRuntimePageTemplateCandidate(item);
+
+      if (runtimeTemplateCandidate) {
+        const classifiedPages = matchedPages.map((page) => ({
+          page,
+          classification: classifyConcretePageForRuntime(page),
+        }));
+        const runtimePages = classifiedPages
+          .filter((entry) => entry.classification.strategy === 'runtime')
+          .map((entry) => entry.page);
+        const dedicatedPages = classifiedPages
+          .filter((entry) => entry.classification.strategy === 'dedicated')
+          .map((entry) => entry.page);
+        const genericRuntimeItem = this.buildRuntimePageBasePlan(
+          item,
+          runtimePages.length,
+        );
+        result.push(genericRuntimeItem);
+        usedComponentNames.add(genericRuntimeItem.componentName);
+        runtimeBackedGenericCount += 1;
+
+        for (const page of dedicatedPages) {
+          const route = this.buildConcretePageRoute(page, content);
+          const componentName = this.buildConcretePageComponentName(
+            page,
+            route,
+            usedComponentNames,
+          );
+          result.push({
+            ...item,
+            componentName,
+            route,
+            isDetail: true,
+            fixedSlug: page.slug,
+            fixedPageId: page.id,
+            fixedTitle: page.title,
+            runtimeRenderer: undefined,
+            description: this.buildConcretePageDescription(item, page, route),
+            visualPlan: undefined,
+            planningSourceLabel: undefined,
+            planningSourceReason: undefined,
+            planningSourceFile: undefined,
+            planningSourceSummary: undefined,
+          });
+          usedComponentNames.add(componentName);
+          materializedCount += 1;
+        }
+        continue;
+      }
+
       if (matchedPages.length === 0) {
         result.push(item);
         usedComponentNames.add(item.componentName);
@@ -3687,13 +3760,49 @@ export class PlannerService {
       }
     }
 
-    if (materializedCount > 0) {
+    if (materializedCount > 0 || runtimeBackedGenericCount > 0) {
+      const detail = [
+        materializedCount > 0
+          ? `materialized ${materializedCount} exact page component(s)`
+          : null,
+        runtimeBackedGenericCount > 0
+          ? `kept ${runtimeBackedGenericCount} runtime-backed generic page route(s)`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' | ');
       this.logger.log(
-        `[Phase B: Concrete Page Expansion] Materialized ${materializedCount} exact page component(s) from DB page bindings`,
+        `[Phase B: Concrete Page Expansion] ${detail}`,
       );
     }
 
     return result;
+  }
+
+  private buildRuntimePageBasePlan(
+    item: PlanResult[number],
+    runtimeSafePageCount: number,
+  ): PlanResult[number] {
+    return {
+      ...item,
+      componentName: 'RuntimePage',
+      runtimeRenderer: 'runtime-page',
+      fixedSlug: undefined,
+      fixedPageId: undefined,
+      fixedTitle: undefined,
+      visualPlan: undefined,
+      surfacePlan: undefined,
+      renderContract: undefined,
+      planningSourceLabel: 'runtime:page-detail',
+      planningSourceReason: 'generic runtime page route',
+      planningSourceFile: 'templates/react-preview/src/pages/RuntimePage.tsx',
+      planningSourceSummary:
+        runtimeSafePageCount > 0
+          ? `Default page route kept generic for ${runtimeSafePageCount} runtime-safe DB page(s); complex pages still materialize as fixed components.`
+          : 'Default page route kept generic so newly added WordPress pages can render through the runtime page endpoint.',
+      description:
+        'Generic runtime-rendered WordPress page route backed by /api/runtime/pages/:slug.',
+    };
   }
 
   private orderPlannerDataNeeds(dataNeeds: string[]): string[] {

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { appendFile, mkdir, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { appendFile, mkdir, readFile, writeFile } from 'fs/promises';
+import { join, resolve } from 'path';
 import { AiLoggerService } from '../../ai-logger/ai-logger.service.js';
 import { LlmFactoryService } from '../../../common/llm/llm-factory.service.js';
 import type { TokenScope } from '../../../common/utils/token-tracker.js';
@@ -51,6 +51,9 @@ const CLASSIC_CHUNK_THRESHOLD_CHARS = 40_000;
 const FSE_CHUNK_THRESHOLD_CHARS = 80_000;
 // Target size per section chunk
 const CHUNK_TARGET_CHARS = 15_000;
+const BUILTIN_RUNTIME_PAGE_PATH = resolve(
+  'templates/react-preview/src/pages/RuntimePage.tsx',
+);
 /**
  * Returns true for top-level block nodes that represent the shared site header
  * or footer (template-part with header/footer slug, or direct header/footer blocks).
@@ -371,6 +374,21 @@ export class ReactGeneratorService {
       jobId,
     } = input;
 
+    if (componentPlan?.runtimeRenderer === 'runtime-page') {
+      const code = await readFile(BUILTIN_RUNTIME_PAGE_PATH, 'utf-8');
+      await this.logToFile(
+        logPath,
+        `[runtime-page] "${componentName}": using built-in RuntimePage renderer scaffold`,
+      );
+      return [
+        this.attachPlanContext(
+          { name: componentName, filePath: '', code },
+          componentPlan,
+          { generationMode: 'deterministic' },
+        ),
+      ];
+    }
+
     const templateSource = rawSource;
     const templateNodes =
       themeType === 'fse' && this.looksLikeBlockMarkup(templateSource)
@@ -629,6 +647,7 @@ export class ReactGeneratorService {
       ...componentPlan,
       visualPlan: {
         ...componentPlan.visualPlan,
+        runtimeRenderer: componentPlan.runtimeRenderer,
         sections,
         dataNeeds,
       },
@@ -779,7 +798,10 @@ export class ReactGeneratorService {
       return null;
     }
 
-    const code = this.codeGenerator.generate(effectivePlan.visualPlan);
+    const code = this.codeGenerator.generate({
+      ...effectivePlan.visualPlan,
+      runtimeRenderer: effectivePlan.runtimeRenderer,
+    });
     return this.attachPlanContext(
       {
         ...component,
@@ -1347,7 +1369,9 @@ ${renders}
         );
       } else {
         lines.push(
-          '- Fetch the main record from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
+          componentPlan.runtimeRenderer === 'runtime-page'
+            ? '- Fetch the main record from `/api/runtime/pages/${slug}`. Do NOT replace it with `/api/pages/${slug}` and do NOT replace it with `/api/pages` + lookup.'
+            : '- Fetch the main record from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
         );
       }
     }

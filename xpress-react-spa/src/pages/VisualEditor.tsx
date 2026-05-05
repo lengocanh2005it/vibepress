@@ -270,6 +270,7 @@ const VisualEditor: React.FC = () => {
     selectedComponent,
     toggle: toggleInspector,
     clear: clearSelectedComponent,
+    syncWithIframe,
   } = useInspector();
 
   const [statusData, setStatusData] = useState<PipelineStatusResponse | null>(null);
@@ -795,6 +796,7 @@ const VisualEditor: React.FC = () => {
                   onLoad={() => {
                     refreshFrameMeta();
                     setLoadedSrc(frameSrc);
+                    syncWithIframe();
                   }}
                 />
                 {frameLoading && !isSubmittingRequest && (

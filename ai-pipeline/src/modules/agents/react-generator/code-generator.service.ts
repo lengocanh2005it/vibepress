@@ -50,6 +50,12 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
+  RUNTIME_PAGE_PLAN_INTERFACE,
+  RUNTIME_PAGE_RESPONSE_INTERFACE,
+  RUNTIME_PAGE_SECTION_INTERFACE,
+  RUNTIME_PAGE_SOURCE_INTERFACE,
+  RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE,
+  RUNTIME_PAGE_SUPPORT_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
@@ -666,6 +672,14 @@ export class CodeGeneratorService {
       plan.dataNeeds.includes('pageDetail')
     ) {
       push(PAGE_INTERFACE);
+      if (plan.runtimeRenderer === 'runtime-page') {
+        push(RUNTIME_PAGE_SOURCE_INTERFACE);
+        push(RUNTIME_PAGE_SUPPORT_INTERFACE);
+        push(RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE);
+        push(RUNTIME_PAGE_SECTION_INTERFACE);
+        push(RUNTIME_PAGE_PLAN_INTERFACE);
+        push(RUNTIME_PAGE_RESPONSE_INTERFACE);
+      }
     }
     if (plan.sections.some((section) => section.type === 'post-meta')) {
       push(POST_INTERFACE);
@@ -818,6 +832,7 @@ export class CodeGeneratorService {
   private buildStateAndFetch(plan: ComponentVisualPlan): string {
     const { dataNeeds, componentName } = plan;
     const fixedSlug = plan.pageBinding?.slug;
+    const isRuntimePage = plan.runtimeRenderer === 'runtime-page';
     const needsPostsPagination = this.needsPagination(plan);
     const hasPostMetaSection = plan.sections.some(
       (section) => section.type === 'post-meta',
@@ -1336,12 +1351,21 @@ export class CodeGeneratorService {
       lines.push(
         fixedSlug
           ? `        const detailRes = await fetch(${JSON.stringify(`/api/pages/${fixedSlug}`)});`
-          : `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
+          : isRuntimePage
+            ? `        const detailRes = await fetch(\`/api/runtime/pages/\${slug}\`);`
+            : `        const detailRes = await fetch(\`/api/pages/\${slug}\`);`,
       );
       lines.push(
         `        if (!detailRes.ok) throw new Error('Page not found');`,
       );
-      lines.push(`        setItem(await detailRes.json());`);
+      if (isRuntimePage && !fixedSlug) {
+        lines.push(
+          `        const detailData = (await detailRes.json()) as RuntimePageResponse;`,
+        );
+        lines.push(`        setItem(detailData.page);`);
+      } else {
+        lines.push(`        setItem(await detailRes.json());`);
+      }
     }
 
     if (fetches.length > 0) {

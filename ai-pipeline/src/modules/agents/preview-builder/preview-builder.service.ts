@@ -333,6 +333,7 @@ export class PreviewBuilderService {
       Single: '/post/:slug',
       SingleWithSidebar: '/post/:slug',
       Page: '/page/:slug',
+      RuntimePage: '/page/:slug',
       PageWithSidebar: '/page/:slug',
       PageWide: '/page/:slug',
       PageNoTitle: '/page/:slug',

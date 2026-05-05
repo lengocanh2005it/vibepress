@@ -1345,6 +1345,11 @@ export class CodeReviewerService {
       fixedSlug: componentPlan?.fixedSlug,
       fixedTitle: componentPlan?.fixedTitle,
       fixedPageId: componentPlan?.fixedPageId,
+      runtimeRenderer:
+        'runtimeRenderer' in (componentPlan ?? {})
+          ? (componentPlan as PlanResult[number] | ComponentPromptContext)
+              ?.runtimeRenderer
+          : undefined,
       dataNeeds,
       requiredCustomClassNames,
       sourceBackedAuxiliaryLabels: componentPlan?.sourceBackedAuxiliaryLabels,
@@ -1377,6 +1382,7 @@ export class CodeReviewerService {
       route: componentPlan?.route,
       isDetail: componentPlan?.isDetail,
       fixedSlug: componentPlan?.fixedSlug,
+      runtimeRenderer: componentPlan?.runtimeRenderer,
       dataNeeds: componentPlan?.dataNeeds,
       type: componentPlan?.type,
       isSubComponent,
@@ -2255,12 +2261,20 @@ export class CodeReviewerService {
     logPath?: string,
     label = 'visual plan',
   ): Promise<{ code: string; isValid: boolean; error?: string }> {
-    let code = this.codeGenerator.generate(visualPlan);
+    const effectiveVisualPlan =
+      validationContext.runtimeRenderer === 'runtime-page'
+        ? {
+            ...visualPlan,
+            runtimeRenderer: validationContext.runtimeRenderer,
+          }
+        : visualPlan;
+    let code = this.codeGenerator.generate(effectiveVisualPlan);
     const check = this.validator.checkCodeStructure(code, {
       ...validationContext,
-      dataNeeds: validationContext.dataNeeds ?? visualPlan.dataNeeds,
+      dataNeeds: validationContext.dataNeeds ?? effectiveVisualPlan.dataNeeds,
       allowedRelativeImports:
-        validationContext.allowedRelativeImports ?? visualPlan.layout.includes,
+        validationContext.allowedRelativeImports ??
+        effectiveVisualPlan.layout.includes,
     });
     if (check.fixedCode) code = check.fixedCode;
 
@@ -3030,9 +3044,10 @@ export class CodeReviewerService {
     }
 
     const sections = componentPlan.visualPlan.sections ?? [];
-    const frame = this.codeGenerator.generateSectionAssemblyFrame(
-      componentPlan.visualPlan,
-    );
+    const frame = this.codeGenerator.generateSectionAssemblyFrame({
+      ...componentPlan.visualPlan,
+      runtimeRenderer: componentPlan.runtimeRenderer,
+    });
     const availableVariables = this.buildSectionAssemblyAvailableVariables(
       this.frameGenerator.describeVariables({
         type: componentPlan.type ?? 'page',
@@ -3352,7 +3367,10 @@ export class CodeReviewerService {
         const deterministicCode = this.normalizeInlineSectionOutput(
           this.postProcessCode(
             this.codeGenerator.generateDeterministicInlineSection(
-              componentPlan.visualPlan,
+              {
+                ...componentPlan.visualPlan,
+                runtimeRenderer: componentPlan.runtimeRenderer,
+              },
               sectionIndex,
             ),
           ),
