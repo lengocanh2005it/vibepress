@@ -1,5 +1,5 @@
 const { query, queryOne } = require('../db/mysql');
-const { deployFullStack, pushToGit } = require('../services/deployService');
+const { deployFullStack, pushToGit, redeployFrontend } = require('../services/deployService');
 
 async function deployJob(req, res) {
   const { jobId, repoName, branch, siteId } = req.body;
@@ -74,4 +74,34 @@ async function checkSubdomain(req, res) {
   res.json({ available: !row });
 }
 
-module.exports = { deployJob, pushToGitJob, checkSubdomain };
+async function redeployJob(req, res) {
+  const { jobId, siteId } = req.body;
+
+  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
+  if (!siteId) return res.status(400).json({ error: 'siteId is required' });
+
+  const migration = await queryOne(
+    'SELECT id, github_repo_url FROM react_migrations WHERE job_id = ? LIMIT 1',
+    [jobId],
+  );
+  if (!migration?.github_repo_url) {
+    return res.status(404).json({ error: 'Migration chưa được deploy lần đầu' });
+  }
+
+  const repoName = migration.github_repo_url.split('/').pop();
+
+  try {
+    const result = await redeployFrontend({ jobId, repoName });
+
+    await query(
+      'UPDATE react_migrations SET deployed_url = ? WHERE id = ?',
+      [result.frontendUrl, migration.id],
+    );
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+module.exports = { deployJob, pushToGitJob, checkSubdomain, redeployJob };

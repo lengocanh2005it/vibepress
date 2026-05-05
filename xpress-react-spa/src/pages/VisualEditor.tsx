@@ -378,6 +378,22 @@ const VisualEditor: React.FC = () => {
     }
   };
 
+  const handleRedeploy = async () => {
+    setPublishState({ loading: true, frontendUrl: null, error: null });
+    try {
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/deploy/redeploy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, siteId }),
+      });
+      const data = await res.json() as { success: boolean; error?: string };
+      if (!res.ok || !data.success) throw new Error(data.error || 'Redeploy failed');
+      setPublishState({ loading: false, frontendUrl: null, error: null });
+    } catch (err) {
+      setPublishState({ loading: false, frontendUrl: null, error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  };
+
   const handlePublishModalConfirm = async () => {
     const slug = publishModal.subdomain.trim().toLowerCase();
     if (!slug) {
@@ -799,8 +815,34 @@ const VisualEditor: React.FC = () => {
               </div>
               {/* Actions */}
               <div className="flex shrink-0 items-center gap-2">
-                {/* Publish button — ẩn nếu đã deploy hoặc vừa publish thành công */}
-                {!state.deployedUrl && (
+                {/* Đã deploy → Visit Site + Redeploy */}
+                {state.deployedUrl ? (
+                  <div className="flex flex-col items-end gap-0.5">
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={state.deployedUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">language</span>
+                        Visit Site
+                      </a>
+                      <button
+                        onClick={() => void handleRedeploy()}
+                        disabled={publishState.loading}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-[#d8cfbf] bg-white px-4 py-1.5 text-sm font-semibold text-[#30483d] transition hover:bg-[#f6f2eb] disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">upload</span>
+                        {publishState.loading ? "Đang redeploy…" : "Redeploy"}
+                      </button>
+                    </div>
+                    {publishState.error && (
+                      <p className="text-[10px] text-red-500">{publishState.error}</p>
+                    )}
+                  </div>
+                ) : (
+                  /* Chưa deploy → Publish */
                   publishState.frontendUrl ? (
                     <a
                       href={publishState.frontendUrl}
@@ -858,6 +900,9 @@ const VisualEditor: React.FC = () => {
                   onLoad={() => {
                     refreshFrameMeta();
                     setLoadedSrc(frameSrc);
+                    if (inspectorActive) {
+                      iframeRef.current?.contentWindow?.postMessage({ type: 'INSPECTOR_ENABLE' }, '*');
+                    }
                   }}
                 />
                 {frameLoading && !isSubmittingRequest && (

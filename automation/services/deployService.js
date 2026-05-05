@@ -402,4 +402,40 @@ async function deployFullStack({ jobId, repoName, branch = 'main', dbCreds = {} 
   return result;
 }
 
-module.exports = { deployFullStack, pushToGit };
+async function redeployFrontend({ jobId, repoName, branch = 'main' }) {
+  console.log(`\n[Redeploy] ── Start jobId=${jobId} ─────────────────────────`);
+
+  if (!GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is not configured');
+  if (!VPS_HOST) throw new Error('VPS_HOST is not configured');
+
+  const generatedDir = path.join(AI_PIPELINE_GENERATED_DIR, jobId);
+  if (!(await fse.pathExists(generatedDir))) {
+    throw new Error(`Generated directory not found for jobId: ${jobId}`);
+  }
+
+  const workDir = path.join(TEMP_ROOT, `redeploy_${jobId}`);
+  await fse.remove(workDir);
+  await fse.copy(generatedDir, workDir);
+
+  try {
+    console.log(`\n[Redeploy] Step 1 — Push delta to GitHub`);
+    const repo = await createGithubRepo(repoName);
+    await initAndPush({
+      workDir,
+      repoCloneUrl: repo.cloneUrl,
+      branch,
+      message: `fix: visual edit update [jobId=${jobId}]`,
+    });
+
+    console.log(`\n[Redeploy] Step 2 — Build & upload frontend`);
+    const backendPort = sitePort(repoName);
+    const { frontendUrl } = await deployFrontendToVps({ workDir, siteDir: repoName, backendPort });
+
+    console.log(`\n[Redeploy] ── Done — Frontend: ${frontendUrl} ────────────`);
+    return { jobId, repoName, githubUrl: repo.htmlUrl, frontendUrl };
+  } finally {
+    await fse.remove(workDir).catch(() => {});
+  }
+}
+
+module.exports = { deployFullStack, pushToGit, redeployFrontend };
