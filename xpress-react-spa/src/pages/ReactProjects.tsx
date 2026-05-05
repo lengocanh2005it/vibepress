@@ -15,8 +15,9 @@ interface Migration {
   site_url: string | null;
 }
 
-const FALLBACK =
-  "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&q=80";
+function fallback(id: string) {
+  return `https://picsum.photos/seed/${id}/1600/900`;
+}
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("vi-VN", {
@@ -50,6 +51,7 @@ export default function ReactProjects() {
         state: {
           jobId: active.job_id,
           siteId: active.site_id,
+          siteUrl: active.site_url,
           previewUrl: data.previewUrl,
           apiBaseUrl: data.apiBaseUrl,
           deployedUrl: active.deployed_url,
@@ -98,7 +100,7 @@ export default function ReactProjects() {
               <div
                 className="absolute inset-0 bg-cover bg-center transition-all duration-700"
                 style={{
-                  backgroundImage: `url(${active.thumbnail_url || FALLBACK})`,
+                  backgroundImage: `url(${active.thumbnail_url || fallback(active.id)})`,
                 }}
               />
               {/* Gradient tối nhẹ ở dưới để đọc text */}
@@ -205,11 +207,11 @@ export default function ReactProjects() {
                     {/* Thumbnail */}
                     <div className="relative w-[120px] h-[80px] shrink-0 rounded-xl overflow-hidden border border-[#e8e4dc]">
                       <img
-                        src={item.thumbnail_url || FALLBACK}
+                        src={item.thumbnail_url || fallback(item.id)}
                         alt={item.site_name || ""}
                         className="w-full h-full object-cover"
                         onError={(e) => {
-                          (e.target as HTMLImageElement).src = FALLBACK;
+                          (e.target as HTMLImageElement).src = fallback(item.id);
                         }}
                       />
                       <span

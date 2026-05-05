@@ -48,6 +48,14 @@ interface ComponentInfo {
   targetElementTag?: string;
   targetTextPreview?: string;
   targetStartLine?: number;
+  sourceNodeId?: string;
+  sectionKey?: string;
+  sectionType?: string;
+  runtimeComponent?: string;
+  runtimeMode?: string;
+  runtimeFidelity?: string;
+  runtimeSafe?: string;
+  runtimeSlug?: string;
 }
 
 type InspectorCommand = 'INSPECTOR_ENABLE' | 'INSPECTOR_DISABLE';
@@ -187,6 +195,34 @@ function roundMetric(value: number, digits = 4): number {
 
 function clampRatio(value: number): number {
   return Math.min(Math.max(roundMetric(value), 0), 1);
+}
+
+function getRuntimeMetadata(el: Element): Pick<
+  ComponentInfo,
+  | 'sourceNodeId'
+  | 'sectionKey'
+  | 'sectionType'
+  | 'runtimeComponent'
+  | 'runtimeMode'
+  | 'runtimeFidelity'
+  | 'runtimeSafe'
+  | 'runtimeSlug'
+> {
+  const runtimeRoot = el.closest('[data-runtime-component]') as HTMLElement | null;
+  const scopedTarget = el.closest(
+    '[data-source-node-id], [data-section-key], [data-section-type]',
+  ) as HTMLElement | null;
+
+  return {
+    sourceNodeId: scopedTarget?.dataset.sourceNodeId || undefined,
+    sectionKey: scopedTarget?.dataset.sectionKey || undefined,
+    sectionType: scopedTarget?.dataset.sectionType || undefined,
+    runtimeComponent: runtimeRoot?.dataset.runtimeComponent || undefined,
+    runtimeMode: runtimeRoot?.dataset.runtimeMode || undefined,
+    runtimeFidelity: runtimeRoot?.dataset.runtimeFidelity || undefined,
+    runtimeSafe: runtimeRoot?.dataset.runtimeSafe || undefined,
+    runtimeSlug: runtimeRoot?.dataset.runtimeSlug || undefined,
+  };
 }
 
 export function startInspectorClient(): void {
@@ -335,6 +371,7 @@ export function startInspectorClient(): void {
       targetElementTag: e.target.tagName.toLowerCase(),
       targetTextPreview: (e.target as HTMLElement).innerText?.slice(0, 120) ?? '',
       targetStartLine: source?.line,
+      ...getRuntimeMetadata(e.target),
     };
 
     window.parent.postMessage({ type: 'INSPECTOR_DATA', payload }, '*');

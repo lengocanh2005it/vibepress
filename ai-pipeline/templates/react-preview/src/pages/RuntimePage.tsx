@@ -118,6 +118,8 @@ export default function RuntimePage({
   return (
     <main
       className="runtime-page"
+      data-runtime-component="RuntimePage"
+      data-runtime-slug={page.slug}
       data-runtime-mode={runtimePlan.mode}
       data-runtime-fidelity={runtimePlan.fidelity}
       data-runtime-safe={runtimePlan.support.safeForRuntime ? 'yes' : 'no'}
@@ -171,20 +173,33 @@ function renderRuntimeNode(
   const style = toNodeStyle(node);
   const className = toClassName(node.customClassNames);
   const text = node.html ?? node.text ?? '';
+  const inspectAttrs = buildRuntimeInspectorAttrs(nodeId, overlaySection);
 
   switch (node.blockName) {
     case 'core/heading': {
       const level = clampHeadingLevel(node.level);
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
       return (
-        <Tag key={key} id={node.domId} className={className} style={style}>
+        <Tag
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {renderRichTextChildren(text, nodeId)}
         </Tag>
       );
     }
     case 'core/paragraph':
       return (
-        <p key={key} id={node.domId} className={className} style={style}>
+        <p
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {renderRichTextChildren(text, nodeId)}
         </p>
       );
@@ -199,21 +214,34 @@ function renderRuntimeNode(
           alt={node.alt ?? ''}
           className={className}
           style={style}
+          {...inspectAttrs}
         />
       );
     case 'core/button':
     case 'core/navigation-link':
-      return renderRuntimeLinkNode(node, key, text, style);
+      return renderRuntimeLinkNode(node, key, text, style, inspectAttrs);
     case 'core/site-title':
       return (
-        <div key={key} id={node.domId} className={className} style={style}>
+        <div
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {renderRichTextChildren(text || ctx.page.title, nodeId)}
         </div>
       );
     case 'core/post-content':
     case 'core/page-content':
       return (
-        <div key={key} id={node.domId} className={className} style={style}>
+        <div
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {renderRichTextChildren(ctx.page.content ?? '', `${nodeId}-content`)}
         </div>
       );
@@ -229,16 +257,29 @@ function renderRuntimeNode(
               }
             : {}),
         },
+        inspectAttrs,
       });
     case 'core/list':
       return (
-        <ul key={key} id={node.domId} className={className} style={style}>
+        <ul
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {children}
         </ul>
       );
     case 'core/list-item':
       return (
-        <li key={key} id={node.domId} className={className} style={style}>
+        <li
+          key={key}
+          id={node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
           {children ?? renderRichTextChildren(text, nodeId)}
         </li>
       );
@@ -247,6 +288,7 @@ function renderRuntimeNode(
         node,
         key,
         children ?? (text ? renderRichTextChildren(text, nodeId) : null),
+        { inspectAttrs },
       );
   }
 }
@@ -519,6 +561,7 @@ function renderRuntimeLinkNode(
   key: string,
   text: string,
   style: CSSProperties,
+  inspectAttrs?: Record<string, string | undefined>,
 ) {
   const className = toClassName(node.customClassNames);
   const href = node.href ?? '#';
@@ -532,6 +575,7 @@ function renderRuntimeLinkNode(
         to={toAppPath(href)}
         className={className}
         style={style}
+        {...inspectAttrs}
       >
         {content}
       </Link>
@@ -547,6 +591,7 @@ function renderRuntimeLinkNode(
       style={style}
       target={node.blockName === 'core/navigation-link' ? undefined : '_self'}
       rel={href.startsWith('http') ? 'noreferrer' : undefined}
+      {...inspectAttrs}
     >
       {content}
     </a>
@@ -557,17 +602,38 @@ function wrapRuntimeNode(
   node: RuntimeBlockNode,
   key: string,
   children: ReactNode,
-  options?: { style?: CSSProperties },
+  options?: {
+    style?: CSSProperties;
+    inspectAttrs?: Record<string, string | undefined>;
+  },
 ) {
   const Tag = pickWrapperTag(node);
   const className = toClassName(node.customClassNames);
   const style = options?.style ?? toNodeStyle(node);
 
   return (
-    <Tag key={key} id={node.domId} className={className} style={style}>
+    <Tag
+      key={key}
+      id={node.domId}
+      className={className}
+      style={style}
+      {...options?.inspectAttrs}
+    >
       {children}
     </Tag>
   );
+}
+
+function buildRuntimeInspectorAttrs(
+  sourceNodeId: string,
+  section?: RuntimePageSection | null,
+): Record<string, string | undefined> {
+  return {
+    'data-runtime-component': 'RuntimePage',
+    'data-source-node-id': sourceNodeId,
+    'data-section-key': section?.debugKey ?? section?.sectionKey,
+    'data-section-type': section?.type,
+  };
 }
 
 function pickWrapperTag(node: RuntimeBlockNode): keyof JSX.IntrinsicElements {

@@ -19,7 +19,6 @@ const {
   deleteCommentFromLocalDb,
 } = require("../services/siteDbService");
 const { simpleGit } = require("simple-git");
-const { extractWpress } = require("../utils/wpressExtractor");
 const { query, queryOne } = require("../db/mysql");
 const {
   GITHUB_TOKEN,
@@ -244,97 +243,6 @@ function getProjectById(req, res) {
   }
 
   return res.json({ success: true, project });
-}
-
-async function uploadTheme(req, res) {
-  const projectId = req.body?.projectId;
-  const uploadedZipPath = req.file?.path;
-  const originalName = req.file?.originalname || "";
-  const workspaceRoot = projectId ? path.join(TEMP_ROOT, projectId) : null;
-
-  if (!projectId) {
-    cleanupWorkspace(workspaceRoot, uploadedZipPath);
-    return res.status(400).json({
-      success: false,
-      code: "PROJECT_ID_REQUIRED",
-      message: "projectId is required",
-    });
-  }
-
-  if (!req.file || !originalName.toLowerCase().endsWith(".wpress")) {
-    cleanupWorkspace(workspaceRoot, uploadedZipPath);
-    return res.status(400).json({
-      success: false,
-      code: "INVALID_WPRESS",
-      message: "Please upload a valid .wpress file",
-    });
-  }
-
-  const db = readDb();
-  const project = db.projects[projectId];
-  if (!project) {
-    cleanupWorkspace(workspaceRoot, uploadedZipPath);
-    return res.status(404).json({
-      success: false,
-      code: "PROJECT_NOT_FOUND",
-      message: "Project not found",
-    });
-  }
-
-  const wpSourceDir = path.join(workspaceRoot, "wp-source");
-
-  try {
-    updateProject(projectId, (p) => {
-      p.status = "uploading";
-      p.updatedAt = new Date().toISOString();
-    });
-
-    await fse.ensureDir(wpSourceDir);
-
-    await extractWpress(uploadedZipPath, wpSourceDir);
-
-    // const dbInfo = await VPGetDbInfo();
-
-    updateProject(projectId, (p) => {
-      p.status = "pushing_wp_repo";
-      // p.dbInfo = dbInfo;
-      p.updatedAt = new Date().toISOString();
-    });
-    await pushDirectoryToRepo(
-      wpSourceDir,
-      project.wpRepoUrl,
-      `Upload WP source for ${projectId}`,
-    );
-
-    updateProject(projectId, (p) => {
-      p.status = "completed";
-      p.updatedAt = new Date().toISOString();
-    });
-
-    return res.status(200).json({
-      success: true,
-      projectId,
-      message: "Bien doi thanh cong! Nguon WP da duoc upload len GitHub.",
-      wpRepoUrl: project.wpRepoUrl,
-      // dbInfo,
-    });
-  } catch (error) {
-    console.error("[uploadTheme] error:", error);
-    updateProject(projectId, (p) => {
-      p.status = "failed";
-      p.updatedAt = new Date().toISOString();
-      p.errorCode = error.message || "UNKNOWN_ERROR";
-    });
-
-    return res.status(500).json({
-      success: false,
-      projectId,
-      code: "UPLOAD_PROCESS_FAILED",
-      message: error.message || "Xu ly that bai",
-    });
-  } finally {
-    cleanupWorkspace(workspaceRoot, uploadedZipPath);
-  }
 }
 
 // -------------------------------------------------------
@@ -1348,7 +1256,6 @@ module.exports = {
   ensureFileSystemState,
   createProject,
   getProjectById,
-  uploadTheme,
   registerWpSite,
   getToken,
   syncComplete,

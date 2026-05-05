@@ -34,6 +34,14 @@ export interface ComponentInfo {
   targetElementTag?: string;
   targetTextPreview?: string;
   targetStartLine?: number;
+  sourceNodeId?: string;
+  sectionKey?: string;
+  sectionType?: string;
+  runtimeComponent?: string;
+  runtimeMode?: string;
+  runtimeFidelity?: string;
+  runtimeSafe?: string;
+  runtimeSlug?: string;
 }
 
 export interface InspectorMessage {
