@@ -194,6 +194,24 @@ export function inferDeterministicRouteContract(
     };
   }
 
+  if (
+    signals.hasConcretePageBindings &&
+    (templateBase === 'page' ||
+      /^page-.+$/.test(templateBase) ||
+      normalizedNeeds.has('page-detail'))
+  ) {
+    evidence.add('concrete-page-bindings');
+    return buildFixedArchetypeContract({
+      archetype: 'single-page',
+      route: templateBase === 'page' ? '/page/:slug' : `/${routeSlug}/:slug`,
+      routeMode: 'hard',
+      isDetail: true,
+      requiredDataNeeds: ['page-detail'],
+      disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+      evidence,
+    });
+  }
+
   const structureFirst = inferStructureFirstArchetype({
     input,
     templateBase,

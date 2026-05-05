@@ -126,6 +126,7 @@ export class PlanReviewerService {
       reviewed,
       warnings,
       warningCodes,
+      reviewed,
       repoManifest,
     );
     reviewed = this.fixDuplicateRoutes(reviewed, warnings, warningCodes);
@@ -256,7 +257,7 @@ export class PlanReviewerService {
     repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item, repoManifest);
+      const policy = this.inferRoutePolicy(item, plan, repoManifest);
       let next = item;
 
       // Home hierarchy normalization may intentionally keep a lower-priority
@@ -326,7 +327,7 @@ export class PlanReviewerService {
     repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item, repoManifest);
+      const policy = this.inferRoutePolicy(item, plan, repoManifest);
       let next = item;
 
       if (policy.routeMode === 'hard') {
@@ -388,10 +389,15 @@ export class PlanReviewerService {
     plan: PlanResult,
     warnings: string[],
     warningCodes: PlanReviewWarningCode[],
+    fullPlan?: PlanResult,
     repoManifest?: RepoThemeManifest,
   ): PlanResult {
     return plan.map((item) => {
-      const policy = this.inferRoutePolicy(item, repoManifest);
+      const policy = this.inferRoutePolicy(
+        item,
+        fullPlan ?? plan,
+        repoManifest,
+      );
       const normalized = item.dataNeeds.filter((need): need is PlanDataNeed =>
         VALID_DATA_NEEDS.has(need as PlanDataNeed),
       );
@@ -687,7 +693,7 @@ export class PlanReviewerService {
     const pageRoutes = new Map<string, string[]>();
 
     for (const item of plan) {
-      const policy = this.inferRoutePolicy(item, repoManifest);
+      const policy = this.inferRoutePolicy(item, plan, repoManifest);
       templateCounts.set(
         item.templateName,
         (templateCounts.get(item.templateName) ?? 0) + 1,
@@ -1270,8 +1276,25 @@ export class PlanReviewerService {
 
   private inferRoutePolicy(
     item: ComponentPlan,
+    plan?: PlanResult,
     repoManifest?: RepoThemeManifest,
   ): RoutePolicy {
+    const hasConcretePageBindings =
+      item.runtimeRenderer === 'runtime-page' ||
+      (!!plan &&
+        item.type === 'page' &&
+        !item.fixedSlug &&
+        item.dataNeeds.includes('page-detail') &&
+        plan.some(
+          (candidate) =>
+            candidate !== item &&
+            candidate.templateName === item.templateName &&
+            candidate.type === 'page' &&
+            candidate.isDetail === true &&
+            !!candidate.fixedSlug &&
+            candidate.dataNeeds.includes('page-detail'),
+        ));
+
     return inferDeterministicRouteContract({
       templateName: item.templateName,
       componentName: item.componentName,
@@ -1286,6 +1309,7 @@ export class PlanReviewerService {
       planningSourceFile: item.planningSourceFile,
       planningSourceLabel: item.planningSourceLabel,
       planningSourceSummary: item.planningSourceSummary,
+      hasConcretePageBindings,
       repoRouteHints: buildRepoRouteHints(item.templateName, repoManifest),
     });
   }
@@ -1304,27 +1328,41 @@ export class PlanReviewerService {
       return false;
     }
 
-    if (
-      !items.every(
-        (item) =>
-          item.type === 'page' &&
-          item.isDetail === true &&
-          !!item.fixedSlug &&
-          item.dataNeeds.includes('page-detail'),
-      )
-    ) {
+    const runtimeItems = items.filter(
+      (item) =>
+        item.type === 'page' &&
+        item.runtimeRenderer === 'runtime-page' &&
+        item.isDetail === true &&
+        !item.fixedSlug &&
+        item.dataNeeds.includes('page-detail'),
+    );
+    const fixedItems = items.filter(
+      (item) =>
+        item.type === 'page' &&
+        item.isDetail === true &&
+        !!item.fixedSlug &&
+        item.dataNeeds.includes('page-detail'),
+    );
+
+    if (runtimeItems.length > 1) {
+      return false;
+    }
+    if (runtimeItems.length + fixedItems.length !== items.length) {
+      return false;
+    }
+    if (fixedItems.length === 0) {
       return false;
     }
 
     const bindingKeys = new Set(
-      items.map((item) =>
+      fixedItems.map((item) =>
         String(item.fixedPageId ?? '').trim()
           ? `id:${String(item.fixedPageId).trim()}`
           : `slug:${String(item.fixedSlug).trim()}`,
       ),
     );
 
-    return bindingKeys.size === items.length;
+    return bindingKeys.size === fixedItems.length;
   }
 
   private isValidComponentName(name: string): boolean {
