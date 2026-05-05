@@ -113,9 +113,7 @@ import {
   buildComponentRenderContract,
   type ComponentRenderContract,
 } from './render-contract.schema.js';
-import {
-  isDefaultRuntimePageTemplateCandidate,
-} from './runtime-page-policy.util.js';
+import { isDefaultRuntimePageTemplateCandidate } from './runtime-page-policy.util.js';
 import type {
   PlannerAuthorityLevel,
   PlannerClusterKind,
@@ -666,11 +664,7 @@ export class PlannerService {
         componentPlan.runtimeRenderer === 'runtime-page'
           ? `"${componentPlan.componentName}": skipped AI visual plan (built-in runtime page renderer owns structure at runtime)`
           : `"${componentPlan.componentName}": skipped AI visual plan (standard partial without matching section schema)`;
-      this.logger.log(
-        this.formatPhaseCLog(
-          skipSummary,
-        ),
-      );
+      this.logger.log(this.formatPhaseCLog(skipSummary));
       return {
         ...componentPlan,
         planningSourceLabel:
@@ -3737,9 +3731,7 @@ export class PlannerService {
       ]
         .filter(Boolean)
         .join(' | ');
-      this.logger.log(
-        `[Phase B: Concrete Page Expansion] ${detail}`,
-      );
+      this.logger.log(`[Phase B: Concrete Page Expansion] ${detail}`);
     }
 
     return result;

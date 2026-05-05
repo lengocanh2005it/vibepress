@@ -59,8 +59,7 @@ export class FrameGeneratorService {
       route,
       fixedSlug,
       runtimeRenderer,
-    } =
-      options;
+    } = options;
     const needs = this.normalizeNeeds(dataNeeds);
     const usesRouteParams =
       isDetail && /:[A-Za-z_]/.test(route ?? '') && !fixedSlug;

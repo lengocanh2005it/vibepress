@@ -163,6 +163,10 @@ function collectPlanReviewBlockingIssues(
           ?.filter(
             (component) =>
               !component.visualPlan &&
+              !(
+                'runtimeRenderer' in component &&
+                component.runtimeRenderer === 'runtime-page'
+              ) &&
               !getComponentStrategy(component.componentName).skipAiVisualPlan,
           )
           .map((component) => component.componentName) ?? [];
@@ -6863,13 +6867,13 @@ export default function ${component.name}() {
       );
     }
     if (dataNeeds.has('pageDetail')) {
-        lines.push(
-          fixedSlug
-            ? `Main record binding is mandatory: fetch the exact page only from \`/api/pages/${fixedSlug}\`. Do NOT switch to \`/api/pages/\${slug}\`, \`useParams()\` for the main record, or \`/api/pages\` + lookup.`
-            : componentPlan?.runtimeRenderer === 'runtime-page'
+      lines.push(
+        fixedSlug
+          ? `Main record binding is mandatory: fetch the exact page only from \`/api/pages/${fixedSlug}\`. Do NOT switch to \`/api/pages/\${slug}\`, \`useParams()\` for the main record, or \`/api/pages\` + lookup.`
+          : componentPlan?.runtimeRenderer === 'runtime-page'
             ? 'Main record binding is mandatory: fetch the page detail from `/api/runtime/pages/${slug}`. Do NOT replace it with `/api/pages/${slug}` and do NOT replace it with `/api/pages` + lookup.'
             : 'Main record binding is mandatory: fetch the page detail from `/api/pages/${slug}` (or equivalent string concatenation with `slug`). Do NOT replace it with `/api/pages` + lookup.',
-        );
+      );
     }
     if (dataNeeds.has('postDetail')) {
       lines.push(

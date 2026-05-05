@@ -15,7 +15,9 @@ export function isDefaultRuntimePageTemplateCandidate(input: {
 }
 
 function normalizeTemplateIdentifier(value: string | undefined): string {
-  const trimmed = String(value ?? '').trim().toLowerCase();
+  const trimmed = String(value ?? '')
+    .trim()
+    .toLowerCase();
   if (!trimmed) return '';
   return trimmed.replace(/\.(php|html)$/i, '');
 }

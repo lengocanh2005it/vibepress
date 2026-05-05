@@ -262,6 +262,136 @@ function extractRuntimeInfoBoxCard(
   };
 }
 
+function rewriteRuntimeHtml(html: string | null | undefined): string {
+  return rewriteInternalLinks(rewriteWpContentAssetUrls(String(html ?? '').trim()));
+}
+
+function walkRuntimeBlocks(
+  block: RuntimeParsedBlock,
+  visit: (candidate: RuntimeParsedBlock) => void,
+) {
+  visit(block);
+  block.children.forEach((child) => walkRuntimeBlocks(child, visit));
+}
+
+function findFirstRuntimeBlock(
+  block: RuntimeParsedBlock,
+  blockNames: string[],
+): RuntimeParsedBlock | null {
+  let result: RuntimeParsedBlock | null = null;
+  walkRuntimeBlocks(block, (candidate) => {
+    if (!result && blockNames.includes(candidate.blockName)) {
+      result = candidate;
+    }
+  });
+  return result;
+}
+
+function collectRuntimeBlocks(
+  block: RuntimeParsedBlock,
+  predicate: (candidate: RuntimeParsedBlock) => boolean,
+): RuntimeParsedBlock[] {
+  const matches: RuntimeParsedBlock[] = [];
+  walkRuntimeBlocks(block, (candidate) => {
+    if (predicate(candidate)) matches.push(candidate);
+  });
+  return matches;
+}
+
+function extractRuntimeImageData(
+  block: RuntimeParsedBlock,
+): { src?: string; alt?: string } {
+  const attrs = block.attrs ?? {};
+  const directCandidates = [
+    attrs.mediaUrl,
+    attrs.imageUrl,
+    attrs.url,
+    attrs.backgroundImageUrl,
+    attrs?.backgroundImage?.url,
+  ]
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean);
+
+  const directSrc =
+    directCandidates[0] ||
+    extractFirstMatch(rewriteRuntimeHtml(block.innerHtml), /\bsrc=(["'])([^"']+)\1/i, 2);
+  const directAlt =
+    (typeof attrs.mediaAlt === 'string' && attrs.mediaAlt.trim()) ||
+    (typeof attrs.imageAlt === 'string' && attrs.imageAlt.trim()) ||
+    (typeof attrs.alt === 'string' && attrs.alt.trim()) ||
+    extractFirstMatch(rewriteRuntimeHtml(block.innerHtml), /\balt=(["'])([^"']*)\1/i, 2);
+
+  if (directSrc) {
+    return {
+      src: localizeWpUploadAssetUrl(directSrc) ?? directSrc,
+      alt: directAlt,
+    };
+  }
+
+  for (const child of block.children) {
+    const childImage = extractRuntimeImageData(child);
+    if (childImage.src) return childImage;
+  }
+
+  return {};
+}
+
+function extractRuntimeSectionText(block: RuntimeParsedBlock): {
+  title?: string;
+  body?: string;
+} {
+  const titleBlock = findFirstRuntimeBlock(block, [
+    'core/heading',
+    'uagb/advanced-heading',
+  ]);
+  const title =
+    titleBlock &&
+    (stripAllHtml(titleBlock.innerHtml) ||
+      String(titleBlock.attrs.heading ?? titleBlock.attrs.title ?? '').trim());
+
+  const bodyBlocks = collectRuntimeBlocks(
+    block,
+    (candidate) =>
+      [
+        'core/paragraph',
+        'core/list-item',
+        'core/button',
+        'core/navigation-link',
+      ].includes(candidate.blockName) &&
+      rewriteRuntimeHtml(candidate.innerHtml).length > 0,
+  );
+  const body = bodyBlocks
+    .map((candidate) => rewriteRuntimeHtml(candidate.innerHtml))
+    .filter(Boolean)
+    .join('');
+
+  return {
+    ...(title ? { title } : {}),
+    ...(body ? { body } : {}),
+  };
+}
+
+function extractRuntimeColumnCard(
+  block: RuntimeParsedBlock,
+  index: number,
+): Record<string, any> | null {
+  const image = extractRuntimeImageData(block);
+  const text = extractRuntimeSectionText(block);
+  const href = extractFirstMatch(
+    rewriteRuntimeHtml(block.innerHtml),
+    /\bhref=(["'])([^"']+)\1/i,
+    2,
+  );
+  if (!text.title && !text.body && !image.src) return null;
+  return {
+    heading: text.title ?? `Card ${index + 1}`,
+    body: text.body ?? '',
+    ...(image.src ? { imageSrc: image.src } : {}),
+    ...(image.alt ? { imageAlt: image.alt } : {}),
+    ...(href ? { href } : {}),
+  };
+}
+
 function extractRuntimeBoxSpacing(
   value: Record<string, any> | undefined,
 ): Record<string, string> | undefined {
@@ -299,9 +429,34 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
   ) {
     colors.background = block.attrs.backgroundColor.trim();
   }
+  if (
+    typeof block.attrs?.overlayColor === 'string' &&
+    block.attrs.overlayColor.trim()
+  ) {
+    colors.overlay = block.attrs.overlayColor.trim();
+  } else if (
+    typeof block.attrs?.customOverlayColor === 'string' &&
+    block.attrs.customOverlayColor.trim()
+  ) {
+    colors.overlay = block.attrs.customOverlayColor.trim();
+  }
+  const borderRadius =
+    typeof block.attrs?.style?.border?.radius === 'string' &&
+    block.attrs.style.border.radius.trim()
+      ? block.attrs.style.border.radius.trim()
+      : undefined;
+  const blockGap = extractRuntimeBlockGap(spacing?.blockGap);
+  const gap =
+    typeof blockGap === 'string'
+      ? blockGap
+      : typeof block.attrs?.gap === 'string' && block.attrs.gap.trim()
+        ? block.attrs.gap.trim()
+        : undefined;
   const styleSpec: Record<string, any> = {
     ...(classNames.length ? { classNames } : {}),
     ...(Object.keys(colors).length > 0 ? { colors } : {}),
+    ...(borderRadius ? { borderRadius } : {}),
+    ...(gap ? { gap } : {}),
     ...(spacing
       ? {
           spacing: {
@@ -309,9 +464,7 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
             ...(extractRuntimeBoxSpacing(spacing.padding)
               ? { padding: extractRuntimeBoxSpacing(spacing.padding) }
               : {}),
-            ...(extractRuntimeBlockGap(spacing.blockGap)
-              ? { blockGap: extractRuntimeBlockGap(spacing.blockGap) }
-              : {}),
+            ...(blockGap ? { blockGap } : {}),
           },
         }
       : {}),
@@ -325,13 +478,20 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
             typography.lineHeight.trim()
               ? { lineHeight: typography.lineHeight.trim() }
               : {}),
-            ...(typeof typography.fontStyle === 'string' &&
-            typography.fontStyle.trim()
-              ? { fontWeight: typography.fontStyle.trim() }
+            ...(typeof typography.fontWeight === 'string' &&
+            typography.fontWeight.trim()
+              ? { fontWeight: typography.fontWeight.trim() }
+              : typeof typography.fontStyle === 'string' &&
+                  typography.fontStyle.trim()
+                ? { fontWeight: typography.fontStyle.trim() }
               : {}),
             ...(typeof typography.textAlign === 'string' &&
             typography.textAlign.trim()
               ? { textAlign: typography.textAlign.trim() }
+              : {}),
+            ...(typeof typography.fontFamily === 'string' &&
+            typography.fontFamily.trim()
+              ? { fontFamily: typography.fontFamily.trim() }
               : {}),
           },
         }
@@ -342,6 +502,10 @@ function buildRuntimeStyleSpec(block: RuntimeParsedBlock, classNames: string[]) 
             ...(typeof dimensions.minHeight === 'string' &&
             dimensions.minHeight.trim()
               ? { minHeight: dimensions.minHeight.trim() }
+              : {}),
+            ...(typeof dimensions.width === 'string' &&
+            dimensions.width.trim()
+              ? { width: dimensions.width.trim() }
               : {}),
           },
         }
@@ -381,11 +545,29 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
       result.orientation = layout.orientation.trim();
     }
   }
+  if (
+    typeof block.attrs?.mediaPosition === 'string' &&
+    block.attrs.mediaPosition.trim()
+  ) {
+    result.orientation = block.attrs.mediaPosition.trim();
+  }
   if (typeof block.attrs?.align === 'string' && block.attrs.align.trim()) {
     result.align = block.attrs.align.trim();
   }
   if (typeof block.attrs?.width === 'string' && block.attrs.width.trim()) {
     result.columnWidth = block.attrs.width.trim();
+  }
+  if (typeof block.attrs?.columns === 'number' && block.attrs.columns > 0) {
+    result.columns = block.attrs.columns;
+  } else if (
+    block.blockName === 'core/columns' ||
+    block.blockName === 'uagb/container' ||
+    block.blockName === 'uagb/section'
+  ) {
+    const visibleColumns = block.children.filter((child) =>
+      ['core/column', 'uagb/container', 'uagb/section'].includes(child.blockName),
+    ).length;
+    if (visibleColumns > 0) result.columns = visibleColumns;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -394,7 +576,16 @@ function buildRuntimeBlockNode(
   block: RuntimeParsedBlock,
   path: string,
 ): Record<string, any> {
-  const kind = block.blockName.split('/').pop() || 'group';
+  const kind =
+    block.blockName === 'core/media-text'
+      ? 'media-text'
+      : block.blockName === 'core/cover'
+        ? 'cover'
+        : block.blockName === 'core/columns'
+          ? 'columns'
+          : block.blockName === 'core/column'
+            ? 'column'
+            : block.blockName.split('/').pop() || 'group';
   const innerHtml = block.innerHtml.trim();
   const childNodes = block.children.map((child, index) =>
     buildRuntimeBlockNode(child, `${path}.${index + 1}`),
@@ -411,7 +602,14 @@ function buildRuntimeBlockNode(
         ? 'section'
         : block.blockName === 'core/column'
           ? 'div'
+          : block.blockName === 'core/media-text'
+            ? 'section'
+            : block.blockName === 'core/group' ||
+                block.blockName === 'uagb/container' ||
+                block.blockName === 'uagb/section'
+              ? 'section'
           : undefined;
+  const image = extractRuntimeImageData(block);
   const node: Record<string, any> = {
     nodeId: path,
     kind,
@@ -432,6 +630,19 @@ function buildRuntimeBlockNode(
         }
       : {}),
     ...(classNames.length ? { customClassNames: classNames } : {}),
+    ...(styleSpec?.colors?.background ? { bgColor: styleSpec.colors.background } : {}),
+    ...(styleSpec?.colors?.text ? { textColor: styleSpec.colors.text } : {}),
+    ...(styleSpec?.colors?.overlay ? { overlayColor: styleSpec.colors.overlay } : {}),
+    ...(styleSpec?.borderRadius ? { borderRadius: styleSpec.borderRadius } : {}),
+    ...(styleSpec?.gap ? { gap: styleSpec.gap } : {}),
+    ...(styleSpec?.spacing?.padding ? { padding: styleSpec.spacing.padding } : {}),
+    ...(styleSpec?.spacing?.margin ? { margin: styleSpec.spacing.margin } : {}),
+    ...(styleSpec?.dimensions?.minHeight ? { minHeight: styleSpec.dimensions.minHeight } : {}),
+    ...(styleSpec?.typography?.fontFamily ? { fontFamily: styleSpec.typography.fontFamily } : {}),
+    ...(styleSpec?.typography?.textAlign ? { textAlign: styleSpec.typography.textAlign } : {}),
+    ...(layoutSpec?.columnWidth ? { columnWidth: layoutSpec.columnWidth } : {}),
+    ...(layoutSpec?.justifyContent ? { justifyContent: layoutSpec.justifyContent } : {}),
+    ...(layoutSpec?.alignItems ? { align: layoutSpec.alignItems } : {}),
     ...(typeof block.attrs.anchor === 'string' && block.attrs.anchor.trim()
       ? { domId: block.attrs.anchor.trim() }
       : {}),
@@ -442,11 +653,13 @@ function buildRuntimeBlockNode(
     Number(block.attrs.level ?? 0) ||
     Number(extractFirstMatch(innerHtml, /<h([1-6])\b/i));
   const src =
-    (typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
-    extractFirstMatch(innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2);
+    image.src ||
+    ((typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
+      extractFirstMatch(innerHtml, /\bsrc=(["'])([^"']+)\1/i, 2));
   const alt =
-    (typeof block.attrs.alt === 'string' && block.attrs.alt.trim()) ||
-    extractFirstMatch(innerHtml, /\balt=(["'])([^"']*)\1/i, 2);
+    image.alt ||
+    ((typeof block.attrs.alt === 'string' && block.attrs.alt.trim()) ||
+      extractFirstMatch(innerHtml, /\balt=(["'])([^"']*)\1/i, 2));
   const href =
     (typeof block.attrs.url === 'string' && block.attrs.url.trim()) ||
     extractFirstMatch(innerHtml, /\bhref=(["'])([^"']+)\1/i, 2);
@@ -461,6 +674,8 @@ function buildRuntimeBlockNode(
       'core/site-title',
       'core/site-tagline',
       'uagb/advanced-heading',
+      'core/button',
+      'core/navigation-link',
     ].includes(block.blockName)
   ) {
     if (htmlText) node.html = htmlText;
@@ -475,6 +690,7 @@ function buildRuntimeBlockNode(
     [
       'core/image',
       'core/cover',
+      'core/media-text',
       'core/site-logo',
       'uagb/info-box',
       'uagb/slider-child',
@@ -504,6 +720,10 @@ function buildRuntimeBlockNode(
     node.bgColor = block.attrs.backgroundColor;
   }
 
+  if (block.blockName === 'core/media-text' && !node.layout) {
+    node.layout = { kind: 'grid', columns: 2 };
+  }
+
   return node;
 }
 
@@ -531,41 +751,30 @@ function collectRuntimeSectionsAndBindings(
     'uagb/section',
     'uagb/advanced-heading',
     'uagb/icon-list',
+    'uagb/icon-list-child',
+    'uagb/buttons',
+    'uagb/button-group',
+    'uagb/image',
   ]);
 
-  const visit = (block: RuntimeParsedBlock, path: string) => {
-    if (
-      block.blockName.startsWith('uagb/') &&
-      !supportedInteractive.has(block.blockName)
-    ) {
-      unsupportedBlocks.add(block.blockName);
-    }
-
-    const directInfoBoxes = block.children.filter(
-      (child) => child.blockName === 'uagb/info-box',
-    );
-    if (directInfoBoxes.length >= 2) {
-      const debugKey = `runtime-card-grid-${++counter}`;
-      const sectionId = `runtime-section-${counter}`;
-      sections.push({
+  const buildSectionBase = (
+    block: RuntimeParsedBlock,
+    path: string,
+    type: string,
+  ) => {
+    const sectionId = `runtime-section-${++counter}`;
+    const debugKey = `runtime-${type}-${counter}`;
+    return {
+      sectionId,
+      debugKey,
+      base: {
         id: sectionId,
-        type: 'card-grid',
+        type,
         debugKey,
         sectionKey: sectionId,
         sourceNodeId: path,
         blockName: block.blockName,
         sourceRef: { sourceNodeId: path },
-        columns: Math.min(Math.max(directInfoBoxes.length, 1), 4),
-        title:
-          extractFirstMatch(
-            rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim())),
-            /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i,
-          ) ?? undefined,
-        subtitle:
-          extractFirstMatch(
-            rewriteInternalLinks(rewriteWpContentAssetUrls(block.innerHtml.trim())),
-            /<p[^>]*>([\s\S]*?)<\/p>/i,
-          ) ?? undefined,
         ...(buildRuntimeLayoutSpec(block)
           ? { layout: buildRuntimeLayoutSpec(block) }
           : {}),
@@ -580,37 +789,148 @@ function collectRuntimeSectionsAndBindings(
               ),
             }
           : {}),
+      },
+    };
+  };
+
+  const pushBinding = (
+    block: RuntimeParsedBlock,
+    path: string,
+    renderer: string,
+    sectionId: string,
+    debugKey: string,
+  ) => {
+    bindings.push({
+      nodeId: path,
+      blockName: block.blockName,
+      renderer,
+      preserveWrapper: true,
+      preserveChildrenOrder: true,
+      childCount: block.children.length,
+      sectionId,
+      sectionDebugKey: debugKey,
+    });
+  };
+
+  const visit = (block: RuntimeParsedBlock, path: string) => {
+    if (
+      block.blockName.startsWith('uagb/') &&
+      !supportedInteractive.has(block.blockName)
+    ) {
+      unsupportedBlocks.add(block.blockName);
+    }
+
+    const directInfoBoxes = block.children.filter(
+      (child) => child.blockName === 'uagb/info-box',
+    );
+    if (directInfoBoxes.length >= 2) {
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'card-grid',
+      );
+      sections.push({
+        ...base,
+        columns: Math.min(Math.max(directInfoBoxes.length, 1), 4),
+        ...extractRuntimeSectionText(block),
         cards: directInfoBoxes.map((child, index) =>
           extractRuntimeInfoBoxCard(child, index),
         ),
       });
-      bindings.push({
-        nodeId: path,
-        blockName: block.blockName,
-        renderer: 'card-grid',
-        preserveWrapper: true,
-        preserveChildrenOrder: true,
-        childCount: directInfoBoxes.length,
-        sectionId,
-        sectionDebugKey: debugKey,
-      });
+      pushBinding(block, path, 'card-grid', sectionId, debugKey);
       block.children
         .filter((child) => child.blockName !== 'uagb/info-box')
         .forEach((child, index) => visit(child, `${path}.${index + 1}`));
       return;
     }
 
-    if (block.blockName === 'uagb/tabs') {
-      const debugKey = `runtime-tabs-${++counter}`;
-      const sectionId = `runtime-section-${counter}`;
+    if (block.blockName === 'core/media-text') {
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'media-text',
+      );
+      const image = extractRuntimeImageData(block);
       sections.push({
-        id: sectionId,
-        type: 'tabs',
-        debugKey,
-        sectionKey: sectionId,
-        sourceNodeId: path,
-        blockName: block.blockName,
-        sourceRef: { sourceNodeId: path },
+        ...base,
+        ...extractRuntimeSectionText(block),
+        ...(image.src ? { imageSrc: image.src } : {}),
+        ...(image.alt ? { imageAlt: image.alt } : {}),
+      });
+      pushBinding(block, path, 'media-text', sectionId, debugKey);
+      return;
+    }
+
+    if (block.blockName === 'core/cover') {
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'cover',
+      );
+      const image = extractRuntimeImageData(block);
+      const text = extractRuntimeSectionText(block);
+      if (image.src || text.title || text.body) {
+        sections.push({
+          ...base,
+          ...text,
+          ...(image.src ? { imageSrc: image.src } : {}),
+          ...(image.alt ? { imageAlt: image.alt } : {}),
+        });
+        pushBinding(block, path, 'cover', sectionId, debugKey);
+        return;
+      }
+    }
+
+    if (block.blockName === 'core/columns') {
+      const cards = block.children
+        .filter((child) => child.blockName === 'core/column')
+        .map((child, index) => extractRuntimeColumnCard(child, index))
+        .filter((card): card is Record<string, any> => Boolean(card));
+      if (cards.length >= 2) {
+        const { sectionId, debugKey, base } = buildSectionBase(
+          block,
+          path,
+          'card-grid',
+        );
+        sections.push({
+          ...base,
+          ...extractRuntimeSectionText(block),
+          columns: cards.length,
+          cards,
+        });
+        pushBinding(block, path, 'card-grid', sectionId, debugKey);
+        return;
+      }
+    }
+
+    if (['core/group', 'uagb/container', 'uagb/section'].includes(block.blockName)) {
+      const image = extractRuntimeImageData(block);
+      const text = extractRuntimeSectionText(block);
+      if (image.src && (text.title || text.body)) {
+        const { sectionId, debugKey, base } = buildSectionBase(
+          block,
+          path,
+          'media-text',
+        );
+        sections.push({
+          ...base,
+          ...text,
+          ...(image.src ? { imageSrc: image.src } : {}),
+          ...(image.alt ? { imageAlt: image.alt } : {}),
+        });
+        pushBinding(block, path, 'media-text', sectionId, debugKey);
+        return;
+      }
+    }
+
+    if (block.blockName === 'uagb/tabs') {
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'tabs',
+      );
+      sections.push({
+        ...base,
         tabs: block.children.map((child, index) => ({
           heading:
             String(child.attrs.heading ?? child.attrs.title ?? '').trim() ||
@@ -625,27 +945,15 @@ function collectRuntimeSectionsAndBindings(
           imageAlt: extractFirstMatch(child.innerHtml, /\balt=(["'])([^"']*)\1/i, 2),
         })),
       });
-      bindings.push({
-        nodeId: path,
-        blockName: block.blockName,
-        renderer: 'tabs',
-        preserveWrapper: true,
-        preserveChildrenOrder: true,
-        childCount: block.children.length,
-        sectionId,
-        sectionDebugKey: debugKey,
-      });
+      pushBinding(block, path, 'tabs', sectionId, debugKey);
     } else if (block.blockName === 'uagb/slider') {
-      const debugKey = `runtime-carousel-${++counter}`;
-      const sectionId = `runtime-section-${counter}`;
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'carousel',
+      );
       sections.push({
-        id: sectionId,
-        type: 'carousel',
-        debugKey,
-        sectionKey: sectionId,
-        sourceNodeId: path,
-        blockName: block.blockName,
-        sourceRef: { sourceNodeId: path },
+        ...base,
         slides: block.children.map((child, index) => ({
           heading:
             extractFirstMatch(child.innerHtml, /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
@@ -659,30 +967,18 @@ function collectRuntimeSectionsAndBindings(
           imageAlt: extractFirstMatch(child.innerHtml, /\balt=(["'])([^"']*)\1/i, 2),
         })),
       });
-      bindings.push({
-        nodeId: path,
-        blockName: block.blockName,
-        renderer: 'carousel',
-        preserveWrapper: true,
-        preserveChildrenOrder: true,
-        childCount: block.children.length,
-        sectionId,
-        sectionDebugKey: debugKey,
-      });
+      pushBinding(block, path, 'carousel', sectionId, debugKey);
     } else if (
       block.blockName === 'uagb/faq' ||
       block.blockName === 'uagb/content-toggle'
     ) {
-      const debugKey = `runtime-accordion-${++counter}`;
-      const sectionId = `runtime-section-${counter}`;
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'accordion',
+      );
       sections.push({
-        id: sectionId,
-        type: 'accordion',
-        debugKey,
-        sectionKey: sectionId,
-        sourceNodeId: path,
-        blockName: block.blockName,
-        sourceRef: { sourceNodeId: path },
+        ...base,
         items: block.children.map((child, index) => ({
           heading:
             String(
@@ -694,40 +990,19 @@ function collectRuntimeSectionsAndBindings(
           body: rewriteInternalLinks(rewriteWpContentAssetUrls(child.innerHtml.trim())),
         })),
       });
-      bindings.push({
-        nodeId: path,
-        blockName: block.blockName,
-        renderer: 'accordion',
-        preserveWrapper: true,
-        preserveChildrenOrder: true,
-        childCount: block.children.length,
-        sectionId,
-        sectionDebugKey: debugKey,
-      });
+      pushBinding(block, path, 'accordion', sectionId, debugKey);
     } else if (block.blockName === 'uagb/info-box') {
-      const debugKey = `runtime-card-grid-${++counter}`;
-      const sectionId = `runtime-section-${counter}`;
+      const { sectionId, debugKey, base } = buildSectionBase(
+        block,
+        path,
+        'card-grid',
+      );
       sections.push({
-        id: sectionId,
-        type: 'card-grid',
-        debugKey,
-        sectionKey: sectionId,
-        sourceNodeId: path,
-        blockName: block.blockName,
-        sourceRef: { sourceNodeId: path },
+        ...base,
         columns: 1,
         cards: [extractRuntimeInfoBoxCard(block, 0)],
       });
-      bindings.push({
-        nodeId: path,
-        blockName: block.blockName,
-        renderer: 'card-grid',
-        preserveWrapper: true,
-        preserveChildrenOrder: true,
-        childCount: block.children.length,
-        sectionId,
-        sectionDebugKey: debugKey,
-      });
+      pushBinding(block, path, 'card-grid', sectionId, debugKey);
     }
 
     block.children.forEach((child, index) => visit(child, `${path}.${index + 1}`));

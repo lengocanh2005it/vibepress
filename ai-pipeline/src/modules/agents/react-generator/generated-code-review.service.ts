@@ -257,10 +257,10 @@ Rules:
 - Treat concrete links like \`/post/\${slug}\` or \`/category/\${slug}\` as valid when they correspond to approved patterns such as \`/post/:slug\` or \`/category/:slug\`.
 - If \`fixedSlug\` is present in the approved contract, this component is bound to one exact record. In that case, do flag any use of \`useParams()\`, \`/api/pages/\${slug}\`, or \`/api/posts/\${slug}\` for the main record fetch. The component should use the exact bound endpoint instead.
 - ${
-  runtimeRenderer === 'runtime-page'
-    ? 'For this runtime-page contract, the main page-detail fetch must use `/api/runtime/pages/:slug`. Do flag `/api/pages/${slug}` as legacy drift for the main record fetch.'
-    : 'A generic backend detail endpoint such as `/api/posts/:slug` or `/api/pages/:slug` is acceptable for route flavors like `/single-with-sidebar/:slug` unless the approved contract explicitly requires a distinct payload shape or a fixed bound slug.'
-}
+      runtimeRenderer === 'runtime-page'
+        ? 'For this runtime-page contract, the main page-detail fetch must use `/api/runtime/pages/:slug`. Do flag `/api/pages/${slug}` as legacy drift for the main record fetch.'
+        : 'A generic backend detail endpoint such as `/api/posts/:slug` or `/api/pages/:slug` is acceptable for route flavors like `/single-with-sidebar/:slug` unless the approved contract explicitly requires a distinct payload shape or a fixed bound slug.'
+    }
 - Do flag visible text links that should behave like WordPress navigation/content links but stay plain text or omit hover underline when the route/data already exists, especially for post titles, author/category archive links inside meta rows, menu/footer/sidebar links, breadcrumbs, and social/footer text links. CTA buttons are exempt.
 - Do NOT flag \`{condition && (<JSX />)}\` or \`{a && b && (<JSX />)}\` as broken JSX — these are standard React conditional rendering patterns. Only flag JSX as broken when there is an actual syntax error, unclosed tag, or raw object literal returned inside JSX.
 - If the component is acceptable, return pass=true with issues=[].

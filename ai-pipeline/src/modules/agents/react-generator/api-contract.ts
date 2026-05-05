@@ -101,10 +101,8 @@ export const RUNTIME_PAGE_SOURCE_INTERFACE = `interface RuntimePageSource { kind
 export const RUNTIME_PAGE_SUPPORT_INTERFACE = `interface RuntimePageSupport { safeForRuntime: boolean; unsupportedBlocks: string[]; }`;
 export const RUNTIME_PAGE_SUBTREE_BINDING_INTERFACE = `interface RuntimePageSubtreeBinding { nodeId: string; blockName: string; renderer: string; preserveWrapper: boolean; preserveChildrenOrder: boolean; childCount?: number; sectionId?: string; sectionDebugKey?: string; }`;
 export const RUNTIME_PAGE_SECTION_INTERFACE = `interface RuntimePageSection { id?: string; type: string; debugKey?: string; sectionKey?: string; sourceNodeId?: string; blockName?: string; title?: string; subtitle?: string; body?: string; imageSrc?: string; imageAlt?: string; columns?: number; cards?: Array<Record<string, unknown>>; items?: Array<Record<string, unknown>>; slides?: Array<Record<string, unknown>>; tabs?: Array<Record<string, unknown>>; layout?: Record<string, unknown>; style?: Record<string, unknown>; children?: RuntimePageSection[]; }`;
-export const RUNTIME_PAGE_PLAN_INTERFACE =
-  `interface RuntimePagePlan { version: 1 | 2; mode: 'block-centric' | 'hybrid' | 'page-content'; fidelity: 'strict-structure' | 'best-effort'; layoutFamily?: string; source: RuntimePageSource; support: RuntimePageSupport; dataNeeds: string[]; sections: RuntimePageSection[]; blockTree: Array<Record<string, unknown>>; subtreeBindings?: RuntimePageSubtreeBinding[]; overrides?: Record<string, unknown>; }`;
-export const RUNTIME_PAGE_RESPONSE_INTERFACE =
-  `interface RuntimePageResponse { page: Page; runtimePlan: RuntimePagePlan; }`;
+export const RUNTIME_PAGE_PLAN_INTERFACE = `interface RuntimePagePlan { version: 1 | 2; mode: 'block-centric' | 'hybrid' | 'page-content'; fidelity: 'strict-structure' | 'best-effort'; layoutFamily?: string; source: RuntimePageSource; support: RuntimePageSupport; dataNeeds: string[]; sections: RuntimePageSection[]; blockTree: Array<Record<string, unknown>>; subtreeBindings?: RuntimePageSubtreeBinding[]; overrides?: Record<string, unknown>; }`;
+export const RUNTIME_PAGE_RESPONSE_INTERFACE = `interface RuntimePageResponse { page: Page; runtimePlan: RuntimePagePlan; }`;
 
 function formatFieldList(fields: readonly string[]): string {
   return fields.map((field) => `\`${field}\``).join(', ');
