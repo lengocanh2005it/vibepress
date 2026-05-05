@@ -8,7 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { mkdir, writeFile } from 'fs/promises';
+import { access, mkdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { lastValueFrom, ReplaySubject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -357,15 +357,28 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     return { jobId };
   }
 
-  getStatus(jobId: string): PipelineStatus {
-    return (
-      this.jobs.get(jobId) ?? {
+  async getStatus(jobId: string): Promise<PipelineStatus> {
+    const state = this.jobs.get(jobId);
+    if (state) {
+      return state;
+    }
+
+    const persistedContext = await this.readPersistedVisualEditContext(jobId);
+    if (persistedContext) {
+      return {
         jobId,
-        status: 'error',
+        status: 'done',
         steps: [],
-        error: 'Job not found',
-      }
-    );
+        result: persistedContext,
+      };
+    }
+
+    return {
+      jobId,
+      status: 'error',
+      steps: [],
+      error: 'Job not found',
+    };
   }
 
   async submitReactVisualEdit(body: SubmitReactVisualEditDto): Promise<{
@@ -382,11 +395,11 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     error?: string;
   }> {
     const state = this.jobs.get(body.jobId);
-    if (!state) {
-      throw new BadRequestException(`Job "${body.jobId}" not found`);
-    }
+    const persistedContext = await this.readPersistedVisualEditContext(
+      body.jobId,
+    );
 
-    const jobResult = (state.result ?? {}) as {
+    const jobResult = (state?.result ?? {}) as {
       previewDir?: string;
       frontendDir?: string;
       previewUrl?: string;
@@ -398,14 +411,19 @@ export class OrchestratorService implements BeforeApplicationShutdown {
 
     const previewDir =
       body.editRequest.reactSourceTarget.previewDir?.trim() ||
-      jobResult.previewDir;
+      jobResult.previewDir ||
+      persistedContext?.previewDir;
     const frontendDir =
       body.editRequest.reactSourceTarget.frontendDir?.trim() ||
       jobResult.frontendDir ||
+      persistedContext?.frontendDir ||
       (previewDir ? join(previewDir, 'frontend') : undefined);
     const routeEntries = body.editRequest.reactSourceTarget.routeEntries?.length
       ? body.editRequest.reactSourceTarget.routeEntries
-      : jobResult.routeEntries;
+      : jobResult.routeEntries?.length
+        ? jobResult.routeEntries
+        : persistedContext?.routeEntries;
+    const plan = jobResult.plan ?? [];
 
     const logDir = previewDir || join('./temp/generated', body.jobId);
     const logPath = join(logDir, 'react-visual-edit-request.json');
@@ -425,25 +443,14 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       `[visual-edit] job=${body.jobId} frontendDir=${frontendDir} component=${body.editRequest.targetHint?.componentName ?? '(unresolved)'}`,
     );
 
-    if (!frontendDir) {
+    if (!frontendDir || !(await this.pathExists(frontendDir))) {
       return {
         accepted: false,
         jobId: body.jobId,
         siteId: body.siteId,
         logPath,
         error:
-          'frontendDir could not be resolved — job may not have a completed preview',
-      };
-    }
-
-    if (!jobResult.plan?.length) {
-      return {
-        accepted: false,
-        jobId: body.jobId,
-        siteId: body.siteId,
-        logPath,
-        error:
-          'Plan not available for this job — re-run the pipeline to populate plan data',
+          'frontendDir could not be resolved — job may not have a completed preview on disk',
       };
     }
 
@@ -486,7 +493,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     try {
       const contract = this.reactVisualEditContract.validate({
         editRequest,
-        plan: jobResult.plan,
+        plan,
         routeEntries,
       });
       if (
@@ -505,7 +512,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       const editResult = await this.reactVisualEdit.applyEdit({
         jobId: body.jobId,
         frontendDir,
-        plan: jobResult.plan,
+        plan,
         routeEntries,
         editRequest,
         logPath,
@@ -537,6 +544,91 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         logPath,
         error: message,
       };
+    }
+  }
+
+  private async readPersistedVisualEditContext(jobId: string): Promise<
+    | {
+        previewDir: string;
+        frontendDir: string;
+        uiSourceMapPath?: string;
+        routeEntries?: Array<{ route: string; componentName: string }>;
+      }
+    | null
+  > {
+    const previewDir = join('./temp/generated', jobId);
+    const frontendDir = join(previewDir, 'frontend');
+
+    if (!(await this.pathExists(frontendDir))) {
+      return null;
+    }
+
+    const uiSourceMapPathCandidate = join(previewDir, 'ui-source-map.json');
+    const uiSourceMapPath = (await this.pathExists(uiSourceMapPathCandidate))
+      ? uiSourceMapPathCandidate
+      : undefined;
+    const routeEntries = await this.readPersistedRouteEntries(
+      previewDir,
+      frontendDir,
+    );
+
+    return {
+      previewDir,
+      frontendDir,
+      ...(uiSourceMapPath ? { uiSourceMapPath } : {}),
+      ...(routeEntries.length > 0 ? { routeEntries } : {}),
+    };
+  }
+
+  private async readPersistedRouteEntries(
+    previewDir: string,
+    frontendDir: string,
+  ): Promise<Array<{ route: string; componentName: string }>> {
+    const fromManifest = await this.sectionManifest.readManifest(previewDir);
+    if (fromManifest?.length) {
+      const deduped = new Map<string, { route: string; componentName: string }>();
+      for (const entry of fromManifest) {
+        const route = entry.route?.trim();
+        const componentName = entry.componentName?.trim();
+        if (!route || !componentName) continue;
+        deduped.set(`${route}::${componentName}`, { route, componentName });
+      }
+      if (deduped.size > 0) {
+        return Array.from(deduped.values());
+      }
+    }
+
+    const appPath = join(frontendDir, 'src', 'App.tsx');
+    if (!(await this.pathExists(appPath))) {
+      return [];
+    }
+
+    try {
+      const appCode = await readFile(appPath, 'utf-8');
+      const routeEntries: Array<{ route: string; componentName: string }> = [];
+      const routePattern =
+        /<Route\s+path="([^"]+)"\s+element={<([A-Za-z0-9_]+)\s*\/>}\s*\/>/g;
+      for (const match of appCode.matchAll(routePattern)) {
+        const route = match[1]?.trim();
+        const componentName = match[2]?.trim();
+        if (!route || !componentName) continue;
+        routeEntries.push({ route, componentName });
+      }
+      return routeEntries;
+    } catch (error) {
+      this.logger.warn(
+        `[visual-edit] failed to parse persisted App.tsx route entries: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await access(path);
+      return true;
+    } catch {
+      return false;
     }
   }
 
