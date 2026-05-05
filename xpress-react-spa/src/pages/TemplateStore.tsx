@@ -287,7 +287,17 @@ function DashboardView({ preset }: { preset: WpPresetDetail }) {
   const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
   const handleCopy = () => {
-    navigator.clipboard.writeText(preset.password);
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(preset.password);
+    } else {
+      const el = document.createElement('textarea');
+      el.value = preset.password;
+      el.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -372,7 +382,7 @@ function DashboardView({ preset }: { preset: WpPresetDetail }) {
                       <ExternalLink className="w-4 h-4 text-gray-500" />
                     </a>
                     <button
-                      onClick={() => navigate('/app/onboarding')}
+                      onClick={() => navigate('/app/projects')}
                       className="inline-flex items-center justify-center gap-2 bg-white border-2 border-gray-100 hover:border-gray-200 px-6 py-3.5 rounded-lg font-bold transition-all shadow-sm"
                       style={{ color: C.text1 }}
                     >
