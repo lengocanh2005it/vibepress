@@ -3786,6 +3786,9 @@ export class PlannerService {
     return {
       ...item,
       componentName: 'RuntimePage',
+      route: '/page/:slug',
+      isDetail: true,
+      dataNeeds: ['page-detail'],
       runtimeRenderer: 'runtime-page',
       fixedSlug: undefined,
       fixedPageId: undefined,
