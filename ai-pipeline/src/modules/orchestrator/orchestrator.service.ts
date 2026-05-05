@@ -332,6 +332,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
       dto,
       state,
       editRequestContext,
+      userId,
     ).catch((err) => {
       if (err instanceof PipelineControlError) {
         void this.finalizeControlledTermination(jobId, state, err);
@@ -1441,6 +1442,7 @@ export default function ${component.name}() {
     dto: RunPipelineDto,
     state: PipelineStatus,
     editRequestContext?: ResolvedEditRequestContext,
+    userId?: string,
   ): Promise<void> {
     // ── Init structured run summary ───────────────────────────────────────
     const jobLogDir = join('./temp/logs', jobId);
