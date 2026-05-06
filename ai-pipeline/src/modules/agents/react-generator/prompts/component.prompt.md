@@ -676,7 +676,7 @@ Only render blocks present in the template tree.
 
 ⛔ **CRITICAL — `post-content` / `page-content` double-render prevention:**
 
-When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved render path (`dangerouslySetInnerHTML` for post HTML or `renderRichTextChildren`/structured JSX for page HTML), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
+When the template contains a `post-content`, `page-content`, or `html` block that renders the canonical body through the approved structured rich-text render path (`renderRichTextChildren` or equivalent JSX node rendering), ALL child content (headings, paragraphs, images, buttons) inside that block is already included in `item.content`. Do NOT also render those child blocks as separate JSX elements outside that canonical body render.
 
 ```tsx
 // ❌ WRONG — "About" heading is already inside item.content from the canonical body render

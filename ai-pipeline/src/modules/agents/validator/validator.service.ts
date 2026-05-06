@@ -1033,17 +1033,9 @@ export class ValidatorService {
     }
 
     if (context.type === 'page' && /dangerouslySetInnerHTML/.test(code)) {
-      // post-content sections are explicitly allowed to render post body HTML via
-      // dangerouslySetInnerHTML — the validator's post-content field check accepts
-      // exactly that pattern. Only block it for pages that have no post-content section.
-      const hasPostContentSection = context.visualPlan?.sections?.some(
-        (s) => s.type === 'post-content',
+      violations.push(
+        'Page/detail components must not use `dangerouslySetInnerHTML`. Preserve rich text through explicit semantic JSX wrappers such as `<p>`, `<div>`, `<h*>`, or `<li>` plus `renderRichTextChildren(...)` instead.',
       );
-      if (!hasPostContentSection) {
-        violations.push(
-          'Page components must not use `dangerouslySetInnerHTML`. Render page/body rich text through structured JSX or the rich-text node helper instead.',
-        );
-      }
     }
 
     // 13. <img> without alt attribute — accessibility + common AI mistake
@@ -2279,7 +2271,7 @@ export class ValidatorService {
     const fields: Array<{ name: string; message: string }> = [
       {
         name: 'content',
-        message: `${label} post-content must render post body HTML`,
+        message: `${label} post-content must render post body through the approved structured rich-text render path`,
       },
     ];
     if (section.showTitle) {
@@ -3150,12 +3142,11 @@ export class ValidatorService {
         ]);
       case 'post-content':
         return this.codeMatchesAnyPattern(code, [
-          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
+          /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
           /\b[A-Za-z_$][\w$]*\.(?:content|title|date|author(?:Name)?|categories?|categorySlugs?|featuredImage|tags)\b/,
         ]);
       case 'page-content':
         return this.codeMatchesAnyPattern(code, [
-          /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/,
           /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i,
           /\b[A-Za-z_$][\w$]*\.(?:content|title)\b/,
         ]);
@@ -3312,9 +3303,6 @@ export class ValidatorService {
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
             return (
-              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-                code,
-              ) ||
               /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
                 code,
               )
@@ -3342,9 +3330,6 @@ export class ValidatorService {
             return /\b[A-Za-z_$][\w$]*\.title\b/.test(code);
           case 'content':
             return (
-              /dangerouslySetInnerHTML=\{\{\s*__html:\s*[A-Za-z_$][\w$]*\.content\s*\}\}/.test(
-                code,
-              ) ||
               /renderRichTextChildren\(\s*[A-Za-z_$][\w$]*\.content\s*,/i.test(
                 code,
               )

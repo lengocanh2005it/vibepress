@@ -5091,29 +5091,23 @@ ${cards}
     const subtitleMarkup = !s.subtitle
       ? ''
       : /<[a-z]/i.test(s.subtitle)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>{renderRichTextChildren(${JSON.stringify(s.subtitle)}, "media-text-subtitle")}</p>`
-          : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.subtitle)} }} />`
+        ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>{renderRichTextChildren(${JSON.stringify(s.subtitle)}, "media-text-subtitle")}</p>`
         : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>${s.subtitle}</p>`;
     const headingMarkup = !s.heading
       ? ''
       : /<[a-z]/i.test(s.heading)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(s.heading)}, "media-text-heading")}</h2>`
-          : `<h2 className="${mediaHeadingClassName}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.heading)} }} />`
+        ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(s.heading)}, "media-text-heading")}</h2>`
         : `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>`;
     const bodyMarkup = !s.body
       ? ''
       : /<[a-z]/i.test(s.body)
-        ? ctx.avoidDangerouslySetInnerHTML
-          ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
-          : `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+        ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
         : `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
             ${subtitleMarkup}
             ${headingMarkup}
             ${bodyMarkup}
-            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? (ctx.avoidDangerouslySetInnerHTML ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />`) : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
+            ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
             ${cta}
           </div>`;
 
@@ -5942,9 +5936,7 @@ ${mainMarkup}
     const metaBlock = hasMeta
       ? `<div className="flex flex-wrap gap-3 text-sm text-[${p.textMuted}]">\n                ${metaParts.join('\n                ')}\n              </div>`
       : '';
-    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
-      ? `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`
-      : `<div className="prose max-w-none" dangerouslySetInnerHTML={{ __html: item.content }} />`;
+    const bodyMarkup = `<div className="prose max-w-none">{renderRichTextChildren(item.content, "post-content")}</div>`;
 
     return `          {item && (
             <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
@@ -5964,9 +5956,7 @@ ${mainMarkup}
     const bodyClass = this.buildPageContentBodyClass(s, ctx);
     const titleWrapperClass =
       s.shellVariant === 'wide' ? this.contentContainerClass(ctx) : '';
-    const bodyMarkup = ctx.avoidDangerouslySetInnerHTML
-      ? `<div className="${bodyClass}">{renderRichTextChildren(item.content, "page-content")}</div>`
-      : `<div className="${bodyClass}" dangerouslySetInnerHTML={{ __html: item.content }} />`;
+    const bodyMarkup = `<div className="${bodyClass}">{renderRichTextChildren(item.content, "page-content")}</div>`;
     return `          {item && (
              <article className="flex flex-col gap-6"${this.buildSectionGapStyleAttr(s)}>
                ${s.showTitle ? `${titleWrapperClass ? `<div className="${titleWrapperClass}">` : ''}<h1 className="${t.h1} font-normal text-[${tc}]">{item.title}</h1>${titleWrapperClass ? `</div>` : ''}` : ''}
@@ -6026,13 +6016,8 @@ ${segments}
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
         if (segment.html && /<[^>]+>/.test(segment.html)) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `            <div className="${segmentContainerClass}">
-              <${tag} className="${headingClass}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-heading'}")}</${tag}>
-            </div>`;
-          }
           return `            <div className="${segmentContainerClass}">
-              <${tag} className="${headingClass}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <${tag} className="${headingClass}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-heading'}")}</${tag}>
             </div>`;
         }
         return `            <div className="${segmentContainerClass}">
@@ -6048,13 +6033,8 @@ ${segments}
           ),
           segment.style ? this.blueprintTypographyStyleAttr(segment.style) : '',
         );
-        if (ctx.avoidDangerouslySetInnerHTML) {
-          return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${paragraphStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-paragraph'}")}</div>
-            </div>`;
-        }
         return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${paragraphStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <div className="${bodyBaseClass}"${paragraphStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-paragraph'}")}</div>
             </div>`;
       }
       case 'image': {
@@ -6097,9 +6077,7 @@ ${segments}
                 ${segment.items
                   .map((item) =>
                     /<[a-z]/i.test(item)
-                      ? ctx.avoidDangerouslySetInnerHTML
-                        ? `<li className="${itemClass}">{renderRichTextChildren(${JSON.stringify(item)}, "${section.debugKey ?? section.sectionKey ?? 'prose-list'}")}</li>`
-                        : `<li className="${itemClass}" dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item)} }} />`
+                      ? `<li className="${itemClass}">{renderRichTextChildren(${JSON.stringify(item)}, "${section.debugKey ?? section.sectionKey ?? 'prose-list'}")}</li>`
                       : `<li className="${itemClass}">${item}</li>`,
                   )
                   .join('\n                ')}
@@ -6112,13 +6090,8 @@ ${segments}
           { baseColor: tc },
           this.pickBlockStyle(ctx, 'paragraph'),
         );
-        if (ctx.avoidDangerouslySetInnerHTML) {
-          return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${htmlStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-html'}")}</div>
-            </div>`;
-        }
         return `            <div className="${segmentContainerClass}">
-              <div className="${bodyBaseClass}"${htmlStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(segment.html)} }} />
+              <div className="${bodyBaseClass}"${htmlStyle}>{renderRichTextChildren(${JSON.stringify(segment.html)}, "${section.debugKey ?? section.sectionKey ?? 'prose-html'}")}</div>
             </div>`;
       }
     }
@@ -6557,10 +6530,7 @@ ${indent}) : null}`;
         const level = Math.min(Math.max(node.level ?? 2, 1), 6);
         const tag = `h${level}`;
         if (node.html && !node.text) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
-          }
-          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'heading'}")}</${tag}>`;
         }
         return `${indent}<${tag}${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'heading'))}>
 ${childIndent}${node.text ?? ''}
@@ -6568,10 +6538,7 @@ ${indent}</${tag}>`;
       }
       case 'paragraph': {
         if (node.html && !node.text) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
-          }
-          return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? 'paragraph'}")}</p>`;
         }
         return `${indent}<p${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'paragraph'))}>
 ${childIndent}${node.text ?? ''}
@@ -6684,10 +6651,7 @@ ${children}
 ${indent}</div>`;
         }
         if (node.html) {
-          if (ctx.avoidDangerouslySetInnerHTML) {
-            return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
-          }
-          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(node.html)} }} />`;
+          return `${indent}<div${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>{renderRichTextChildren(${JSON.stringify(node.html)}, "${node.sourceRef?.sourceNodeId ?? block}")}</div>`;
         }
         if (node.text) {
           return `${indent}<span${this.buildWpNodeAttrs(node)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, block))}>${node.text}</span>`;
@@ -7211,9 +7175,7 @@ ${indent}</ul>`;
       ? `\n                  <h3 className="${this.appendStyledTextAlignClass(`${t.h2} font-semibold tracking-[-0.02em]`, s.headingCustomClassNames, s.presentation?.textAlign)}"${headingTextStyle}>{${JSON.stringify(s.heading)}}</h3>`
       : '';
     const bodyPart = s.body
-      ? ctx.avoidDangerouslySetInnerHTML
-        ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "modal-body")}</div>`
-        : `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+      ? `\n                  <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, s.bodyCustomClassNames, s.presentation?.textAlign)}"${bodyTextStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "modal-body")}</div>`
       : '';
     const ctaPart = this.renderInteractiveAnchorCtaGroup(
       this.resolveSectionCtas(s),
@@ -7449,9 +7411,7 @@ ${indent}</ul>`;
           ? `\n                <h3 className="${this.appendStyledTextAlignClass(`${t.h3} font-semibold`, tab.headingCustomClassNames, 'left')}"${panelHeadingStyle}>{${JSON.stringify(tab.heading)}}</h3>`
           : '';
         const bodyPart = tab.body
-          ? ctx.avoidDangerouslySetInnerHTML
-            ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle}>{renderRichTextChildren(${JSON.stringify(tab.body)}, "${domKey}-tab-body-${index}")}</div>`
-            : `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(tab.body)} }} />`
+          ? `\n                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, tab.bodyCustomClassNames, 'left')}"${panelBodyStyle}>{renderRichTextChildren(${JSON.stringify(tab.body)}, "${domKey}-tab-body-${index}")}</div>`
           : '';
         const imagePart = tab.imageSrc
           ? `\n                <img src={resolveAsset(${JSON.stringify(tab.imageSrc)})} alt={${JSON.stringify(tab.imageAlt ?? '')}} className="${this.appendOptionalCustomClasses(`vp-uagb-tabs__media-image ${imageRadius}`, tab.imageCustomClassNames)}"${imageStyle} />`
@@ -7643,7 +7603,7 @@ ${panels}
             </button>
             {((${openStateExpr}).includes(${index})) ? (
               <div id="${domKey}-panel-${index}" className="uagb-faq-content vp-uagb-faq__content">
-                ${ctx.avoidDangerouslySetInnerHTML ? `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle}>{renderRichTextChildren(${JSON.stringify(item.body)}, "${domKey}-accordion-body-${index}")}</div>` : `<div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(item.body)} }} />`}
+                <div className="${this.appendStyledTextAlignClass(`${t.body} leading-7`, item.bodyCustomClassNames, 'left')}"${itemBodyStyle}>{renderRichTextChildren(${JSON.stringify(item.body)}, "${domKey}-accordion-body-${index}")}</div>
               </div>
             ) : null}
             </div>

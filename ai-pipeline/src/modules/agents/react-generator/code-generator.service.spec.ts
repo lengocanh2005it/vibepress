@@ -225,6 +225,123 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('post.featuredImage && <img');
   });
 
+  it('renders page content through structured rich-text nodes instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SamplePage',
+      dataNeeds: ['page'],
+      sections: [
+        {
+          type: 'page-content',
+          showTitle: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren(item.content, "page-content")}',
+    );
+    expect(code).not.toContain(
+      'dangerouslySetInnerHTML={{ __html: item.content }}',
+    );
+  });
+
+  it('renders post content through structured rich-text nodes instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Single',
+      dataNeeds: ['postDetail'],
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: true,
+          showAuthor: true,
+          showDate: true,
+          showCategories: true,
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren(item.content, "post-content")}',
+    );
+    expect(code).not.toContain(
+      'dangerouslySetInnerHTML={{ __html: item.content }}',
+    );
+  });
+
+  it('renders rich text sections through explicit JSX wrappers instead of dangerouslySetInnerHTML', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'TemplateServices',
+      sections: [
+        {
+          type: 'media-text',
+          subtitle: '<strong>About</strong> Me',
+          heading: 'Welcome <mark>Julia</mark>',
+          body: '<em>Structured</em> body copy',
+          listItems: ['<a href="/contact">Contact</a>'],
+        },
+        {
+          type: 'tabs',
+          tabs: [
+            {
+              label: 'Overview',
+              body: '<strong>Tabbed</strong> content',
+            },
+          ],
+        },
+        {
+          type: 'accordion',
+          items: [
+            {
+              title: 'FAQ',
+              body: '<em>Accordion</em> answer',
+            },
+          ],
+        },
+        {
+          type: 'modal',
+          triggerText: 'Open',
+          body: '<strong>Modal</strong> body',
+        },
+        {
+          type: 'prose-block',
+          sourceSegments: [
+            {
+              kind: 'paragraph',
+              html: '<strong>Paragraph</strong> text',
+            },
+            {
+              kind: 'html',
+              html: '<div><em>HTML</em> block</div>',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>About</strong> Me", "media-text-subtitle")}',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>Tabbed</strong> content",',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<em>Accordion</em> answer",',
+    );
+    expect(code).toContain(
+      '{renderRichTextChildren("<strong>Modal</strong> body", "modal-body")}',
+    );
+    expect(code).not.toContain('dangerouslySetInnerHTML');
+  });
+
   it('renders search widgets inside sidebar sections', () => {
     const plan = {
       ...basePlan,

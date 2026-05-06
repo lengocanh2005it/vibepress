@@ -1896,10 +1896,13 @@ function buildImageSourcesNote(templateSource: string): string {
     'Preserve emphasis from the source: if a media-text heading or key list lines read as bold/strong in the template, keep them visually strong in JSX instead of downgrading everything to regular muted text.',
   );
   lines.push(
-    'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), preserve that markup. In page components prefer `renderRichTextChildren(item, key)` or equivalent structured JSX; reserve `dangerouslySetInnerHTML` for approved post-html render paths only.',
+    'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), preserve that markup through `renderRichTextChildren(item, key)` or equivalent structured JSX instead of dumping the HTML with `dangerouslySetInnerHTML`.',
   );
   lines.push(
-    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. In page components prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.',
+    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. Prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.',
+  );
+  lines.push(
+    'When preserving inline markup, keep the wrapper tag explicit and semantic. Good: `<p>{renderRichTextChildren(...)}</p>`, `<div>{renderRichTextChildren(...)}</div>`, `<h2>{renderRichTextChildren(...)}</h2>`, `<li>{renderRichTextChildren(...)}</li>`.',
   );
 
   return lines.join('\n');
@@ -3361,11 +3364,19 @@ When this section renders post-list/archive/search/recent-post meta:
 function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
   const stateKeyHint = resolveInteractiveSectionPromptStateKey(section);
   switch (section.type) {
+    case 'post-content':
+      return [
+        '## Section behavior contract',
+        '- This is the ONLY place that should render `post.content` or `item.content` for the canonical post body.',
+        '- Render the post body through `renderRichTextChildren(post.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for post content.',
+        '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
+        '- Do NOT render `post.content` outside of this section element.',
+      ].join('\n');
     case 'page-content':
       return [
         '## Section behavior contract',
         '- This is the ONLY place that should render `page.content` or `item.content`.',
-        '- Render the page body using `dangerouslySetInnerHTML={{ __html: page.content }}` or `renderRichTextChildren(page.content, ...)` inside this section ONLY.',
+        '- Render the page body through `renderRichTextChildren(page.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for page content.',
         '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
         '- Do NOT render `page.content` outside of this section element.',
       ].join('\n');
