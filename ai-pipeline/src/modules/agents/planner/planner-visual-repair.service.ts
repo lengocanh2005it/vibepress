@@ -3,6 +3,7 @@ import { buildEditRequestContextNote } from '../../edit-request/edit-request-pro
 import type { PipelineEditRequestDto } from '../../orchestrator/orchestrator.dto.js';
 import type { DbContentResult } from '../db-content/db-content.service.js';
 import type { ThemeTokens } from '../block-parser/block-parser.service.js';
+import type { ChunkPlan } from '../../../common/types/chunk.schema.js';
 import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import {
   buildVisualPlanPrompt,
@@ -709,7 +710,7 @@ export class PlannerVisualRepairService {
       pushCategory('json-format');
     }
     if (
-      /lost |droppedsections|preserve every source-backed section/.test(
+      /lost |droppedsections|preserve every source-backed section|was dropped in visual plan/.test(
         combined,
       )
     ) {
@@ -1129,7 +1130,7 @@ export class PlannerVisualRepairService {
     }
     if (diagnosis.categories.includes('content-drop')) {
       lines.push(
-        '- Do not drop headings, bodies, CTA copy, or source-backed section nodes from the deterministic draft.',
+        '- Do not drop or replace headings, subheadings, titles, subtitles, body copy, CTA text, or any other content field already set in the deterministic draft sections. Copy those fields verbatim — do not paraphrase, summarise, or omit them.',
       );
     }
     if (diagnosis.categories.includes('json-format')) {
@@ -1645,4 +1646,105 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       .trim()
       .toLowerCase();
   }
+}
+
+// ── Chunk compose utilities (PR2) ──────────────────────────────────────────
+
+const SEMANTIC_FAMILIES: Record<string, string> = {
+  navbar: 'nav',
+  navigation: 'nav',
+  nav: 'nav',
+  footer: 'footer',
+  'footer-links': 'footer',
+  hero: 'hero',
+  cover: 'hero',
+  'cta-strip': 'hero',
+  cta: 'hero',
+  'card-grid': 'content',
+  'media-text': 'content',
+  'prose-block': 'content',
+  'page-content': 'content',
+  'post-content': 'content',
+  tabs: 'content',
+  accordion: 'content',
+  carousel: 'content',
+  modal: 'content',
+  gallery: 'content',
+  'post-list': 'list',
+  'blog-list': 'list',
+  query: 'list',
+  testimonial: 'testimonial',
+  testimonials: 'testimonial',
+  newsletter: 'form',
+  form: 'form',
+  sidebar: 'sidebar',
+  search: 'search',
+  breadcrumb: 'search',
+  'post-title': 'post-detail',
+  'post-featured-image': 'post-detail',
+  'post-meta': 'post-detail',
+  'post-terms': 'post-detail',
+  'post-navigation': 'post-detail',
+  comments: 'post-detail',
+};
+
+function getSemanticFamily(semanticKind: string | undefined): string {
+  if (!semanticKind) return 'misc';
+  return SEMANTIC_FAMILIES[semanticKind.toLowerCase()] ?? 'misc';
+}
+
+export function canMergeChunks(a: ChunkPlan, b: ChunkPlan): boolean {
+  const aHint = a.aiLabel?.mergeHint ?? 'isolated';
+  const bHint = b.aiLabel?.mergeHint ?? 'isolated';
+
+  if (aHint === 'isolated' || bHint === 'isolated') return false;
+  if (aHint !== 'merge-next') return false;
+  if (bHint !== 'merge-prev') return false;
+
+  const aFamily = getSemanticFamily(a.aiLabel?.semanticKind);
+  const bFamily = getSemanticFamily(b.aiLabel?.semanticKind);
+  if (aFamily !== bFamily) return false;
+
+  return true;
+}
+
+export function composeSectionsFromChunkPlans(
+  chunks: ChunkPlan[],
+): import('../react-generator/visual-plan.schema.js').SectionPlan[] {
+  type SectionPlan =
+    import('../react-generator/visual-plan.schema.js').SectionPlan;
+
+  const groups: ChunkPlan[][] = [];
+  let currentGroup: ChunkPlan[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const next = chunks[i + 1];
+    currentGroup.push(chunk);
+
+    const shouldMergeNext = next !== undefined && canMergeChunks(chunk, next);
+    if (!shouldMergeNext) {
+      groups.push(currentGroup);
+      currentGroup = [];
+    }
+  }
+  if (currentGroup.length > 0) groups.push(currentGroup);
+
+  const seen = new Set<string>();
+  const result: SectionPlan[] = [];
+
+  for (const group of groups) {
+    for (const chunk of group) {
+      for (const section of chunk.draftSections) {
+        const sectionAny = section as unknown as Record<string, unknown>;
+        const key = `${section.type}:${sectionAny['heading'] ?? ''}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(section);
+        }
+      }
+    }
+  }
+
+  return result;
 }

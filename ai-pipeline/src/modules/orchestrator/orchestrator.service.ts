@@ -549,15 +549,12 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
   }
 
-  private async readPersistedVisualEditContext(jobId: string): Promise<
-    | {
-        previewDir: string;
-        frontendDir: string;
-        uiSourceMapPath?: string;
-        routeEntries?: Array<{ route: string; componentName: string }>;
-      }
-    | null
-  > {
+  private async readPersistedVisualEditContext(jobId: string): Promise<{
+    previewDir: string;
+    frontendDir: string;
+    uiSourceMapPath?: string;
+    routeEntries?: Array<{ route: string; componentName: string }>;
+  } | null> {
     const previewDir = join('./temp/generated', jobId);
     const frontendDir = join(previewDir, 'frontend');
 
@@ -588,7 +585,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
   ): Promise<Array<{ route: string; componentName: string }>> {
     const fromManifest = await this.sectionManifest.readManifest(previewDir);
     if (fromManifest?.length) {
-      const deduped = new Map<string, { route: string; componentName: string }>();
+      const deduped = new Map<
+        string,
+        { route: string; componentName: string }
+      >();
       for (const entry of fromManifest) {
         const route = entry.route?.trim();
         const componentName = entry.componentName?.trim();
@@ -1768,6 +1768,15 @@ export default function ${component.name}() {
               repoManifest: repoResult.themeManifest,
             },
           );
+          plan = await this.planner.attachSharedChromePartialVisualPlans(
+            normalizedTheme,
+            content,
+            plan,
+            resolvedModels.planning,
+            repoResult.themeManifest,
+            undefined,
+            logPath,
+          );
           this.emitStepProgress(
             state,
             '5_planner',
@@ -1855,6 +1864,15 @@ export default function ${component.name}() {
                 planReviewErrors: planBlockingIssues,
               },
             );
+            plan = await this.planner.attachSharedChromePartialVisualPlans(
+              normalizedTheme,
+              content,
+              plan,
+              resolvedModels.planning,
+              repoResult.themeManifest,
+              undefined,
+              logPath,
+            );
             review = this.planReviewer.review(
               plan,
               reviewedExpectedTemplateNames,
@@ -1923,6 +1941,8 @@ export default function ${component.name}() {
             review.plan,
             resolvedModels.planning,
             repoResult.themeManifest,
+            undefined,
+            logPath,
           );
           let visualReview = this.planReviewer.review(
             planWithVisuals,
@@ -2021,6 +2041,8 @@ export default function ${component.name}() {
               review.plan,
               resolvedModels.planning,
               repoResult.themeManifest,
+              undefined,
+              logPath,
             );
             visualReview = this.planReviewer.review(
               planWithVisuals,
@@ -4318,6 +4340,11 @@ export default function ${component.name}() {
             `resolved: activeTheme=${manifest.resolvedSource.activeTheme.slug}${manifest.resolvedSource.parentTheme ? `, parentTheme=${manifest.resolvedSource.parentTheme.slug}` : ''}, activePlugins=${manifest.resolvedSource.activePlugins.length}, runtimeOnlyPlugins=${manifest.resolvedSource.runtimeOnlyPlugins.length}, repoOnlyPlugins=${manifest.resolvedSource.repoOnlyPlugins.length}`,
           ]
         : []),
+      ...(manifest.themeDeepAnalysis
+        ? [
+            `theme-profile: ${manifest.themeDeepAnalysis.themeSlug}, routeChains=${manifest.themeDeepAnalysis.routeSources.length}, behaviors=${manifest.themeDeepAnalysis.behaviorSignals.map((signal) => signal.key).join(', ') || 'none'}`,
+          ]
+        : []),
     ];
   }
 
@@ -5325,7 +5352,12 @@ export default function ${component.name}() {
   }): Promise<{
     requested: boolean;
     endpoint: string;
-    payload: { site_id: string; job_id: string; preview_url?: string; user_id?: string };
+    payload: {
+      site_id: string;
+      job_id: string;
+      preview_url?: string;
+      user_id?: string;
+    };
     responsePreview?: string;
     error?: string;
   } | null> {

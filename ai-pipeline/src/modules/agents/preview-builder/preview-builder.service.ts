@@ -19,6 +19,7 @@ import * as net from 'net';
 import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { resolveThemeAssetPublicPath } from '../../../common/utils/theme-asset.util.js';
+import { sanitizeInlineThemeCss } from '../../../common/utils/theme-css-sources.js';
 import { ReactGenerateResult } from '../react-generator/react-generator.service.js';
 import type {
   ThemeInteractionState,
@@ -517,7 +518,7 @@ ${routesBlock}
     const previewBase = `/preview/${jobId}/`;
     await writeFile(
       join(rootDir, 'server', '.env'),
-      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\nPREVIEW_BASE=${previewBase}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${previewBase}${copiedLogoPublicPath.replace(/^\//, '')}\n` : ''}`,
+      `API_PORT=${apiPort}\nDB_HOST=${dbCreds.host}\nDB_PORT=${dbCreds.port}\nDB_NAME=${dbCreds.dbName}\nDB_USER=${dbCreds.user}\nDB_PASSWORD=${dbCreds.password}\nPREVIEW_BASE=${previewBase}\n${siteInfo?.siteUrl ? `SITE_URL=${siteInfo.siteUrl}\n` : ''}${copiedLogoPublicPath ? `SITE_LOGO_URL=${previewBase}${copiedLogoPublicPath.replace(/^\//, '')}\n` : ''}${themeDir ? `THEME_DIR=${themeDir}\n` : ''}`,
     );
 
     // 6. Reuse cached template dependencies, install only on cache miss
@@ -751,6 +752,7 @@ ${fontEntries}
     await this.injectWordPressBridgeClasses(frontendDir, tokens);
     if (themeDir) {
       await this.applyThemeJsonGlobalStyles(frontendDir, themeDir);
+      await this.applyThemeStylesheetCss(frontendDir, themeDir);
     }
   }
 
@@ -959,6 +961,33 @@ ${fontEntries}
         `${existing.trimEnd()}\n\n${lines.join('\n')}\n`,
       );
     }
+  }
+
+  private async applyThemeStylesheetCss(
+    frontendDir: string,
+    themeDir: string,
+  ): Promise<void> {
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const existingCss = await readFile(cssPath, 'utf-8');
+    const marker = '/* Vibepress theme stylesheet CSS */';
+    if (existingCss.includes(marker)) return;
+
+    let styleCss = '';
+    try {
+      styleCss = await readFile(join(themeDir, 'style.css'), 'utf-8');
+    } catch {
+      return;
+    }
+
+    const sanitizedStyleCss = sanitizeInlineThemeCss(styleCss).trim();
+    if (!sanitizedStyleCss) return;
+
+    const normalizedStyleCss =
+      this.normalizeWordPressCustomCssSelectors(sanitizedStyleCss);
+    await writeFile(
+      cssPath,
+      `${existingCss.trimEnd()}\n\n${marker}\n${normalizedStyleCss}\n`,
+    );
   }
 
   private async buildLocalThemeFontFaceCss(

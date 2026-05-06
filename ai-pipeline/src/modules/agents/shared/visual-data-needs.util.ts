@@ -2,9 +2,11 @@ import type { DataNeed } from '../react-generator/visual-plan.schema.js';
 
 const VISUAL_DATA_NEED_ORDER: DataNeed[] = [
   'postDetail',
+  'productDetail',
   'pageDetail',
   'comments',
   'posts',
+  'products',
   'pages',
   'menus',
   'siteInfo',
@@ -34,6 +36,9 @@ export function toVisualDataNeeds(
       case 'post-detail':
         mapped.add('postDetail');
         break;
+      case 'product-detail':
+        mapped.add('productDetail');
+        break;
       case 'page-detail':
         mapped.add('pageDetail');
         break;
@@ -41,6 +46,7 @@ export function toVisualDataNeeds(
         mapped.add('comments');
         break;
       case 'posts':
+      case 'products':
       case 'pages':
       case 'menus':
         mapped.add(need);

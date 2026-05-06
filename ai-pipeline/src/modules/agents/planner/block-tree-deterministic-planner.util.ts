@@ -5,6 +5,7 @@ import type {
   ColorPalette,
   CommentsSection,
   ComponentVisualPlan,
+  CoverSection,
   FooterSection,
   LayoutTokens,
   NavbarSection,
@@ -20,6 +21,7 @@ import type {
   SearchSection,
   SectionPlan,
   SidebarSection,
+  SidebarWidget,
   SourceSegment,
   TypographyTokens,
   VisualPlanLockPolicy,
@@ -65,6 +67,13 @@ interface SidebarShellPresentation {
   gapStyle?: string;
   sourceRef?: BlockNode['sourceRef'];
   customClassNames?: string[];
+}
+
+interface SidebarSourceMatch {
+  nodes: BlockNode[];
+  shell?: SidebarShellPresentation;
+  position?: 'left' | 'right';
+  width?: string;
 }
 
 export interface BuildBlockTreeDrivenVisualPlanInput {
@@ -180,12 +189,13 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
   if (
     componentPlan.type === 'page' &&
     componentPlan.isDetail === true &&
-    dataNeeds.includes('postDetail') &&
-    /^(single|single-with-sidebar)$/.test(normalizedTemplate)
+    (dataNeeds.includes('postDetail') || dataNeeds.includes('productDetail')) &&
+    /^(single|single-with-sidebar|single-product)$/.test(normalizedTemplate)
   ) {
     const result = buildBlockTreeDrivenPostDetailSections({
       componentPlan,
       draftBlockTree,
+      draftSections,
       content,
       layout,
     });
@@ -249,7 +259,9 @@ export function shouldBypassCoverageAuditForBlockTreeListingPlan(
   if (
     componentPlan.type !== 'page' ||
     componentPlan.isDetail === true ||
-    !toVisualDataNeeds(componentPlan.dataNeeds).includes('posts')
+    !toVisualDataNeeds(componentPlan.dataNeeds).some((need) =>
+      ['posts', 'products'].includes(need),
+    )
   ) {
     return false;
   }
@@ -264,6 +276,7 @@ export function shouldShortCircuitBlockTreeVisualPlan(
 ): boolean {
   return (
     isEligibleBlockTreeSharedPartial(componentPlan) ||
+    isEligibleBlockTreeDetailTemplate(componentPlan) ||
     isEligibleBlockTreeListingTemplate(componentPlan, draftBlockTree) ||
     isEligibleTransactionalTemplateByName(componentPlan) ||
     isEligibleTransactionalByComponentName(componentPlan)
@@ -276,6 +289,22 @@ function isEligibleBlockTreeSharedPartial(
   if (componentPlan.type !== 'partial') return false;
   return /^(header|footer|navigation|nav|sidebar|postmeta)$/i.test(
     componentPlan.componentName,
+  );
+}
+
+function isEligibleBlockTreeDetailTemplate(
+  componentPlan: BlockTreePlannerComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'page' || componentPlan.isDetail !== true) {
+    return false;
+  }
+  const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  return (
+    (dataNeeds.includes('postDetail') || dataNeeds.includes('productDetail')) &&
+    /^(single|single-with-sidebar|single-product)$/.test(normalizedTemplate)
   );
 }
 
@@ -301,21 +330,46 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
     (section) => section.type === 'navbar' || section.type === 'footer',
   );
   if (explicitChromeSections.length > 0) {
-    return explicitChromeSections.map((section) => {
+    const mappedSections = explicitChromeSections.map((section) => {
+      if (
+        section.type === 'navbar' &&
+        /^(header|navigation|nav)$/.test(normalizedName)
+      ) {
+        return decorateNavbarSectionFromBlockTree(
+          section,
+          orderedNodes,
+          content,
+        );
+      }
       if (section.type === 'footer' && /^footer$/.test(normalizedName)) {
         return decorateFooterSectionFromBlockTree(section, orderedNodes);
       }
       return section;
     });
+    return mappedSections.filter(
+      (section): section is NavbarSection | FooterSection => section !== null,
+    );
   }
 
   if (/^(header|navigation|nav)$/.test(normalizedName)) {
     const navigationNode = orderedNodes.find(
       (node) => node.kind === 'navigation',
     );
+    const siteLogoNode = orderedNodes.find((node) => node.kind === 'site-logo');
+    const siteTitleNode = orderedNodes.find(
+      (node) => node.kind === 'site-title',
+    );
+    const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+    const stickySignalNode = orderedNodes.find(isStickyChromeNode);
+    const sourceNode =
+      navigationNode ??
+      siteLogoNode ??
+      siteTitleNode ??
+      stickySignalNode ??
+      orderedNodes.find((node) => node.sourceRef);
     const section: NavbarSection = {
       type: 'navbar',
-      sticky: false,
+      sticky: Boolean(stickySignalNode),
       menuSlug: content.menus[0]?.slug ?? 'primary',
       orientation:
         navigationNode?.menuOrientation ??
@@ -323,15 +377,20 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
         'horizontal',
       overlayMenu: navigationNode?.overlayMenu ?? 'mobile',
       isResponsive: navigationNode?.isResponsive ?? true,
-      ...(navigationNode?.sourceRef
-        ? { sourceRef: navigationNode.sourceRef }
-        : {}),
+      showSiteLogo: Boolean(siteLogoNode),
+      showSiteTitle: Boolean(siteTitleNode),
+      ...(siteLogoNode?.width ? { logoWidth: `${siteLogoNode.width}px` } : {}),
+      ...(cta ? { cta } : {}),
+      ...(sourceNode?.sourceRef ? { sourceRef: sourceNode.sourceRef } : {}),
       debugKey: 'navbar-0',
     };
     return [section];
   }
 
   if (/^footer$/.test(normalizedName)) {
+    if (!shouldBuildDeterministicFooterFromBlockTree(orderedNodes)) {
+      return [];
+    }
     const footerColumnsNode = orderedNodes.find(
       (node) => node.kind === 'columns',
     );
@@ -385,6 +444,52 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
   return [];
 }
 
+function decorateNavbarSectionFromBlockTree(
+  section: NavbarSection,
+  orderedNodes: BlockNode[],
+  content: DbContentResult,
+): NavbarSection {
+  const navigationNode = orderedNodes.find(
+    (node) => node.kind === 'navigation',
+  );
+  const siteLogoNode = orderedNodes.find((node) => node.kind === 'site-logo');
+  const siteTitleNode = orderedNodes.find((node) => node.kind === 'site-title');
+  const cta = inferNavbarCtaFromBlockTree(orderedNodes);
+  const stickySignalNode = orderedNodes.find(isStickyChromeNode);
+
+  return {
+    ...section,
+    menuSlug: section.menuSlug?.trim() || content.menus[0]?.slug || 'primary',
+    orientation:
+      section.orientation ??
+      navigationNode?.menuOrientation ??
+      readLayoutOrientation(navigationNode) ??
+      'horizontal',
+    overlayMenu:
+      section.overlayMenu ??
+      navigationNode?.overlayMenu ??
+      ((section.orientation ?? readLayoutOrientation(navigationNode)) ===
+      'vertical'
+        ? 'never'
+        : 'mobile'),
+    isResponsive: section.isResponsive ?? navigationNode?.isResponsive ?? true,
+    sticky: section.sticky || Boolean(stickySignalNode),
+    showSiteLogo: section.showSiteLogo ?? Boolean(siteLogoNode),
+    showSiteTitle: section.showSiteTitle ?? Boolean(siteTitleNode),
+    ...(section.logoWidth
+      ? {}
+      : siteLogoNode?.width
+        ? { logoWidth: `${siteLogoNode.width}px` }
+        : {}),
+    ...(section.cta ? {} : cta ? { cta } : {}),
+    ...(section.sourceRef
+      ? {}
+      : navigationNode?.sourceRef
+        ? { sourceRef: navigationNode.sourceRef }
+        : {}),
+  };
+}
+
 function inferFooterMenuColumnsFromBlockTree(
   nodes: BlockNode[],
 ): FooterSection['menuColumns'] {
@@ -405,6 +510,41 @@ function inferFooterMenuColumnsFromBlockTree(
     });
   }
   return result;
+}
+
+function shouldBuildDeterministicFooterFromBlockTree(
+  orderedNodes: BlockNode[],
+): boolean {
+  const hasBrandSignal = orderedNodes.some((node) =>
+    ['site-logo', 'site-title', 'site-tagline'].includes(node.kind),
+  );
+  const hasMenuColumns =
+    inferFooterMenuColumnsFromBlockTree(orderedNodes).length > 0;
+  const hasColumnsShell = orderedNodes.some((node) => node.kind === 'columns');
+  const hasSupplementalImages =
+    collectFooterSupplementalImagesFromBlockTree(orderedNodes).length > 0;
+  const hasScrollTopHook =
+    collectFooterScrollTopTriggerClassNamesFromBlockTree(orderedNodes).length >
+    0;
+  const hasMeaningfulFooterContent = orderedNodes.some((node) =>
+    [
+      'heading',
+      'paragraph',
+      'navigation',
+      'buttons',
+      'button',
+      'social-links',
+      'social-link',
+    ].includes(node.kind),
+  );
+  return (
+    hasBrandSignal ||
+    hasMenuColumns ||
+    hasColumnsShell ||
+    hasSupplementalImages ||
+    hasScrollTopHook ||
+    hasMeaningfulFooterContent
+  );
 }
 
 function decorateFooterSectionFromBlockTree(
@@ -504,6 +644,37 @@ function mergeFooterSupplementalImages(
   return merged;
 }
 
+function inferNavbarCtaFromBlockTree(
+  nodes: BlockNode[],
+): NavbarSection['cta'] | undefined {
+  const ctaNode = nodes.find(
+    (node) =>
+      node.kind === 'button' &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+  if (!ctaNode?.text?.trim()) return undefined;
+  return {
+    text: ctaNode.text.trim(),
+    link: ctaNode.href?.trim() || '#',
+    style: 'button',
+    ...(ctaNode.customClassNames?.length
+      ? {
+          customClassNames: Array.from(new Set(ctaNode.customClassNames)),
+        }
+      : {}),
+  };
+}
+
+function isStickyChromeNode(node: BlockNode): boolean {
+  if (typeof node.domId === 'string' && /sticky/i.test(node.domId)) {
+    return true;
+  }
+  return (node.customClassNames ?? []).some((className) =>
+    /sticky/i.test(className),
+  );
+}
+
 function containsKind(node: BlockNode, kind: string): boolean {
   if (node.kind === kind) return true;
   return (node.children ?? []).some((child) => containsKind(child, kind));
@@ -534,13 +705,17 @@ function isEligibleBlockTreeListingTemplate(
     return false;
   }
   const dataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
-  if (!dataNeeds.includes('posts')) {
+  if (!dataNeeds.some((need) => ['posts', 'products'].includes(need))) {
     return false;
   }
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
-  if (['archive', 'index', 'search'].includes(normalizedTemplate)) {
+  if (
+    ['archive', 'archive-product', 'index', 'search'].includes(
+      normalizedTemplate,
+    )
+  ) {
     return true;
   }
 
@@ -944,10 +1119,17 @@ function buildBlockTreeDrivenListingSections(input: {
     componentPlan.templateName,
   );
   const shell = inspectDetailShellFromBlockTree(draftBlockTree);
+  const sidebarSource = resolveSidebarSourceMatch(draftBlockTree, shell);
   const orderedNodes = collectBlockNodesInOrder(
     draftBlockTree,
-    shell.sidebarColumnSourceNodeId
-      ? new Set([shell.sidebarColumnSourceNodeId])
+    shell.sidebarColumnSourceNodeId ||
+      sidebarSource?.shell?.sourceRef?.sourceNodeId
+      ? new Set(
+          [
+            shell.sidebarColumnSourceNodeId,
+            sidebarSource?.shell?.sourceRef?.sourceNodeId,
+          ].filter((value): value is string => Boolean(value)),
+        )
       : undefined,
   );
   const queryNode = orderedNodes.find((node) =>
@@ -966,7 +1148,17 @@ function buildBlockTreeDrivenListingSections(input: {
       section.type === 'cover' &&
       !sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId),
   );
-  sections.push(...leadCoverSections);
+  if (leadCoverSections.length > 0) {
+    sections.push(...leadCoverSections);
+  } else {
+    const synthesizedLeadCover = buildListingLeadCoverSection(
+      draftBlockTree,
+      shell.sidebarColumnSourceNodeId,
+    );
+    if (synthesizedLeadCover) {
+      sections.push(synthesizedLeadCover);
+    }
+  }
 
   const searchSection = draftSections?.find(
     (section): section is SearchSection => section.type === 'search',
@@ -1009,15 +1201,13 @@ function buildBlockTreeDrivenListingSections(input: {
     );
   }
 
-  if (shell.sidebarNodes?.length) {
+  if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
-        paddingStyle: shell.shellPaddingStyle,
-        marginStyle: shell.shellMarginStyle,
-        gapStyle: shell.shellGapStyle,
-        sourceRef: shell.shellSourceRef,
-        customClassNames: shell.shellCustomClassNames,
-      }),
+      buildSidebarSectionFromBlockTree(
+        sidebarSource.nodes,
+        input.content,
+        sidebarSource.shell,
+      ),
     );
   }
 
@@ -1027,15 +1217,21 @@ function buildBlockTreeDrivenListingSections(input: {
 
   return {
     sections,
-    layout: shell.hasSidebar
-      ? {
-          ...input.layout,
-          contentLayout:
-            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
-          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
-          sidebarScope: 'all-content',
-        }
-      : input.layout,
+    layout:
+      shell.hasSidebar || !!sidebarSource
+        ? {
+            ...input.layout,
+            contentLayout:
+              (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+                ? 'sidebar-left'
+                : 'sidebar-right',
+            sidebarWidth:
+              sidebarSource?.width ??
+              shell.sidebarWidth ??
+              input.layout.sidebarWidth,
+            sidebarScope: 'all-content',
+          }
+        : input.layout,
   };
 }
 
@@ -1078,8 +1274,12 @@ function buildBlockTreeDrivenListingFallbackSection(
   const normalizedTemplate = normalizeTemplateIdentifier(
     componentPlan.templateName,
   );
+  const isProductListing =
+    normalizedTemplate === 'archive-product' ||
+    toVisualDataNeeds(componentPlan.dataNeeds).includes('products');
   return {
     type: 'post-list',
+    ...(isProductListing ? { resource: 'products' as const } : {}),
     ...(normalizedTemplate === 'index' ? { title: 'Posts' } : {}),
     layout: 'grid-3',
     showDate: normalizedTemplate === 'index',
@@ -1087,6 +1287,7 @@ function buildBlockTreeDrivenListingFallbackSection(
     showCategory: normalizedTemplate === 'search',
     showExcerpt: true,
     showFeaturedImage: true,
+    ...(isProductListing ? { showPrice: true, showButton: true } : {}),
     itemLayout: 'stacked',
     metaLayout: 'inline',
     metaAlign: 'start',
@@ -1096,9 +1297,64 @@ function buildBlockTreeDrivenListingFallbackSection(
     sectionKey: 'post-list-0',
     obligation: {
       role: 'post-list',
-      required: ['posts'],
-      minItems: { posts: 1 },
+      required: [isProductListing ? 'products' : 'posts'],
+      minItems: isProductListing ? { products: 1 } : { posts: 1 },
     },
+  };
+}
+
+function buildListingLeadCoverSection(
+  draftBlockTree: BlockNode[],
+  excludedSourceNodeIdPrefix?: string,
+): CoverSection | undefined {
+  const coverNode = draftBlockTree.find(
+    (node) =>
+      node.kind === 'cover' &&
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix),
+  );
+  if (!coverNode?.src?.trim()) {
+    return undefined;
+  }
+
+  const coverDescendants = collectBlockNodesInOrder([coverNode]);
+  const headingNode = coverDescendants.find(
+    (node) =>
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix) &&
+      ['heading', 'query-title'].includes(node.kind) &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+  const paragraphNode = coverDescendants.find(
+    (node) =>
+      !nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix) &&
+      node.kind === 'paragraph' &&
+      typeof node.text === 'string' &&
+      node.text.trim().length > 0,
+  );
+
+  return {
+    type: 'cover',
+    imageSrc: coverNode.src,
+    dimRatio:
+      typeof coverNode.attrs?.dimRatio === 'number'
+        ? coverNode.attrs.dimRatio
+        : 50,
+    minHeight: normalizeCoverCssLength(coverNode.minHeight) ?? '400px',
+    contentAlign:
+      coverNode.textAlign === 'left' || coverNode.textAlign === 'right'
+        ? coverNode.textAlign
+        : 'center',
+    ...(headingNode?.text?.trim() ? { heading: headingNode.text.trim() } : {}),
+    ...(paragraphNode?.text?.trim()
+      ? { subheading: paragraphNode.text.trim() }
+      : {}),
+    ...(coverNode.overlayColor ? { overlayColor: coverNode.overlayColor } : {}),
+    ...(coverNode.sourceRef ? { sourceRef: coverNode.sourceRef } : {}),
+    ...(coverNode.customClassNames?.length
+      ? { customClassNames: [...new Set(coverNode.customClassNames)] }
+      : {}),
+    debugKey: 'cover-0',
+    sectionKey: 'cover-0',
   };
 }
 
@@ -1136,23 +1392,68 @@ function sectionBelongsToSourceSubtree(
   );
 }
 
+function nodeBelongsToSourceSubtree(
+  node: BlockNode,
+  sourceNodeIdPrefix?: string,
+): boolean {
+  if (!sourceNodeIdPrefix?.trim()) {
+    return false;
+  }
+  const sourceNodeId = node.sourceRef?.sourceNodeId;
+  return (
+    typeof sourceNodeId === 'string' &&
+    sourceNodeId.startsWith(sourceNodeIdPrefix)
+  );
+}
+
+function normalizeCoverCssLength(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
 function buildBlockTreeDrivenPostDetailSections(input: {
   componentPlan: BlockTreePlannerComponentPlan;
   draftBlockTree: BlockNode[];
+  draftSections?: SectionPlan[];
   content: DbContentResult;
   layout: LayoutTokens;
 }): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
   const shell = inspectDetailShellFromBlockTree(input.draftBlockTree);
+  const sidebarSource = resolveSidebarSourceMatch(input.draftBlockTree, shell);
+  const dataNeeds = toVisualDataNeeds(input.componentPlan.dataNeeds);
+  const isProductDetail = dataNeeds.includes('productDetail');
   const mainNodes = collectBlockNodesInOrder(
     input.draftBlockTree,
-    shell.sidebarColumnSourceNodeId
-      ? new Set([shell.sidebarColumnSourceNodeId])
+    shell.sidebarColumnSourceNodeId ||
+      sidebarSource?.shell?.sourceRef?.sourceNodeId
+      ? new Set(
+          [
+            shell.sidebarColumnSourceNodeId,
+            sidebarSource?.shell?.sourceRef?.sourceNodeId,
+          ].filter((value): value is string => Boolean(value)),
+        )
       : undefined,
   );
   const stats = collectPostDetailBlockStats(mainNodes);
-  if (!stats.postContentNode) return undefined;
+  const primaryContentNode =
+    stats.postContentNode ??
+    (isProductDetail
+      ? (stats.productDetailsNode ?? stats.excerptNode ?? stats.metaNode)
+      : undefined);
+  if (!stats.titleNode && !primaryContentNode) return undefined;
 
   const sections: SectionPlan[] = [];
+  const leadSections = (input.draftSections ?? []).filter((section) => {
+    if (
+      sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId)
+    ) {
+      return false;
+    }
+    return section.type === 'cover' || section.type === 'breadcrumb';
+  });
+  sections.push(...leadSections);
 
   if (stats.featuredImageNode) {
     const section: PostFeaturedImageSection = {
@@ -1219,32 +1520,53 @@ function buildBlockTreeDrivenPostDetailSections(input: {
     showTitle: !stats.titleNode,
     showAuthor: !stats.hasMetaSection && stats.hasAuthor,
     showDate: !stats.hasMetaSection && stats.hasDate,
-    showCategories: !stats.hasMetaSection && stats.hasCategoryTerms,
-    ...(stats.postContentNode.sourceRef
-      ? { sourceRef: stats.postContentNode.sourceRef }
+    showCategories:
+      !stats.hasMetaSection &&
+      stats.hasCategoryTerms &&
+      !stats.categoryTermsNode,
+    ...(primaryContentNode?.sourceRef
+      ? { sourceRef: primaryContentNode.sourceRef }
       : {}),
-    ...(stats.postContentNode.customClassNames?.length
-      ? { customClassNames: [...stats.postContentNode.customClassNames] }
+    ...(primaryContentNode?.customClassNames?.length
+      ? { customClassNames: [...primaryContentNode.customClassNames] }
       : {}),
     debugKey: 'post-content-0',
     sectionKey: 'post-content-0',
   };
   sections.push(postContentSection);
 
-  if (stats.termsNode && stats.hasTagTerms) {
+  if (stats.categoryTermsNode) {
     const section: PostTermsSection = {
       type: 'post-terms',
-      taxonomy: stats.termsTaxonomy ?? 'post_tag',
-      separator: stats.termsSeparator,
+      taxonomy: 'category',
+      separator: stats.categoryTermsSeparator,
       layout: 'inline',
-      ...(stats.termsNode.sourceRef
-        ? { sourceRef: stats.termsNode.sourceRef }
+      ...(stats.categoryTermsNode.sourceRef
+        ? { sourceRef: stats.categoryTermsNode.sourceRef }
         : {}),
-      ...(stats.termsNode.customClassNames?.length
-        ? { customClassNames: [...stats.termsNode.customClassNames] }
+      ...(stats.categoryTermsNode.customClassNames?.length
+        ? { customClassNames: [...stats.categoryTermsNode.customClassNames] }
         : {}),
       debugKey: 'post-terms-0',
       sectionKey: 'post-terms-0',
+    };
+    sections.push(section);
+  }
+
+  if (stats.tagTermsNode) {
+    const section: PostTermsSection = {
+      type: 'post-terms',
+      taxonomy: stats.tagTermsTaxonomy ?? 'post_tag',
+      separator: stats.tagTermsSeparator,
+      layout: 'inline',
+      ...(stats.tagTermsNode.sourceRef
+        ? { sourceRef: stats.tagTermsNode.sourceRef }
+        : {}),
+      ...(stats.tagTermsNode.customClassNames?.length
+        ? { customClassNames: [...stats.tagTermsNode.customClassNames] }
+        : {}),
+      debugKey: stats.categoryTermsNode ? 'post-terms-1' : 'post-terms-0',
+      sectionKey: stats.categoryTermsNode ? 'post-terms-1' : 'post-terms-0',
     };
     sections.push(section);
   }
@@ -1278,29 +1600,42 @@ function buildBlockTreeDrivenPostDetailSections(input: {
     sections.push(section);
   }
 
-  if (shell.sidebarNodes?.length) {
+  const relatedCollectionSections = (input.draftSections ?? []).filter(
+    (section): section is PostListSection =>
+      section.type === 'post-list' &&
+      !sectionBelongsToSourceSubtree(section, shell.sidebarColumnSourceNodeId),
+  );
+  for (const section of relatedCollectionSections) {
+    sections.push({ ...section });
+  }
+
+  if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
-        paddingStyle: shell.shellPaddingStyle,
-        marginStyle: shell.shellMarginStyle,
-        gapStyle: shell.shellGapStyle,
-        sourceRef: shell.shellSourceRef,
-        customClassNames: shell.shellCustomClassNames,
-      }),
+      buildSidebarSectionFromBlockTree(
+        sidebarSource.nodes,
+        input.content,
+        sidebarSource.shell,
+      ),
     );
   }
 
   return {
     sections,
-    layout: shell.hasSidebar
-      ? {
-          ...input.layout,
-          contentLayout:
-            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
-          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
-          sidebarScope: 'all-content',
-        }
-      : input.layout,
+    layout:
+      shell.hasSidebar || !!sidebarSource
+        ? {
+            ...input.layout,
+            contentLayout:
+              (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+                ? 'sidebar-left'
+                : 'sidebar-right',
+            sidebarWidth:
+              sidebarSource?.width ??
+              shell.sidebarWidth ??
+              input.layout.sidebarWidth,
+            sidebarScope: 'all-content',
+          }
+        : input.layout,
   };
 }
 
@@ -1457,6 +1792,89 @@ function blockTreeContainsSidebarTemplate(node: BlockNode): boolean {
   );
 }
 
+function resolveSidebarSourceMatch(
+  draftBlockTree: BlockNode[],
+  shell: DetailShellInfo,
+): SidebarSourceMatch | undefined {
+  const shellNodes = shell.sidebarNodes ?? [];
+  if (hasRenderableSidebarWidgetContent(shellNodes)) {
+    return {
+      nodes: shellNodes,
+      position: shell.sidebarPosition,
+      width: shell.sidebarWidth,
+      shell: {
+        paddingStyle: shell.shellPaddingStyle,
+        marginStyle: shell.shellMarginStyle,
+        gapStyle: shell.shellGapStyle,
+        sourceRef: shell.shellSourceRef,
+        customClassNames: shell.shellCustomClassNames,
+      },
+    };
+  }
+
+  const standaloneSidebar = findStandaloneSidebarRoot(
+    draftBlockTree,
+    shell.sidebarColumnSourceNodeId,
+  );
+  if (!standaloneSidebar?.children?.length) {
+    return undefined;
+  }
+
+  return {
+    nodes: standaloneSidebar.children,
+    position: shell.sidebarPosition ?? 'right',
+    width: shell.sidebarWidth,
+    shell: {
+      paddingStyle: blockSpacingToCssShorthand(standaloneSidebar.padding),
+      marginStyle: blockSpacingToCssShorthand(standaloneSidebar.margin),
+      gapStyle: standaloneSidebar.gap,
+      sourceRef: standaloneSidebar.sourceRef,
+      customClassNames: standaloneSidebar.customClassNames,
+    },
+  };
+}
+
+function hasRenderableSidebarWidgetContent(
+  sidebarNodes?: BlockNode[],
+): boolean {
+  return collectSidebarWidgetKinds(sidebarNodes ?? []).size > 0;
+}
+
+function findStandaloneSidebarRoot(
+  nodes: BlockNode[],
+  excludedSourceNodeIdPrefix?: string,
+): BlockNode | undefined {
+  const visit = (node: BlockNode): BlockNode | undefined => {
+    if (nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix)) {
+      return undefined;
+    }
+    if (isStandaloneSidebarRootCandidate(node)) {
+      return node;
+    }
+    for (const child of node.children ?? []) {
+      const nested = visit(child);
+      if (nested) return nested;
+    }
+    return undefined;
+  };
+
+  for (const node of nodes) {
+    const candidate = visit(node);
+    if (candidate) return candidate;
+  }
+  return undefined;
+}
+
+function isStandaloneSidebarRootCandidate(node: BlockNode): boolean {
+  const widgetKinds = collectSidebarWidgetKinds([node]);
+  if (widgetKinds.size === 0) return false;
+  const hasStickySidebarClass = (node.customClassNames ?? []).some(
+    (className) => /sticky-sidebar/i.test(className),
+  );
+  if (hasStickySidebarClass) return true;
+  return widgetKinds.size >= 3 && (node.children?.length ?? 0) >= 2;
+}
+
 function collectBlockNodesInOrder(
   nodes: BlockNode[],
   skipSourceNodeIds?: Set<string>,
@@ -1476,6 +1894,7 @@ function collectBlockNodesInOrder(
   for (const node of nodes) {
     visit(node);
   }
+
   return collected;
 }
 
@@ -1489,9 +1908,13 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   featuredImageNode?: BlockNode;
   metaNode?: BlockNode;
   postContentNode?: BlockNode;
-  termsNode?: BlockNode;
-  termsTaxonomy?: 'category' | 'post_tag' | 'tag';
-  termsSeparator?: string;
+  excerptNode?: BlockNode;
+  productDetailsNode?: BlockNode;
+  categoryTermsNode?: BlockNode;
+  categoryTermsSeparator?: string;
+  tagTermsNode?: BlockNode;
+  tagTermsTaxonomy?: 'post_tag' | 'tag';
+  tagTermsSeparator?: string;
   commentsNode?: BlockNode;
   postNavigationNode?: BlockNode;
 } {
@@ -1499,7 +1922,10 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   let featuredImageNode: BlockNode | undefined;
   let metaNode: BlockNode | undefined;
   let postContentNode: BlockNode | undefined;
-  let termsNode: BlockNode | undefined;
+  let excerptNode: BlockNode | undefined;
+  let productDetailsNode: BlockNode | undefined;
+  let categoryTermsNode: BlockNode | undefined;
+  let tagTermsNode: BlockNode | undefined;
   let commentsNode: BlockNode | undefined;
   let postNavigationNode: BlockNode | undefined;
   let hasAuthor = false;
@@ -1507,8 +1933,9 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
   let hasCategoryTerms = false;
   let hasTagTerms = false;
   let hasMetaSection = false;
-  let termsTaxonomy: 'category' | 'post_tag' | 'tag' | undefined;
-  let termsSeparator: string | undefined;
+  let categoryTermsSeparator: string | undefined;
+  let tagTermsTaxonomy: 'post_tag' | 'tag' | undefined;
+  let tagTermsSeparator: string | undefined;
 
   for (const node of nodes) {
     switch (node.kind) {
@@ -1537,18 +1964,24 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
       case 'post-content':
         postContentNode ??= node;
         break;
+      case 'post-excerpt':
+        excerptNode ??= node;
+        break;
+      case 'product-details':
+        productDetailsNode ??= node;
+        break;
       case 'post-terms': {
         const taxonomy = normalizePostTermsTaxonomy(node);
+        const separator = readStringBlockAttr(node, 'separator');
         if (taxonomy === 'category') {
           hasCategoryTerms = true;
-          if (hasMetaSection && !termsNode) {
-            termsNode = node;
-          }
+          categoryTermsNode ??= node;
+          categoryTermsSeparator ??= separator;
         } else {
           hasTagTerms = true;
-          termsNode ??= node;
-          termsTaxonomy = taxonomy;
-          termsSeparator ??= readStringBlockAttr(node, 'separator');
+          tagTermsNode ??= node;
+          tagTermsTaxonomy = taxonomy;
+          tagTermsSeparator ??= separator;
         }
         break;
       }
@@ -1574,9 +2007,13 @@ function collectPostDetailBlockStats(nodes: BlockNode[]): {
     featuredImageNode,
     metaNode,
     postContentNode,
-    termsNode,
-    termsTaxonomy,
-    termsSeparator,
+    excerptNode,
+    productDetailsNode,
+    categoryTermsNode,
+    categoryTermsSeparator,
+    tagTermsNode,
+    tagTermsTaxonomy,
+    tagTermsSeparator,
     commentsNode,
     postNavigationNode,
   };
@@ -1596,62 +2033,7 @@ function buildSidebarSectionFromBlockTree(
         node.text.trim().length > 0,
     )
     .map((node) => node.text!.trim());
-  const hasSearch = orderedNodes.some((node) => node.kind === 'search');
-  const hasNavigation = orderedNodes.some((node) => node.kind === 'navigation');
-  const hasAuthorBio = orderedNodes.some((node) =>
-    ['post-author-biography', 'avatar'].includes(node.kind),
-  );
-  const hasCategories = orderedNodes.some((node) => node.kind === 'categories');
-  const hasRecentPosts = orderedNodes.some((node) =>
-    ['query', 'latest-posts'].includes(node.kind),
-  );
-
-  const widgets: SidebarSection['widgets'] = [];
-  if (hasSearch) {
-    widgets.push({
-      kind: 'search',
-      ...(headingTexts.find((heading) => /search/i.test(heading))
-        ? {
-            title: headingTexts.find((heading) => /search/i.test(heading)),
-          }
-        : {}),
-    });
-  }
-  if (hasAuthorBio) {
-    widgets.push({
-      kind: 'author-bio',
-      title:
-        headingTexts.find((heading) => /author/i.test(heading)) ??
-        'About the author',
-      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
-    });
-  }
-  if (hasCategories) {
-    widgets.push({
-      kind: 'categories',
-      title:
-        headingTexts.find((heading) => /categor/i.test(heading)) ??
-        'Popular Categories',
-    });
-  }
-  if (hasNavigation) {
-    widgets.push({
-      kind: 'navigation',
-      title:
-        headingTexts.find((heading) =>
-          /link|resource|menu|explore/i.test(heading),
-        ) ?? 'Useful Links',
-      menuSlug: content.menus[0]?.slug ?? 'primary',
-    });
-  }
-  if (hasRecentPosts) {
-    widgets.push({
-      kind: 'recent-posts',
-      title:
-        headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
-        'Recent Posts',
-    });
-  }
+  const widgets = buildOrderedSidebarWidgets(sidebarNodes, content);
   if (widgets.length === 0) {
     widgets.push({
       kind: 'pages-list',
@@ -1686,6 +2068,219 @@ function buildSidebarSectionFromBlockTree(
   };
 }
 
+function buildOrderedSidebarWidgets(
+  sidebarNodes: BlockNode[],
+  content: DbContentResult,
+): SidebarWidget[] {
+  const widgetRoots = collectSidebarWidgetRoots(sidebarNodes);
+  const widgets = widgetRoots
+    .map((root) => buildSidebarWidgetFromRoot(root, content))
+    .filter((widget): widget is SidebarWidget => Boolean(widget));
+  if (widgets.length > 0) {
+    return widgets;
+  }
+
+  const orderedNodes = collectBlockNodesInOrder(sidebarNodes);
+  const headingTexts = orderedNodes
+    .filter(
+      (node) =>
+        node.kind === 'heading' &&
+        typeof node.text === 'string' &&
+        node.text.trim().length > 0,
+    )
+    .map((node) => node.text!.trim());
+
+  const fallbackWidgets: SidebarWidget[] = [];
+  if (orderedNodes.some((node) => node.kind === 'search')) {
+    fallbackWidgets.push({
+      kind: 'search',
+      ...(headingTexts.find((heading) => /search/i.test(heading))
+        ? {
+            title: headingTexts.find((heading) => /search/i.test(heading)),
+          }
+        : {}),
+    });
+  }
+  if (
+    orderedNodes.some((node) => ['query', 'latest-posts'].includes(node.kind))
+  ) {
+    fallbackWidgets.push({
+      kind: 'recent-posts',
+      title:
+        headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
+        'Recent Posts',
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'categories')) {
+    fallbackWidgets.push({
+      kind: 'categories',
+      title:
+        headingTexts.find((heading) => /categor/i.test(heading)) ??
+        'Popular Categories',
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'tag-cloud')) {
+    fallbackWidgets.push({
+      kind: 'tags',
+      title: headingTexts.find((heading) => /tag/i.test(heading)) ?? 'Tags',
+    });
+  }
+  if (
+    orderedNodes.some((node) =>
+      ['post-author-biography', 'avatar'].includes(node.kind),
+    )
+  ) {
+    fallbackWidgets.push({
+      kind: 'author-bio',
+      title:
+        headingTexts.find((heading) => /author/i.test(heading)) ??
+        'About the author',
+      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'navigation')) {
+    fallbackWidgets.push({
+      kind: 'navigation',
+      title:
+        headingTexts.find((heading) =>
+          /link|resource|menu|explore/i.test(heading),
+        ) ?? 'Useful Links',
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+    });
+  }
+  return fallbackWidgets;
+}
+
+function collectSidebarWidgetRoots(nodes: BlockNode[]): BlockNode[] {
+  const roots: BlockNode[] = [];
+  const visit = (node: BlockNode) => {
+    const widgetKinds = collectSidebarWidgetKinds([node]);
+    if (widgetKinds.size === 0) {
+      for (const child of node.children ?? []) {
+        visit(child);
+      }
+      return;
+    }
+
+    if (isSidebarWidgetRootNode(node, widgetKinds)) {
+      roots.push(node);
+      return;
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child);
+    }
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+  return roots;
+}
+
+function isSidebarWidgetRootNode(
+  node: BlockNode,
+  widgetKinds: Set<SidebarWidget['kind']>,
+): boolean {
+  if (widgetKinds.size !== 1) return false;
+  if (mapSidebarWidgetKind(node.kind)) return true;
+  const children = node.children ?? [];
+  return (
+    children.some((child) => child.kind === 'heading') || children.length <= 1
+  );
+}
+
+function buildSidebarWidgetFromRoot(
+  root: BlockNode,
+  content: DbContentResult,
+): SidebarWidget | undefined {
+  const orderedNodes = collectBlockNodesInOrder([root]);
+  const title = orderedNodes
+    .find((node) => node.kind === 'heading' && node.text?.trim())
+    ?.text?.trim();
+
+  if (orderedNodes.some((node) => node.kind === 'search')) {
+    return {
+      kind: 'search',
+      ...(title ? { title } : {}),
+    };
+  }
+  if (
+    orderedNodes.some((node) => ['query', 'latest-posts'].includes(node.kind))
+  ) {
+    return {
+      kind: 'recent-posts',
+      title: title ?? 'Recent Posts',
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'categories')) {
+    return {
+      kind: 'categories',
+      title: title ?? 'Popular Categories',
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'tag-cloud')) {
+    return {
+      kind: 'tags',
+      title: title ?? 'Tags',
+    };
+  }
+  if (
+    orderedNodes.some((node) =>
+      ['post-author-biography', 'avatar'].includes(node.kind),
+    )
+  ) {
+    return {
+      kind: 'author-bio',
+      title: title ?? 'About the author',
+      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'navigation')) {
+    return {
+      kind: 'navigation',
+      title: title ?? 'Useful Links',
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+    };
+  }
+  return undefined;
+}
+
+function collectSidebarWidgetKinds(
+  nodes: BlockNode[],
+): Set<SidebarWidget['kind']> {
+  const kinds = new Set<SidebarWidget['kind']>();
+  const orderedNodes = collectBlockNodesInOrder(nodes);
+  for (const node of orderedNodes) {
+    const widgetKind = mapSidebarWidgetKind(node.kind);
+    if (widgetKind) {
+      kinds.add(widgetKind);
+    }
+  }
+  return kinds;
+}
+
+function mapSidebarWidgetKind(kind: string): SidebarWidget['kind'] | undefined {
+  switch (kind) {
+    case 'search':
+      return 'search';
+    case 'post-author-biography':
+    case 'avatar':
+      return 'author-bio';
+    case 'categories':
+      return 'categories';
+    case 'tag-cloud':
+      return 'tags';
+    case 'navigation':
+      return 'navigation';
+    case 'query':
+    case 'latest-posts':
+      return 'recent-posts';
+    default:
+      return undefined;
+  }
+}
+
 function isCommentsBlockTreeNode(node: BlockNode): boolean {
   const blockName = node.blockName.toLowerCase();
   const patternSlug = String(node.patternSlug ?? '').toLowerCase();
@@ -1709,7 +2304,8 @@ function normalizePostTermsTaxonomy(
   node: BlockNode,
 ): 'category' | 'post_tag' | 'tag' {
   const taxonomy = readStringBlockAttr(node, 'term');
-  if (taxonomy === 'category') return 'category';
+  if (taxonomy === 'category' || taxonomy === 'product_cat') return 'category';
+  if (taxonomy === 'product_tag') return 'post_tag';
   if (taxonomy === 'tag') return 'tag';
   return 'post_tag';
 }

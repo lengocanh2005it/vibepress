@@ -39,9 +39,11 @@ export interface RuntimeLayoutSpec {
   kind?: string;
   align?: string;
   columnWidth?: string;
+  minimumColumnWidth?: string;
   justifyContent?: string;
   alignItems?: string;
   orientation?: string;
+  flexWrap?: string;
   columns?: number;
 }
 
@@ -107,6 +109,8 @@ export interface RuntimeBlockNode {
   margin?: Record<string, string>;
   minHeight?: string;
   overlayColor?: string;
+  hasParallax?: boolean;
+  focalPoint?: { x: number; y: number };
   columnWidth?: string;
   textAlign?: string;
   justifyContent?: string;
@@ -173,6 +177,8 @@ export interface RuntimeSectionPlan {
   style?: RuntimeStyleSpec;
   children?: RuntimeSectionPlan[];
   customClassNames?: string[];
+  hasParallax?: boolean;
+  focalPoint?: { x: number; y: number };
   [key: string]: unknown;
 }
 

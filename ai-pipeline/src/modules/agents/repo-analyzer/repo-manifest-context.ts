@@ -339,6 +339,54 @@ export function buildRepoManifestContextNote(
     }
   }
 
+  if (includeStructureHints && manifest.themeDeepAnalysis) {
+    const deep = manifest.themeDeepAnalysis;
+    lines.push(`## Theme-specific deep analysis (${deep.themeSlug})`);
+    if (deep.routeSources.length > 0) {
+      lines.push('Resolved route/template chains:');
+      for (const route of deep.routeSources.slice(
+        0,
+        mode === 'compact' ? 4 : 8,
+      )) {
+        const chainPreview = fmtList(
+          route.chainFiles,
+          mode === 'compact' ? 4 : 8,
+          (file) => file,
+        );
+        const patternPreview =
+          route.patternSlugs.length > 0
+            ? ` | patterns=${fmtTokens(route.patternSlugs, 4)}`
+            : '';
+        lines.push(
+          `- ${route.routeFamily}: ${route.entryFile} -> ${chainPreview}${patternPreview}`,
+        );
+        if (mode !== 'compact' && route.customClasses.length > 0) {
+          lines.push(`  classes: ${fmtTokens(route.customClasses, 8)}`);
+        }
+      }
+    }
+    if (deep.behaviorSignals.length > 0) {
+      lines.push(
+        `Recovered runtime behavior signals: ${deep.behaviorSignals
+          .map((signal) => signal.key)
+          .join(', ')}`,
+      );
+      if (mode !== 'compact') {
+        for (const signal of deep.behaviorSignals.slice(0, 6)) {
+          const selectorSuffix =
+            signal.selectors.length > 0
+              ? ` selectors=${fmtTokens(signal.selectors, 4)}`
+              : '';
+          const classSuffix =
+            signal.classNames.length > 0
+              ? ` classes=${fmtTokens(signal.classNames, 6)}`
+              : '';
+          lines.push(`- ${signal.key}${selectorSuffix}${classSuffix}`);
+        }
+      }
+    }
+  }
+
   const structuralSignals: string[] = [];
   if (manifest.structureHints.containsNavigation)
     structuralSignals.push('navigation');

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { readFile, readdir, stat } from 'fs/promises';
 import { basename, join, relative } from 'path';
 import { extractStyleCssTokens } from '../../../common/style-token-extractor/style-token-extractor.js';
+import { normalizeWordPressPhpMarkup } from '../../../common/utils/wp-block-to-json.js';
 import { collectThemeCssSources } from '../../../common/utils/theme-css-sources.js';
 
 export interface ThemeDefaults {
@@ -869,39 +870,7 @@ export class BlockParserService {
    * 3. Remove remaining <?php ... ?> tags
    */
   private stripPhp(raw: string): string {
-    return (
-      raw
-        .replace(/<\?php\s*\/\*\*[\s\S]*?\*\/\s*\?>/g, '')
-        // PHP i18n in JSON string values: "<?php esc_html_e('Team', 'domain'); ?>" → "Team"
-        .replace(
-          /"<\?php\s+(?:esc_html_e|esc_attr_e|esc_html|esc_attr|__|_e)\s*\(\s*'([^']+)'[\s\S]*?\?>"/g,
-          '"$1"',
-        )
-        // PHP i18n in HTML content: <?php esc_html_e('text', 'domain'); ?> → text
-        // Also handles esc_attr_e (e.g. alt attributes)
-        .replace(
-          /<\?php\s+(?:esc_html_e|esc_attr_e|_e)\s*\(\s*'([^']+)'[\s\S]*?\?>/g,
-          '$1',
-        )
-        .replace(
-          /<\?php\s+echo\s+(?:esc_html|esc_attr|__)\s*\(\s*'([^']+)'[\s\S]*?\?>/g,
-          '$1',
-        )
-        // <?php echo esc_html_x('text', 'context', 'domain'); ?> → text
-        // Must run BEFORE the bare esc_html_x regex so outer PHP tags are removed together
-        .replace(
-          /<\?php\s+echo\s+esc_html_x\s*\(\s*'([^']+)'[\s\S]*?\?>/g,
-          '$1',
-        )
-        .replace(/esc_html_x\(\s*(['"`])([\s\S]*?)\1\s*,[\s\S]*?\)/g, '$2')
-        .replace(/esc_html__\(\s*(['"`])([\s\S]*?)\1\s*,[\s\S]*?\)/g, '$2')
-        .replace(/esc_attr_e\(\s*(['"`])([\s\S]*?)\1\s*,[\s\S]*?\)/g, '$2')
-        .replace(/esc_attr__\(\s*(['"`])([\s\S]*?)\1\s*,[\s\S]*?\)/g, '$2')
-        .replace(/echo\s+(['"`])([\s\S]*?)\1\s*;/g, '$2')
-        .replace(/<\?php[\s\S]*?\?>/g, '')
-        .replace(/<\?php[^>]*$/gm, '')
-        .trim()
-    );
+    return normalizeWordPressPhpMarkup(raw).trim();
   }
 
   private mergeBySlug<T extends { slug: string }>(base: T[], extra: T[]): T[] {

@@ -49,7 +49,7 @@ describe('ReactGeneratorService shared partial renderer policy', () => {
     expect(result).toBe(true);
   });
 
-  it('keeps Footer on semantic deterministic path when deterministic-authority is locked', () => {
+  it('keeps Footer on block-faithful deterministic path when deterministic-authority is locked', () => {
     const result = shouldUseBlockFaithfulSharedPartial(
       'Footer',
       {
@@ -61,7 +61,7 @@ describe('ReactGeneratorService shared partial renderer policy', () => {
       [{ block: 'core/group', kind: 'group', children: [] }],
     );
 
-    expect(result).toBe(false);
+    expect(result).toBe(true);
   });
 
   it('still allows Footer block-faithful rendering when deterministic-authority is not locked', () => {

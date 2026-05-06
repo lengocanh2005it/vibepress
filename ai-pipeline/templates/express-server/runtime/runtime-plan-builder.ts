@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { basename, extname } from 'path';
+import { readFileSync, existsSync } from 'fs';
+import { basename, extname, join } from 'path';
 
 type RuntimeParsedBlock = {
   blockName: string;
@@ -7,6 +8,73 @@ type RuntimeParsedBlock = {
   innerHtml: string;
   children: RuntimeParsedBlock[];
 };
+
+interface RuntimeSectionExtractionOptions {
+  preserveSourceStructuralBlocks?: boolean;
+}
+
+function inferRuntimeThemeSlug(themeDir?: string | null): string {
+  const normalized = String(themeDir ?? '')
+    .trim()
+    .replace(/[\\/]+$/, '');
+  return normalized ? basename(normalized).toLowerCase() : '';
+}
+
+function normalizeRuntimeTemplateSlug(template: unknown): string {
+  return String(template ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^templates\//i, '')
+    .replace(/\.(html|php)$/i, '')
+    .toLowerCase();
+}
+
+function shouldPreserveSourceStructuralBlocks(
+  row: any,
+  themeSlug: string,
+): boolean {
+  if (themeSlug !== 'profolio-fse') return false;
+  const template = normalizeRuntimeTemplateSlug(row?.template);
+  const isFrontPage = Number(row?.is_front_page ?? 0) === 1;
+  return (
+    isFrontPage ||
+    !template ||
+    [
+      'default',
+      'page',
+      'front-page',
+      'template-about',
+      'template-contact',
+      'template-services',
+      'blank',
+      'full-width',
+    ].includes(template)
+  );
+}
+
+function deriveRuntimeLayoutFamily(row: any, themeSlug: string): string {
+  if (themeSlug !== 'profolio-fse') return 'default-page';
+  const template = normalizeRuntimeTemplateSlug(row?.template);
+  if (Number(row?.is_front_page ?? 0) === 1) {
+    return 'profolio-fse-front-page';
+  }
+  switch (template) {
+    case 'front-page':
+      return 'profolio-fse-front-page';
+    case 'template-about':
+      return 'profolio-fse-about-page';
+    case 'template-contact':
+      return 'profolio-fse-contact-page';
+    case 'template-services':
+      return 'profolio-fse-services-page';
+    case 'blank':
+      return 'profolio-fse-blank-page';
+    case 'full-width':
+      return 'profolio-fse-full-width-page';
+    default:
+      return 'profolio-fse-default-page';
+  }
+}
 
 function rebaseToSiteOrigin(url: string, siteUrl: string): string {
   try {
@@ -215,6 +283,10 @@ function extractRuntimeClassNames(
   pushClassNames(
     extractFirstMatch(innerHtml, /\bclass=(["'])([^"']+)\1/i, 2) ?? null,
   );
+  const layoutType =
+    typeof attrs.layout?.type === 'string' ? attrs.layout.type.trim() : '';
+  if (layoutType === 'flex') collected.add('is-layout-flex');
+  if (layoutType === 'grid') collected.add('is-layout-grid');
   return [...collected];
 }
 
@@ -544,6 +616,18 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
     if (typeof layout.orientation === 'string' && layout.orientation.trim()) {
       result.orientation = layout.orientation.trim();
     }
+    if (
+      typeof layout.minimumColumnWidth === 'string' &&
+      layout.minimumColumnWidth.trim()
+    ) {
+      result.minimumColumnWidth = layout.minimumColumnWidth.trim();
+    }
+    if (typeof layout.flexWrap === 'string' && layout.flexWrap.trim()) {
+      result.flexWrap = layout.flexWrap.trim();
+    }
+    if (typeof layout.columnCount === 'number' && layout.columnCount > 0) {
+      result.columns = layout.columnCount;
+    }
   }
   if (
     typeof block.attrs?.mediaPosition === 'string' &&
@@ -568,6 +652,14 @@ function buildRuntimeLayoutSpec(block: RuntimeParsedBlock) {
       ['core/column', 'uagb/container', 'uagb/section'].includes(child.blockName),
     ).length;
     if (visibleColumns > 0) result.columns = visibleColumns;
+  } else if (
+    layout &&
+    typeof layout === 'object' &&
+    layout.type === 'grid' &&
+    typeof result.columns !== 'number'
+  ) {
+    const childCount = block.children.length;
+    if (childCount > 1) result.columns = childCount;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -724,11 +816,36 @@ function buildRuntimeBlockNode(
     node.layout = { kind: 'grid', columns: 2 };
   }
 
+  if (block.blockName === 'core/cover') {
+    if (block.attrs.hasParallax === true) node.hasParallax = true;
+    const fp = block.attrs.focalPoint;
+    if (fp && typeof fp === 'object') {
+      const fpObj = fp as Record<string, unknown>;
+      const x = typeof fpObj.x === 'number' ? fpObj.x : parseFloat(String(fpObj.x ?? ''));
+      const y = typeof fpObj.y === 'number' ? fpObj.y : parseFloat(String(fpObj.y ?? ''));
+      if (!isNaN(x) && !isNaN(y)) node.focalPoint = { x, y };
+    }
+  }
+
+  if (['core/image', 'core/site-logo'].includes(block.blockName)) {
+    const w = typeof block.attrs.width === 'number' ? block.attrs.width
+      : parseInt(String(block.attrs.width ?? ''), 10);
+    const h = typeof block.attrs.height === 'number' ? block.attrs.height
+      : parseInt(String(block.attrs.height ?? ''), 10);
+    if (!isNaN(w) && w > 0) node.width = w;
+    if (!isNaN(h) && h > 0) node.height = h;
+  }
+
+  if (['core/table', 'core/verse', 'core/html', 'core/preformatted', 'core/code'].includes(block.blockName)) {
+    if (innerHtml && !node.html) node.html = rewriteRuntimeHtml(innerHtml);
+  }
+
   return node;
 }
 
 function collectRuntimeSectionsAndBindings(
   blocks: RuntimeParsedBlock[],
+  options: RuntimeSectionExtractionOptions = {},
 ): {
   sections: Array<Record<string, any>>;
   bindings: Array<Record<string, any>>;
@@ -756,6 +873,8 @@ function collectRuntimeSectionsAndBindings(
     'uagb/button-group',
     'uagb/image',
   ]);
+  const preserveSourceStructuralBlocks =
+    options.preserveSourceStructuralBlocks === true;
 
   const buildSectionBase = (
     block: RuntimeParsedBlock,
@@ -823,7 +942,7 @@ function collectRuntimeSectionsAndBindings(
     const directInfoBoxes = block.children.filter(
       (child) => child.blockName === 'uagb/info-box',
     );
-    if (directInfoBoxes.length >= 2) {
+    if (!preserveSourceStructuralBlocks && directInfoBoxes.length >= 2) {
       const { sectionId, debugKey, base } = buildSectionBase(
         block,
         path,
@@ -844,7 +963,7 @@ function collectRuntimeSectionsAndBindings(
       return;
     }
 
-    if (block.blockName === 'core/media-text') {
+    if (!preserveSourceStructuralBlocks && block.blockName === 'core/media-text') {
       const { sectionId, debugKey, base } = buildSectionBase(
         block,
         path,
@@ -861,7 +980,7 @@ function collectRuntimeSectionsAndBindings(
       return;
     }
 
-    if (block.blockName === 'core/cover') {
+    if (!preserveSourceStructuralBlocks && block.blockName === 'core/cover') {
       const { sectionId, debugKey, base } = buildSectionBase(
         block,
         path,
@@ -870,18 +989,31 @@ function collectRuntimeSectionsAndBindings(
       const image = extractRuntimeImageData(block);
       const text = extractRuntimeSectionText(block);
       if (image.src || text.title || text.body) {
+        const coverHasParallax = block.attrs.hasParallax === true;
+        const coverFpRaw = block.attrs.focalPoint;
+        const coverFp =
+          coverFpRaw && typeof coverFpRaw === 'object'
+            ? (() => {
+                const fp = coverFpRaw as Record<string, unknown>;
+                const x = typeof fp.x === 'number' ? fp.x : parseFloat(String(fp.x ?? ''));
+                const y = typeof fp.y === 'number' ? fp.y : parseFloat(String(fp.y ?? ''));
+                return !isNaN(x) && !isNaN(y) ? { x, y } : null;
+              })()
+            : null;
         sections.push({
           ...base,
           ...text,
           ...(image.src ? { imageSrc: image.src } : {}),
           ...(image.alt ? { imageAlt: image.alt } : {}),
+          ...(coverHasParallax ? { hasParallax: true } : {}),
+          ...(coverFp ? { focalPoint: coverFp } : {}),
         });
         pushBinding(block, path, 'cover', sectionId, debugKey);
         return;
       }
     }
 
-    if (block.blockName === 'core/columns') {
+    if (!preserveSourceStructuralBlocks && block.blockName === 'core/columns') {
       const cards = block.children
         .filter((child) => child.blockName === 'core/column')
         .map((child, index) => extractRuntimeColumnCard(child, index))
@@ -903,7 +1035,10 @@ function collectRuntimeSectionsAndBindings(
       }
     }
 
-    if (['core/group', 'uagb/container', 'uagb/section'].includes(block.blockName)) {
+    if (
+      !preserveSourceStructuralBlocks &&
+      ['core/group', 'uagb/container', 'uagb/section'].includes(block.blockName)
+    ) {
       const image = extractRuntimeImageData(block);
       const text = extractRuntimeSectionText(block);
       if (image.src && (text.title || text.body)) {
@@ -920,6 +1055,35 @@ function collectRuntimeSectionsAndBindings(
         });
         pushBinding(block, path, 'media-text', sectionId, debugKey);
         return;
+      }
+    }
+
+    if (!preserveSourceStructuralBlocks && block.blockName === 'core/gallery') {
+      const imageBlocks = block.children.filter((c) => c.blockName === 'core/image');
+      if (imageBlocks.length > 0) {
+        const { sectionId, debugKey, base } = buildSectionBase(block, path, 'card-grid');
+        const cards = imageBlocks
+          .map((child, index) => {
+            const img = extractRuntimeImageData(child);
+            if (!img.src) return null;
+            const caption =
+              typeof child.attrs.caption === 'string' ? child.attrs.caption.trim() : '';
+            return {
+              heading: caption || `Image ${index + 1}`,
+              imageSrc: img.src,
+              ...(img.alt ? { imageAlt: img.alt } : {}),
+            };
+          })
+          .filter((c): c is NonNullable<typeof c> => Boolean(c));
+        if (cards.length > 0) {
+          const cols =
+            typeof block.attrs.columns === 'number'
+              ? block.attrs.columns
+              : Math.min(cards.length, 3);
+          sections.push({ ...base, columns: cols, cards });
+          pushBinding(block, path, 'card-grid', sectionId, debugKey);
+          return;
+        }
       }
     }
 
@@ -1017,13 +1181,114 @@ function collectRuntimeSectionsAndBindings(
   };
 }
 
+function stripPhpPatternHeader(markup: string): string {
+  const firstBlockIndex = markup.search(/<!--\s*wp:/i);
+  return firstBlockIndex > 0 ? markup.slice(firstBlockIndex) : markup;
+}
+
+function expandTemplateMarkup(
+  markup: string,
+  postContent: string,
+  themeDir: string,
+  seen: Set<string>,
+  depth = 0,
+): string {
+  if (depth > 5) return markup;
+
+  markup = markup.replace(/<!--\s*wp:template-part\s+\{[^}]*\}\s*\/-->/gi, '');
+
+  markup = markup.replace(
+    /<!--\s*wp:pattern\s+(\{[^}]*\})\s*\/-->/gi,
+    (_full, attrsRaw: string) => {
+      try {
+        const attrs = JSON.parse(attrsRaw) as { slug?: unknown };
+        const slug = String(attrs.slug ?? '').trim();
+        if (!slug || seen.has(slug)) return '';
+        const patternName = slug.includes('/') ? slug.split('/').slice(1).join('/') : slug;
+        for (const ext of ['.php', '.html']) {
+          const patternPath = join(themeDir, 'patterns', `${patternName}${ext}`);
+          if (existsSync(patternPath)) {
+            const raw = readFileSync(patternPath, 'utf-8');
+            const cleaned = stripPhpPatternHeader(raw);
+            const nextSeen = new Set(seen);
+            nextSeen.add(slug);
+            return expandTemplateMarkup(cleaned, postContent, themeDir, nextSeen, depth + 1);
+          }
+        }
+        return '';
+      } catch {
+        return '';
+      }
+    },
+  );
+
+  markup = markup.replace(
+    /<!--\s*wp:post-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+    postContent,
+  );
+  markup = markup.replace(
+    /<!--\s*wp:page-content(?:\s+\{[^}]*\})?\s*\/-->/gi,
+    postContent,
+  );
+
+  return markup;
+}
+
+function buildRuntimeTemplateCandidates(row: any): string[] {
+  const normalizedTemplate = normalizeRuntimeTemplateSlug(row?.template);
+  const isFrontPage = Number(row?.is_front_page ?? 0) === 1;
+  const isPostsPage = Number(row?.is_posts_page ?? 0) === 1;
+  const candidates = new Set<string>();
+
+  if (isFrontPage) candidates.add('front-page.html');
+  if (normalizedTemplate) candidates.add(`${normalizedTemplate}.html`);
+  if (isPostsPage) {
+    candidates.add('home.html');
+    candidates.add('index.html');
+  }
+  candidates.add('page.html');
+
+  return [...candidates];
+}
+
+function resolvePageTemplate(row: any): string {
+  const themeDir = process.env.THEME_DIR?.trim();
+  const postContent = String(row.post_content ?? '');
+  if (!themeDir) return postContent;
+
+  for (const fileName of buildRuntimeTemplateCandidates(row)) {
+    const templatePath = join(themeDir, 'templates', fileName);
+    if (existsSync(templatePath)) {
+      try {
+        const templateMarkup = readFileSync(templatePath, 'utf-8');
+        const resolved = expandTemplateMarkup(templateMarkup, postContent, themeDir, new Set());
+        if (resolved.trim()) return resolved;
+      } catch {
+        // fall through to next candidate
+      }
+    }
+  }
+
+  return postContent;
+}
+
 export function buildRuntimePlanFromPageRow(row: any) {
-  const markup = String(row.post_content ?? '');
+  const themeSlug = inferRuntimeThemeSlug(process.env.THEME_DIR);
+  const normalizedTemplate = normalizeRuntimeTemplateSlug(row?.template);
+  const resolvedTemplate =
+    normalizedTemplate ||
+    (Number(row?.is_front_page ?? 0) === 1 ? 'front-page' : 'default');
+  const markup = resolvePageTemplate(row);
   const blocks = parseRuntimeBlocks(markup);
   const blockTree = blocks.map((block, index) =>
     buildRuntimeBlockNode(block, `root.${index + 1}`),
   );
-  const runtimeSignals = collectRuntimeSectionsAndBindings(blocks);
+  const runtimeSignals = collectRuntimeSectionsAndBindings(blocks, {
+    preserveSourceStructuralBlocks: shouldPreserveSourceStructuralBlocks(
+      row,
+      themeSlug,
+    ),
+  });
   const hasInteractiveSections = runtimeSignals.sections.length > 0;
   return {
     version: 2,
@@ -1037,11 +1302,12 @@ export function buildRuntimePlanFromPageRow(row: any) {
       runtimeSignals.unsupportedBlocks.length > 0
         ? 'best-effort'
         : 'strict-structure',
-    layoutFamily: 'default-page',
+    layoutFamily: deriveRuntimeLayoutFamily(row, themeSlug),
     source: {
       kind: 'page-post-content',
-      template: String(row.template ?? '').trim() || 'default',
+      template: resolvedTemplate,
       slug: String(row.post_name ?? '').trim(),
+      templateExpanded: Boolean(process.env.THEME_DIR?.trim()),
       sourceSummary:
         blockTree.length > 0
           ? `runtime block tree with ${blockTree.length} root node(s)`

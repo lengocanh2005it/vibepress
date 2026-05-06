@@ -29,7 +29,11 @@ import {
 } from './prompts/component.prompt.js';
 import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import { FLAT_REST_SAFETY_RULE } from './api-contract.js';
-import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
+import {
+  normalizeCanonicalPostMetaAndTextLinks,
+  normalizeCommonTypographyTypos,
+  normalizeThemeAssetReferences,
+} from '../shared/code-postprocess.util.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
@@ -64,6 +68,7 @@ import {
   shouldBypassAiGenerationForVisualPlan,
   shouldProtectDeterministicStructureFromAi,
 } from './visual-plan.schema.js';
+import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -188,6 +193,9 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
   'post-featured-image',
 ]);
 
+// Keep deterministic inline assembly limited to low-risk, content-structural
+// sections. Rich marketing/interactive sections need AI section generation to
+// preserve heading/body/cta/styling fidelity.
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'post-content',
   'post-title',
@@ -199,11 +207,6 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'comments',
   'sidebar',
   'prose-block',
-  'card-grid',
-  'carousel',
-  'modal',
-  'tabs',
-  'accordion',
 ]);
 
 /**
@@ -222,6 +225,7 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
 export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
   private readonly tokenTracker = new TokenTracker();
+  private readonly themeProfiles = new ThemeProfileRegistry();
   private readonly componentSystemPrompt =
     'You are a senior React + TypeScript engineer focused on source-faithful WordPress migration. Generate a complete component from the provided migration context, preserve source-backed class/style semantics and DOM hierarchy, and return ONLY raw TSX code.';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
@@ -411,6 +415,7 @@ export class CodeReviewerService {
     const sectionAssemblyDecision = this.getSectionLevelAssemblyDecision(
       componentPlan,
       componentName,
+      repoManifest,
     );
     if (
       !strictDeterministicAuthority &&
@@ -551,7 +556,11 @@ export class CodeReviewerService {
 
         const prefersDeterministicPlan =
           strategy.deterministicFirst ||
-          this.shouldPreferDeterministicPlan(componentPlan, componentName);
+          this.shouldPreferDeterministicPlan(
+            componentPlan,
+            componentName,
+            repoManifest,
+          );
         if (prefersDeterministicPlan) {
           const deterministicFirst = await this.tryDeterministicPlan(
             componentName,
@@ -1569,10 +1578,50 @@ export class CodeReviewerService {
   private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
+    repoManifest?: RepoThemeManifest,
   ): { enabled: boolean; reason: string } {
     if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
     }
+
+    if (
+      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+        componentPlan,
+        componentName,
+        repoManifest,
+      )
+    ) {
+      return {
+        enabled: false,
+        reason:
+          'theme source-faithful page prefers deterministic block-tree/full-file generation',
+      };
+    }
+
+    const pinnedSectionAssemblyComponent = Boolean(
+      /^(FrontPage|Home|TemplateAbout|TemplateContact|TemplateServices)$/i.test(
+        componentName,
+      ) && componentPlan.visualPlan.sections.length >= 1,
+    );
+    if (pinnedSectionAssemblyComponent) {
+      return {
+        enabled: true,
+        reason: 'component is pinned to section assembly',
+      };
+    }
+
+    // PR4: honor planner-annotated generationMode (set by PR3 for home-like components).
+    // When ≥2 sections carry 'section-assembly', bypass heuristic scoring entirely.
+    const plannerAnnotated = componentPlan.visualPlan.sections.filter(
+      (s) => s.generationMode === 'section-assembly',
+    );
+    if (plannerAnnotated.length >= 2) {
+      return {
+        enabled: true,
+        reason: `planner-annotated section-assembly (${plannerAnnotated.length}/${componentPlan.visualPlan.sections.length} sections)`,
+      };
+    }
+
     const normalizedNeeds = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
     const signals = this.getVisualPlanSectionSignals(componentPlan);
     const complexAiFirstPageCandidate = this.isComplexAiFirstPageCandidate(
@@ -1784,8 +1833,34 @@ export class CodeReviewerService {
   private shouldPreferDeterministicPlan(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
+    repoManifest?: RepoThemeManifest,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (
+      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+        componentPlan,
+        componentName,
+        repoManifest,
+      )
+    ) {
+      return true;
+    }
+    if (
+      componentPlan?.visualPlan?.sections.some(
+        (section): section is Extract<SectionPlan, { type: 'accordion' }> =>
+          section.type === 'accordion',
+      )
+    ) {
+      return true;
+    }
+    if (
+      componentPlan?.visualPlan?.sections.some(
+        (section) =>
+          section.type === 'post-list' && section.resource === 'products',
+      )
+    ) {
+      return true;
+    }
     const normalizedNeeds = new Set(
       toVisualDataNeeds(componentPlan?.dataNeeds),
     );
@@ -1847,6 +1922,41 @@ export class CodeReviewerService {
       isDeterministicFallbackEligibleForRenderContract(
         componentPlan?.renderContract,
       )
+    );
+  }
+
+  private shouldPreferThemeSourceFaithfulDeterministicPage(
+    componentPlan:
+      | ComponentPromptContext
+      | ReviewInput['componentPlan']
+      | undefined,
+    componentName: string,
+    repoManifest?: RepoThemeManifest,
+  ): boolean {
+    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan)
+      return false;
+    const themeSlug = repoManifest?.themeTypeHints?.themeSlug?.trim();
+    if (!themeSlug) return false;
+    const profile = this.themeProfiles.resolveFseProfile(themeSlug);
+    const sourceFaithfulComponents = new Set(
+      (profile.sourceFaithfulComponents ?? []).map((name) =>
+        name.toLowerCase(),
+      ),
+    );
+    if (!sourceFaithfulComponents.has(componentName.trim().toLowerCase())) {
+      return false;
+    }
+    if (profile.sharedChromeMode !== 'block-tree-first') return false;
+    if ((componentPlan.visualPlan.blockTree?.length ?? 0) === 0) return false;
+
+    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
+    return (
+      [
+        'front-page',
+        'template-about',
+        'template-contact',
+        'template-services',
+      ].includes(templateName) || /^frontpage$/i.test(componentName)
     );
   }
 
@@ -2873,7 +2983,9 @@ export class CodeReviewerService {
           ? 'pageDetail'
           : need === 'post-detail'
             ? 'postDetail'
-            : need,
+            : need === 'product-detail'
+              ? 'productDetail'
+              : need,
       ),
     );
     const instructions = [
@@ -2894,6 +3006,11 @@ export class CodeReviewerService {
       if (normalizedDataNeeds.has('postDetail')) {
         instructions.push(
           `Fetch the main record only from \`/api/posts/${fixedSlug}\`, not \`/api/posts/\${slug}\` and not \`/api/posts\` + lookup.`,
+        );
+      }
+      if (normalizedDataNeeds.has('productDetail')) {
+        instructions.push(
+          `Fetch the main record only from \`/api/post-types/product/${fixedSlug}\`, not \`/api/post-types/product/\${slug}\` and not \`/api/post-types/product/posts\` + lookup.`,
         );
       }
     }
@@ -3844,6 +3961,11 @@ export class CodeReviewerService {
           lines.push(
             `- Card ${cardIndex + 1} body: ${JSON.stringify(card.body)}`,
           );
+          if (card.imageSrc) {
+            lines.push(
+              `- Card ${cardIndex + 1} image src (use exactly, do not omit): ${JSON.stringify(card.imageSrc)}`,
+            );
+          }
         });
         break;
       case 'accordion':
@@ -4101,6 +4223,11 @@ export class CodeReviewerService {
             `- Keep image src exactly: ${JSON.stringify(section.imageSrc)}`,
           );
         }
+        if (section.subtitle) {
+          lines.push(
+            `- Keep subtitle exactly: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
         if (section.heading) {
           lines.push(
             `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
@@ -4136,7 +4263,44 @@ export class CodeReviewerService {
         }
         break;
       case 'hero':
+        if (
+          'image' in section &&
+          (section as { image?: { src?: string } }).image?.src
+        ) {
+          lines.push(
+            `- Keep image src exactly (do not omit): ${JSON.stringify((section as { image: { src: string } }).image.src)}`,
+          );
+        }
+        if ('heading' in section && section.heading) {
+          lines.push(
+            `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
+          );
+        }
+        if ('subheading' in section && section.subheading) {
+          lines.push(
+            `- Keep subheading exactly: ${JSON.stringify(section.subheading)}`,
+          );
+        }
+        if ('cta' in section && section.cta?.text) {
+          lines.push(
+            `- Keep CTA text exactly: ${JSON.stringify(section.cta.text)}`,
+          );
+        }
+        if ('ctas' in section && Array.isArray(section.ctas)) {
+          section.ctas.slice(1).forEach((cta, ctaIndex) => {
+            if (!cta.text) return;
+            lines.push(
+              `- Keep CTA ${ctaIndex + 2} text exactly: ${JSON.stringify(cta.text)}`,
+            );
+          });
+        }
+        break;
       case 'cover':
+        if ('imageSrc' in section && section.imageSrc) {
+          lines.push(
+            `- Keep image src exactly (do not omit): ${JSON.stringify(section.imageSrc)}`,
+          );
+        }
         if ('heading' in section && section.heading) {
           lines.push(
             `- Keep heading exactly: ${JSON.stringify(section.heading)}`,
@@ -4191,6 +4355,11 @@ export class CodeReviewerService {
             `- Keep author title exactly: ${JSON.stringify(section.authorTitle)}`,
           );
         }
+        if (section.authorAvatar) {
+          lines.push(
+            `- Keep author avatar src exactly (do not omit): ${JSON.stringify(section.authorAvatar)}`,
+          );
+        }
         break;
       case 'newsletter':
         lines.push(
@@ -4242,10 +4411,139 @@ export class CodeReviewerService {
   }
 
   private normalizeInlineSectionOutput(code: string): string {
-    return code
+    let result = code
       .trim()
       .replace(/^(?:\s*\{\/\*[\s\S]*?\*\/\}\s*)+/, '')
       .trim();
+
+    const unwrap = (value: string): string => {
+      const trimmed = value.trim().replace(/;+\s*$/, '');
+
+      const returnWrappedMatch = trimmed.match(
+        /^return\s*\(\s*([\s\S]*?)\s*\)\s*;?$/i,
+      );
+      if (returnWrappedMatch) {
+        return returnWrappedMatch[1]?.trim() ?? trimmed;
+      }
+
+      const returnDirectMatch = trimmed.match(/^return\s+([\s\S]*?)\s*;?$/i);
+      if (returnDirectMatch && /^<[\s\S]+>$/.test(returnDirectMatch[1] ?? '')) {
+        return returnDirectMatch[1]?.trim() ?? trimmed;
+      }
+
+      const wrappedJsxMatch = trimmed.match(/^\(\s*(<[\s\S]+>)\s*\)\s*;?$/);
+      if (wrappedJsxMatch) {
+        return wrappedJsxMatch[1]?.trim() ?? trimmed;
+      }
+
+      return trimmed;
+    };
+
+    let previous = '';
+    while (result !== previous) {
+      previous = result;
+      result = unwrap(result);
+    }
+
+    const trimmed = result.trim();
+    if (
+      trimmed &&
+      (this.shouldWrapInlineSectionInFragment(trimmed) ||
+        !/^<[\s\S]+>$/.test(trimmed)) &&
+      !/^\s*(?:import\b|export\b)/m.test(trimmed) &&
+      !/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed) &&
+      /^(?:\{[\s\S]+\}|<[\s\S]+>)/.test(trimmed)
+    ) {
+      return `<>${trimmed}</>`;
+    }
+
+    return result.trim();
+  }
+
+  private shouldWrapInlineSectionInFragment(code: string): boolean {
+    const trimmed = code.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith('{')) return true;
+    if (!trimmed.startsWith('<')) return false;
+
+    const firstNodeEnd = this.findFirstTopLevelJsxNodeEnd(trimmed);
+    if (firstNodeEnd == null) return false;
+    return trimmed.slice(firstNodeEnd).trim().length > 0;
+  }
+
+  private findFirstTopLevelJsxNodeEnd(code: string): number | null {
+    let depth = 0;
+    let index = 0;
+
+    while (index < code.length) {
+      if (code[index] !== '<') {
+        index += 1;
+        continue;
+      }
+
+      const tagEnd = this.findJsxTagEnd(code, index);
+      if (tagEnd == null) return null;
+
+      const token = code.slice(index, tagEnd + 1).trim();
+      const isFragmentOpen = token === '<>';
+      const isFragmentClose = token === '</>';
+      const isClosingTag = /^<\//.test(token) && !isFragmentClose;
+      const isDeclaration =
+        /^<!/.test(token) || /^<\?/.test(token) || /^<!--/.test(token);
+      const isSelfClosing =
+        !isClosingTag && !isFragmentOpen && /\/>\s*$/.test(token);
+
+      if (!isDeclaration) {
+        if (isClosingTag || isFragmentClose) {
+          depth = Math.max(0, depth - 1);
+        } else {
+          depth += 1;
+          if (isSelfClosing) depth = Math.max(0, depth - 1);
+        }
+      }
+
+      index = tagEnd + 1;
+      if (depth === 0) return index;
+    }
+
+    return null;
+  }
+
+  private findJsxTagEnd(code: string, start: number): number | null {
+    let quote: '"' | "'" | null = null;
+    let braceDepth = 0;
+
+    for (let index = start + 1; index < code.length; index++) {
+      const char = code[index];
+      const prev = code[index - 1];
+
+      if (quote) {
+        if (char === quote && prev !== '\\') {
+          quote = null;
+        }
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+
+      if (char === '{') {
+        braceDepth += 1;
+        continue;
+      }
+      if (char === '}') {
+        braceDepth = Math.max(0, braceDepth - 1);
+        continue;
+      }
+
+      if (char === '>' && braceDepth === 0) {
+        return index;
+      }
+    }
+
+    return null;
   }
 
   private buildApprovedPlanRetryChecklist(
@@ -4546,6 +4844,11 @@ export class CodeReviewerService {
           parts.push(
             section.imageSrc
               ? `imageSrc=${JSON.stringify(section.imageSrc)}`
+              : null,
+          );
+          parts.push(
+            section.subtitle
+              ? `subtitle=${JSON.stringify(section.subtitle)}`
               : null,
           );
           parts.push(
@@ -4890,6 +5193,7 @@ export class CodeReviewerService {
         }
         break;
       case 'media-text':
+        add(section.subtitleCustomClassNames);
         add(section.headingCustomClassNames);
         add(section.bodyCustomClassNames);
         add(section.imageCustomClassNames);
@@ -4963,9 +5267,11 @@ export class CodeReviewerService {
     if (fixedSlug) {
       const boundEndpoint = componentPlan?.dataNeeds?.includes('postDetail')
         ? `/api/posts/${fixedSlug}`
-        : componentPlan?.dataNeeds?.includes('pageDetail')
-          ? `/api/pages/${fixedSlug}`
-          : undefined;
+        : componentPlan?.dataNeeds?.includes('productDetail')
+          ? `/api/post-types/product/${fixedSlug}`
+          : componentPlan?.dataNeeds?.includes('pageDetail')
+            ? `/api/pages/${fixedSlug}`
+            : undefined;
       const bindingLines = [
         `Fixed slug binding: \`${fixedSlug}\`.`,
         'Do not import or call `useParams()`.',
@@ -5013,10 +5319,14 @@ export class CodeReviewerService {
   // ── Code post-processors ──────────────────────────────────────────────────
 
   private postProcessCode(code: string): string {
-    return normalizeCanonicalPostMetaAndTextLinks(
-      this.normalizeTailwindFunctionSpacing(
-        this.fixDoublebraces(
-          this.mergeClassNames(this.stripMarkdownFences(code)),
+    return normalizeCommonTypographyTypos(
+      normalizeThemeAssetReferences(
+        normalizeCanonicalPostMetaAndTextLinks(
+          this.normalizeTailwindFunctionSpacing(
+            this.fixDoublebraces(
+              this.mergeClassNames(this.stripMarkdownFences(code)),
+            ),
+          ),
         ),
       ),
     );

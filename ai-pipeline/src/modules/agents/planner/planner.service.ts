@@ -18,7 +18,10 @@ import {
 import {
   mapWpNodesToDraftSections,
   mapWpNodesToLosslessPageSections,
+  buildPlannerChunksFromNodes,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import { buildCanonicalPagePath } from '../../../common/utils/wp-page-path.util.js';
+import type { ChunkPlan } from '../../../common/types/chunk.schema.js';
 import {
   mapWpNodesToBlockTree,
   type BlockNode,
@@ -75,6 +78,7 @@ import type {
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
+  composeSectionsFromChunkPlans,
   type CanonicalPlanningSource,
   type PlanningSourceCandidate,
   type PlanningSourceContext,
@@ -82,6 +86,10 @@ import {
   type PlannerVisualPlanRepairState,
   type PlannerVisualRepairDelegate,
 } from './planner-visual-repair.service.js';
+import {
+  buildChunkLabelingPrompt,
+  parseChunkLabelingResponse,
+} from './chunk-labeling.prompt.js';
 import {
   countDraftSectionsInSource,
   detectInteractiveWidgetsFromSource,
@@ -128,6 +136,7 @@ import {
   matchesRepoEntrySourceTemplate,
   resolveHomeHierarchy,
 } from './route-contract.util.js';
+import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -184,6 +193,7 @@ export class PlannerService {
     private readonly styleResolver: StyleResolverService,
     private readonly capturePlanning: CapturePlanningService,
     private readonly visualRepair: PlannerVisualRepairService,
+    private readonly themeProfiles: ThemeProfileRegistry,
   ) {}
 
   async plan(
@@ -432,6 +442,7 @@ export class PlannerService {
     modelName?: string,
     repoManifest?: RepoThemeManifest,
     editRequest?: PipelineEditRequestDto,
+    logPath?: string,
   ): Promise<PlanResult> {
     const skipVisualPlan =
       this.configService.get<boolean>('planner.minimalVisualPlan') ?? false;
@@ -474,8 +485,75 @@ export class PlannerService {
       repoManifest,
       editRequest,
       resolvedModel,
-      undefined,
+      logPath,
     );
+  }
+
+  async attachSharedChromePartialVisualPlans(
+    theme: PhpParseResult | BlockParseResult,
+    content: DbContentResult,
+    plan: PlanResult,
+    modelName?: string,
+    repoManifest?: RepoThemeManifest,
+    editRequest?: PipelineEditRequestDto,
+    logPath?: string,
+  ): Promise<PlanResult> {
+    const targets = plan
+      .map((componentPlan, index) => ({ componentPlan, index }))
+      .filter(
+        ({ componentPlan }) =>
+          componentPlan.type === 'partial' &&
+          isSharedChromePartialComponent(componentPlan.componentName) &&
+          !componentPlan.visualPlan,
+      );
+    if (targets.length === 0) return plan;
+
+    const sourceMap = new Map<string, string>();
+    const allTemplates =
+      theme.type === 'classic'
+        ? theme.templates
+        : [...theme.templates, ...theme.parts];
+    for (const t of allTemplates) {
+      sourceMap.set(t.name, 'markup' in t ? t.markup : t.html);
+    }
+
+    const tokens = theme.type === 'fse' ? theme.tokens : undefined;
+    const globalPalette = this.deriveGlobalPalette(tokens);
+    const globalTypography = this.deriveGlobalTypography(tokens);
+    const resolvedModel = modelName ?? this.llmFactory.getModel();
+    const result = [...plan];
+
+    this.logger.log(
+      this.formatPhaseCLog(
+        `Precomputing visual plans for ${targets.length} shared chrome partial(s) before architecture review`,
+      ),
+    );
+
+    const plannedTargets = await Promise.all(
+      targets.map(async ({ componentPlan, index }) => ({
+        index,
+        componentPlan: await this.generateVisualPlanForComponent(
+          componentPlan,
+          sourceMap.get(componentPlan.templateName) ?? '',
+          sourceMap,
+          content,
+          tokens,
+          globalPalette,
+          globalTypography,
+          plan,
+          repoManifest,
+          editRequest,
+          resolvedModel,
+          logPath,
+        ),
+      })),
+    );
+
+    for (const { index, componentPlan } of plannedTargets) {
+      result[index] = componentPlan;
+    }
+
+    return result;
   }
 
   // ── Phase C: AI visual plan per component ───────────────────────────
@@ -818,14 +896,22 @@ export class PlannerService {
           }),
         };
       }
-      // Deterministically parse the WordPress block tree to get an ordered
-      // draft of sections. This is injected into the prompt as a hard-ordered
-      // skeleton so AI only needs to fill in content, not infer layout order.
-      draftSections = this.buildDraftSectionsForPlanningSource(
+      // Chunk-label then compose draft sections (PR2).
+      // Falls back to the deterministic mapper if chunking yields nothing.
+      const composedSections = await this.labelAndComposeChunks(
         planningSource,
         componentPlan,
         tokens,
+        modelName,
+        logPath,
       );
+      draftSections =
+        composedSections ??
+        this.buildDraftSectionsForPlanningSource(
+          planningSource,
+          componentPlan,
+          tokens,
+        );
       const blockTreeVisualPlan =
         this.buildBlockTreeDrivenVisualPlanForComponent({
           componentPlan,
@@ -1180,17 +1266,28 @@ export class PlannerService {
           const degenerateSections = this.describeDegenerateSections(
             parsed.sections,
           );
+          const filteredParsedSections =
+            degenerateSections.length > 0
+              ? this.filterDegenerateDraftSections(parsed.sections)
+              : parsed.sections;
           if (degenerateSections.length > 0) {
             lastReason = 'visual plan contains degenerate sections';
             lastDropped = ` | degenerateSections: ${degenerateSections.join('; ')}`;
-            if (attempt < 2) {
-              this.logger.warn(
-                this.formatPhaseCLog(
-                  `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
-                ),
-              );
+            if (filteredParsedSections.length === 0) {
+              if (attempt < 2) {
+                this.logger.warn(
+                  this.formatPhaseCLog(
+                    `"${componentPlan.componentName}" parse attempt ${attempt}/2 failed: ${lastReason}${lastDropped} — retrying once`,
+                  ),
+                );
+              }
+              continue;
             }
-            continue;
+            this.logger.debug(
+              this.formatPhaseCLog(
+                `"${componentPlan.componentName}" dropped ${degenerateSections.length} degenerate visual-plan section(s) before contract assembly${lastDropped}`,
+              ),
+            );
           }
 
           const layout = this.deriveComponentLayout(
@@ -1218,7 +1315,7 @@ export class PlannerService {
               blockStyles: tokens?.blockStyles,
               sections: this.injectMissingDraftSections(
                 this.mergeDraftSectionPresentation(
-                  parsed.sections,
+                  filteredParsedSections,
                   draftSections,
                   visualContract,
                 ),
@@ -1567,7 +1664,10 @@ export class PlannerService {
       };
     }
 
-    if (this.isPostDetailComponentPlan(componentPlan)) {
+    if (
+      this.isPostDetailComponentPlan(componentPlan) ||
+      this.isProductDetailComponentPlan(componentPlan)
+    ) {
       const sectionTypes = new Set(
         sections?.map((section) => section.type) ?? [],
       );
@@ -1678,6 +1778,7 @@ export class PlannerService {
       ? 'strict'
       : this.isHomeLikeComponentPlan(input.componentPlan) ||
           this.isPostDetailComponentPlan(input.componentPlan) ||
+          this.isProductDetailComponentPlan(input.componentPlan) ||
           input.componentPlan.isDetail ||
           hasStructureEvidence
         ? 'guided'
@@ -1738,7 +1839,10 @@ export class PlannerService {
       }
       return 'homepage-brand';
     }
-    if (this.isPostDetailComponentPlan(input.componentPlan)) {
+    if (
+      this.isPostDetailComponentPlan(input.componentPlan) ||
+      this.isProductDetailComponentPlan(input.componentPlan)
+    ) {
       return 'article';
     }
     if (
@@ -2244,7 +2348,8 @@ export class PlannerService {
       }));
 
     if (
-      this.isPostDetailComponentPlan(componentPlan) &&
+      (this.isPostDetailComponentPlan(componentPlan) ||
+        this.isProductDetailComponentPlan(componentPlan)) &&
       toVisualDataNeeds(componentPlan.dataNeeds).includes('comments') &&
       !entries.some((entry) => entry.kind === 'comments')
     ) {
@@ -2420,7 +2525,8 @@ export class PlannerService {
       case 'post-content':
       case 'page-content':
       case 'prose-block':
-        return this.isPostDetailComponentPlan(componentPlan)
+        return this.isPostDetailComponentPlan(componentPlan) ||
+          this.isProductDetailComponentPlan(componentPlan)
           ? 'article-body'
           : 'prose';
       case 'post-title':
@@ -2450,6 +2556,7 @@ export class PlannerService {
         push(section.subheading);
         break;
       case 'media-text':
+        push(section.subtitle);
         push(section.heading);
         push(section.body);
         (section.listItems ?? []).forEach(push);
@@ -2684,6 +2791,18 @@ export class PlannerService {
     );
   }
 
+  private isProductDetailComponentPlan(
+    componentPlan: PlanResult[number],
+  ): boolean {
+    const needs = new Set(toVisualDataNeeds(componentPlan.dataNeeds));
+    return (
+      componentPlan.isDetail === true &&
+      (needs.has('productDetail') ||
+        componentPlan.templateName.toLowerCase().startsWith('single-product') ||
+        (componentPlan.route ?? '').startsWith('/product/'))
+    );
+  }
+
   private inferHomeMode(
     componentPlan: PlanResult[number],
     clusters: Array<{ kind: PlannerClusterKind }>,
@@ -2756,6 +2875,10 @@ export class PlannerService {
       blockStyles: tokens?.blockStyles,
     } as const;
     const strategy = getComponentStrategy(componentPlan.componentName);
+    const prefersBlockTreeSharedChrome =
+      this.themeProfiles.prefersBlockTreeSharedChrome(
+        content.siteInfo?.activeTheme,
+      ) && (componentPlan.draftBlockTree?.length ?? 0) > 0;
     switch (strategy.kind) {
       case 'not-found':
         if (!strategy.deterministicFirst) return undefined;
@@ -2773,8 +2896,11 @@ export class PlannerService {
           ],
         };
       case 'header':
-        // When deterministicFirst is false the AI reads the actual WP template
-        // to generate a faithful visual plan — skip the generic navbar stub.
+        // When a source-faithful shared-chrome theme already has block-tree
+        // evidence, let the block-tree deterministic planner own Header.
+        // Keeping the legacy semantic navbar stub here creates conflicting
+        // plans and drops theme-specific wrappers/classes.
+        if (prefersBlockTreeSharedChrome) return undefined;
         if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
@@ -2790,7 +2916,9 @@ export class PlannerService {
           ],
         };
       case 'footer':
-        // Same as header — let AI derive the real layout from the WP template.
+        // Same policy as Header: prefer preserved source block trees for
+        // source-faithful shared chrome instead of the old semantic stub.
+        if (prefersBlockTreeSharedChrome) return undefined;
         if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
@@ -3450,7 +3578,21 @@ export class PlannerService {
         templateBase.includes('sidebar');
       const isPageTemplate =
         templateBase.startsWith('page') || templateBase === 'frontend-page';
-      const detailNeed = isPageTemplate ? 'page-detail' : 'post-detail';
+      const isWooProductTemplate =
+        templateBase === 'archive-product' ||
+        templateBase === 'single-product' ||
+        source.includes('"postType":"product"') ||
+        source.includes('"postType": "product"') ||
+        source.includes('woocommerce/product-query') ||
+        source.includes('woocommerce/related-products') ||
+        source.includes('term":"product_cat"') ||
+        source.includes('term":"product_tag"');
+      const detailNeed = isPageTemplate
+        ? 'page-detail'
+        : isWooProductTemplate
+          ? 'product-detail'
+          : 'post-detail';
+      const listingNeed = isWooProductTemplate ? 'products' : 'posts';
 
       // FSE block theme
       if (
@@ -3463,7 +3605,7 @@ export class PlannerService {
           else needs.add('menus');
         }
       if (source.includes('wp:query') || source.includes('"query"'))
-        needs.add('posts');
+        needs.add(listingNeed);
       if (
         source.includes('wp:post-content') ||
         source.includes('"post-content"')
@@ -3482,21 +3624,21 @@ export class PlannerService {
           source.includes('wp:avatar') ||
           source.includes('"avatar"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
         needs.add('site-info');
       }
       if (
         isSidebarLike &&
         (source.includes('wp:categories') || source.includes('"categories"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
       }
       if (
         isSidebarLike &&
         (source.includes('wp:latest-posts') ||
           source.includes('"latest-posts"'))
       ) {
-        needs.add('posts');
+        needs.add(listingNeed);
       }
 
       // Classic PHP theme
@@ -3509,7 +3651,7 @@ export class PlannerService {
           if (isFooterPartial) needs.add('footer-links');
           else needs.add('menus');
         }
-      if (source.includes('{/* WP: loop start */}')) needs.add('posts');
+      if (source.includes('{/* WP: loop start */}')) needs.add(listingNeed);
       if (
         source.includes('{/* WP: post.content') ||
         source.includes('{/* WP: post.title')
@@ -3769,10 +3911,12 @@ export class PlannerService {
   private orderPlannerDataNeeds(dataNeeds: string[]): string[] {
     const order = [
       'post-detail',
+      'product-detail',
       'page-detail',
       'categoryDetail',
       'comments',
       'posts',
+      'products',
       'pages',
       'menus',
       'site-info',
@@ -3829,11 +3973,9 @@ export class PlannerService {
     page: DbContentResult['pages'][number],
     content: DbContentResult,
   ): string {
-    const slug = page.slug?.trim();
-    if (slug) return `/page/${slug}`;
-
-    const fallbackSlug = String(page.id ?? '').trim();
-    return fallbackSlug ? `/page/${fallbackSlug}` : '/page';
+    return buildCanonicalPagePath(page, content.pages, {
+      frontPageId: content.readingSettings.pageOnFrontId,
+    });
   }
 
   private buildConcretePageComponentName(
@@ -3913,14 +4055,15 @@ For each template, decide:
   functions → type "partial", route null
 
 ── DATA NEEDS RULES ───────────────────────────────────────────────────────────
-Allowed values: "posts" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "page-detail" | "comments"
+Allowed values: "posts" | "products" | "pages" | "menus" | "site-info" | "footer-links" | "post-detail" | "product-detail" | "page-detail" | "comments"
 
 - "post-detail"  → ONLY for single-post templates (route /post/:slug or /single-*/:slug)
+- "product-detail" → ONLY for Woo single-product templates (route /product/:slug)
 - "page-detail"  → ONLY for true page-detail templates or exact bound DB pages
 - Page templates MUST use "page-detail" — NEVER "post-detail"
-- Static custom templates MUST NOT keep "post-detail" or "page-detail" unless they are truly singular/detail routes
-- Partial components (type "partial") MUST NOT include "post-detail" or "page-detail"
-- Archive / listing pages use "posts", not "post-detail"
+- Static custom templates MUST NOT keep "post-detail", "product-detail", or "page-detail" unless they are truly singular/detail routes
+- Partial components (type "partial") MUST NOT include "post-detail", "product-detail", or "page-detail"
+- Archive / listing pages use "posts" or "products", not detail data needs
 - Dedicated Header / Navigation partials may include "menus"
 - Dedicated Footer partials should use "footer-links" for footer columns and may include "site-info" for brand/title/tagline
 - Ordinary page components MUST NOT request "menus", "site-info", or "footer-links" just because the original WordPress template referenced shared header/footer chrome.
@@ -4601,6 +4744,9 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
           ...(mediaTextDraft.columnWidths
             ? { columnWidths: mediaTextDraft.columnWidths }
             : {}),
+          ...(mediaTextDraft.subtitleStyle
+            ? { subtitleStyle: mediaTextDraft.subtitleStyle }
+            : {}),
           ...(mediaTextDraft.headingStyle
             ? { headingStyle: mediaTextDraft.headingStyle }
             : {}),
@@ -4899,7 +5045,7 @@ Fix all of the above errors and return a corrected JSON array. Key rules:
 - isDetail must be true when route contains :slug
 - Custom templates without clear singular/detail evidence should stay static (\`/template-name\`), not \`/template-name/:slug\`
 - Do not keep \`post-detail\` or \`page-detail\` on static custom templates
-- Valid dataNeeds values: posts, pages, menus, site-info, footer-links, post-detail, page-detail, comments, categoryDetail
+- Valid dataNeeds values: posts, products, pages, menus, site-info, footer-links, post-detail, product-detail, page-detail, comments, categoryDetail
 - description must stay specific and source-backed; mention major layout/widgets when visible
 
 Return ONLY a valid JSON array — no markdown fences, no explanation.`;
@@ -5129,6 +5275,117 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
   }
 
+  // ── Chunk labeling + composition (PR2) ────────────────────────────────────
+
+  private async labelAndComposeChunks(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlanResult[number],
+    tokens: ThemeTokens | undefined,
+    modelName: string,
+    logPath: string | undefined,
+  ): Promise<ReturnType<typeof mapWpNodesToDraftSections> | undefined> {
+    const rawChunks = this.buildChunkPlansForPlanningSource(
+      planningSource,
+      componentPlan,
+      tokens,
+    );
+    if (rawChunks.length === 0) return undefined;
+
+    const labeledChunks = await this.labelChunksWithAi(rawChunks, modelName);
+
+    if (logPath) {
+      void this.writeArtifact(
+        logPath,
+        `plan.chunks.${componentPlan.componentName}.json`,
+        {
+          componentName: componentPlan.componentName,
+          generatedAt: new Date().toISOString(),
+          chunkCount: labeledChunks.length,
+          chunks: labeledChunks,
+        },
+      );
+    }
+
+    const composed = composeSectionsFromChunkPlans(labeledChunks);
+    if (composed.length === 0) return undefined;
+
+    // PR3: annotate sections for home-like components so generator can use
+    // per-section codegen and targeted retry (PR4 reads this field).
+    if (this.isHomeLikeComponentPlan(componentPlan)) {
+      return composed.map((section) => ({
+        ...section,
+        generationMode: 'section-assembly' as const,
+      }));
+    }
+
+    return composed;
+  }
+
+  private async labelChunksWithAi(
+    chunks: ChunkPlan[],
+    modelName: string,
+  ): Promise<ChunkPlan[]> {
+    try {
+      const { systemPrompt, userPrompt } = buildChunkLabelingPrompt(chunks);
+      const { text } = await this.requestVisualPlanCompletion({
+        model: modelName,
+        systemPrompt,
+        userPrompt,
+        maxTokens: 1024,
+      });
+      const results = parseChunkLabelingResponse(text, chunks);
+      const resultIndex = new Map(results.map((r) => [r.chunkId, r]));
+      return chunks.map((chunk) => {
+        const label = resultIndex.get(chunk.chunkId);
+        if (!label) return chunk;
+        return {
+          ...chunk,
+          aiLabel: {
+            semanticKind: label.semanticKind,
+            suggestedSectionType: label.suggestedSectionType,
+            mergeHint: label.mergeHint,
+            confidence: label.confidence,
+            ...(label.rationale ? { rationale: label.rationale } : {}),
+          },
+        };
+      });
+    } catch {
+      return chunks;
+    }
+  }
+
+  // ── Chunk plan builder (shared by PR1 artifact + PR2 labeling) ────────────
+
+  private buildChunkPlansForPlanningSource(
+    planningSource: PlanningSourceContext | undefined,
+    componentPlan: PlanResult[number],
+    tokens: ThemeTokens | undefined,
+  ): ChunkPlan[] {
+    try {
+      const nodes = planningSource?.canonicalSource?.resolvedNodes?.length
+        ? planningSource.canonicalSource.resolvedNodes
+        : this.styleResolver.resolve(
+            this.parsePlanningSourceNodes({
+              source: planningSource?.source ?? '',
+              templateName:
+                planningSource?.sourceTemplateName ??
+                componentPlan.templateName,
+              sourceFile:
+                planningSource?.sourceFile ??
+                inferFseSourceFile(
+                  componentPlan.templateName,
+                  componentPlan.type,
+                ),
+            }),
+            tokens,
+          );
+      if (nodes.length === 0) return [];
+      return buildPlannerChunksFromNodes(nodes);
+    } catch {
+      return [];
+    }
+  }
+
   private augmentDraftSectionsWithSourceWidgets(input: {
     draftSections?: SectionPlan[];
     planningSource?: PlanningSourceContext;
@@ -5313,37 +5570,16 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
 
   private shouldUseLosslessPlanningDraft(
     componentPlan: PlanResult[number],
-    nodes: WpNode[],
+    _nodes: WpNode[],
   ): boolean {
-    if (componentPlan.type !== 'page' || componentPlan.isDetail === true) {
-      return false;
-    }
-
-    const TRANSACTIONAL_NAMES = [
-      'cart',
-      'checkout',
-      'my-account',
-      'order-pay',
-      'order-received',
-    ];
-
-    const normalizedTemplate = this.normalizeTemplateIdentifier(
-      componentPlan.templateName,
-    );
-    if (TRANSACTIONAL_NAMES.includes(normalizedTemplate)) {
-      return true;
-    }
-
-    const normalizedComponentName = componentPlan.componentName
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '');
-    if (TRANSACTIONAL_NAMES.includes(normalizedComponentName)) {
-      return true;
-    }
-
-    return this.containsTransactionalCommerceBlocks(nodes);
+    // Partials (header/footer/sidebar) use deterministic rendering — not lossless draft.
+    if (componentPlan.type !== 'page') return false;
+    // Detail pages (single-post, single-page) use their own section builders — not lossless draft.
+    if (componentPlan.isDetail === true) return false;
+    // All general pages use the lossless mapper to preserve full block-tree context
+    // (group headers, labels, container text) so that every source-backed text node
+    // is available to the visual planner and can satisfy the render contract.
+    return true;
   }
 
   private containsTransactionalCommerceBlocks(nodes: WpNode[]): boolean {
@@ -5552,6 +5788,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         requiredCapabilities.add('site-info');
       }
       if (widget.kind === 'categories') requiredCapabilities.add('posts');
+      if (widget.kind === 'tags') requiredCapabilities.add('posts');
       if (widget.kind === 'navigation') requiredCapabilities.add('menus');
       if (widget.kind === 'pages-list') requiredCapabilities.add('pages');
       if (widget.kind === 'recent-posts') requiredCapabilities.add('posts');
@@ -6331,6 +6568,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         );
       case 'media-text':
         return (
+          !hasText(section.subtitle) &&
           !hasText(section.heading) &&
           !hasText(section.body) &&
           !hasText(section.imageSrc) &&
@@ -6408,6 +6646,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       case 'media-text':
         return [
           section.type,
+          normalize(section.subtitle),
           normalize(section.heading),
           normalize(section.body),
           normalize(section.imageSrc),

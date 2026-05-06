@@ -4,6 +4,7 @@ import type {
   RepoEntrySourceChain,
   RepoThemeManifest,
 } from '../repo-analyzer/repo-analyzer.service.js';
+import { wpBlocksToJson } from '../../../common/utils/wp-block-to-json.js';
 import { extractStaticImageSources } from '../../../common/utils/theme-asset.util.js';
 import {
   detectInteractiveWidgetsFromSource,
@@ -73,6 +74,38 @@ export interface PickInvestigativePlanningSourceInput extends BuildPlanningSourc
     sourceLabel?: string;
   };
   previousReason: string;
+}
+
+function sourceLooksLikePatternShell(source: string): boolean {
+  const trimmed = source.trim();
+  if (!trimmed) return false;
+
+  try {
+    const nodes = wpBlocksToJson(trimmed);
+    if (nodes.length === 0) return false;
+
+    let hasPattern = false;
+    for (const node of nodes) {
+      const block = String(node.block ?? '').toLowerCase();
+      if (block === 'pattern' || block === 'core/pattern') {
+        hasPattern = true;
+        continue;
+      }
+      if (block === 'template-part' || block === 'core/template-part') {
+        continue;
+      }
+      return false;
+    }
+
+    return hasPattern;
+  } catch {
+    return (
+      /wp:pattern/i.test(trimmed) &&
+      !/wp:(?:group|columns|column|cover|image|heading|paragraph|query|details|buttons?)/i.test(
+        trimmed,
+      )
+    );
+  }
 }
 
 export function isAuthoritativeDbPlanningSource(
@@ -171,6 +204,10 @@ export function buildPlanningSourceCandidates(
     componentPlan.templateName,
     repoManifest,
   );
+  const preferRepoChainForPatternShell =
+    componentPlan.type === 'page' &&
+    !!repoEntryChain?.composedSource &&
+    sourceLooksLikePatternShell(templateSource);
   const candidates: PlanningSourceSeed[] = [];
   const seen = new Set<string>();
 
@@ -217,7 +254,7 @@ export function buildPlanningSourceCandidates(
     label: `repo:${componentPlan.templateName}`,
     templateName: componentPlan.templateName,
     sourceFile: inferSourceFile(componentPlan.templateName, componentPlan.type),
-    priority: repoEntryChain ? 35 : 15,
+    priority: preferRepoChainForPatternShell ? 8 : repoEntryChain ? 35 : 15,
   });
 
   pushCandidate({
@@ -227,8 +264,17 @@ export function buildPlanningSourceCandidates(
       : `repo-chain:${componentPlan.templateName}`,
     templateName: componentPlan.templateName,
     sourceFile: repoEntryChain?.entryFile,
-    priority:
-      componentPlan.route === '/' ? 85 : componentPlan.fixedSlug ? 70 : 55,
+    priority: preferRepoChainForPatternShell
+      ? componentPlan.route === '/'
+        ? 105
+        : componentPlan.fixedSlug
+          ? 90
+          : 75
+      : componentPlan.route === '/'
+        ? 85
+        : componentPlan.fixedSlug
+          ? 70
+          : 55,
   });
 
   if (componentPlan.route === '/') {
@@ -317,20 +363,37 @@ export function buildPlanningSourceCandidates(
         String(page.id) === String(componentPlan.fixedPageId ?? '') ||
         page.slug === componentPlan.fixedSlug,
     );
-    const assignedTemplate = boundPage?.template
-      ?.replace(/\.php$/, '')
-      .replace(/^templates\//, '')
-      .trim();
+    const assignedTemplate = normalizePlanningTemplateIdentifier(
+      boundPage?.template,
+    );
+    const resolvedRoute = content.themeResolvedContent?.routes.find(
+      (route) =>
+        String(route.pageId) === String(componentPlan.fixedPageId ?? '') ||
+        route.slug === componentPlan.fixedSlug,
+    );
+    const resolvedTemplateNames = resolvedRoute
+      ? [
+          ...resolvedRoute.templateCandidates,
+          ...resolvedRoute.matchedDbTemplateSlugs,
+        ]
+          .map((entry) => normalizePlanningTemplateIdentifier(entry))
+          .filter(Boolean)
+      : [];
     const pageTemplateNames = [
       assignedTemplate || null,
+      ...resolvedTemplateNames,
       `page-${componentPlan.fixedSlug}`,
       componentPlan.fixedPageId ? `page-${componentPlan.fixedPageId}` : null,
       'page',
       'singular',
-    ].filter(
-      (templateName): templateName is string =>
-        Boolean(templateName) && templateName !== componentPlan.templateName,
-    );
+    ]
+      .filter(
+        (templateName): templateName is string =>
+          Boolean(templateName) && templateName !== componentPlan.templateName,
+      )
+      .filter(
+        (templateName, index, all) => all.indexOf(templateName) === index,
+      );
 
     for (const templateName of pageTemplateNames) {
       const chain = findRepoEntrySourceChain(templateName, repoManifest);
@@ -376,6 +439,7 @@ export function buildPlanningSourceCandidates(
       [
         componentPlan.fixedSlug,
         assignedTemplate,
+        ...resolvedTemplateNames,
         `page-${componentPlan.fixedSlug}`,
       ].filter(Boolean),
     );

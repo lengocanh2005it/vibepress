@@ -212,6 +212,41 @@ describe('planner-surface-plan util', () => {
     expect(literals).toContain('Welcome to Studio North');
   });
 
+  it('filters low-signal Woo checkout scaffold headings from required literals', () => {
+    const surfacePlan = buildSurfacePlan();
+    surfacePlan.componentName = 'Checkout';
+    surfacePlan.templateName = 'checkout';
+    surfacePlan.contract.route = '/checkout';
+    surfacePlan.sourceEvidence.sourceFacts = {
+      hasQuery: false,
+      hasSidebarTemplatePart: false,
+      hasSearch: false,
+      hasPostContent: false,
+      hasPageList: false,
+      hasComments: false,
+      hasNavigation: false,
+      hasWooCart: false,
+      hasWooCheckout: true,
+    };
+    surfacePlan.sourceEvidence.primaryHeadings = [
+      'Checkout',
+      'Checkout Fields',
+      'Order Summary',
+    ];
+    surfacePlan.sourceEvidence.contentClusters.unshift({
+      id: 'checkout-fields',
+      kind: 'prose',
+      importance: 'high',
+      textEvidence: ['Checkout Fields', 'Order Summary'],
+    });
+
+    const literals = collectSurfacePlanRequiredLiterals(surfacePlan);
+
+    expect(literals).toContain('Checkout');
+    expect(literals).not.toContain('Checkout Fields');
+    expect(literals).not.toContain('Order Summary');
+  });
+
   it('builds a regression snapshot from stable surface-plan facts', () => {
     const surfacePlan = buildSurfacePlan();
 

@@ -34,6 +34,7 @@ import {
   MENU_ITEM_FIELDS,
   PAGE_FRONTEND_FIELDS,
   POST_FIELDS,
+  PRODUCT_FIELDS,
   SITE_INFO_FIELDS,
 } from '../api-contract.js';
 import {
@@ -90,6 +91,7 @@ const DATA_NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
   'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
+  'product-detail': 'productDetail',
   'page-detail': 'pageDetail',
 };
 
@@ -495,6 +497,7 @@ function buildAllowedEndpointsNote(input: {
         allowed.add('GET /api/site-info');
       }
       if (widget.kind === 'categories') allowed.add('GET /api/posts');
+      if (widget.kind === 'tags') allowed.add('GET /api/posts');
       if (widget.kind === 'navigation') allowed.add('GET /api/menus');
       if (widget.kind === 'pages-list') allowed.add('GET /api/pages');
       if (widget.kind === 'recent-posts') allowed.add('GET /api/posts');
@@ -530,7 +533,7 @@ function buildForbiddenBehaviorNote(input: {
 
   if (input.type === 'page') {
     lines.push(
-      '- Do NOT render shared site chrome (`<header>`, navigation bar, `<footer>`, site logo/title, footer columns) inside this page component.',
+      '- Do NOT render shared site chrome (`<header>`, navigation bar, site-level `<footer>`, site logo/title, footer columns) inside this page component. Semantic nested `<header>`/`<footer>` elements are allowed when they belong to page content rather than global layout.',
     );
     lines.push(
       '- Do NOT fetch `/api/site-info`, `/api/menus`, or `/api/footer-links` just to rebuild shared layout chrome inside a page component.',
@@ -676,11 +679,21 @@ function buildScopedApiContractNote(input: {
     endpoints.add('GET /api/posts -> Post[]');
     entityLines.push(`- Post: ${formatContractFields(POST_FIELDS)}`);
   }
+  if (hasAnyDataNeed(needs, 'products', 'productDetail')) {
+    endpoints.add('GET /api/post-types/product/posts -> Product[]');
+    entityLines.push(`- Product: ${formatContractFields(PRODUCT_FIELDS)}`);
+  }
   if (needs.includes('postDetail') && routeHasParams) {
     endpoints.add('GET /api/posts/${slug} -> Post');
   }
   if (needs.includes('postDetail') && input.fixedSlug) {
     endpoints.add(`GET /api/posts/${input.fixedSlug} -> Post`);
+  }
+  if (needs.includes('productDetail') && routeHasParams) {
+    endpoints.add('GET /api/post-types/product/${slug} -> Product');
+  }
+  if (needs.includes('productDetail') && input.fixedSlug) {
+    endpoints.add(`GET /api/post-types/product/${input.fixedSlug} -> Product`);
   }
   if (hasAnyDataNeed(needs, 'pages', 'pageDetail')) {
     endpoints.add('GET /api/pages -> Page[]');
@@ -747,6 +760,16 @@ function buildScopedApiContractNote(input: {
     '- Pages must NOT use post-only fields such as `author`, `categories`, `tags`, `date`, `excerpt`, or `comments`.',
   );
   lines.push(PAGE_COMPONENT_RICH_TEXT_RULE);
+  if (needs.includes('products') && !needs.includes('productDetail')) {
+    lines.push(
+      '- Product listing/archive rule: fetch ONLY the products collection endpoint `GET /api/post-types/product/posts` (pagination query params are allowed). Do NOT fetch `/api/post-types/product/${slug}`, do NOT create `product` detail state, and do NOT treat the page as a single-product screen.',
+    );
+  }
+  if (!needs.includes('postDetail')) {
+    lines.push(
+      '- For page/list sections, do NOT use `dangerouslySetInnerHTML` for card bodies, excerpts, accordion text, or other rich text fields. Prefer plain JSX or `renderRichTextChildren(...)` when inline markup must be preserved.',
+    );
+  }
   lines.push(
     '- In ordinary post meta/listings, author names should link to `/author/${post.authorSlug}` when that route is approved and `post.authorSlug` exists. Plain-text `post.author` is only acceptable when it is the actual page/article/archive title or heading (for example an `h1`).',
   );
@@ -1268,6 +1291,7 @@ export function buildDataGroundingNote(
     'comments',
     'authorDetail',
   );
+  const wantsProducts = hasAnyDataNeed(dataNeeds, 'products', 'productDetail');
   const wantsPages = hasAnyDataNeed(dataNeeds, 'pages', 'pageDetail');
   const wantsFooterLinks = dataNeeds.includes('footerLinks');
   const wantsMenus = dataNeeds.includes('menus');
@@ -1287,6 +1311,7 @@ export function buildDataGroundingNote(
     '> Only use fields shown below. Any field not listed here does NOT exist.',
   );
   parts.push(`> Posts have: ${formatContractFields(POST_FIELDS)}.`);
+  parts.push(`> Products have: ${formatContractFields(PRODUCT_FIELDS)}.`);
   parts.push(`> Pages have: ${formatContractFields(PAGE_FRONTEND_FIELDS)}.`);
   parts.push(
     '> ⛔ Pages do NOT have: excerpt, date, author, categories, tags, comments.',
@@ -1323,6 +1348,15 @@ export function buildDataGroundingNote(
     parts.push('');
   }
 
+  if (wantsProducts) {
+    parts.push(
+      '### Products',
+      '- Runtime source: `GET /api/post-types/product/posts` and `GET /api/post-types/product/${slug}`.',
+      '- Use only flat product fields from the canonical contract: title, slug, featuredImage, price, buttonText, buttonUrl, categories, tags, content, excerpt.',
+      '',
+    );
+  }
+
   if (wantsPages) {
     const pageSample = pages.slice(0, MAX_SAMPLE_ITEMS);
     parts.push(
@@ -1336,6 +1370,39 @@ export function buildDataGroundingNote(
       parts.push(`- ... and ${pages.length - MAX_SAMPLE_ITEMS} more`);
     }
     if (pages.length === 0) parts.push('- (empty)');
+    parts.push('');
+  }
+
+  if (content.themeResolvedContent) {
+    parts.push(
+      `### Theme-resolved route + template map (${content.themeResolvedContent.themeSlug})`,
+    );
+    if (content.themeResolvedContent.frontPageRoute) {
+      parts.push(
+        `- Front page route: ${content.themeResolvedContent.frontPageRoute}`,
+      );
+    }
+    if (content.themeResolvedContent.postsPageRoute) {
+      parts.push(
+        `- Posts page route: ${content.themeResolvedContent.postsPageRoute}`,
+      );
+    }
+    for (const route of content.themeResolvedContent.routes.slice(
+      0,
+      MAX_SAMPLE_ITEMS,
+    )) {
+      parts.push(
+        `- route:${route.routePath} title:"${route.title}" templateCandidates:${route.templateCandidates.join(', ') || '(none)'} matchedDbTemplates:${route.matchedDbTemplateSlugs.join(', ') || '(none)'}`,
+      );
+    }
+    const primaryNav = content.themeResolvedContent.navigationRecords.find(
+      (record) => record.location === 'primary',
+    );
+    if (primaryNav) {
+      parts.push(
+        `- primaryNav:${primaryNav.itemUrls.slice(0, MAX_SAMPLE_ITEMS).join(', ') || '(none)'}`,
+      );
+    }
     parts.push('');
   }
 
@@ -1829,10 +1896,10 @@ function buildImageSourcesNote(templateSource: string): string {
     'Preserve emphasis from the source: if a media-text heading or key list lines read as bold/strong in the template, keep them visually strong in JSX instead of downgrading everything to regular muted text.',
   );
   lines.push(
-    'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), render it with `dangerouslySetInnerHTML={{ __html: item }}` on the `<li>` element instead of outputting the string as plain text. Example: `<li dangerouslySetInnerHTML={{ __html: "Trạng thái <strong>Đã thanh toán</strong>" }} />`.',
+    'When a list item string contains HTML tags (e.g. `<strong>`, `<em>`, `<a>`), preserve that markup. In page components prefer `renderRichTextChildren(item, key)` or equivalent structured JSX; reserve `dangerouslySetInnerHTML` for approved post-html render paths only.',
   );
   lines.push(
-    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. For non-form text containers, prefer `dangerouslySetInnerHTML` on the final text node.',
+    'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. In page components prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.',
   );
 
   return lines.join('\n');
@@ -2137,6 +2204,7 @@ function buildCompactSectionSummary(
         break;
       case 'media-text':
         parts.push(`imagePosition=${section.imagePosition}`);
+        pushPlanTextPart(parts, 'subtitle', section.subtitle);
         pushPlanTextPart(parts, 'heading', section.heading);
         pushPlanTextPart(parts, 'body', section.body, 240);
         pushPlanTextPart(parts, 'imageSrc', section.imageSrc);
@@ -3018,6 +3086,11 @@ function buildFullFileLiteralChecklist(
         });
         break;
       case 'media-text':
+        if (section.subtitle) {
+          lines.push(
+            `- ${label} subtitle: ${JSON.stringify(section.subtitle)}`,
+          );
+        }
         if (section.heading) {
           lines.push(`- ${label} heading: ${JSON.stringify(section.heading)}`);
         }
@@ -3513,7 +3586,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       break;
     case 'media-text':
       if (section.imageSrc) {
-        lines.push(`- imageSrc: ${JSON.stringify(section.imageSrc)}`);
+        lines.push(
+          `- imageSrc (render exactly, do not omit): ${JSON.stringify(section.imageSrc)}`,
+        );
       }
       if (section.imageCustomClassNames?.length) {
         lines.push(
@@ -3522,6 +3597,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       }
       if (section.heading) {
         lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if (section.subtitle) {
+        lines.push(`- subtitle: ${JSON.stringify(section.subtitle)}`);
       }
       if (section.body) {
         lines.push(`- body: ${JSON.stringify(section.body)}`);
@@ -3630,6 +3708,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
         if (card.body) {
           lines.push(`- card ${index + 1} body: ${JSON.stringify(card.body)}`);
         }
+        if (card.imageSrc) {
+          lines.push(
+            `- card ${index + 1} imageSrc (render exactly, do not omit): ${JSON.stringify(card.imageSrc)}`,
+          );
+        }
         if (card.customClassNames?.length) {
           lines.push(
             `- card ${index + 1} customClassNames: ${formatClassList(card.customClassNames)}`,
@@ -3653,6 +3736,11 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       lines.push(`- authorName: ${JSON.stringify(section.authorName)}`);
       if (section.authorTitle) {
         lines.push(`- authorTitle: ${JSON.stringify(section.authorTitle)}`);
+      }
+      if (section.authorAvatar) {
+        lines.push(
+          `- authorAvatar (render exactly, do not omit): ${JSON.stringify(section.authorAvatar)}`,
+        );
       }
       if (section.quoteStyle) {
         lines.push(`- quoteStyle: ${JSON.stringify(section.quoteStyle)}`);
@@ -3882,7 +3970,45 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       );
       break;
     case 'hero':
+      if (
+        'image' in section &&
+        (section as { image?: { src?: string } }).image?.src
+      ) {
+        lines.push(
+          `- imageSrc (render exactly, do not omit): ${JSON.stringify((section as { image: { src: string } }).image.src)}`,
+        );
+      }
+      if ('heading' in section && section.heading) {
+        lines.push(`- heading: ${JSON.stringify(section.heading)}`);
+      }
+      if ('subheading' in section && section.subheading) {
+        lines.push(`- subheading: ${JSON.stringify(section.subheading)}`);
+      }
+      if ('cta' in section && section.cta?.text) {
+        lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
+      }
+      if ('ctas' in section && Array.isArray(section.ctas)) {
+        section.ctas.slice(1).forEach((cta, ctaIndex) => {
+          if (cta.text) {
+            lines.push(`- cta${ctaIndex + 2}Text: ${JSON.stringify(cta.text)}`);
+          }
+        });
+      }
+      if ('ctaStyle' in section && section.ctaStyle) {
+        lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
+      }
+      if ('secondaryCtaStyle' in section && section.secondaryCtaStyle) {
+        lines.push(
+          `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
+        );
+      }
+      break;
     case 'cover':
+      if ('imageSrc' in section && section.imageSrc) {
+        lines.push(
+          `- imageSrc (render exactly, do not omit): ${JSON.stringify(section.imageSrc)}`,
+        );
+      }
       if ('heading' in section && section.heading) {
         lines.push(`- heading: ${JSON.stringify(section.heading)}`);
       }
@@ -4059,6 +4185,7 @@ function extractCustomClassNamesFromSection(section: SectionPlan): string[] {
       }
       break;
     case 'media-text':
+      add(section.subtitleCustomClassNames);
       add(section.headingCustomClassNames);
       add(section.bodyCustomClassNames);
       add(section.imageCustomClassNames);

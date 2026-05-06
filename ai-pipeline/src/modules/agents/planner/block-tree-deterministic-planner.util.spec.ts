@@ -203,6 +203,167 @@ describe('block-tree deterministic listing shells', () => {
     expect(plan?.layout.contentLayout).toBe('sidebar-right');
     expect(plan?.layout.sidebarScope).toBe('all-content');
   });
+
+  it('synthesizes the lead cover from block-tree evidence when draft sections omit it', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...baseInput,
+      draftSections: [
+        {
+          type: 'post-list',
+          layout: 'list',
+          showDate: true,
+          showAuthor: true,
+          showCategory: false,
+          showExcerpt: true,
+          showFeaturedImage: true,
+          sourceRef: {
+            sourceNodeId: 'blog-right-sidebar::query::3.0.0.0',
+            templateName: 'blog-right-sidebar',
+            sourceFile: 'templates/blog-right-sidebar.html',
+            topLevelIndex: 3,
+            parentSourceNodeId: 'blog-right-sidebar::column::3.0.0',
+            blockName: 'query',
+          },
+        },
+      ] as ComponentVisualPlan['sections'],
+      draftBlockTree: [
+        {
+          ...draftBlockTree[0],
+          src: 'theme-asset:/assets/images/banner.jpg',
+          attrs: { dimRatio: 80 },
+          minHeight: '250px',
+          overlayColor: '#000',
+          textAlign: 'center',
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: 'News',
+              sourceRef: {
+                sourceNodeId: 'blog-right-sidebar::heading::2.0',
+                templateName: 'blog-right-sidebar',
+                sourceFile: 'templates/blog-right-sidebar.html',
+                topLevelIndex: 2,
+                parentSourceNodeId: 'blog-right-sidebar::cover::2',
+                blockName: 'heading',
+              },
+            },
+          ],
+        },
+        draftBlockTree[1],
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'cover',
+      heading: 'News',
+      imageSrc: 'theme-asset:/assets/images/banner.jpg',
+    });
+  });
+
+  it('uses standalone sticky-sidebar content when the sidebar template-part shell is empty', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...baseInput,
+      draftBlockTree: [
+        draftBlockTree[0],
+        {
+          kind: 'columns',
+          blockName: 'columns',
+          children: [
+            {
+              kind: 'column',
+              blockName: 'column',
+              children: [
+                {
+                  kind: 'query',
+                  blockName: 'query',
+                  sourceRef: {
+                    sourceNodeId: 'blog-right-sidebar::query::3.0.0.0',
+                    templateName: 'blog-right-sidebar',
+                    sourceFile: 'templates/blog-right-sidebar.html',
+                    topLevelIndex: 3,
+                    parentSourceNodeId: 'blog-right-sidebar::column::3.0.0',
+                    blockName: 'query',
+                  },
+                },
+              ],
+            },
+            {
+              kind: 'column',
+              blockName: 'column',
+              columnWidth: '320px',
+              sourceRef: {
+                sourceNodeId: 'blog-right-sidebar::column::3.0.1',
+                templateName: 'blog-right-sidebar',
+                sourceFile: 'templates/blog-right-sidebar.html',
+                topLevelIndex: 3,
+                parentSourceNodeId: 'blog-right-sidebar::columns::3.0',
+                blockName: 'column',
+              },
+              children: [
+                {
+                  kind: 'template-part',
+                  blockName: 'template-part',
+                  templatePartSlug: 'sidebar',
+                },
+              ],
+            },
+          ],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
+                { kind: 'latest-posts', blockName: 'latest-posts' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Categories' },
+                { kind: 'categories', blockName: 'categories' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections.map((section) => section.type)).toEqual([
+      'cover',
+      'post-list',
+      'sidebar',
+    ]);
+    expect(plan?.sections[2]).toMatchObject({
+      type: 'sidebar',
+      widgets: [
+        { kind: 'search' },
+        { kind: 'recent-posts', title: 'Latest Posts' },
+        { kind: 'categories', title: 'Categories' },
+        { kind: 'tags', title: 'Tags' },
+      ],
+    });
+  });
 });
 
 describe('block-tree deterministic shared partials', () => {
@@ -275,9 +436,109 @@ describe('block-tree deterministic shared partials', () => {
       type: 'sidebar',
       widgets: [
         { kind: 'search' },
-        { kind: 'categories' },
         { kind: 'recent-posts' },
+        { kind: 'categories' },
       ],
+    });
+  });
+
+  it('derives header logo/title visibility and CTA from the shared partial block tree', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'header',
+        componentName: 'Header',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'menus'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          domId: 'sticky-header',
+          children: [
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+              overlayMenu: 'mobile',
+              isResponsive: true,
+            },
+            {
+              kind: 'button',
+              blockName: 'button',
+              text: 'Get Started',
+              href: '#',
+              customClassNames: ['is-style-fill'],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'navbar',
+      sticky: true,
+      showSiteLogo: false,
+      showSiteTitle: true,
+      cta: {
+        text: 'Get Started',
+        link: '#',
+        style: 'button',
+      },
+    });
+  });
+
+  it('preserves explicit site logo width in deterministic header partial sections', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'header',
+        componentName: 'Header',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'menus'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'site-logo',
+              blockName: 'site-logo',
+              width: 60,
+            },
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toHaveLength(1);
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'navbar',
+      showSiteLogo: true,
+      showSiteTitle: true,
+      logoWidth: '60px',
     });
   });
 
@@ -362,5 +623,438 @@ describe('block-tree deterministic shared partials', () => {
       type: 'footer',
       scrollTopTriggerClassNames: ['profolio-fse-scroll-top'],
     });
+  });
+
+  it('keeps marketing-heavy footers on the deterministic block-tree path', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...sharedBaseInput,
+      componentPlan: {
+        templateName: 'footer',
+        componentName: 'Footer',
+        type: 'partial' as const,
+        route: null,
+        dataNeeds: ['site-info', 'footer-links'],
+        isDetail: false,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: "Let's Work Together",
+            },
+            {
+              kind: 'paragraph',
+              blockName: 'paragraph',
+              text: 'Marketing footer intro',
+            },
+            {
+              kind: 'social-links',
+              blockName: 'social-links',
+              children: [
+                {
+                  kind: 'social-link',
+                  blockName: 'social-link',
+                  href: '#',
+                  text: 'Facebook',
+                },
+              ],
+            },
+            {
+              kind: 'button',
+              blockName: 'button',
+              text: 'Contact',
+              href: '#',
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.renderMode).toBe('block-centric');
+    expect(plan?.sections[0]).toMatchObject({
+      type: 'footer',
+    });
+  });
+});
+
+describe('block-tree deterministic post detail terms', () => {
+  const detailBaseInput = {
+    content: {
+      menus: [],
+      pages: [],
+      posts: [],
+    } as any,
+    tokens: undefined,
+    globalPalette: {
+      background: '#ffffff',
+      surface: '#f5f5f5',
+      text: '#111111',
+      textMuted: '#666666',
+      accent: '#000000',
+      accentText: '#ffffff',
+      dark: '#000000',
+      darkText: '#ffffff',
+    },
+    globalTypography: {
+      headingFamily: 'inherit',
+      bodyFamily: 'inherit',
+      h1: 'text-4xl',
+      h2: 'text-3xl',
+      h3: 'text-2xl',
+      body: 'text-base',
+      small: 'text-sm',
+      buttonRadius: 'rounded',
+    },
+    deriveComponentLayout: () => ({
+      containerClass: 'max-w-6xl mx-auto w-full',
+      blockGap: 'gap-12',
+      includes: [],
+    }),
+    buildRichBoundPageDetailSections: () => undefined,
+    buildBoundPageContentFallbackSection: () => ({
+      type: 'page-content' as const,
+      showTitle: true,
+    }),
+  };
+
+  it('preserves separate product category and tag term blocks without folding categories into post-content', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan: {
+        templateName: 'single',
+        componentName: 'SingleProductLike',
+        type: 'page' as const,
+        route: '/single-product-like',
+        dataNeeds: ['post-detail'],
+        isDetail: true,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'post-title',
+          blockName: 'post-title',
+        },
+        {
+          kind: 'post-content',
+          blockName: 'post-content',
+        },
+        {
+          kind: 'post-terms',
+          blockName: 'post-terms',
+          attrs: {
+            term: 'product_cat',
+            prefix: 'Category: ',
+          },
+        },
+        {
+          kind: 'post-terms',
+          blockName: 'post-terms',
+          attrs: {
+            term: 'product_tag',
+            prefix: 'Tags: ',
+          },
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections).toMatchObject([
+      {
+        type: 'post-title',
+      },
+      {
+        type: 'post-content',
+        showCategories: false,
+      },
+      {
+        type: 'post-terms',
+        taxonomy: 'category',
+      },
+      {
+        type: 'post-terms',
+        taxonomy: 'post_tag',
+      },
+    ]);
+  });
+
+  it('short-circuits Woo single-product templates and preserves related products as a products post-list', () => {
+    const componentPlan = {
+      templateName: 'single-product',
+      componentName: 'SingleProduct',
+      type: 'page' as const,
+      route: '/product/:slug',
+      dataNeeds: ['product-detail', 'products'],
+      isDetail: true,
+    };
+
+    const draftSections: ComponentVisualPlan['sections'] = [
+      {
+        type: 'cover',
+        imageSrc: 'theme-asset:/assets/images/banner.jpg',
+        dimRatio: 90,
+        minHeight: '232px',
+        contentAlign: 'center',
+        sourceRef: {
+          sourceNodeId: 'single-product::cover::0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          blockName: 'cover',
+        },
+      },
+      {
+        type: 'breadcrumb',
+        sourceRef: {
+          sourceNodeId: 'single-product::breadcrumbs::0.2.0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          parentSourceNodeId: 'single-product::group::0.2',
+          blockName: 'woocommerce/breadcrumbs',
+        },
+      },
+      {
+        type: 'post-list',
+        resource: 'products',
+        title: 'Related Products',
+        layout: 'grid-3',
+        showDate: false,
+        showAuthor: false,
+        showCategory: false,
+        showExcerpt: false,
+        showFeaturedImage: true,
+        showPrice: true,
+        showButton: true,
+        sourceRef: {
+          sourceNodeId: 'single-product::query::1.1.2.0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 1,
+          parentSourceNodeId: 'single-product::related-products::1.1.2',
+          blockName: 'query',
+        },
+      },
+    ];
+
+    const draftBlockTree: BlockNode[] = [
+      {
+        kind: 'cover',
+        blockName: 'cover',
+        sourceRef: {
+          sourceNodeId: 'single-product::cover::0',
+          templateName: 'single-product',
+          sourceFile: 'patterns/single-product.php',
+          topLevelIndex: 0,
+          blockName: 'cover',
+        },
+        children: [
+          {
+            kind: 'breadcrumbs',
+            blockName: 'woocommerce/breadcrumbs',
+            sourceRef: {
+              sourceNodeId: 'single-product::breadcrumbs::0.2.0',
+              templateName: 'single-product',
+              sourceFile: 'patterns/single-product.php',
+              topLevelIndex: 0,
+              parentSourceNodeId: 'single-product::group::0.2',
+              blockName: 'woocommerce/breadcrumbs',
+            },
+          },
+        ],
+      },
+      {
+        kind: 'group',
+        blockName: 'group',
+        children: [
+          {
+            kind: 'columns',
+            blockName: 'columns',
+            children: [
+              {
+                kind: 'column',
+                blockName: 'column',
+                children: [
+                  {
+                    kind: 'product-image-gallery',
+                    blockName: 'woocommerce/product-image-gallery',
+                  },
+                ],
+              },
+              {
+                kind: 'column',
+                blockName: 'column',
+                children: [
+                  {
+                    kind: 'post-title',
+                    blockName: 'post-title',
+                  },
+                  {
+                    kind: 'post-excerpt',
+                    blockName: 'post-excerpt',
+                  },
+                  {
+                    kind: 'product-meta',
+                    blockName: 'woocommerce/product-meta',
+                    children: [
+                      {
+                        kind: 'post-terms',
+                        blockName: 'post-terms',
+                        attrs: {
+                          term: 'product_cat',
+                          prefix: 'Category: ',
+                        },
+                      },
+                      {
+                        kind: 'post-terms',
+                        blockName: 'post-terms',
+                        attrs: {
+                          term: 'product_tag',
+                          prefix: 'Tags: ',
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            kind: 'product-details',
+            blockName: 'woocommerce/product-details',
+          },
+          {
+            kind: 'related-products',
+            blockName: 'woocommerce/related-products',
+            children: [
+              {
+                kind: 'query',
+                blockName: 'query',
+                sourceRef: {
+                  sourceNodeId: 'single-product::query::1.1.2.0',
+                  templateName: 'single-product',
+                  sourceFile: 'patterns/single-product.php',
+                  topLevelIndex: 1,
+                  parentSourceNodeId: 'single-product::related-products::1.1.2',
+                  blockName: 'query',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    expect(
+      shouldShortCircuitBlockTreeVisualPlan(componentPlan, draftBlockTree),
+    ).toBe(true);
+
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan,
+      draftSections,
+      draftBlockTree,
+    });
+
+    expect(plan?.sections).toMatchObject([
+      { type: 'cover' },
+      { type: 'breadcrumb' },
+      { type: 'post-title' },
+      { type: 'post-content', showTitle: false },
+      { type: 'post-terms', taxonomy: 'category' },
+      { type: 'post-terms', taxonomy: 'post_tag' },
+      {
+        type: 'post-list',
+        resource: 'products',
+        title: 'Related Products',
+        showFeaturedImage: true,
+        showPrice: true,
+        showButton: true,
+      },
+    ]);
+  });
+
+  it('promotes standalone sticky-sidebar widgets into the deterministic single-post plan', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan: {
+        templateName: 'single',
+        componentName: 'Single',
+        type: 'page' as const,
+        route: '/post/:slug',
+        dataNeeds: ['post-detail'],
+        isDetail: true,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'cover',
+          blockName: 'cover',
+          src: 'theme-asset:/assets/images/banner.jpg',
+          children: [{ kind: 'post-title', blockName: 'post-title' }],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [{ kind: 'post-content', blockName: 'post-content' }],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
+                { kind: 'latest-posts', blockName: 'latest-posts' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Categories' },
+                { kind: 'categories', blockName: 'categories' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections.map((section) => section.type)).toEqual([
+      'post-title',
+      'post-content',
+      'sidebar',
+    ]);
+    expect(plan?.sections[2]).toMatchObject({
+      type: 'sidebar',
+      widgets: [
+        { kind: 'search' },
+        { kind: 'recent-posts', title: 'Latest Posts' },
+        { kind: 'categories', title: 'Categories' },
+        { kind: 'tags', title: 'Tags' },
+      ],
+    });
+    expect(plan?.layout.contentLayout).toBe('sidebar-right');
+    expect(plan?.layout.sidebarScope).toBe('all-content');
   });
 });

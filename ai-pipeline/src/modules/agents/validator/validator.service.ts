@@ -36,7 +36,11 @@ import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.
 import { collectSurfacePlanRequiredLiterals } from '../planner/planner-surface-plan.util.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
-import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
+import {
+  normalizeCanonicalPostMetaAndTextLinks,
+  normalizeCommonTypographyTypos,
+  normalizeThemeAssetReferences,
+} from '../shared/code-postprocess.util.js';
 import {
   appendUniqueClasses,
   ensureReactRouterLinkImport,
@@ -96,6 +100,7 @@ export interface ComponentValidationResult {
 
 type SectionBindingKind =
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'footer-links'
@@ -194,6 +199,7 @@ export class ValidatorService {
         route: comp.route,
         isDetail: comp.isDetail,
         fixedSlug: comp.fixedSlug,
+        runtimeRenderer: comp.runtimeRenderer,
         dataNeeds: comp.dataNeeds,
         type: comp.type,
         isSubComponent: comp.isSubComponent,
@@ -302,6 +308,8 @@ export class ValidatorService {
     code = repairBrokenArbitraryValueClasses(code);
     code = stripDebugStatements(code);
     code = normalizeCanonicalPostMetaAndTextLinks(code);
+    code = normalizeThemeAssetReferences(code);
+    code = normalizeCommonTypographyTypos(code);
     code = ensureReactRouterLinkImport(code);
     return code;
   }
@@ -441,35 +449,9 @@ export class ValidatorService {
       return { isValid: false, error: tsxSyntaxError };
     }
 
-    // 6. Unbalanced braces — truncated output
-    let depth = 0;
-    for (const char of code) {
-      if (char === '{') depth++;
-      else if (char === '}') depth--;
-    }
-    if (depth !== 0) {
-      return { isValid: false, error: `Unbalanced braces (depth: ${depth})` };
-    }
+    // TS already parsed successfully, so avoid delimiter-count heuristics here.
 
-    // 6b. Unbalanced parentheses — truncated return() or missing closing paren
-    const parenDepth = this.balanceCount(code, '(', ')');
-    if (parenDepth !== 0) {
-      return {
-        isValid: false,
-        error: `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated \`return (\` block or missing closing paren.`,
-      };
-    }
-
-    // 6c. Unbalanced square brackets — truncated array or destructuring
-    const bracketDepth = this.balanceCount(code, '[', ']');
-    if (bracketDepth !== 0) {
-      return {
-        isValid: false,
-        error: `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated array literal or destructuring expression.`,
-      };
-    }
-
-    // 6d. Multiple export default — AI sometimes duplicates the component
+    // 6. Multiple export default — AI sometimes duplicates the component
     const exportDefaultCount = (code.match(/\bexport\s+default\b/g) ?? [])
       .length;
     if (exportDefaultCount > 1) {
@@ -522,6 +504,7 @@ export class ValidatorService {
 
     const DATA_NEED_ALIASES: Record<string, string> = {
       'post-detail': 'postDetail',
+      'product-detail': 'productDetail',
       'page-detail': 'pageDetail',
       'site-info': 'siteInfo',
       'footer-links': 'footerLinks',
@@ -531,9 +514,13 @@ export class ValidatorService {
       (context.dataNeeds ?? []).map((n) => DATA_NEED_ALIASES[n] ?? n),
     );
     const expectsPostDetail = dataNeeds.has('postDetail');
+    const expectsProductDetail = dataNeeds.has('productDetail');
     const expectsPageDetail = dataNeeds.has('pageDetail');
     const expectsAnyDetail =
-      context.isDetail === true || expectsPostDetail || expectsPageDetail;
+      context.isDetail === true ||
+      expectsPostDetail ||
+      expectsProductDetail ||
+      expectsPageDetail;
     const fixedSlug = context.fixedSlug?.trim();
     const hasFixedSlug = Boolean(fixedSlug);
     const isRuntimePage = context.runtimeRenderer === 'runtime-page';
@@ -730,10 +717,10 @@ export class ValidatorService {
     }
 
     if (isPageComponent) {
-      const redundantTagMatch = code.match(/<(header|footer)\b/i);
-      if (redundantTagMatch) {
+      const redundantSharedChromeTag = this.findRedundantSharedChromeTag(code);
+      if (redundantSharedChromeTag) {
         violations.push(
-          `Layout contract violated: page components must NOT include their own \`<${redundantTagMatch[1]}>\` tag. Global navigation and footer are provided by the shared Layout wrapper.`,
+          `Layout contract violated: page components must NOT render their own shared site \`<${redundantSharedChromeTag}>\` chrome. Semantic nested \`<header>\`/\`<footer>\` elements are allowed, but global site navigation/footer belongs to the shared Layout wrapper.`,
         );
       }
       if (this.fetchesSharedChromeData(code)) {
@@ -927,9 +914,19 @@ export class ValidatorService {
       context.isSubComponent === true ||
       isPartialComponent;
     if (!skipRouteDataContractChecks) {
-      if (expectsAnyDetail && !hasFixedSlug && !/\buseParams\s*</.test(code)) {
+      if (
+        expectsAnyDetail &&
+        !hasFixedSlug &&
+        !isRuntimePage &&
+        !/\buseParams\s*</.test(code)
+      ) {
         violations.push(
           'Detail component is missing `useParams<{ slug: string }>()` for slug-based routing.',
+        );
+      }
+      if (isRuntimePage && !/\buseParams\b/.test(code)) {
+        violations.push(
+          'Runtime-page component must call `useParams()` to read the slug from the route.',
         );
       }
       if (hasFixedSlug && /\buseParams\s*</.test(code)) {
@@ -952,6 +949,18 @@ export class ValidatorService {
           hasFixedSlug
             ? `Post detail component must fetch the exact bound record via \`/api/posts/${fixedSlug}\`.`
             : 'Post detail component must fetch the record via `/api/posts/${slug}` (or equivalent string concatenation with `slug`).',
+        );
+      }
+      if (
+        expectsProductDetail &&
+        !(hasFixedSlug
+          ? this.matchesExactProductDetailFetch(code, fixedSlug!)
+          : this.matchesProductDetailFetch(code))
+      ) {
+        violations.push(
+          hasFixedSlug
+            ? `Product detail component must fetch the exact bound record via \`/api/post-types/product/${fixedSlug}\`.`
+            : 'Product detail component must fetch the record via `/api/post-types/product/${slug}` (or equivalent string concatenation with `slug`).',
         );
       }
       if (
@@ -979,6 +988,14 @@ export class ValidatorService {
         );
       }
       if (
+        !dataNeeds.has('productDetail') &&
+        this.matchesAnyProductDetailFetch(code)
+      ) {
+        violations.push(
+          'Component fetches a product detail endpoint even though its plan does not require product detail data.',
+        );
+      }
+      if (
         !dataNeeds.has('pageDetail') &&
         this.matchesAnyDetailFetch(code, 'pages')
       ) {
@@ -989,6 +1006,11 @@ export class ValidatorService {
       if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'posts')) {
         violations.push(
           `Fixed-slug component must not fetch dynamic post detail via \`/api/posts/\${slug}\`. Fetch only \`/api/posts/${fixedSlug}\`.`,
+        );
+      }
+      if (hasFixedSlug && this.matchesDynamicProductDetailFetch(code)) {
+        violations.push(
+          `Fixed-slug component must not fetch dynamic product detail via \`/api/post-types/product/\${slug}\`. Fetch only \`/api/post-types/product/${fixedSlug}\`.`,
         );
       }
       if (hasFixedSlug && this.matchesDynamicDetailFetch(code, 'pages')) {
@@ -1252,21 +1274,6 @@ export class ValidatorService {
     const tsxSyntaxError = this.checkTsxSyntax(code);
     if (tsxSyntaxError) return tsxSyntaxError;
 
-    const braceDepth = this.balanceCount(code, '{', '}');
-    if (braceDepth !== 0) {
-      return `Unbalanced braces (depth: ${braceDepth})`;
-    }
-
-    const parenDepth = this.balanceCount(code, '(', ')');
-    if (parenDepth !== 0) {
-      return `Unbalanced parentheses (depth: ${parenDepth}) — likely a truncated inline JSX expression or handler.`;
-    }
-
-    const bracketDepth = this.balanceCount(code, '[', ']');
-    if (bracketDepth !== 0) {
-      return `Unbalanced square brackets (depth: ${bracketDepth}) — likely a truncated inline array or expression.`;
-    }
-
     return null;
   }
 
@@ -1285,6 +1292,7 @@ export class ValidatorService {
           case 'avatar':
           case 'post-author-biography':
           case 'categories':
+          case 'tag-cloud':
           case 'post-date':
           case 'post-author-name':
           case 'post-terms':
@@ -1379,10 +1387,15 @@ export class ValidatorService {
         semanticCoverageSourceNodeIds,
       },
     );
+    const staticTexts = this.filterRenderContractStaticTexts(
+      auditSignals.staticTexts,
+      renderContract,
+      visualPlan,
+    );
     const textLimit = strictBlockTree ? 8 : 4;
     const assetLimit = strictBlockTree ? 6 : 3;
 
-    for (const text of auditSignals.staticTexts.slice(0, textLimit)) {
+    for (const text of staticTexts.slice(0, textLimit)) {
       if (!normalizedCode.includes(this.normalizeForTextMatch(text))) {
         issues.push(
           `Missing source-backed static text "${this.summarizeRenderContractValue(text)}".`,
@@ -1437,6 +1450,32 @@ export class ValidatorService {
     ].join('\n')}`;
   }
 
+  private filterRenderContractStaticTexts(
+    staticTexts: readonly string[],
+    renderContract: ComponentRenderContract,
+    visualPlan?: ComponentVisualPlan,
+  ): string[] {
+    if (renderContract.structure.renderMode !== 'hybrid') {
+      return [...staticTexts];
+    }
+    const sections =
+      visualPlan?.sections ?? renderContract.fallback?.sections ?? [];
+    const isListingSurface = sections.some(
+      (section) =>
+        section.type === 'post-list' ||
+        section.type === 'search' ||
+        section.type === 'sidebar',
+    );
+    if (!isListingSurface) {
+      return [...staticTexts];
+    }
+
+    const genericListingLabels = new Set(['news', 'latest posts']);
+    return staticTexts.filter(
+      (text) => !genericListingLabels.has(this.normalizeForTextMatch(text)),
+    );
+  }
+
   private collectRenderContractAuditSignals(
     nodes: readonly BlockNode[],
     options?: {
@@ -1463,15 +1502,20 @@ export class ValidatorService {
         .filter(Boolean) ?? [],
     );
 
-    const visit = (node: BlockNode, dynamicBranch = false) => {
+    const visit = (
+      node: BlockNode,
+      dynamicBranch = false,
+      coveredBranch = false,
+    ) => {
       const currentBranchIsDynamic =
         dynamicBranch || this.isDynamicRenderContractNode(node);
-      const nodeSemanticallyCovered =
+      const thisNodeCovered =
         options?.skipCoveredContentSignals === true &&
         this.isRenderContractNodeSemanticallyCovered(
           node,
           semanticCoverageSourceNodeIds,
         );
+      const currentBranchIsCovered = coveredBranch || thisNodeCovered;
 
       if (
         node.kind === 'navigation' ||
@@ -1491,7 +1535,7 @@ export class ValidatorService {
         columnWidths.add(columnWidth);
       }
 
-      if (!currentBranchIsDynamic && !nodeSemanticallyCovered) {
+      if (!currentBranchIsDynamic && !currentBranchIsCovered) {
         const textCandidate = this.extractRenderContractStaticText(node);
         if (textCandidate) {
           staticTexts.add(textCandidate);
@@ -1509,7 +1553,7 @@ export class ValidatorService {
       }
 
       for (const child of node.children ?? []) {
-        visit(child, currentBranchIsDynamic);
+        visit(child, currentBranchIsDynamic, currentBranchIsCovered);
       }
     };
 
@@ -2040,14 +2084,18 @@ export class ValidatorService {
     if (this.shouldRequireTitleLiteral(section.obligation)) {
       addLiteral(section.title, `${label} lost post-list title`);
     }
+    const bindingKind: SectionBindingKind =
+      section.resource === 'products' ? 'products' : 'posts';
+    const bindingLabel =
+      bindingKind === 'products' ? 'products collection' : 'posts collection';
     const fields: Array<{ name: string; message: string }> = [
       {
         name: 'title',
-        message: `${label} post-list is missing post title rendering`,
+        message: `${label} post-list is missing item title rendering`,
       },
       {
         name: 'slug',
-        message: `${label} post-list is missing post link rendering`,
+        message: `${label} post-list is missing item link rendering`,
       },
     ];
     if (section.showFeaturedImage) {
@@ -2080,9 +2128,25 @@ export class ValidatorService {
         message: `${label} post-list is missing category rendering`,
       });
     }
+    if (bindingKind === 'products' && section.showPrice) {
+      fields.push({
+        name: 'price',
+        message: `${label} post-list is missing product price rendering`,
+      });
+    }
+    if (bindingKind === 'products' && section.showButton) {
+      fields.push({
+        name: 'buttonUrl',
+        message: `${label} post-list is missing product button link rendering`,
+      });
+      fields.push({
+        name: 'buttonText',
+        message: `${label} post-list is missing product button text rendering`,
+      });
+    }
     addBinding(
-      'posts',
-      `${label} post-list must render from the posts collection`,
+      bindingKind,
+      `${label} post-list must render from the ${bindingLabel}`,
       fields,
     );
   }
@@ -2133,6 +2197,7 @@ export class ValidatorService {
     addLiteral: (value: string | undefined, message: string) => void,
   ): void {
     addLiteral(section.imageSrc, `${label} lost media-text image src`);
+    addLiteral(section.subtitle, `${label} lost media-text subtitle`);
     addLiteral(section.heading, `${label} lost media-text heading`);
     addLiteral(section.body, `${label} lost media-text body`);
     for (const item of section.listItems ?? []) {
@@ -2549,6 +2614,15 @@ export class ValidatorService {
             ],
           );
           break;
+        case 'tags':
+          addLiteral(widget.title, `${label} tags widget lost title`);
+          addBinding('posts', `${label} tags widget is missing tag rendering`, [
+            {
+              name: 'tags',
+              message: `${label} tags widget is missing tag labels`,
+            },
+          ]);
+          break;
         case 'navigation':
           addLiteral(widget.title, `${label} navigation widget lost title`);
           addLiteral(
@@ -2905,6 +2979,7 @@ export class ValidatorService {
         }
         break;
       case 'media-text':
+        push(section.subtitle);
         push(section.heading);
         push(section.body);
         push(section.imageSrc);
@@ -3026,7 +3101,13 @@ export class ValidatorService {
       case 'posts':
         return this.codeMatchesAnyPattern(code, [
           /\bposts(?:\??\.)?(?:map|slice|filter|find|findIndex)\s*\(/,
-          /\b(?:post|item|previousPost|nextPost)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?)\b/,
+          /\b(?:post|item|previousPost|nextPost)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?|tags)\b/,
+        ]);
+      case 'products':
+        return this.codeMatchesAnyPattern(code, [
+          /\bproducts(?:\??\.)?(?:map|slice|filter|find|findIndex)\s*\(/,
+          /\b(?:product|post|item)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?|tags|price|buttonText|buttonUrl)\b/,
+          /\/api\/post-types\/product\//,
         ]);
       case 'pages':
         return this.codeMatchesAnyPattern(code, [
@@ -3108,9 +3189,13 @@ export class ValidatorService {
               code,
             );
           case 'categories':
-            return /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
-              code,
+            return (
+              /\b(?:post|item|previousPost|nextPost)\.(?:categories|category|categorySlugs?)\b/i.test(
+                code,
+              ) || this.codeUsesDerivedCategoryCollection(code)
             );
+          case 'tags':
+            return /\b(?:post|item|previousPost|nextPost)\.tags\b/i.test(code);
           case 'featuredImage':
             return /\b(?:post|item|previousPost|nextPost)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,
@@ -3132,6 +3217,43 @@ export class ValidatorService {
             return /\b(?:page|item)\.content\b|dangerouslySetInnerHTML/.test(
               code,
             );
+          default:
+            return true;
+        }
+      case 'products':
+        switch (field) {
+          case 'title':
+            return /\b(?:product|post|item)\.title\b/.test(code);
+          case 'slug':
+            return /\b(?:product|post|item)\.slug\b|<(?:Link|a)\b/i.test(code);
+          case 'excerpt':
+            return /\b(?:product|post|item)\.excerpt\b|excerpt/i.test(code);
+          case 'author':
+            return /\b(?:product|post|item)\.author(?:Name)?\b/i.test(code);
+          case 'date':
+            return /\b(?:product|post|item)\.date\b|<time\b/i.test(code);
+          case 'categories':
+            return (
+              /\b(?:product|post|item)\.(?:categories|category|categorySlugs?)\b/i.test(
+                code,
+              ) || this.codeUsesDerivedCategoryCollection(code)
+            );
+          case 'tags':
+            return /\b(?:product|post|item)\.tags\b/i.test(code);
+          case 'featuredImage':
+            return /\b(?:product|post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
+              code,
+            );
+          case 'price':
+            return /\b(?:product|post|item)\.price\b/.test(code);
+          case 'buttonText':
+            return /\b(?:product|post|item)\.buttonText\b/.test(code);
+          case 'buttonUrl':
+            return /\b(?:product|post|item)\.buttonUrl\b|<(?:Link|a)\b/i.test(
+              code,
+            );
+          case 'content':
+            return /\b(?:product|post|item)\.content\b/.test(code);
           default:
             return true;
         }
@@ -3231,6 +3353,14 @@ export class ValidatorService {
             return true;
         }
     }
+  }
+
+  private codeUsesDerivedCategoryCollection(code: string): boolean {
+    return this.codeMatchesAnyPattern(code, [
+      /\b(?:categoryMap|categoryItems|topCategories|categoriesWithCount)\b/,
+      /\b(?:category|cat)\.(?:name|slug|count)\b/i,
+      /Array\.from\(\s*[A-Za-z_$][\w$]*\.(?:entries|values)\(\)\s*\)/,
+    ]);
   }
 
   private codeSatisfiesInteractionRequirement(
@@ -3437,6 +3567,12 @@ mustKeep=${mustKeep}
         normalized.includes('from the posts')
       ) {
         kinds.add('posts');
+      }
+      if (
+        normalized.includes('products collection') ||
+        normalized.includes('from the products')
+      ) {
+        kinds.add('products');
       }
       if (
         normalized.includes('post-navigation') ||
@@ -4146,6 +4282,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         return importPath;
       }
 
+      if (
+        context.runtimeRenderer === 'runtime-page' &&
+        importPath === '../runtime/runtime-contract'
+      ) {
+        continue;
+      }
+
       const basename = importPath
         .replace(/^\.\/|^\.\.\//, '')
         .split('/')
@@ -4205,6 +4348,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return this.matchesDynamicDetailFetch(code, resource);
   }
 
+  private matchesProductDetailFetch(code: string): boolean {
+    return this.matchesDynamicProductDetailFetch(code);
+  }
+
   private matchesAnyDetailFetch(
     code: string,
     resource: 'posts' | 'pages' | 'products',
@@ -4215,6 +4362,14 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     );
     return (
       this.matchesDynamicDetailFetch(code, resource) || exactPattern.test(code)
+    );
+  }
+
+  private matchesAnyProductDetailFetch(code: string): boolean {
+    const exactPattern =
+      /fetch\(\s*['"`]\/api\/post-types\/product\/(?!posts(?:[/?#'"`\s)]|$))[^'"`\s)]+['"`]/;
+    return (
+      this.matchesDynamicProductDetailFetch(code) || exactPattern.test(code)
     );
   }
 
@@ -4237,6 +4392,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return patterns.some((pattern) => pattern.test(code));
   }
 
+  private matchesDynamicProductDetailFetch(code: string): boolean {
+    const patterns = [
+      /fetch\(\s*\`\/api\/post-types\/product\/\$\{[^}]*(?:slug|productId)[^}]*\}\`/,
+      /fetch\(\s*['"]\/api\/post-types\/product\/['"]\s*\+/,
+      /fetch\(\s*['"]\/api\/post-types\/product\/\$\{[^}]*(?:slug|productId)[^}]*\}['"]/,
+    ];
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
   private matchesExactDetailFetch(
     code: string,
     resource: 'posts' | 'pages' | 'products',
@@ -4255,11 +4419,25 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return patterns.some((pattern) => pattern.test(code));
   }
 
+  private matchesExactProductDetailFetch(code: string, slug: string): boolean {
+    const escapedSlug = this.escapeRegExp(slug);
+    const patterns = [
+      new RegExp(
+        `fetch\\(\\s*['"\`]/api/post-types/product/${escapedSlug}['"\`]`,
+      ),
+      new RegExp(
+        String.raw`fetch\(\s*\`/api/post-types/product/${escapedSlug}\``,
+      ),
+    ];
+    return patterns.some((pattern) => pattern.test(code));
+  }
+
   private matchesRuntimePageDetailFetch(code: string): boolean {
     const patterns = [
       /fetch\(\s*\`\/api\/runtime\/pages\/\$\{[^}]*(?:slug)[^}]*\}\`/,
       /fetch\(\s*['"]\/api\/runtime\/pages\/['"]\s*\+/,
       /fetch\(\s*['"]\/api\/runtime\/pages\/\$\{[^}]*(?:slug)[^}]*\}['"]/,
+      /fetch\(\s*\`\$\{[^}]*(?:apiBase|baseUrl|base)[^}]*\}\/api\/runtime\/pages\/\$\{[^}]*(?:slug)[^}]*\}\`/,
     ];
     return patterns.some((pattern) => pattern.test(code));
   }
@@ -4391,6 +4569,33 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     return /fetch\(\s*['"`]\/api\/(?:site-info|menus|footer-links)\b/.test(
       code,
     );
+  }
+
+  private findRedundantSharedChromeTag(
+    code: string,
+  ): 'header' | 'footer' | null {
+    if (
+      /<header\b/i.test(code) &&
+      (/<nav\b/i.test(code) ||
+        this.fetchesSharedChromeData(code) ||
+        this.usesSharedChromeData(code) ||
+        /No menus available/i.test(code))
+    ) {
+      return 'header';
+    }
+
+    if (
+      /<footer\b/i.test(code) &&
+      (this.fetchesSharedChromeData(code) ||
+        this.usesSharedChromeData(code) ||
+        /All rights reserved|©|&copy;|footer[-\s]links|social[-\s]links/i.test(
+          code,
+        ))
+    ) {
+      return 'footer';
+    }
+
+    return null;
   }
 
   private usesSharedChromeData(code: string): boolean {

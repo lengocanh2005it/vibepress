@@ -36,9 +36,10 @@ export async function collectThemeCssSources(
   for (const filePath of files) {
     try {
       const css = await readFile(filePath, 'utf-8');
-      if (!css.trim()) continue;
+      const sanitizedCss = sanitizeInlineThemeCss(css);
+      if (!sanitizedCss.trim()) continue;
       const relPath = relative(themeDir, filePath).split(sep).join('/');
-      chunks.push(`/* ${relPath} */\n${css}`);
+      chunks.push(`/* ${relPath} */\n${sanitizedCss}`);
     } catch {
       // Ignore unreadable CSS assets. They are supplemental only.
     }
@@ -141,4 +142,10 @@ async function tryRead(filePath: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+export function sanitizeInlineThemeCss(css: string): string {
+  return css
+    .replace(/^\uFEFF/, '')
+    .replace(/^\s*@charset\s+(['"])[^'"]+\1;\s*/i, '');
 }

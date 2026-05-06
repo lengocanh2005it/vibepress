@@ -10,7 +10,8 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     cursor: pointer;
   }
 
-  .wow {
+  .wow,
+  .vp-source-reveal {
     will-change: opacity, transform;
     backface-visibility: hidden;
     transform-origin: center center;
@@ -21,7 +22,8 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     --vp-wow-timing: ease;
   }
 
-  .wow.animate__animated {
+  .wow.animate__animated,
+  .vp-source-reveal.animate__animated {
     opacity: 0;
     transition-property: opacity, transform;
     transition-duration: var(--vp-wow-duration);
@@ -30,40 +32,59 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   }
 
   .wow.animate__animated.vp-wow-visible,
-  .wow.vp-wow-visible {
+  .wow.vp-wow-visible,
+  .vp-source-reveal.animate__animated.vp-wow-visible,
+  .vp-source-reveal.vp-wow-visible {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
   }
 
-  .wow.animate__fadeIn {
+  .wow.animate__fadeIn,
+  .vp-source-reveal.animate__fadeIn {
     transform: translate3d(0, 0, 0);
   }
 
   .wow.animate__fadeInUp,
   .wow.animate__fadeInUpBig,
   .wow.animate__slideInUp,
-  .wow.animate__bounceInUp {
+  .wow.animate__bounceInUp,
+  .vp-source-reveal.animate__fadeInUp,
+  .vp-source-reveal.animate__fadeInUpBig,
+  .vp-source-reveal.animate__slideInUp,
+  .vp-source-reveal.animate__bounceInUp {
     transform: translate3d(0, var(--vp-wow-distance), 0);
   }
 
   .wow.animate__fadeInDown,
   .wow.animate__fadeInDownBig,
   .wow.animate__slideInDown,
-  .wow.animate__bounceInDown {
+  .wow.animate__bounceInDown,
+  .vp-source-reveal.animate__fadeInDown,
+  .vp-source-reveal.animate__fadeInDownBig,
+  .vp-source-reveal.animate__slideInDown,
+  .vp-source-reveal.animate__bounceInDown {
     transform: translate3d(0, calc(var(--vp-wow-distance) * -1), 0);
   }
 
   .wow.animate__fadeInLeft,
   .wow.animate__fadeInLeftBig,
   .wow.animate__slideInLeft,
-  .wow.animate__bounceInLeft {
+  .wow.animate__bounceInLeft,
+  .vp-source-reveal.animate__fadeInLeft,
+  .vp-source-reveal.animate__fadeInLeftBig,
+  .vp-source-reveal.animate__slideInLeft,
+  .vp-source-reveal.animate__bounceInLeft {
     transform: translate3d(calc(var(--vp-wow-distance) * -1), 0, 0);
   }
 
   .wow.animate__fadeInRight,
   .wow.animate__fadeInRightBig,
   .wow.animate__slideInRight,
-  .wow.animate__bounceInRight {
+  .wow.animate__bounceInRight,
+  .vp-source-reveal.animate__fadeInRight,
+  .vp-source-reveal.animate__fadeInRightBig,
+  .vp-source-reveal.animate__slideInRight,
+  .vp-source-reveal.animate__bounceInRight {
     transform: translate3d(var(--vp-wow-distance), 0, 0);
   }
 
@@ -72,55 +93,73 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
   .wow.animate__zoomInUp,
   .wow.animate__zoomInLeft,
   .wow.animate__zoomInRight,
-  .wow.animate__bounceIn {
+  .wow.animate__bounceIn,
+  .vp-source-reveal.animate__zoomIn,
+  .vp-source-reveal.animate__zoomInDown,
+  .vp-source-reveal.animate__zoomInUp,
+  .vp-source-reveal.animate__zoomInLeft,
+  .vp-source-reveal.animate__zoomInRight,
+  .vp-source-reveal.animate__bounceIn {
     transform: scale(var(--vp-wow-scale));
   }
 
-  .wow.animate__flipInX {
+  .wow.animate__flipInX,
+  .vp-source-reveal.animate__flipInX {
     transform: perspective(900px) rotateX(-12deg);
   }
 
-  .wow.animate__flipInY {
+  .wow.animate__flipInY,
+  .vp-source-reveal.animate__flipInY {
     transform: perspective(900px) rotateY(-12deg);
   }
 
-  .wow.animate__fast {
+  .wow.animate__fast,
+  .vp-source-reveal.animate__fast {
     --vp-wow-duration: 560ms;
   }
 
-  .wow.animate__faster {
+  .wow.animate__faster,
+  .vp-source-reveal.animate__faster {
     --vp-wow-duration: 420ms;
   }
 
-  .wow.animate__slow {
+  .wow.animate__slow,
+  .vp-source-reveal.animate__slow {
     --vp-wow-duration: 900ms;
   }
 
-  .wow.animate__slower {
+  .wow.animate__slower,
+  .vp-source-reveal.animate__slower {
     --vp-wow-duration: 1200ms;
   }
 
-  .wow.animate__delay-500ms {
+  .wow.animate__delay-500ms,
+  .vp-source-reveal.animate__delay-500ms {
     --vp-wow-delay: 500ms;
   }
 
-  .wow.animate__delay-1s {
+  .wow.animate__delay-1s,
+  .vp-source-reveal.animate__delay-1s {
     --vp-wow-delay: 1s;
   }
 
-  .wow.animate__delay-2s {
+  .wow.animate__delay-2s,
+  .vp-source-reveal.animate__delay-2s {
     --vp-wow-delay: 2s;
   }
 
-  .wow.animate__delay-3s {
+  .wow.animate__delay-3s,
+  .vp-source-reveal.animate__delay-3s {
     --vp-wow-delay: 3s;
   }
 
-  .wow.animate__delay-4s {
+  .wow.animate__delay-4s,
+  .vp-source-reveal.animate__delay-4s {
     --vp-wow-delay: 4s;
   }
 
-  .wow.animate__delay-5s {
+  .wow.animate__delay-5s,
+  .vp-source-reveal.animate__delay-5s {
     --vp-wow-delay: 5s;
   }
 }
@@ -128,7 +167,9 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
 @media (prefers-reduced-motion: reduce) {
   @layer components {
     .wow,
+    .vp-source-reveal,
     .wow.animate__animated,
+    .vp-source-reveal.animate__animated,
     .wow.animate__fadeInUp,
     .wow.animate__fadeInUpBig,
     .wow.animate__fadeInDown,
@@ -141,7 +182,20 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
     .wow.animate__slideInDown,
     .wow.animate__slideInLeft,
     .wow.animate__slideInRight,
-    .wow.animate__zoomIn {
+    .wow.animate__zoomIn,
+    .vp-source-reveal.animate__fadeInUp,
+    .vp-source-reveal.animate__fadeInUpBig,
+    .vp-source-reveal.animate__fadeInDown,
+    .vp-source-reveal.animate__fadeInDownBig,
+    .vp-source-reveal.animate__fadeInLeft,
+    .vp-source-reveal.animate__fadeInLeftBig,
+    .vp-source-reveal.animate__fadeInRight,
+    .vp-source-reveal.animate__fadeInRightBig,
+    .vp-source-reveal.animate__slideInUp,
+    .vp-source-reveal.animate__slideInDown,
+    .vp-source-reveal.animate__slideInLeft,
+    .vp-source-reveal.animate__slideInRight,
+    .vp-source-reveal.animate__zoomIn {
       opacity: 1;
       transform: none;
       transition: none;
@@ -152,7 +206,7 @@ export const SOURCE_MOTION_BRIDGE_CSS = String.raw`@layer components {
 
 export function buildSourceMotionBootstrapTs(): string {
   return String.raw`const SOURCE_MOTION_SELECTOR =
-  '.wow.animate__animated, .wow[class*="animate__"]';
+  '.wow, .animate__animated[class*="animate__"]';
 const SOURCE_STICKY_HEADER_SELECTOR = '#sticky-header';
 const SOURCE_SCROLL_TOP_SELECTOR = '.profolio-fse-scroll-top';
 const SOURCE_THEME_INTERACTION_SELECTOR =
@@ -169,18 +223,26 @@ function startSourceMotionBridge() {
     element.classList.add('vp-wow-visible');
   };
 
+  const isSourceRevealCandidate = (element: HTMLElement) => {
+    if (element.classList.contains('wow')) return true;
+    if (!element.classList.contains('animate__animated')) return false;
+    return Array.from(element.classList).some(
+      (className) =>
+        className.startsWith('animate__') && className !== 'animate__animated',
+    );
+  };
+
   const register = (
     element: HTMLElement,
     observer?: IntersectionObserver,
   ) => {
-    if (
-      !element.classList.contains('wow') ||
-      element.dataset.vpWowObserved === '1'
-    ) {
+    if (!isSourceRevealCandidate(element) || element.dataset.vpWowObserved === '1')
       return;
-    }
 
     element.dataset.vpWowObserved = '1';
+    if (!element.classList.contains('wow')) {
+      element.classList.add('vp-source-reveal');
+    }
 
     if (reduceMotion || !observer) {
       activate(element);
@@ -195,7 +257,7 @@ function startSourceMotionBridge() {
       register(root, observer);
     }
     root
-      .querySelectorAll?.<HTMLElement>('.wow')
+      .querySelectorAll?.<HTMLElement>('.wow, .animate__animated')
       .forEach((element) => register(element, observer));
   };
 
@@ -271,8 +333,31 @@ function startSourceThemeInteractionBridge() {
     });
   };
 
+  const isEligibleScrollTopElement = (element: HTMLElement) => {
+    const structuralTags = new Set([
+      'MAIN',
+      'HEADER',
+      'FOOTER',
+      'SECTION',
+      'ARTICLE',
+      'NAV',
+      'ASIDE',
+    ]);
+    if (structuralTags.has(element.tagName)) return false;
+    if (
+      element.childElementCount > 0 &&
+      element.tagName !== 'A' &&
+      element.tagName !== 'BUTTON'
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   const getScrollTopElements = () =>
-    Array.from(document.querySelectorAll<HTMLElement>(SOURCE_SCROLL_TOP_SELECTOR));
+    Array.from(
+      document.querySelectorAll<HTMLElement>(SOURCE_SCROLL_TOP_SELECTOR),
+    ).filter((element) => isEligibleScrollTopElement(element));
 
   const updateScrollTopVisibility = () => {
     const shouldShow = window.scrollY > 100;

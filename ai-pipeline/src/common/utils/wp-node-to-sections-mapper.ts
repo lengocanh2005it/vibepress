@@ -11,6 +11,7 @@
  * unless the underlying source structure explicitly contradicts the draft.
  */
 
+import type { ChunkPlan, ChunkStructuralKind } from '../types/chunk.schema.js';
 import type { WpNode } from './wp-block-to-json.js';
 import type {
   SectionPlan,
@@ -1118,8 +1119,33 @@ function mapQuery(node: WpNode): PostListSection {
     ['core/post-excerpt', 'post-excerpt'].includes(child.block),
   );
   const hasFeaturedImageBlock = templateNodes.some((child) =>
-    ['core/post-featured-image', 'post-featured-image'].includes(child.block),
+    [
+      'core/post-featured-image',
+      'post-featured-image',
+      'woocommerce/product-image',
+    ].includes(child.block),
   );
+  const hasCommerceProductCardBlock = templateNodes.some((child) =>
+    [
+      'woocommerce/product-price',
+      'woocommerce/product-button',
+      'woocommerce/product-rating',
+    ].includes(child.block),
+  );
+  const hasProductPriceBlock = templateNodes.some((child) =>
+    ['woocommerce/product-price'].includes(child.block),
+  );
+  const hasProductButtonBlock = templateNodes.some((child) =>
+    ['woocommerce/product-button'].includes(child.block),
+  );
+  const isProductQuery =
+    String(node.params?.query?.postType ?? '').toLowerCase() === 'product' ||
+    String(node.params?.namespace ?? '')
+      .toLowerCase()
+      .includes('woocommerce/product-query') ||
+    String(postTemplate?.params?.__woocommerceNamespace ?? '')
+      .toLowerCase()
+      .includes('woocommerce/product-query');
   const separatorNode = templateNodes.find((child) =>
     ['core/separator', 'separator'].includes(child.block),
   );
@@ -1161,6 +1187,7 @@ function mapQuery(node: WpNode): PostListSection {
   const isMinimalTitleOnlyTemplate =
     !hasExcerptBlock &&
     !hasFeaturedImageBlock &&
+    !hasCommerceProductCardBlock &&
     !hasAuthorBlock &&
     !hasDateBlock &&
     !hasTermsBlock;
@@ -1198,6 +1225,7 @@ function mapQuery(node: WpNode): PostListSection {
 
   return {
     type: 'post-list',
+    ...(isProductQuery ? { resource: 'products' as const } : {}),
     layout,
     showDate: isMinimalTitleOnlyTemplate
       ? true
@@ -1216,6 +1244,8 @@ function mapQuery(node: WpNode): PostListSection {
       node.params?.displayFeaturedImage,
       hasFeaturedImageBlock,
     ),
+    ...(isProductQuery && hasProductPriceBlock ? { showPrice: true } : {}),
+    ...(isProductQuery && hasProductButtonBlock ? { showButton: true } : {}),
     itemLayout,
     metaLayout,
     metaAlign,
@@ -1563,9 +1593,9 @@ function mapPostFeaturedImage(node: WpNode): PostFeaturedImageSection {
 function mapPostTerms(node: WpNode): PostTermsSection {
   const term = String(node.params?.term ?? '').toLowerCase();
   const taxonomy: PostTermsSection['taxonomy'] =
-    term === 'category'
+    term === 'category' || term === 'product_cat'
       ? 'category'
-      : term === 'post_tag' || term === 'tag'
+      : term === 'post_tag' || term === 'tag' || term === 'product_tag'
         ? 'post_tag'
         : undefined;
 
@@ -3130,11 +3160,14 @@ function buildCardGridCardFromGroup(node: WpNode): {
   const primaryParagraphText = primaryParagraph
     ? extractNodeText(primaryParagraph)
     : '';
-  const bodyParagraphs = paragraphNodes.filter((candidate) => {
-    if (headingNode) return true;
-    return candidate !== primaryParagraph;
-  });
+  const { subtitleNode, bodyParagraphs } = splitMediaTextParagraphNodes(
+    paragraphNodes,
+    headingNode,
+  );
   const bodyText = extractRichTextFromNodes(bodyParagraphs);
+  const firstBodyParagraph = bodyParagraphs.find((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
 
   const heading = headingText || primaryParagraphText;
   const body = bodyText || '';
@@ -3143,8 +3176,16 @@ function buildCardGridCardFromGroup(node: WpNode): {
   }
 
   return {
+    ...(subtitleNode ? { subtitle: extractNodeRichText(subtitleNode) } : {}),
     heading,
     body,
+    ...(extractStyleVariantClassNames(subtitleNode?.customClassNames).length
+      ? {
+          subtitleCustomClassNames: extractStyleVariantClassNames(
+            subtitleNode?.customClassNames,
+          ),
+        }
+      : {}),
     ...(extractStyleVariantClassNames(
       (headingNode ?? primaryParagraph)?.customClassNames,
     ).length
@@ -3154,13 +3195,16 @@ function buildCardGridCardFromGroup(node: WpNode): {
           ),
         }
       : {}),
-    ...(extractStyleVariantClassNames(bodyParagraphs[0]?.customClassNames)
+    ...(extractStyleVariantClassNames(firstBodyParagraph?.customClassNames)
       .length
       ? {
           bodyCustomClassNames: extractStyleVariantClassNames(
-            bodyParagraphs[0]?.customClassNames,
+            firstBodyParagraph?.customClassNames,
           ),
         }
+      : {}),
+    ...(subtitleNode?.typography || subtitleNode?.fontFamily
+      ? { subtitleStyle: toTypographyStyle(subtitleNode) }
       : {}),
     ...(imageNode?.src
       ? {
@@ -3184,11 +3228,12 @@ function buildHeroFromChildren(
   children: WpNode[],
 ): HeroSection {
   const flat = flattenChildren({ children } as WpNode);
-  const h = flat.find(
-    (c) =>
-      (c.block === 'core/heading' || c.block === 'heading') &&
-      (c.level === 1 || c.level === 2),
-  );
+  const h =
+    flat.find(
+      (c) =>
+        (c.block === 'core/heading' || c.block === 'heading') &&
+        (c.level === 1 || c.level === 2),
+    ) ?? flat.find((c) => c.block === 'core/heading' || c.block === 'heading');
   const p = flat.find(
     (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
@@ -3370,12 +3415,13 @@ function buildMediaTextFromColumns(
     return { type: 'card-grid', columns: 2, cards };
   }
 
+  const imageFlat = imgInFirst ? flat0 : flat1;
+  const imageCoverNode = imageFlat.find(
+    (c) => c.block === 'core/cover' || c.block === 'cover',
+  );
   const textFlat = imgInFirst ? flat1 : flat0;
   const h = textFlat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
-  );
-  const p = textFlat.find(
-    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
   );
   const listItems = textFlat
     .filter((c) => c.block === 'core/list-item' || c.block === 'list-item')
@@ -3392,12 +3438,43 @@ function buildMediaTextFromColumns(
           imageCustomClassNames: uniqueClassNames(imgNode.customClassNames),
         }
       : {}),
+    ...(imageCoverNode?.borderRadius
+      ? { imageRadius: normalizeBorderRadiusValue(imageCoverNode.borderRadius) }
+      : {}),
+    ...(imageCoverNode?.minHeight
+      ? { imageFrameMinHeight: imageCoverNode.minHeight }
+      : {}),
+    ...(imageCoverNode?.overlayColor || imageCoverNode?.bgColor
+      ? {
+          imageFrameBackground:
+            imageCoverNode.overlayColor ?? imageCoverNode.bgColor,
+        }
+      : {}),
+    ...(imageCoverNode?.padding
+      ? { imageFramePaddingStyle: boxSpacingToCss(imageCoverNode.padding) }
+      : {}),
+    ...(imageCoverNode?.customClassNames?.length
+      ? {
+          imageFrameCustomClassNames: uniqueClassNames(
+            imageCoverNode.customClassNames,
+          ),
+        }
+      : {}),
+    ...(imageCoverNode ? { imageFit: 'contain' as const } : {}),
   };
   const columnWidths = cols
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
-  if (h?.text) s.heading = h.text;
+  const paragraphNodes = textFlat.filter(
+    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+  );
+  const { subtitleNode, bodyParagraphs } = splitMediaTextParagraphNodes(
+    paragraphNodes,
+    h,
+  );
+  if (h) s.heading = extractNodeRichText(h);
+  if (subtitleNode) s.subtitle = extractNodeRichText(subtitleNode);
   const mediaHeadingCustomClassNames = extractStyleVariantClassNames(
     h?.customClassNames,
   );
@@ -3405,15 +3482,29 @@ function buildMediaTextFromColumns(
     s.headingCustomClassNames = mediaHeadingCustomClassNames;
   }
   if (h?.typography || h?.fontFamily) s.headingStyle = toTypographyStyle(h);
-  const richBody = extractRichTextFromNodes(textFlat);
+  const richBody = extractRichTextFromNodes(bodyParagraphs);
   if (richBody) s.body = richBody;
+  const mediaSubtitleCustomClassNames = extractStyleVariantClassNames(
+    subtitleNode?.customClassNames,
+  );
+  if (mediaSubtitleCustomClassNames.length > 0) {
+    s.subtitleCustomClassNames = mediaSubtitleCustomClassNames;
+  }
+  if (subtitleNode?.typography || subtitleNode?.fontFamily) {
+    s.subtitleStyle = toTypographyStyle(subtitleNode);
+  }
+  const firstBodyParagraph = bodyParagraphs.find((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
   const mediaBodyCustomClassNames = extractStyleVariantClassNames(
-    p?.customClassNames,
+    firstBodyParagraph?.customClassNames,
   );
   if (mediaBodyCustomClassNames.length > 0) {
     s.bodyCustomClassNames = mediaBodyCustomClassNames;
   }
-  if (p?.typography || p?.fontFamily) s.bodyStyle = toTypographyStyle(p);
+  if (firstBodyParagraph?.typography || firstBodyParagraph?.fontFamily) {
+    s.bodyStyle = toTypographyStyle(firstBodyParagraph);
+  }
   if (listItems.length > 0) s.listItems = listItems;
   applySectionCtas(s, textFlat);
   return s;
@@ -3629,6 +3720,137 @@ function buildSectionCta(node: WpNode): SectionCta {
   };
 }
 
+// ── Chunk builder ───────────────────────────────────────────────────────────
+//
+// Deterministic chunker: WpNode[] → ChunkPlan[]
+//
+// Splits the top-level node list into independent structural chunks before AI
+// labeling. Each chunk is one logical section of the page (e.g. banner,
+// projects, services). AI receives one chunk at a time and only answers
+// "what semantic kind is this?" — it cannot reorder, merge, or drop chunks.
+
+/**
+ * Main public entry point. Converts a flat WpNode[] (page source) into an
+ * ordered array of ChunkPlans, one per structural subtree.
+ */
+export function buildPlannerChunksFromNodes(nodes: WpNode[]): ChunkPlan[] {
+  const groups = splitTopLevelChunkCandidates(nodes);
+  return groups.map((group, index) => buildChunkPlanFromNodes(group, index));
+}
+
+/**
+ * Splits top-level WpNodes into chunk groups.
+ *
+ * Default: each top-level node → its own chunk.
+ * Escape hatch: a core/group that contains ONLY semantic boundary nodes is
+ * unwrapped so each child becomes its own chunk (avoids grouping unrelated
+ * sections under one opaque wrapper).
+ */
+export function splitTopLevelChunkCandidates(nodes: WpNode[]): WpNode[][] {
+  const result: WpNode[][] = [];
+  for (const node of nodes) {
+    if (isSpacerBlock(node.block) || isSeparatorBlock(node.block)) continue;
+
+    // Escape hatch: transparent group wrapper holding only semantic nodes
+    if (
+      (node.block === 'core/group' || node.block === 'group') &&
+      node.children?.length &&
+      node.children.every(
+        (child) =>
+          isSpacerBlock(child.block) ||
+          isSeparatorBlock(child.block) ||
+          isSemanticChunkBoundaryNode(child),
+      )
+    ) {
+      for (const child of node.children) {
+        if (!isSpacerBlock(child.block) && !isSeparatorBlock(child.block)) {
+          result.push([child]);
+        }
+      }
+      continue;
+    }
+
+    result.push([node]);
+  }
+  return result;
+}
+
+/**
+ * Returns true when a node represents a strong semantic chunk boundary:
+ * pattern, template-part, columns, cover, query, or major uagb containers.
+ * Inner core/group nodes do NOT qualify — they stay inside their parent chunk.
+ */
+export function isSemanticChunkBoundaryNode(node: WpNode): boolean {
+  const block = node.block;
+  return (
+    block === 'core/pattern' ||
+    block === 'pattern' ||
+    block === 'core/template-part' ||
+    block === 'template-part' ||
+    block === 'core/columns' ||
+    block === 'columns' ||
+    block === 'core/cover' ||
+    block === 'cover' ||
+    block === 'core/query' ||
+    block === 'query' ||
+    block === 'uagb/container' ||
+    block === 'uagb/section'
+  );
+}
+
+function buildChunkPlanFromNodes(nodes: WpNode[], index: number): ChunkPlan {
+  const primary = nodes[0];
+  const structuralKind = resolveChunkStructuralKind(primary);
+  const chunkId = `chunk-${index + 1}-${structuralKind}`;
+
+  const allDescendants = nodes.flatMap((n) => [n, ...flattenChildren(n)]);
+  const blockNames = [
+    ...new Set(allDescendants.map((n) => n.block).filter(Boolean)),
+  ];
+  const wrapperClassNames = uniqueClassNames(primary?.customClassNames ?? []);
+  const draftSections = deduplicateSectionKeys(mapNodes(nodes, nodes));
+
+  return {
+    chunkId,
+    order: index,
+    structuralKind,
+    sourceRef: {
+      ...(primary?.sourceRef?.sourceNodeId
+        ? { sourceNodeId: primary.sourceRef.sourceNodeId }
+        : {}),
+      ...(primary?.sourceRef?.templateName
+        ? { templateName: primary.sourceRef.templateName }
+        : {}),
+      ...(primary?.sourceRef?.sourceFile
+        ? { sourceFile: primary.sourceRef.sourceFile }
+        : {}),
+      topLevelIndex: index,
+      ...(primary?.block ? { blockName: primary.block } : {}),
+    },
+    blockNames,
+    wrapperClassNames,
+    ...(primary?.html ? { rawHtml: primary.html.slice(0, 500) } : {}),
+    draftSections,
+  };
+}
+
+function resolveChunkStructuralKind(
+  node: WpNode | undefined,
+): ChunkStructuralKind {
+  if (!node) return 'misc';
+  const block = node.block;
+  if (block === 'core/pattern' || block === 'pattern') return 'pattern';
+  if (block === 'core/template-part' || block === 'template-part')
+    return 'template-part';
+  if (block === 'core/group' || block === 'group') return 'group';
+  if (block === 'core/columns' || block === 'columns') return 'columns';
+  if (block === 'core/cover' || block === 'cover') return 'cover';
+  if (block === 'core/query' || block === 'query') return 'query';
+  if (block === 'uagb/container') return 'uagb-container';
+  if (block === 'uagb/section') return 'uagb-section';
+  return 'misc';
+}
+
 function buildSectionCtas(nodes: WpNode[]): SectionCta[] {
   const seen = new Set<string>();
   const result: SectionCta[] = [];
@@ -3832,6 +4054,20 @@ function boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
   return `${top} ${right} ${bottom} ${left}`;
 }
 
+function normalizeBorderRadiusValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return undefined;
+  const radius = value as Record<string, unknown>;
+  const topLeft = normalizeCssLength(String(radius.topLeft ?? '0')) ?? '0';
+  const topRight =
+    normalizeCssLength(String(radius.topRight ?? topLeft)) ?? topLeft;
+  const bottomRight =
+    normalizeCssLength(String(radius.bottomRight ?? topLeft)) ?? topLeft;
+  const bottomLeft =
+    normalizeCssLength(String(radius.bottomLeft ?? topRight)) ?? topRight;
+  return `${topLeft} ${topRight} ${bottomRight} ${bottomLeft}`;
+}
+
 function normalizeCssLength(value?: string): string | undefined {
   if (!value) return undefined;
   const normalized = value.trim();
@@ -3946,6 +4182,72 @@ function extractRichTextFromNodes(nodes: WpNode[]): string {
     .map((node) => extractNodeRichText(node))
     .filter(Boolean);
   return texts.join('\n');
+}
+
+function splitMediaTextParagraphNodes(
+  paragraphNodes: WpNode[],
+  headingNode?: WpNode | null,
+): {
+  subtitleNode?: WpNode;
+  bodyParagraphs: WpNode[];
+} {
+  const contentfulParagraphs = paragraphNodes.filter((candidate) =>
+    Boolean(extractNodeText(candidate)),
+  );
+  const firstParagraph = contentfulParagraphs[0];
+  if (!firstParagraph) {
+    return { bodyParagraphs: [] };
+  }
+
+  if (!headingNode) {
+    return {
+      bodyParagraphs: paragraphNodes.filter(
+        (candidate) => candidate !== firstParagraph,
+      ),
+    };
+  }
+
+  const remainingParagraphs = contentfulParagraphs.slice(1);
+  if (
+    shouldPromoteMediaTextSubtitle(firstParagraph, remainingParagraphs) ===
+    false
+  ) {
+    return { bodyParagraphs: paragraphNodes };
+  }
+
+  return {
+    subtitleNode: firstParagraph,
+    bodyParagraphs: paragraphNodes.filter(
+      (candidate) => candidate !== firstParagraph,
+    ),
+  };
+}
+
+function shouldPromoteMediaTextSubtitle(
+  firstParagraph: WpNode,
+  remainingParagraphs: WpNode[],
+): boolean {
+  if (remainingParagraphs.length === 0) return false;
+
+  const firstText = extractNodeText(firstParagraph).replace(/\s+/g, ' ').trim();
+  if (!firstText) return false;
+
+  const remainingText = stripInlineHtml(
+    extractRichTextFromNodes(remainingParagraphs),
+  );
+  if (!remainingText) return false;
+
+  const wordCount = firstText.split(/\s+/).filter(Boolean).length;
+  const charCount = firstText.length;
+  const remainingLength = remainingText.length;
+  const hasTerminalPunctuation = /[.!?।۔。！？]$/.test(firstText);
+
+  return (
+    wordCount <= 8 &&
+    charCount <= 64 &&
+    remainingLength >= Math.max(40, charCount * 2) &&
+    (!hasTerminalPunctuation || charCount <= 24)
+  );
 }
 
 function stripInlineHtml(html: string): string {

@@ -547,8 +547,8 @@ Blocks form a hierarchical tree. Parent blocks control layout.
 | `query`         | dynamic list of posts                                                                                                                      |
 | `post-template` | template for each post inside query                                                                                                        |
 | `navigation`    | navigation menu container                                                                                                                  |
-| `header`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<header>` only inside dedicated `Header` partials. |
-| `footer`        | ⛔ **SKIP entirely in PAGE components** — shared Layout wrapper provides it. Render as `<footer>` only inside dedicated `Footer` partials. |
+| `header`        | ⛔ **SKIP shared site header blocks in PAGE components** — shared Layout wrapper provides them. Semantic nested `<header>` inside article/section content is allowed when source-backed. |
+| `footer`        | ⛔ **SKIP shared site footer blocks in PAGE components** — shared Layout wrapper provides them. Semantic nested `<footer>` inside article/section content is allowed when source-backed. |
 | `html`          | render approved raw HTML; prefer structured rich-text rendering for page/body wrappers when required by the approved contract                                                                                              |
 
 ## Block hierarchy — DO NOT FLATTEN
@@ -562,8 +562,8 @@ Rules:
 - `column` → child flex item
 - `query` → container for mapped posts
 - `post-template` → wrapper for each post item
-- `header` → ⛔ **SKIP in page components** — shared Layout wrapper provides it; render as `<header>` only in dedicated Header partials
-- `footer` → ⛔ **SKIP in page components** — shared Layout wrapper provides it; render as `<footer>` only in dedicated Footer partials
+- `header` → ⛔ **SKIP shared site header blocks in page components** — shared Layout wrapper provides them; semantic nested `<header>` inside page content is allowed when source-backed
+- `footer` → ⛔ **SKIP shared site footer blocks in page components** — shared Layout wrapper provides them; semantic nested `<footer>` inside page content is allowed when source-backed
 
 ⛔ NEVER move children outside their parent block.
 ⛔ NEVER flatten nested layout blocks.
@@ -579,7 +579,7 @@ Rules:
 - Footer should always fetch `/api/footer-links`; `/api/menus` is optional and only for non-primary footer/social groups.
 - Do not produce a generic placeholder when the template explicitly defines these blocks.
 
-**For PAGE components** (any other component): ⛔ Do NOT render a `<header>` or `<footer>` — they are provided by the shared Layout wrapper.
+**For PAGE components** (any other component): ⛔ Do NOT render shared site `<header>` / `<footer>` chrome — they are provided by the shared Layout wrapper. Semantic nested `<header>` / `<footer>` elements are allowed when they belong to the page body itself.
 
 ⛔ NEVER flatten nested layout blocks.
 

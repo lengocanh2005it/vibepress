@@ -109,16 +109,38 @@ export class StyleResolverService {
     return nodes.map((node) => {
       const out: WpNode = { ...node };
 
-      if (out.bgColor && !out.bgColor.startsWith('#'))
-        out.bgColor = map.get(out.bgColor) ?? out.bgColor;
-      if (out.textColor && !out.textColor.startsWith('#'))
-        out.textColor = map.get(out.textColor) ?? out.textColor;
-      if (out.overlayColor && !out.overlayColor.startsWith('#'))
-        out.overlayColor = map.get(out.overlayColor) ?? out.overlayColor;
+      if (out.bgColor)
+        out.bgColor = this.resolveColorValue(out.bgColor, map) ?? out.bgColor;
+      if (out.textColor)
+        out.textColor =
+          this.resolveColorValue(out.textColor, map) ?? out.textColor;
+      if (out.overlayColor)
+        out.overlayColor =
+          this.resolveColorValue(out.overlayColor, map) ?? out.overlayColor;
 
       if (out.children) out.children = this.resolveColors(out.children, map);
       return out;
     });
+  }
+
+  private resolveColorValue(
+    value: string,
+    map: Map<string, string>,
+  ): string | undefined {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (
+      trimmed.startsWith('#') ||
+      /^(rgb|rgba|hsl|hsla|lab|lch|oklab|oklch|color)\(/i.test(trimmed) ||
+      /^(transparent|currentColor|inherit|initial|unset)$/i.test(trimmed)
+    ) {
+      return trimmed;
+    }
+    const shorthand = trimmed.match(/var:preset\|color\|([^|)\s]+)/);
+    if (shorthand) return map.get(shorthand[1]) ?? trimmed;
+    const cssVar = trimmed.match(/var\(--wp--preset--color--([^)]+)\)/);
+    if (cssVar) return map.get(cssVar[1]) ?? trimmed;
+    return map.get(trimmed) ?? trimmed;
   }
 
   private resolveTypography(

@@ -152,4 +152,303 @@ describe('ValidatorService render-contract coverage', () => {
 
     expect(issue).toContain('theme-asset:/assets/images/must-keep.jpg');
   });
+
+  it('ignores generic listing labels for hybrid listing surfaces', () => {
+    const renderContract = {
+      version: 1,
+      sourceModel: {
+        kind: 'block-tree',
+        blockTree: [
+          {
+            kind: 'cover',
+            blockName: 'core/cover',
+            sourceRef: {
+              sourceNodeId: 'index::cover::1',
+            },
+            children: [
+              {
+                kind: 'heading',
+                blockName: 'core/heading',
+                text: 'News',
+                sourceRef: {
+                  sourceNodeId: 'index::heading::1.0',
+                },
+                children: [],
+              },
+            ],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: {
+              sourceNodeId: 'index::group::2',
+            },
+            children: [
+              {
+                kind: 'heading',
+                blockName: 'core/heading',
+                text: 'Latest Posts',
+                sourceRef: {
+                  sourceNodeId: 'index::heading::2.0',
+                },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+      structure: {
+        renderMode: 'hybrid',
+        sharedChrome: {},
+        subtreeBindings: [],
+      },
+      preserveRules,
+      fallback: {
+        reason: 'listing surface coverage test',
+        sections: [
+          {
+            type: 'post-list',
+            layout: 'grid-3',
+            showDate: true,
+            showAuthor: true,
+            showCategory: false,
+            showExcerpt: true,
+            showFeaturedImage: true,
+            itemLayout: 'stacked',
+            metaLayout: 'inline',
+            metaAlign: 'start',
+          },
+        ],
+      },
+    } as unknown as ComponentRenderContract;
+
+    const issue = (
+      service as unknown as {
+        checkRenderContractCoverage: (
+          code: string,
+          renderContract?: ComponentRenderContract,
+          componentName?: string,
+          visualPlan?: ComponentVisualPlan,
+        ) => string | null;
+      }
+    ).checkRenderContractCoverage(
+      '<section><h2>Posts</h2></section>',
+      renderContract,
+      'Index',
+      {
+        componentName: 'Index',
+        sections: renderContract.fallback?.sections ?? [],
+      } as ComponentVisualPlan,
+    );
+
+    expect(issue).toBeNull();
+  });
+});
+
+describe('ValidatorService Woo endpoint guards', () => {
+  const service = new ValidatorService({} as ConfigService);
+
+  it('does not treat the products collection endpoint as a product-detail fetch', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useEffect, useState } from 'react';
+
+        type Product = { slug: string };
+
+        export default function ArchiveProduct() {
+          const [products, setProducts] = useState<Product[]>([]);
+
+          useEffect(() => {
+            void fetch('/api/post-types/product/posts?page=1&perPage=10')
+              .then((res) => res.json())
+              .then((data) => setProducts(Array.isArray(data) ? data : []));
+          }, []);
+
+          return <section>{products.length}</section>;
+        }
+      `,
+      {
+        componentName: 'ArchiveProduct',
+        type: 'page',
+        dataNeeds: ['products'],
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+});
+
+describe('ValidatorService derived collection bindings', () => {
+  const service = new ValidatorService({} as ConfigService);
+
+  it('accepts sidebar category labels derived from the posts collection', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useState } from 'react';
+        import { Link } from 'react-router-dom';
+
+        export default function BlogRightSidebar() {
+          const [posts] = useState<any[]>([]);
+          const categoryItems = (() => {
+            const map = new Map<string, { slug: string; count: number }>();
+            posts.forEach((post) => {
+              (post.categories ?? []).forEach((cat, idx) => {
+                const slug = post.categorySlugs?.[idx] ?? '';
+                const prev = map.get(cat);
+                map.set(cat, {
+                  slug: prev?.slug || slug,
+                  count: (prev?.count ?? 0) + 1,
+                });
+              });
+            });
+            return Array.from(map.entries()).map(([name, data]) => ({
+              name,
+              slug: data.slug,
+              count: data.count,
+            }));
+          })();
+
+          return (
+            <section>
+              <h3>Popular Categories</h3>
+              <ul>
+                {categoryItems.map((category) => (
+                  <li key={category.slug || category.name}>
+                    <Link
+                      to={'/category/' + category.slug}
+                      className="hover:underline underline-offset-4"
+                    >
+                      {category.name}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          );
+        }
+      `,
+      {
+        componentName: 'BlogRightSidebar',
+        type: 'page',
+        dataNeeds: ['posts'],
+        visualPlan: {
+          componentName: 'BlogRightSidebar',
+          sections: [
+            {
+              type: 'sidebar',
+              widgets: [{ kind: 'categories', title: 'Popular Categories' }],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('accepts sidebar tag labels derived from the posts collection', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useState } from 'react';
+        import { Link } from 'react-router-dom';
+
+        export default function BlogRightSidebar() {
+          const [posts] = useState<any[]>([]);
+          const tagItems = (() => {
+            const map = new Map<string, number>();
+            posts.forEach((post) => {
+              (post.tags ?? []).forEach((tag) => {
+                const key = String(tag ?? '').trim();
+                if (!key) return;
+                map.set(key, (map.get(key) ?? 0) + 1);
+              });
+            });
+            return Array.from(map.entries()).map(([name, count]) => ({
+              name,
+              slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+              count,
+            }));
+          })();
+
+          return (
+            <section>
+              <h3>Tags</h3>
+              <div>
+                {tagItems.map((tag) => (
+                  <Link
+                    key={tag.slug || tag.name}
+                    to={'/tag/' + tag.slug}
+                    className="hover:underline underline-offset-4"
+                  >
+                    {tag.name}
+                  </Link>
+                ))}
+              </div>
+            </section>
+          );
+        }
+      `,
+      {
+        componentName: 'BlogRightSidebar',
+        type: 'page',
+        dataNeeds: ['posts'],
+        visualPlan: {
+          componentName: 'BlogRightSidebar',
+          sections: [
+            {
+              type: 'sidebar',
+              widgets: [{ kind: 'tags', title: 'Tags' }],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('sanitizes raw theme-asset references before validation', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      const resolveThemeAsset = (src?: string) => {
+        if (!src) return '';
+        if (src.startsWith('theme-asset:')) return src;
+        return src;
+      };
+
+      export default function FrontPage() {
+        return (
+          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+            <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+          </section>
+        );
+      }
+    `);
+
+    expect(code).toContain('const resolveAsset = (src: string) => {');
+    expect(code).toContain(
+      'backgroundImage: `url("${resolveAsset("theme-asset:/assets/images/banner.jpg")}")`',
+    );
+    expect(code).toContain(
+      'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+    expect(code).toContain('const resolveThemeAsset = (src?: string) => {');
+  });
+
+  it('normalizes common sans-serif typos before validation', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return <h1 style={{ fontFamily: "League Spartan, san-serif" }}>Hello</h1>;
+      }
+    `);
+
+    expect(code).toContain('League Spartan, sans-serif');
+    expect(code).not.toContain('san-serif');
+  });
 });

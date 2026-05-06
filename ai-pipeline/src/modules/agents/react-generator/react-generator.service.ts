@@ -77,6 +77,7 @@ export interface GeneratedComponent {
   route?: string | null;
   isDetail?: boolean;
   fixedSlug?: string;
+  runtimeRenderer?: 'runtime-page';
   dataNeeds?: string[];
   type?: 'page' | 'partial';
   // When true, preview-builder must NOT create a route for this component.
@@ -893,6 +894,8 @@ ${renders}
       route: componentPlan?.route ?? component.route,
       isDetail: componentPlan?.isDetail ?? component.isDetail,
       fixedSlug: componentPlan?.fixedSlug ?? component.fixedSlug,
+      runtimeRenderer:
+        componentPlan?.runtimeRenderer ?? component.runtimeRenderer,
       dataNeeds: componentPlan?.dataNeeds
         ? [...componentPlan.dataNeeds]
         : component.dataNeeds,
@@ -1318,7 +1321,13 @@ ${renders}
       normalized.includes('rootcause=route-mapping-error') ||
       normalized.includes('rootcause=data-binding-error') ||
       normalized.includes('exact bound record via') ||
-      normalized.includes('must not include their own <header> tag')
+      normalized.includes('must not include their own <header> tag') ||
+      normalized.includes(
+        'must not render their own shared site `<header>` chrome',
+      ) ||
+      normalized.includes(
+        'must not render their own shared site `<footer>` chrome',
+      )
     );
   }
 
@@ -1563,14 +1572,18 @@ ${renders}
     const isSharedPartial = componentPlan?.type === 'partial';
     const isHeaderPartial = isSharedPartial && /^header/i.test(componentName);
     const isFooterPartial = isSharedPartial && /^footer/i.test(componentName);
-    if (componentPlan?.visualPlan?.deterministicAuthority && !isHeaderPartial) {
+    if (
+      componentPlan?.visualPlan?.deterministicAuthority &&
+      !isHeaderPartial &&
+      !isFooterPartial
+    ) {
       return false;
     }
     // Shared chrome is more stable when we preserve the original WordPress
     // wrapper/column/navigation tree directly instead of letting AI restyle it.
-    // For Header specifically, even deterministic-authority plans benefit from
-    // block-faithful rendering because theme nav hover, spacing, and wrapper
-    // fidelity are highly dependent on the original block hierarchy/classes.
+    // Header/Footer specifically benefit from block-faithful rendering because
+    // theme-specific spacing, wrapper hierarchy, CTA groups, and auxiliary
+    // assets/hooks are highly dependent on the original block structure.
     return !!(
       (isHeaderPartial || isFooterPartial) &&
       nodes &&

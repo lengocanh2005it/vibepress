@@ -40,6 +40,12 @@ export class ThemeProfileRegistry {
     );
   }
 
+  prefersBlockTreeSharedChrome(value?: string | null): boolean {
+    return (
+      this.resolveFseProfile(value).sharedChromeMode === 'block-tree-first'
+    );
+  }
+
   formatKnownFseThemeSlugs(): string {
     return this.getKnownFseThemeSlugs().join(', ');
   }

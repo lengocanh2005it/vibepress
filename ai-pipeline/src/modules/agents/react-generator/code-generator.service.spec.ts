@@ -115,6 +115,67 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('to="/"');
   });
 
+  it('renders media-text subtitles before the main heading/body copy', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'FrontPage',
+      sections: [
+        {
+          type: 'media-text',
+          imageSrc: 'theme-asset:/assets/images/banner-image.png',
+          imageAlt: 'Julia Henderson',
+          imagePosition: 'right',
+          subtitle: 'About Me',
+          heading: 'Welcome To My Profile I am Julia Henderson',
+          body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo.',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('>About Me</p>');
+    expect(code).toContain('>Welcome To My Profile I am Julia Henderson</h2>');
+    expect(code.indexOf('>About Me</p>')).toBeLessThan(
+      code.indexOf('>Welcome To My Profile I am Julia Henderson</h2>'),
+    );
+  });
+
+  it('renders rich media-text headings and cover-backed image frames', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'FrontPage',
+      sections: [
+        {
+          type: 'media-text',
+          imageSrc: 'theme-asset:/assets/images/banner-image.png',
+          imageAlt: 'Julia Henderson',
+          imagePosition: 'right',
+          imageFit: 'contain',
+          imageRadius: '50% 50% 0px 0px',
+          imageFrameBackground: '#F5B731',
+          imageFrameMinHeight: '550px',
+          imageFrameCustomClassNames: ['r-cover'],
+          subtitle: 'About Me',
+          heading:
+            'Welcome To My Profile <br>I am <mark style="background-color:transparent;color:#F5B731">Julia Henderson</mark>',
+          body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo.',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain(
+      'className="flex-1 flex items-end justify-center overflow-hidden r-cover"',
+    );
+    expect(code).toContain("backgroundColor: '#F5B731'");
+    expect(code).toContain("minHeight: '550px'");
+    expect(code).toContain(
+      'renderRichTextChildren("Welcome To My Profile <br>I am <mark',
+    );
+  });
+
   it('resolves theme asset images inside card-grid sections', () => {
     const plan = {
       ...basePlan,
@@ -188,6 +249,31 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('<form role="search"');
     expect(code).toContain('Search posts...');
     expect(code).toContain('>Find</button>');
+  });
+
+  it('renders tag widgets inside sidebar sections as archive links', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'BlogRightSidebar',
+      sections: [
+        {
+          type: 'sidebar',
+          widgets: [
+            {
+              kind: 'tags',
+              title: 'Tags',
+              showCounts: true,
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("to={'/tag/' + slug}");
+    expect(code).toContain("tag.toLowerCase().replace(/[^a-z0-9]+/g, '-')");
+    expect(code).toContain('Tags');
   });
 
   it('does not fetch shared chrome data for block-tree content widgets on page components', () => {
@@ -287,6 +373,116 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('wp-block-navigation__container');
     expect(code).toContain('wp-block-navigation-item');
     expect(code).toContain('wp-block-navigation-item__content');
+    expect(code).toContain('useLocation');
+    expect(code).toContain('current-menu-item current_page_item');
+  });
+
+  it('renders block-centric headers from the preserved block tree instead of the semantic navbar abstraction', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Header',
+      dataNeeds: ['siteInfo', 'menus'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'navbar',
+          menuSlug: 'primary',
+          showSiteLogo: false,
+          showSiteTitle: true,
+          orientation: 'horizontal',
+          isResponsive: true,
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          domId: 'sticky-header',
+          customClassNames: ['wp-block-group', 'has-primary-background-color'],
+          children: [
+            {
+              kind: 'site-title',
+              blockName: 'site-title',
+            },
+            {
+              kind: 'navigation',
+              blockName: 'navigation',
+              menuOrientation: 'horizontal',
+              overlayMenu: 'mobile',
+              isResponsive: true,
+            },
+            {
+              kind: 'buttons',
+              blockName: 'buttons',
+              customClassNames: ['header-btn'],
+              children: [
+                {
+                  kind: 'button',
+                  blockName: 'button',
+                  text: 'Get Started',
+                  href: '#',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('id="sticky-header"');
+    expect(code).toContain("position: 'sticky'");
+    expect(code).toContain('top: 0');
+    expect(code).toContain('zIndex: 50');
+    expect(code).toContain('has-primary-background-color');
+    expect(code).toContain('header-btn');
+    expect(code).toContain('Get Started');
+    expect(code).toContain('<Link to="/"');
+  });
+
+  it('uses inline background color for responsive block-faithful mobile nav panels', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'navigation',
+          menuOrientation: 'horizontal',
+          overlayMenu: 'mobile',
+          isResponsive: true,
+        },
+      ],
+      dataNeeds: ['menus'],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).not.toContain('bg-[${ctx.p.surface}]');
+    expect(code).toContain("backgroundColor: '#f5f5f5'");
+  });
+
+  it('does not add fallback text underlines to header navigation links', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'navigation',
+          menuOrientation: 'horizontal',
+          overlayMenu: 'mobile',
+          isResponsive: true,
+        },
+      ],
+      dataNeeds: ['menus'],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).toContain('wp-block-navigation-item__content');
+    expect(code).toContain('useLocation');
+    expect(code).toContain('current-menu-item current_page_item');
+    expect(code).not.toContain('hover:underline');
   });
 
   it('emits asset and app-path helpers for deterministic footer sections', () => {
@@ -340,6 +536,66 @@ describe('CodeGeneratorService', () => {
       'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
     );
     expect(code).toContain('Back to top');
+  });
+
+  it('renders block-centric footers from the preserved block tree instead of the semantic footer abstraction', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Footer',
+      dataNeeds: ['siteInfo', 'footerLinks'],
+      renderMode: 'block-centric',
+      sections: [
+        {
+          type: 'footer',
+          menuColumns: [],
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['pg-footer-center-row'],
+          children: [
+            {
+              kind: 'heading',
+              blockName: 'heading',
+              text: "Let's Work Together",
+            },
+            {
+              kind: 'social-links',
+              blockName: 'social-links',
+              children: [
+                {
+                  kind: 'social-link',
+                  blockName: 'social-link',
+                  text: 'Facebook',
+                  href: '#',
+                },
+              ],
+            },
+            {
+              kind: 'buttons',
+              blockName: 'buttons',
+              children: [
+                {
+                  kind: 'button',
+                  blockName: 'button',
+                  text: 'Contact',
+                  href: '#',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('pg-footer-center-row');
+    expect(code).toContain("Let's Work Together");
+    expect(code).toContain('Facebook');
+    expect(code).toContain('Contact');
   });
 
   it('renders scroll-top hook markup for deterministic footer sections', () => {

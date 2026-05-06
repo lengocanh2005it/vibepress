@@ -12,9 +12,11 @@ export type DataNeed =
   | 'siteInfo'
   | 'footerLinks'
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'postDetail'
+  | 'productDetail'
   | 'pageDetail'
   | 'comments';
 
@@ -27,6 +29,7 @@ export type SectionCapability =
   | 'slides'
   | 'cards'
   | 'posts'
+  | 'products'
   | 'menus'
   | 'pages'
   | 'site-info'
@@ -57,7 +60,7 @@ export interface SectionContentRequirements {
 export interface SectionObligation {
   role: string;
   required: SectionCapability[];
-  minItems?: Partial<Record<'slides' | 'cards' | 'posts', number>>;
+  minItems?: Partial<Record<'slides' | 'cards' | 'posts' | 'products', number>>;
   sourceEvidence?: SectionSourceEvidence;
   contentRequirements?: SectionContentRequirements;
 }
@@ -203,6 +206,10 @@ interface BaseSection {
   secondaryCtaStyle?: SectionButtonStyle;
   presentation?: SectionPresentation;
   sourceSegments?: SourceSegment[];
+  /** Set by planner (PR3+). Controls generator strategy for this section.
+   *  'section-assembly' = generate this section independently, retry only this section on failure.
+   *  'full-file' = generate entire component file as one unit (default when absent). */
+  generationMode?: 'full-file' | 'section-assembly';
 }
 
 export interface NavbarSection extends BaseSection {
@@ -268,12 +275,15 @@ export interface PostListSection extends BaseSection {
   type: 'post-list';
   title?: string;
   titleCustomClassNames?: string[];
+  resource?: 'posts' | 'products';
   layout: 'list' | 'grid-2' | 'grid-3';
   showDate: boolean;
   showAuthor: boolean;
   showCategory: boolean;
   showExcerpt: boolean;
   showFeaturedImage: boolean;
+  showPrice?: boolean;
+  showButton?: boolean;
   itemLayout?: 'title-meta-inline' | 'stacked';
   metaLayout?: 'inline' | 'stacked';
   metaAlign?: 'start' | 'end';
@@ -321,12 +331,20 @@ export interface MediaTextSection extends BaseSection {
   imagePosition: 'left' | 'right';
   imageRadius?: string;
   imageAspectRatio?: string; // e.g. "16/9" | "1/1"
+  imageFit?: 'contain' | 'cover';
   imageCustomClassNames?: string[];
+  imageFrameBackground?: string;
+  imageFrameMinHeight?: string;
+  imageFramePaddingStyle?: string;
+  imageFrameCustomClassNames?: string[];
   columnWidths?: string[];
+  subtitle?: string;
   heading?: string;
   body?: string;
+  subtitleCustomClassNames?: string[];
   headingCustomClassNames?: string[];
   bodyCustomClassNames?: string[];
+  subtitleStyle?: TypographyStyle;
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];
@@ -486,6 +504,11 @@ export type SidebarWidget =
       showCounts?: boolean;
     }
   | {
+      kind: 'tags';
+      title?: string;
+      showCounts?: boolean;
+    }
+  | {
       kind: 'navigation';
       title?: string;
       description?: string;
@@ -630,6 +653,22 @@ export type SectionPlan =
   | TabsSection
   | AccordionSection
   | CarouselSection;
+
+/**
+ * Optional chunk-level metadata attached to sections after the chunk-labeling
+ * stage (PR2+). Planner sets these fields; generator reads them to decide
+ * per-section generation mode and retry scope.
+ */
+export interface SectionChunkMeta {
+  /** Which ChunkPlan(s) this section was composed from. */
+  chunkIds?: string[];
+  /** Semantic label assigned by AI chunk-labeling (e.g. "hero", "projects", "services"). */
+  semanticKind?: string;
+  /** AI confidence score for the semantic label (0–1). */
+  confidence?: number;
+  /** Generation strategy: full-file = one-shot page TSX; section-assembly = per-section codegen. */
+  generationMode?: 'full-file' | 'section-assembly';
+}
 
 /**
  * Typography tokens derived from theme.json / style.css.
@@ -871,19 +910,24 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
           requireImageIfSourceHasImage: !!section.imageSrc,
         },
       };
-    case 'post-list':
+    case 'post-list': {
+      const collectionCapability: SectionCapability =
+        section.resource === 'products' ? 'products' : 'posts';
+      const minItemsKey =
+        section.resource === 'products' ? 'products' : 'posts';
       return {
         role: 'post-list',
         required: [
           ...(section.title ? (['heading'] as SectionCapability[]) : []),
-          'posts',
+          collectionCapability,
         ],
-        minItems: { posts: 1 },
+        minItems: { [minItemsKey]: 1 },
         sourceEvidence,
         contentRequirements: {
           requireTitle: !!section.title,
         },
       };
+    }
     case 'card-grid':
       return {
         role: 'card-grid',
@@ -1023,6 +1067,7 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
           sidebarRequired.add('site-info');
         }
         if (widget.kind === 'categories') sidebarRequired.add('posts');
+        if (widget.kind === 'tags') sidebarRequired.add('posts');
         if (widget.kind === 'navigation') sidebarRequired.add('menus');
         if (widget.kind === 'pages-list') sidebarRequired.add('pages');
         if (widget.kind === 'recent-posts') sidebarRequired.add('posts');

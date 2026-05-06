@@ -158,6 +158,130 @@ describe('CodeReviewerService section assembly policy', () => {
     expect(decision.reason).toContain('section assembly');
   });
 
+  it('always pins Home to section assembly when sections exist', () => {
+    const decision = (
+      service as unknown as {
+        getSectionLevelAssemblyDecision: (
+          componentPlan: any,
+          componentName: string,
+        ) => { enabled: boolean; reason: string };
+      }
+    ).getSectionLevelAssemblyDecision(
+      {
+        templateName: 'home',
+        type: 'page',
+        route: '/',
+        isDetail: false,
+        dataNeeds: [],
+        visualPlan: {
+          renderMode: 'hybrid',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'all-content',
+          },
+          sections: [
+            {
+              type: 'hero',
+              heading: 'Welcome',
+              sourceRef: { sourceNodeId: 'home::group::1.0' },
+            },
+          ],
+        },
+      },
+      'Home',
+    );
+
+    expect(decision.enabled).toBe(true);
+    expect(decision.reason).toContain('pinned to section assembly');
+  });
+
+  it('always pins template landing components to section assembly when present', () => {
+    const decision = (
+      service as unknown as {
+        getSectionLevelAssemblyDecision: (
+          componentPlan: any,
+          componentName: string,
+        ) => { enabled: boolean; reason: string };
+      }
+    ).getSectionLevelAssemblyDecision(
+      {
+        templateName: 'template-about',
+        type: 'page',
+        route: '/about',
+        isDetail: false,
+        dataNeeds: [],
+        visualPlan: {
+          renderMode: 'hybrid',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'none',
+          },
+          sections: [
+            {
+              type: 'media-text',
+              heading: 'About',
+              body: 'Body',
+              imageSrc: '/assets/about.jpg',
+              sourceRef: { sourceNodeId: 'template-about::group::1.0' },
+            },
+          ],
+        },
+      },
+      'TemplateAbout',
+    );
+
+    expect(decision.enabled).toBe(true);
+    expect(decision.reason).toContain('pinned to section assembly');
+  });
+
+  it('does not pin profolio-fse FrontPage to section assembly when source-faithful deterministic path exists', () => {
+    const decision = (
+      service as unknown as {
+        getSectionLevelAssemblyDecision: (
+          componentPlan: any,
+          componentName: string,
+          repoManifest?: any,
+        ) => { enabled: boolean; reason: string };
+      }
+    ).getSectionLevelAssemblyDecision(
+      {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        isDetail: false,
+        dataNeeds: [],
+        visualPlan: {
+          renderMode: 'hybrid',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'none',
+          },
+          sections: [
+            {
+              type: 'media-text',
+              heading: 'Welcome',
+              body: 'Body',
+              imageSrc: '/assets/hero.jpg',
+              sourceRef: { sourceNodeId: 'front-page::group::1.0' },
+            },
+          ],
+        },
+      },
+      'FrontPage',
+      {
+        themeTypeHints: {
+          themeSlug: 'profolio-fse',
+        },
+      },
+    );
+
+    expect(decision.enabled).toBe(false);
+    expect(decision.reason).toContain('deterministic');
+  });
+
   it('does not prefer deterministic-first for complex homepage/page templates', () => {
     const preferDeterministic = (
       service as unknown as {
@@ -216,6 +340,55 @@ describe('CodeReviewerService section assembly policy', () => {
     );
 
     expect(preferDeterministic).toBe(false);
+  });
+
+  it('prefers deterministic-first for profolio-fse FrontPage source-faithful plans', () => {
+    const preferDeterministic = (
+      service as unknown as {
+        shouldPreferDeterministicPlan: (
+          componentPlan: any,
+          componentName: string,
+          repoManifest?: any,
+        ) => boolean;
+      }
+    ).shouldPreferDeterministicPlan(
+      {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        isDetail: false,
+        dataNeeds: [],
+        renderContract: {
+          structure: { renderMode: 'hybrid' },
+        },
+        visualPlan: {
+          renderMode: 'hybrid',
+          renderAuthority: 'deterministic-structure',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'none',
+          },
+          sections: [
+            {
+              type: 'media-text',
+              heading: 'About Me',
+              body: 'Body',
+              imageSrc: '/assets/about.jpg',
+              sourceRef: { sourceNodeId: 'front-page::group::1.0' },
+            },
+          ],
+        },
+      },
+      'FrontPage',
+      {
+        themeTypeHints: {
+          themeSlug: 'profolio-fse',
+        },
+      },
+    );
+
+    expect(preferDeterministic).toBe(true);
   });
 
   it('treats template-driven PagePage variants with rich block-tree markers as AI-first', () => {
@@ -333,5 +506,224 @@ describe('CodeReviewerService section assembly policy', () => {
     );
 
     expect(preferDeterministic).toBe(false);
+  });
+});
+
+describe('CodeReviewerService inline section generation policy', () => {
+  it('normalizes parenthesized inline JSX output before validation', () => {
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      new FrameGeneratorService(),
+    );
+
+    const normalized = (
+      service as unknown as {
+        normalizeInlineSectionOutput: (code: string) => string;
+        validateInlineSectionOutput: (code: string) => string | undefined;
+      }
+    ).normalizeInlineSectionOutput(`
+      return (
+        <section className="hero">
+          <div>Content</div>
+        </section>
+      );
+    `);
+
+    expect(normalized).toBe(
+      '<section className="hero">\n          <div>Content</div>\n        </section>',
+    );
+    expect(
+      (
+        service as unknown as {
+          validateInlineSectionOutput: (code: string) => string | undefined;
+        }
+      ).validateInlineSectionOutput(normalized),
+    ).toBeUndefined();
+  });
+
+  it('wraps sibling inline section nodes in a fragment before validation', () => {
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      new FrameGeneratorService(),
+    );
+
+    const normalized = (
+      service as unknown as {
+        normalizeInlineSectionOutput: (code: string) => string;
+        validateInlineSectionOutput: (code: string) => string | undefined;
+      }
+    ).normalizeInlineSectionOutput(`
+      <div className="eyebrow">About Me</div>
+      <div className="content">Welcome To My Profile</div>
+    `);
+
+    expect(normalized).toBe(
+      '<><div className="eyebrow">About Me</div>\n      <div className="content">Welcome To My Profile</div></>',
+    );
+    expect(
+      (
+        service as unknown as {
+          validateInlineSectionOutput: (code: string) => string | undefined;
+        }
+      ).validateInlineSectionOutput(normalized),
+    ).toBeUndefined();
+  });
+
+  it('does not use deterministic inline assembly for rich media-text sections', async () => {
+    const validator = {
+      checkInlineSectionSyntax: jest.fn().mockReturnValue(undefined),
+      checkInlineSectionFidelity: jest.fn().mockReturnValue(undefined),
+    };
+    const codeGenerator = {
+      generateDeterministicInlineSection: jest
+        .fn()
+        .mockReturnValue('<section><div>deterministic</div></section>'),
+    };
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      validator as never,
+      codeGenerator as never,
+      new FrameGeneratorService(),
+    );
+
+    const result = await (
+      service as unknown as {
+        generateInlineSectionForAssembly: (input: any) => Promise<any>;
+      }
+    ).generateInlineSectionForAssembly({
+      componentName: 'FrontPage',
+      section: {
+        type: 'media-text',
+        heading: 'About',
+        body: 'Body',
+        imageSrc: 'theme-asset:/assets/images/about.jpg',
+      },
+      sectionIndex: 0,
+      totalSections: 1,
+      availableVariables: '',
+      modelName: 'test-model',
+      systemPrompt: 'test-system',
+      content: {},
+      componentPlan: {
+        visualPlan: {
+          sections: [{ type: 'media-text' }],
+        },
+      },
+      maxAttempts: 0,
+    });
+
+    expect(
+      codeGenerator.generateDeterministicInlineSection,
+    ).not.toHaveBeenCalled();
+    expect(result.isValid).toBe(false);
+    expect(result.attemptsUsed).toBe(0);
+  });
+
+  it('still uses deterministic inline assembly for low-risk post-content sections', async () => {
+    const validator = {
+      checkInlineSectionSyntax: jest.fn().mockReturnValue(undefined),
+      checkInlineSectionFidelity: jest.fn().mockReturnValue(undefined),
+    };
+    const codeGenerator = {
+      generateDeterministicInlineSection: jest
+        .fn()
+        .mockReturnValue('<section><article>Body</article></section>'),
+    };
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      validator as never,
+      codeGenerator as never,
+      new FrameGeneratorService(),
+    );
+
+    const result = await (
+      service as unknown as {
+        generateInlineSectionForAssembly: (input: any) => Promise<any>;
+      }
+    ).generateInlineSectionForAssembly({
+      componentName: 'Single',
+      section: {
+        type: 'post-content',
+      },
+      sectionIndex: 0,
+      totalSections: 1,
+      availableVariables: '',
+      modelName: 'test-model',
+      systemPrompt: 'test-system',
+      content: {},
+      componentPlan: {
+        visualPlan: {
+          sections: [{ type: 'post-content' }],
+        },
+      },
+      maxAttempts: 0,
+    });
+
+    expect(
+      codeGenerator.generateDeterministicInlineSection,
+    ).toHaveBeenCalledTimes(1);
+    expect(result.isValid).toBe(true);
+    expect(result.attemptsUsed).toBe(0);
+  });
+});
+
+describe('CodeReviewerService theme-asset postprocess', () => {
+  const service = new CodeReviewerService(
+    {} as never,
+    {} as never,
+    {} as never,
+    new CodeGeneratorService(),
+    new FrameGeneratorService(),
+  );
+
+  it('normalizes raw theme-asset URLs into resolveAsset calls', () => {
+    const processed = (
+      service as unknown as {
+        postProcessCode: (code: string) => string;
+      }
+    ).postProcessCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return (
+          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+            <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+          </section>
+        );
+      }
+    `);
+
+    expect(processed).toContain('const resolveAsset = (src: string) => {');
+    expect(processed).toContain(
+      'backgroundImage: `url("${resolveAsset("theme-asset:/assets/images/banner.jpg")}")`',
+    );
+    expect(processed).toContain(
+      'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+  });
+
+  it('normalizes common sans-serif typos in generated inline styles', () => {
+    const processed = (
+      service as unknown as {
+        postProcessCode: (code: string) => string;
+      }
+    ).postProcessCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return <h1 style={{ fontFamily: "League Spartan, san-serif" }}>Hello</h1>;
+      }
+    `);
+
+    expect(processed).toContain('League Spartan, sans-serif');
+    expect(processed).not.toContain('san-serif');
   });
 });

@@ -5,11 +5,13 @@ import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.j
 
 export type RouteContractDataNeed =
   | 'posts'
+  | 'products'
   | 'pages'
   | 'menus'
   | 'site-info'
   | 'footer-links'
   | 'post-detail'
+  | 'product-detail'
   | 'page-detail'
   | 'comments'
   | 'categoryDetail';
@@ -120,6 +122,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: [],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -140,6 +143,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: [],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -157,7 +161,11 @@ export function inferDeterministicRouteContract(
         routeMode: 'hard',
         isDetail: true,
         requiredDataNeeds: ['page-detail'],
-        disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'product-detail',
+          'categoryDetail',
+        ],
         evidence: [...evidence],
       };
     }
@@ -174,6 +182,24 @@ export function inferDeterministicRouteContract(
         evidence: [...evidence],
       };
     }
+    if (normalizedNeeds.has('product-detail')) {
+      evidence.add('fixed-product-binding');
+      return {
+        archetype: 'exact-post-binding',
+        type: 'page',
+        route: `/product/${input.fixedSlug}`,
+        routeMode: 'hard',
+        isDetail: true,
+        requiredDataNeeds: ['product-detail'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'product-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
+        evidence: [...evidence],
+      };
+    }
   }
 
   if (templateBase === '404') {
@@ -187,6 +213,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: [],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -207,7 +234,11 @@ export function inferDeterministicRouteContract(
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['page-detail'],
-      disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
+        'categoryDetail',
+      ],
       evidence,
     });
   }
@@ -234,6 +265,25 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: ['posts'],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
+        'page-detail',
+        'categoryDetail',
+      ],
+      evidence,
+    });
+  }
+
+  if (templateBase === 'archive-product') {
+    evidence.add('template:archive-product');
+    return buildFixedArchetypeContract({
+      archetype: 'archive',
+      route: '/products',
+      routeMode: 'hard',
+      isDetail: false,
+      requiredDataNeeds: ['products'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -251,6 +301,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: ['posts'],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -268,6 +319,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: ['posts'],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -286,7 +338,11 @@ export function inferDeterministicRouteContract(
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['categoryDetail', 'posts'],
-      disallowedDetailDataNeeds: ['post-detail', 'page-detail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
+        'page-detail',
+      ],
       evidence,
     });
   }
@@ -301,6 +357,7 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: ['posts'],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -318,6 +375,33 @@ export function inferDeterministicRouteContract(
       requiredDataNeeds: ['posts'],
       disallowedDetailDataNeeds: [
         'post-detail',
+        'product-detail',
+        'page-detail',
+        'categoryDetail',
+      ],
+      evidence,
+    });
+  }
+
+  if (
+    templateBase === 'single-product' ||
+    (normalizedNeeds.has('product-detail') &&
+      !normalizedNeeds.has('page-detail'))
+  ) {
+    evidence.add(
+      templateBase === 'single-product'
+        ? 'template:single-product'
+        : 'dataNeed:product-detail',
+    );
+    return buildFixedArchetypeContract({
+      archetype: 'single-post',
+      route: '/product/:slug',
+      routeMode: 'hard',
+      isDetail: true,
+      requiredDataNeeds: ['product-detail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
         'page-detail',
         'categoryDetail',
       ],
@@ -343,7 +427,11 @@ export function inferDeterministicRouteContract(
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['post-detail'],
-      disallowedDetailDataNeeds: ['page-detail', 'categoryDetail'],
+      disallowedDetailDataNeeds: [
+        'product-detail',
+        'page-detail',
+        'categoryDetail',
+      ],
       evidence,
     });
   }
@@ -366,7 +454,11 @@ export function inferDeterministicRouteContract(
       routeMode: 'hard',
       isDetail: true,
       requiredDataNeeds: ['page-detail'],
-      disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+      disallowedDetailDataNeeds: [
+        'post-detail',
+        'product-detail',
+        'categoryDetail',
+      ],
       evidence,
     });
   }
@@ -379,7 +471,12 @@ export function inferDeterministicRouteContract(
     routeMode: 'soft',
     isDetail: false,
     requiredDataNeeds: [],
-    disallowedDetailDataNeeds: ['post-detail', 'page-detail', 'categoryDetail'],
+    disallowedDetailDataNeeds: [
+      'post-detail',
+      'product-detail',
+      'page-detail',
+      'categoryDetail',
+    ],
     evidence: [...evidence],
   };
 }
@@ -745,7 +842,11 @@ function inferStructureFirstArchetype(input: {
         routeMode: 'hard',
         isDetail: true,
         requiredDataNeeds: ['page-detail'],
-        disallowedDetailDataNeeds: ['post-detail', 'categoryDetail'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'product-detail',
+          'categoryDetail',
+        ],
         evidence: new Set([
           ...evidence,
           signals.hasConcretePageBindings
@@ -772,7 +873,11 @@ function inferStructureFirstArchetype(input: {
         routeMode: 'hard',
         isDetail: true,
         requiredDataNeeds: ['post-detail'],
-        disallowedDetailDataNeeds: ['page-detail', 'categoryDetail'],
+        disallowedDetailDataNeeds: [
+          'product-detail',
+          'page-detail',
+          'categoryDetail',
+        ],
         evidence: new Set([...evidence, 'structure:post-detail']),
       }),
       score:
@@ -798,6 +903,7 @@ function inferStructureFirstArchetype(input: {
         requiredDataNeeds: ['posts'],
         disallowedDetailDataNeeds: [
           'post-detail',
+          'product-detail',
           'page-detail',
           'categoryDetail',
         ],
@@ -816,7 +922,11 @@ function inferStructureFirstArchetype(input: {
         routeMode: 'hard',
         isDetail: true,
         requiredDataNeeds: ['categoryDetail', 'posts'],
-        disallowedDetailDataNeeds: ['post-detail', 'page-detail'],
+        disallowedDetailDataNeeds: [
+          'post-detail',
+          'product-detail',
+          'page-detail',
+        ],
         evidence: new Set([...evidence, 'structure:category-archive']),
       }),
       score: 9,
@@ -834,6 +944,7 @@ function inferStructureFirstArchetype(input: {
         requiredDataNeeds: ['posts'],
         disallowedDetailDataNeeds: [
           'post-detail',
+          'product-detail',
           'page-detail',
           'categoryDetail',
         ],
@@ -854,6 +965,7 @@ function inferStructureFirstArchetype(input: {
         requiredDataNeeds: ['posts'],
         disallowedDetailDataNeeds: [
           'post-detail',
+          'product-detail',
           'page-detail',
           'categoryDetail',
         ],
@@ -885,6 +997,7 @@ function inferStructureFirstArchetype(input: {
         requiredDataNeeds: ['posts'],
         disallowedDetailDataNeeds: [
           'post-detail',
+          'product-detail',
           'page-detail',
           'categoryDetail',
         ],
@@ -913,6 +1026,7 @@ function inferStructureFirstArchetype(input: {
         requiredDataNeeds: ['posts'],
         disallowedDetailDataNeeds: [
           'post-detail',
+          'product-detail',
           'page-detail',
           'categoryDetail',
         ],

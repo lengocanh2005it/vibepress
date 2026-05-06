@@ -6,6 +6,7 @@ import {
   MENU_ITEM_INTERFACE,
   PAGE_INTERFACE,
   POST_INTERFACE,
+  PRODUCT_INTERFACE,
   SITE_INFO_INTERFACE,
 } from './api-contract.js';
 
@@ -14,6 +15,7 @@ const NEED_ALIASES: Record<string, string> = {
   'site-info': 'siteInfo',
   'footer-links': 'footerLinks',
   'post-detail': 'postDetail',
+  'product-detail': 'productDetail',
   'page-detail': 'pageDetail',
 };
 
@@ -65,8 +67,10 @@ export class FrameGeneratorService {
       isDetail && /:[A-Za-z_]/.test(route ?? '') && !fixedSlug;
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
+    const hasProductDetail = needs.has('productDetail') && isDetail;
     const hasPageDetail = needs.has('pageDetail') && isDetail;
     const hasPosts = needs.has('posts');
+    const hasProducts = needs.has('products');
     const hasPages = needs.has('pages');
     const hasMenus = needs.has('menus');
     const hasSiteInfo = needs.has('siteInfo');
@@ -78,6 +82,7 @@ export class FrameGeneratorService {
       componentName.toLowerCase() === 'archive' || route === '/archive';
 
     const needsPost = hasPostDetail || hasPosts;
+    const needsProduct = hasProductDetail || hasProducts;
     const needsPage = hasPageDetail || hasPages;
 
     const lines: string[] = [];
@@ -89,7 +94,8 @@ export class FrameGeneratorService {
       if (!routerImports.includes('useParams')) routerImports.push('useParams');
       routerImports.push('useLocation');
     }
-    if (hasPosts || isArchive) routerImports.push('useSearchParams');
+    if (hasPosts || hasProducts || isArchive)
+      routerImports.push('useSearchParams');
     lines.push(`import React, { useState, useEffect } from 'react';`);
     lines.push(
       `import { ${Array.from(new Set(routerImports)).join(', ')} } from 'react-router-dom';`,
@@ -99,6 +105,9 @@ export class FrameGeneratorService {
     // ── 2. TypeScript interfaces ──────────────────────────────────────────────
     if (needsPost) {
       lines.push(POST_INTERFACE);
+    }
+    if (needsProduct) {
+      lines.push(PRODUCT_INTERFACE);
     }
     if (needsPage) {
       lines.push(PAGE_INTERFACE);
@@ -118,6 +127,7 @@ export class FrameGeneratorService {
     }
     if (
       needsPost ||
+      needsProduct ||
       needsPage ||
       hasMenus ||
       isFooter ||
@@ -144,7 +154,7 @@ export class FrameGeneratorService {
     } else if (isDetail && fixedSlug) {
       lines.push(`  const slug = ${JSON.stringify(fixedSlug)};`);
     }
-    if (hasPosts || isArchive) {
+    if (hasPosts || hasProducts || isArchive) {
       lines.push(
         `  const [searchParams, setSearchParams] = useSearchParams();`,
       );
@@ -173,6 +183,13 @@ export class FrameGeneratorService {
     } else if (hasPosts) {
       lines.push(`  const [posts, setPosts] = useState<Post[]>([]);`);
     }
+    if (hasProductDetail) {
+      lines.push(
+        `  const [product, setProduct] = useState<Product | null>(null);`,
+      );
+    } else if (hasProducts) {
+      lines.push(`  const [products, setProducts] = useState<Product[]>([]);`);
+    }
     if (hasPageDetail) {
       lines.push(`  const [page, setPage] = useState<Page | null>(null);`);
     } else if (hasPages) {
@@ -198,7 +215,9 @@ export class FrameGeneratorService {
     // ── 6. useEffect ─────────────────────────────────────────────────────────
     const fetches = this.buildFetches({
       hasPostDetail,
+      hasProductDetail,
       hasPosts,
+      hasProducts,
       hasPageDetail,
       hasPages,
       hasMenus,
@@ -218,7 +237,7 @@ export class FrameGeneratorService {
         ? '[slug, archiveType, currentPage]'
         : isDetail && usesRouteParams
           ? '[slug]'
-          : hasPosts
+          : hasPosts || hasProducts
             ? '[currentPage]'
             : '[]';
       lines.push(`  useEffect(() => {`);
@@ -229,6 +248,14 @@ export class FrameGeneratorService {
           lines.push(`      const postsData = await res.json();`);
           lines.push(
             `      setPosts(Array.isArray(postsData) ? postsData : []);`,
+          );
+          lines.push(
+            `      setTotalPages(Number(res.headers.get('X-WP-TotalPages') ?? '1'));`,
+          );
+        } else if (fetches[0].setter === 'setProducts') {
+          lines.push(`      const productsData = await res.json();`);
+          lines.push(
+            `      setProducts(Array.isArray(productsData) ? productsData : []);`,
           );
           lines.push(
             `      setTotalPages(Number(res.headers.get('X-WP-TotalPages') ?? '1'));`,
@@ -254,6 +281,14 @@ export class FrameGeneratorService {
             lines.push(
               `      setTotalPages(Number(r${i}.headers.get('X-WP-TotalPages') ?? '1'));`,
             );
+          } else if (f.setter === 'setProducts') {
+            lines.push(`      const productsData${i} = await r${i}.json();`);
+            lines.push(
+              `      setProducts(Array.isArray(productsData${i}) ? productsData${i} : []);`,
+            );
+            lines.push(
+              `      setTotalPages(Number(r${i}.headers.get('X-WP-TotalPages') ?? '1'));`,
+            );
           } else {
             lines.push(`      ${f.setter}(await r${i}.json());`);
           }
@@ -269,6 +304,10 @@ export class FrameGeneratorService {
       lines.push(
         `  if (!post) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
       );
+    } else if (hasProductDetail) {
+      lines.push(
+        `  if (!product) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
+      );
     } else if (hasPageDetail) {
       lines.push(
         `  if (!page) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
@@ -278,6 +317,10 @@ export class FrameGeneratorService {
     } else if (hasPosts) {
       lines.push(
         `  if (!posts.length) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
+      );
+    } else if (hasProducts) {
+      lines.push(
+        `  if (!products.length) return <div className="p-8 text-center text-gray-500">Loading...</div>;`,
       );
     }
 
@@ -330,11 +373,19 @@ export class FrameGeneratorService {
     const vars: string[] = [];
 
     const hasPostDetail = needs.has('postDetail') && isDetail;
+    const hasProductDetail = needs.has('productDetail') && isDetail;
     const hasPageDetail = needs.has('pageDetail') && isDetail;
 
     if (hasPostDetail) vars.push('`post: Post | null`');
     else if (needs.has('posts')) {
       vars.push('`posts: Post[]`');
+      vars.push('`currentPage: number`');
+      vars.push('`totalPages: number`');
+      vars.push('`updatePage(nextPage: number): void`');
+    }
+    if (hasProductDetail) vars.push('`product: Product | null`');
+    else if (needs.has('products')) {
+      vars.push('`products: Product[]`');
       vars.push('`currentPage: number`');
       vars.push('`totalPages: number`');
       vars.push('`updatePage(nextPage: number): void`');
@@ -364,7 +415,9 @@ export class FrameGeneratorService {
 
   private buildFetches(flags: {
     hasPostDetail: boolean;
+    hasProductDetail: boolean;
     hasPosts: boolean;
+    hasProducts: boolean;
     hasPageDetail: boolean;
     hasPages: boolean;
     hasMenus: boolean;
@@ -396,10 +449,22 @@ export class FrameGeneratorService {
           ? JSON.stringify(`/api/posts/${flags.fixedSlug}`)
           : '`/api/posts/${slug}`',
       });
+    } else if (flags.hasProductDetail) {
+      fetches.push({
+        setter: 'setProduct',
+        url: flags.fixedSlug
+          ? JSON.stringify(`/api/post-types/product/${flags.fixedSlug}`)
+          : '`/api/post-types/product/${slug}`',
+      });
     } else if (flags.hasPosts) {
       fetches.push({
         setter: 'setPosts',
         url: '`/api/posts?page=${currentPage}&perPage=${perPage}`',
+      });
+    } else if (flags.hasProducts) {
+      fetches.push({
+        setter: 'setProducts',
+        url: '`/api/post-types/product/posts?page=${currentPage}&perPage=${perPage}`',
       });
     }
 

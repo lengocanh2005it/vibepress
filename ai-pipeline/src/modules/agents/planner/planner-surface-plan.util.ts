@@ -45,6 +45,9 @@ export function collectSurfacePlanRequiredLiterals(
   const authority = surfacePlan.authority.level;
   const ownsSharedChrome =
     surfacePlan.contract.sharedChromeOwnership === 'self';
+  const isTransactionalCommerceSurface =
+    surfacePlan.sourceEvidence.sourceFacts?.hasWooCart === true ||
+    surfacePlan.sourceEvidence.sourceFacts?.hasWooCheckout === true;
 
   values.push(...surfacePlan.sourceEvidence.primaryHeadings.slice(0, 4));
 
@@ -73,7 +76,12 @@ export function collectSurfacePlanRequiredLiterals(
         .filter((value) => !value.startsWith('/'))
         .filter((value) => !value.startsWith('#'))
         .filter((value) => !/^https?:\/\//i.test(value))
-        .filter((value) => ownsSharedChrome || !isSharedChromeLiteral(value)),
+        .filter((value) => ownsSharedChrome || !isSharedChromeLiteral(value))
+        .filter(
+          (value) =>
+            !isTransactionalCommerceSurface ||
+            !isTransactionalCommerceLiteral(value),
+        ),
     ),
   ].slice(0, authority === 'strict' ? 12 : authority === 'guided' ? 9 : 6);
 }
@@ -133,4 +141,20 @@ function isSharedChromeLiteral(value: string): boolean {
     return true;
   }
   return /^[a-z0-9-]+\.(com|net|org|io|co)(\.[a-z]{2})?$/i.test(normalized);
+}
+
+function isTransactionalCommerceLiteral(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return false;
+  return new Set([
+    'checkout fields',
+    'order summary',
+    'billing details',
+    'shipping address',
+    'shipping methods',
+    'payment',
+    'additional information',
+    'order note',
+    'terms',
+  ]).has(normalized);
 }

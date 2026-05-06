@@ -119,6 +119,68 @@ describe('mapWpNodesToDraftSections', () => {
     });
   });
 
+  it('maps Woo product term aliases on post-terms blocks', () => {
+    const markup = `
+<!-- wp:post-terms {"term":"product_cat","prefix":"Category: "} /-->
+<!-- wp:post-terms {"term":"product_tag","prefix":"Tags: "} /-->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+    const categoryTerms = sections.find(
+      (section) =>
+        section.type === 'post-terms' && section.taxonomy === 'category',
+    );
+    const tagTerms = sections.find(
+      (section) =>
+        section.type === 'post-terms' && section.taxonomy === 'post_tag',
+    );
+
+    expect(categoryTerms).toMatchObject({
+      type: 'post-terms',
+      taxonomy: 'category',
+      prefix: 'Category:',
+    });
+    expect(tagTerms).toMatchObject({
+      type: 'post-terms',
+      taxonomy: 'post_tag',
+      prefix: 'Tags:',
+    });
+  });
+
+  it('avoids blog-meta defaults for Woo related products queries', () => {
+    const markup = `
+<!-- wp:group -->
+<div class="wp-block-group">
+  <!-- wp:query {"namespace":"woocommerce/related-products"} -->
+  <div class="wp-block-query">
+    <!-- wp:post-template {"className":"products-block-post-template","layout":{"type":"grid","columnCount":"4"},"__woocommerceNamespace":"woocommerce/product-query/product-template"} -->
+    <!-- wp:woocommerce/product-image {"isDescendentOfQueryLoop":true} /-->
+    <!-- wp:post-title {"level":3} /-->
+    <!-- wp:woocommerce/product-price {"isDescendentOfQueryLoop":true} /-->
+    <!-- wp:woocommerce/product-button {"isDescendentOfQueryLoop":true} /-->
+    <!-- /wp:post-template -->
+  </div>
+  <!-- /wp:query -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+    const postList = sections.find((section) => section.type === 'post-list');
+
+    expect(postList).toMatchObject({
+      type: 'post-list',
+      layout: 'grid-3',
+      showDate: false,
+      showAuthor: false,
+      showCategory: false,
+      showExcerpt: false,
+      showFeaturedImage: true,
+    });
+  });
+
   it('collapses repeated testimonial group cards into one card-grid section', () => {
     const markup = `
 <!-- wp:group -->
@@ -286,6 +348,134 @@ describe('mapWpNodesToDraftSections', () => {
           imageSrc: '/photoshop.png',
         },
       ],
+    });
+  });
+
+  it('preserves short eyebrow paragraphs as media-text subtitles instead of flattening them into body', () => {
+    const markup = `
+<!-- wp:columns -->
+<div class="wp-block-columns">
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:heading -->
+    <h2>Welcome To My Profile I am Julia Henderson</h2>
+    <!-- /wp:heading -->
+    <!-- wp:paragraph {"style":{"typography":{"fontWeight":"700","textTransform":"uppercase","letterSpacing":"1px"}}} -->
+    <p>About Me</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:paragraph -->
+    <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient.</p>
+    <!-- /wp:paragraph -->
+  </div>
+  <!-- /wp:column -->
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:image -->
+    <figure class="wp-block-image"><img src="/banner-image.png" alt="Julia Henderson" /></figure>
+    <!-- /wp:image -->
+  </div>
+  <!-- /wp:column -->
+</div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/banner-image.png',
+      heading: 'Welcome To My Profile I am Julia Henderson',
+      subtitle: 'About Me',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient.',
+      subtitleStyle: {
+        fontWeight: '700',
+        letterSpacing: '1px',
+        textTransform: 'uppercase',
+      },
+    });
+  });
+
+  it('preserves rich heading markup and cover-backed image frames in media-text columns', () => {
+    const markup = `
+<!-- wp:columns -->
+<div class="wp-block-columns">
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:paragraph {"style":{"typography":{"fontWeight":"700","textTransform":"uppercase","letterSpacing":"1px"}}} -->
+    <p>About Me</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading {"level":1} -->
+    <h1>Welcome To My Profile <br>I am <mark style="background-color:rgba(0,0,0,0)" class="has-inline-color has-secondary-color">Julia Henderson</mark></h1>
+    <!-- /wp:heading -->
+    <!-- wp:paragraph -->
+    <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo.</p>
+    <!-- /wp:paragraph -->
+  </div>
+  <!-- /wp:column -->
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:cover {"overlayColor":"secondary","minHeight":550,"className":"r-cover","style":{"border":{"radius":{"topLeft":"50%","topRight":"50%","bottomLeft":"0px","bottomRight":"0px"}},"spacing":{"padding":{"top":"0","right":"0","bottom":"0","left":"0"}}}} -->
+    <div class="wp-block-cover r-cover" style="border-top-left-radius:50%;border-top-right-radius:50%;border-bottom-left-radius:0px;border-bottom-right-radius:0px;padding-top:0;padding-right:0;padding-bottom:0;padding-left:0;min-height:550px">
+      <span aria-hidden="true" class="wp-block-cover__background has-secondary-background-color has-background-dim-100 has-background-dim"></span>
+      <div class="wp-block-cover__inner-container">
+        <!-- wp:image -->
+        <figure class="wp-block-image is-resized"><img src="/banner-image.png" alt="Julia Henderson" /></figure>
+        <!-- /wp:image -->
+      </div>
+    </div>
+    <!-- /wp:cover -->
+  </div>
+  <!-- /wp:column -->
+</div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/banner-image.png',
+      imageFit: 'contain',
+      imageFrameMinHeight: '550px',
+      imageRadius: '50% 50% 0px 0px',
+      imageFrameCustomClassNames: ['r-cover'],
+      subtitle: 'About Me',
+    });
+    expect((sections[0] as { heading?: string }).heading).toContain('<br>');
+    expect((sections[0] as { heading?: string }).heading).toContain(
+      'Julia Henderson',
+    );
+  });
+
+  it('preserves wow scroll-reveal classes on profolio-style intro groups', () => {
+    const markup = `
+<!-- wp:group {"className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+<div class="wp-block-group wow animate__animated animate__fadeInUp cover-inner">
+  <!-- wp:paragraph -->
+  <p>My Projects</p>
+  <!-- /wp:paragraph -->
+  <!-- wp:heading -->
+  <h2>Some Of My Projects</h2>
+  <!-- /wp:heading -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections[0]).toMatchObject({
+      type: 'hero',
+      customClassNames: expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+      ]),
     });
   });
 });
