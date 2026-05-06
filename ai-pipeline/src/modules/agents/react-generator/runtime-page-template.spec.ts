@@ -21,4 +21,11 @@ describe('RuntimePage template source', () => {
     expect(source).toContain("embedded\n      ? ''");
     expect(source).toContain(": 'mx-auto max-w-6xl px-6 py-12';");
   });
+
+  it('supports query loop hydration and profolio-specific runtime page classes', () => {
+    expect(source).toContain('collectRuntimeQueryDescriptors');
+    expect(source).toContain("case 'core/query':");
+    expect(source).toContain('renderRuntimeQueryNode');
+    expect(source).toContain('runtime-page--theme-profolio-fse');
+  });
 });

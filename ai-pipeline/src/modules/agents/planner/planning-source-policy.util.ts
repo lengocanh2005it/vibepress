@@ -363,20 +363,37 @@ export function buildPlanningSourceCandidates(
         String(page.id) === String(componentPlan.fixedPageId ?? '') ||
         page.slug === componentPlan.fixedSlug,
     );
-    const assignedTemplate = boundPage?.template
-      ?.replace(/\.php$/, '')
-      .replace(/^templates\//, '')
-      .trim();
+    const assignedTemplate = normalizePlanningTemplateIdentifier(
+      boundPage?.template,
+    );
+    const resolvedRoute = content.themeResolvedContent?.routes.find(
+      (route) =>
+        String(route.pageId) === String(componentPlan.fixedPageId ?? '') ||
+        route.slug === componentPlan.fixedSlug,
+    );
+    const resolvedTemplateNames = resolvedRoute
+      ? [
+          ...resolvedRoute.templateCandidates,
+          ...resolvedRoute.matchedDbTemplateSlugs,
+        ]
+          .map((entry) => normalizePlanningTemplateIdentifier(entry))
+          .filter(Boolean)
+      : [];
     const pageTemplateNames = [
       assignedTemplate || null,
+      ...resolvedTemplateNames,
       `page-${componentPlan.fixedSlug}`,
       componentPlan.fixedPageId ? `page-${componentPlan.fixedPageId}` : null,
       'page',
       'singular',
-    ].filter(
-      (templateName): templateName is string =>
-        Boolean(templateName) && templateName !== componentPlan.templateName,
-    );
+    ]
+      .filter(
+        (templateName): templateName is string =>
+          Boolean(templateName) && templateName !== componentPlan.templateName,
+      )
+      .filter(
+        (templateName, index, all) => all.indexOf(templateName) === index,
+      );
 
     for (const templateName of pageTemplateNames) {
       const chain = findRepoEntrySourceChain(templateName, repoManifest);
@@ -422,6 +439,7 @@ export function buildPlanningSourceCandidates(
       [
         componentPlan.fixedSlug,
         assignedTemplate,
+        ...resolvedTemplateNames,
         `page-${componentPlan.fixedSlug}`,
       ].filter(Boolean),
     );

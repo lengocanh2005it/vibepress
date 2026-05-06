@@ -1373,6 +1373,39 @@ export function buildDataGroundingNote(
     parts.push('');
   }
 
+  if (content.themeResolvedContent) {
+    parts.push(
+      `### Theme-resolved route + template map (${content.themeResolvedContent.themeSlug})`,
+    );
+    if (content.themeResolvedContent.frontPageRoute) {
+      parts.push(
+        `- Front page route: ${content.themeResolvedContent.frontPageRoute}`,
+      );
+    }
+    if (content.themeResolvedContent.postsPageRoute) {
+      parts.push(
+        `- Posts page route: ${content.themeResolvedContent.postsPageRoute}`,
+      );
+    }
+    for (const route of content.themeResolvedContent.routes.slice(
+      0,
+      MAX_SAMPLE_ITEMS,
+    )) {
+      parts.push(
+        `- route:${route.routePath} title:"${route.title}" templateCandidates:${route.templateCandidates.join(', ') || '(none)'} matchedDbTemplates:${route.matchedDbTemplateSlugs.join(', ') || '(none)'}`,
+      );
+    }
+    const primaryNav = content.themeResolvedContent.navigationRecords.find(
+      (record) => record.location === 'primary',
+    );
+    if (primaryNav) {
+      parts.push(
+        `- primaryNav:${primaryNav.itemUrls.slice(0, MAX_SAMPLE_ITEMS).join(', ') || '(none)'}`,
+      );
+    }
+    parts.push('');
+  }
+
   if (wantsFooterLinks) {
     parts.push('### Footer links (GET /api/footer-links)');
     parts.push(

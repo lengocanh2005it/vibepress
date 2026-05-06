@@ -4337,6 +4337,11 @@ export default function ${component.name}() {
             `resolved: activeTheme=${manifest.resolvedSource.activeTheme.slug}${manifest.resolvedSource.parentTheme ? `, parentTheme=${manifest.resolvedSource.parentTheme.slug}` : ''}, activePlugins=${manifest.resolvedSource.activePlugins.length}, runtimeOnlyPlugins=${manifest.resolvedSource.runtimeOnlyPlugins.length}, repoOnlyPlugins=${manifest.resolvedSource.repoOnlyPlugins.length}`,
           ]
         : []),
+      ...(manifest.themeDeepAnalysis
+        ? [
+            `theme-profile: ${manifest.themeDeepAnalysis.themeSlug}, routeChains=${manifest.themeDeepAnalysis.routeSources.length}, behaviors=${manifest.themeDeepAnalysis.behaviorSignals.map((signal) => signal.key).join(', ') || 'none'}`,
+          ]
+        : []),
     ];
   }
 

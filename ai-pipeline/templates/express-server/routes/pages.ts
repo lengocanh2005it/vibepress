@@ -12,6 +12,24 @@ export function registerPageRoutes(input: {
 
   const buildPageSelectSql = (prefix: string, whereClause: string) => `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
               COALESCE(pm.meta_value, '') AS template,
+              CASE
+                WHEN p.ID = (
+                  SELECT CAST(option_value AS UNSIGNED)
+                  FROM \`${prefix}options\`
+                  WHERE option_name = 'page_on_front'
+                  LIMIT 1
+                ) THEN 1
+                ELSE 0
+              END AS is_front_page,
+              CASE
+                WHEN p.ID = (
+                  SELECT CAST(option_value AS UNSIGNED)
+                  FROM \`${prefix}options\`
+                  WHERE option_name = 'page_for_posts'
+                  LIMIT 1
+                ) THEN 1
+                ELSE 0
+              END AS is_posts_page,
               img.guid AS featured_image
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}postmeta\` pm ON pm.post_id = p.ID AND pm.meta_key = '_wp_page_template'

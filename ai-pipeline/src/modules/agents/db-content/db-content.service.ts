@@ -24,6 +24,7 @@ import type {
 } from '../plugin-discovery/plugin-discovery.service.js';
 import { PluginDiscoveryService } from '../plugin-discovery/plugin-discovery.service.js';
 import { parseDbConnectionString } from '../../../common/utils/db-connection-parser.js';
+import { buildCanonicalPagePath } from '../../../common/utils/wp-page-path.util.js';
 
 function rebaseToSiteOrigin(url: string, siteUrl: string): string {
   try {
@@ -62,6 +63,49 @@ export interface DbContentResult {
   capabilities: WpSiteCapabilities;
   detectedPlugins: DetectedPlugin[];
   discovery: PluginDiscoverySummary;
+  themeResolvedContent?: DbThemeResolvedContentSummary;
+}
+
+export interface DbThemeResolvedRouteSummary {
+  pageId: number;
+  slug: string;
+  title: string;
+  routePath: string;
+  template: string;
+  templateCandidates: string[];
+  matchedDbTemplateSlugs: string[];
+  pageBlockTypes: string[];
+  isFrontPage: boolean;
+  isPostsPage: boolean;
+}
+
+export interface DbThemeResolvedTemplateSummary {
+  id: number;
+  postType: 'wp_template' | 'wp_template_part';
+  canonicalSlug: string;
+  title: string;
+  area: string | null;
+  status: string;
+  blockTypes: string[];
+}
+
+export interface DbThemeResolvedNavigationSummary {
+  kind: 'menu' | 'db-navigation';
+  slug: string;
+  title: string;
+  location: string | null;
+  itemTitles: string[];
+  itemUrls: string[];
+}
+
+export interface DbThemeResolvedContentSummary {
+  themeSlug: string;
+  frontPageRoute: string | null;
+  postsPageRoute: string | null;
+  routes: DbThemeResolvedRouteSummary[];
+  templateRecords: DbThemeResolvedTemplateSummary[];
+  navigationRecords: DbThemeResolvedNavigationSummary[];
+  notes: string[];
 }
 
 @Injectable()
@@ -118,6 +162,14 @@ export class DbContentService {
       pages,
     );
     const parsedGlobalStyles = this.resolveParsedGlobalStyles(dbGlobalStyles);
+    const themeResolvedContent = this.buildThemeResolvedContent({
+      siteInfo,
+      pages,
+      menus,
+      dbNavigations,
+      dbTemplates,
+      readingSettings: enrichedReadingSettings,
+    });
 
     const discovery = await this.pluginDiscovery.discover({
       siteInfo,
@@ -140,6 +192,11 @@ export class DbContentService {
         `${mediaAttachments.length} media attachments` +
         `${discovery.detectedPlugins.length > 0 ? `, detected plugins: ${discovery.detectedPlugins.map((plugin) => plugin.slug).join(', ')}` : ''}`,
     );
+    if (themeResolvedContent) {
+      this.logger.log(
+        `Theme-resolved content (${themeResolvedContent.themeSlug}): routes=${themeResolvedContent.routes.length}, templates=${themeResolvedContent.templateRecords.length}, navSources=${themeResolvedContent.navigationRecords.length}`,
+      );
+    }
 
     // Normalize featured image URLs — guid values can still reference the old
     // host (e.g. localhost:8000) when a DB was migrated without search-replace.
@@ -173,7 +230,244 @@ export class DbContentService {
       capabilities: runtimeFeatures.capabilities,
       detectedPlugins: discovery.detectedPlugins,
       discovery: discovery.summary,
+      ...(themeResolvedContent ? { themeResolvedContent } : {}),
     };
+  }
+
+  private buildThemeResolvedContent(input: {
+    siteInfo: WpSiteInfo;
+    pages: WpPage[];
+    menus: WpMenu[];
+    dbNavigations: WpDbNavigation[];
+    dbTemplates: WpDbTemplate[];
+    readingSettings: WpReadingSettings;
+  }): DbThemeResolvedContentSummary | undefined {
+    const themeSlug = this.normalizeThemeSlug(
+      input.siteInfo.activeTheme || input.siteInfo.templateTheme,
+    );
+    if (themeSlug !== 'profolio-fse') {
+      return undefined;
+    }
+
+    const frontPageId = input.readingSettings.pageOnFrontId;
+    const pageRecords = input.pages.map((page) => ({
+      id: page.id,
+      slug: page.slug,
+      parentId: page.parentId,
+    }));
+    const routes = input.pages.map((page) => {
+      const isFrontPage =
+        frontPageId !== null && Number(page.id) === Number(frontPageId);
+      const isPostsPage =
+        input.readingSettings.pageForPostsId !== null &&
+        Number(page.id) === Number(input.readingSettings.pageForPostsId);
+      const routePath = buildCanonicalPagePath(
+        {
+          id: page.id,
+          slug: page.slug,
+          parentId: page.parentId,
+        },
+        pageRecords,
+        { frontPageId },
+      );
+      const templateCandidates = this.buildPageTemplateCandidates({
+        page,
+        isFrontPage,
+        isPostsPage,
+      });
+      const matchedDbTemplates = input.dbTemplates.filter(
+        (template) =>
+          template.postType === 'wp_template' &&
+          templateCandidates.includes(template.canonicalSlug),
+      );
+
+      return {
+        pageId: page.id,
+        slug: page.slug,
+        title: page.title,
+        routePath,
+        template: page.template,
+        templateCandidates,
+        matchedDbTemplateSlugs: matchedDbTemplates.map(
+          (template) => template.canonicalSlug,
+        ),
+        pageBlockTypes: this.extractBlockTypesFromMarkup(page.content),
+        isFrontPage,
+        isPostsPage,
+      } satisfies DbThemeResolvedRouteSummary;
+    });
+
+    const focusTemplateSlugs = new Set([
+      'header',
+      'footer',
+      'front-page',
+      'home',
+      'page',
+      'single',
+      'archive',
+      'search',
+      'template-about',
+      'template-contact',
+      'template-services',
+      'blog-left-sidebar',
+      'blog-right-sidebar',
+    ]);
+    const templateRecords = input.dbTemplates
+      .filter(
+        (template) =>
+          focusTemplateSlugs.has(template.canonicalSlug) ||
+          (template.postType === 'wp_template_part' &&
+            ['header', 'footer'].includes(
+              String(template.area ?? '').toLowerCase(),
+            )),
+      )
+      .map(
+        (template) =>
+          ({
+            id: template.id,
+            postType: template.postType,
+            canonicalSlug: template.canonicalSlug,
+            title: template.title,
+            area: template.area,
+            status: template.status,
+            blockTypes: template.blockTypes,
+          }) satisfies DbThemeResolvedTemplateSummary,
+      );
+
+    const navigationRecords = [
+      ...input.dbNavigations.map(
+        (nav) =>
+          ({
+            kind: 'db-navigation',
+            slug: nav.slug,
+            title: nav.title,
+            location: nav.location,
+            itemTitles: nav.items.map((item) => item.title),
+            itemUrls: nav.items.map((item) => item.url),
+          }) satisfies DbThemeResolvedNavigationSummary,
+      ),
+      ...input.menus.map(
+        (menu) =>
+          ({
+            kind: 'menu',
+            slug: menu.slug,
+            title: menu.name,
+            location: menu.location,
+            itemTitles: menu.items.map((item) => item.title),
+            itemUrls: menu.items.map((item) => item.url),
+          }) satisfies DbThemeResolvedNavigationSummary,
+      ),
+    ];
+
+    const frontPageRoute =
+      routes.find((route) => route.isFrontPage)?.routePath ?? null;
+    const postsPageRoute =
+      routes.find((route) => route.isPostsPage)?.routePath ?? null;
+    const templateNamedRoutes = routes.filter((route) =>
+      route.templateCandidates.some((candidate) =>
+        /^template-(about|contact|services)$/.test(candidate),
+      ),
+    );
+    const chromeParts = templateRecords.filter(
+      (template) =>
+        template.postType === 'wp_template_part' &&
+        ['header', 'footer'].includes(
+          String(template.area ?? '').toLowerCase(),
+        ),
+    );
+
+    const notes = [
+      frontPageRoute
+        ? `Resolved front page route: ${frontPageRoute}`
+        : 'Resolved front page route: none',
+      postsPageRoute
+        ? `Resolved posts page route: ${postsPageRoute}`
+        : 'Resolved posts page route: none',
+      chromeParts.length > 0
+        ? `Resolved shared chrome DB parts: ${chromeParts.map((part) => `${part.area}:${part.canonicalSlug}`).join(', ')}`
+        : 'Resolved shared chrome DB parts: none',
+    ];
+    if (templateNamedRoutes.length > 0) {
+      notes.push(
+        `Resolved named template routes: ${templateNamedRoutes
+          .map(
+            (route) =>
+              `${route.routePath}->${route.templateCandidates.join('/')}`,
+          )
+          .join(', ')}`,
+      );
+    }
+    const primaryNav = navigationRecords.find(
+      (record) => record.location === 'primary',
+    );
+    if (primaryNav) {
+      notes.push(
+        `Resolved primary navigation: ${primaryNav.title} (${primaryNav.itemUrls.slice(0, 6).join(', ')})`,
+      );
+    }
+
+    return {
+      themeSlug,
+      frontPageRoute,
+      postsPageRoute,
+      routes,
+      templateRecords,
+      navigationRecords,
+      notes,
+    };
+  }
+
+  private buildPageTemplateCandidates(input: {
+    page: WpPage;
+    isFrontPage: boolean;
+    isPostsPage: boolean;
+  }): string[] {
+    const candidates = new Set<string>();
+    const normalizedTemplate = this.normalizePageTemplateSlug(
+      input.page.template,
+    );
+    if (input.isFrontPage) {
+      candidates.add('front-page');
+      candidates.add('home');
+      candidates.add('index');
+    }
+    if (input.isPostsPage) {
+      candidates.add('home');
+      candidates.add('archive');
+      candidates.add('index');
+    }
+    if (normalizedTemplate) {
+      candidates.add(normalizedTemplate);
+    }
+    if (candidates.size === 0) {
+      candidates.add('page');
+    }
+    return Array.from(candidates);
+  }
+
+  private normalizePageTemplateSlug(template: string): string {
+    return String(template ?? '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^templates\//i, '')
+      .replace(/\.(html|php)$/i, '');
+  }
+
+  private extractBlockTypesFromMarkup(content: string): string[] {
+    if (!content?.trim()) return [];
+    return Array.from(
+      new Set(
+        Array.from(
+          content.matchAll(/<!--\s*wp:([a-z0-9-]+(?:\/[a-z0-9-]+)?)\b/gi),
+        )
+          .map((match) =>
+            String(match[1] ?? '')
+              .trim()
+              .toLowerCase(),
+          )
+          .filter(Boolean),
+      ),
+    ).sort();
   }
 
   private materializeReadingSettings(

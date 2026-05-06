@@ -236,6 +236,52 @@ describe('CodeReviewerService section assembly policy', () => {
     expect(decision.reason).toContain('pinned to section assembly');
   });
 
+  it('does not pin profolio-fse FrontPage to section assembly when source-faithful deterministic path exists', () => {
+    const decision = (
+      service as unknown as {
+        getSectionLevelAssemblyDecision: (
+          componentPlan: any,
+          componentName: string,
+          repoManifest?: any,
+        ) => { enabled: boolean; reason: string };
+      }
+    ).getSectionLevelAssemblyDecision(
+      {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        isDetail: false,
+        dataNeeds: [],
+        visualPlan: {
+          renderMode: 'hybrid',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'none',
+          },
+          sections: [
+            {
+              type: 'media-text',
+              heading: 'Welcome',
+              body: 'Body',
+              imageSrc: '/assets/hero.jpg',
+              sourceRef: { sourceNodeId: 'front-page::group::1.0' },
+            },
+          ],
+        },
+      },
+      'FrontPage',
+      {
+        themeTypeHints: {
+          themeSlug: 'profolio-fse',
+        },
+      },
+    );
+
+    expect(decision.enabled).toBe(false);
+    expect(decision.reason).toContain('deterministic');
+  });
+
   it('does not prefer deterministic-first for complex homepage/page templates', () => {
     const preferDeterministic = (
       service as unknown as {
@@ -294,6 +340,55 @@ describe('CodeReviewerService section assembly policy', () => {
     );
 
     expect(preferDeterministic).toBe(false);
+  });
+
+  it('prefers deterministic-first for profolio-fse FrontPage source-faithful plans', () => {
+    const preferDeterministic = (
+      service as unknown as {
+        shouldPreferDeterministicPlan: (
+          componentPlan: any,
+          componentName: string,
+          repoManifest?: any,
+        ) => boolean;
+      }
+    ).shouldPreferDeterministicPlan(
+      {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        isDetail: false,
+        dataNeeds: [],
+        renderContract: {
+          structure: { renderMode: 'hybrid' },
+        },
+        visualPlan: {
+          renderMode: 'hybrid',
+          renderAuthority: 'deterministic-structure',
+          blockTree: [{ kind: 'group', blockName: 'core/group', children: [] }],
+          layout: {
+            contentLayout: 'single-column',
+            sidebarScope: 'none',
+          },
+          sections: [
+            {
+              type: 'media-text',
+              heading: 'About Me',
+              body: 'Body',
+              imageSrc: '/assets/about.jpg',
+              sourceRef: { sourceNodeId: 'front-page::group::1.0' },
+            },
+          ],
+        },
+      },
+      'FrontPage',
+      {
+        themeTypeHints: {
+          themeSlug: 'profolio-fse',
+        },
+      },
+    );
+
+    expect(preferDeterministic).toBe(true);
   });
 
   it('treats template-driven PagePage variants with rich block-tree markers as AI-first', () => {

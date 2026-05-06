@@ -68,6 +68,7 @@ import {
   shouldBypassAiGenerationForVisualPlan,
   shouldProtectDeterministicStructureFromAi,
 } from './visual-plan.schema.js';
+import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -224,6 +225,7 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
 export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
   private readonly tokenTracker = new TokenTracker();
+  private readonly themeProfiles = new ThemeProfileRegistry();
   private readonly componentSystemPrompt =
     'You are a senior React + TypeScript engineer focused on source-faithful WordPress migration. Generate a complete component from the provided migration context, preserve source-backed class/style semantics and DOM hierarchy, and return ONLY raw TSX code.';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
@@ -344,6 +346,7 @@ export class CodeReviewerService {
     const sectionAssemblyDecision = this.getSectionLevelAssemblyDecision(
       componentPlan,
       componentName,
+      repoManifest,
     );
     if (
       !strictDeterministicAuthority &&
@@ -484,7 +487,11 @@ export class CodeReviewerService {
 
         const prefersDeterministicPlan =
           strategy.deterministicFirst ||
-          this.shouldPreferDeterministicPlan(componentPlan, componentName);
+          this.shouldPreferDeterministicPlan(
+            componentPlan,
+            componentName,
+            repoManifest,
+          );
         if (prefersDeterministicPlan) {
           const deterministicFirst = await this.tryDeterministicPlan(
             componentName,
@@ -1502,9 +1509,24 @@ export class CodeReviewerService {
   private getSectionLevelAssemblyDecision(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
+    repoManifest?: RepoThemeManifest,
   ): { enabled: boolean; reason: string } {
     if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
       return { enabled: false, reason: 'not eligible' };
+    }
+
+    if (
+      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+        componentPlan,
+        componentName,
+        repoManifest,
+      )
+    ) {
+      return {
+        enabled: false,
+        reason:
+          'theme source-faithful page prefers deterministic block-tree/full-file generation',
+      };
     }
 
     const pinnedSectionAssemblyComponent = Boolean(
@@ -1742,8 +1764,18 @@ export class CodeReviewerService {
   private shouldPreferDeterministicPlan(
     componentPlan: ComponentPromptContext | undefined,
     componentName: string,
+    repoManifest?: RepoThemeManifest,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
+    if (
+      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+        componentPlan,
+        componentName,
+        repoManifest,
+      )
+    ) {
+      return true;
+    }
     if (
       componentPlan?.visualPlan?.sections.some(
         (section): section is Extract<SectionPlan, { type: 'accordion' }> =>
@@ -1821,6 +1853,41 @@ export class CodeReviewerService {
       isDeterministicFallbackEligibleForRenderContract(
         componentPlan?.renderContract,
       )
+    );
+  }
+
+  private shouldPreferThemeSourceFaithfulDeterministicPage(
+    componentPlan:
+      | ComponentPromptContext
+      | ReviewInput['componentPlan']
+      | undefined,
+    componentName: string,
+    repoManifest?: RepoThemeManifest,
+  ): boolean {
+    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan)
+      return false;
+    const themeSlug = repoManifest?.themeTypeHints?.themeSlug?.trim();
+    if (!themeSlug) return false;
+    const profile = this.themeProfiles.resolveFseProfile(themeSlug);
+    const sourceFaithfulComponents = new Set(
+      (profile.sourceFaithfulComponents ?? []).map((name) =>
+        name.toLowerCase(),
+      ),
+    );
+    if (!sourceFaithfulComponents.has(componentName.trim().toLowerCase())) {
+      return false;
+    }
+    if (profile.sharedChromeMode !== 'block-tree-first') return false;
+    if ((componentPlan.visualPlan.blockTree?.length ?? 0) === 0) return false;
+
+    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
+    return (
+      [
+        'front-page',
+        'template-about',
+        'template-contact',
+        'template-services',
+      ].includes(templateName) || /^frontpage$/i.test(componentName)
     );
   }
 

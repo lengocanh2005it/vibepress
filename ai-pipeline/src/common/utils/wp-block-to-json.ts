@@ -811,6 +811,10 @@ function buildNode(
 ): WpNode {
   const domId =
     normalizeDomId(params?.anchor) ?? extractDomIdFromMarkup(innerMarkup);
+  const wrapperCustomClassNames = mergeCustomClassNameLists(
+    extractUsefulCustomClassNamesFromParam(params?.className),
+    extractOpeningTagCustomClassNames(innerMarkup),
+  );
   const hasNestedBlocks = /<!-- wp:[a-z]/.test(innerMarkup);
   const modalSyntheticChildren = isUagbModalBlock(blockName)
     ? extractUagbModalTriggerChildren(innerMarkup)
@@ -855,11 +859,9 @@ function buildNode(
       block: blockName,
       params,
       ...(domId ? { domId } : {}),
-      ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+      ...(wrapperCustomClassNames.length
         ? {
-            customClassNames: extractUsefulCustomClassNamesFromParam(
-              params?.className,
-            ),
+            customClassNames: wrapperCustomClassNames,
           }
         : {}),
       ...coverExtras,
@@ -915,11 +917,9 @@ function buildNode(
         block: blockName,
         params,
         ...(domId ? { domId } : {}),
-        ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+        ...(wrapperCustomClassNames.length
           ? {
-              customClassNames: extractUsefulCustomClassNamesFromParam(
-                params?.className,
-              ),
+              customClassNames: wrapperCustomClassNames,
             }
           : {}),
         children: syntheticChildren,
@@ -929,6 +929,14 @@ function buildNode(
 
   // Leaf node — extract content from HTML
   const leaf = extractLeafContent(blockName, innerMarkup);
+  const {
+    customClassNames: _leafCustomClassNames,
+    ...leafWithoutCustomClasses
+  } = leaf;
+  const leafCustomClassNames = mergeCustomClassNameLists(
+    wrapperCustomClassNames,
+    _leafCustomClassNames,
+  );
 
   // For wp:image — add dimensions from params if not already in img tag
   if (blockName === 'image') {
@@ -942,15 +950,14 @@ function buildNode(
   return compact({
     block: blockName,
     params,
-    ...(extractUsefulCustomClassNamesFromParam(params?.className)?.length
+    ...(domId ? { domId } : {}),
+    ...(leafCustomClassNames.length
       ? {
-          customClassNames: extractUsefulCustomClassNamesFromParam(
-            params?.className,
-          ),
+          customClassNames: leafCustomClassNames,
         }
       : {}),
     ...coverSrc,
-    ...leaf,
+    ...leafWithoutCustomClasses,
     ...(modalSyntheticChildren.length > 0
       ? { children: modalSyntheticChildren }
       : {}),
@@ -1103,6 +1110,30 @@ function extractUsefulCustomClassNamesFromHtml(html: string): string[] {
       .filter(Boolean),
   );
   return extractUsefulCustomClassNames(tokens);
+}
+
+function extractOpeningTagCustomClassNames(markup: string): string[] {
+  const openingTagMatch = String(markup ?? '').match(
+    /^\s*<([a-z0-9:-]+)\b([^>]*)>/i,
+  );
+  if (!openingTagMatch?.[2]) return [];
+  const classMatch = openingTagMatch[2].match(/\bclass=(['"])(.*?)\1/i);
+  return classMatch?.[2]
+    ? (extractUsefulCustomClassNamesFromParam(classMatch[2]) ?? [])
+    : [];
+}
+
+function mergeCustomClassNameLists(
+  ...lists: Array<string[] | undefined>
+): string[] {
+  return Array.from(
+    new Set(
+      lists
+        .flatMap((list) => list ?? [])
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
 function isUagbModalBlock(blockName: string): boolean {

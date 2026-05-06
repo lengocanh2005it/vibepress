@@ -291,6 +291,7 @@ export interface RepoThemeManifest {
   resolvedSource?: RepoResolvedSourceSummary;
   uagbSummary?: RepoUagbDetectionSummary;
   interactiveContracts?: RepoInteractiveContractsSummary;
+  themeDeepAnalysis?: RepoThemeDeepAnalysisSummary;
   sourceOfTruth: RepoSourceOfTruth;
 }
 
@@ -455,6 +456,35 @@ export interface RepoSpectraInteractiveContracts {
 
 export interface RepoInteractiveContractsSummary {
   spectra?: RepoSpectraInteractiveContracts;
+}
+
+export interface RepoThemeBehaviorSignal {
+  key: string;
+  sourceFiles: string[];
+  selectors: string[];
+  classNames: string[];
+  notes: string[];
+}
+
+export interface RepoThemeRouteSourceSummary {
+  routeFamily: string;
+  entryFile: string;
+  routeHint: string;
+  chainFiles: string[];
+  patternSlugs: string[];
+  templatePartSlugs: string[];
+  blockTypes: string[];
+  headingTexts: string[];
+  customClasses: string[];
+  assetFiles: string[];
+  notes: string[];
+}
+
+export interface RepoThemeDeepAnalysisSummary {
+  themeSlug: string;
+  routeSources: RepoThemeRouteSourceSummary[];
+  behaviorSignals: RepoThemeBehaviorSignal[];
+  notes: string[];
 }
 
 export interface RepoThemeTypeHints {
@@ -671,7 +701,7 @@ export class RepoAnalyzerService {
       this.logger.warn(
         `No specialized repo analysis strategy registered for theme "${themeSlug}". Falling back to generic FSE analysis.`,
       );
-      return this.patchManifest(
+      const manifest = this.patchManifest(
         await this.buildGenericFseManifest(themeDir, fileTree, themeSlug),
         {
           sourceOfTruthNotes: [
@@ -682,8 +712,9 @@ export class RepoAnalyzerService {
           ],
         },
       );
+      return this.enrichThemeSpecificManifest(themeDir, manifest);
     }
-    return strategy.buildManifest(
+    const manifest = await strategy.buildManifest(
       {
         themeDir,
         fileTree,
@@ -699,6 +730,7 @@ export class RepoAnalyzerService {
         patchManifest: (manifest, patch) => this.patchManifest(manifest, patch),
       },
     );
+    return this.enrichThemeSpecificManifest(themeDir, manifest);
   }
 
   private async buildGenericFseManifest(
@@ -811,6 +843,411 @@ export class RepoAnalyzerService {
         ),
       },
     };
+  }
+
+  private async enrichThemeSpecificManifest(
+    themeDir: string,
+    manifest: RepoThemeManifest,
+  ): Promise<RepoThemeManifest> {
+    if (manifest.themeTypeHints.themeSlug !== 'profolio-fse') {
+      return manifest;
+    }
+
+    const themeDeepAnalysis = await this.buildProfolioThemeDeepAnalysis(
+      themeDir,
+      manifest,
+    );
+    if (!themeDeepAnalysis) {
+      return manifest;
+    }
+
+    return {
+      ...manifest,
+      themeDeepAnalysis,
+      sourceOfTruth: {
+        ...manifest.sourceOfTruth,
+        notes: [
+          ...new Set([
+            ...manifest.sourceOfTruth.notes,
+            ...themeDeepAnalysis.notes,
+          ]),
+        ],
+      },
+    };
+  }
+
+  private async buildProfolioThemeDeepAnalysis(
+    themeDir: string,
+    manifest: RepoThemeManifest,
+  ): Promise<RepoThemeDeepAnalysisSummary | undefined> {
+    const fileAnalysesByFile = new Map(
+      manifest.structureHints.fileAnalyses.map(
+        (analysis) => [analysis.file, analysis] as const,
+      ),
+    );
+    const entryChainsByFile = new Map(
+      manifest.structureHints.entrySourceChains.map(
+        (chain) => [chain.entryFile, chain] as const,
+      ),
+    );
+    const routeConfigs: Array<{ routeFamily: string; entryFile: string }> = [
+      { routeFamily: 'shared-header', entryFile: 'parts/header.html' },
+      { routeFamily: 'shared-footer', entryFile: 'parts/footer.html' },
+      { routeFamily: 'front-page', entryFile: 'templates/front-page.html' },
+      { routeFamily: 'page', entryFile: 'templates/page.html' },
+      { routeFamily: 'single', entryFile: 'templates/single.html' },
+      {
+        routeFamily: 'template-about',
+        entryFile: 'templates/template-about.html',
+      },
+      {
+        routeFamily: 'template-contact',
+        entryFile: 'templates/template-contact.html',
+      },
+      {
+        routeFamily: 'template-services',
+        entryFile: 'templates/template-services.html',
+      },
+      {
+        routeFamily: 'blog-left-sidebar',
+        entryFile: 'templates/blog-left-sidebar.html',
+      },
+      {
+        routeFamily: 'blog-right-sidebar',
+        entryFile: 'templates/blog-right-sidebar.html',
+      },
+      { routeFamily: 'archive', entryFile: 'templates/archive.html' },
+      { routeFamily: 'search', entryFile: 'templates/search.html' },
+    ];
+
+    const routeSources = routeConfigs
+      .map((config) =>
+        this.buildThemeRouteSourceSummary(
+          config,
+          fileAnalysesByFile,
+          entryChainsByFile,
+        ),
+      )
+      .filter(
+        (entry): entry is RepoThemeRouteSourceSummary => entry !== undefined,
+      );
+
+    const runtimeFiles = [
+      'functions.php',
+      'style.css',
+      'assets/js/script.js',
+      'assets/js/jquery-sticky.js',
+      'assets/js/wow.js',
+      'patterns/header.php',
+      'patterns/footer.php',
+    ];
+    const runtimeSources = new Map<string, string>();
+    const runtimeRaw = await Promise.all(
+      runtimeFiles.map((file) => this.readOptionalText(themeDir, file)),
+    );
+    runtimeFiles.forEach((file, index) => {
+      const raw = runtimeRaw[index];
+      if (raw) runtimeSources.set(file, raw);
+    });
+
+    const behaviorSignals = this.extractProfolioBehaviorSignals(
+      manifest,
+      runtimeSources,
+    );
+    if (routeSources.length === 0 && behaviorSignals.length === 0) {
+      return undefined;
+    }
+
+    return {
+      themeSlug: 'profolio-fse',
+      routeSources,
+      behaviorSignals,
+      notes: [
+        `Theme deep profile (profolio-fse): expanded ${routeSources.length} key route/template source chain(s) beyond the generic manifest ordering.`,
+        `Theme deep profile (profolio-fse): recovered runtime behavior cues for ${behaviorSignals.map((signal) => signal.key).join(', ') || 'none'}.`,
+      ],
+    };
+  }
+
+  private buildThemeRouteSourceSummary(
+    config: { routeFamily: string; entryFile: string },
+    fileAnalysesByFile: Map<string, RepoSourceFileAnalysis>,
+    entryChainsByFile: Map<string, RepoEntrySourceChain>,
+  ): RepoThemeRouteSourceSummary | undefined {
+    if (!fileAnalysesByFile.has(config.entryFile)) {
+      return undefined;
+    }
+
+    const collected = {
+      chainFiles: [] as string[],
+      patternSlugs: new Set<string>(),
+      templatePartSlugs: new Set<string>(),
+      blockTypes: new Set<string>(),
+      headingTexts: new Set<string>(),
+      customClasses: new Set<string>(),
+      assetFiles: new Set<string>(),
+    };
+    this.collectThemeRouteSourceFiles(
+      config.entryFile,
+      fileAnalysesByFile,
+      new Set<string>(),
+      collected,
+    );
+
+    const chain = entryChainsByFile.get(config.entryFile);
+    const routeHint = chain?.routeHint ?? config.routeFamily;
+    const notes = [...(chain?.notes ?? [])];
+    if (collected.patternSlugs.size > 0) {
+      notes.push(
+        `Nested pattern expansion: ${Array.from(collected.patternSlugs).slice(0, 6).join(', ')}`,
+      );
+    }
+    const motionClasses = Array.from(collected.customClasses).filter(
+      (className) =>
+        className === 'wow' ||
+        className === 'cover-inner' ||
+        className === 'r-cover' ||
+        className === 'profolio-fse-scroll-top' ||
+        className.startsWith('animate__'),
+    );
+    if (motionClasses.length > 0) {
+      notes.push(
+        `Source motion/layout classes: ${motionClasses.slice(0, 8).join(', ')}`,
+      );
+    }
+
+    return {
+      routeFamily: config.routeFamily,
+      entryFile: config.entryFile,
+      routeHint,
+      chainFiles: collected.chainFiles,
+      patternSlugs: Array.from(collected.patternSlugs).sort(),
+      templatePartSlugs: Array.from(collected.templatePartSlugs).sort(),
+      blockTypes: Array.from(collected.blockTypes).sort(),
+      headingTexts: Array.from(collected.headingTexts).sort(),
+      customClasses: Array.from(collected.customClasses).sort(),
+      assetFiles: Array.from(collected.assetFiles).sort(),
+      notes: Array.from(new Set(notes)),
+    };
+  }
+
+  private collectThemeRouteSourceFiles(
+    file: string,
+    fileAnalysesByFile: Map<string, RepoSourceFileAnalysis>,
+    visited: Set<string>,
+    collected: {
+      chainFiles: string[];
+      patternSlugs: Set<string>;
+      templatePartSlugs: Set<string>;
+      blockTypes: Set<string>;
+      headingTexts: Set<string>;
+      customClasses: Set<string>;
+      assetFiles: Set<string>;
+    },
+  ): void {
+    if (visited.has(file)) return;
+    visited.add(file);
+
+    const analysis = fileAnalysesByFile.get(file);
+    if (!analysis) return;
+
+    collected.chainFiles.push(file);
+    analysis.patternSlugs.forEach((slug) => collected.patternSlugs.add(slug));
+    analysis.templatePartSlugs.forEach((slug) =>
+      collected.templatePartSlugs.add(slug),
+    );
+    analysis.blockTypes.forEach((blockType) =>
+      collected.blockTypes.add(blockType),
+    );
+    analysis.headingTexts.forEach((heading) =>
+      collected.headingTexts.add(heading),
+    );
+    analysis.customClasses.forEach((className) =>
+      collected.customClasses.add(className),
+    );
+    analysis.referencedAssetPaths.forEach((assetPath) =>
+      collected.assetFiles.add(assetPath),
+    );
+
+    for (const childFile of [
+      ...analysis.templatePartFiles,
+      ...analysis.patternFiles,
+    ]) {
+      this.collectThemeRouteSourceFiles(
+        childFile,
+        fileAnalysesByFile,
+        visited,
+        collected,
+      );
+    }
+  }
+
+  private extractProfolioBehaviorSignals(
+    manifest: RepoThemeManifest,
+    runtimeSources: Map<string, string>,
+  ): RepoThemeBehaviorSignal[] {
+    const signals: RepoThemeBehaviorSignal[] = [];
+    const functionsRaw = runtimeSources.get('functions.php') ?? '';
+    const styleRaw = runtimeSources.get('style.css') ?? '';
+    const scriptRaw = runtimeSources.get('assets/js/script.js') ?? '';
+    const stickyRaw = runtimeSources.get('assets/js/jquery-sticky.js') ?? '';
+    const wowRaw = runtimeSources.get('assets/js/wow.js') ?? '';
+    const headerRaw = runtimeSources.get('patterns/header.php') ?? '';
+    const footerRaw = runtimeSources.get('patterns/footer.php') ?? '';
+
+    const stickyClass =
+      this.extractQuotedAssignmentValue(stickyRaw, 'className') ?? 'is-sticky';
+    const stickyWrapperClass =
+      this.extractQuotedAssignmentValue(stickyRaw, 'wrapperClassName') ??
+      'sticky-wrapper';
+
+    if (
+      scriptRaw.includes('#sticky-header') ||
+      headerRaw.includes('id="sticky-header"')
+    ) {
+      const notes = [
+        'Theme JS activates the sticky plugin on `#sticky-header` instead of treating the header as a static top bar.',
+      ];
+      if (scriptRaw.includes('topSpacing:0')) {
+        notes.push(
+          'Sticky behavior uses topSpacing 0, so the header pins flush to the top edge.',
+        );
+      }
+      if (styleRaw.includes('#sticky-header')) {
+        notes.push(
+          'Theme CSS elevates the sticky header with a dedicated z-index rule.',
+        );
+      }
+      signals.push({
+        key: 'sticky-header',
+        sourceFiles: [
+          'patterns/header.php',
+          'assets/js/script.js',
+          'assets/js/jquery-sticky.js',
+          'style.css',
+        ],
+        selectors: ['#sticky-header'],
+        classNames: [stickyClass, stickyWrapperClass],
+        notes,
+      });
+    }
+
+    const motionClasses = Array.from(
+      new Set(
+        manifest.structureHints.fileAnalyses.flatMap((analysis) =>
+          analysis.customClasses.filter(
+            (className) =>
+              className === 'wow' ||
+              className === 'cover-inner' ||
+              className === 'r-cover' ||
+              className.startsWith('animate__'),
+          ),
+        ),
+      ),
+    ).sort();
+    if (scriptRaw.includes('new WOW') || wowRaw.includes("boxClass: 'wow'")) {
+      const notes = [
+        'Reveal animation is scroll-triggered through WOW.js, not just a page-load animation.',
+      ];
+      if (wowRaw.includes('offset: 0') || wowRaw.includes('offset:       0')) {
+        notes.push(
+          'WOW visibility threshold uses offset 0, so elements start revealing as soon as they enter the viewport.',
+        );
+      }
+      if (functionsRaw.includes('animate.css')) {
+        notes.push(
+          'animate.css is explicitly enqueued by the theme and should remain available to source-backed motion classes.',
+        );
+      }
+      signals.push({
+        key: 'scroll-reveal',
+        sourceFiles: [
+          'functions.php',
+          'assets/js/script.js',
+          'assets/js/wow.js',
+          'patterns/banner.php',
+          'patterns/services.php',
+          'patterns/skills.php',
+          'patterns/articles.php',
+          'patterns/contact.php',
+        ].filter((file) =>
+          file.startsWith('patterns/')
+            ? manifest.structureHints.fileAnalyses.some(
+                (analysis) => analysis.file === file,
+              )
+            : runtimeSources.has(file),
+        ),
+        selectors: ['.wow'],
+        classNames: motionClasses,
+        notes,
+      });
+    }
+
+    if (
+      styleRaw.includes('.wp-block-navigation a::after') &&
+      styleRaw.includes('.wp-block-navigation-item.current-menu-item a::after')
+    ) {
+      signals.push({
+        key: 'nav-underline-active',
+        sourceFiles: ['style.css', 'patterns/header.php'],
+        selectors: [
+          '.wp-block-navigation a::after',
+          '.wp-block-navigation-item.current-menu-item a::after',
+        ],
+        classNames: ['current-menu-item', 'current_page_item'],
+        notes: [
+          'Desktop navigation uses a white underline pseudo-element that animates from width 0 to 100% on hover.',
+          'The active menu item keeps the underline visible after navigation via the current-menu-item/current_page_item classes.',
+        ],
+      });
+    }
+
+    if (
+      scriptRaw.includes('.profolio-fse-scroll-top') ||
+      footerRaw.includes('profolio-fse-scroll-top')
+    ) {
+      const notes = [
+        'Footer injects a dedicated `.profolio-fse-scroll-top` trigger that stays hidden until the user scrolls down.',
+      ];
+      if (scriptRaw.includes('.fadeIn()') || scriptRaw.includes('.fadeOut()')) {
+        notes.push(
+          'Theme JS toggles the trigger with fadeIn/fadeOut based on window scroll position.',
+        );
+      }
+      if (scriptRaw.includes('scrollTop: 0')) {
+        notes.push(
+          'Clicking the trigger animates the document back to the top.',
+        );
+      }
+      signals.push({
+        key: 'scroll-top',
+        sourceFiles: [
+          'patterns/footer.php',
+          'assets/js/script.js',
+          'style.css',
+        ],
+        selectors: [
+          '.profolio-fse-scroll-top',
+          '.profolio-fse-scroll-top::before',
+        ],
+        classNames: ['profolio-fse-scroll-top'],
+        notes,
+      });
+    }
+
+    return signals;
+  }
+
+  private extractQuotedAssignmentValue(
+    raw: string,
+    key: string,
+  ): string | undefined {
+    if (!raw.trim()) return undefined;
+    const match = raw.match(
+      new RegExp(`${this.escapeRegExp(key)}\\s*:\\s*'([^']+)'`, 'i'),
+    );
+    const value = match?.[1]?.trim();
+    return value ? value : undefined;
   }
 
   private bucketFiles(fileTree: string[]): RepoFileBuckets {

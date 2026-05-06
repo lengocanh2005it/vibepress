@@ -516,6 +516,30 @@ function buildSiteContext(content: DbContentResult): string {
   );
   lines.push(`Posts in DB: ${content.posts.length}`);
   lines.push(`Pages in DB: ${content.pages.length}`);
+  if (content.themeResolvedContent) {
+    lines.push(
+      `Theme-resolved routes (${content.themeResolvedContent.themeSlug}): ${content.themeResolvedContent.routes
+        .slice(0, 6)
+        .map(
+          (route) =>
+            `${route.routePath}->${route.title} [${route.templateCandidates.join('/')}]`,
+        )
+        .join(', ')}`,
+    );
+    if (content.themeResolvedContent.frontPageRoute) {
+      lines.push(
+        `Resolved front page route: ${content.themeResolvedContent.frontPageRoute}`,
+      );
+    }
+    const primaryNav = content.themeResolvedContent.navigationRecords.find(
+      (record) => record.location === 'primary',
+    );
+    if (primaryNav) {
+      lines.push(
+        `Resolved primary nav: ${primaryNav.itemUrls.slice(0, 6).join(', ')}`,
+      );
+    }
+  }
   return lines.join('\n');
 }
 

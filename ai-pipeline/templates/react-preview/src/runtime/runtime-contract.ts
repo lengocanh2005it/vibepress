@@ -39,9 +39,11 @@ export interface RuntimeLayoutSpec {
   kind?: string;
   align?: string;
   columnWidth?: string;
+  minimumColumnWidth?: string;
   justifyContent?: string;
   alignItems?: string;
   orientation?: string;
+  flexWrap?: string;
   columns?: number;
 }
 

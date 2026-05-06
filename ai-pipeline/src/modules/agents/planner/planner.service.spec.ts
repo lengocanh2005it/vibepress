@@ -10,6 +10,10 @@ describe('PlannerService shared chrome visual plans', () => {
     {} as any,
     { scopeRequestToComponent: () => undefined } as any,
     {} as any,
+    {
+      prefersBlockTreeSharedChrome: (themeSlug?: string | null) =>
+        themeSlug === 'profolio-fse',
+    } as any,
   );
 
   it('precomputes deterministic visual plans for shared chrome partials before full visual planning', async () => {
@@ -79,5 +83,59 @@ describe('PlannerService shared chrome visual plans', () => {
       componentName: 'Footer',
       type: 'partial',
     });
+  });
+
+  it('skips legacy semantic footer stubs when profolio-fse already has draft block-tree chrome', () => {
+    const visualPlan = (
+      service as any
+    ).buildDeterministicVisualPlanForComponent(
+      {
+        templateName: 'footer',
+        componentName: 'Footer',
+        type: 'partial',
+        route: null,
+        dataNeeds: ['site-info', 'footer-links'],
+        isDetail: false,
+        description: 'Shared footer partial',
+        draftBlockTree: [
+          {
+            kind: 'group',
+            blockName: 'group',
+          },
+        ],
+      },
+      {
+        siteInfo: {
+          activeTheme: 'profolio-fse',
+        },
+        menus: [],
+        posts: [],
+        pages: [],
+      },
+      undefined,
+      {
+        background: '#fff',
+        surface: '#fff',
+        text: '#111',
+        textMuted: '#666',
+        accent: '#000',
+        accentText: '#fff',
+        dark: '#000',
+        darkText: '#fff',
+      },
+      {
+        headingFamily: 'inherit',
+        bodyFamily: 'inherit',
+        h1: 'text-4xl',
+        h2: 'text-3xl',
+        h3: 'text-2xl',
+        body: 'text-base',
+        small: 'text-sm',
+        buttonRadius: 'rounded',
+      },
+      [],
+    );
+
+    expect(visualPlan).toBeUndefined();
   });
 });

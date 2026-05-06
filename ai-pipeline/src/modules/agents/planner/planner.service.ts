@@ -136,6 +136,7 @@ import {
   matchesRepoEntrySourceTemplate,
   resolveHomeHierarchy,
 } from './route-contract.util.js';
+import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
 
 export interface ComponentPlan {
   templateName: string;
@@ -192,6 +193,7 @@ export class PlannerService {
     private readonly styleResolver: StyleResolverService,
     private readonly capturePlanning: CapturePlanningService,
     private readonly visualRepair: PlannerVisualRepairService,
+    private readonly themeProfiles: ThemeProfileRegistry,
   ) {}
 
   async plan(
@@ -2873,6 +2875,10 @@ export class PlannerService {
       blockStyles: tokens?.blockStyles,
     } as const;
     const strategy = getComponentStrategy(componentPlan.componentName);
+    const prefersBlockTreeSharedChrome =
+      this.themeProfiles.prefersBlockTreeSharedChrome(
+        content.siteInfo?.activeTheme,
+      ) && (componentPlan.draftBlockTree?.length ?? 0) > 0;
     switch (strategy.kind) {
       case 'not-found':
         if (!strategy.deterministicFirst) return undefined;
@@ -2890,8 +2896,11 @@ export class PlannerService {
           ],
         };
       case 'header':
-        // When deterministicFirst is false the AI reads the actual WP template
-        // to generate a faithful visual plan — skip the generic navbar stub.
+        // When a source-faithful shared-chrome theme already has block-tree
+        // evidence, let the block-tree deterministic planner own Header.
+        // Keeping the legacy semantic navbar stub here creates conflicting
+        // plans and drops theme-specific wrappers/classes.
+        if (prefersBlockTreeSharedChrome) return undefined;
         if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,
@@ -2907,7 +2916,9 @@ export class PlannerService {
           ],
         };
       case 'footer':
-        // Same as header — let AI derive the real layout from the WP template.
+        // Same policy as Header: prefer preserved source block trees for
+        // source-faithful shared chrome instead of the old semantic stub.
+        if (prefersBlockTreeSharedChrome) return undefined;
         if (!strategy.deterministicFirst) return undefined;
         return {
           ...base,

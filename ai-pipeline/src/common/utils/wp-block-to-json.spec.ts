@@ -65,4 +65,35 @@ describe('wpBlocksToJson PHP normalization', () => {
     expect(nodes[0]?.padding?.top).toBe('80px');
     expect(nodes[0]?.padding?.bottom).toBe('auto');
   });
+
+  it('preserves dom ids on leaf blocks', () => {
+    const markup = `
+<!-- wp:paragraph -->
+<p id="intro-copy">Hello world</p>
+<!-- /wp:paragraph -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.domId).toBe('intro-copy');
+  });
+
+  it('merges explicit wrapper classes from params and markup on leaf blocks', () => {
+    const markup = `
+<!-- wp:button {"className":"header-btn"} -->
+<div class="wp-block-button header-btn is-style-fill"><a class="wp-block-button__link wow animate__animated" href="#">Get Started</a></div>
+<!-- /wp:button -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.customClassNames).toEqual(
+      expect.arrayContaining([
+        'header-btn',
+        'is-style-fill',
+        'wow',
+        'animate__animated',
+      ]),
+    );
+  });
 });

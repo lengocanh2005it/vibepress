@@ -28,11 +28,25 @@ type RuntimeRenderableSection = RuntimePageSection & {
   __hidden?: boolean;
 };
 
+interface RuntimePostRecord {
+  id: number;
+  title: string;
+  excerpt?: string;
+  slug: string;
+  type?: string;
+  date?: string;
+  author?: string;
+  authorSlug?: string;
+  featuredImage?: string | null;
+}
+
 interface RuntimeRenderContext {
   page: RuntimePageRecord;
   plan: RuntimePagePlan;
   bindings: Map<string, RuntimePageSubtreeBinding>;
   sections: Map<string, RuntimeRenderableSection>;
+  queryResults: Map<string, RuntimePostRecord[]>;
+  currentPost?: RuntimePostRecord;
 }
 
 interface RuntimeSectionRenderOptions {
@@ -46,6 +60,9 @@ export default function RuntimePage({
   const params = useParams();
   const slug = explicitSlug ?? params.slug ?? '';
   const [payload, setPayload] = useState<RuntimePageResponse | null>(null);
+  const [queryResults, setQueryResults] = useState<
+    Record<string, RuntimePostRecord[]>
+  >({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -92,6 +109,54 @@ export default function RuntimePage({
     };
   }, [apiBase, slug]);
 
+  useEffect(() => {
+    if (!payload) {
+      setQueryResults({});
+      return;
+    }
+
+    const plan = applyRuntimeOverrides(payload.page, payload.runtimePlan);
+    const descriptors = collectRuntimeQueryDescriptors(
+      plan.blockTree as RuntimeRenderableNode[],
+    );
+    if (descriptors.length === 0) {
+      setQueryResults({});
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadQueryResults() {
+      try {
+        const entries = await Promise.all(
+          descriptors.map(async (descriptor) => {
+            const res = await fetch(
+              buildRuntimeQueryEndpoint(descriptor, apiBase),
+            );
+            if (!res.ok) {
+              throw new Error(`Runtime query request failed (${res.status})`);
+            }
+            const posts = (await res.json()) as RuntimePostRecord[];
+            return [descriptor.nodeId, posts] as const;
+          }),
+        );
+        if (!cancelled) {
+          setQueryResults(Object.fromEntries(entries));
+        }
+      } catch {
+        if (!cancelled) {
+          setQueryResults({});
+        }
+      }
+    }
+
+    void loadQueryResults();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, payload]);
+
   if (loading) {
     return (
       <main className="mx-auto max-w-6xl px-6 py-16">
@@ -126,11 +191,12 @@ export default function RuntimePage({
       ]),
     ),
     sections: buildRuntimeSectionMap(effectivePlan.sections),
+    queryResults: new Map(Object.entries(queryResults)),
   };
 
   return (
     <main
-      className="runtime-page"
+      className={runtimePageClassName(effectivePlan)}
       data-runtime-component="RuntimePage"
       data-runtime-slug={page.slug}
       data-runtime-version={effectivePlan.version}
@@ -162,6 +228,71 @@ export default function RuntimePage({
           )}
     </main>
   );
+}
+
+interface RuntimeQueryDescriptor {
+  nodeId: string;
+  postType: string;
+  perPage: number;
+  author?: string;
+}
+
+function runtimePageClassName(plan: RuntimePagePlan): string {
+  const layoutFamily = plan.layoutFamily ?? 'default-page';
+  return mergeClassNames(
+    'runtime-page',
+    `runtime-page--${layoutFamily}`,
+    layoutFamily.startsWith('profolio-fse')
+      ? 'runtime-page--theme-profolio-fse'
+      : undefined,
+  );
+}
+
+function collectRuntimeQueryDescriptors(
+  nodes: RuntimeRenderableNode[],
+): RuntimeQueryDescriptor[] {
+  const descriptors: RuntimeQueryDescriptor[] = [];
+  const visit = (node: RuntimeRenderableNode) => {
+    if (node.blockName === 'core/query') {
+      const attrsQuery =
+        node.attrs?.query && typeof node.attrs.query === 'object'
+          ? (node.attrs.query as Record<string, unknown>)
+          : null;
+      const nodeId = node.nodeId ?? node.sourceRef?.sourceNodeId;
+      if (attrsQuery && nodeId) {
+        const postType =
+          typeof attrsQuery.postType === 'string' && attrsQuery.postType.trim()
+            ? attrsQuery.postType.trim()
+            : 'post';
+        const perPage =
+          typeof attrsQuery.perPage === 'number' && attrsQuery.perPage > 0
+            ? attrsQuery.perPage
+            : 3;
+        const author =
+          typeof attrsQuery.author === 'string' && attrsQuery.author.trim()
+            ? attrsQuery.author.trim()
+            : undefined;
+        descriptors.push({ nodeId, postType, perPage, author });
+      }
+    }
+    node.children?.forEach(visit);
+  };
+  nodes.forEach(visit);
+  return descriptors;
+}
+
+function buildRuntimeQueryEndpoint(
+  descriptor: RuntimeQueryDescriptor,
+  apiBase = '',
+): string {
+  const params = new URLSearchParams();
+  params.set('perPage', String(descriptor.perPage));
+  if (descriptor.author) params.set('author', descriptor.author);
+  if (descriptor.postType === 'post') {
+    params.set('type', 'post');
+    return `${apiBase}/api/posts?${params.toString()}`;
+  }
+  return `${apiBase}/api/post-types/${encodeURIComponent(descriptor.postType)}/posts?${params.toString()}`;
 }
 
 function buildRuntimeSectionMap(
@@ -301,6 +432,86 @@ function renderRuntimeNode(
           {renderRichTextChildren(ctx.page.content ?? '', `${nodeId}-content`)}
         </div>
       );
+    case 'core/query': {
+      const queryTemplate = node.children?.find(
+        (child) => child.blockName === 'core/post-template',
+      );
+      const queryPosts = ctx.queryResults.get(nodeId);
+      if (queryTemplate && queryPosts && queryPosts.length > 0) {
+        return renderRuntimeQueryNode(
+          node,
+          queryTemplate as RuntimeRenderableNode,
+          queryPosts,
+          ctx,
+          key,
+          inspectAttrs,
+        );
+      }
+      return wrapRuntimeNode(node, key, children, { inspectAttrs });
+    }
+    case 'core/post-template':
+      return wrapRuntimeNode(node, key, children, { inspectAttrs });
+    case 'core/post-title':
+      if (ctx.currentPost) {
+        return renderRuntimePostTitleNode(
+          node,
+          ctx.currentPost,
+          key,
+          style,
+          inspectAttrs,
+        );
+      }
+      return wrapRuntimeNode(
+        node,
+        key,
+        text ? renderRichTextChildren(text, nodeId) : children,
+        { inspectAttrs },
+      );
+    case 'core/post-date':
+      if (ctx.currentPost?.date) {
+        return (
+          <p
+            key={key}
+            id={node.wrapper?.domId ?? node.domId}
+            className={className}
+            style={style}
+            {...inspectAttrs}
+          >
+            {ctx.currentPost.date}
+          </p>
+        );
+      }
+      return wrapRuntimeNode(node, key, children, { inspectAttrs });
+    case 'core/post-excerpt':
+      if (ctx.currentPost?.excerpt) {
+        return (
+          <div
+            key={key}
+            id={node.wrapper?.domId ?? node.domId}
+            className={className}
+            style={style}
+            {...inspectAttrs}
+          >
+            {renderRichTextChildren(ctx.currentPost.excerpt, `${nodeId}-excerpt`)}
+          </div>
+        );
+      }
+      return wrapRuntimeNode(node, key, children, { inspectAttrs });
+    case 'core/post-featured-image':
+      if (ctx.currentPost?.featuredImage) {
+        return (
+          <img
+            key={key}
+            id={node.wrapper?.domId ?? node.domId}
+            src={resolveAsset(ctx.currentPost.featuredImage)}
+            alt={ctx.currentPost.title ?? ''}
+            className={className}
+            style={style}
+            {...inspectAttrs}
+          />
+        );
+      }
+      return wrapRuntimeNode(node, key, children, { inspectAttrs });
     case 'core/cover': {
       const coverBgPos = node.focalPoint
         ? `${Math.round(node.focalPoint.x * 100)}% ${Math.round(node.focalPoint.y * 100)}%`
@@ -504,6 +715,81 @@ function renderRuntimeNode(
         { inspectAttrs },
       );
   }
+}
+
+function renderRuntimeQueryNode(
+  node: RuntimeRenderableNode,
+  templateNode: RuntimeRenderableNode,
+  posts: RuntimePostRecord[],
+  ctx: RuntimeRenderContext,
+  key: string,
+  inspectAttrs?: Record<string, string | undefined>,
+): ReactNode {
+  const templateNodeId =
+    templateNode.nodeId ?? templateNode.sourceRef?.sourceNodeId ?? `${key}-template`;
+  const templateClassName = toNodeClassName(templateNode);
+  const templateStyle = toNodeStyle(templateNode);
+  const templateChildren = templateNode.children ?? [];
+
+  return wrapRuntimeNode(
+    node,
+    key,
+    <div
+      className={templateClassName}
+      style={templateStyle}
+      {...buildRuntimeInspectorAttrs(templateNodeId)}
+    >
+      {posts.map((post, index) => {
+        const postCtx: RuntimeRenderContext = {
+          ...ctx,
+          currentPost: post,
+        };
+        return (
+          <article
+            key={`${templateNodeId}-${post.id ?? index}`}
+            className="wp-block-post"
+          >
+            {renderRuntimeNodes(
+              templateChildren,
+              postCtx,
+              `${templateNodeId}.${index + 1}`,
+            )}
+          </article>
+        );
+      })}
+    </div>,
+    { inspectAttrs },
+  );
+}
+
+function renderRuntimePostTitleNode(
+  node: RuntimeRenderableNode,
+  post: RuntimePostRecord,
+  key: string,
+  style: CSSProperties,
+  inspectAttrs?: Record<string, string | undefined>,
+): ReactNode {
+  const className = toNodeClassName(node);
+  const headingLevel = clampHeadingLevel(node.level ?? 2);
+  const Tag = `h${headingLevel}` as keyof JSX.IntrinsicElements;
+  const isLinked = node.attrs?.isLink === true;
+  const titleChildren = renderRichTextChildren(post.title ?? '', `${key}-post-title`);
+
+  return (
+    <Tag
+      key={key}
+      id={node.wrapper?.domId ?? node.domId}
+      className={className}
+      style={style}
+      {...inspectAttrs}
+    >
+      {isLinked ? (
+        <Link to={getRuntimePostHref(post)}>{titleChildren}</Link>
+      ) : (
+        titleChildren
+      )}
+    </Tag>
+  );
 }
 
 function resolveOverlaySection(
@@ -1108,6 +1394,13 @@ function resolveAsset(src?: string): string {
   return src;
 }
 
+function getRuntimePostHref(post: RuntimePostRecord): string {
+  if (post.type === 'product') {
+    return `/product/${post.slug}`;
+  }
+  return `/${post.slug}`;
+}
+
 function toAppPath(url?: string): string {
   if (!url) return '/';
   if (url.startsWith('/')) return url;
@@ -1300,10 +1593,16 @@ function toLayoutStyle(
   } else if (layout.orientation === 'horizontal') {
     style.flexDirection = 'row';
   }
+  if (layout.flexWrap) {
+    style.flexWrap = layout.flexWrap as CSSProperties['flexWrap'];
+  }
   if (layout.columnWidth) {
     style.flexBasis = layout.columnWidth;
   }
-  if (layout.columns && (style.display === 'grid' || preferGrid)) {
+  if (layout.minimumColumnWidth && (style.display === 'grid' || preferGrid)) {
+    style.display = 'grid';
+    style.gridTemplateColumns = `repeat(auto-fit, minmax(${layout.minimumColumnWidth}, 1fr))`;
+  } else if (layout.columns && (style.display === 'grid' || preferGrid)) {
     style.display = 'grid';
     style.gridTemplateColumns = `repeat(${Math.max(
       layout.columns,
