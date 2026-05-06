@@ -14,6 +14,7 @@ import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { ValidatorService } from '../validator/validator.service.js';
 import type { GeneratedComponent } from './react-generator.service.js';
 import { ReactGeneratorService } from './react-generator.service.js';
+import { CodeReviewerService } from './code-reviewer.service.js';
 
 export interface VisualEditInput {
   jobId: string;
@@ -42,6 +43,7 @@ export class ReactVisualEditService {
   constructor(
     private readonly reactGenerator: ReactGeneratorService,
     private readonly validator: ValidatorService,
+    private readonly codeReviewer: CodeReviewerService,
   ) {}
 
   private saveBackup(jobId: string, filePath: string, code: string): void {
@@ -68,6 +70,13 @@ export class ReactVisualEditService {
 
   async applyEdit(input: VisualEditInput): Promise<VisualEditResult> {
     const { frontendDir, plan, routeEntries, editRequest, logPath } = input;
+
+    const startLine =
+      editRequest.targetHint?.targetStartLine ?? editRequest.targetHint?.startLine;
+    const endLine = editRequest.targetHint?.endLine;
+    if (startLine !== undefined && endLine !== undefined && startLine <= endLine) {
+      return this.applySurgicalPatch(input, startLine, endLine);
+    }
 
     const componentName = this.resolveComponentName(
       editRequest.targetHint,
@@ -159,6 +168,94 @@ export class ReactVisualEditService {
       isValid: true,
       warnings: [],
     };
+  }
+
+  private async applySurgicalPatch(
+    input: VisualEditInput,
+    startLine: number,
+    endLine: number,
+  ): Promise<VisualEditResult> {
+    const { frontendDir, routeEntries, editRequest, logPath } = input;
+
+    const componentName = this.resolveComponentName(editRequest.targetHint, routeEntries);
+    if (!componentName) {
+      throw new Error(
+        'Cannot resolve target component: provide targetHint.componentName, targetHint.templateName, or targetHint.route',
+      );
+    }
+
+    const filePath = this.resolveTargetFilePath(frontendDir, componentName, editRequest.targetHint);
+    const currentCode = await readFile(filePath, 'utf-8');
+    const lines = currentCode.split('\n');
+
+    const from = Math.max(0, startLine - 1);
+    const to = Math.min(lines.length - 1, endLine - 1);
+    const originalSnippet = lines.slice(from, to + 1).join('\n');
+
+    const instruction = this.buildSurgicalInstruction(editRequest, from + 1, to + 1);
+
+    this.logger.log(
+      `[visual-edit] "${componentName}" surgical patch lines ${from + 1}–${to + 1} — "${instruction.slice(0, 80).replace(/\n/g, ' ')}"`,
+    );
+
+    const model = this.reactGenerator.getDefaultModel();
+    const patchedSnippet = await this.codeReviewer.patchSnippet(
+      model,
+      originalSnippet,
+      instruction,
+      logPath,
+      componentName,
+    );
+
+    if (normalizeCodeForComparison(patchedSnippet) === normalizeCodeForComparison(originalSnippet)) {
+      throw new Error(
+        `Visual edit for "${componentName}" did not produce a material code change in the targeted region (lines ${from + 1}–${to + 1}).`,
+      );
+    }
+
+    const balanceError = checkSnippetJsxBalance(patchedSnippet);
+    if (balanceError) {
+      throw new Error(`Visual edit produced unbalanced JSX in the patched region: ${balanceError}`);
+    }
+
+    const patchedLines = patchedSnippet.split('\n');
+    const newCode = [...lines.slice(0, from), ...patchedLines, ...lines.slice(to + 1)].join('\n');
+
+    this.saveBackup(input.jobId, filePath, currentCode);
+    await writeFile(filePath, newCode, 'utf-8');
+
+    this.logger.log(`[visual-edit] "${componentName}" ✓ surgical patch written to ${filePath}`);
+
+    return { componentName, filePath, isValid: true, warnings: [] };
+  }
+
+  private buildSurgicalInstruction(
+    editRequest: PipelineReactVisualEditRequestDto,
+    startLine: number,
+    endLine: number,
+  ): string {
+    const parts: string[] = [];
+
+    if (editRequest.prompt?.trim()) {
+      parts.push(editRequest.prompt.trim());
+    }
+
+    const attachmentNotes = (editRequest.attachments ?? [])
+      .map((a) => a.note?.trim())
+      .filter((n): n is string => Boolean(n));
+    if (attachmentNotes.length > 0) {
+      parts.push(attachmentNotes.join(' '));
+    }
+
+    if (parts.length === 0) {
+      parts.push('Apply the visual change as described by the attached context.');
+    }
+
+    parts.push(
+      `This snippet spans lines ${startLine}–${endLine} of the component. Modify only what is needed. Do NOT add imports or export statements.`,
+    );
+
+    return parts.join('\n');
   }
 
   undoLast(jobId: string): { filePath: string; code: string } | undefined {
@@ -407,6 +504,24 @@ export class ReactVisualEditService {
 
 function normalizeCodeForComparison(code: string): string {
   return code.replace(/\r\n/g, '\n').trim();
+}
+
+function checkSnippetJsxBalance(snippet: string): string | null {
+  let depth = 0;
+  for (const ch of snippet) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  if (depth !== 0) return `Unbalanced braces (depth: ${depth})`;
+
+  const parenDepth = [...snippet].reduce((acc, ch) => {
+    if (ch === '(') return acc + 1;
+    if (ch === ')') return acc - 1;
+    return acc;
+  }, 0);
+  if (parenDepth !== 0) return `Unbalanced parentheses (depth: ${parenDepth})`;
+
+  return null;
 }
 
 function buildInstructionText(

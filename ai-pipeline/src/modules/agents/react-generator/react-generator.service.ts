@@ -114,6 +114,10 @@ export class ReactGeneratorService {
     private readonly aiLogger: AiLoggerService,
   ) {}
 
+  getDefaultModel(): string {
+    return this.llmFactory.getModel();
+  }
+
   // ── Public entry point ─────────────────────────────────────────────────────
 
   async generate(input: {

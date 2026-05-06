@@ -238,7 +238,41 @@ export class CodeReviewerService {
   private readonly selfFixSystemPrompt =
     'You are a React/TypeScript expert. Fix the exact validation or targeted UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code, no explanation.';
 
+  private readonly patchSnippetSystemPrompt =
+    'You are a React/TypeScript expert. Apply the requested change to the given TSX snippet. ' +
+    'Return ONLY the modified snippet — no imports, no exports, no full component file, no markdown fences, no explanation. ' +
+    'The snippet may start or end mid-JSX. Preserve original indentation exactly.';
+
   // ── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Apply a targeted edit instruction to a small TSX snippet (not the whole file).
+   * Returns the modified snippet only — caller is responsible for splicing it back.
+   */
+  public async patchSnippet(
+    model: string,
+    snippet: string,
+    instruction: string,
+    logPath?: string,
+    label?: string,
+  ): Promise<string> {
+    const userPrompt =
+      `Edit instruction: ${instruction}\n\n` +
+      `Snippet to modify:\n\`\`\`tsx\n${snippet}\n\`\`\`\n\n` +
+      'Return only the modified lines, preserving original indentation. No fences, no explanation.';
+
+    await this.log(logPath, `[patch-snippet] ${label ?? 'snippet'}: ${instruction.slice(0, 120)}`);
+
+    const result = await this.llmFactory.chat({
+      model,
+      systemPrompt: this.patchSnippetSystemPrompt,
+      userPrompt,
+      maxTokens: 2048,
+    });
+
+    const raw = result.text ?? '';
+    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+  }
 
   /**
    * Review + generate a single component.
