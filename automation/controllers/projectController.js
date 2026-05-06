@@ -1142,6 +1142,34 @@ function logPreviewSourceContext({
 }
 
 // -------------------------------------------------------
+// -------------------------------------------------------
+// Rewrites all HTTP WP origin URLs inside HTML/CSS text so they are fetched
+// through the HTTPS /api/wp/proxy-asset endpoint instead of directly.
+// Using a relative prefix (/api/...) means the browser inherits the current
+// protocol (HTTPS), eliminating mixed-content errors.
+// -------------------------------------------------------
+function rewriteWpHttpUrls(text, wpOrigin) {
+  const proxyPrefix = `/api/wp/proxy-asset?url=${encodeURIComponent(wpOrigin)}`;
+
+  // 1. Rewrite absolute "http://WP_ORIGIN/..." occurrences (src=, href=, url(), JS strings)
+  text = text.split(wpOrigin).join(proxyPrefix);
+
+  // 2. Rewrite root-relative asset attributes: src="/...", srcset="/...", data-src="/..."
+  //    Leave href="/" for <a> navigation links — only rewrite non-anchor asset attrs.
+  text = text.replace(
+    /((?:src|srcset|data-src|data-lazy-src|data-bg|poster)=["'])\/(?![/"'])/gi,
+    (_, prefix) => `${prefix}${proxyPrefix}/`,
+  );
+
+  // 3. Rewrite root-relative url() in inline CSS / <style> blocks
+  text = text.replace(
+    /\burl\(\s*(['"]?)\/(?![/"'])/g,
+    (_, quote) => `url(${quote || "'"}${proxyPrefix}/`,
+  );
+
+  return text;
+}
+
 // GET /api/wp/proxy-asset?url=<full-url>
 // Proxy bất kỳ static asset (font, CSS, JS, image) từ WP với CORS headers.
 // Frontend dùng: /api/wp/proxy-asset?url=http://localhost:8000/wp-content/...
@@ -1171,6 +1199,17 @@ async function proxyWpAsset(req, res) {
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.setHeader("Content-Type", contentType);
+
+    // Rewrite HTTP WP URLs inside CSS files (e.g. @font-face src, background url())
+    if (contentType.includes("text/css")) {
+      const assetOrigin = new URL(url).origin;
+      const css = rewriteWpHttpUrls(
+        Buffer.from(response.data).toString("utf-8"),
+        assetOrigin,
+      );
+      return res.status(200).send(css);
+    }
+
     return res.status(200).send(Buffer.from(response.data));
   } catch (e) {
     const status = e.response?.status || 502;
@@ -1211,11 +1250,9 @@ async function proxyWpPage(req, res) {
 
     let html = response.data;
 
-    // Inject <base> so relative URLs (CSS, JS, images, links) resolve to the WP origin.
-    html = html.replace(
-      /(<head[^>]*>)/i,
-      `$1\n  <base href="${targetUrl.origin}/">`,
-    );
+    // Rewrite all HTTP WP asset URLs so they are fetched through the HTTPS proxy,
+    // preventing mixed-content blocks when the editor runs on HTTPS.
+    html = rewriteWpHttpUrls(html, targetUrl.origin);
     const previewSourceContext = await buildPreviewSourceContext({
       site,
       targetUrl: targetUrl.toString(),
