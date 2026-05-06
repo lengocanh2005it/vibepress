@@ -269,7 +269,9 @@ async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
   await git.init();
   await git.addConfig('user.email', GIT_AUTHOR_EMAIL);
   await git.addConfig('user.name', GIT_AUTHOR_NAME);
-  await git.checkoutLocalBranch(branch);
+  // Rename the current HEAD branch to the target name.
+  // git init on Git ≥ 2.28 already creates 'main', so `checkout -b main` would fail.
+  await git.raw(['branch', '-M', branch]);
   await git.add('.');
 
   const status = await git.status();

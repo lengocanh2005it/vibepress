@@ -177,7 +177,7 @@ async function pushDirectoryToRepo(localDir, repoHtmlUrl, commitMessage) {
   await git.init();
   await git.addConfig("user.name", GIT_AUTHOR_NAME);
   await git.addConfig("user.email", GIT_AUTHOR_EMAIL);
-  await git.checkoutLocalBranch("main");
+  await git.raw(["branch", "-M", "main"]);
   await git.add(".");
   await git.commit(commitMessage);
   await git.addRemote("origin", buildAuthenticatedRepoUrl(repoHtmlUrl));
