@@ -2,7 +2,7 @@ const path = require('path');
 const fse = require('fs-extra');
 const { chromium } = require('playwright');
 const { UPLOAD_ROOT } = require('../config/constants');
-const { uploadCaptureAsset } = require('../services/imageUploadService');
+const { uploadCaptureAsset, uploadImageFromBase64 } = require('../services/imageUploadService');
 const { query } = require('../db/mysql');
 const { buildPublicUrl, resolvePublicBaseUrl } = require('../utils/publicUrl');
 
@@ -274,4 +274,17 @@ async function getCapturesBySite(req, res) {
 }
 
 
-module.exports = { captureRegion, saveCapture, deleteCapturesBySite, getCapturesBySite };
+async function uploadImage(req, res) {
+  const { data, fileName, mimeType } = req.body ?? {};
+  if (!data) return res.status(400).json({ message: 'data (base64) is required' });
+  if (!fileName) return res.status(400).json({ message: 'fileName is required' });
+  if (!mimeType) return res.status(400).json({ message: 'mimeType is required' });
+  try {
+    const result = await uploadImageFromBase64(data, fileName, mimeType);
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+module.exports = { captureRegion, saveCapture, deleteCapturesBySite, getCapturesBySite, uploadImage };

@@ -187,6 +187,66 @@ async function uploadCaptureAsset(filePath, filename, fallbackPublicUrl, dimensi
   );
 }
 
+async function uploadImageFromBase64(base64Data, filename, mimeType) {
+  const provider = (CLOUD_IMAGE_PROVIDER || '').trim().toLowerCase();
+  const buffer = Buffer.from(base64Data, 'base64');
+  const blob = new Blob([buffer], { type: mimeType });
+
+  if (!provider || provider === 'local') {
+    throw new Error('Cloud image provider is not configured. Set CLOUD_IMAGE_PROVIDER=cloudinary or imagekit.');
+  }
+
+  if (provider === 'cloudinary') {
+    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+      throw new Error('Cloudinary credentials are not configured.');
+    }
+    const timestamp = Math.floor(Date.now() / 1000);
+    const publicId = path.parse(filename).name;
+    const signature = buildCloudinarySignature(
+      { folder: CLOUDINARY_FOLDER, public_id: publicId, timestamp },
+      CLOUDINARY_API_SECRET,
+    );
+    const form = new FormData();
+    form.append('file', blob, filename);
+    form.append('api_key', CLOUDINARY_API_KEY);
+    form.append('timestamp', String(timestamp));
+    form.append('public_id', publicId);
+    if (CLOUDINARY_FOLDER) form.append('folder', CLOUDINARY_FOLDER);
+    form.append('signature', signature);
+
+    const response = await fetch(
+      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+      { method: 'POST', body: form },
+    );
+    if (!response.ok) throw new Error(`Cloudinary upload failed: ${await response.text()}`);
+    const data = await response.json();
+    return { provider: 'cloudinary', url: data.secure_url, publicId: data.public_id, bytes: data.bytes, width: data.width, height: data.height };
+  }
+
+  if (provider === 'imagekit') {
+    if (!IMAGEKIT_PUBLIC_KEY || !IMAGEKIT_PRIVATE_KEY) {
+      throw new Error('ImageKit credentials are not configured.');
+    }
+    const form = new FormData();
+    form.append('file', blob, filename);
+    form.append('fileName', filename);
+    if (IMAGEKIT_FOLDER) form.append('folder', IMAGEKIT_FOLDER);
+    form.append('useUniqueFileName', 'true');
+    const basicAuth = Buffer.from(`${IMAGEKIT_PUBLIC_KEY}:${IMAGEKIT_PRIVATE_KEY}`).toString('base64');
+    const response = await fetch('https://upload.imagekit.io/api/v1/files/upload', {
+      method: 'POST',
+      headers: { Authorization: `Basic ${basicAuth}` },
+      body: form,
+    });
+    if (!response.ok) throw new Error(`ImageKit upload failed: ${await response.text()}`);
+    const data = await response.json();
+    return { provider: 'imagekit', url: data.url, publicId: data.fileId, bytes: data.size, width: data.width, height: data.height };
+  }
+
+  throw new Error(`Unsupported CLOUD_IMAGE_PROVIDER "${CLOUD_IMAGE_PROVIDER}".`);
+}
+
 module.exports = {
   uploadCaptureAsset,
+  uploadImageFromBase64,
 };

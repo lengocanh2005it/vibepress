@@ -11,6 +11,14 @@ import {
 import { captureRegion } from "../services/automationService";
 import { useInspector } from "../hooks/useInspector";
 
+interface PendingImage {
+  id: string;
+  localUrl: string;
+  cloudUrl: string | null;
+  uploading: boolean;
+  error: string | null;
+}
+
 type PipelineJobStatus =
   | "running"
   | "awaiting_confirmation"
@@ -347,6 +355,38 @@ const VisualEditor: React.FC = () => {
   ]);
   const [canUndo, setCanUndo] = useState(false);
   const [isUndoing, setIsUndoing] = useState(false);
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageFileSelected = async (file: File) => {
+    const id = crypto.randomUUID();
+    const localUrl = URL.createObjectURL(file);
+    setPendingImages((prev) => [...prev, { id, localUrl, cloudUrl: null, uploading: true, error: null }]);
+
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/upload-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: base64, fileName: file.name, mimeType: file.type }),
+      });
+      if (!res.ok) throw new Error((await res.json())?.message || 'Upload failed');
+      const { url } = await res.json() as { url: string };
+      setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, cloudUrl: url, uploading: false } : img));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Upload failed';
+      setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, uploading: false, error: msg } : img));
+    }
+  };
 
   const [effectiveDeployedUrl, setEffectiveDeployedUrl] = useState<string | null>(state.deployedUrl ?? null);
 
@@ -686,6 +726,8 @@ const VisualEditor: React.FC = () => {
 
     try {
       const payload = await buildPayload();
+      console.log('[visual-edit] payload:', JSON.stringify(payload, null, 2));
+      return;
       const res: ReactVisualEditResult = await submitReactVisualEdit(siteId, jobId, payload);
       if (!res.accepted) {
         setMessages((prev) => [
@@ -1030,6 +1072,46 @@ const VisualEditor: React.FC = () => {
 
             {/* Footer: Send to AI */}
             <div className="flex-none border-t border-[#ede4d8] px-4 py-3">
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handleImageFileSelected(file);
+                  e.target.value = '';
+                }}
+              />
+
+              {/* Image thumbnails */}
+              {pendingImages.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {pendingImages.map((img) => (
+                    <div key={img.id} className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-[#e7dfd2] bg-[#f5f0e8]">
+                      <img src={img.localUrl} alt="" className="h-full w-full object-cover" />
+                      {img.uploading && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                          <span className="text-[10px] text-white">...</span>
+                        </div>
+                      )}
+                      {img.error && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-red-500/70">
+                          <span className="text-[9px] text-white">Lỗi</span>
+                        </div>
+                      )}
+                      {img.cloudUrl && !img.uploading && (
+                        <div className="absolute bottom-0 left-0 right-0 bg-green-600/80 py-0.5 text-center text-[8px] text-white">✓</div>
+                      )}
+                      <button
+                        onClick={() => setPendingImages((prev) => prev.filter((i) => i.id !== img.id))}
+                        className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/50 text-[10px] text-white hover:bg-black/70"
+                      >×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -1040,6 +1122,14 @@ const VisualEditor: React.FC = () => {
                 Chỉ dùng ô này cho chỉnh sửa cục bộ trên element đã chọn: content, background, color, hoặc layout.
               </p>
               <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={isSubmittingRequest}
+                  title="Đính kèm ảnh"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#d8cfbf] bg-white text-[#5c4033] transition hover:bg-[#f6f2eb] disabled:opacity-50"
+                >
+                  📎
+                </button>
                 <button
                   onClick={() => void handleSubmitRequest()}
                   disabled={isSubmittingRequest || isUndoing}

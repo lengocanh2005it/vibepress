@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile, writeFile } from 'fs/promises';
 import { basename, isAbsolute, join, resolve } from 'path';
+import { parse as babelParse } from '@babel/parser';
 import type {
   PipelineEditTargetHintDto,
   PipelineReactVisualEditRequestDto,
@@ -84,6 +85,8 @@ export class ReactVisualEditService {
         `Visual edit for "${componentName}" did not produce a material code change.`,
       );
     }
+
+    validateGeneratedCode(newCode, componentName);
 
     this.saveBackup(input.jobId, filePath, currentCode);
     await writeFile(filePath, newCode, 'utf-8');
@@ -223,4 +226,23 @@ export class ReactVisualEditService {
 
 function normalizeCode(code: string): string {
   return code.replace(/\r\n/g, '\n').trim();
+}
+
+function validateGeneratedCode(code: string, componentName: string): void {
+  // 1. JSX/TSX syntax check via Babel parser
+  try {
+    babelParse(code, {
+      sourceType: 'module',
+      plugins: ['typescript', 'jsx'],
+      errorRecovery: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Visual edit for "${componentName}" produced invalid TSX syntax: ${msg}`);
+  }
+
+  // 2. Structural check — must still have a default export
+  if (!/export\s+default\s+/m.test(code)) {
+    throw new Error(`Visual edit for "${componentName}" removed the default export — aborting write.`);
+  }
 }
