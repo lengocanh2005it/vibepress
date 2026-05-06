@@ -14,7 +14,10 @@ import { useInspector } from "../hooks/useInspector";
 interface PendingImage {
   id: string;
   localUrl: string;
+  fileName: string;
+  mimeType: string;
   cloudUrl: string | null;
+  cloudMeta: { provider: string; publicId?: string; bytes?: number; width?: number; height?: number } | null;
   uploading: boolean;
   error: string | null;
 }
@@ -361,7 +364,7 @@ const VisualEditor: React.FC = () => {
   const handleImageFileSelected = async (file: File) => {
     const id = crypto.randomUUID();
     const localUrl = URL.createObjectURL(file);
-    setPendingImages((prev) => [...prev, { id, localUrl, cloudUrl: null, uploading: true, error: null }]);
+    setPendingImages((prev) => [...prev, { id, localUrl, fileName: file.name, mimeType: file.type, cloudUrl: null, cloudMeta: null, uploading: true, error: null }]);
 
     try {
       const base64 = await new Promise<string>((resolve, reject) => {
@@ -380,8 +383,8 @@ const VisualEditor: React.FC = () => {
         body: JSON.stringify({ data: base64, fileName: file.name, mimeType: file.type }),
       });
       if (!res.ok) throw new Error((await res.json())?.message || 'Upload failed');
-      const { url } = await res.json() as { url: string };
-      setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, cloudUrl: url, uploading: false } : img));
+      const data = await res.json() as { url: string; provider: string; publicId?: string; bytes?: number; width?: number; height?: number };
+      setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, cloudUrl: data.url, cloudMeta: { provider: data.provider, publicId: data.publicId, bytes: data.bytes, width: data.width, height: data.height }, uploading: false } : img));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Upload failed';
       setPendingImages((prev) => prev.map((img) => img.id === id ? { ...img, uploading: false, error: msg } : img));
@@ -605,7 +608,24 @@ const VisualEditor: React.FC = () => {
         viewport: selectedComponent?.viewport,
         document: selectedComponent?.document,
       },
-      attachments: attachment ? [attachment] : [],
+      attachments: [
+        ...(attachment ? [attachment] : []),
+        ...pendingImages
+          .filter((img) => img.cloudUrl !== null && img.cloudMeta !== null)
+          .map((img) => ({
+            id: img.id,
+            asset: {
+              provider: img.cloudMeta!.provider as 'cloudinary' | 'imagekit',
+              fileName: img.fileName,
+              publicUrl: img.cloudUrl!,
+              mimeType: img.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | undefined,
+              bytes: img.cloudMeta!.bytes,
+              width: img.cloudMeta!.width,
+              height: img.cloudMeta!.height,
+              providerAssetId: img.cloudMeta!.publicId,
+            },
+          })),
+      ],
       targetHint: {
         route: selectedRoute?.route || "/",
         componentName,
@@ -726,8 +746,6 @@ const VisualEditor: React.FC = () => {
 
     try {
       const payload = await buildPayload();
-      console.log('[visual-edit] payload:', JSON.stringify(payload, null, 2));
-      return;
       const res: ReactVisualEditResult = await submitReactVisualEdit(siteId, jobId, payload);
       if (!res.accepted) {
         setMessages((prev) => [
@@ -764,6 +782,7 @@ const VisualEditor: React.FC = () => {
         }
         setCanUndo(true);
         setPrompt("");
+        setPendingImages([]);
         setTimeout(() => {
           iframeRef.current?.contentWindow?.location.reload();
         }, 400);

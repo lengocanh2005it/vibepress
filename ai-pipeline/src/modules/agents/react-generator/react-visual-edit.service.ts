@@ -121,6 +121,15 @@ export class ReactVisualEditService {
       parts.push(attachmentNotes.join(' '));
     }
 
+    const imageUrls = (editRequest.attachments ?? [])
+      .filter((a) => a.asset?.provider && a.asset.provider !== 'local' && a.asset.publicUrl)
+      .map((a) => a.asset.publicUrl);
+    if (imageUrls.length > 0) {
+      parts.push(
+        `Add the following image(s) to the component using <img> tag(s) with these src URL(s): ${imageUrls.join(', ')}`,
+      );
+    }
+
     const hint = editRequest.targetHint;
     if (hint) {
       if (hint.targetElementTag) {
