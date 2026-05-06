@@ -331,7 +331,12 @@ export interface MediaTextSection extends BaseSection {
   imagePosition: 'left' | 'right';
   imageRadius?: string;
   imageAspectRatio?: string; // e.g. "16/9" | "1/1"
+  imageFit?: 'contain' | 'cover';
   imageCustomClassNames?: string[];
+  imageFrameBackground?: string;
+  imageFrameMinHeight?: string;
+  imageFramePaddingStyle?: string;
+  imageFrameCustomClassNames?: string[];
   columnWidths?: string[];
   subtitle?: string;
   heading?: string;
@@ -495,6 +500,11 @@ export type SidebarWidget =
     }
   | {
       kind: 'categories';
+      title?: string;
+      showCounts?: boolean;
+    }
+  | {
+      kind: 'tags';
       title?: string;
       showCounts?: boolean;
     }
@@ -1057,6 +1067,7 @@ function deriveSectionObligation(section: SectionPlan): SectionObligation {
           sidebarRequired.add('site-info');
         }
         if (widget.kind === 'categories') sidebarRequired.add('posts');
+        if (widget.kind === 'tags') sidebarRequired.add('posts');
         if (widget.kind === 'navigation') sidebarRequired.add('menus');
         if (widget.kind === 'pages-list') sidebarRequired.add('pages');
         if (widget.kind === 'recent-posts') sidebarRequired.add('posts');

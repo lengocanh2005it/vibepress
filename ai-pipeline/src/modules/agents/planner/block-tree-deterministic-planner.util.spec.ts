@@ -260,6 +260,110 @@ describe('block-tree deterministic listing shells', () => {
       imageSrc: 'theme-asset:/assets/images/banner.jpg',
     });
   });
+
+  it('uses standalone sticky-sidebar content when the sidebar template-part shell is empty', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...baseInput,
+      draftBlockTree: [
+        draftBlockTree[0],
+        {
+          kind: 'columns',
+          blockName: 'columns',
+          children: [
+            {
+              kind: 'column',
+              blockName: 'column',
+              children: [
+                {
+                  kind: 'query',
+                  blockName: 'query',
+                  sourceRef: {
+                    sourceNodeId: 'blog-right-sidebar::query::3.0.0.0',
+                    templateName: 'blog-right-sidebar',
+                    sourceFile: 'templates/blog-right-sidebar.html',
+                    topLevelIndex: 3,
+                    parentSourceNodeId: 'blog-right-sidebar::column::3.0.0',
+                    blockName: 'query',
+                  },
+                },
+              ],
+            },
+            {
+              kind: 'column',
+              blockName: 'column',
+              columnWidth: '320px',
+              sourceRef: {
+                sourceNodeId: 'blog-right-sidebar::column::3.0.1',
+                templateName: 'blog-right-sidebar',
+                sourceFile: 'templates/blog-right-sidebar.html',
+                topLevelIndex: 3,
+                parentSourceNodeId: 'blog-right-sidebar::columns::3.0',
+                blockName: 'column',
+              },
+              children: [
+                {
+                  kind: 'template-part',
+                  blockName: 'template-part',
+                  templatePartSlug: 'sidebar',
+                },
+              ],
+            },
+          ],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
+                { kind: 'latest-posts', blockName: 'latest-posts' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Categories' },
+                { kind: 'categories', blockName: 'categories' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections.map((section) => section.type)).toEqual([
+      'cover',
+      'post-list',
+      'sidebar',
+    ]);
+    expect(plan?.sections[2]).toMatchObject({
+      type: 'sidebar',
+      widgets: [
+        { kind: 'search' },
+        { kind: 'recent-posts', title: 'Latest Posts' },
+        { kind: 'categories', title: 'Categories' },
+        { kind: 'tags', title: 'Tags' },
+      ],
+    });
+  });
 });
 
 describe('block-tree deterministic shared partials', () => {
@@ -332,8 +436,8 @@ describe('block-tree deterministic shared partials', () => {
       type: 'sidebar',
       widgets: [
         { kind: 'search' },
-        { kind: 'categories' },
         { kind: 'recent-posts' },
+        { kind: 'categories' },
       ],
     });
   });
@@ -871,5 +975,86 @@ describe('block-tree deterministic post detail terms', () => {
         showButton: true,
       },
     ]);
+  });
+
+  it('promotes standalone sticky-sidebar widgets into the deterministic single-post plan', () => {
+    const plan = buildBlockTreeDrivenVisualPlanForComponent({
+      ...detailBaseInput,
+      componentPlan: {
+        templateName: 'single',
+        componentName: 'Single',
+        type: 'page' as const,
+        route: '/post/:slug',
+        dataNeeds: ['post-detail'],
+        isDetail: true,
+      },
+      draftSections: [],
+      draftBlockTree: [
+        {
+          kind: 'cover',
+          blockName: 'cover',
+          src: 'theme-asset:/assets/images/banner.jpg',
+          children: [{ kind: 'post-title', blockName: 'post-title' }],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          children: [{ kind: 'post-content', blockName: 'post-content' }],
+        },
+        {
+          kind: 'group',
+          blockName: 'group',
+          customClassNames: ['sticky-sidebar'],
+          children: [
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [{ kind: 'search', blockName: 'search' }],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Latest Posts' },
+                { kind: 'latest-posts', blockName: 'latest-posts' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Categories' },
+                { kind: 'categories', blockName: 'categories' },
+              ],
+            },
+            {
+              kind: 'group',
+              blockName: 'group',
+              children: [
+                { kind: 'heading', blockName: 'heading', text: 'Tags' },
+                { kind: 'tag-cloud', blockName: 'tag-cloud' },
+              ],
+            },
+          ],
+        },
+      ] as BlockNode[],
+    });
+
+    expect(plan?.sections.map((section) => section.type)).toEqual([
+      'post-title',
+      'post-content',
+      'sidebar',
+    ]);
+    expect(plan?.sections[2]).toMatchObject({
+      type: 'sidebar',
+      widgets: [
+        { kind: 'search' },
+        { kind: 'recent-posts', title: 'Latest Posts' },
+        { kind: 'categories', title: 'Categories' },
+        { kind: 'tags', title: 'Tags' },
+      ],
+    });
+    expect(plan?.layout.contentLayout).toBe('sidebar-right');
+    expect(plan?.layout.sidebarScope).toBe('all-content');
   });
 });

@@ -514,3 +514,56 @@ describe('CodeReviewerService inline section generation policy', () => {
     expect(result.attemptsUsed).toBe(0);
   });
 });
+
+describe('CodeReviewerService theme-asset postprocess', () => {
+  const service = new CodeReviewerService(
+    {} as never,
+    {} as never,
+    {} as never,
+    new CodeGeneratorService(),
+    new FrameGeneratorService(),
+  );
+
+  it('normalizes raw theme-asset URLs into resolveAsset calls', () => {
+    const processed = (
+      service as unknown as {
+        postProcessCode: (code: string) => string;
+      }
+    ).postProcessCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return (
+          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+            <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+          </section>
+        );
+      }
+    `);
+
+    expect(processed).toContain('const resolveAsset = (src: string) => {');
+    expect(processed).toContain(
+      'backgroundImage: `url("${resolveAsset("theme-asset:/assets/images/banner.jpg")}")`',
+    );
+    expect(processed).toContain(
+      'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+  });
+
+  it('normalizes common sans-serif typos in generated inline styles', () => {
+    const processed = (
+      service as unknown as {
+        postProcessCode: (code: string) => string;
+      }
+    ).postProcessCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return <h1 style={{ fontFamily: "League Spartan, san-serif" }}>Hello</h1>;
+      }
+    `);
+
+    expect(processed).toContain('League Spartan, sans-serif');
+    expect(processed).not.toContain('san-serif');
+  });
+});

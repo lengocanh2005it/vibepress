@@ -1191,7 +1191,11 @@ ${component.code}
       'must preserve spectra/uagb-compatible markers',
       'must keep real interactive state wiring',
       'approved carousel section must move the track',
-    ];
+      'resolveasset() helper',
+      'theme asset paths are rendered directly',
+      'theme asset urls are used directly',
+      'images will not load correctly at runtime',
+     ];
 
     return review.issues.filter(
       (issue) =>

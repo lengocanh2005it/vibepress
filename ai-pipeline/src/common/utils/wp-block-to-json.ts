@@ -908,6 +908,7 @@ function extractLeafContent(blockName: string, html: string): Partial<WpNode> {
     return {
       level: parseInt(headingMatch[1]),
       text: stripTags(headingMatch[2]),
+      html: headingMatch[2].trim(),
     };
   }
 

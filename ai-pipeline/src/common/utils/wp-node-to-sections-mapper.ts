@@ -3415,6 +3415,10 @@ function buildMediaTextFromColumns(
     return { type: 'card-grid', columns: 2, cards };
   }
 
+  const imageFlat = imgInFirst ? flat0 : flat1;
+  const imageCoverNode = imageFlat.find(
+    (c) => c.block === 'core/cover' || c.block === 'cover',
+  );
   const textFlat = imgInFirst ? flat1 : flat0;
   const h = textFlat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
@@ -3434,6 +3438,29 @@ function buildMediaTextFromColumns(
           imageCustomClassNames: uniqueClassNames(imgNode.customClassNames),
         }
       : {}),
+    ...(imageCoverNode?.borderRadius
+      ? { imageRadius: normalizeBorderRadiusValue(imageCoverNode.borderRadius) }
+      : {}),
+    ...(imageCoverNode?.minHeight
+      ? { imageFrameMinHeight: imageCoverNode.minHeight }
+      : {}),
+    ...(imageCoverNode?.overlayColor || imageCoverNode?.bgColor
+      ? {
+          imageFrameBackground:
+            imageCoverNode.overlayColor ?? imageCoverNode.bgColor,
+        }
+      : {}),
+    ...(imageCoverNode?.padding
+      ? { imageFramePaddingStyle: boxSpacingToCss(imageCoverNode.padding) }
+      : {}),
+    ...(imageCoverNode?.customClassNames?.length
+      ? {
+          imageFrameCustomClassNames: uniqueClassNames(
+            imageCoverNode.customClassNames,
+          ),
+        }
+      : {}),
+    ...(imageCoverNode ? { imageFit: 'contain' as const } : {}),
   };
   const columnWidths = cols
     .map((col) => normalizeCssLength(col.columnWidth))
@@ -3446,7 +3473,7 @@ function buildMediaTextFromColumns(
     paragraphNodes,
     h,
   );
-  if (h?.text) s.heading = h.text;
+  if (h) s.heading = extractNodeRichText(h);
   if (subtitleNode) s.subtitle = extractNodeRichText(subtitleNode);
   const mediaHeadingCustomClassNames = extractStyleVariantClassNames(
     h?.customClassNames,
@@ -4025,6 +4052,19 @@ function boxSpacingToCss(box: NonNullable<WpNode['padding']>): string {
   if (top === right && top === bottom && top === left) return top;
   if (top === bottom && right === left) return `${top} ${right}`;
   return `${top} ${right} ${bottom} ${left}`;
+}
+
+function normalizeBorderRadiusValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return undefined;
+  const radius = value as Record<string, unknown>;
+  const topLeft = normalizeCssLength(String(radius.topLeft ?? '0')) ?? '0';
+  const topRight = normalizeCssLength(String(radius.topRight ?? topLeft)) ?? topLeft;
+  const bottomRight =
+    normalizeCssLength(String(radius.bottomRight ?? topLeft)) ?? topLeft;
+  const bottomLeft =
+    normalizeCssLength(String(radius.bottomLeft ?? topRight)) ?? topRight;
+  return `${topLeft} ${topRight} ${bottomRight} ${bottomLeft}`;
 }
 
 function normalizeCssLength(value?: string): string | undefined {

@@ -21,6 +21,7 @@ import type {
   SearchSection,
   SectionPlan,
   SidebarSection,
+  SidebarWidget,
   SourceSegment,
   TypographyTokens,
   VisualPlanLockPolicy,
@@ -66,6 +67,13 @@ interface SidebarShellPresentation {
   gapStyle?: string;
   sourceRef?: BlockNode['sourceRef'];
   customClassNames?: string[];
+}
+
+interface SidebarSourceMatch {
+  nodes: BlockNode[];
+  shell?: SidebarShellPresentation;
+  position?: 'left' | 'right';
+  width?: string;
 }
 
 export interface BuildBlockTreeDrivenVisualPlanInput {
@@ -1111,10 +1119,16 @@ function buildBlockTreeDrivenListingSections(input: {
     componentPlan.templateName,
   );
   const shell = inspectDetailShellFromBlockTree(draftBlockTree);
+  const sidebarSource = resolveSidebarSourceMatch(draftBlockTree, shell);
   const orderedNodes = collectBlockNodesInOrder(
     draftBlockTree,
-    shell.sidebarColumnSourceNodeId
-      ? new Set([shell.sidebarColumnSourceNodeId])
+    shell.sidebarColumnSourceNodeId || sidebarSource?.shell?.sourceRef?.sourceNodeId
+      ? new Set(
+          [
+            shell.sidebarColumnSourceNodeId,
+            sidebarSource?.shell?.sourceRef?.sourceNodeId,
+          ].filter((value): value is string => Boolean(value)),
+        )
       : undefined,
   );
   const queryNode = orderedNodes.find((node) =>
@@ -1186,15 +1200,9 @@ function buildBlockTreeDrivenListingSections(input: {
     );
   }
 
-  if (shell.sidebarNodes?.length) {
+  if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
-        paddingStyle: shell.shellPaddingStyle,
-        marginStyle: shell.shellMarginStyle,
-        gapStyle: shell.shellGapStyle,
-        sourceRef: shell.shellSourceRef,
-        customClassNames: shell.shellCustomClassNames,
-      }),
+      buildSidebarSectionFromBlockTree(sidebarSource.nodes, input.content, sidebarSource.shell),
     );
   }
 
@@ -1204,12 +1212,17 @@ function buildBlockTreeDrivenListingSections(input: {
 
   return {
     sections,
-    layout: shell.hasSidebar
+    layout: shell.hasSidebar || !!sidebarSource
       ? {
           ...input.layout,
           contentLayout:
-            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
-          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
+            (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+              ? 'sidebar-left'
+              : 'sidebar-right',
+          sidebarWidth:
+            sidebarSource?.width ??
+            shell.sidebarWidth ??
+            input.layout.sidebarWidth,
           sidebarScope: 'all-content',
         }
       : input.layout,
@@ -1399,12 +1412,18 @@ function buildBlockTreeDrivenPostDetailSections(input: {
   layout: LayoutTokens;
 }): { sections: SectionPlan[]; layout?: LayoutTokens } | undefined {
   const shell = inspectDetailShellFromBlockTree(input.draftBlockTree);
+  const sidebarSource = resolveSidebarSourceMatch(input.draftBlockTree, shell);
   const dataNeeds = toVisualDataNeeds(input.componentPlan.dataNeeds);
   const isProductDetail = dataNeeds.includes('productDetail');
   const mainNodes = collectBlockNodesInOrder(
     input.draftBlockTree,
-    shell.sidebarColumnSourceNodeId
-      ? new Set([shell.sidebarColumnSourceNodeId])
+    shell.sidebarColumnSourceNodeId || sidebarSource?.shell?.sourceRef?.sourceNodeId
+      ? new Set(
+          [
+            shell.sidebarColumnSourceNodeId,
+            sidebarSource?.shell?.sourceRef?.sourceNodeId,
+          ].filter((value): value is string => Boolean(value)),
+        )
       : undefined,
   );
   const stats = collectPostDetailBlockStats(mainNodes);
@@ -1580,26 +1599,25 @@ function buildBlockTreeDrivenPostDetailSections(input: {
     sections.push({ ...section });
   }
 
-  if (shell.sidebarNodes?.length) {
+  if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(shell.sidebarNodes, input.content, {
-        paddingStyle: shell.shellPaddingStyle,
-        marginStyle: shell.shellMarginStyle,
-        gapStyle: shell.shellGapStyle,
-        sourceRef: shell.shellSourceRef,
-        customClassNames: shell.shellCustomClassNames,
-      }),
+      buildSidebarSectionFromBlockTree(sidebarSource.nodes, input.content, sidebarSource.shell),
     );
   }
 
   return {
     sections,
-    layout: shell.hasSidebar
+    layout: shell.hasSidebar || !!sidebarSource
       ? {
           ...input.layout,
           contentLayout:
-            shell.sidebarPosition === 'left' ? 'sidebar-left' : 'sidebar-right',
-          sidebarWidth: shell.sidebarWidth ?? input.layout.sidebarWidth,
+            (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+              ? 'sidebar-left'
+              : 'sidebar-right',
+          sidebarWidth:
+            sidebarSource?.width ??
+            shell.sidebarWidth ??
+            input.layout.sidebarWidth,
           sidebarScope: 'all-content',
         }
       : input.layout,
@@ -1757,6 +1775,87 @@ function blockTreeContainsSidebarTemplate(node: BlockNode): boolean {
   return (node.children ?? []).some((child) =>
     blockTreeContainsSidebarTemplate(child),
   );
+}
+
+function resolveSidebarSourceMatch(
+  draftBlockTree: BlockNode[],
+  shell: DetailShellInfo,
+): SidebarSourceMatch | undefined {
+  const shellNodes = shell.sidebarNodes ?? [];
+  if (hasRenderableSidebarWidgetContent(shellNodes)) {
+    return {
+      nodes: shellNodes,
+      position: shell.sidebarPosition,
+      width: shell.sidebarWidth,
+      shell: {
+        paddingStyle: shell.shellPaddingStyle,
+        marginStyle: shell.shellMarginStyle,
+        gapStyle: shell.shellGapStyle,
+        sourceRef: shell.shellSourceRef,
+        customClassNames: shell.shellCustomClassNames,
+      },
+    };
+  }
+
+  const standaloneSidebar = findStandaloneSidebarRoot(
+    draftBlockTree,
+    shell.sidebarColumnSourceNodeId,
+  );
+  if (!standaloneSidebar?.children?.length) {
+    return undefined;
+  }
+
+  return {
+    nodes: standaloneSidebar.children,
+    position: shell.sidebarPosition ?? 'right',
+    width: shell.sidebarWidth,
+    shell: {
+      paddingStyle: blockSpacingToCssShorthand(standaloneSidebar.padding),
+      marginStyle: blockSpacingToCssShorthand(standaloneSidebar.margin),
+      gapStyle: standaloneSidebar.gap,
+      sourceRef: standaloneSidebar.sourceRef,
+      customClassNames: standaloneSidebar.customClassNames,
+    },
+  };
+}
+
+function hasRenderableSidebarWidgetContent(sidebarNodes?: BlockNode[]): boolean {
+  return collectSidebarWidgetKinds(sidebarNodes ?? []).size > 0;
+}
+
+function findStandaloneSidebarRoot(
+  nodes: BlockNode[],
+  excludedSourceNodeIdPrefix?: string,
+): BlockNode | undefined {
+  const visit = (node: BlockNode): BlockNode | undefined => {
+    if (nodeBelongsToSourceSubtree(node, excludedSourceNodeIdPrefix)) {
+      return undefined;
+    }
+    if (isStandaloneSidebarRootCandidate(node)) {
+      return node;
+    }
+    for (const child of node.children ?? []) {
+      const nested = visit(child);
+      if (nested) return nested;
+    }
+    return undefined;
+  };
+
+  for (const node of nodes) {
+    const candidate = visit(node);
+    if (candidate) return candidate;
+  }
+  return undefined;
+}
+
+function isStandaloneSidebarRootCandidate(node: BlockNode): boolean {
+  const widgetKinds = collectSidebarWidgetKinds([node]);
+  if (widgetKinds.size === 0) return false;
+  const hasStickySidebarClass = (node.customClassNames ?? []).some((className) =>
+    /sticky-sidebar/i.test(className),
+  );
+  if (hasStickySidebarClass) return true;
+  return widgetKinds.size >= 3 && (node.children?.length ?? 0) >= 2;
 }
 
 function collectBlockNodesInOrder(
@@ -1917,62 +2016,7 @@ function buildSidebarSectionFromBlockTree(
         node.text.trim().length > 0,
     )
     .map((node) => node.text!.trim());
-  const hasSearch = orderedNodes.some((node) => node.kind === 'search');
-  const hasNavigation = orderedNodes.some((node) => node.kind === 'navigation');
-  const hasAuthorBio = orderedNodes.some((node) =>
-    ['post-author-biography', 'avatar'].includes(node.kind),
-  );
-  const hasCategories = orderedNodes.some((node) => node.kind === 'categories');
-  const hasRecentPosts = orderedNodes.some((node) =>
-    ['query', 'latest-posts'].includes(node.kind),
-  );
-
-  const widgets: SidebarSection['widgets'] = [];
-  if (hasSearch) {
-    widgets.push({
-      kind: 'search',
-      ...(headingTexts.find((heading) => /search/i.test(heading))
-        ? {
-            title: headingTexts.find((heading) => /search/i.test(heading)),
-          }
-        : {}),
-    });
-  }
-  if (hasAuthorBio) {
-    widgets.push({
-      kind: 'author-bio',
-      title:
-        headingTexts.find((heading) => /author/i.test(heading)) ??
-        'About the author',
-      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
-    });
-  }
-  if (hasCategories) {
-    widgets.push({
-      kind: 'categories',
-      title:
-        headingTexts.find((heading) => /categor/i.test(heading)) ??
-        'Popular Categories',
-    });
-  }
-  if (hasNavigation) {
-    widgets.push({
-      kind: 'navigation',
-      title:
-        headingTexts.find((heading) =>
-          /link|resource|menu|explore/i.test(heading),
-        ) ?? 'Useful Links',
-      menuSlug: content.menus[0]?.slug ?? 'primary',
-    });
-  }
-  if (hasRecentPosts) {
-    widgets.push({
-      kind: 'recent-posts',
-      title:
-        headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
-        'Recent Posts',
-    });
-  }
+  const widgets = buildOrderedSidebarWidgets(sidebarNodes, content);
   if (widgets.length === 0) {
     widgets.push({
       kind: 'pages-list',
@@ -2005,6 +2049,212 @@ function buildSidebarSectionFromBlockTree(
     debugKey: 'sidebar-0',
     sectionKey: 'sidebar-0',
   };
+}
+
+function buildOrderedSidebarWidgets(
+  sidebarNodes: BlockNode[],
+  content: DbContentResult,
+): SidebarWidget[] {
+  const widgetRoots = collectSidebarWidgetRoots(sidebarNodes);
+  const widgets = widgetRoots
+    .map((root) => buildSidebarWidgetFromRoot(root, content))
+    .filter((widget): widget is SidebarWidget => Boolean(widget));
+  if (widgets.length > 0) {
+    return widgets;
+  }
+
+  const orderedNodes = collectBlockNodesInOrder(sidebarNodes);
+  const headingTexts = orderedNodes
+    .filter(
+      (node) =>
+        node.kind === 'heading' &&
+        typeof node.text === 'string' &&
+        node.text.trim().length > 0,
+    )
+    .map((node) => node.text!.trim());
+
+  const fallbackWidgets: SidebarWidget[] = [];
+  if (orderedNodes.some((node) => node.kind === 'search')) {
+    fallbackWidgets.push({
+      kind: 'search',
+      ...(headingTexts.find((heading) => /search/i.test(heading))
+        ? {
+            title: headingTexts.find((heading) => /search/i.test(heading)),
+          }
+        : {}),
+    });
+  }
+  if (
+    orderedNodes.some((node) => ['query', 'latest-posts'].includes(node.kind))
+  ) {
+    fallbackWidgets.push({
+      kind: 'recent-posts',
+      title:
+        headingTexts.find((heading) => /recent|latest/i.test(heading)) ??
+        'Recent Posts',
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'categories')) {
+    fallbackWidgets.push({
+      kind: 'categories',
+      title:
+        headingTexts.find((heading) => /categor/i.test(heading)) ??
+        'Popular Categories',
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'tag-cloud')) {
+    fallbackWidgets.push({
+      kind: 'tags',
+      title: headingTexts.find((heading) => /tag/i.test(heading)) ?? 'Tags',
+    });
+  }
+  if (
+    orderedNodes.some((node) => ['post-author-biography', 'avatar'].includes(node.kind))
+  ) {
+    fallbackWidgets.push({
+      kind: 'author-bio',
+      title:
+        headingTexts.find((heading) => /author/i.test(heading)) ??
+        'About the author',
+      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
+    });
+  }
+  if (orderedNodes.some((node) => node.kind === 'navigation')) {
+    fallbackWidgets.push({
+      kind: 'navigation',
+      title:
+        headingTexts.find((heading) => /link|resource|menu|explore/i.test(heading)) ??
+        'Useful Links',
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+    });
+  }
+  return fallbackWidgets;
+}
+
+function collectSidebarWidgetRoots(nodes: BlockNode[]): BlockNode[] {
+  const roots: BlockNode[] = [];
+  const visit = (node: BlockNode) => {
+    const widgetKinds = collectSidebarWidgetKinds([node]);
+    if (widgetKinds.size === 0) {
+      for (const child of node.children ?? []) {
+        visit(child);
+      }
+      return;
+    }
+
+    if (isSidebarWidgetRootNode(node, widgetKinds)) {
+      roots.push(node);
+      return;
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child);
+    }
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+  return roots;
+}
+
+function isSidebarWidgetRootNode(
+  node: BlockNode,
+  widgetKinds: Set<SidebarWidget['kind']>,
+): boolean {
+  if (widgetKinds.size !== 1) return false;
+  if (mapSidebarWidgetKind(node.kind)) return true;
+  const children = node.children ?? [];
+  return children.some((child) => child.kind === 'heading') || children.length <= 1;
+}
+
+function buildSidebarWidgetFromRoot(
+  root: BlockNode,
+  content: DbContentResult,
+): SidebarWidget | undefined {
+  const orderedNodes = collectBlockNodesInOrder([root]);
+  const title = orderedNodes
+    .find((node) => node.kind === 'heading' && node.text?.trim())
+    ?.text?.trim();
+
+  if (orderedNodes.some((node) => node.kind === 'search')) {
+    return {
+      kind: 'search',
+      ...(title ? { title } : {}),
+    };
+  }
+  if (
+    orderedNodes.some((node) => ['query', 'latest-posts'].includes(node.kind))
+  ) {
+    return {
+      kind: 'recent-posts',
+      title: title ?? 'Recent Posts',
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'categories')) {
+    return {
+      kind: 'categories',
+      title: title ?? 'Popular Categories',
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'tag-cloud')) {
+    return {
+      kind: 'tags',
+      title: title ?? 'Tags',
+    };
+  }
+  if (
+    orderedNodes.some((node) => ['post-author-biography', 'avatar'].includes(node.kind))
+  ) {
+    return {
+      kind: 'author-bio',
+      title: title ?? 'About the author',
+      showAvatar: orderedNodes.some((node) => node.kind === 'avatar'),
+    };
+  }
+  if (orderedNodes.some((node) => node.kind === 'navigation')) {
+    return {
+      kind: 'navigation',
+      title: title ?? 'Useful Links',
+      menuSlug: content.menus[0]?.slug ?? 'primary',
+    };
+  }
+  return undefined;
+}
+
+function collectSidebarWidgetKinds(
+  nodes: BlockNode[],
+): Set<SidebarWidget['kind']> {
+  const kinds = new Set<SidebarWidget['kind']>();
+  const orderedNodes = collectBlockNodesInOrder(nodes);
+  for (const node of orderedNodes) {
+    const widgetKind = mapSidebarWidgetKind(node.kind);
+    if (widgetKind) {
+      kinds.add(widgetKind);
+    }
+  }
+  return kinds;
+}
+
+function mapSidebarWidgetKind(kind: string): SidebarWidget['kind'] | undefined {
+  switch (kind) {
+    case 'search':
+      return 'search';
+    case 'post-author-biography':
+    case 'avatar':
+      return 'author-bio';
+    case 'categories':
+      return 'categories';
+    case 'tag-cloud':
+      return 'tags';
+    case 'navigation':
+      return 'navigation';
+    case 'query':
+    case 'latest-posts':
+      return 'recent-posts';
+    default:
+      return undefined;
+  }
 }
 
 function isCommentsBlockTreeNode(node: BlockNode): boolean {

@@ -347,4 +347,108 @@ describe('ValidatorService derived collection bindings', () => {
     expect(result.isValid).toBe(true);
     expect(result.error).toBeUndefined();
   });
+
+  it('accepts sidebar tag labels derived from the posts collection', () => {
+    const result = service.checkCodeStructure(
+      `
+        import { useState } from 'react';
+        import { Link } from 'react-router-dom';
+
+        export default function BlogRightSidebar() {
+          const [posts] = useState<any[]>([]);
+          const tagItems = (() => {
+            const map = new Map<string, number>();
+            posts.forEach((post) => {
+              (post.tags ?? []).forEach((tag) => {
+                const key = String(tag ?? '').trim();
+                if (!key) return;
+                map.set(key, (map.get(key) ?? 0) + 1);
+              });
+            });
+            return Array.from(map.entries()).map(([name, count]) => ({
+              name,
+              slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+              count,
+            }));
+          })();
+
+          return (
+            <section>
+              <h3>Tags</h3>
+              <div>
+                {tagItems.map((tag) => (
+                  <Link
+                    key={tag.slug || tag.name}
+                    to={'/tag/' + tag.slug}
+                    className="hover:underline underline-offset-4"
+                  >
+                    {tag.name}
+                  </Link>
+                ))}
+              </div>
+            </section>
+          );
+        }
+      `,
+      {
+        componentName: 'BlogRightSidebar',
+        type: 'page',
+        dataNeeds: ['posts'],
+        visualPlan: {
+          componentName: 'BlogRightSidebar',
+          sections: [
+            {
+              type: 'sidebar',
+              widgets: [{ kind: 'tags', title: 'Tags' }],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('sanitizes raw theme-asset references before validation', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      const resolveThemeAsset = (src?: string) => {
+        if (!src) return '';
+        if (src.startsWith('theme-asset:')) return src;
+        return src;
+      };
+
+      export default function FrontPage() {
+        return (
+          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+            <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+          </section>
+        );
+      }
+    `);
+
+    expect(code).toContain('const resolveAsset = (src: string) => {');
+    expect(code).toContain(
+      'backgroundImage: `url("${resolveAsset("theme-asset:/assets/images/banner.jpg")}")`',
+    );
+    expect(code).toContain(
+      'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+    expect(code).toContain('const resolveThemeAsset = (src?: string) => {');
+  });
+
+  it('normalizes common sans-serif typos before validation', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        return <h1 style={{ fontFamily: "League Spartan, san-serif" }}>Hello</h1>;
+      }
+    `);
+
+    expect(code).toContain('League Spartan, sans-serif');
+    expect(code).not.toContain('san-serif');
+  });
 });

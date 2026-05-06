@@ -29,7 +29,11 @@ import {
 } from './prompts/component.prompt.js';
 import { INVENTED_AUXILIARY_SECTION_LABELS } from './auxiliary-section.guard.js';
 import { FLAT_REST_SAFETY_RULE } from './api-contract.js';
-import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
+import {
+  normalizeCanonicalPostMetaAndTextLinks,
+  normalizeCommonTypographyTypos,
+  normalizeThemeAssetReferences,
+} from '../shared/code-postprocess.util.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
@@ -5050,11 +5054,15 @@ export class CodeReviewerService {
   // ── Code post-processors ──────────────────────────────────────────────────
 
   private postProcessCode(code: string): string {
-    return normalizeCanonicalPostMetaAndTextLinks(
+    return normalizeCommonTypographyTypos(
+      normalizeThemeAssetReferences(
+      normalizeCanonicalPostMetaAndTextLinks(
       this.normalizeTailwindFunctionSpacing(
         this.fixDoublebraces(
           this.mergeClassNames(this.stripMarkdownFences(code)),
         ),
+      ),
+      ),
       ),
     );
   }

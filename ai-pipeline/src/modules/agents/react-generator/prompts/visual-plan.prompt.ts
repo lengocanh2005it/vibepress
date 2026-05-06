@@ -253,7 +253,7 @@ prose-block:  { shellVariant?: article|wide, sourceSegments: [{ type: heading|pa
 comments:     { showForm, requireName, requireEmail }
 search:       { title? }
 breadcrumb:   {}
-sidebar:      { title?, widgets: [{ kind: search|author-bio|categories|navigation|pages-list|recent-posts, ... }], maxItems? }
+sidebar:      { title?, widgets: [{ kind: search|author-bio|categories|tags|navigation|pages-list|recent-posts, ... }], maxItems? }
 modal:        { triggerText?, triggerStyle?, heading?, headingStyle?, body?, bodyStyle?, imageSrc?, imageAlt?, cta?, ctas?, layout?: centered|split, closeOnOverlay?, closeOnEsc?, overlayColor?, width?, height? }
 tabs:         { title?, activeTab?, variant?, tabAlign?, tabs: [{ label, heading?, body?, imageSrc?, imageAlt?, cta? }] }
 accordion:    { title?, items: [{ heading, body }], allowMultiple?, enableToggle?, defaultOpenItems?, variant? }
@@ -1071,6 +1071,7 @@ function sanitizeSidebarWidgets(rawWidgets: unknown): SidebarWidget[] {
         });
         break;
       case 'categories':
+      case 'tags':
         widgets.push({
           kind,
           ...(title ? { title } : {}),
@@ -1986,6 +1987,7 @@ export function sanitizeSectionsForContract(
             widget.kind === 'search' ||
             widget.kind === 'pages-list' ||
             widget.kind === 'recent-posts' ||
+            widget.kind === 'tags' ||
             widget.kind === 'categories',
         );
         if (allowedWidgets.length !== (next.widgets ?? []).length) {

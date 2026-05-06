@@ -396,4 +396,58 @@ describe('mapWpNodesToDraftSections', () => {
       },
     });
   });
+
+  it('preserves rich heading markup and cover-backed image frames in media-text columns', () => {
+    const markup = `
+<!-- wp:columns -->
+<div class="wp-block-columns">
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:paragraph {"style":{"typography":{"fontWeight":"700","textTransform":"uppercase","letterSpacing":"1px"}}} -->
+    <p>About Me</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading {"level":1} -->
+    <h1>Welcome To My Profile <br>I am <mark style="background-color:rgba(0,0,0,0)" class="has-inline-color has-secondary-color">Julia Henderson</mark></h1>
+    <!-- /wp:heading -->
+    <!-- wp:paragraph -->
+    <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo.</p>
+    <!-- /wp:paragraph -->
+  </div>
+  <!-- /wp:column -->
+  <!-- wp:column -->
+  <div class="wp-block-column">
+    <!-- wp:cover {"overlayColor":"secondary","minHeight":550,"className":"r-cover","style":{"border":{"radius":{"topLeft":"50%","topRight":"50%","bottomLeft":"0px","bottomRight":"0px"}},"spacing":{"padding":{"top":"0","right":"0","bottom":"0","left":"0"}}}} -->
+    <div class="wp-block-cover r-cover" style="border-top-left-radius:50%;border-top-right-radius:50%;border-bottom-left-radius:0px;border-bottom-right-radius:0px;padding-top:0;padding-right:0;padding-bottom:0;padding-left:0;min-height:550px">
+      <span aria-hidden="true" class="wp-block-cover__background has-secondary-background-color has-background-dim-100 has-background-dim"></span>
+      <div class="wp-block-cover__inner-container">
+        <!-- wp:image -->
+        <figure class="wp-block-image is-resized"><img src="/banner-image.png" alt="Julia Henderson" /></figure>
+        <!-- /wp:image -->
+      </div>
+    </div>
+    <!-- /wp:cover -->
+  </div>
+  <!-- /wp:column -->
+</div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/banner-image.png',
+      imageFit: 'contain',
+      imageFrameMinHeight: '550px',
+      imageRadius: '50% 50% 0px 0px',
+      imageFrameCustomClassNames: ['r-cover'],
+      subtitle: 'About Me',
+    });
+    expect((sections[0] as { heading?: string }).heading).toContain('<br>');
+    expect((sections[0] as { heading?: string }).heading).toContain(
+      'Julia Henderson',
+    );
+  });
 });

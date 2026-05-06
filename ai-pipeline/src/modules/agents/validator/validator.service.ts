@@ -36,7 +36,11 @@ import type { PlannerSurfacePlan } from '../planner/planner-surface-plan.schema.
 import { collectSurfacePlanRequiredLiterals } from '../planner/planner-surface-plan.util.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
 import { findPlainTextPostMetaArchiveSnippets as findSharedPlainTextPostMetaArchiveSnippets } from '../../../common/utils/post-meta-link.util.js';
-import { normalizeCanonicalPostMetaAndTextLinks } from '../shared/code-postprocess.util.js';
+import {
+  normalizeCanonicalPostMetaAndTextLinks,
+  normalizeCommonTypographyTypos,
+  normalizeThemeAssetReferences,
+} from '../shared/code-postprocess.util.js';
 import {
   appendUniqueClasses,
   ensureReactRouterLinkImport,
@@ -304,6 +308,8 @@ export class ValidatorService {
     code = repairBrokenArbitraryValueClasses(code);
     code = stripDebugStatements(code);
     code = normalizeCanonicalPostMetaAndTextLinks(code);
+    code = normalizeThemeAssetReferences(code);
+    code = normalizeCommonTypographyTypos(code);
     code = ensureReactRouterLinkImport(code);
     return code;
   }
@@ -1286,6 +1292,7 @@ export class ValidatorService {
           case 'avatar':
           case 'post-author-biography':
           case 'categories':
+          case 'tag-cloud':
           case 'post-date':
           case 'post-author-name':
           case 'post-terms':
@@ -2607,6 +2614,15 @@ export class ValidatorService {
             ],
           );
           break;
+        case 'tags':
+          addLiteral(widget.title, `${label} tags widget lost title`);
+          addBinding('posts', `${label} tags widget is missing tag rendering`, [
+            {
+              name: 'tags',
+              message: `${label} tags widget is missing tag labels`,
+            },
+          ]);
+          break;
         case 'navigation':
           addLiteral(widget.title, `${label} navigation widget lost title`);
           addLiteral(
@@ -3085,12 +3101,12 @@ export class ValidatorService {
       case 'posts':
         return this.codeMatchesAnyPattern(code, [
           /\bposts(?:\??\.)?(?:map|slice|filter|find|findIndex)\s*\(/,
-          /\b(?:post|item|previousPost|nextPost)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?)\b/,
+          /\b(?:post|item|previousPost|nextPost)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?|tags)\b/,
         ]);
       case 'products':
         return this.codeMatchesAnyPattern(code, [
           /\bproducts(?:\??\.)?(?:map|slice|filter|find|findIndex)\s*\(/,
-          /\b(?:product|post|item)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?|price|buttonText|buttonUrl)\b/,
+          /\b(?:product|post|item)\.(?:title|slug|excerpt|content|date|author(?:Name)?|featuredImage|image|thumbnail|categories?|categorySlugs?|tags|price|buttonText|buttonUrl)\b/,
           /\/api\/post-types\/product\//,
         ]);
       case 'pages':
@@ -3178,6 +3194,8 @@ export class ValidatorService {
                 code,
               ) || this.codeUsesDerivedCategoryCollection(code)
             );
+          case 'tags':
+            return /\b(?:post|item|previousPost|nextPost)\.tags\b/i.test(code);
           case 'featuredImage':
             return /\b(?:post|item|previousPost|nextPost)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,
@@ -3220,6 +3238,8 @@ export class ValidatorService {
                 code,
               ) || this.codeUsesDerivedCategoryCollection(code)
             );
+          case 'tags':
+            return /\b(?:product|post|item)\.tags\b/i.test(code);
           case 'featuredImage':
             return /\b(?:product|post|item)\.(?:featuredImage|image|thumbnail)\b|<img\b/i.test(
               code,

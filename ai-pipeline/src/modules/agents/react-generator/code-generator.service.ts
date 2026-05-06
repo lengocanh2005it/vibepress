@@ -598,6 +598,7 @@ export class CodeGeneratorService {
               needs.add('posts');
             }
             if (widget.kind === 'categories') needs.add('posts');
+            if (widget.kind === 'tags') needs.add('posts');
             if (widget.kind === 'navigation') needs.add('menus');
             if (widget.kind === 'pages-list') needs.add('pages');
             if (widget.kind === 'recent-posts') needs.add('posts');
@@ -622,6 +623,7 @@ export class CodeGeneratorService {
       switch (node.kind) {
         case 'avatar':
         case 'categories':
+        case 'tag-cloud':
         case 'query':
         case 'latest-posts':
           needs.add('posts');
@@ -2202,6 +2204,9 @@ export default ${componentName};`;
       case 'categories':
         return this.renderBlockTreeCategories(node, depth);
 
+      case 'tag-cloud':
+        return this.renderBlockTreeTagCloud(node, depth);
+
       case 'query':
       case 'latest-posts':
         return this.renderBlockTreeRecentPosts(node, depth);
@@ -2417,6 +2422,32 @@ ${indent}        </Link>
 ${indent}      </li>
 ${indent}    ))}
 ${indent}  </ul>
+${indent}</div>`;
+  }
+
+  private renderBlockTreeTagCloud(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${indent}  <div className="flex flex-wrap gap-2">
+${indent}    {(() => {
+${indent}      const tagMap = new Map<string, number>();
+${indent}      posts.forEach((post) => {
+${indent}        (post.tags ?? []).forEach((tag) => {
+${indent}          const key = String(tag ?? '').trim();
+${indent}          if (!key) return;
+${indent}          tagMap.set(key, (tagMap.get(key) ?? 0) + 1);
+${indent}        });
+${indent}      });
+${indent}      return Array.from(tagMap.entries()).map(([tag, count]) => {
+${indent}        const slug = encodeURIComponent(tag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+${indent}        return (
+${indent}          <Link key={tag} to={'/tag/' + slug} className="hover:underline underline-offset-4">
+${indent}            {tag}{count > 1 ? \` (\${count})\` : ''}
+${indent}          </Link>
+${indent}        );
+${indent}      });
+${indent}    })()}
+${indent}  </div>
 ${indent}</div>`;
   }
 
@@ -4927,11 +4958,13 @@ ${cards}
       ...this.buildBlockStyleMap(imageStyle, {}, false, ctx),
       borderRadius: s.imageRadius,
       aspectRatio: s.imageAspectRatio,
-      objectFit: s.imageAspectRatio
-        ? this.shouldPreserveFullAsset(s.imageSrc)
-          ? 'contain'
-          : 'cover'
-        : undefined,
+      objectFit:
+        s.imageFit ??
+        (s.imageAspectRatio
+          ? this.shouldPreserveFullAsset(s.imageSrc)
+            ? 'contain'
+            : 'cover'
+          : undefined),
     });
     const headingStyle = this.buildTextTokenStyleAttr(
       ctx,
@@ -4965,11 +4998,21 @@ ${cards}
       ctaStyle: s.ctaStyle,
       secondaryCtaStyle: s.secondaryCtaStyle,
     });
+    const imageFrameClassName = this.appendOptionalCustomClasses(
+      `${itemWrapper} ${s.imageFrameBackground || s.imageFrameMinHeight ? 'flex items-end justify-center overflow-hidden' : ''}`.trim(),
+      s.imageFrameCustomClassNames,
+    );
     const mediaImageClassName = this.appendOptionalCustomClasses(
-      `w-full h-auto ${this.inlineImageFitClass(s.imageSrc)} ${imageRadius}`.trim(),
+      `${s.imageFrameBackground || s.imageFrameMinHeight ? 'max-w-full' : 'w-full h-auto'} ${this.inlineImageFitClass(s.imageSrc)} ${s.imageFrameBackground || s.imageFrameMinHeight ? '' : imageRadius}`.trim(),
       s.imageCustomClassNames,
     );
-    const imgEl = `<div className="${itemWrapper}"><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
+    const imageFrameStyleAttr = this.buildStyleAttr({
+      backgroundColor: s.imageFrameBackground,
+      minHeight: s.imageFrameMinHeight,
+      padding: s.imageFramePaddingStyle,
+      borderRadius: s.imageFrameBackground || s.imageFrameMinHeight ? s.imageRadius : undefined,
+    });
+    const imgEl = `<div className="${imageFrameClassName}"${imageFrameStyleAttr}><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
     const mediaHeadingClassName = this.appendStyledTextAlignClass(
       `${t.h3} font-[600]`,
       s.headingCustomClassNames,
@@ -4985,10 +5028,31 @@ ${cards}
       s.bodyCustomClassNames,
       presentation.textAlign,
     );
+    const subtitleMarkup = !s.subtitle
+      ? ''
+      : /<[a-z]/i.test(s.subtitle)
+        ? ctx.avoidDangerouslySetInnerHTML
+          ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>{renderRichTextChildren(${JSON.stringify(s.subtitle)}, "media-text-subtitle")}</p>`
+          : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.subtitle)} }} />`
+        : `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>${s.subtitle}</p>`;
+    const headingMarkup = !s.heading
+      ? ''
+      : /<[a-z]/i.test(s.heading)
+        ? ctx.avoidDangerouslySetInnerHTML
+          ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>{renderRichTextChildren(${JSON.stringify(s.heading)}, "media-text-heading")}</h2>`
+          : `<h2 className="${mediaHeadingClassName}"${headingStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.heading)} }} />`
+        : `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>`;
+    const bodyMarkup = !s.body
+      ? ''
+      : /<[a-z]/i.test(s.body)
+        ? ctx.avoidDangerouslySetInnerHTML
+          ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
+          : `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(s.body)} }} />`
+        : `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>`;
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
-            ${s.subtitle ? `<p${mediaSubtitleClassName ? ` className="${mediaSubtitleClassName}"` : ''}${subtitleStyle}>${s.subtitle}</p>` : ''}
-            ${s.heading ? `<h2 className="${mediaHeadingClassName}"${headingStyle}>${s.heading}</h2>` : ''}
-            ${s.body ? `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>` : ''}
+            ${subtitleMarkup}
+            ${headingMarkup}
+            ${bodyMarkup}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? (ctx.avoidDangerouslySetInnerHTML ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle} dangerouslySetInnerHTML={{ __html: ${JSON.stringify(li)} }} />`) : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
             ${cta}
           </div>`;
@@ -6151,6 +6215,37 @@ ${
                 })()}
               </ul>
             </section>`;
+      case 'tags':
+        return `            <section className="flex flex-col gap-[16px]">
+${
+  widget.title
+    ? `              <h3 className="${t.h3} font-normal text-[${p.text}]"${headingStyle}>${widget.title}</h3>
+`
+    : ''
+}              <div className="flex flex-wrap gap-2 text-sm text-[${p.textMuted}]">
+                 {(() => {
+                   const tagMap = new Map<string, number>();
+                   posts.forEach((post) => {
+                     (post.tags ?? []).forEach((tag) => {
+                       const key = String(tag ?? '').trim();
+                       if (!key) return;
+                       tagMap.set(key, (tagMap.get(key) ?? 0) + 1);
+                     });
+                   });
+                   return Array.from(tagMap.entries())
+                     .sort((a, b) => b[1] - a[1])
+                     .slice(0, ${maxItems})
+                     .map(([tag, count]) => {
+                       const slug = encodeURIComponent(tag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+                       return (
+                         <Link key={tag} to={'/tag/' + slug} className="${linkClass}"${navLinkStyle}>
+                           {tag}${widget.showCounts ? ` ({count})` : ''}
+                         </Link>
+                       );
+                     });
+                 })()}
+               </div>
+             </section>`;
       case 'navigation': {
         const menuSlug = widget.menuSlug
           ? JSON.stringify(widget.menuSlug)

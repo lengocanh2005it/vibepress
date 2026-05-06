@@ -497,6 +497,7 @@ function buildAllowedEndpointsNote(input: {
         allowed.add('GET /api/site-info');
       }
       if (widget.kind === 'categories') allowed.add('GET /api/posts');
+      if (widget.kind === 'tags') allowed.add('GET /api/posts');
       if (widget.kind === 'navigation') allowed.add('GET /api/menus');
       if (widget.kind === 'pages-list') allowed.add('GET /api/pages');
       if (widget.kind === 'recent-posts') allowed.add('GET /api/posts');

@@ -5711,6 +5711,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         requiredCapabilities.add('site-info');
       }
       if (widget.kind === 'categories') requiredCapabilities.add('posts');
+      if (widget.kind === 'tags') requiredCapabilities.add('posts');
       if (widget.kind === 'navigation') requiredCapabilities.add('menus');
       if (widget.kind === 'pages-list') requiredCapabilities.add('pages');
       if (widget.kind === 'recent-posts') requiredCapabilities.add('posts');
