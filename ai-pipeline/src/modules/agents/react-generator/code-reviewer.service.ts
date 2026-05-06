@@ -238,6 +238,12 @@ export class CodeReviewerService {
   private readonly selfFixSystemPrompt =
     'You are a React/TypeScript expert. Fix the exact validation or targeted UI issue in the component. Preserve unrelated code, keep existing source-tracking attributes intact, and do not return the input unchanged when the request requires a scoped refinement. Return ONLY the corrected TSX code, no explanation.';
 
+  private readonly rewriteFileSystemPrompt =
+    'You are a React/TypeScript expert. Apply ONLY the requested change to the complete TSX file. ' +
+    'Return the ENTIRE modified file — all imports, exports, types, hooks, and unchanged code must be preserved exactly as-is. ' +
+    'Do NOT reformat, rename variables, or alter anything not mentioned in the instruction. ' +
+    'Do NOT wrap the output in markdown fences or add any explanation. The output must be valid, compilable TSX.';
+
   private readonly patchSnippetSystemPrompt =
     'You are a React/TypeScript expert. Apply the requested change to the given TSX snippet. ' +
     'Return ONLY the modified snippet — no imports, no exports, no full component file, no markdown fences, no explanation. ' +
@@ -268,6 +274,35 @@ export class CodeReviewerService {
       systemPrompt: this.patchSnippetSystemPrompt,
       userPrompt,
       maxTokens: 2048,
+    });
+
+    const raw = result.text ?? '';
+    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+  }
+
+  /**
+   * Send the entire TSX file to AI with an edit instruction and get back the fully rewritten file.
+   * Caller is responsible for backup + writeFile.
+   */
+  public async rewriteFile(
+    model: string,
+    fileContent: string,
+    instruction: string,
+    logPath?: string,
+    label?: string,
+  ): Promise<string> {
+    const userPrompt =
+      `Edit instruction:\n${instruction}\n\n` +
+      `Complete TSX file to modify:\n\`\`\`tsx\n${fileContent}\n\`\`\`\n\n` +
+      'Return the complete modified file only. No markdown fences, no explanation.';
+
+    await this.log(logPath, `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`);
+
+    const result = await this.llmFactory.chat({
+      model,
+      systemPrompt: this.rewriteFileSystemPrompt,
+      userPrompt,
+      maxTokens: 8192,
     });
 
     const raw = result.text ?? '';
