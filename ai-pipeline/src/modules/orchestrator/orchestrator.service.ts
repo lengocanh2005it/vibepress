@@ -844,7 +844,10 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     error?: string;
   }> {
     const state = this.jobs.get(body.jobId);
-    if (!state) {
+    const persistedContext = !state
+      ? await this.readPersistedVisualEditContext(body.jobId)
+      : null;
+    if (!state && !persistedContext) {
       throw new BadRequestException(`Job "${body.jobId}" not found`);
     }
 

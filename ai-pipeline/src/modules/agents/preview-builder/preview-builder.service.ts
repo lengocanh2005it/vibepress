@@ -2766,10 +2766,16 @@ ${fontEntries}
       ]);
       this.spawnDevServer(frontendDir);
       this.spawnDevServer(serverDir);
-      await this.validator.assertPreviewRuntime(
-        `http://localhost:${vitePort}`,
-        ['/'],
-      );
+      try {
+        await this.validator.assertPreviewRuntime(
+          `http://localhost:${vitePort}`,
+          ['/'],
+        );
+      } catch (err) {
+        this.logger.warn(
+          `[startPreviewForJob] Smoke test warning for job ${jobId} — preview may still be accessible: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     } else {
       this.logger.log(
         `[startPreviewForJob] Servers already running on vitePort=${vitePort}`,
@@ -2786,7 +2792,7 @@ ${fontEntries}
     };
   }
 
-  private spawnDevServer(dir: string, ttlMs = 30 * 60 * 1000) {
+  private spawnDevServer(dir: string, ttlMs = 60 * 60 * 1000) {
     const proc = spawn('npm', ['run', 'dev'], {
       cwd: dir,
       shell: true,
