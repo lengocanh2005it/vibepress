@@ -39,8 +39,8 @@ async function createSiteDatabase(siteId, dumpPath) {
       totalRows += Number(count);
     }
 
-    const host     = process.env.MYSQL_HOST ;
-    const port     = parseInt(process.env.MYSQL_HOST_PORT || process.env.MYSQL_PORT);
+    const host     = process.env.MYSQL_HOST;
+    const port     = parseInt(process.env.MYSQL_PORT || '3306');
     const user     = process.env.MYSQL_ROOT_USER ;
     const password = process.env.MYSQL_ROOT_PASSWORD ;
 
