@@ -142,6 +142,25 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
   const fiber = getReactFiber(el);
   if (!fiber) return undefined;
 
+  // 1. Element's own _debugSource — exact JSX line where this element was written
+  if (fiber._debugSource) {
+    const s = extractSource(fiber._debugSource);
+    if (s) return s;
+  }
+
+  // 2. Walk return chain (parent fibers) — finds the nearest enclosing component
+  {
+    let current: ReactFiber | undefined = fiber.return;
+    while (current) {
+      if (current._debugSource) {
+        const s = extractSource(current._debugSource);
+        if (s) return s;
+      }
+      current = current.return;
+    }
+  }
+
+  // 3. Walk _debugOwner chain — component instantiation site (last resort)
   {
     let owner: ReactFiber | undefined = fiber._debugOwner;
     while (owner) {
@@ -150,17 +169,6 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
         if (s) return s;
       }
       owner = owner._debugOwner;
-    }
-  }
-
-  {
-    let current: ReactFiber | undefined = fiber;
-    while (current) {
-      if (current._debugSource) {
-        const s = extractSource(current._debugSource);
-        if (s) return s;
-      }
-      current = current.return;
     }
   }
 
