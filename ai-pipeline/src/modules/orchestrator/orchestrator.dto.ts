@@ -138,6 +138,17 @@ export interface PipelineClientCaptureAttachmentDto {
   asset: PipelineClientCaptureAssetDto;
 }
 
+export interface PipelineClientImageAssetDto {
+  provider: 'cloudinary' | 'imagekit';
+  fileName: string;
+  publicUrl: string;
+  mimeType?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+  providerAssetId?: string;
+}
+
 export interface PipelineEditPageContextDto {
   reactUrl?: string;
   reactRoute?: string;
@@ -202,6 +213,7 @@ export interface PipelineClientEditRequestDto {
   language?: string;
   pageContext?: PipelineClientEditPageContextDto;
   attachments?: PipelineClientCaptureAttachmentDto[];
+  imageAssets?: PipelineClientImageAssetDto[];
   targetHint?: PipelineEditTargetHintDto;
   constraints?: PipelineEditConstraintsDto;
 }
@@ -290,6 +302,7 @@ export interface PipelineReactVisualEditRequestDto {
   language?: string;
   pageContext?: PipelineClientEditPageContextDto;
   attachments?: PipelineClientCaptureAttachmentDto[];
+  imageAssets?: PipelineClientImageAssetDto[];
   targetHint?: PipelineEditTargetHintDto;
   constraints?: PipelineEditConstraintsDto;
   reactSourceTarget: PipelineReactSourceTargetDto;

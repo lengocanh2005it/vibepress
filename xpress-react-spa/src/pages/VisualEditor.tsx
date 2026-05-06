@@ -8,7 +8,6 @@ import {
   type ReactVisualEditRouteEntry,
   type ReactVisualEditResult,
 } from "../services/AiService";
-import { captureRegion } from "../services/automationService";
 import { useInspector } from "../hooks/useInspector";
 
 interface PendingImage {
@@ -114,21 +113,6 @@ const roundMetric = (value: number, digits = 4) => {
   return Math.round(value * factor) / factor;
 };
 
-const buildPreviewProxyUrl = (
-  pageUrl?: string | null,
-  siteId?: string | null,
-  previewVersion?: number,
-) => {
-  if (!pageUrl) return "";
-
-  const params = new URLSearchParams({ url: pageUrl });
-  if (siteId) params.set("siteId", siteId);
-  if (typeof previewVersion === "number") {
-    params.set("vpv", String(previewVersion));
-  }
-
-  return `/api/wp/proxy?${params.toString()}`;
-};
 
 const buildRouteItems = (
   iframePreviewUrl?: string,
@@ -536,59 +520,7 @@ const VisualEditor: React.FC = () => {
     clearSelectedComponent();
   }, [clearSelectedComponent, frameSrc]);
 
-  const buildAttachmentFromSelection = async () => {
-    if (!selectedComponent?.viewportRect || !selectedComponent.viewport) {
-      return undefined;
-    }
-
-    const now = new Date().toISOString();
-    const result = await captureRegion(
-      selectedCapturePageUrl,
-      buildPreviewProxyUrl(selectedCapturePageUrl, siteId),
-      {
-        x: selectedComponent.viewportRect.x,
-        y: selectedComponent.viewportRect.y,
-        width: selectedComponent.viewportRect.width,
-        height: selectedComponent.viewportRect.height,
-      },
-      prompt.trim(),
-      selectedComponent.viewport,
-    );
-
-    return {
-      id: `visual-edit-${Date.now()}`,
-      note: prompt.trim() || undefined,
-      sourcePageUrl: selectedCapturePageUrl,
-      captureContext: {
-        capturedAt: now,
-        iframeSrc: frameSrc,
-        viewport: selectedComponent.viewport,
-        page: {
-          url: selectedCapturePageUrl,
-          route: selectedRoute?.route || "/",
-          title: frameTitle || selectedRoute?.label,
-        },
-        document: selectedComponent.document,
-      },
-      selection: selectedComponent.documentRect,
-      geometry: {
-        viewportRect: selectedComponent.viewportRect,
-        documentRect: selectedComponent.documentRect,
-        normalizedRect: selectedComponent.normalizedRect,
-      },
-      asset: {
-        provider: result.asset?.provider ?? "local",
-        fileName: result.asset?.fileName ?? result.fileName,
-        publicUrl: result.asset?.url ?? result.filePath,
-        mimeType: result.asset?.mimeType as "image/png" | "image/jpeg" | "image/webp" | undefined,
-        width: result.asset?.width ?? Math.max(1, Math.round(selectedComponent.viewportRect.width)),
-        height: result.asset?.height ?? Math.max(1, Math.round(selectedComponent.viewportRect.height)),
-      },
-    };
-  };
-
   const buildPayload = async (): Promise<ReactVisualEditPayload> => {
-    const attachment = await buildAttachmentFromSelection();
     const componentName =
       selectedComponent?.component?.trim() || selectedRoute?.componentName || undefined;
     const sourceFile = selectedComponent?.source?.file?.trim() || undefined;
@@ -608,24 +540,18 @@ const VisualEditor: React.FC = () => {
         viewport: selectedComponent?.viewport,
         document: selectedComponent?.document,
       },
-      attachments: [
-        ...(attachment ? [attachment] : []),
-        ...pendingImages
-          .filter((img) => img.cloudUrl !== null && img.cloudMeta !== null)
-          .map((img) => ({
-            id: img.id,
-            asset: {
-              provider: img.cloudMeta!.provider as 'cloudinary' | 'imagekit',
-              fileName: img.fileName,
-              publicUrl: img.cloudUrl!,
-              mimeType: img.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | undefined,
-              bytes: img.cloudMeta!.bytes,
-              width: img.cloudMeta!.width,
-              height: img.cloudMeta!.height,
-              providerAssetId: img.cloudMeta!.publicId,
-            },
-          })),
-      ],
+      imageAssets: pendingImages
+        .filter((img) => img.cloudUrl !== null && img.cloudMeta !== null)
+        .map((img) => ({
+          provider: img.cloudMeta!.provider as 'cloudinary' | 'imagekit',
+          fileName: img.fileName,
+          publicUrl: img.cloudUrl!,
+          mimeType: img.mimeType,
+          bytes: img.cloudMeta!.bytes,
+          width: img.cloudMeta!.width,
+          height: img.cloudMeta!.height,
+          providerAssetId: img.cloudMeta!.publicId,
+        })),
       targetHint: {
         route: selectedRoute?.route || "/",
         componentName,
@@ -642,7 +568,7 @@ const VisualEditor: React.FC = () => {
         targetStartLine: selectedComponent?.targetStartLine,
       },
       constraints: {
-        preserveOutsideSelection: !!attachment,
+        preserveOutsideSelection: false,
         preserveDataContract: true,
         rerunFromScratch: false,
       },

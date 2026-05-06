@@ -151,6 +151,16 @@ export interface AiEditRequestPayload {
         targetTextPreview?: string;
         targetStartLine?: number;
     };
+    imageAssets?: Array<{
+        provider: 'cloudinary' | 'imagekit';
+        fileName: string;
+        publicUrl: string;
+        mimeType?: string;
+        bytes?: number;
+        width?: number;
+        height?: number;
+        providerAssetId?: string;
+    }>;
     constraints?: {
         preserveOutsideSelection?: boolean;
         preserveDataContract?: boolean;
