@@ -107,6 +107,8 @@ export interface RuntimeBlockNode {
   margin?: Record<string, string>;
   minHeight?: string;
   overlayColor?: string;
+  hasParallax?: boolean;
+  focalPoint?: { x: number; y: number };
   columnWidth?: string;
   textAlign?: string;
   justifyContent?: string;
@@ -173,6 +175,8 @@ export interface RuntimeSectionPlan {
   style?: RuntimeStyleSpec;
   children?: RuntimeSectionPlan[];
   customClassNames?: string[];
+  hasParallax?: boolean;
+  focalPoint?: { x: number; y: number };
   [key: string]: unknown;
 }
 

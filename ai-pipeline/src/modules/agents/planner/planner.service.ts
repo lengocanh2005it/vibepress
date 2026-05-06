@@ -20,6 +20,7 @@ import {
   mapWpNodesToLosslessPageSections,
   buildPlannerChunksFromNodes,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
+import { buildCanonicalPagePath } from '../../../common/utils/wp-page-path.util.js';
 import type { ChunkPlan } from '../../../common/types/chunk.schema.js';
 import {
   mapWpNodesToBlockTree,
@@ -484,6 +485,73 @@ export class PlannerService {
       resolvedModel,
       logPath,
     );
+  }
+
+  async attachSharedChromePartialVisualPlans(
+    theme: PhpParseResult | BlockParseResult,
+    content: DbContentResult,
+    plan: PlanResult,
+    modelName?: string,
+    repoManifest?: RepoThemeManifest,
+    editRequest?: PipelineEditRequestDto,
+    logPath?: string,
+  ): Promise<PlanResult> {
+    const targets = plan
+      .map((componentPlan, index) => ({ componentPlan, index }))
+      .filter(
+        ({ componentPlan }) =>
+          componentPlan.type === 'partial' &&
+          isSharedChromePartialComponent(componentPlan.componentName) &&
+          !componentPlan.visualPlan,
+      );
+    if (targets.length === 0) return plan;
+
+    const sourceMap = new Map<string, string>();
+    const allTemplates =
+      theme.type === 'classic'
+        ? theme.templates
+        : [...theme.templates, ...theme.parts];
+    for (const t of allTemplates) {
+      sourceMap.set(t.name, 'markup' in t ? t.markup : t.html);
+    }
+
+    const tokens = theme.type === 'fse' ? theme.tokens : undefined;
+    const globalPalette = this.deriveGlobalPalette(tokens);
+    const globalTypography = this.deriveGlobalTypography(tokens);
+    const resolvedModel = modelName ?? this.llmFactory.getModel();
+    const result = [...plan];
+
+    this.logger.log(
+      this.formatPhaseCLog(
+        `Precomputing visual plans for ${targets.length} shared chrome partial(s) before architecture review`,
+      ),
+    );
+
+    const plannedTargets = await Promise.all(
+      targets.map(async ({ componentPlan, index }) => ({
+        index,
+        componentPlan: await this.generateVisualPlanForComponent(
+          componentPlan,
+          sourceMap.get(componentPlan.templateName) ?? '',
+          sourceMap,
+          content,
+          tokens,
+          globalPalette,
+          globalTypography,
+          plan,
+          repoManifest,
+          editRequest,
+          resolvedModel,
+          logPath,
+        ),
+      })),
+    );
+
+    for (const { index, componentPlan } of plannedTargets) {
+      result[index] = componentPlan;
+    }
+
+    return result;
   }
 
   // ── Phase C: AI visual plan per component ───────────────────────────
@@ -3894,11 +3962,9 @@ export class PlannerService {
     page: DbContentResult['pages'][number],
     content: DbContentResult,
   ): string {
-    const slug = page.slug?.trim();
-    if (slug) return `/page/${slug}`;
-
-    const fallbackSlug = String(page.id ?? '').trim();
-    return fallbackSlug ? `/page/${fallbackSlug}` : '/page';
+    return buildCanonicalPagePath(page, content.pages, {
+      frontPageId: content.readingSettings.pageOnFrontId,
+    });
   }
 
   private buildConcretePageComponentName(

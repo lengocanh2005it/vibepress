@@ -166,8 +166,10 @@ function getSectionHeadingCandidates(section: SectionPlan): string[] {
     case 'search':
       return [section.title].filter(isNonEmptyString);
     case 'sidebar':
-      return [section.title, ...(section.widgets ?? []).map((widget) => widget.title)]
-        .filter(isNonEmptyString);
+      return [
+        section.title,
+        ...(section.widgets ?? []).map((widget) => widget.title),
+      ].filter(isNonEmptyString);
     case 'modal':
       return [section.heading, section.triggerText].filter(isNonEmptyString);
     case 'tabs':

@@ -450,4 +450,32 @@ describe('mapWpNodesToDraftSections', () => {
       'Julia Henderson',
     );
   });
+
+  it('preserves wow scroll-reveal classes on profolio-style intro groups', () => {
+    const markup = `
+<!-- wp:group {"className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+<div class="wp-block-group wow animate__animated animate__fadeInUp cover-inner">
+  <!-- wp:paragraph -->
+  <p>My Projects</p>
+  <!-- /wp:paragraph -->
+  <!-- wp:heading -->
+  <h2>Some Of My Projects</h2>
+  <!-- /wp:heading -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections[0]).toMatchObject({
+      type: 'hero',
+      customClassNames: expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+      ]),
+    });
+  });
 });

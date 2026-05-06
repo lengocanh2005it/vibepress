@@ -166,10 +166,14 @@ describe('CodeGeneratorService', () => {
 
     const code = service.generate(plan);
 
-    expect(code).toContain('className="flex-1 flex items-end justify-center overflow-hidden r-cover"');
+    expect(code).toContain(
+      'className="flex-1 flex items-end justify-center overflow-hidden r-cover"',
+    );
     expect(code).toContain("backgroundColor: '#F5B731'");
     expect(code).toContain("minHeight: '550px'");
-    expect(code).toContain('renderRichTextChildren("Welcome To My Profile <br>I am <mark');
+    expect(code).toContain(
+      'renderRichTextChildren("Welcome To My Profile <br>I am <mark',
+    );
   });
 
   it('resolves theme asset images inside card-grid sections', () => {
@@ -268,7 +272,7 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain("to={'/tag/' + slug}");
-    expect(code).toContain('tag.toLowerCase().replace(/[^a-z0-9]+/g, \'-\')');
+    expect(code).toContain("tag.toLowerCase().replace(/[^a-z0-9]+/g, '-')");
     expect(code).toContain('Tags');
   });
 
@@ -369,6 +373,8 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('wp-block-navigation__container');
     expect(code).toContain('wp-block-navigation-item');
     expect(code).toContain('wp-block-navigation-item__content');
+    expect(code).toContain('useLocation');
+    expect(code).toContain('current-menu-item current_page_item');
   });
 
   it('renders block-centric headers from the preserved block tree instead of the semantic navbar abstraction', () => {
@@ -426,10 +432,57 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('id="sticky-header"');
+    expect(code).toContain("position: 'sticky'");
+    expect(code).toContain('top: 0');
+    expect(code).toContain('zIndex: 50');
     expect(code).toContain('has-primary-background-color');
     expect(code).toContain('header-btn');
     expect(code).toContain('Get Started');
     expect(code).toContain('<Link to="/"');
+  });
+
+  it('uses inline background color for responsive block-faithful mobile nav panels', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'navigation',
+          menuOrientation: 'horizontal',
+          overlayMenu: 'mobile',
+          isResponsive: true,
+        },
+      ],
+      dataNeeds: ['menus'],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).not.toContain('bg-[${ctx.p.surface}]');
+    expect(code).toContain("backgroundColor: '#f5f5f5'");
+  });
+
+  it('does not add fallback text underlines to header navigation links', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'navigation',
+          menuOrientation: 'horizontal',
+          overlayMenu: 'mobile',
+          isResponsive: true,
+        },
+      ],
+      dataNeeds: ['menus'],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).toContain('wp-block-navigation-item__content');
+    expect(code).toContain('useLocation');
+    expect(code).toContain('current-menu-item current_page_item');
+    expect(code).not.toContain('hover:underline');
   });
 
   it('emits asset and app-path helpers for deterministic footer sections', () => {

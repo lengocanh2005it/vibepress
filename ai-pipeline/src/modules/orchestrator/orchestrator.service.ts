@@ -1765,6 +1765,15 @@ export default function ${component.name}() {
               repoManifest: repoResult.themeManifest,
             },
           );
+          plan = await this.planner.attachSharedChromePartialVisualPlans(
+            normalizedTheme,
+            content,
+            plan,
+            resolvedModels.planning,
+            repoResult.themeManifest,
+            undefined,
+            logPath,
+          );
           this.emitStepProgress(
             state,
             '5_planner',
@@ -1851,6 +1860,15 @@ export default function ${component.name}() {
                 repoManifest: repoResult.themeManifest,
                 planReviewErrors: planBlockingIssues,
               },
+            );
+            plan = await this.planner.attachSharedChromePartialVisualPlans(
+              normalizedTheme,
+              content,
+              plan,
+              resolvedModels.planning,
+              repoResult.themeManifest,
+              undefined,
+              logPath,
             );
             review = this.planReviewer.review(
               plan,

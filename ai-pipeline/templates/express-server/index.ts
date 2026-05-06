@@ -1374,7 +1374,15 @@ function rewriteCanonicalMenuDetailPath(
   const normalizedObjectType = String(objectType ?? '')
     .trim()
     .toLowerCase();
-  if (normalizedObjectType !== 'page' && normalizedObjectType !== 'post') {
+  if (normalizedObjectType === 'page') {
+    try {
+      const parsed = new URL(raw, 'http://vp.local');
+      return `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+    } catch {
+      return raw;
+    }
+  }
+  if (normalizedObjectType !== 'post') {
     return raw;
   }
 
@@ -1384,11 +1392,37 @@ function rewriteCanonicalMenuDetailPath(
     const slug = segments.at(-1);
     if (!slug) return raw;
 
-    const detailPrefix = normalizedObjectType === 'page' ? '/page/' : '/post/';
-    return `${detailPrefix}${slug}${parsed.search}${parsed.hash}`;
+    return `/post/${slug}${parsed.search}${parsed.hash}`;
   } catch {
     return raw;
   }
+}
+
+function buildCanonicalPagePath(
+  page: { id: number; slug: string; parentId: number },
+  pages: Array<{ id: number; slug: string; parentId: number }>,
+  frontPageId: number | null,
+): string {
+  if (frontPageId != null && page.id === frontPageId) return '/';
+  const byId = new Map(pages.map((entry) => [entry.id, entry] as const));
+  const segments: string[] = [];
+  const visited = new Set<number>();
+  let current: { id: number; slug: string; parentId: number } | undefined = page;
+
+  while (current) {
+    if (visited.has(current.id)) break;
+    visited.add(current.id);
+    if (frontPageId != null && current.id === frontPageId) break;
+    const slug = String(current.slug ?? '')
+      .trim()
+      .replace(/^\/+|\/+$/g, '');
+    if (slug) segments.unshift(slug);
+    if (!current.parentId) break;
+    current = byId.get(current.parentId);
+  }
+
+  if (segments.length === 0) return page.id ? `/page/${page.id}` : '/page';
+  return `/${segments.join('/')}`;
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -1476,11 +1510,23 @@ app.get('/api/menus', async (req, res) => {
     }
 
     if (result.length === 0) {
+      const [[frontPageRow]] = await conn.query<any[]>(
+        `SELECT option_value
+         FROM \`${prefix}options\`
+         WHERE option_name = 'page_on_front'
+         LIMIT 1`,
+      );
+      const frontPageId = Number(frontPageRow?.option_value ?? 0) || null;
       const [pages] = await conn.query<any[]>(
-        `SELECT ID, post_title, post_name, menu_order FROM \`${prefix}posts\`
+        `SELECT ID, post_title, post_name, post_parent, menu_order FROM \`${prefix}posts\`
          WHERE post_type = 'page' AND post_status = 'publish'
          ORDER BY menu_order, ID`,
       );
+      const pageRecords = pages.map((entry) => ({
+        id: Number(entry.ID),
+        slug: String(entry.post_name ?? ''),
+        parentId: Number(entry.post_parent ?? 0),
+      }));
       result.push({
         name: 'Primary',
         slug: 'primary',
@@ -1488,7 +1534,15 @@ app.get('/api/menus', async (req, res) => {
         items: pages.map((p, idx) => ({
           id: p.ID,
           title: p.post_title,
-          url: `/page/${p.post_name}`,
+          url: buildCanonicalPagePath(
+            {
+              id: Number(p.ID),
+              slug: String(p.post_name ?? ''),
+              parentId: Number(p.post_parent ?? 0),
+            },
+            pageRecords,
+            frontPageId,
+          ),
           order: p.menu_order || idx,
           parentId: 0,
           target: null,

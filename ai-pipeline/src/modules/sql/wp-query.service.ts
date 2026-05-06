@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createConnection } from 'mysql2/promise';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
+import { buildCanonicalPagePath } from '../../common/utils/wp-page-path.util.js';
 
 export interface WpPost {
   id: number;
@@ -380,13 +381,25 @@ export class WpQueryService {
       }
 
       if (result.length === 0) {
+        const [[frontPageRow]] = await conn.query<any[]>(
+          `SELECT option_value
+           FROM \`${prefix}options\`
+           WHERE option_name = 'page_on_front'
+           LIMIT 1`,
+        );
+        const frontPageId = Number(frontPageRow?.option_value ?? 0) || null;
         const [pages] = await conn.query<any[]>(
-          `SELECT ID, post_title, post_name, menu_order
+          `SELECT ID, post_title, post_name, post_parent, menu_order
            FROM \`${prefix}posts\`
            WHERE post_type = 'page' AND post_status = 'publish'
            ORDER BY menu_order, ID`,
         );
         if (pages.length > 0) {
+          const pageRecords = pages.map((page) => ({
+            id: Number(page.ID),
+            slug: String(page.post_name ?? ''),
+            parentId: Number(page.post_parent ?? 0),
+          }));
           result.push({
             name: 'Primary',
             slug: 'primary',
@@ -394,7 +407,15 @@ export class WpQueryService {
             items: pages.map((page, index) => ({
               id: Number(page.ID),
               title: String(page.post_title ?? ''),
-              url: `/page/${page.post_name}`,
+              url: buildCanonicalPagePath(
+                {
+                  id: Number(page.ID),
+                  slug: String(page.post_name ?? ''),
+                  parentId: Number(page.post_parent ?? 0),
+                },
+                pageRecords,
+                { frontPageId },
+              ),
               order: Number(page.menu_order ?? index),
               parentId: 0,
               target: null,
@@ -1888,7 +1909,15 @@ function rewriteCanonicalMenuDetailPath(
   const normalizedObjectType = String(objectType ?? '')
     .trim()
     .toLowerCase();
-  if (normalizedObjectType !== 'page' && normalizedObjectType !== 'post') {
+  if (normalizedObjectType === 'page') {
+    try {
+      const parsed = new URL(raw, 'http://vp.local');
+      return `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+    } catch {
+      return raw;
+    }
+  }
+  if (normalizedObjectType !== 'post') {
     return raw;
   }
 
@@ -1898,8 +1927,7 @@ function rewriteCanonicalMenuDetailPath(
     const slug = segments.at(-1);
     if (!slug) return raw;
 
-    const detailPrefix = normalizedObjectType === 'page' ? '/page/' : '/post/';
-    return `${detailPrefix}${slug}${parsed.search}${parsed.hash}`;
+    return `/post/${slug}${parsed.search}${parsed.hash}`;
   } catch {
     return raw;
   }

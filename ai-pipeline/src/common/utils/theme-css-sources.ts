@@ -144,7 +144,7 @@ async function tryRead(filePath: string): Promise<string | undefined> {
   }
 }
 
-function sanitizeInlineThemeCss(css: string): string {
+export function sanitizeInlineThemeCss(css: string): string {
   return css
     .replace(/^\uFEFF/, '')
     .replace(/^\s*@charset\s+(['"])[^'"]+\1;\s*/i, '');

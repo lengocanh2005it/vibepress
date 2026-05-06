@@ -4275,10 +4275,139 @@ export class CodeReviewerService {
   }
 
   private normalizeInlineSectionOutput(code: string): string {
-    return code
+    let result = code
       .trim()
       .replace(/^(?:\s*\{\/\*[\s\S]*?\*\/\}\s*)+/, '')
       .trim();
+
+    const unwrap = (value: string): string => {
+      const trimmed = value.trim().replace(/;+\s*$/, '');
+
+      const returnWrappedMatch = trimmed.match(
+        /^return\s*\(\s*([\s\S]*?)\s*\)\s*;?$/i,
+      );
+      if (returnWrappedMatch) {
+        return returnWrappedMatch[1]?.trim() ?? trimmed;
+      }
+
+      const returnDirectMatch = trimmed.match(/^return\s+([\s\S]*?)\s*;?$/i);
+      if (returnDirectMatch && /^<[\s\S]+>$/.test(returnDirectMatch[1] ?? '')) {
+        return returnDirectMatch[1]?.trim() ?? trimmed;
+      }
+
+      const wrappedJsxMatch = trimmed.match(/^\(\s*(<[\s\S]+>)\s*\)\s*;?$/);
+      if (wrappedJsxMatch) {
+        return wrappedJsxMatch[1]?.trim() ?? trimmed;
+      }
+
+      return trimmed;
+    };
+
+    let previous = '';
+    while (result !== previous) {
+      previous = result;
+      result = unwrap(result);
+    }
+
+    const trimmed = result.trim();
+    if (
+      trimmed &&
+      (this.shouldWrapInlineSectionInFragment(trimmed) ||
+        !/^<[\s\S]+>$/.test(trimmed)) &&
+      !/^\s*(?:import\b|export\b)/m.test(trimmed) &&
+      !/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed) &&
+      /^(?:\{[\s\S]+\}|<[\s\S]+>)/.test(trimmed)
+    ) {
+      return `<>${trimmed}</>`;
+    }
+
+    return result.trim();
+  }
+
+  private shouldWrapInlineSectionInFragment(code: string): boolean {
+    const trimmed = code.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith('{')) return true;
+    if (!trimmed.startsWith('<')) return false;
+
+    const firstNodeEnd = this.findFirstTopLevelJsxNodeEnd(trimmed);
+    if (firstNodeEnd == null) return false;
+    return trimmed.slice(firstNodeEnd).trim().length > 0;
+  }
+
+  private findFirstTopLevelJsxNodeEnd(code: string): number | null {
+    let depth = 0;
+    let index = 0;
+
+    while (index < code.length) {
+      if (code[index] !== '<') {
+        index += 1;
+        continue;
+      }
+
+      const tagEnd = this.findJsxTagEnd(code, index);
+      if (tagEnd == null) return null;
+
+      const token = code.slice(index, tagEnd + 1).trim();
+      const isFragmentOpen = token === '<>';
+      const isFragmentClose = token === '</>';
+      const isClosingTag = /^<\//.test(token) && !isFragmentClose;
+      const isDeclaration =
+        /^<!/.test(token) || /^<\?/.test(token) || /^<!--/.test(token);
+      const isSelfClosing =
+        !isClosingTag && !isFragmentOpen && /\/>\s*$/.test(token);
+
+      if (!isDeclaration) {
+        if (isClosingTag || isFragmentClose) {
+          depth = Math.max(0, depth - 1);
+        } else {
+          depth += 1;
+          if (isSelfClosing) depth = Math.max(0, depth - 1);
+        }
+      }
+
+      index = tagEnd + 1;
+      if (depth === 0) return index;
+    }
+
+    return null;
+  }
+
+  private findJsxTagEnd(code: string, start: number): number | null {
+    let quote: '"' | "'" | null = null;
+    let braceDepth = 0;
+
+    for (let index = start + 1; index < code.length; index++) {
+      const char = code[index];
+      const prev = code[index - 1];
+
+      if (quote) {
+        if (char === quote && prev !== '\\') {
+          quote = null;
+        }
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+
+      if (char === '{') {
+        braceDepth += 1;
+        continue;
+      }
+      if (char === '}') {
+        braceDepth = Math.max(0, braceDepth - 1);
+        continue;
+      }
+
+      if (char === '>' && braceDepth === 0) {
+        return index;
+      }
+    }
+
+    return null;
   }
 
   private buildApprovedPlanRetryChecklist(
@@ -5056,13 +5185,13 @@ export class CodeReviewerService {
   private postProcessCode(code: string): string {
     return normalizeCommonTypographyTypos(
       normalizeThemeAssetReferences(
-      normalizeCanonicalPostMetaAndTextLinks(
-      this.normalizeTailwindFunctionSpacing(
-        this.fixDoublebraces(
-          this.mergeClassNames(this.stripMarkdownFences(code)),
+        normalizeCanonicalPostMetaAndTextLinks(
+          this.normalizeTailwindFunctionSpacing(
+            this.fixDoublebraces(
+              this.mergeClassNames(this.stripMarkdownFences(code)),
+            ),
+          ),
         ),
-      ),
-      ),
       ),
     );
   }

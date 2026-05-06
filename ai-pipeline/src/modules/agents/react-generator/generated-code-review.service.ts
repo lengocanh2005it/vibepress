@@ -1195,7 +1195,7 @@ ${component.code}
       'theme asset paths are rendered directly',
       'theme asset urls are used directly',
       'images will not load correctly at runtime',
-     ];
+    ];
 
     return review.issues.filter(
       (issue) =>

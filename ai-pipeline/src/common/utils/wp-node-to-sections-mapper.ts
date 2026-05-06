@@ -4059,7 +4059,8 @@ function normalizeBorderRadiusValue(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const radius = value as Record<string, unknown>;
   const topLeft = normalizeCssLength(String(radius.topLeft ?? '0')) ?? '0';
-  const topRight = normalizeCssLength(String(radius.topRight ?? topLeft)) ?? topLeft;
+  const topRight =
+    normalizeCssLength(String(radius.topRight ?? topLeft)) ?? topLeft;
   const bottomRight =
     normalizeCssLength(String(radius.bottomRight ?? topLeft)) ?? topLeft;
   const bottomLeft =

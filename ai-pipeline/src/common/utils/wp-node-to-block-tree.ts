@@ -31,6 +31,8 @@ export interface BlockNode {
   padding?: BlockNodeSpacing;
   margin?: BlockNodeSpacing;
   minHeight?: string;
+  hasParallax?: boolean;
+  focalPoint?: { x: number; y: number };
   overlayColor?: string;
   columnWidth?: string;
   textAlign?: string;
@@ -96,6 +98,8 @@ function mapWpNodeToBlockNode(node: WpNode): BlockNode {
     ...(typeof node.minHeight === 'string'
       ? { minHeight: node.minHeight }
       : {}),
+    ...(node.hasParallax === true ? { hasParallax: true } : {}),
+    ...(node.focalPoint ? { focalPoint: { ...node.focalPoint } } : {}),
     ...(typeof node.overlayColor === 'string'
       ? { overlayColor: node.overlayColor }
       : {}),

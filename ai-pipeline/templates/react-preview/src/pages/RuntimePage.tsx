@@ -35,6 +35,10 @@ interface RuntimeRenderContext {
   sections: Map<string, RuntimeRenderableSection>;
 }
 
+interface RuntimeSectionRenderOptions {
+  embedded?: boolean;
+}
+
 export default function RuntimePage({
   slug: explicitSlug,
   apiBase = '',
@@ -196,8 +200,13 @@ function renderRuntimeNode(
   const overlaySection = resolveOverlaySection(binding, ctx.sections);
 
   if (overlaySection && !overlaySection.__hidden) {
-    const overlay = renderBoundSectionOverlay(overlaySection, ctx);
-    if (overlay) return wrapRuntimeNode(node, key, overlay);
+    const preserveWrapper = binding?.preserveWrapper !== false;
+    const overlay = renderBoundSectionOverlay(overlaySection, ctx, {
+      embedded: preserveWrapper,
+    });
+    if (overlay) {
+      return preserveWrapper ? wrapRuntimeNode(node, key, overlay) : overlay;
+    }
   }
 
   const children = node.children?.length
@@ -292,7 +301,10 @@ function renderRuntimeNode(
           {renderRichTextChildren(ctx.page.content ?? '', `${nodeId}-content`)}
         </div>
       );
-    case 'core/cover':
+    case 'core/cover': {
+      const coverBgPos = node.focalPoint
+        ? `${Math.round(node.focalPoint.x * 100)}% ${Math.round(node.focalPoint.y * 100)}%`
+        : 'center';
       return wrapRuntimeNode(node, key, children, {
         style: {
           ...style,
@@ -300,7 +312,9 @@ function renderRuntimeNode(
             ? {
                 backgroundImage: `url("${resolveAsset(node.src)}")`,
                 backgroundSize: 'cover',
-                backgroundPosition: 'center',
+                backgroundPosition: coverBgPos,
+                backgroundRepeat: 'no-repeat',
+                ...(node.hasParallax ? { backgroundAttachment: 'fixed' } : {}),
               }
             : {}),
         },
@@ -310,9 +324,12 @@ function renderRuntimeNode(
           : undefined,
         inspectAttrs,
       });
-    case 'core/list':
+    }
+    case 'core/list': {
+      const isOrdered = node.attrs?.ordered === true;
+      const ListTag = isOrdered ? 'ol' : 'ul';
       return (
-        <ul
+        <ListTag
           key={key}
           id={node.wrapper?.domId ?? node.domId}
           className={className}
@@ -320,8 +337,9 @@ function renderRuntimeNode(
           {...inspectAttrs}
         >
           {children}
-        </ul>
+        </ListTag>
       );
+    }
     case 'core/list-item':
       return (
         <li
@@ -338,6 +356,146 @@ function renderRuntimeNode(
       return <div key={key} style={{ ...style, height: node.minHeight ?? '2rem' }} />;
     case 'core/separator':
       return <hr key={key} className={className} style={style} {...inspectAttrs} />;
+    case 'core/quote':
+    case 'core/pullquote':
+      return (
+        <blockquote
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
+          {children ?? renderRichTextChildren(text, nodeId)}
+        </blockquote>
+      );
+    case 'core/code':
+    case 'core/preformatted':
+    case 'core/verse':
+      return (
+        <pre
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
+          <code>{node.text ?? ''}</code>
+        </pre>
+      );
+    case 'core/video': {
+      const videoSrc =
+        node.src ??
+        (typeof node.attrs?.src === 'string' ? node.attrs.src : undefined) ??
+        (typeof node.attrs?.url === 'string' ? node.attrs.url : undefined);
+      if (videoSrc) {
+        return (
+          <video
+            key={key}
+            id={node.wrapper?.domId ?? node.domId}
+            src={resolveAsset(videoSrc)}
+            controls
+            className={className}
+            style={{ maxWidth: '100%', ...style }}
+            {...inspectAttrs}
+          />
+        );
+      }
+      return wrapRuntimeNode(node, key, children ?? (text ? renderRichTextChildren(text, nodeId) : null), { inspectAttrs });
+    }
+    case 'core/embed': {
+      const embedUrl = typeof node.attrs?.url === 'string' ? node.attrs.url : '';
+      if (embedUrl) {
+        return (
+          <div
+            key={key}
+            id={node.wrapper?.domId ?? node.domId}
+            className={className}
+            style={{ position: 'relative', ...style }}
+            {...inspectAttrs}
+          >
+            <iframe
+              src={embedUrl}
+              title={typeof node.attrs?.caption === 'string' ? node.attrs.caption : 'Embedded content'}
+              style={{ width: '100%', minHeight: '400px', border: 'none' }}
+              loading="lazy"
+              allowFullScreen
+            />
+          </div>
+        );
+      }
+      return wrapRuntimeNode(node, key, children ?? (text ? renderRichTextChildren(text, nodeId) : null), { inspectAttrs });
+    }
+    case 'core/gallery': {
+      const galleryCols = typeof node.attrs?.columns === 'number' ? node.attrs.columns : 3;
+      return (
+        <div
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          className={className}
+          style={{
+            display: 'grid',
+            gridTemplateColumns: `repeat(${galleryCols}, minmax(0, 1fr))`,
+            gap: node.gap ?? '1rem',
+            ...style,
+          }}
+          {...inspectAttrs}
+        >
+          {children}
+        </div>
+      );
+    }
+    case 'core/social-links':
+      return (
+        <nav
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          aria-label="Social media links"
+          className={className}
+          style={{ display: 'flex', flexWrap: 'wrap', gap: node.gap ?? '0.5rem', alignItems: 'center', ...style }}
+          {...inspectAttrs}
+        >
+          {children}
+        </nav>
+      );
+    case 'core/social-link': {
+      const socialHref =
+        node.href ??
+        (typeof node.attrs?.url === 'string' ? node.attrs.url : '#');
+      const socialLabel =
+        (typeof node.attrs?.label === 'string' && node.attrs.label
+          ? node.attrs.label
+          : typeof node.attrs?.service === 'string' && node.attrs.service
+          ? node.attrs.service
+          : 'Social link');
+      return (
+        <a
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          href={socialHref}
+          aria-label={socialLabel}
+          className={className}
+          style={style}
+          target="_blank"
+          rel="noreferrer noopener"
+          {...inspectAttrs}
+        >
+          {children ?? socialLabel}
+        </a>
+      );
+    }
+    case 'core/html':
+      return (
+        <div
+          key={key}
+          id={node.wrapper?.domId ?? node.domId}
+          className={className}
+          style={style}
+          {...inspectAttrs}
+        >
+          {text ? renderRichTextChildren(text, nodeId) : children}
+        </div>
+      );
     default:
       return wrapRuntimeNode(
         node,
@@ -365,8 +523,10 @@ function resolveOverlaySection(
 function renderBoundSectionOverlay(
   section: RuntimeRenderableSection,
   ctx: RuntimeRenderContext,
+  options: RuntimeSectionRenderOptions = {},
 ): ReactNode {
   if (section.__hidden) return null;
+  const embedded = options.embedded === true;
 
   switch (section.type) {
     case 'page-content':
@@ -374,33 +534,35 @@ function renderBoundSectionOverlay(
         section,
         <>
           {section.showTitle !== false ? (
-            <h1 className="text-4xl font-semibold tracking-tight">
+            <h1 className={embedded ? undefined : 'text-4xl font-semibold tracking-tight'}>
               {ctx.page.title}
             </h1>
           ) : null}
-          <div className="prose max-w-none pt-6">
+          <div className={embedded ? undefined : 'prose max-w-none pt-6'}>
             {renderRichTextChildren(
               ctx.page.content ?? '',
               `${ctx.page.slug}-page-content`,
             )}
           </div>
         </>,
+        options,
       );
     case 'prose-block':
       return renderSectionShell(
         section,
         <>
-          {renderSectionHeading(section)}
+          {renderSectionHeading(section, options)}
           {section.body ? (
-            <div className="prose max-w-none pt-5">
+            <div className={embedded ? undefined : 'prose max-w-none pt-5'}>
               {renderRichTextChildren(
                 section.body,
                 `${getSectionPrimaryKey(section)}-body`,
               )}
             </div>
           ) : null}
-          {renderNestedSections(section, ctx)}
+          {renderNestedSections(section, ctx, options)}
         </>,
+        options,
       );
     case 'card-grid': {
       const columnCount = Math.max(
@@ -410,7 +572,7 @@ function renderBoundSectionOverlay(
       return renderSectionShell(
         section,
         <>
-          {renderSectionHeading(section)}
+          {renderSectionHeading(section, options)}
           <div
             className="grid"
             style={{
@@ -444,8 +606,9 @@ function renderBoundSectionOverlay(
               </article>
             ))}
           </div>
-          {renderNestedSections(section, ctx)}
+          {renderNestedSections(section, ctx, options)}
         </>,
+        options,
       );
     }
     case 'accordion':
@@ -456,24 +619,25 @@ function renderBoundSectionOverlay(
       return <RuntimeCarouselSection section={section} />;
     case 'hero':
     case 'cover':
-      return renderCoverLikeSection(section, ctx);
+      return renderCoverLikeSection(section, ctx, options);
     case 'media-text':
-      return renderMediaTextSection(section, ctx);
+      return renderMediaTextSection(section, ctx, options);
     default:
       return renderSectionShell(
         section,
         <>
-          {renderSectionHeading(section)}
+          {renderSectionHeading(section, options)}
           {section.body ? (
-            <div className="prose max-w-none pt-5">
+            <div className={embedded ? undefined : 'prose max-w-none pt-5'}>
               {renderRichTextChildren(
                 section.body,
                 `${getSectionPrimaryKey(section)}-generic`,
               )}
             </div>
           ) : null}
-          {renderNestedSections(section, ctx)}
+          {renderNestedSections(section, ctx, options)}
         </>,
+        options,
       );
   }
 }
@@ -481,21 +645,29 @@ function renderBoundSectionOverlay(
 function renderCoverLikeSection(
   section: RuntimeRenderableSection,
   ctx: RuntimeRenderContext,
+  options: RuntimeSectionRenderOptions = {},
 ) {
+  const embedded = options.embedded === true;
   const image = getSectionImage(section);
+  const coverFp = section.focalPoint as { x: number; y: number } | undefined;
+  const coverBgPos = coverFp
+    ? `${Math.round(coverFp.x * 100)}% ${Math.round(coverFp.y * 100)}%`
+    : 'center';
   const style = toSectionStyle(section, {
     ...(image?.src
       ? {
           backgroundImage: `url("${resolveAsset(image.src)}")`,
           backgroundSize: 'cover',
-          backgroundPosition: 'center',
+          backgroundPosition: coverBgPos,
+          backgroundRepeat: 'no-repeat',
+          ...(section.hasParallax ? { backgroundAttachment: 'fixed' } : {}),
         }
       : {}),
   });
 
   return (
     <section
-      className={sectionClassName(section, true)}
+      className={sectionClassName(section, true, embedded)}
       style={style}
       {...buildRuntimeInspectorAttrs(
         section.sourceNodeId ?? getSectionPrimaryKey(section),
@@ -503,23 +675,25 @@ function renderCoverLikeSection(
       )}
     >
       <div
-        className="mx-auto max-w-6xl px-6 py-16"
+        className={embedded ? undefined : 'mx-auto max-w-6xl px-6 py-16'}
         style={
           section.style?.colors?.overlay
             ? { backgroundColor: section.style.colors.overlay }
             : undefined
         }
       >
-        {renderSectionHeading(section)}
+        {renderSectionHeading(section, options)}
         {section.body ? (
-          <div className="prose max-w-none pt-5 text-white/95">
+          <div
+            className={embedded ? undefined : 'prose max-w-none pt-5 text-white/95'}
+          >
             {renderRichTextChildren(
               section.body,
               `${getSectionPrimaryKey(section)}-cover`,
             )}
           </div>
         ) : null}
-        {renderNestedSections(section, ctx)}
+        {renderNestedSections(section, ctx, options)}
       </div>
     </section>
   );
@@ -528,7 +702,9 @@ function renderCoverLikeSection(
 function renderMediaTextSection(
   section: RuntimeRenderableSection,
   ctx: RuntimeRenderContext,
+  options: RuntimeSectionRenderOptions = {},
 ) {
+  const embedded = options.embedded === true;
   const image = getSectionImage(section);
   const isReversed =
     section.layout?.orientation === 'reverse' ||
@@ -541,16 +717,16 @@ function renderMediaTextSection(
       style={toLayoutStyle(section.layout, section.style, true)}
     >
       <div style={{ order: isReversed ? 2 : 1 }}>
-        {renderSectionHeading(section)}
+        {renderSectionHeading(section, options)}
         {section.body ? (
-          <div className="prose max-w-none pt-5">
+          <div className={embedded ? undefined : 'prose max-w-none pt-5'}>
             {renderRichTextChildren(
               section.body,
               `${getSectionPrimaryKey(section)}-body`,
             )}
           </div>
         ) : null}
-        {renderNestedSections(section, ctx)}
+        {renderNestedSections(section, ctx, options)}
       </div>
       {image?.src ? (
         <img
@@ -561,6 +737,7 @@ function renderMediaTextSection(
         />
       ) : null}
     </div>,
+    options,
   );
 }
 
@@ -839,17 +1016,27 @@ function pickWrapperTag(
   return 'div';
 }
 
-function renderSectionHeading(section: RuntimePageSection) {
+function renderSectionHeading(
+  section: RuntimePageSection,
+  options: RuntimeSectionRenderOptions = {},
+) {
+  const embedded = options.embedded === true;
   if (!section.title && !section.subtitle) return null;
   return (
-    <header className="pb-6">
+    <header className={embedded ? undefined : 'pb-6'}>
       {section.subtitle ? (
-        <p className="pb-2 text-sm uppercase tracking-[0.18em] text-neutral-500">
+        <p
+          className={
+            embedded
+              ? undefined
+              : 'pb-2 text-sm uppercase tracking-[0.18em] text-neutral-500'
+          }
+        >
           {section.subtitle}
         </p>
       ) : null}
       {section.title ? (
-        <h2 className="text-3xl font-semibold tracking-tight">
+        <h2 className={embedded ? undefined : 'text-3xl font-semibold tracking-tight'}>
           {section.title}
         </h2>
       ) : null}
@@ -860,10 +1047,14 @@ function renderSectionHeading(section: RuntimePageSection) {
 function renderSectionShell(
   section: RuntimeRenderableSection,
   children: ReactNode,
+  options: RuntimeSectionRenderOptions = {},
 ) {
+  if (options.embedded) {
+    return <Fragment>{children}</Fragment>;
+  }
   return (
     <section
-      className={sectionClassName(section)}
+      className={sectionClassName(section, false, options.embedded)}
       style={toSectionStyle(section)}
       {...buildRuntimeInspectorAttrs(
         section.sourceNodeId ?? getSectionPrimaryKey(section),
@@ -878,17 +1069,23 @@ function renderSectionShell(
 function renderNestedSections(
   section: RuntimeRenderableSection,
   ctx: RuntimeRenderContext,
+  options: RuntimeSectionRenderOptions = {},
 ) {
   if (!section.children?.length) return null;
-  return section.children.map((child) => renderBoundSectionOverlay(child, ctx));
+  return section.children.map((child) =>
+    renderBoundSectionOverlay(child, ctx, options),
+  );
 }
 
-function sectionClassName(
+export function sectionClassName(
   section: RuntimePageSection,
   isCover = false,
+  embedded = false,
 ): string {
   const base =
-    section.layout?.align === 'full' || isCover
+    embedded
+      ? ''
+      : section.layout?.align === 'full' || isCover
       ? 'w-full py-12'
       : 'mx-auto max-w-6xl px-6 py-12';
   return mergeClassNames(
@@ -1519,7 +1716,9 @@ const intrinsicTagMap: Record<
   p: (props, children) => <p {...props}>{children}</p>,
   span: (props, children) => <span {...props}>{children}</span>,
   strong: (props, children) => <strong {...props}>{children}</strong>,
+  b: (props, children) => <strong {...props}>{children}</strong>,
   em: (props, children) => <em {...props}>{children}</em>,
+  i: (props, children) => <em {...props}>{children}</em>,
   ul: (props, children) => <ul {...props}>{children}</ul>,
   ol: (props, children) => <ol {...props}>{children}</ol>,
   li: (props, children) => <li {...props}>{children}</li>,
@@ -1530,6 +1729,36 @@ const intrinsicTagMap: Record<
   h5: (props, children) => <h5 {...props}>{children}</h5>,
   h6: (props, children) => <h6 {...props}>{children}</h6>,
   blockquote: (props, children) => <blockquote {...props}>{children}</blockquote>,
+  figure: (props, children) => <figure {...props}>{children}</figure>,
+  figcaption: (props, children) => <figcaption {...props}>{children}</figcaption>,
+  pre: (props, children) => <pre {...props}>{children}</pre>,
+  code: (props, children) => <code {...props}>{children}</code>,
+  kbd: (props, children) => <kbd {...props}>{children}</kbd>,
+  table: (props, children) => <table {...props}>{children}</table>,
+  thead: (props, children) => <thead {...props}>{children}</thead>,
+  tbody: (props, children) => <tbody {...props}>{children}</tbody>,
+  tfoot: (props, children) => <tfoot {...props}>{children}</tfoot>,
+  tr: (props, children) => <tr {...props}>{children}</tr>,
+  th: (props, children) => <th {...props}>{children}</th>,
+  td: (props, children) => <td {...props}>{children}</td>,
+  caption: (props, children) => <caption {...props}>{children}</caption>,
+  mark: (props, children) => <mark {...props}>{children}</mark>,
+  s: (props, children) => <s {...props}>{children}</s>,
+  del: (props, children) => <del {...props}>{children}</del>,
+  ins: (props, children) => <ins {...props}>{children}</ins>,
+  sub: (props, children) => <sub {...props}>{children}</sub>,
+  sup: (props, children) => <sup {...props}>{children}</sup>,
+  section: (props, children) => <section {...props}>{children}</section>,
+  article: (props, children) => <article {...props}>{children}</article>,
+  aside: (props, children) => <aside {...props}>{children}</aside>,
+  header: (props, children) => <header {...props}>{children}</header>,
+  footer: (props, children) => <footer {...props}>{children}</footer>,
+  nav: (props, children) => <nav {...props}>{children}</nav>,
+  details: (props, children) => <details {...props}>{children}</details>,
+  summary: (props, children) => <summary {...props}>{children}</summary>,
+  address: (props, children) => <address {...props}>{children}</address>,
+  br: (_props, _children) => <br />,
+  hr: (_props, _children) => <hr />,
 };
 
 function styleToObject(style: string): CSSProperties {

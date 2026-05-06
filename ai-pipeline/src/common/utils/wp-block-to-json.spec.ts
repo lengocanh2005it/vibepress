@@ -28,4 +28,41 @@ describe('wpBlocksToJson PHP normalization', () => {
 
     expect(nodes[0]?.domId).toBe('sticky-header');
   });
+
+  it('preserves standalone wow motion hook classes from WordPress block markup', () => {
+    const markup = `
+<!-- wp:group {"className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+<div class="wp-block-group wow animate__animated animate__fadeInUp cover-inner">
+  <!-- wp:paragraph -->
+  <p>About Me</p>
+  <!-- /wp:paragraph -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.customClassNames).toEqual(
+      expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+      ]),
+    );
+  });
+
+  it('normalizes border radius objects and duplicate css units from block params', () => {
+    const markup = `
+<!-- wp:group {"style":{"border":{"radius":{"topLeft":"40px","topRight":"40px","bottomRight":"40px","bottomLeft":"40px"}},"spacing":{"padding":{"top":"80pxpx","bottom":"autopx"}}}} -->
+<div class="wp-block-group"></div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.borderRadius).toBe('40px');
+    expect(nodes[0]?.padding?.top).toBe('80px');
+    expect(nodes[0]?.padding?.bottom).toBe('auto');
+  });
 });

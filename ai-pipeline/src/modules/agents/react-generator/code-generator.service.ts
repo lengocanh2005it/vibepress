@@ -260,7 +260,7 @@ export class CodeGeneratorService {
     const fragment = this.renderBlockFaithfulNodes(nodes, ctx, renderState, 3);
     const lines: string[] = [
       "import React, { useEffect, useState } from 'react';",
-      "import { Link } from 'react-router-dom';",
+      `import { Link${needsMenus && renderState.componentKind === 'header' ? ', useLocation' : ''} } from 'react-router-dom';`,
       '',
       SHARED_INTERFACES,
       '',
@@ -431,17 +431,17 @@ export class CodeGeneratorService {
       );
       lines.push('        return (');
       lines.push(
-        `          <li key={item.id} className={vertical ? "${this.navigationItemClass(true)}" : "${this.navigationItemClass(false)}"}>`,
+        `          <li key={item.id} className={vertical ? \`${this.navigationItemClass(true)} \${isCurrentMenuItem(item.url) ? 'current-menu-item current_page_item' : ''}\`.trim() : \`${this.navigationItemClass(false)} \${isCurrentMenuItem(item.url) ? 'current-menu-item current_page_item' : ''}\`.trim()}>`,
       );
       lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
-        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.opacityLinkClass())}">`,
+        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(renderState.componentKind === 'header' ? this.opacityLinkClass('', false) : this.opacityLinkClass())}">`,
       );
       lines.push('                {item.title}');
       lines.push('              </Link>');
       lines.push('            ) : (');
       lines.push(
-        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.opacityLinkClass())}">`,
+        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(renderState.componentKind === 'header' ? this.opacityLinkClass('', false) : this.opacityLinkClass())}">`,
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
@@ -519,6 +519,26 @@ export class CodeGeneratorService {
       lines.push('    const next = toAppPath(url);');
       lines.push("    return next.startsWith('/');");
       lines.push('  };');
+      if (needsMenus && renderState.componentKind === 'header') {
+        lines.push('');
+        lines.push('  const location = useLocation();');
+        lines.push('  const normalizeNavPath = (value?: string) => {');
+        lines.push(
+          "    const next = (value ?? '/').split('#')[0]?.split('?')[0] || '/';",
+        );
+        lines.push("    if (next === '/') return '/';");
+        lines.push("    return next.replace(/\\/+$/, '') || '/';");
+        lines.push('  };');
+        lines.push(
+          '  const currentPath = normalizeNavPath(location.pathname);',
+        );
+        lines.push('  const isCurrentMenuItem = (url?: string) => {');
+        lines.push('    if (!isInternalPath(url)) return false;');
+        lines.push(
+          '    return normalizeNavPath(toAppPath(url)) === currentPath;',
+        );
+        lines.push('  };');
+      }
     }
 
     if (needsSiteInfo) {
@@ -654,6 +674,7 @@ export class CodeGeneratorService {
     ];
     const routerParts: string[] = [];
     if (needsRouter) routerParts.push('Link');
+    if (this.needsLocation(plan)) routerParts.push('useLocation');
     if (needsParams) routerParts.push('useParams');
     if (this.needsPagination(plan)) routerParts.push('useSearchParams');
     if (routerParts.length > 0) {
@@ -759,6 +780,10 @@ export class CodeGeneratorService {
         'cover',
       ].includes(s.type),
     );
+  }
+
+  private needsLocation(plan: ComponentVisualPlan): boolean {
+    return plan.sections.some((section) => section.type === 'navbar');
   }
 
   private needsParams(plan: ComponentVisualPlan): boolean {
@@ -1767,6 +1792,26 @@ export class CodeGeneratorService {
       lines.push(`    return next.startsWith('/');`);
       lines.push(`  };`);
       lines.push('');
+      if (this.needsLocation(plan)) {
+        lines.push(`  const location = useLocation();`);
+        lines.push(`  const normalizeNavPath = (value?: string) => {`);
+        lines.push(
+          `    const next = (value ?? '/').split('#')[0]?.split('?')[0] || '/';`,
+        );
+        lines.push(`    if (next === '/') return '/';`);
+        lines.push(`    return next.replace(/\\/+$/, '') || '/';`);
+        lines.push(`  };`);
+        lines.push(
+          `  const currentPath = normalizeNavPath(location.pathname);`,
+        );
+        lines.push(`  const isCurrentMenuItem = (url?: string) => {`);
+        lines.push(`    if (!isInternalPath(url)) return false;`);
+        lines.push(
+          `    return normalizeNavPath(toAppPath(url)) === currentPath;`,
+        );
+        lines.push(`  };`);
+        lines.push('');
+      }
     }
     lines.push(
       `  if (loading) return <div className="min-h-screen flex items-center justify-center"><span>Loading...</span></div>;`,
@@ -3000,9 +3045,15 @@ ${indent}) : null}`;
     });
     if (!node.src) return baseStyle;
 
+    const bgPosition = node.focalPoint
+      ? `${Math.round(node.focalPoint.x * 100)}% ${Math.round(node.focalPoint.y * 100)}%`
+      : 'center';
+    const bgAttachment = node.hasParallax
+      ? `, backgroundAttachment: 'fixed'`
+      : '';
     const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
       node.src,
-    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: '${bgPosition}', backgroundRepeat: 'no-repeat'${bgAttachment} }}`;
     return this.mergeStyleAttrs(baseStyle, backgroundStyle);
   }
 
@@ -3106,9 +3157,12 @@ ${indent}) : null}`;
   private buildStyleAttr(
     style: Record<string, string | number | undefined>,
   ): string {
-    const entries = Object.entries(style).filter(
-      ([, value]) => value !== undefined && value !== '',
-    );
+    const entries = Object.entries(style)
+      .map(
+        ([key, value]) =>
+          [key, this.normalizeGeneratedStyleValue(key, value)] as const,
+      )
+      .filter(([, value]) => value !== undefined && value !== '');
     if (entries.length === 0) return '';
 
     return ` style={{ ${entries
@@ -3278,14 +3332,18 @@ ${indent}) : null}`;
     });
   }
 
-  private textLinkClass(color: string, accent: string, extra = ''): string {
+  private textLinkClass(
+    color: string,
+    accent: string,
+    extra = '',
+    includeUnderline = true,
+  ): string {
     return [
       extra,
       `text-[${color}]`,
       'transition-colors',
-      'underline-offset-4',
       `hover:text-[${accent}]`,
-      'hover:underline',
+      ...(includeUnderline ? ['underline-offset-4', 'hover:underline'] : []),
     ]
       .filter(Boolean)
       .join(' ');
@@ -3472,13 +3530,12 @@ ${indent}) : null}`;
     return `\n                  <div className="flex flex-wrap items-center ${justifyClass} gap-4">${links}\n                  </div>`;
   }
 
-  private opacityLinkClass(extra = ''): string {
+  private opacityLinkClass(extra = '', includeUnderline = true): string {
     return [
       extra,
       'transition-opacity',
-      'underline-offset-4',
       'hover:opacity-75',
-      'hover:underline',
+      ...(includeUnderline ? ['underline-offset-4', 'hover:underline'] : []),
     ]
       .filter(Boolean)
       .join(' ');
@@ -3805,7 +3862,7 @@ ${indent}) : null}`;
     const cta = s.cta
       ? s.cta.style === 'button'
         ? `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(`bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity`, s.cta.customClassNames)}"${buttonStyle}>${s.cta.text}</Link>`
-        : `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(this.textLinkClass(tc, p.accent), s.cta.customClassNames)}"${navLinkStyle}>${s.cta.text}</Link>`
+        : `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(this.textLinkClass(tc, p.accent, '', false), s.cta.customClassNames)}"${navLinkStyle}>${s.cta.text}</Link>`
       : '';
 
     const navItems = `((menus.find((menu) => menu.location === 'primary') ?? menus.find((menu) => menu.slug === 'primary') ?? menus.find((menu) => menu.slug === '${s.menuSlug}') ?? menus[0])?.items ?? []).filter((item) => item.parentId === 0)`;
@@ -3814,13 +3871,13 @@ ${indent}) : null}`;
     );
     const mobileListClass = this.navigationListClass(true, 'w-full');
     const renderNavItem = (vertical = false, extraLinkClass = '') =>
-      `<li key={item.id} className="${this.navigationItemClass(vertical)}">
+      `<li key={item.id} className={\`${this.navigationItemClass(vertical)} \${isCurrentMenuItem(item.url) ? 'current-menu-item current_page_item' : ''}\`.trim()}>
                     {isInternalPath(item.url) ? (
-                      <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent), extraLinkClass))}"${navLinkStyle}>
+                      <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent, '', false), extraLinkClass))}"${navLinkStyle}>
                         {item.title}
                       </Link>
                     ) : (
-                      <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent), extraLinkClass))}"${navLinkStyle}>
+                      <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent, '', false), extraLinkClass))}"${navLinkStyle}>
                         {item.title}
                       </a>
                     )}
@@ -5010,7 +5067,10 @@ ${cards}
       backgroundColor: s.imageFrameBackground,
       minHeight: s.imageFrameMinHeight,
       padding: s.imageFramePaddingStyle,
-      borderRadius: s.imageFrameBackground || s.imageFrameMinHeight ? s.imageRadius : undefined,
+      borderRadius:
+        s.imageFrameBackground || s.imageFrameMinHeight
+          ? s.imageRadius
+          : undefined,
     });
     const imgEl = `<div className="${imageFrameClassName}"${imageFrameStyleAttr}><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
     const mediaHeadingClassName = this.appendStyledTextAlignClass(
@@ -6398,7 +6458,10 @@ ${
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'group'),
-          this.buildWpLayoutStyle(node),
+          {
+            ...this.buildWpLayoutStyle(node),
+            ...this.buildBlockFaithfulBehaviorStyle(node, state),
+          },
         );
         return `${indent}<div${this.buildWpNodeAttrs(node)}${styleAttr}>
 ${children}
@@ -6714,8 +6777,11 @@ ${indent}</nav>`;
           : 'md:hidden flex items-center p-2';
       const mobilePanelClass =
         overlayMode === 'always'
-          ? 'absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50'
-          : 'md:hidden absolute top-full left-0 right-0 bg-[${ctx.p.surface}] border-b border-black/10 z-50';
+          ? 'absolute top-full left-0 right-0 border-b border-black/10 z-50'
+          : 'md:hidden absolute top-full left-0 right-0 border-b border-black/10 z-50';
+      const mobilePanelStyle = this.buildStyleAttr({
+        backgroundColor: ctx.p.surface,
+      });
       return `${indent}<>
  ${indent}  <nav${this.buildWpNodeAttrs(node, this.navigationRootClass(desktopNavClass))}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}    {${menuVar} ? (
@@ -6738,7 +6804,7 @@ ${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" vi
 ${indent}    )}
 ${indent}  </button>
 ${indent}  {mobileMenuOpen && (
-${indent}    <nav className="${this.navigationRootClass(mobilePanelClass)}">
+${indent}    <nav className="${this.navigationRootClass(mobilePanelClass)}"${mobilePanelStyle}>
 ${indent}      <div className="${ctx.l.containerClass} py-3">
 ${indent}        {${menuVar} ? (
 ${indent}          <ul className="${this.navigationListClass(true)}">
@@ -6812,6 +6878,23 @@ ${indent}</ul>`;
     });
   }
 
+  private buildBlockFaithfulBehaviorStyle(
+    node: WpNode,
+    state: BlockFaithfulRenderState,
+  ): Record<string, string | number | undefined> {
+    if (
+      state.componentKind === 'header' &&
+      node.domId?.trim().toLowerCase() === 'sticky-header'
+    ) {
+      return {
+        position: 'sticky',
+        top: 0,
+        zIndex: 50,
+      };
+    }
+    return {};
+  }
+
   private buildWpCoverStyleAttr(node: WpNode, ctx: RenderCtx): string {
     const baseStyle = this.buildWpNodeStyleAttr(
       node,
@@ -6823,9 +6906,15 @@ ${indent}</ul>`;
     );
     if (!node.src) return baseStyle;
 
+    const bgPosition = node.focalPoint
+      ? `${Math.round(node.focalPoint.x * 100)}% ${Math.round(node.focalPoint.y * 100)}%`
+      : 'center';
+    const bgAttachment = node.hasParallax
+      ? `, backgroundAttachment: 'fixed'`
+      : '';
     const backgroundStyle = ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
       node.src,
-    )})}")\`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}`;
+    )})}")\`, backgroundSize: 'cover', backgroundPosition: '${bgPosition}', backgroundRepeat: 'no-repeat'${bgAttachment} }}`;
     return this.mergeStyleAttrs(baseStyle, backgroundStyle);
   }
 
@@ -6956,7 +7045,72 @@ ${indent}</ul>`;
     if (!value) return undefined;
     const normalized = value.trim();
     if (!normalized) return undefined;
-    return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+    if (
+      /^(auto|inherit|initial|unset|fit-content|max-content|min-content)$/i.test(
+        normalized,
+      )
+    ) {
+      return normalized.toLowerCase();
+    }
+    if (/^(calc|min|max|clamp|var)\(/i.test(normalized)) {
+      return normalized;
+    }
+    const collapsedAuto = normalized.replace(
+      /\b(auto)(?:px|r?em|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc)\b/gi,
+      '$1',
+    );
+    const dedupedUnits = collapsedAuto.replace(
+      /(-?\d*\.?\d+)(px|r?em|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc)\2\b/gi,
+      '$1$2',
+    );
+    return /^-?\d+(\.\d+)?$/.test(dedupedUnits)
+      ? `${dedupedUnits}px`
+      : dedupedUnits;
+  }
+
+  private normalizeGeneratedStyleValue(
+    key: string,
+    value: string | number | undefined,
+  ): string | number | undefined {
+    if (typeof value === 'number') return value;
+    if (value === undefined) return undefined;
+    const normalized = String(value).trim();
+    if (!normalized || normalized === '[object Object]') return undefined;
+
+    const lengthLikeKeys = new Set([
+      'width',
+      'height',
+      'minHeight',
+      'maxWidth',
+      'maxHeight',
+      'padding',
+      'margin',
+      'gap',
+      'top',
+      'right',
+      'bottom',
+      'left',
+      'borderRadius',
+      'borderWidth',
+      'fontSize',
+      'lineHeight',
+      'letterSpacing',
+      'flexBasis',
+    ]);
+    if (lengthLikeKeys.has(key)) {
+      if (
+        /^(calc|min|max|clamp|var)\(/i.test(normalized) ||
+        normalized.includes('/')
+      ) {
+        return this.normalizeCssLength(normalized) ?? normalized;
+      }
+      return normalized
+        .split(/\s+/)
+        .map((part) => this.normalizeCssLength(part) ?? part)
+        .join(' ');
+    }
+
+    return normalized;
   }
 
   private buildInteractiveSectionStateKey(

@@ -1122,7 +1122,8 @@ function buildBlockTreeDrivenListingSections(input: {
   const sidebarSource = resolveSidebarSourceMatch(draftBlockTree, shell);
   const orderedNodes = collectBlockNodesInOrder(
     draftBlockTree,
-    shell.sidebarColumnSourceNodeId || sidebarSource?.shell?.sourceRef?.sourceNodeId
+    shell.sidebarColumnSourceNodeId ||
+      sidebarSource?.shell?.sourceRef?.sourceNodeId
       ? new Set(
           [
             shell.sidebarColumnSourceNodeId,
@@ -1202,7 +1203,11 @@ function buildBlockTreeDrivenListingSections(input: {
 
   if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(sidebarSource.nodes, input.content, sidebarSource.shell),
+      buildSidebarSectionFromBlockTree(
+        sidebarSource.nodes,
+        input.content,
+        sidebarSource.shell,
+      ),
     );
   }
 
@@ -1212,20 +1217,21 @@ function buildBlockTreeDrivenListingSections(input: {
 
   return {
     sections,
-    layout: shell.hasSidebar || !!sidebarSource
-      ? {
-          ...input.layout,
-          contentLayout:
-            (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
-              ? 'sidebar-left'
-              : 'sidebar-right',
-          sidebarWidth:
-            sidebarSource?.width ??
-            shell.sidebarWidth ??
-            input.layout.sidebarWidth,
-          sidebarScope: 'all-content',
-        }
-      : input.layout,
+    layout:
+      shell.hasSidebar || !!sidebarSource
+        ? {
+            ...input.layout,
+            contentLayout:
+              (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+                ? 'sidebar-left'
+                : 'sidebar-right',
+            sidebarWidth:
+              sidebarSource?.width ??
+              shell.sidebarWidth ??
+              input.layout.sidebarWidth,
+            sidebarScope: 'all-content',
+          }
+        : input.layout,
   };
 }
 
@@ -1330,7 +1336,9 @@ function buildListingLeadCoverSection(
     type: 'cover',
     imageSrc: coverNode.src,
     dimRatio:
-      typeof coverNode.attrs?.dimRatio === 'number' ? coverNode.attrs.dimRatio : 50,
+      typeof coverNode.attrs?.dimRatio === 'number'
+        ? coverNode.attrs.dimRatio
+        : 50,
     minHeight: normalizeCoverCssLength(coverNode.minHeight) ?? '400px',
     contentAlign:
       coverNode.textAlign === 'left' || coverNode.textAlign === 'right'
@@ -1393,7 +1401,8 @@ function nodeBelongsToSourceSubtree(
   }
   const sourceNodeId = node.sourceRef?.sourceNodeId;
   return (
-    typeof sourceNodeId === 'string' && sourceNodeId.startsWith(sourceNodeIdPrefix)
+    typeof sourceNodeId === 'string' &&
+    sourceNodeId.startsWith(sourceNodeIdPrefix)
   );
 }
 
@@ -1417,7 +1426,8 @@ function buildBlockTreeDrivenPostDetailSections(input: {
   const isProductDetail = dataNeeds.includes('productDetail');
   const mainNodes = collectBlockNodesInOrder(
     input.draftBlockTree,
-    shell.sidebarColumnSourceNodeId || sidebarSource?.shell?.sourceRef?.sourceNodeId
+    shell.sidebarColumnSourceNodeId ||
+      sidebarSource?.shell?.sourceRef?.sourceNodeId
       ? new Set(
           [
             shell.sidebarColumnSourceNodeId,
@@ -1601,26 +1611,31 @@ function buildBlockTreeDrivenPostDetailSections(input: {
 
   if (sidebarSource?.nodes?.length) {
     sections.push(
-      buildSidebarSectionFromBlockTree(sidebarSource.nodes, input.content, sidebarSource.shell),
+      buildSidebarSectionFromBlockTree(
+        sidebarSource.nodes,
+        input.content,
+        sidebarSource.shell,
+      ),
     );
   }
 
   return {
     sections,
-    layout: shell.hasSidebar || !!sidebarSource
-      ? {
-          ...input.layout,
-          contentLayout:
-            (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
-              ? 'sidebar-left'
-              : 'sidebar-right',
-          sidebarWidth:
-            sidebarSource?.width ??
-            shell.sidebarWidth ??
-            input.layout.sidebarWidth,
-          sidebarScope: 'all-content',
-        }
-      : input.layout,
+    layout:
+      shell.hasSidebar || !!sidebarSource
+        ? {
+            ...input.layout,
+            contentLayout:
+              (sidebarSource?.position ?? shell.sidebarPosition) === 'left'
+                ? 'sidebar-left'
+                : 'sidebar-right',
+            sidebarWidth:
+              sidebarSource?.width ??
+              shell.sidebarWidth ??
+              input.layout.sidebarWidth,
+            sidebarScope: 'all-content',
+          }
+        : input.layout,
   };
 }
 
@@ -1819,7 +1834,9 @@ function resolveSidebarSourceMatch(
   };
 }
 
-function hasRenderableSidebarWidgetContent(sidebarNodes?: BlockNode[]): boolean {
+function hasRenderableSidebarWidgetContent(
+  sidebarNodes?: BlockNode[],
+): boolean {
   return collectSidebarWidgetKinds(sidebarNodes ?? []).size > 0;
 }
 
@@ -1851,8 +1868,8 @@ function findStandaloneSidebarRoot(
 function isStandaloneSidebarRootCandidate(node: BlockNode): boolean {
   const widgetKinds = collectSidebarWidgetKinds([node]);
   if (widgetKinds.size === 0) return false;
-  const hasStickySidebarClass = (node.customClassNames ?? []).some((className) =>
-    /sticky-sidebar/i.test(className),
+  const hasStickySidebarClass = (node.customClassNames ?? []).some(
+    (className) => /sticky-sidebar/i.test(className),
   );
   if (hasStickySidebarClass) return true;
   return widgetKinds.size >= 3 && (node.children?.length ?? 0) >= 2;
@@ -2109,7 +2126,9 @@ function buildOrderedSidebarWidgets(
     });
   }
   if (
-    orderedNodes.some((node) => ['post-author-biography', 'avatar'].includes(node.kind))
+    orderedNodes.some((node) =>
+      ['post-author-biography', 'avatar'].includes(node.kind),
+    )
   ) {
     fallbackWidgets.push({
       kind: 'author-bio',
@@ -2123,8 +2142,9 @@ function buildOrderedSidebarWidgets(
     fallbackWidgets.push({
       kind: 'navigation',
       title:
-        headingTexts.find((heading) => /link|resource|menu|explore/i.test(heading)) ??
-        'Useful Links',
+        headingTexts.find((heading) =>
+          /link|resource|menu|explore/i.test(heading),
+        ) ?? 'Useful Links',
       menuSlug: content.menus[0]?.slug ?? 'primary',
     });
   }
@@ -2165,7 +2185,9 @@ function isSidebarWidgetRootNode(
   if (widgetKinds.size !== 1) return false;
   if (mapSidebarWidgetKind(node.kind)) return true;
   const children = node.children ?? [];
-  return children.some((child) => child.kind === 'heading') || children.length <= 1;
+  return (
+    children.some((child) => child.kind === 'heading') || children.length <= 1
+  );
 }
 
 function buildSidebarWidgetFromRoot(
@@ -2204,7 +2226,9 @@ function buildSidebarWidgetFromRoot(
     };
   }
   if (
-    orderedNodes.some((node) => ['post-author-biography', 'avatar'].includes(node.kind))
+    orderedNodes.some((node) =>
+      ['post-author-biography', 'avatar'].includes(node.kind),
+    )
   ) {
     return {
       kind: 'author-bio',

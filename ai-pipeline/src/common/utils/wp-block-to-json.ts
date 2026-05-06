@@ -30,6 +30,8 @@ export interface WpNode {
   padding?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.padding
   margin?: { top?: string; right?: string; bottom?: string; left?: string }; // from params.style.spacing.margin
   minHeight?: string; // from params.minHeight (cover/group blocks)
+  hasParallax?: boolean; // cover block parallax scroll (background-attachment: fixed)
+  focalPoint?: { x: number; y: number }; // cover block focal point for background-position
   overlayColor?: string; // cover block overlay color hex (pre-resolved)
   columnWidth?: string; // wp:column percentage width (e.g. "33.33%")
   textAlign?: string; // from params.textAlign
@@ -89,7 +91,7 @@ export function wpJsonToString(nodes: WpNode[]): string {
   return JSON.stringify(stripParams(nodes));
 }
 
-function normalizeWordPressPhpMarkup(raw: string): string {
+export function normalizeWordPressPhpMarkup(raw: string): string {
   return String(raw ?? '')
     .replace(/<\?php\s*\/\*\*[\s\S]*?\*\/\s*\?>/g, '')
     .replace(
@@ -225,10 +227,10 @@ function normalizeBoxSpacing(
   if (typeof value === 'object') {
     const box = value as Record<string, unknown>;
     return compactBoxSpacing({
-      top: box.top as string | undefined,
-      right: box.right as string | undefined,
-      bottom: box.bottom as string | undefined,
-      left: box.left as string | undefined,
+      top: normalizeCssLength(box.top),
+      right: normalizeCssLength(box.right),
+      bottom: normalizeCssLength(box.bottom),
+      left: normalizeCssLength(box.left),
     });
   }
 
@@ -270,7 +272,65 @@ function normalizeCssLength(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   const normalized = String(value).trim();
   if (!normalized) return undefined;
-  return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+  if (
+    /^(auto|inherit|initial|unset|fit-content|max-content|min-content)$/i.test(
+      normalized,
+    )
+  ) {
+    return normalized.toLowerCase();
+  }
+  if (
+    /^(calc|min|max|clamp|var)\(/i.test(normalized) ||
+    normalized.includes('/')
+  ) {
+    return normalized;
+  }
+  const collapsedAuto = normalized.replace(
+    /\b(auto)(?:px|r?em|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc)\b/gi,
+    '$1',
+  );
+  const dedupedUnits = collapsedAuto.replace(
+    /(-?\d*\.?\d+)(px|r?em|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc)\2\b/gi,
+    '$1$2',
+  );
+  return /^-?\d+(\.\d+)?$/.test(dedupedUnits)
+    ? `${dedupedUnits}px`
+    : dedupedUnits;
+}
+
+function normalizeBorderRadius(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === 'string' || typeof value === 'number') {
+    return normalizeCssLength(value);
+  }
+  if (typeof value !== 'object') return undefined;
+
+  const radius = value as Record<string, unknown>;
+  const topLeft =
+    normalizeCssLength(radius.topLeft ?? radius.top ?? radius.left) ?? '0px';
+  const topRight =
+    normalizeCssLength(radius.topRight ?? radius.top ?? radius.right) ?? '0px';
+  const bottomRight =
+    normalizeCssLength(radius.bottomRight ?? radius.bottom ?? radius.right) ??
+    '0px';
+  const bottomLeft =
+    normalizeCssLength(radius.bottomLeft ?? radius.bottom ?? radius.left) ??
+    '0px';
+
+  if (
+    topLeft === topRight &&
+    topLeft === bottomRight &&
+    topLeft === bottomLeft
+  ) {
+    return topLeft;
+  }
+  if (topLeft === bottomRight && topRight === bottomLeft) {
+    return topLeft === topRight ? topLeft : `${topLeft} ${topRight}`;
+  }
+  if (topRight === bottomLeft) {
+    return `${topLeft} ${topRight} ${bottomRight}`;
+  }
+  return `${topLeft} ${topRight} ${bottomRight} ${bottomLeft}`;
 }
 
 function normalizeHorizontalAlign(
@@ -637,8 +697,8 @@ function parseBlocks(markup: string): WpNode[] {
     if (params?.style?.color?.text && !node.textColor)
       node.textColor = params.style.color.text as string;
     // Lift border radius from params.style.border.radius
-    const borderRadius = params?.style?.border?.radius;
-    if (borderRadius) node.borderRadius = borderRadius as string;
+    const borderRadius = normalizeBorderRadius(params?.style?.border?.radius);
+    if (borderRadius) node.borderRadius = borderRadius;
     // Lift gap from params.style.spacing.blockGap or params.gap
     const gap = normalizeGapValue(
       params?.style?.spacing?.blockGap ?? params?.gap,
@@ -651,6 +711,14 @@ function parseBlocks(markup: string): WpNode[] {
     // Lift minHeight (cover/group blocks)
     if (params?.minHeight)
       node.minHeight = normalizeCssLength(params.minHeight);
+    // Lift parallax and focal point for cover blocks
+    if (params?.hasParallax === true) node.hasParallax = true;
+    if (params?.focalPoint && typeof params.focalPoint === 'object') {
+      const fp = params.focalPoint as Record<string, unknown>;
+      const x = typeof fp.x === 'number' ? fp.x : parseFloat(String(fp.x));
+      const y = typeof fp.y === 'number' ? fp.y : parseFloat(String(fp.y));
+      if (!isNaN(x) && !isNaN(y)) node.focalPoint = { x, y };
+    }
     // Lift inline typography from params.style.typography
     const typo = params?.style?.typography;
     if (typo || params?.fontSize) {
@@ -1118,12 +1186,17 @@ function mergeSyntheticChildren(
 }
 
 function extractUsefulCustomClassNames(tokens: string[]): string[] {
+  const standaloneUsefulClassNames = new Set(['wow']);
   return Array.from(
     new Set(
       tokens.filter((token) => {
         const normalized = token.trim().toLowerCase();
         if (!normalized) return false;
-        if (!normalized.includes('-') && !normalized.includes('__'))
+        if (
+          !normalized.includes('-') &&
+          !normalized.includes('__') &&
+          !standaloneUsefulClassNames.has(normalized)
+        )
           return false;
         return !/^(wp-|has-|align|is-layout-|current-|menu-item|page-item|post-|blocks-gallery|size-|components-|editor-|screen-reader-text$)/i.test(
           normalized,

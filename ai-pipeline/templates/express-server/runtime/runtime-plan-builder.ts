@@ -725,6 +725,30 @@ function buildRuntimeBlockNode(
     node.layout = { kind: 'grid', columns: 2 };
   }
 
+  if (block.blockName === 'core/cover') {
+    if (block.attrs.hasParallax === true) node.hasParallax = true;
+    const fp = block.attrs.focalPoint;
+    if (fp && typeof fp === 'object') {
+      const fpObj = fp as Record<string, unknown>;
+      const x = typeof fpObj.x === 'number' ? fpObj.x : parseFloat(String(fpObj.x ?? ''));
+      const y = typeof fpObj.y === 'number' ? fpObj.y : parseFloat(String(fpObj.y ?? ''));
+      if (!isNaN(x) && !isNaN(y)) node.focalPoint = { x, y };
+    }
+  }
+
+  if (['core/image', 'core/site-logo'].includes(block.blockName)) {
+    const w = typeof block.attrs.width === 'number' ? block.attrs.width
+      : parseInt(String(block.attrs.width ?? ''), 10);
+    const h = typeof block.attrs.height === 'number' ? block.attrs.height
+      : parseInt(String(block.attrs.height ?? ''), 10);
+    if (!isNaN(w) && w > 0) node.width = w;
+    if (!isNaN(h) && h > 0) node.height = h;
+  }
+
+  if (['core/table', 'core/verse', 'core/html', 'core/preformatted', 'core/code'].includes(block.blockName)) {
+    if (innerHtml && !node.html) node.html = rewriteRuntimeHtml(innerHtml);
+  }
+
   return node;
 }
 
@@ -871,11 +895,24 @@ function collectRuntimeSectionsAndBindings(
       const image = extractRuntimeImageData(block);
       const text = extractRuntimeSectionText(block);
       if (image.src || text.title || text.body) {
+        const coverHasParallax = block.attrs.hasParallax === true;
+        const coverFpRaw = block.attrs.focalPoint;
+        const coverFp =
+          coverFpRaw && typeof coverFpRaw === 'object'
+            ? (() => {
+                const fp = coverFpRaw as Record<string, unknown>;
+                const x = typeof fp.x === 'number' ? fp.x : parseFloat(String(fp.x ?? ''));
+                const y = typeof fp.y === 'number' ? fp.y : parseFloat(String(fp.y ?? ''));
+                return !isNaN(x) && !isNaN(y) ? { x, y } : null;
+              })()
+            : null;
         sections.push({
           ...base,
           ...text,
           ...(image.src ? { imageSrc: image.src } : {}),
           ...(image.alt ? { imageAlt: image.alt } : {}),
+          ...(coverHasParallax ? { hasParallax: true } : {}),
+          ...(coverFp ? { focalPoint: coverFp } : {}),
         });
         pushBinding(block, path, 'cover', sectionId, debugKey);
         return;
@@ -921,6 +958,35 @@ function collectRuntimeSectionsAndBindings(
         });
         pushBinding(block, path, 'media-text', sectionId, debugKey);
         return;
+      }
+    }
+
+    if (block.blockName === 'core/gallery') {
+      const imageBlocks = block.children.filter((c) => c.blockName === 'core/image');
+      if (imageBlocks.length > 0) {
+        const { sectionId, debugKey, base } = buildSectionBase(block, path, 'card-grid');
+        const cards = imageBlocks
+          .map((child, index) => {
+            const img = extractRuntimeImageData(child);
+            if (!img.src) return null;
+            const caption =
+              typeof child.attrs.caption === 'string' ? child.attrs.caption.trim() : '';
+            return {
+              heading: caption || `Image ${index + 1}`,
+              imageSrc: img.src,
+              ...(img.alt ? { imageAlt: img.alt } : {}),
+            };
+          })
+          .filter((c): c is NonNullable<typeof c> => Boolean(c));
+        if (cards.length > 0) {
+          const cols =
+            typeof block.attrs.columns === 'number'
+              ? block.attrs.columns
+              : Math.min(cards.length, 3);
+          sections.push({ ...base, columns: cols, cards });
+          pushBinding(block, path, 'card-grid', sectionId, debugKey);
+          return;
+        }
       }
     }
 

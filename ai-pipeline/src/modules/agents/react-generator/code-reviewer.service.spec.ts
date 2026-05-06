@@ -415,6 +415,71 @@ describe('CodeReviewerService section assembly policy', () => {
 });
 
 describe('CodeReviewerService inline section generation policy', () => {
+  it('normalizes parenthesized inline JSX output before validation', () => {
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      new FrameGeneratorService(),
+    );
+
+    const normalized = (
+      service as unknown as {
+        normalizeInlineSectionOutput: (code: string) => string;
+        validateInlineSectionOutput: (code: string) => string | undefined;
+      }
+    ).normalizeInlineSectionOutput(`
+      return (
+        <section className="hero">
+          <div>Content</div>
+        </section>
+      );
+    `);
+
+    expect(normalized).toBe(
+      '<section className="hero">\n          <div>Content</div>\n        </section>',
+    );
+    expect(
+      (
+        service as unknown as {
+          validateInlineSectionOutput: (code: string) => string | undefined;
+        }
+      ).validateInlineSectionOutput(normalized),
+    ).toBeUndefined();
+  });
+
+  it('wraps sibling inline section nodes in a fragment before validation', () => {
+    const service = new CodeReviewerService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      new FrameGeneratorService(),
+    );
+
+    const normalized = (
+      service as unknown as {
+        normalizeInlineSectionOutput: (code: string) => string;
+        validateInlineSectionOutput: (code: string) => string | undefined;
+      }
+    ).normalizeInlineSectionOutput(`
+      <div className="eyebrow">About Me</div>
+      <div className="content">Welcome To My Profile</div>
+    `);
+
+    expect(normalized).toBe(
+      '<><div className="eyebrow">About Me</div>\n      <div className="content">Welcome To My Profile</div></>',
+    );
+    expect(
+      (
+        service as unknown as {
+          validateInlineSectionOutput: (code: string) => string | undefined;
+        }
+      ).validateInlineSectionOutput(normalized),
+    ).toBeUndefined();
+  });
+
   it('does not use deterministic inline assembly for rich media-text sections', async () => {
     const validator = {
       checkInlineSectionSyntax: jest.fn().mockReturnValue(undefined),
