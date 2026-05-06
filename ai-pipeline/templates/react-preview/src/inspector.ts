@@ -148,17 +148,29 @@ function getSourceInfo(el: Element): ComponentInfo['source'] {
     if (s) return s;
   }
 
-  // 2. Walk return chain (parent fibers) — finds the nearest enclosing component
+  // 2. Walk return chain.
+  //    Host element fibers (div, p, span…) have _debugSource pointing to the file
+  //    where that element was WRITTEN — i.e. the component's own definition file.
+  //    Component fibers have _debugSource pointing to where <Component /> was
+  //    INSTANTIATED in the parent — the wrong file for our purpose.
+  //    So: prefer host-element sources, fall back to component-fiber sources.
+  let componentFallback: ComponentInfo['source'] | null = null;
   {
     let current: ReactFiber | undefined = fiber.return;
     while (current) {
       if (current._debugSource) {
+        const isHostElement = typeof current.type === 'string';
         const s = extractSource(current._debugSource);
-        if (s) return s;
+        if (s) {
+          if (isHostElement) return s;
+          if (!componentFallback) componentFallback = s;
+        }
       }
       current = current.return;
     }
   }
+
+  if (componentFallback) return componentFallback;
 
   // 3. Walk _debugOwner chain — component instantiation site (last resort)
   {
