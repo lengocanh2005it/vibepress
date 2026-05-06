@@ -47,6 +47,7 @@ export class ReactVisualEditService {
 
   async applyEdit(input: VisualEditInput): Promise<VisualEditResult> {
     const { frontendDir, routeEntries, editRequest, logPath } = input;
+    const t0 = Date.now();
 
     const componentName = this.resolveComponentName(
       editRequest.targetHint,
@@ -64,20 +65,28 @@ export class ReactVisualEditService {
       editRequest.targetHint,
     );
 
+    const t1 = Date.now();
     const currentCode = await readFile(filePath, 'utf-8');
-    const instruction = this.buildEditInstruction(editRequest);
+    this.logger.log(
+      `[timing] readFile "${componentName}" — ${Date.now() - t1}ms | lines=${currentCode.split('\n').length}`,
+    );
 
+    const instruction = this.buildEditInstruction(editRequest);
     this.logger.log(
       `[visual-edit] "${componentName}" rewriting — "${instruction.slice(0, 80).replace(/\n/g, ' ')}"`,
     );
 
     const model = this.reactGenerator.getDefaultModel();
+    const t2 = Date.now();
     const newCode = await this.codeReviewer.rewriteFile(
       model,
       currentCode,
       instruction,
       logPath,
       componentName,
+    );
+    this.logger.log(
+      `[timing] rewriteFile "${componentName}" — ${Date.now() - t2}ms`,
     );
 
     if (normalizeCode(newCode) === normalizeCode(currentCode)) {
@@ -86,12 +95,18 @@ export class ReactVisualEditService {
       );
     }
 
+    const t3 = Date.now();
     validateGeneratedCode(newCode, componentName);
+    this.logger.log(
+      `[timing] validateGeneratedCode "${componentName}" — ${Date.now() - t3}ms`,
+    );
 
     this.saveBackup(input.jobId, filePath, currentCode);
     await writeFile(filePath, newCode, 'utf-8');
 
-    this.logger.log(`[visual-edit] "${componentName}" ✓ written to ${filePath}`);
+    this.logger.log(
+      `[timing] applyEdit total "${componentName}" — ${Date.now() - t0}ms`,
+    );
 
     return { componentName, filePath, isValid: true, warnings: [] };
   }

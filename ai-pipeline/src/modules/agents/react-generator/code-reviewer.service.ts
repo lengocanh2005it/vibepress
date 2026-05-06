@@ -302,12 +302,20 @@ export class CodeReviewerService {
 
     await this.log(logPath, `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`);
 
+    const inputChars = userPrompt.length;
+    this.logger.log(
+      `[timing] llm.chat start — model=${model} inputChars=${inputChars}`,
+    );
+    const tChat = Date.now();
     const result = await this.llmFactory.chat({
       model,
       systemPrompt: this.rewriteFileSystemPrompt,
       userPrompt,
       maxTokens: 8192,
     });
+    this.logger.log(
+      `[timing] llm.chat done — ${Date.now() - tChat}ms | inputTokens=${result.inputTokens} outputTokens=${result.outputTokens}`,
+    );
 
     const raw = result.text ?? '';
     return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();

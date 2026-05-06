@@ -493,11 +493,18 @@ export class OrchestratorService implements BeforeApplicationShutdown {
     }
 
     try {
+      const tTotal = Date.now();
+
+      const tValidate = Date.now();
       const contract = this.reactVisualEditContract.validate({
         editRequest,
         plan,
         routeEntries,
       });
+      this.logger.log(
+        `[timing] contract.validate — ${Date.now() - tValidate}ms`,
+      );
+
       if (
         contract.resolvedComponentName &&
         !editRequest.targetHint?.componentName?.trim()
@@ -511,6 +518,7 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         };
       }
 
+      const tApply = Date.now();
       const editResult = await this.reactVisualEdit.applyEdit({
         jobId: body.jobId,
         frontendDir,
@@ -519,6 +527,12 @@ export class OrchestratorService implements BeforeApplicationShutdown {
         editRequest,
         logPath,
       });
+      this.logger.log(
+        `[timing] applyEdit total from orchestrator — ${Date.now() - tApply}ms`,
+      );
+      this.logger.log(
+        `[timing] submitReactVisualEdit total — ${Date.now() - tTotal}ms`,
+      );
 
       return {
         accepted: true,
