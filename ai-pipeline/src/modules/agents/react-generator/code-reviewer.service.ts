@@ -34,11 +34,13 @@ import {
   normalizeCommonTypographyTypos,
   normalizeThemeAssetReferences,
 } from '../shared/code-postprocess.util.js';
-import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
+import {
+  synchronizeVisualPlanContract,
+  toVisualDataNeeds,
+} from '../shared/visual-data-needs.util.js';
 import { isHybridDetailPlanWithoutCanonicalBody } from './prompt-policy.util.js';
 import {
   isDeterministicFallbackEligibleForRenderContract,
-  isStrictBlockTreeRenderContract,
   shouldPreferDeterministicGenerationForRenderContract,
 } from '../planner/render-contract.schema.js';
 import {
@@ -68,7 +70,11 @@ import {
   shouldBypassAiGenerationForVisualPlan,
   shouldProtectDeterministicStructureFromAi,
 } from './visual-plan.schema.js';
-import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
+import {
+  shouldForceStrictThemeSourceFaithfulDeterministicPage,
+  shouldPreferSectionAssemblyForFrontPage,
+  shouldPreferThemeSourceFaithfulDeterministicPage,
+} from './source-faithful-deterministic.util.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -194,9 +200,11 @@ const LIST_DRIVEN_VISUAL_SECTION_TYPES = new Set([
 ]);
 
 // Keep deterministic inline assembly limited to low-risk, content-structural
-// sections. Rich marketing/interactive sections need AI section generation to
-// preserve heading/body/cta/styling fidelity.
+// sections and compact source-backed sections where dropping a literal field is
+// worse than losing some design freedom. Rich interactive sections still need AI.
 const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
+  'cover',
+  'post-list',
   'post-content',
   'post-title',
   'post-featured-image',
@@ -207,6 +215,7 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
   'comments',
   'sidebar',
   'prose-block',
+  'testimonial',
 ]);
 
 /**
@@ -225,7 +234,6 @@ const DETERMINISTIC_SECTION_ASSEMBLY_TYPES = new Set<SectionPlan['type']>([
 export class CodeReviewerService {
   private readonly logger = new Logger(CodeReviewerService.name);
   private readonly tokenTracker = new TokenTracker();
-  private readonly themeProfiles = new ThemeProfileRegistry();
   private readonly componentSystemPrompt =
     'You are a senior React + TypeScript engineer focused on source-faithful WordPress migration. Generate a complete component from the provided migration context, preserve source-backed class/style semantics and DOM hierarchy, and return ONLY raw TSX code.';
   private readonly rawOutputDivider = '\n----- RAW OUTPUT BEGIN -----\n';
@@ -416,6 +424,7 @@ export class CodeReviewerService {
       const deterministicOnly = await this.tryDeterministicPlan(
         componentName,
         componentPlan.visualPlan,
+        componentPlan.renderContract?.fallback?.sections,
         validationContext,
         logPath,
         'locked deterministic-authority plan',
@@ -496,6 +505,7 @@ export class CodeReviewerService {
           const deterministicFirst = await this.tryDeterministicPlan(
             componentName,
             componentPlan.visualPlan,
+            componentPlan.renderContract?.fallback?.sections,
             validationContext,
             logPath,
             'reviewed plan (deterministic-first)',
@@ -588,6 +598,7 @@ export class CodeReviewerService {
           const deterministic = await this.tryDeterministicPlan(
             componentName,
             componentPlan.visualPlan,
+            componentPlan.renderContract?.fallback?.sections,
             validationContext,
             logPath,
             'reviewed plan',
@@ -770,6 +781,7 @@ export class CodeReviewerService {
               const deterministicFirst = await this.tryDeterministicPlan(
                 componentName,
                 visualPlan,
+                componentPlan?.renderContract?.fallback?.sections,
                 validationContext,
                 logPath,
                 'AI visual plan (deterministic-first)',
@@ -852,6 +864,7 @@ export class CodeReviewerService {
               const deterministic = await this.tryDeterministicPlan(
                 componentName,
                 visualPlan,
+                componentPlan?.renderContract?.fallback?.sections,
                 validationContext,
                 logPath,
                 'AI visual plan',
@@ -1326,7 +1339,10 @@ export class CodeReviewerService {
     const resolvedVisualPlan =
       options?.includeVisualPlan === false
         ? undefined
-        : (visualPlan ?? componentPlan?.visualPlan);
+        : synchronizeVisualPlanContract(
+            visualPlan ?? componentPlan?.visualPlan,
+            componentPlan,
+          );
     const hasExplicitDataNeeds = Array.isArray(componentPlan?.dataNeeds);
     const dataNeeds = hasExplicitDataNeeds
       ? [...(componentPlan?.dataNeeds ?? [])]
@@ -1516,11 +1532,11 @@ export class CodeReviewerService {
     }
 
     if (
-      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+      shouldPreferThemeSourceFaithfulDeterministicPage({
         componentPlan,
         componentName,
         repoManifest,
-      )
+      })
     ) {
       return {
         enabled: false,
@@ -1768,11 +1784,21 @@ export class CodeReviewerService {
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
     if (
-      this.shouldPreferThemeSourceFaithfulDeterministicPage(
+      componentPlan?.type === 'page' &&
+      componentPlan.visualPlan?.renderAuthority === 'ai' &&
+      componentPlan.visualPlan.renderMode === 'section-centric'
+    ) {
+      return false;
+    }
+    if (shouldPreferSectionAssemblyForFrontPage({ componentPlan, componentName })) {
+      return false;
+    }
+    if (
+      shouldPreferThemeSourceFaithfulDeterministicPage({
         componentPlan,
         componentName,
         repoManifest,
-      )
+      })
     ) {
       return true;
     }
@@ -1828,17 +1854,25 @@ export class CodeReviewerService {
     componentPlan: ReviewInput['componentPlan'] | undefined,
   ): boolean {
     if (!this.canUseDeterministicGeneration(componentPlan)) return false;
-    if (isStrictBlockTreeRenderContract(componentPlan?.renderContract)) {
+    if (
+      shouldPreferSectionAssemblyForFrontPage({
+        componentPlan,
+        componentName: componentPlan?.componentName ?? '',
+      })
+    ) {
+      return false;
+    }
+    if (
+      shouldForceStrictThemeSourceFaithfulDeterministicPage({
+        componentPlan,
+        componentName: componentPlan?.componentName ?? '',
+      })
+    ) {
       return true;
     }
     if (!componentPlan?.visualPlan) return false;
-    if (shouldBypassAiGenerationForVisualPlan(componentPlan.visualPlan)) {
-      return true;
-    }
-    return (
-      componentPlan.visualPlan.renderMode === 'block-centric' &&
-      componentPlan.planningSourceReason ===
-        'block-tree deterministic visual plan path'
+    return shouldBypassAiGenerationForVisualPlan(
+      synchronizeVisualPlanContract(componentPlan.visualPlan, componentPlan),
     );
   }
 
@@ -1853,41 +1887,6 @@ export class CodeReviewerService {
       isDeterministicFallbackEligibleForRenderContract(
         componentPlan?.renderContract,
       )
-    );
-  }
-
-  private shouldPreferThemeSourceFaithfulDeterministicPage(
-    componentPlan:
-      | ComponentPromptContext
-      | ReviewInput['componentPlan']
-      | undefined,
-    componentName: string,
-    repoManifest?: RepoThemeManifest,
-  ): boolean {
-    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan)
-      return false;
-    const themeSlug = repoManifest?.themeTypeHints?.themeSlug?.trim();
-    if (!themeSlug) return false;
-    const profile = this.themeProfiles.resolveFseProfile(themeSlug);
-    const sourceFaithfulComponents = new Set(
-      (profile.sourceFaithfulComponents ?? []).map((name) =>
-        name.toLowerCase(),
-      ),
-    );
-    if (!sourceFaithfulComponents.has(componentName.trim().toLowerCase())) {
-      return false;
-    }
-    if (profile.sharedChromeMode !== 'block-tree-first') return false;
-    if ((componentPlan.visualPlan.blockTree?.length ?? 0) === 0) return false;
-
-    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
-    return (
-      [
-        'front-page',
-        'template-about',
-        'template-contact',
-        'template-services',
-      ].includes(templateName) || /^frontpage$/i.test(componentName)
     );
   }
 
@@ -2198,6 +2197,7 @@ export class CodeReviewerService {
         raw,
         componentName,
         fullFilePolicy,
+        componentPlan,
       );
 
       const check = this.validator.checkCodeStructure(code, validationContext);
@@ -2250,13 +2250,23 @@ export class CodeReviewerService {
         const isVisualPlanFidelity = lastError?.includes(
           'Visual plan obligations violated',
         );
+        const isLayoutContract = lastError?.includes(
+          'Layout contract violated',
+        );
 
-        if (isNoJsx || isPageContract || isVisualPlanFidelity) {
+        if (
+          isNoJsx ||
+          isPageContract ||
+          isVisualPlanFidelity ||
+          isLayoutContract
+        ) {
           const reason = isNoJsx
             ? 'No JSX return found'
             : isPageContract
               ? 'Page detail contract violated'
-              : 'Visual plan obligations violated';
+              : isLayoutContract
+                ? 'Layout contract violated'
+                : 'Visual plan obligations violated';
           this.logger.warn(
             `[reviewer:autofix] "${componentName}" ${reason}; invoking self-fix agent`,
           );
@@ -2283,6 +2293,7 @@ export class CodeReviewerService {
               fixedResult.code,
               componentName,
               fullFilePolicy,
+              componentPlan,
             );
 
             const finalCheck = this.validator.checkCodeStructure(
@@ -2367,17 +2378,22 @@ export class CodeReviewerService {
   private async tryDeterministicPlan(
     componentName: string,
     visualPlan: ComponentVisualPlan,
+    fallbackSections: SectionPlan[] | undefined,
     validationContext: CodeValidationContext,
     logPath?: string,
     label = 'visual plan',
   ): Promise<{ code: string; isValid: boolean; error?: string }> {
+    const resolvedVisualPlan = this.mergeDeterministicFallbackSections(
+      visualPlan,
+      fallbackSections,
+    );
     const effectiveVisualPlan =
-      validationContext.runtimeRenderer === 'runtime-page'
-        ? {
-            ...visualPlan,
-            runtimeRenderer: validationContext.runtimeRenderer,
-          }
-        : visualPlan;
+      synchronizeVisualPlanContract(resolvedVisualPlan, {
+        dataNeeds: validationContext.dataNeeds,
+        fixedSlug: validationContext.fixedSlug,
+        route: validationContext.route,
+        runtimeRenderer: validationContext.runtimeRenderer,
+      }) ?? resolvedVisualPlan;
     let code = this.codeGenerator.generate(effectiveVisualPlan);
     const check = this.validator.checkCodeStructure(code, {
       ...validationContext,
@@ -2410,6 +2426,54 @@ export class CodeReviewerService {
       code,
       isValid: false,
       error: check.error,
+    };
+  }
+
+  private mergeDeterministicFallbackSections(
+    visualPlan: ComponentVisualPlan,
+    fallbackSections: SectionPlan[] | undefined,
+  ): ComponentVisualPlan {
+    const safeFallbackSections = Array.isArray(fallbackSections)
+      ? fallbackSections.filter(Boolean)
+      : [];
+    if (safeFallbackSections.length === 0) return visualPlan;
+
+    const currentSections = Array.isArray(visualPlan.sections)
+      ? visualPlan.sections.filter(Boolean)
+      : [];
+    if (currentSections.length === 0) {
+      return {
+        ...visualPlan,
+        sections: safeFallbackSections,
+      };
+    }
+
+    const sectionKeyFor = (section: SectionPlan): string =>
+      [
+        section.type,
+        section.sectionKey ?? '',
+        section.debugKey ?? '',
+        section.sourceRef?.sourceNodeId ?? '',
+      ].join('::');
+
+    const existing = new Set(
+      currentSections.map((section) => sectionKeyFor(section)),
+    );
+    const mergedSections = [...currentSections];
+    for (const section of safeFallbackSections) {
+      const key = sectionKeyFor(section);
+      if (existing.has(key)) continue;
+      mergedSections.push(section);
+      existing.add(key);
+    }
+
+    if (mergedSections.length === currentSections.length) {
+      return visualPlan;
+    }
+
+    return {
+      ...visualPlan,
+      sections: mergedSections,
     };
   }
 
@@ -3492,15 +3556,19 @@ export class CodeReviewerService {
             ),
           ),
         );
-        const basicError = this.validateInlineSectionOutput(deterministicCode);
+        const stableDeterministicCode =
+          this.ensureInlineSectionSingleWrapper(deterministicCode, section);
+        const basicError = this.validateInlineSectionOutput(
+          stableDeterministicCode,
+        );
         const syntaxError = basicError
           ? undefined
-          : this.validator.checkInlineSectionSyntax(deterministicCode);
+          : this.validator.checkInlineSectionSyntax(stableDeterministicCode);
         const fidelityError =
           basicError || syntaxError
             ? undefined
             : this.validator.checkInlineSectionFidelity(
-                deterministicCode,
+                stableDeterministicCode,
                 section,
                 componentName,
                 sectionIndex + 1,
@@ -3516,10 +3584,10 @@ export class CodeReviewerService {
             `[reviewer] "${componentName}" section-level (${phaseLabel}): section ${sectionIndex + 1}/${totalSections} (${section.type}) accepted via deterministic collection renderer`,
           );
           return {
-            code: deterministicCode,
+            code: stableDeterministicCode,
             isValid: true,
             attemptsUsed: 0,
-            lastRawOutput: deterministicCode,
+            lastRawOutput: stableDeterministicCode,
             cotAttempts: [],
           };
         }
@@ -4335,10 +4403,18 @@ export class CodeReviewerService {
     if (/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed)) {
       return 'Inline section output must not declare hooks or component functions';
     }
-    if (!/^<[\s\S]+>$/.test(trimmed)) {
+    if (!this.hasSingleTopLevelJsxWrapper(trimmed)) {
       return 'Inline section output must be a single top-level JSX wrapper';
     }
     return undefined;
+  }
+
+  private hasSingleTopLevelJsxWrapper(code: string): boolean {
+    const trimmed = code.trim();
+    if (!trimmed.startsWith('<')) return false;
+    const firstNodeEnd = this.findFirstTopLevelJsxNodeEnd(trimmed);
+    if (firstNodeEnd == null) return false;
+    return trimmed.slice(firstNodeEnd).trim().length === 0;
   }
 
   private normalizeInlineSectionOutput(code: string): string {
@@ -4376,6 +4452,17 @@ export class CodeReviewerService {
       result = unwrap(result);
     }
 
+    const firstJsxIndex = this.findFirstLikelyJsxStart(result);
+    if (firstJsxIndex > 0) {
+      const prelude = result.slice(0, firstJsxIndex).trim();
+      if (
+        prelude &&
+        /^(?:const|let|var|function|type|interface)\b/m.test(prelude)
+      ) {
+        result = result.slice(firstJsxIndex).trim();
+      }
+    }
+
     const trimmed = result.trim();
     if (
       trimmed &&
@@ -4389,6 +4476,43 @@ export class CodeReviewerService {
     }
 
     return result.trim();
+  }
+
+  private ensureInlineSectionSingleWrapper(
+    code: string,
+    section: SectionPlan,
+  ): string {
+    const trimmed = code.trim();
+    if (!trimmed) return trimmed;
+    if (section.type === 'sidebar' && trimmed.startsWith('<>')) {
+      const inner = trimmed.replace(/^<>\s*/, '').replace(/\s*<\/>$/, '');
+      return `<section className="vp-inline-section vp-inline-section-sidebar" data-inline-section="sidebar">\n${inner}\n</section>`;
+    }
+    if (this.hasSingleTopLevelJsxWrapper(trimmed)) return trimmed;
+    if (/^\s*(?:import\b|export\b)/m.test(trimmed)) return trimmed;
+    if (/\buseEffect\s*\(|\buseState\s*\(|function\s+[A-Z]/.test(trimmed)) {
+      return trimmed;
+    }
+
+    const className =
+      section.type === 'sidebar'
+        ? 'vp-inline-section vp-inline-section-sidebar'
+        : 'vp-inline-section';
+    return `<section className="${className}" data-inline-section="${section.type}">\n${trimmed}\n</section>`;
+  }
+
+  private findFirstLikelyJsxStart(code: string): number {
+    const pattern = /<(?:>|\/?[A-Za-z])/g;
+    for (const match of code.matchAll(pattern)) {
+      const index = match.index ?? -1;
+      if (index < 0) continue;
+      const lineStart = code.lastIndexOf('\n', index - 1) + 1;
+      const prefix = code.slice(lineStart, index);
+      if (/^\s*$/.test(prefix)) {
+        return index;
+      }
+    }
+    return -1;
   }
 
   private shouldWrapInlineSectionInFragment(code: string): boolean {
@@ -4405,8 +4529,46 @@ export class CodeReviewerService {
   private findFirstTopLevelJsxNodeEnd(code: string): number | null {
     let depth = 0;
     let index = 0;
+    let childExpressionDepth = 0;
+    let childExpressionQuote: '"' | "'" | '`' | null = null;
 
     while (index < code.length) {
+      const char = code[index];
+      const prev = code[index - 1];
+
+      if (childExpressionDepth > 0) {
+        if (childExpressionQuote) {
+          if (char === childExpressionQuote && prev !== '\\') {
+            childExpressionQuote = null;
+          }
+          index += 1;
+          continue;
+        }
+        if (char === '"' || char === "'" || char === '`') {
+          childExpressionQuote = char;
+          index += 1;
+          continue;
+        }
+        if (char === '{') {
+          childExpressionDepth += 1;
+          index += 1;
+          continue;
+        }
+        if (char === '}') {
+          childExpressionDepth = Math.max(0, childExpressionDepth - 1);
+          index += 1;
+          continue;
+        }
+        index += 1;
+        continue;
+      }
+
+      if (char === '{') {
+        childExpressionDepth = 1;
+        index += 1;
+        continue;
+      }
+
       if (code[index] !== '<') {
         index += 1;
         continue;
@@ -4441,7 +4603,7 @@ export class CodeReviewerService {
   }
 
   private findJsxTagEnd(code: string, start: number): number | null {
-    let quote: '"' | "'" | null = null;
+    let quote: '"' | "'" | '`' | null = null;
     let braceDepth = 0;
 
     for (let index = start + 1; index < code.length; index++) {
@@ -4455,7 +4617,7 @@ export class CodeReviewerService {
         continue;
       }
 
-      if (char === '"' || char === "'") {
+      if (char === '"' || char === "'" || char === '`') {
         quote = char;
         continue;
       }
@@ -5267,8 +5429,14 @@ export class CodeReviewerService {
     code: string,
     componentName: string,
     policy: FullFileGenerationPolicy,
+    componentPlan?: ComponentPromptContext,
   ): string {
-    const processed = this.postProcessCode(code);
+    let processed = this.postProcessCode(code);
+    processed = this.stripSharedChromeLeakSections(
+      processed,
+      componentName,
+      componentPlan,
+    );
     if (policy !== 'direct-ai-full-file') {
       return processed;
     }
@@ -5395,6 +5563,71 @@ export class CodeReviewerService {
       }
       // else: silently drop the spurious hardcoded section
 
+      i = j;
+    }
+    return result;
+  }
+
+  private stripSharedChromeLeakSections(
+    code: string,
+    componentName: string,
+    componentPlan?: ComponentPromptContext,
+  ): string {
+    if (componentPlan?.type !== 'page') return code;
+
+    const sharedFooterMarker =
+      /pg-footer-center-row|profolio-fse-scroll-top|let'?s work together|looking for a one time project|looking for a dedicated designer/i;
+    const containsSharedFooterMarker = (value: string) =>
+      sharedFooterMarker.test(value);
+
+    const cleaned = this.stripTopLevelSectionBlocks(code, (sectionContent) =>
+      containsSharedFooterMarker(sectionContent),
+    );
+    if (cleaned !== code) return cleaned;
+
+    const topLevelFooterPattern = /\n?\s*<footer\b[\s\S]*?<\/footer>\s*/gi;
+    return code.replace(topLevelFooterPattern, (match) =>
+      containsSharedFooterMarker(match) ? '' : match,
+    );
+  }
+
+  private stripTopLevelSectionBlocks(
+    code: string,
+    shouldDrop: (sectionContent: string) => boolean,
+  ): string {
+    let result = '';
+    let i = 0;
+    while (i < code.length) {
+      const sectionStart = code.indexOf('<section', i);
+      if (sectionStart === -1) {
+        result += code.slice(i);
+        break;
+      }
+      result += code.slice(i, sectionStart);
+
+      let depth = 0;
+      let j = sectionStart;
+      while (j < code.length) {
+        const openIdx = code.indexOf('<section', j);
+        const closeIdx = code.indexOf('</section>', j);
+        if (closeIdx === -1) {
+          j = code.length;
+          break;
+        }
+        if (openIdx !== -1 && openIdx < closeIdx) {
+          depth++;
+          j = openIdx + 8;
+        } else {
+          depth--;
+          j = closeIdx + 10;
+          if (depth === 0) break;
+        }
+      }
+
+      const sectionContent = code.slice(sectionStart, j);
+      if (!shouldDrop(sectionContent)) {
+        result += sectionContent;
+      }
       i = j;
     }
     return result;

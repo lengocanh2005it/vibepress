@@ -383,8 +383,10 @@ export class GenerationContractAuditService {
 
     while ((match = regex.exec(code)) !== null) {
       const raw = (match[1] ?? match[2] ?? match[3] ?? '').trim();
-      if (!raw.startsWith('/api/')) continue;
-      const normalizedRaw = raw.replace(/\$\{[^}]+\}/g, ':param');
+      const apiStart = raw.indexOf('/api/');
+      if (apiStart < 0) continue;
+      const apiRaw = raw.slice(apiStart);
+      const normalizedRaw = apiRaw.replace(/\$\{[^}]+\}/g, ':param');
       const [path, query = ''] = normalizedRaw.split('?');
       const queryKeys = query
         .split('&')

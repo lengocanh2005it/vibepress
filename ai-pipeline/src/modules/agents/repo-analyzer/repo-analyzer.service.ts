@@ -1769,6 +1769,7 @@ export class RepoAnalyzerService {
     const entrySourceChains = this.buildEntrySourceChains(
       fileAnalyses,
       contentByFile,
+      patternSlugToFile,
     );
 
     // Parse block.json files for custom block type definitions
@@ -1932,6 +1933,30 @@ export class RepoAnalyzerService {
     return Array.from(refs).sort();
   }
 
+  private resolveComposedSourcePatternRefs(
+    content: string,
+    contentByFile: Map<string, string>,
+    patternSlugToFile: Map<string, string>,
+    depth = 0,
+  ): string {
+    if (depth > 5) return content;
+    return content.replace(
+      /<!-- wp:pattern \{"slug":"([^"]+)"\} \/-->/g,
+      (match, slug) => {
+        const file = patternSlugToFile.get(String(slug).trim());
+        if (!file) return match;
+        const patternContent = contentByFile.get(file);
+        if (!patternContent) return match;
+        return this.resolveComposedSourcePatternRefs(
+          patternContent,
+          contentByFile,
+          patternSlugToFile,
+          depth + 1,
+        );
+      },
+    );
+  }
+
   private resolvePatternFiles(
     slugs: string[],
     filesByRole: RepoFileBuckets,
@@ -2044,6 +2069,7 @@ export class RepoAnalyzerService {
   private buildEntrySourceChains(
     fileAnalyses: RepoSourceFileAnalysis[],
     contentByFile: Map<string, string>,
+    patternSlugToFile: Map<string, string>,
   ): RepoEntrySourceChain[] {
     const byFile = new Map(fileAnalyses.map((entry) => [entry.file, entry]));
     const entryFiles = fileAnalyses.filter((entry) =>
@@ -2060,15 +2086,20 @@ export class RepoAnalyzerService {
         const seen = new Set<string>();
         const composedParts: string[] = [];
 
-        const visit = (file: string) => {
+        const visit = (file: string, includeInComposedSource = true) => {
           if (seen.has(file)) return;
           seen.add(file);
           chainFiles.push(file);
           const analysis = byFile.get(file);
           const content = contentByFile.get(file);
-          if (content) {
+          if (content && includeInComposedSource) {
+            const resolvedContent = this.resolveComposedSourcePatternRefs(
+              content,
+              contentByFile,
+              patternSlugToFile,
+            );
             composedParts.push(
-              this.wrapRepoChainContent(file, analysis?.kind, content),
+              this.wrapRepoChainContent(file, analysis?.kind, resolvedContent),
             );
           }
           if (!analysis) return;
@@ -2083,11 +2114,14 @@ export class RepoAnalyzerService {
           for (const heading of analysis.headingTexts)
             headingTexts.add(heading);
 
-          for (const dependency of [
-            ...analysis.templatePartFiles,
-            ...analysis.patternFiles,
-          ]) {
-            visit(dependency);
+          for (const dependency of analysis.templatePartFiles) {
+            visit(dependency, true);
+          }
+          for (const dependency of analysis.patternFiles) {
+            // Pattern references are already expanded inline in resolvedContent
+            // above. Keep dependency metadata/chainFiles, but do not append the
+            // same pattern body again to composedSource.
+            visit(dependency, false);
           }
         };
 

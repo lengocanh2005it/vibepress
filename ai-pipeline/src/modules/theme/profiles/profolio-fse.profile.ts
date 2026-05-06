@@ -8,10 +8,7 @@ export const PROFOLIO_FSE_THEME_PROFILE: ThemeProfile = {
   sourceFaithfulComponents: [
     'Header',
     'Footer',
-    'FrontPage',
-    'TemplateAbout',
-    'TemplateContact',
-    'TemplateServices',
+    'Sidebar',
   ],
   sharedChromeMode: 'block-tree-first',
   motionHooks: [

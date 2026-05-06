@@ -224,6 +224,7 @@ ${detailRoutes.length > 0 ? detailRoutes.map((route) => `  - ${route}`).join('\n
 - intentionally excluded dedicated CPT routes: ${excludedCptSlugs.length > 0 ? excludedCptSlugs.join(', ') : '(none)'}
 - These excluded integrations are intentionally served only through the generic static endpoints already present in the template. Do NOT require or suggest dedicated /api/products... routes for them.
 - Generic detail endpoints such as \`/api/posts/:slug\`, \`/api/pages/:slug\`, and \`/api/runtime/pages/:slug\` are valid when they match the approved frontend contract for the route flavor and payload shape.
+- Product detail support is satisfied by either \`/api/post-types/product/:slug\` / \`/api/post-types/:postType/:slug\` with \`postType=product\`, or by \`/api/posts/:slug\` when the handler supports product post types. Do NOT require a separate \`/api/products/:slug\` route.
 - content counts:
   - posts: ${content.posts.length}
   - pages: ${content.pages.length}
@@ -304,9 +305,26 @@ ${api.files
     const hasGenericPageDetailRoute = api.files.some((file) =>
       /app\.get\(\s*['"`]\/api\/pages\/:slug['"`]/.test(file.code),
     );
+    const hasGenericProductDetailRoute = api.files.some(
+      (file) =>
+        /app\.get\(\s*['"`]\/api\/post-types\/:postType\/:slug['"`]/.test(
+          file.code,
+        ) ||
+        /app\.get\(\s*['"`]\/api\/post-types\/product\/:slug['"`]/.test(
+          file.code,
+        ),
+    );
 
     const issues = review.issues.filter((issue) => {
       const message = issue.message.toLowerCase();
+      if (
+        (hasGenericProductDetailRoute || hasGenericPostDetailRoute) &&
+        /product detail|singleproduct|\/product\/:slug|\/api\/products/.test(
+          message,
+        )
+      ) {
+        return false;
+      }
       if (
         hasGenericPostDetailRoute &&
         /single-with-sidebar|dedicated post detail route|distinct \/single-with-sidebar\/:slug detail behavior/.test(

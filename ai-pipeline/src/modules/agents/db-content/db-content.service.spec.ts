@@ -203,6 +203,17 @@ describe('DbContentService theme-scoped filtering', () => {
         template: 'template-services.html',
         featuredImage: null,
       },
+      {
+        id: 14,
+        title: 'Title1',
+        content:
+          '<!-- wp:paragraph --><p>Our payment automation API platform streamlines business technology workflows.</p><!-- /wp:paragraph -->',
+        slug: 'title1',
+        parentId: 0,
+        menuOrder: 3,
+        template: '',
+        featuredImage: null,
+      },
     ];
 
     const dbTemplates: WpDbTemplate[] = [
@@ -306,6 +317,14 @@ describe('DbContentService theme-scoped filtering', () => {
               parentId: 0,
               target: null,
             },
+            {
+              id: 3,
+              title: 'Our Technology',
+              url: '/title1',
+              order: 2,
+              parentId: 0,
+              target: null,
+            },
           ],
         },
       ] satisfies WpMenu[]),
@@ -324,6 +343,14 @@ describe('DbContentService theme-scoped filtering', () => {
               title: 'About Us',
               url: '/sample-page',
               order: 0,
+              parentId: 0,
+              target: null,
+            },
+            {
+              id: 3,
+              title: 'Our Technology',
+              url: '/title1',
+              order: 2,
               parentId: 0,
               target: null,
             },
@@ -383,6 +410,15 @@ describe('DbContentService theme-scoped filtering', () => {
       routePath: '/sample-page',
       templateCandidates: expect.arrayContaining(['template-about']),
       matchedDbTemplateSlugs: ['template-about'],
+    });
+    expect(
+      result.themeResolvedContent?.routes.find(
+        (route) => route.slug === 'title1',
+      ),
+    ).toMatchObject({
+      routePath: '/title1',
+      templateCandidates: expect.arrayContaining(['template-services', 'page']),
+      matchedDbTemplateSlugs: ['template-services'],
     });
     expect(
       result.themeResolvedContent?.templateRecords

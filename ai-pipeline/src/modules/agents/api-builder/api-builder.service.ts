@@ -96,7 +96,7 @@ export class ApiBuilderService {
       const code = await readFile(templateFile, 'utf-8');
       return {
         outDir,
-        files: [{ name: 'index.ts', filePath: templateFile, code }],
+        files: await this.buildReviewFiles(outDir, templateFile, code),
       };
     }
 
@@ -173,8 +173,34 @@ export class ApiBuilderService {
 
     return {
       outDir,
-      files: [{ name: 'index.ts', filePath: templateFile, code: injected }],
+      files: await this.buildReviewFiles(outDir, templateFile, injected),
     };
+  }
+
+  private async buildReviewFiles(
+    outDir: string,
+    indexFile: string,
+    indexCode: string,
+  ): Promise<ApiBuilderResult['files']> {
+    const files: ApiBuilderResult['files'] = [
+      { name: 'index.ts', filePath: indexFile, code: indexCode },
+    ];
+    for (const relativePath of [
+      'routes/pages.ts',
+      'runtime/runtime-plan-builder.ts',
+    ]) {
+      const filePath = join(outDir, relativePath);
+      try {
+        files.push({
+          name: relativePath,
+          filePath,
+          code: await readFile(filePath, 'utf-8'),
+        });
+      } catch {
+        // Optional template helper; ignore when a future template omits it.
+      }
+    }
+    return files;
   }
 
   async fixApi(input: {

@@ -5,10 +5,17 @@ export function registerPageRoutes(input: {
   getConn: () => Promise<any>;
   getPrefix: (conn: any) => Promise<string>;
   serializePage: (conn: any, prefix: string, row: any) => Promise<any>;
+  serializeRuntimePage?: (conn: any, prefix: string, row: any) => Promise<any>;
   buildRuntimePlanFromPageRow: (row: any) => Record<string, any>;
 }) {
-  const { app, getConn, getPrefix, serializePage, buildRuntimePlanFromPageRow } =
-    input;
+  const {
+    app,
+    getConn,
+    getPrefix,
+    serializePage,
+    serializeRuntimePage,
+    buildRuntimePlanFromPageRow,
+  } = input;
 
   const buildPageSelectSql = (prefix: string, whereClause: string) => `SELECT p.ID, p.post_title, p.post_content, p.post_name, p.post_parent, p.menu_order,
               COALESCE(pm.meta_value, '') AS template,
@@ -48,7 +55,7 @@ export function registerPageRoutes(input: {
       if (!rows.length) return res.status(404).json({ error: 'Not found' });
       const row = rows[0];
       res.json({
-        page: await serializePage(conn, prefix, row),
+        page: await (serializeRuntimePage ?? serializePage)(conn, prefix, row),
         runtimePlan: buildRuntimePlanFromPageRow(row),
       });
     } finally {

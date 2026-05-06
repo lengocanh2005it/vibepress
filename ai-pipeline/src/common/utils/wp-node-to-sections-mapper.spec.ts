@@ -181,6 +181,50 @@ describe('mapWpNodesToDraftSections', () => {
     });
   });
 
+  it('maps columns that wrap a query loop as a post-list instead of a static card-grid', () => {
+    const markup = `
+<!-- wp:columns -->
+<div class="wp-block-columns"><!-- wp:column -->
+<div class="wp-block-column"><!-- wp:query {"query":{"perPage":4,"postType":"post","inherit":true},"layout":{"type":"default"}} -->
+<div class="wp-block-query"><!-- wp:post-template {"style":{"spacing":{"blockGap":"40px"}},"layout":{"type":"grid","minimumColumnWidth":"20rem"}} -->
+<!-- wp:group {"style":{"border":{"radius":"10px","color":"#e0e0e0","width":"1px"}}} -->
+<div class="wp-block-group"><!-- wp:post-featured-image {"isLink":true} /-->
+<!-- wp:group -->
+<div class="wp-block-group"><!-- wp:post-author {"showAvatar":false} /-->
+<!-- wp:post-date /-->
+<!-- wp:post-title {"isLink":true} /-->
+<!-- wp:post-excerpt {"moreText":"Read More","excerptLength":16} /--></div>
+<!-- /wp:group --></div>
+<!-- /wp:group -->
+<!-- /wp:post-template -->
+<!-- wp:query-no-results -->
+<!-- wp:paragraph {"align":"center"} -->
+<p class="has-text-align-center">No posts found</p>
+<!-- /wp:paragraph -->
+<!-- /wp:query-no-results --></div>
+<!-- /wp:query --></div>
+<!-- /wp:column --></div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections.some((section) => section.type === 'card-grid')).toBe(
+      false,
+    );
+    expect(sections.find((section) => section.type === 'post-list')).toMatchObject(
+      {
+        type: 'post-list',
+        layout: 'grid-3',
+        showAuthor: true,
+        showDate: true,
+        showExcerpt: true,
+        showFeaturedImage: true,
+      },
+    );
+  });
+
   it('collapses repeated testimonial group cards into one card-grid section', () => {
     const markup = `
 <!-- wp:group -->
@@ -476,6 +520,262 @@ describe('mapWpNodesToDraftSections', () => {
         'animate__fadeInUp',
         'cover-inner',
       ]),
+    });
+  });
+
+  it('maps profolio contact columns with a cover-backed location panel into media-text', () => {
+    const markup = `
+<!-- wp:columns {"verticalAlignment":"center"} -->
+<div class="wp-block-columns are-vertically-aligned-center">
+  <!-- wp:column {"verticalAlignment":"center","className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+  <div class="wp-block-column is-vertically-aligned-center wow animate__animated animate__fadeInUp cover-inner">
+    <!-- wp:paragraph {"style":{"typography":{"fontWeight":"700","textTransform":"uppercase","letterSpacing":"1px"}}} -->
+    <p>Get in touch</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading {"level":1} -->
+    <h1>Let's Work Together</h1>
+    <!-- /wp:heading -->
+    <!-- wp:paragraph -->
+    <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit.</p>
+    <!-- /wp:paragraph -->
+  </div>
+  <!-- /wp:column -->
+  <!-- wp:column {"verticalAlignment":"center"} -->
+  <div class="wp-block-column is-vertically-aligned-center">
+    <!-- wp:cover {"url":"/projects-3.jpg","dimRatio":40,"overlayColor":"base","minHeight":620,"contentPosition":"bottom left","className":"r-cover","style":{"border":{"radius":{"topLeft":"10px","topRight":"10px","bottomLeft":"10px","bottomRight":"10px"}},"spacing":{"padding":{"top":"20px","bottom":"20px","left":"20px","right":"20px"}}}} -->
+    <div class="wp-block-cover has-custom-content-position is-position-bottom-left r-cover" style="border-top-left-radius:10px;border-top-right-radius:10px;border-bottom-left-radius:10px;border-bottom-right-radius:10px;padding-top:20px;padding-right:20px;padding-bottom:20px;padding-left:20px;min-height:620px">
+      <img class="wp-block-cover__image-background" alt="" src="/projects-3.jpg" data-object-fit="cover"/>
+      <span aria-hidden="true" class="wp-block-cover__background has-base-background-color has-background-dim-40 has-background-dim"></span>
+      <div class="wp-block-cover__inner-container">
+        <!-- wp:paragraph {"align":"center","fontSize":"large"} -->
+        <p class="has-text-align-center has-large-font-size">New York, USA</p>
+        <!-- /wp:paragraph -->
+      </div>
+    </div>
+    <!-- /wp:cover -->
+  </div>
+  <!-- /wp:column -->
+</div>
+<!-- /wp:columns -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/projects-3.jpg',
+      imagePosition: 'right',
+      imageFrameMinHeight: '620px',
+      subtitle: 'Get in touch',
+      heading: "Let's Work Together",
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit.',
+    });
+    expect(
+      (sections[0] as { imageFrameCustomClassNames?: string[] })
+        .imageFrameCustomClassNames,
+    ).toEqual(expect.arrayContaining(['r-cover', 'is-position-bottom-left']));
+  });
+
+  it('merges profolio article intros into the following post-list section', () => {
+    const markup = `
+<!-- wp:group {"metadata":{"name":"Articles"},"className":"r-pad"} -->
+<div class="wp-block-group r-pad">
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:paragraph -->
+    <p>Insights and articles</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading -->
+    <h2>Recent Blog Posts</h2>
+    <!-- /wp:heading -->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group {"className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+  <div class="wp-block-group wow animate__animated animate__fadeInUp cover-inner">
+    <!-- wp:query {"query":{"perPage":3,"postType":"post","order":"desc","orderBy":"date","inherit":false}} -->
+    <div class="wp-block-query">
+      <!-- wp:post-template {"layout":{"type":"grid","columnCount":3}} -->
+      <!-- wp:post-featured-image /-->
+      <!-- wp:group {"backgroundColor":"contrast"} -->
+      <div class="wp-block-group has-contrast-background-color has-background">
+        <!-- wp:post-date /-->
+        <!-- wp:post-title {"isLink":true} /-->
+        <!-- wp:post-excerpt {"moreText":"Read More","excerptLength":16} /-->
+      </div>
+      <!-- /wp:group -->
+      <!-- /wp:post-template -->
+    </div>
+    <!-- /wp:query -->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'post-list',
+      title: 'Recent Blog Posts',
+      layout: 'grid-3',
+      showDate: true,
+      showExcerpt: true,
+      showFeaturedImage: true,
+      customClassNames: expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+      ]),
+    });
+  });
+
+  it('maps profolio services pattern into one intro hero plus repeated media-text service rows', () => {
+    const markup = `
+<!-- wp:group {"metadata":{"name":"Services"},"className":"r-pad"} -->
+<div class="wp-block-group r-pad">
+  <!-- wp:group -->
+  <div class="wp-block-group">
+    <!-- wp:paragraph -->
+    <p>Services</p>
+    <!-- /wp:paragraph -->
+    <!-- wp:heading -->
+    <h2>My Services</h2>
+    <!-- /wp:heading -->
+  </div>
+  <!-- /wp:group -->
+
+  <!-- wp:group {"className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+  <div class="wp-block-group wow animate__animated animate__fadeInUp cover-inner">
+    <!-- wp:columns {"backgroundColor":"primary"} -->
+    <div class="wp-block-columns has-primary-background-color has-background">
+      <!-- wp:column -->
+      <div class="wp-block-column">
+        <!-- wp:heading -->
+        <h2>UI/UX Design</h2>
+        <!-- /wp:heading -->
+        <!-- wp:paragraph -->
+        <p>Class aptent taciti sociosqu ad litora torquent per conubia nostra.</p>
+        <!-- /wp:paragraph -->
+      </div>
+      <!-- /wp:column -->
+      <!-- wp:column -->
+      <div class="wp-block-column">
+        <!-- wp:cover {"url":"/projects-1.jpg","minHeight":380,"className":"r-cover"} -->
+        <div class="wp-block-cover r-cover" style="min-height:380px">
+          <img class="wp-block-cover__image-background" alt="" src="/projects-1.jpg" data-object-fit="cover"/>
+          <div class="wp-block-cover__inner-container"></div>
+        </div>
+        <!-- /wp:cover -->
+      </div>
+      <!-- /wp:column -->
+    </div>
+    <!-- /wp:columns -->
+
+    <!-- wp:columns -->
+    <div class="wp-block-columns">
+      <!-- wp:column -->
+      <div class="wp-block-column">
+        <!-- wp:heading -->
+        <h2>Graphic Design</h2>
+        <!-- /wp:heading -->
+        <!-- wp:paragraph -->
+        <p>Vestibulum ante ipsum primis in faucibus orci luctus et ultrices.</p>
+        <!-- /wp:paragraph -->
+      </div>
+      <!-- /wp:column -->
+      <!-- wp:column -->
+      <div class="wp-block-column">
+        <!-- wp:cover {"url":"/projects-2.jpg","minHeight":380,"className":"r-cover"} -->
+        <div class="wp-block-cover r-cover" style="min-height:380px">
+          <img class="wp-block-cover__image-background" alt="" src="/projects-2.jpg" data-object-fit="cover"/>
+          <div class="wp-block-cover__inner-container"></div>
+        </div>
+        <!-- /wp:cover -->
+      </div>
+      <!-- /wp:column -->
+    </div>
+    <!-- /wp:columns -->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(3);
+    expect(sections[0]).toMatchObject({
+      type: 'hero',
+      heading: 'My Services',
+      subheading: 'Services',
+    });
+    expect(sections[1]).toMatchObject({
+      type: 'media-text',
+      heading: 'UI/UX Design',
+      imageSrc: '/projects-1.jpg',
+      imagePosition: 'right',
+    });
+    expect(sections[2]).toMatchObject({
+      type: 'media-text',
+      heading: 'Graphic Design',
+      imageSrc: '/projects-2.jpg',
+      imagePosition: 'right',
+    });
+  });
+
+  it('maps profolio experience pattern into a left-image media-text section', () => {
+    const markup = `
+<!-- wp:group {"metadata":{"name":"Experience"},"className":"r-pad","backgroundColor":"secondary"} -->
+<div class="wp-block-group r-pad has-secondary-background-color has-background">
+  <!-- wp:columns {"verticalAlignment":"center"} -->
+  <div class="wp-block-columns are-vertically-aligned-center">
+    <!-- wp:column {"verticalAlignment":"center"} -->
+    <div class="wp-block-column is-vertically-aligned-center">
+      <!-- wp:cover {"url":"/experience.jpg","minHeight":500,"contentPosition":"bottom center","className":"r-cover"} -->
+      <div class="wp-block-cover is-position-bottom-center r-cover" style="min-height:500px">
+        <img class="wp-block-cover__image-background" alt="" src="/experience.jpg" data-object-fit="cover"/>
+        <div class="wp-block-cover__inner-container"></div>
+      </div>
+      <!-- /wp:cover -->
+    </div>
+    <!-- /wp:column -->
+    <!-- wp:column {"verticalAlignment":"center","className":"wow animate__animated animate__fadeInUp cover-inner"} -->
+    <div class="wp-block-column is-vertically-aligned-center wow animate__animated animate__fadeInUp cover-inner">
+      <!-- wp:paragraph -->
+      <p>Welcome to my profile</p>
+      <!-- /wp:paragraph -->
+      <!-- wp:heading {"level":1} -->
+      <h1>Lead Product and Designer and Art Director</h1>
+      <!-- /wp:heading -->
+      <!-- wp:paragraph -->
+      <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur.</p>
+      <!-- /wp:paragraph -->
+    </div>
+    <!-- /wp:column -->
+  </div>
+  <!-- /wp:columns -->
+</div>
+<!-- /wp:group -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const sections = mapWpNodesToDraftSections(nodes);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      imageSrc: '/experience.jpg',
+      imagePosition: 'left',
+      subtitle: 'Welcome to my profile',
+      heading: 'Lead Product and Designer and Art Director',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur.',
     });
   });
 });

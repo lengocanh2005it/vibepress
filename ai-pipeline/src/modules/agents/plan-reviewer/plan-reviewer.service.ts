@@ -436,8 +436,10 @@ export class PlanReviewerService {
       }
 
       if (isFooterPartial) {
-        needs.add('site-info');
-        needs.add('footer-links');
+        if (this.footerNeedsSiteInfo(item)) needs.add('site-info');
+        else needs.delete('site-info');
+        if (this.footerNeedsFooterLinks(item)) needs.add('footer-links');
+        else needs.delete('footer-links');
         needs.delete('menus');
       }
       if (isHeaderLikePartial) {
@@ -497,6 +499,23 @@ export class PlanReviewerService {
       const next = { ...item, dataNeeds: after };
       return this.syncVisualPlan(next, warnings, warningCodes);
     });
+  }
+
+  private footerNeedsFooterLinks(item: PlanResult[number]): boolean {
+    return (item.visualPlan?.sections ?? []).some(
+      (section) =>
+        section.type === 'footer' && (section.menuColumns?.length ?? 0) > 0,
+    );
+  }
+
+  private footerNeedsSiteInfo(item: PlanResult[number]): boolean {
+    return (item.visualPlan?.sections ?? []).some(
+      (section) =>
+        section.type === 'footer' &&
+        (section.showSiteLogo === true ||
+          section.showSiteTitle === true ||
+          section.showTagline === true),
+    );
   }
 
   private syncVisualPlan(
@@ -1155,6 +1174,10 @@ export class PlanReviewerService {
         );
       })
       .map((item) => item.templateName);
+    const preferPostsIndexAlias = homeItems.some(
+      ({ item }) =>
+        item.homeMode === 'posts-index' || item.homeMode === 'hybrid-home',
+    );
 
     const homeHierarchy = resolveHomeHierarchy({
       templateNames: [
@@ -1163,16 +1186,8 @@ export class PlanReviewerService {
       ],
       repoManifest,
       explicitTemplateNames,
+      preferPostsIndexAlias,
     });
-
-    if (homeItems.length > 1 && homeHierarchy.winnerBase) {
-      this.pushWarning(
-        warnings,
-        warningCodes,
-        'multiple_home_like_templates_detected',
-        `Multiple home-like templates detected — prioritizing "${homeHierarchy.winnerBase}" for route "/" and reassigning lower-priority routes later`,
-      );
-    }
 
     const redundantBases = new Set(homeHierarchy.redundantBases);
     let nextPlan = plan;
@@ -1276,6 +1291,7 @@ export class PlanReviewerService {
       templateNames: nextExpectedTemplateNames,
       repoManifest,
       explicitTemplateNames,
+      preferPostsIndexAlias,
     }).orderedTemplateNames;
 
     return {
@@ -1321,6 +1337,7 @@ export class PlanReviewerService {
       planningSourceSummary: item.planningSourceSummary,
       hasConcretePageBindings,
       repoRouteHints: buildRepoRouteHints(item.templateName, repoManifest),
+      homeMode: item.homeMode ?? undefined,
     });
   }
 
@@ -1329,6 +1346,25 @@ export class PlanReviewerService {
     items: ComponentPlan[],
   ): boolean {
     if (items.length <= 1) return false;
+
+    const allFixedPageBindings = items.every(
+      (item) =>
+        item.type === 'page' &&
+        item.isDetail === true &&
+        !!item.fixedSlug &&
+        item.dataNeeds.includes('page-detail') &&
+        item.runtimeRenderer !== 'runtime-page',
+    );
+    if (allFixedPageBindings) {
+      const bindingKeys = new Set(
+        items.map((item) =>
+          String(item.fixedPageId ?? '').trim()
+            ? `id:${String(item.fixedPageId).trim()}`
+            : `slug:${String(item.fixedSlug).trim()}`,
+        ),
+      );
+      return bindingKeys.size === items.length;
+    }
 
     const templateBase = toTemplateBase(templateName);
     if (

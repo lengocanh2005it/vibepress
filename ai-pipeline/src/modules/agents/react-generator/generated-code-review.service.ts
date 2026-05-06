@@ -392,7 +392,10 @@ ${component.code}
   private buildVisualSectionDetailLines(
     contract: PlanResult[number] | null,
   ): string {
-    const sections = contract?.visualPlan?.sections ?? [];
+    const sections = [
+      ...(contract?.visualPlan?.sections ?? []),
+      ...(contract?.draftSections ?? []),
+    ];
     if (sections.length === 0) return '- (none)';
 
     return sections
@@ -591,6 +594,7 @@ ${component.code}
       const allowedAuxiliaryLabels = mergeAuxiliaryLabels(
         contract?.sourceBackedAuxiliaryLabels,
         extractAuxiliaryLabelsFromSections(sections),
+        extractAuxiliaryLabelsFromSections(contract?.draftSections),
       );
       const inventedAuxiliaryHeadings =
         this.findTrailingInventedAuxiliaryHeadingSnippets(
@@ -759,7 +763,10 @@ ${component.code}
   private hasCanonicalPageContentRender(code: string): boolean {
     return (
       /\b[A-Za-z_$][\w$]*(?:\?\.)?\.content\b/.test(code) &&
-      /dangerouslySetInnerHTML|renderRichTextChildren\s*\(/.test(code)
+      /renderRichTextChildren\s*\(/.test(code) &&
+      !/dangerouslySetInnerHTML\s*=\s*\{\s*\{\s*__html\s*:\s*[^}]*\bcontent\b/.test(
+        code,
+      )
     );
   }
 

@@ -2,12 +2,14 @@ type SupportedLlmProfile = 'openai' | 'custom';
 
 const OPENAI_CODE_MODEL = 'gpt-5.3-codex';
 const OPENAI_REASONING_MODEL = 'gpt-5.4';
+const OPENAI_PLANNING_MODEL = 'gpt-5.5';
 const CUSTOM_CODE_MODEL = 'Qwen/Qwen2.5-Coder-14B-Instruct';
 const CUSTOM_REASONING_MODEL = 'DeepSeek-R1-14B';
 
 const OPENAI_ALLOWED_MODELS = new Set([
   OPENAI_CODE_MODEL,
   OPENAI_REASONING_MODEL,
+  OPENAI_PLANNING_MODEL,
 ]);
 const CUSTOM_ALLOWED_MODELS = new Set([
   CUSTOM_CODE_MODEL,
@@ -56,7 +58,11 @@ function normalizeSupportedModel(
   }
 
   throw new Error(
-    `Unsupported LLM model "${trimmed}". Supported models: openai/${OPENAI_CODE_MODEL}, openai/${OPENAI_REASONING_MODEL}, custom/${CUSTOM_CODE_MODEL}, custom/${CUSTOM_REASONING_MODEL}`,
+    `Unsupported LLM model "${trimmed}". Supported models: ${[
+      ...OPENAI_ALLOWED_MODELS,
+    ]
+      .map((model) => `openai/${model}`)
+      .join(', ')}, custom/${CUSTOM_CODE_MODEL}, custom/${CUSTOM_REASONING_MODEL}`,
   );
 }
 

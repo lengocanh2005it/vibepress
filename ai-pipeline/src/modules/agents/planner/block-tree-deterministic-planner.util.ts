@@ -25,7 +25,6 @@ import type {
   SourceSegment,
   TypographyTokens,
   VisualPlanLockPolicy,
-  VisualPlanRenderAuthority,
 } from '../react-generator/visual-plan.schema.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { assessDeterministicRenderAuthority } from './deterministic-render-authority-policy.util.js';
@@ -36,6 +35,44 @@ const TRANSACTIONAL_TEMPLATE_NAMES = new Set([
   'my-account',
   'order-pay',
   'order-received',
+]);
+
+const PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_TEMPLATES = new Set([
+  'template-about',
+  'template-contact',
+]);
+
+const PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_COMPONENTS = new Set([
+  'templateabout',
+  'templatecontact',
+]);
+
+const PROFOLIO_AI_VISUAL_PLAN_TEMPLATES = new Set([
+  'front-page',
+  'home',
+  'index',
+  'archive',
+  'archive-product',
+  'blog-left-sidebar',
+  'blog-right-sidebar',
+  'search',
+  'template-about',
+  'template-contact',
+  'template-services',
+]);
+
+const PROFOLIO_AI_VISUAL_PLAN_COMPONENTS = new Set([
+  'frontpage',
+  'home',
+  'index',
+  'archive',
+  'archiveproduct',
+  'blogleftsidebar',
+  'blogrightsidebar',
+  'search',
+  'templateabout',
+  'templatecontact',
+  'templateservices',
 ]);
 
 export interface BlockTreePlannerComponentPlan {
@@ -114,13 +151,48 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     componentPlan.componentName,
     componentPlan.isDetail === true && componentPlan.route !== '/',
   );
+
+  if (shouldUseSectionAssemblyForProfolioFrontPage({ componentPlan, content })) {
+    const usable = filterUsableGenericPageSections(draftSections ?? []);
+    if (usable.length > 0) {
+      return {
+        componentName: componentPlan.componentName,
+        dataNeeds,
+        palette: input.globalPalette,
+        typography: input.globalTypography,
+        layout,
+        blockStyles: tokens?.blockStyles,
+        renderMode: 'section-centric',
+        deterministicAuthority: false,
+        renderAuthority: 'ai',
+        lockPolicy: {
+          reason:
+            'Profolio front-page uses AI section assembly from source-derived sections instead of canonical block-tree rendering.',
+        },
+        sections: usable.map((section) => ({
+          ...section,
+          generationMode: 'section-assembly',
+        })),
+      };
+    }
+  }
+
+  const canonicalBlockTreePageRenderer =
+    shouldUseCanonicalBlockTreePageRenderer({
+      componentPlan,
+      content,
+      draftBlockTree,
+    });
   const authorityAssessment = assessDeterministicRenderAuthority({
     componentPlan,
     draftBlockTree,
     draftSections,
+    canUseCanonicalBlockTreePageRenderer: canonicalBlockTreePageRenderer,
   });
   const renderAuthority = authorityAssessment.renderAuthority;
-  const lockPolicy = buildDeterministicLockPolicy(authorityAssessment.reason);
+  const pixelLockPolicy = buildDeterministicLockPolicy(
+    authorityAssessment.reason,
+  );
   const base = {
     componentName: componentPlan.componentName,
     dataNeeds,
@@ -128,17 +200,22 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     typography: input.globalTypography,
     layout,
     blockStyles: tokens?.blockStyles,
+    ...(canonicalBlockTreePageRenderer
+      ? { renderMode: 'block-centric' as const }
+      : {}),
   } as const;
-  const authorityDecorators =
-    componentPlan.type === 'partial'
-      ? {
-          deterministicAuthority: true,
-          renderAuthority,
-          lockPolicy,
-        }
-      : {
-          renderAuthority: 'ai' as const,
-        };
+  // Only pixel-locked components bypass AI generation entirely.
+  // Deterministic-structure components (including structure-only partials like Sidebar)
+  // still get AI code generation but are constrained to the section skeleton.
+  const lockPolicy =
+    renderAuthority === 'deterministic-pixel'
+      ? pixelLockPolicy
+      : buildStructureOnlyLockPolicy(authorityAssessment.reason);
+  const authorityDecorators = {
+    deterministicAuthority: true as const,
+    renderAuthority,
+    lockPolicy,
+  };
 
   if (isEligibleBlockTreeSharedPartial(componentPlan)) {
     const sections = buildBlockTreeDrivenSharedPartialSections({
@@ -249,7 +326,51 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     }
   }
 
+  // Generic page fallback: when labeled draftSections are available from the
+  // block tree but no specific template path matched, use them directly so the
+  // generator follows the WP-derived structure rather than hallucinating sections.
+  if (componentPlan.type === 'page') {
+    const usable = filterUsableGenericPageSections(draftSections ?? []);
+    if (usable.length > 0) {
+      return {
+        ...base,
+        ...authorityDecorators,
+        sections: usable,
+      };
+    }
+  }
+
   return undefined;
+}
+
+export function shouldUseAiVisualPlanningForProfolioSurface(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  content: DbContentResult;
+}): boolean {
+  if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
+    return false;
+  }
+  if (input.componentPlan.type !== 'page' || input.componentPlan.isDetail) {
+    return false;
+  }
+  if (isEligibleTransactionalTemplateByName(input.componentPlan)) {
+    return false;
+  }
+  if (isEligibleTransactionalByComponentName(input.componentPlan)) {
+    return false;
+  }
+
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    input.componentPlan.templateName,
+  );
+  const normalizedComponent = input.componentPlan.componentName
+    .trim()
+    .toLowerCase();
+
+  return (
+    PROFOLIO_AI_VISUAL_PLAN_TEMPLATES.has(normalizedTemplate) ||
+    PROFOLIO_AI_VISUAL_PLAN_COMPONENTS.has(normalizedComponent)
+  );
 }
 
 export function shouldBypassCoverageAuditForBlockTreeListingPlan(
@@ -280,6 +401,52 @@ export function shouldShortCircuitBlockTreeVisualPlan(
     isEligibleBlockTreeListingTemplate(componentPlan, draftBlockTree) ||
     isEligibleTransactionalTemplateByName(componentPlan) ||
     isEligibleTransactionalByComponentName(componentPlan)
+  );
+}
+
+function shouldUseSectionAssemblyForProfolioFrontPage(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  content: DbContentResult;
+}): boolean {
+  if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
+    return false;
+  }
+  if (input.componentPlan.type !== 'page' || input.componentPlan.isDetail) {
+    return false;
+  }
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    input.componentPlan.templateName,
+  );
+  return (
+    normalizedTemplate === 'front-page' ||
+    input.componentPlan.componentName.trim().toLowerCase() === 'frontpage'
+  );
+}
+
+function shouldUseCanonicalBlockTreePageRenderer(input: {
+  componentPlan: BlockTreePlannerComponentPlan;
+  content: DbContentResult;
+  draftBlockTree?: BlockNode[];
+}): boolean {
+  if (input.componentPlan.type !== 'page' || input.componentPlan.isDetail) {
+    return false;
+  }
+  if ((input.draftBlockTree?.length ?? 0) === 0) {
+    return false;
+  }
+  if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
+    return false;
+  }
+
+  const normalizedTemplate = normalizeTemplateIdentifier(
+    input.componentPlan.templateName,
+  );
+  if (PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_TEMPLATES.has(normalizedTemplate)) {
+    return true;
+  }
+
+  return PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_COMPONENTS.has(
+    input.componentPlan.componentName.trim().toLowerCase(),
   );
 }
 
@@ -315,6 +482,18 @@ function buildDeterministicLockPolicy(reason: string): VisualPlanLockPolicy {
     allowAiFixModes: ['syntax-only'],
     reason,
   };
+}
+
+function buildStructureOnlyLockPolicy(reason: string): VisualPlanLockPolicy {
+  return { reason };
+}
+
+function filterUsableGenericPageSections(
+  sections: SectionPlan[],
+): SectionPlan[] {
+  return sections.filter(
+    (section) => section.type !== 'navbar' && section.type !== 'footer',
+  );
 }
 
 function buildBlockTreeDrivenSharedPartialSections(input: {
@@ -370,6 +549,7 @@ function buildBlockTreeDrivenSharedPartialSections(input: {
     const section: NavbarSection = {
       type: 'navbar',
       sticky: Boolean(stickySignalNode),
+      ...(stickySignalNode?.domId ? { domId: stickySignalNode.domId } : {}),
       menuSlug: content.menus[0]?.slug ?? 'primary',
       orientation:
         navigationNode?.menuOrientation ??

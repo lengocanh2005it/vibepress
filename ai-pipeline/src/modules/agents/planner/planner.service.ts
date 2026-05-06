@@ -104,9 +104,16 @@ import {
   buildBlockTreeDrivenVisualPlanForComponent,
   shouldBypassCoverageAuditForBlockTreeListingPlan,
   shouldShortCircuitBlockTreeVisualPlan,
+  shouldUseAiVisualPlanningForProfolioSurface,
 } from './block-tree-deterministic-planner.util.js';
 import { summarizeSharedLayoutSubtree } from './shared-layout-subtree.util.js';
-import { buildPlanningSourceCandidates } from './planning-source-policy.util.js';
+import {
+  buildPlanningSourceCandidates,
+  extractPlanningSourceOrigin,
+  getTrustedPlanningDbTemplateSlugs,
+  isCompatibleSupplementalPlanningSource,
+  normalizePlanningTemplateIdentifier,
+} from './planning-source-policy.util.js';
 import {
   buildLayoutAnalysisComponentEntry,
   createLayoutAnalysisArtifact,
@@ -132,9 +139,12 @@ import type {
 } from './planner-surface-plan.schema.js';
 import {
   buildRepoRouteHints,
+  type DeterministicHomeMode,
+  type HomeTemplateBase,
   inferDeterministicRouteContract,
   matchesRepoEntrySourceTemplate,
   resolveHomeHierarchy,
+  toHomeTemplateBase,
 } from './route-contract.util.js';
 import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
 
@@ -158,6 +168,8 @@ export interface ComponentPlan {
   fixedPageId?: number | string;
   fixedTitle?: string;
   runtimeRenderer?: 'runtime-page';
+  homeTemplateBase?: HomeTemplateBase | null;
+  homeMode?: DeterministicHomeMode | null;
   /** Evidence-guided surface brief for page/home/post composition. */
   surfacePlan?: PlannerSurfacePlan;
   /** Pre-computed visual plan from Phase B — generator skips Stage 1 if present */
@@ -385,7 +397,7 @@ export class PlannerService {
     );
     const enriched = this.materializeConcretePagePlans(
       this.applyDeterministicRouteContracts(
-        this.enrichPlan(plan, sourceMap),
+        this.enrichPlan(plan, sourceMap, content),
         content,
         options?.repoManifest,
       ),
@@ -789,15 +801,22 @@ export class PlannerService {
         componentPlan,
         tokens,
       );
-      const earlyBlockTreeVisualPlan =
-        this.buildBlockTreeDrivenVisualPlanForComponent({
+      const forceAiVisualPlan =
+        shouldUseAiVisualPlanningForProfolioSurface({
           componentPlan,
-          draftBlockTree,
           content,
-          tokens,
-          globalPalette,
-          globalTypography,
         });
+      const earlyBlockTreeVisualPlan =
+        forceAiVisualPlan
+          ? undefined
+          : this.buildBlockTreeDrivenVisualPlanForComponent({
+              componentPlan,
+              draftBlockTree,
+              content,
+              tokens,
+              globalPalette,
+              globalTypography,
+            });
       if (
         earlyBlockTreeVisualPlan &&
         this.shouldShortCircuitBlockTreeVisualPlan(
@@ -913,15 +932,17 @@ export class PlannerService {
           tokens,
         );
       const blockTreeVisualPlan =
-        this.buildBlockTreeDrivenVisualPlanForComponent({
-          componentPlan,
-          draftSections,
-          draftBlockTree,
-          content,
-          tokens,
-          globalPalette,
-          globalTypography,
-        });
+        forceAiVisualPlan
+          ? undefined
+          : this.buildBlockTreeDrivenVisualPlanForComponent({
+              componentPlan,
+              draftSections,
+              draftBlockTree,
+              content,
+              tokens,
+              globalPalette,
+              globalTypography,
+            });
       if (blockTreeVisualPlan) {
         const blockTreeSurfacePlan = this.buildSurfacePlanForComponent({
           componentPlan,
@@ -1313,16 +1334,22 @@ export class PlannerService {
               typography: globalTypography,
               layout,
               blockStyles: tokens?.blockStyles,
-              sections: this.injectMissingDraftSections(
-                this.mergeDraftSectionPresentation(
-                  filteredParsedSections,
+              sections: this.stabilizeAiVisualPlanSections({
+                componentPlan,
+                content,
+                aiSections: this.injectMissingDraftSections(
+                  this.mergeDraftSectionPresentation(
+                    filteredParsedSections,
+                    draftSections,
+                    visualContract,
+                  ),
                   draftSections,
                   visualContract,
+                  componentPlan.componentName,
                 ),
                 draftSections,
                 visualContract,
-                componentPlan.componentName,
-              ),
+              }),
             },
             repoManifest,
           );
@@ -1438,14 +1465,18 @@ export class PlannerService {
       );
     }
 
+    const normalizedAiVisualPlan = visualPlan
+      ? this.normalizeAiVisualPlanForComponent(visualPlan, componentPlan)
+      : undefined;
     const finalizedDraftSections =
-      visualPlan?.sections?.length && Array.isArray(visualPlan.sections)
-        ? visualPlan.sections.map((section) => ({ ...section }))
+      normalizedAiVisualPlan?.sections?.length &&
+      Array.isArray(normalizedAiVisualPlan.sections)
+        ? normalizedAiVisualPlan.sections.map((section) => ({ ...section }))
         : draftSections;
     const finalizedVisualPlan =
-      visualPlan && draftBlockTree?.length
-        ? { ...visualPlan, blockTree: draftBlockTree }
-        : visualPlan;
+      normalizedAiVisualPlan && draftBlockTree?.length
+        ? { ...normalizedAiVisualPlan, blockTree: draftBlockTree }
+        : normalizedAiVisualPlan;
     const renderContract = buildComponentRenderContract({
       componentName: componentPlan.componentName,
       templateName: componentPlan.templateName,
@@ -1622,10 +1653,9 @@ export class PlannerService {
       return {
         ...base,
         kind: 'home-page',
-        homeMode: this.inferHomeMode(
-          componentPlan,
-          sourceEvidence.contentClusters,
-        ),
+        homeMode:
+          componentPlan.homeMode ??
+          this.inferHomeMode(componentPlan, sourceEvidence.contentClusters),
         heroEvidence: {
           headingPresent: sourceEvidence.primaryHeadings.length > 0,
           primaryCtaPresent: sourceEvidence.contentClusters.some(
@@ -3011,6 +3041,52 @@ export class PlannerService {
     return getComponentStrategy(componentPlan.componentName).skipAiVisualPlan;
   }
 
+  private normalizeAiVisualPlanForComponent(
+    visualPlan: ComponentVisualPlan,
+    componentPlan: PlanResult[number],
+  ): ComponentVisualPlan {
+    const visualDataNeeds = toVisualDataNeeds(componentPlan.dataNeeds);
+    const isProductListing =
+      visualDataNeeds.includes('products') &&
+      !visualDataNeeds.includes('posts') &&
+      !componentPlan.isDetail;
+
+    return {
+      ...visualPlan,
+      renderMode: visualPlan.renderMode ?? 'section-centric',
+      renderAuthority: visualPlan.renderAuthority ?? 'ai',
+      deterministicAuthority: visualPlan.deterministicAuthority ?? false,
+      sections: visualPlan.sections.map((section) => {
+        if (section.type !== 'post-list' || !isProductListing) {
+          return section;
+        }
+
+        const minItems = section.obligation?.minItems;
+        const normalizedMinItems = minItems
+          ? {
+              ...(minItems.slides ? { slides: minItems.slides } : {}),
+              ...(minItems.cards ? { cards: minItems.cards } : {}),
+              products: minItems.products ?? minItems.posts ?? 1,
+            }
+          : undefined;
+
+        return {
+          ...section,
+          resource: 'products',
+          obligation: section.obligation
+            ? {
+                ...section.obligation,
+                required: section.obligation.required.map((capability) =>
+                  capability === 'posts' ? 'products' : capability,
+                ),
+                ...(normalizedMinItems ? { minItems: normalizedMinItems } : {}),
+              }
+            : section.obligation,
+        };
+      }),
+    };
+  }
+
   // ── Global typography: deterministic from theme tokens, no AI ────────────
 
   private deriveGlobalTypography(tokens?: ThemeTokens): TypographyTokens {
@@ -3146,6 +3222,7 @@ export class PlannerService {
         }))
         .filter((plan) => isSharedChromePartialComponent(plan.componentName)),
       sourceMap,
+      content,
     );
 
     const globalPalette = this.deriveGlobalPalette(theme.tokens);
@@ -3169,6 +3246,7 @@ export class PlannerService {
             hasSharedLayoutPartials,
             theme.tokens,
             sourceCandidates,
+            content,
           )
         : undefined;
       const draftSections = this.buildDraftSectionsForPlanningSource(
@@ -3545,6 +3623,7 @@ export class PlannerService {
   private enrichPlan(
     plan: PlanResult,
     sourceMap: Map<string, string>,
+    content: DbContentResult,
   ): PlanResult {
     const hasSharedChromePartials = plan.some(
       (candidate) =>
@@ -3559,6 +3638,10 @@ export class PlannerService {
       const needs = new Set(item.dataNeeds);
       const ownsSharedChromeData =
         item.type === 'partial' || !hasSharedChromePartials;
+      const prefersBlockTreeSharedChrome =
+        this.themeProfiles.prefersBlockTreeSharedChrome(
+          content.siteInfo?.activeTheme,
+        );
       const componentKey =
         `${item.componentName} ${item.templateName}`.toLowerCase();
       const isFooterPartial =
@@ -3593,13 +3676,20 @@ export class PlannerService {
           ? 'product-detail'
           : 'post-detail';
       const listingNeed = isWooProductTemplate ? 'products' : 'posts';
-
-      // FSE block theme
-      if (
+      const hasNavigationEvidence =
         source.includes('wp:navigation') ||
         source.includes('block:"navigation"') ||
-        source.includes('"navigation"')
-      )
+        source.includes('"navigation"');
+      const hasSiteInfoEvidence =
+        source.includes('wp:site-logo') ||
+        source.includes('"site-logo"') ||
+        source.includes('wp:site-title') ||
+        source.includes('"site-title"') ||
+        source.includes('wp:site-tagline') ||
+        source.includes('"site-tagline"');
+
+      // FSE block theme
+      if (hasNavigationEvidence)
         if (ownsSharedChromeData) {
           if (isFooterPartial) needs.add('footer-links');
           else needs.add('menus');
@@ -3611,12 +3701,7 @@ export class PlannerService {
         source.includes('"post-content"')
       )
         needs.add(detailNeed);
-      if (
-        source.includes('wp:site-title') ||
-        source.includes('"site-title"') ||
-        source.includes('wp:site-tagline')
-      )
-        if (ownsSharedChromeData) needs.add('site-info');
+      if (hasSiteInfoEvidence) if (ownsSharedChromeData) needs.add('site-info');
       if (
         isSidebarLike &&
         (source.includes('wp:post-author-biography') ||
@@ -3672,8 +3757,15 @@ export class PlannerService {
         needs.add('comments');
 
       if (isFooterPartial && ownsSharedChromeData) {
-        needs.add('footer-links');
-        needs.add('site-info');
+        if (prefersBlockTreeSharedChrome) {
+          if (hasNavigationEvidence) needs.add('footer-links');
+          else needs.delete('footer-links');
+          if (hasSiteInfoEvidence) needs.add('site-info');
+          else needs.delete('site-info');
+        } else {
+          needs.add('footer-links');
+          needs.add('site-info');
+        }
         needs.delete('menus');
       }
       if (isHeaderLikePartial && ownsSharedChromeData) {
@@ -3697,7 +3789,18 @@ export class PlannerService {
     content: DbContentResult,
     repoManifest?: RepoThemeManifest,
   ): PlanResult {
+    const homeHierarchy = resolveHomeHierarchy({
+      templateNames: plan.map((item) => item.templateName),
+      repoManifest,
+      explicitTemplateNames: getTrustedPlanningDbTemplateSlugs(content),
+      readingSettings: content.readingSettings,
+    });
     return plan.map((item) => {
+      const homeTemplateBase =
+        item.homeTemplateBase ?? toHomeTemplateBase(item.templateName);
+      const resolvedHomeRoute = homeTemplateBase
+        ? homeHierarchy.routeByBase[homeTemplateBase]
+        : undefined;
       const concretePageBindings =
         item.type === 'page' && !item.fixedSlug
           ? this.findConcretePagesForTemplate(item, content)
@@ -3729,6 +3832,8 @@ export class PlannerService {
               planningSourceSummary: item.planningSourceSummary,
               hasConcretePageBindings: true,
               repoRouteHints,
+              readingSettings: content.readingSettings,
+              homeMode: item.homeMode ?? undefined,
             }),
             route: '/page/:slug',
             isDetail: true,
@@ -3738,7 +3843,7 @@ export class PlannerService {
             templateName: item.templateName,
             componentName: item.componentName,
             type: item.type,
-            route: item.route,
+            route: resolvedHomeRoute ?? item.route,
             dataNeeds: item.dataNeeds,
             isDetail: item.isDetail,
             fixedSlug: item.fixedSlug,
@@ -3750,6 +3855,8 @@ export class PlannerService {
             planningSourceSummary: item.planningSourceSummary,
             hasConcretePageBindings: concretePageBindings.length > 0,
             repoRouteHints,
+            readingSettings: content.readingSettings,
+            homeMode: item.homeMode ?? undefined,
           });
 
       const normalizedNeeds = new Set(item.dataNeeds);
@@ -3788,6 +3895,8 @@ export class PlannerService {
                 .filter(Boolean)
                 .join(' | ')
             : undefined),
+        homeTemplateBase: contract.homeTemplateBase ?? item.homeTemplateBase,
+        homeMode: contract.homeMode ?? item.homeMode,
       };
     });
   }
@@ -3801,6 +3910,7 @@ export class PlannerService {
     let materializedCount = 0;
     let runtimeBackedGenericCount = 0;
     let runtimeBackedPageCount = 0;
+    let runtimePageAdded = false;
 
     for (const item of plan) {
       if (item.fixedSlug || !this.shouldExpandConcretePages(item)) {
@@ -3814,12 +3924,17 @@ export class PlannerService {
         isDefaultRuntimePageTemplateCandidate(item);
 
       if (runtimeTemplateCandidate) {
-        const genericRuntimeItem = this.buildRuntimePageBasePlan(
-          item,
-          matchedPages.length,
-        );
-        result.push(genericRuntimeItem);
-        usedComponentNames.add(genericRuntimeItem.componentName);
+        // Only emit one RuntimePage entry regardless of how many templates
+        // resolve to /page/:slug (e.g. blank, full-width, template-about, page).
+        if (!runtimePageAdded) {
+          const genericRuntimeItem = this.buildRuntimePageBasePlan(
+            item,
+            matchedPages.length,
+          );
+          result.push(genericRuntimeItem);
+          usedComponentNames.add(genericRuntimeItem.componentName);
+          runtimePageAdded = true;
+        }
         runtimeBackedGenericCount += 1;
         runtimeBackedPageCount += matchedPages.length;
         continue;
@@ -3952,12 +4067,7 @@ export class PlannerService {
         if (!page.slug?.trim()) return false;
         if (page.id === frontPageId) return false;
         if (page.id === postsPageId) return false;
-
-        const pageTemplate = this.normalizeTemplateIdentifier(page.template);
-        if (templateName === 'page') {
-          return pageTemplate === '' || pageTemplate === 'default';
-        }
-        return pageTemplate === templateName;
+        return this.pageMatchesPlanningTemplate(page, templateName, content);
       })
       .sort((a, b) => {
         const routeCompare = this.buildConcretePageRoute(
@@ -3967,6 +4077,132 @@ export class PlannerService {
         if (routeCompare !== 0) return routeCompare;
         return String(a.id).localeCompare(String(b.id));
       });
+  }
+
+  private pageMatchesPlanningTemplate(
+    page: DbContentResult['pages'][number],
+    templateName: string,
+    content: DbContentResult,
+  ): boolean {
+    const pageTemplate = this.normalizeTemplateIdentifier(page.template);
+    const normalizedTemplate = this.normalizeTemplateIdentifier(templateName);
+    if (!normalizedTemplate) return false;
+
+    if (normalizedTemplate === 'page') {
+      return pageTemplate === '' || pageTemplate === 'default';
+    }
+    if (pageTemplate === normalizedTemplate) {
+      return true;
+    }
+
+    // Concrete page expansion must only bind named templates to pages when the
+    // page is actually assigned that template in WordPress. Semantic route
+    // heuristics remain useful for planning-source hints, but they are too
+    // broad to safely materialize exact route/component bindings.
+    if (/^(template-|blank$|full-width$)/.test(normalizedTemplate)) {
+      return false;
+    }
+
+    const resolvedRoute = content.themeResolvedContent?.routes.find(
+      (route) =>
+        Number(route.pageId) === Number(page.id) || route.slug === page.slug,
+    );
+    if (!resolvedRoute) return false;
+
+    return [
+      ...resolvedRoute.templateCandidates,
+      ...resolvedRoute.matchedDbTemplateSlugs,
+    ]
+      .map((candidate) => this.normalizeTemplateIdentifier(candidate))
+      .includes(normalizedTemplate);
+  }
+
+  buildRoutingDecisionArtifact(input: {
+    plan: PlanResult;
+    content: DbContentResult;
+    repoManifest?: RepoThemeManifest;
+    expectedTemplateNames?: string[];
+  }): Record<string, unknown> {
+    const { plan, content, repoManifest, expectedTemplateNames = [] } = input;
+    const explicitTemplateNames = plan
+      .filter((item) => {
+        const base =
+          item.homeTemplateBase ?? toHomeTemplateBase(item.templateName);
+        if (!base) return false;
+        const sourceFile = String(item.planningSourceFile ?? '').toLowerCase();
+        const sourceLabel = String(
+          item.planningSourceLabel ?? '',
+        ).toLowerCase();
+        return (
+          sourceFile.endsWith(`/${base}`) ||
+          sourceLabel.endsWith(`:${base}`) ||
+          sourceLabel.endsWith(`/${base}`)
+        );
+      })
+      .map((item) => item.templateName);
+
+    const homeHierarchy = resolveHomeHierarchy({
+      templateNames: [
+        ...expectedTemplateNames,
+        ...plan.map((item) => item.templateName),
+      ],
+      repoManifest,
+      explicitTemplateNames,
+      readingSettings: content.readingSettings,
+    });
+
+    return {
+      generatedAt: new Date().toISOString(),
+      readingSettings: content.readingSettings,
+      homeHierarchy,
+      routes: plan.map((item) => {
+        const repoRouteHints = buildRepoRouteHints(
+          item.templateName,
+          repoManifest,
+        );
+        const concretePageBindings =
+          item.type === 'page' && !item.fixedSlug
+            ? this.findConcretePagesForTemplate(item, content)
+            : [];
+        const contract = inferDeterministicRouteContract({
+          templateName: item.templateName,
+          componentName: item.componentName,
+          type: item.type,
+          route: item.route,
+          dataNeeds: item.dataNeeds,
+          isDetail: item.isDetail,
+          fixedSlug: item.fixedSlug,
+          fixedPageId: item.fixedPageId,
+          draftBlockTree: item.draftBlockTree,
+          renderContract: item.renderContract,
+          planningSourceFile: item.planningSourceFile,
+          planningSourceLabel: item.planningSourceLabel,
+          planningSourceSummary: item.planningSourceSummary,
+          hasConcretePageBindings: concretePageBindings.length > 0,
+          repoRouteHints,
+          readingSettings: content.readingSettings,
+          homeMode: item.homeMode ?? undefined,
+        });
+
+        return {
+          templateName: item.templateName,
+          componentName: item.componentName,
+          type: item.type,
+          route: item.route,
+          isDetail: item.isDetail,
+          dataNeeds: item.dataNeeds,
+          fixedSlug: item.fixedSlug ?? null,
+          fixedPageId: item.fixedPageId ?? null,
+          planningSource: {
+            label: item.planningSourceLabel ?? null,
+            file: item.planningSourceFile ?? null,
+            summary: item.planningSourceSummary ?? null,
+          },
+          repoRouteHints,
+          inferredContract: contract,
+        };
+      }),
+    };
   }
 
   private buildConcretePageRoute(
@@ -4851,6 +5087,96 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
   private shouldSkipFullDraftInjection(contract?: VisualPlanContract): boolean {
     return contract?.componentType === 'page';
+  }
+
+  private stabilizeAiVisualPlanSections(input: {
+    componentPlan: PlanResult[number];
+    content: DbContentResult;
+    aiSections: SectionPlan[];
+    draftSections: SectionPlan[] | undefined;
+    visualContract: VisualPlanContract | undefined;
+  }): SectionPlan[] {
+    const draftSections = input.draftSections ?? [];
+    if (draftSections.length < 2) return input.aiSections;
+    if (
+      !shouldUseAiVisualPlanningForProfolioSurface({
+        componentPlan: input.componentPlan,
+        content: input.content,
+      })
+    ) {
+      return input.aiSections;
+    }
+
+    const effectiveDraft = input.visualContract
+      ? sanitizeSectionsForContract(draftSections, input.visualContract).sections
+      : draftSections;
+    if (effectiveDraft.length < 2) return input.aiSections;
+    if (!this.shouldPreferDraftSkeletonForAiPlan(input.aiSections, effectiveDraft)) {
+      return input.aiSections;
+    }
+
+    this.logger.warn(
+      this.formatPhaseCLog(
+        `"${input.componentPlan.componentName}" AI visual plan shape diverged from source-derived draft; using stable draft section skeleton (${effectiveDraft
+          .map((section) => section.debugKey ?? section.sectionKey ?? section.type)
+          .join(', ')})`,
+      ),
+    );
+    return effectiveDraft.map((section) => ({
+      ...section,
+      generationMode: section.generationMode ?? 'section-assembly',
+    }));
+  }
+
+  private shouldPreferDraftSkeletonForAiPlan(
+    aiSections: SectionPlan[],
+    draftSections: SectionPlan[],
+  ): boolean {
+    const structuredTypes = new Set([
+      'card-grid',
+      'media-text',
+      'testimonial',
+      'accordion',
+      'tabs',
+      'carousel',
+      'modal',
+      'post-list',
+    ]);
+    const draftStructuredCount = draftSections.filter((section) =>
+      structuredTypes.has(section.type),
+    ).length;
+    if (draftStructuredCount === 0) return false;
+
+    const draftCounts = this.countSectionTypes(draftSections);
+    const aiCounts = this.countSectionTypes(aiSections);
+    for (const [type, draftCount] of draftCounts) {
+      if (!structuredTypes.has(type)) continue;
+      if ((aiCounts.get(type) ?? 0) < draftCount) return true;
+    }
+
+    const wrapperTypes = new Set(['cover', 'hero', 'prose-block']);
+    const aiWrapperCount = aiSections.filter((section) =>
+      wrapperTypes.has(section.type),
+    ).length;
+    const draftWrapperCount = draftSections.filter((section) =>
+      wrapperTypes.has(section.type),
+    ).length;
+    if (
+      aiSections.length >= draftSections.length + 3 &&
+      aiWrapperCount > draftWrapperCount + 2
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private countSectionTypes(sections: SectionPlan[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const section of sections) {
+      counts.set(section.type, (counts.get(section.type) ?? 0) + 1);
+    }
+    return counts;
   }
 
   private applyRepoInteractiveDefaults(
@@ -6880,8 +7206,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     return resolveHomeHierarchy({
       templateNames,
       repoManifest,
-      explicitTemplateNames:
-        content?.dbTemplates?.map((entry) => entry.slug) ?? [],
+      explicitTemplateNames: content
+        ? getTrustedPlanningDbTemplateSlugs(content)
+        : [],
+      readingSettings: content?.readingSettings,
     }).orderedTemplateNames;
   }
 
@@ -7047,6 +7375,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       hasSharedLayoutPartials,
       tokens,
       candidates,
+      content,
     );
   }
 
@@ -7056,6 +7385,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     hasSharedLayoutPartials: boolean,
     tokens: ThemeTokens | undefined,
     candidates: PlanningSourceCandidate[] = [],
+    content?: DbContentResult,
   ): PlanningSourceContext {
     const hints: string[] = [];
     const sourceTemplateName =
@@ -7080,7 +7410,13 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceFile,
       tokens,
     });
-    const supplementalSources: PlanningSourceSupplement[] = [];
+    const supplementalSources = this.buildSupplementalPlanningSources({
+      componentPlan,
+      preferredSource,
+      candidates,
+      tokens,
+      content,
+    });
     const mode = this.looksLikeBlockMarkup(preferredSource.source)
       ? 'body-only block JSON'
       : 'body-only markup';
@@ -7103,7 +7439,9 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       `Component body source narrowed to route-owned content: ${componentPlan.type === 'page' ? 'yes' : 'partial/full-source'}`,
     );
     summaryLines.push(
-      'Source of truth policy: only the selected primary planning source is used; supplemental planning sources are disabled.',
+      supplementalSources.length > 0
+        ? 'Source of truth policy: primary planning source is preserved, and compatible supplemental sources are merged to combine repo archetypes with DB-backed content evidence.'
+        : 'Source of truth policy: only the selected primary planning source is used; supplemental planning sources are disabled.',
     );
     if (hints.length > 0) {
       summaryLines.push(...hints.map((hint) => `- ${hint}`));
@@ -7126,13 +7464,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       extractSourceBackedAuxiliaryLabels({
         source: canonicalAnalysisSource,
       }),
-      ...(componentPlan.type === 'partial'
-        ? supplementalSources.map((source) =>
-            extractSourceBackedAuxiliaryLabels({
-              source: source.source,
-            }),
-          )
-        : []),
+      ...supplementalSources.map((source) =>
+        extractSourceBackedAuxiliaryLabels({
+          source: source.source,
+        }),
+      ),
     );
     if (customClassNames.length > 0) {
       summaryLines.push(
@@ -7225,6 +7561,147 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       sourceReason: preferredSource.reason,
       canonicalSource,
     };
+  }
+
+  private buildSupplementalPlanningSources(input: {
+    componentPlan: PlanResult[number];
+    preferredSource: PlanningSourceCandidate;
+    candidates: PlanningSourceCandidate[];
+    tokens: ThemeTokens | undefined;
+    content?: DbContentResult;
+  }): PlanningSourceSupplement[] {
+    if (input.content?.themeResolvedContent?.themeSlug !== 'profolio-fse') {
+      return [];
+    }
+
+    const preferredOrigin = extractPlanningSourceOrigin(
+      input.preferredSource.label,
+    );
+    const isRepoLikeOrigin = (origin: string): boolean =>
+      origin === 'repo' ||
+      origin === 'repo-chain' ||
+      origin === 'repo-archetype';
+    const pageArchetypeTemplates = new Set([
+      'page',
+      'template-about',
+      'template-contact',
+      'template-services',
+      'blank',
+      'full-width',
+    ]);
+
+    const selected = input.candidates
+      .filter((candidate) => {
+        if (candidate.label === input.preferredSource.label) return false;
+        if (!candidate.source.trim()) return false;
+
+        const candidateOrigin = extractPlanningSourceOrigin(candidate.label);
+        const normalizedTemplate = normalizePlanningTemplateIdentifier(
+          candidate.templateName,
+        );
+
+        if (input.componentPlan.fixedSlug) {
+          if (
+            preferredOrigin === 'db' &&
+            isRepoLikeOrigin(candidateOrigin) &&
+            pageArchetypeTemplates.has(normalizedTemplate)
+          ) {
+            return true;
+          }
+          if (
+            preferredOrigin === 'repo' &&
+            candidateOrigin === 'db' &&
+            /^db:(bound-page|page):/i.test(candidate.label)
+          ) {
+            return true;
+          }
+        }
+
+        if (input.componentPlan.route === '/') {
+          if (
+            isRepoLikeOrigin(preferredOrigin) &&
+            candidateOrigin === 'db' &&
+            (/^db:page-on-front(?::|$)/i.test(candidate.label) ||
+              /^db:page-for-posts(?::|$)/i.test(candidate.label) ||
+              /^db:[^:]+:(front-page|home)$/i.test(candidate.label))
+          ) {
+            return true;
+          }
+          if (
+            preferredOrigin === 'db' &&
+            isRepoLikeOrigin(candidateOrigin) &&
+            ['front-page', 'home', 'index'].includes(normalizedTemplate)
+          ) {
+            return true;
+          }
+        }
+
+        return isCompatibleSupplementalPlanningSource(
+          input.componentPlan,
+          input.preferredSource,
+          candidate,
+        );
+      })
+      .sort((a, b) => {
+        const aOrigin = extractPlanningSourceOrigin(a.label);
+        const bOrigin = extractPlanningSourceOrigin(b.label);
+        const aOpposite = aOrigin !== preferredOrigin ? 1 : 0;
+        const bOpposite = bOrigin !== preferredOrigin ? 1 : 0;
+        if (bOpposite !== aOpposite) return bOpposite - aOpposite;
+
+        const aArchetype = /^repo-archetype:/i.test(a.label) ? 1 : 0;
+        const bArchetype = /^repo-archetype:/i.test(b.label) ? 1 : 0;
+        if (bArchetype !== aArchetype) return bArchetype - aArchetype;
+
+        const aRepoChain = /^repo-chain:/i.test(a.label) ? 1 : 0;
+        const bRepoChain = /^repo-chain:/i.test(b.label) ? 1 : 0;
+        if (bRepoChain !== aRepoChain) return bRepoChain - aRepoChain;
+
+        return (
+          (b.selectionScore ?? b.richness) - (a.selectionScore ?? a.richness)
+        );
+      })
+      .slice(0, input.componentPlan.fixedSlug ? 2 : 1);
+
+    return selected.map((candidate) => {
+      const sourceTemplateName =
+        candidate.templateName ?? input.componentPlan.templateName;
+      const sourceFile =
+        candidate.sourceFile ??
+        inferFseSourceFile(
+          input.componentPlan.templateName,
+          input.componentPlan.type,
+        );
+      const hints: string[] = [];
+      const scopedSource = this.scopePlanningSourceMarkup(
+        input.componentPlan,
+        candidate.source,
+        sourceTemplateName,
+        sourceFile,
+        hints,
+      );
+      const fallbackSource = scopedSource.trim().length
+        ? scopedSource
+        : candidate.source;
+      const canonicalSource = this.buildCanonicalPlanningSource({
+        source: fallbackSource,
+        templateName: sourceTemplateName,
+        sourceFile,
+        tokens: input.tokens,
+      });
+
+      return {
+        source: fallbackSource,
+        label: candidate.label,
+        reason:
+          hints.length > 0
+            ? `${candidate.reason}; ${hints.join('; ')}`
+            : candidate.reason,
+        templateName: sourceTemplateName,
+        sourceFile,
+        canonicalSource,
+      };
+    });
   }
 
   private buildRetrySourceCandidateEvidence(
@@ -7420,11 +7897,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     const matches = content.pages.filter((page) => {
-      const pageTemplate = this.normalizeTemplateIdentifier(page.template);
-      if (templateName === 'page') {
-        return pageTemplate === '' || pageTemplate === 'default';
-      }
-      return pageTemplate === templateName;
+      return this.pageMatchesPlanningTemplate(page, templateName, content);
     });
 
     return matches

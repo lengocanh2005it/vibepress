@@ -4,7 +4,10 @@ import dotenv from 'dotenv';
 import { createHash } from 'crypto';
 import { basename, extname, resolve, join } from 'path';
 import { getConn, getPrefix } from './lib/db-context.js';
-import { buildRuntimePlanFromPageRow } from './runtime/runtime-plan-builder.js';
+import {
+  buildRuntimePlanFromPageRow,
+  resolveRuntimePageMarkupFromRow,
+} from './runtime/runtime-plan-builder.js';
 import { registerPageRoutes } from './routes/pages.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env'), override: true });
@@ -574,6 +577,22 @@ async function serializePage(
   };
 }
 
+async function serializeRuntimePage(
+  conn: Awaited<ReturnType<typeof getConn>>,
+  prefix: string,
+  r: any,
+) {
+  const page = await serializePage(conn, prefix, r);
+  return {
+    ...page,
+    content: await normalizeRichContent(
+      conn,
+      prefix,
+      resolveRuntimePageMarkupFromRow(r),
+    ),
+  };
+}
+
 async function serializePostRows(
   conn: Awaited<ReturnType<typeof getConn>>,
   prefix: string,
@@ -1017,13 +1036,24 @@ app.get('/api/posts', async (req, res) => {
     const authorFilter = authorSlug
       ? `AND u.user_nicename = ${conn.escape(authorSlug)}`
       : '';
+    const searchTerm =
+      typeof req.query.search === 'string'
+        ? req.query.search.trim()
+        : typeof req.query.s === 'string'
+          ? req.query.s.trim()
+          : '';
+    const searchFilter = searchTerm
+      ? `AND (p.post_title LIKE ${conn.escape(`%${searchTerm}%`)}
+          OR p.post_excerpt LIKE ${conn.escape(`%${searchTerm}%`)}
+          OR p.post_content LIKE ${conn.escape(`%${searchTerm}%`)})`
+      : '';
     const typeFilter = buildPostTypeWhereClause(conn, selectedPostTypes);
     const { page, perPage, offset } = parsePostsPaginationQuery(req);
     const [[countRow]] = await conn.query<any[]>(
       `SELECT COUNT(*) AS total
        FROM \`${prefix}posts\` p
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
-       WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter}`,
+       WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter} ${searchFilter}`,
     );
     applyPostsPaginationHeaders(
       res,
@@ -1051,7 +1081,7 @@ app.get('/api/posts', async (req, res) => {
        LEFT JOIN \`${prefix}postmeta\` price ON price.post_id = p.ID AND price.meta_key = '_price'
        LEFT JOIN \`${prefix}posts\` img ON img.ID = thumb.meta_value AND img.post_type = 'attachment'
        LEFT JOIN \`${prefix}users\` u ON u.ID = p.post_author
-       WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter}
+        WHERE p.post_status = 'publish' ${typeFilter} ${authorFilter} ${searchFilter}
        ORDER BY p.post_date DESC
        LIMIT ? OFFSET ?`,
       [perPage, offset],
@@ -1108,6 +1138,7 @@ registerPageRoutes({
   getConn,
   getPrefix,
   serializePage,
+  serializeRuntimePage,
   buildRuntimePlanFromPageRow,
 });
 
@@ -1377,7 +1408,16 @@ function rewriteCanonicalMenuDetailPath(
   if (normalizedObjectType === 'page') {
     try {
       const parsed = new URL(raw, 'http://vp.local');
-      return `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+      const normalizedPath = parsed.pathname || '/';
+      if (normalizedPath === '/' || normalizedPath === '') {
+        return `${normalizedPath}${parsed.search}${parsed.hash}` || '/';
+      }
+
+      const segments = normalizedPath.split('/').filter(Boolean);
+      const slug = segments.at(-1);
+      if (!slug) return raw;
+
+      return `/page/${slug}${parsed.search}${parsed.hash}`;
     } catch {
       return raw;
     }
@@ -1398,31 +1438,16 @@ function rewriteCanonicalMenuDetailPath(
   }
 }
 
-function buildCanonicalPagePath(
-  page: { id: number; slug: string; parentId: number },
-  pages: Array<{ id: number; slug: string; parentId: number }>,
+function buildPreviewMenuPagePath(
+  page: { id: number; slug: string },
   frontPageId: number | null,
 ): string {
   if (frontPageId != null && page.id === frontPageId) return '/';
-  const byId = new Map(pages.map((entry) => [entry.id, entry] as const));
-  const segments: string[] = [];
-  const visited = new Set<number>();
-  let current: { id: number; slug: string; parentId: number } | undefined = page;
-
-  while (current) {
-    if (visited.has(current.id)) break;
-    visited.add(current.id);
-    if (frontPageId != null && current.id === frontPageId) break;
-    const slug = String(current.slug ?? '')
-      .trim()
-      .replace(/^\/+|\/+$/g, '');
-    if (slug) segments.unshift(slug);
-    if (!current.parentId) break;
-    current = byId.get(current.parentId);
-  }
-
-  if (segments.length === 0) return page.id ? `/page/${page.id}` : '/page';
-  return `/${segments.join('/')}`;
+  const slug = String(page.slug ?? '')
+    .trim()
+    .replace(/^\/+|\/+$/g, '');
+  if (!slug) return '/';
+  return `/page/${slug}`;
 }
 
 app.get('/api/menus', async (req, res) => {
@@ -1522,11 +1547,6 @@ app.get('/api/menus', async (req, res) => {
          WHERE post_type = 'page' AND post_status = 'publish'
          ORDER BY menu_order, ID`,
       );
-      const pageRecords = pages.map((entry) => ({
-        id: Number(entry.ID),
-        slug: String(entry.post_name ?? ''),
-        parentId: Number(entry.post_parent ?? 0),
-      }));
       result.push({
         name: 'Primary',
         slug: 'primary',
@@ -1534,13 +1554,11 @@ app.get('/api/menus', async (req, res) => {
         items: pages.map((p, idx) => ({
           id: p.ID,
           title: p.post_title,
-          url: buildCanonicalPagePath(
+          url: buildPreviewMenuPagePath(
             {
               id: Number(p.ID),
               slug: String(p.post_name ?? ''),
-              parentId: Number(p.post_parent ?? 0),
             },
-            pageRecords,
             frontPageId,
           ),
           order: p.menu_order || idx,

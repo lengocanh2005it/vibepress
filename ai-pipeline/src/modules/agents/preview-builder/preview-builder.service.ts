@@ -12,11 +12,10 @@ import {
   copyFile,
   readdir,
 } from 'fs/promises';
-import { dirname, join, resolve } from 'path';
+import { basename, dirname, extname, join, posix, resolve } from 'path';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import * as net from 'net';
-import { basename, extname } from 'path';
 import type { WpDbCredentials } from '@/common/types/db-credentials.type.js';
 import { resolveThemeAssetPublicPath } from '../../../common/utils/theme-asset.util.js';
 import { sanitizeInlineThemeCss } from '../../../common/utils/theme-css-sources.js';
@@ -500,6 +499,9 @@ ${routesBlock}
         themeDir,
       );
     }
+    if (themeDir) {
+      await this.applyThemeSourceStyles(frontendDir, themeDir, repoManifest);
+    }
 
     // 5. Generate .env cho từng folder
     const [apiPort, vitePort] = await Promise.all([
@@ -750,15 +752,27 @@ ${fontEntries}
     await this.applyInteractionTokens(frontendDir, tokens);
     await this.applyBlockStyleBridges(frontendDir);
     await this.injectWordPressBridgeClasses(frontendDir, tokens);
-    if (themeDir) {
-      await this.applyThemeJsonGlobalStyles(frontendDir, themeDir);
-      await this.applyThemeStylesheetCss(frontendDir, themeDir);
+  }
+
+  private async applyThemeSourceStyles(
+    frontendDir: string,
+    themeDir: string,
+    repoManifest?: RepoThemeManifest,
+  ): Promise<void> {
+    await this.applyThemeJsonGlobalStyles(frontendDir, themeDir, repoManifest);
+
+    if (this.shouldUseThemeSourceCssBundle(themeDir, repoManifest)) {
+      await this.applyThemeSourceCssBundle(frontendDir, themeDir, repoManifest);
+      return;
     }
+
+    await this.applyThemeStylesheetCss(frontendDir, themeDir);
   }
 
   private async applyThemeJsonGlobalStyles(
     frontendDir: string,
     themeDir: string,
+    repoManifest?: RepoThemeManifest,
   ): Promise<void> {
     const marker = '/* Vibepress theme.json global styles */';
     const cssPath = join(frontendDir, 'src', 'index.css');
@@ -937,22 +951,27 @@ ${fontEntries}
       lines.push(styles.css);
     }
 
-    // Inject CSS files from common theme vendor CSS directories.
-    try {
-      const cssDirs = [join(themeDir, 'assets', 'css'), join(themeDir, 'css')];
-      const seenCssFiles = new Set<string>();
-      for (const cssDir of cssDirs) {
-        const cssFiles = await readdir(cssDir).catch(() => []);
-        for (const cssFile of cssFiles.filter((f) => f.endsWith('.css'))) {
-          const seenKey = `${cssDir}::${cssFile}`.toLowerCase();
-          if (seenCssFiles.has(seenKey)) continue;
-          seenCssFiles.add(seenKey);
-          const content = await readFile(join(cssDir, cssFile), 'utf-8');
-          lines.push(`/* theme ${cssFile} */\n${content}`);
+    if (!this.shouldUseThemeSourceCssBundle(themeDir, repoManifest)) {
+      // Inject CSS files from common theme vendor CSS directories.
+      try {
+        const cssDirs = [
+          join(themeDir, 'assets', 'css'),
+          join(themeDir, 'css'),
+        ];
+        const seenCssFiles = new Set<string>();
+        for (const cssDir of cssDirs) {
+          const cssFiles = await readdir(cssDir).catch(() => []);
+          for (const cssFile of cssFiles.filter((f) => f.endsWith('.css'))) {
+            const seenKey = `${cssDir}::${cssFile}`.toLowerCase();
+            if (seenCssFiles.has(seenKey)) continue;
+            seenCssFiles.add(seenKey);
+            const content = await readFile(join(cssDir, cssFile), 'utf-8');
+            lines.push(`/* theme ${cssFile} */\n${content}`);
+          }
         }
+      } catch {
+        // theme vendor CSS directories may not exist for all themes
       }
-    } catch {
-      // theme vendor CSS directories may not exist for all themes
     }
 
     if (lines.length > 1) {
@@ -987,6 +1006,156 @@ ${fontEntries}
     await writeFile(
       cssPath,
       `${existingCss.trimEnd()}\n\n${marker}\n${normalizedStyleCss}\n`,
+    );
+  }
+
+  private shouldUseThemeSourceCssBundle(
+    themeDir: string,
+    repoManifest?: RepoThemeManifest,
+  ): boolean {
+    return this.resolveThemeSlug(themeDir, repoManifest) === 'profolio-fse';
+  }
+
+  private resolveThemeSlug(
+    themeDir: string,
+    repoManifest?: RepoThemeManifest,
+  ): string {
+    return (
+      repoManifest?.themeTypeHints?.themeSlug?.trim().toLowerCase() ??
+      basename(themeDir).trim().toLowerCase()
+    );
+  }
+
+  private async applyThemeSourceCssBundle(
+    frontendDir: string,
+    themeDir: string,
+    repoManifest?: RepoThemeManifest,
+  ): Promise<void> {
+    const themeSlug = this.resolveThemeSlug(themeDir, repoManifest);
+    const cssEntries = await this.collectThemeSourceCssBundleEntries(
+      themeDir,
+      repoManifest,
+    );
+    if (cssEntries.length === 0) return;
+
+    const stylesDir = join(frontendDir, 'src', 'styles');
+    const cssPath = join(frontendDir, 'src', 'index.css');
+    const bundleFileName = `theme-source-${themeSlug}.css`;
+    const bundlePath = join(stylesDir, bundleFileName);
+    const importLine = `@import './styles/${bundleFileName}';`;
+    const [existingCss] = await Promise.all([
+      readFile(cssPath, 'utf-8'),
+      mkdir(stylesDir, { recursive: true }),
+    ]);
+
+    const bundleChunks: string[] = [
+      `/* Vibepress theme source CSS bundle: ${themeSlug} */`,
+    ];
+    for (const relPath of cssEntries) {
+      const rawCss = await readFile(join(themeDir, relPath), 'utf-8').catch(
+        () => null,
+      );
+      if (!rawCss) continue;
+      const sanitizedCss = sanitizeInlineThemeCss(rawCss).trim();
+      if (!sanitizedCss) continue;
+      const rewrittenCss = this.rewriteThemeCssAssetUrls(sanitizedCss, relPath);
+      const normalizedCss =
+        this.normalizeWordPressCustomCssSelectors(rewrittenCss);
+      bundleChunks.push(`/* ${relPath} */\n${normalizedCss}`);
+    }
+
+    if (bundleChunks.length <= 1) return;
+
+    await Promise.all([
+      writeFile(
+        bundlePath,
+        `${bundleChunks.join('\n\n').trimEnd()}\n`,
+        'utf-8',
+      ),
+      writeFile(
+        cssPath,
+        this.insertCssImportBeforeTailwindDirectives(existingCss, importLine),
+        'utf-8',
+      ),
+    ]);
+  }
+
+  private async collectThemeSourceCssBundleEntries(
+    themeDir: string,
+    repoManifest?: RepoThemeManifest,
+  ): Promise<string[]> {
+    const fallbackPriority = [
+      'style.css',
+      'assets/font-awesome/css/all.css',
+      'assets/css/animate.css',
+    ];
+    const prioritized = [
+      ...fallbackPriority,
+      ...(repoManifest?.sourceOfTruth?.styleFiles ?? []),
+    ];
+    const uniqueEntries = Array.from(
+      new Set(
+        prioritized
+          .map((file) =>
+            String(file ?? '')
+              .trim()
+              .replace(/\\/g, '/'),
+          )
+          .filter((file) => file.length > 0),
+      ),
+    );
+    const result: string[] = [];
+
+    for (const relPath of uniqueEntries) {
+      const normalized = relPath.replace(/^\/+/, '');
+      if (!normalized.toLowerCase().endsWith('.css')) continue;
+      if (
+        /(^|\/)(admin|editor|login|customize|customizer|woocommerce-admin)[^/]*\.css$/i.test(
+          normalized,
+        )
+      ) {
+        continue;
+      }
+      if (await this.pathExists(join(themeDir, normalized))) {
+        result.push(normalized);
+      }
+    }
+
+    return result;
+  }
+
+  private rewriteThemeCssAssetUrls(
+    css: string,
+    cssRelativePath: string,
+  ): string {
+    const cssDir = posix.dirname(cssRelativePath.replace(/\\/g, '/'));
+
+    return css.replace(
+      /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
+      (match, quote: string, rawUrl: string) => {
+        const value = String(rawUrl ?? '').trim();
+        if (!value) return match;
+        if (/^(?:data:|blob:|https?:|\/\/|#)/i.test(value)) return match;
+
+        const pathPart = value.split('#')[0]?.split('?')[0] ?? value;
+        const suffix = value.slice(pathPart.length);
+        const normalizedPath = pathPart.replace(/\\/g, '/');
+        const resolvedThemePath = normalizedPath.startsWith('/')
+          ? normalizedPath
+          : posix.normalize(posix.join(cssDir, normalizedPath));
+        if (!resolvedThemePath || resolvedThemePath.startsWith('..')) {
+          return match;
+        }
+
+        const publicPath = resolveThemeAssetPublicPath(
+          resolvedThemePath.startsWith('/')
+            ? resolvedThemePath
+            : `/${resolvedThemePath}`,
+        );
+        if (!publicPath) return match;
+        const nextUrl = `${publicPath}${suffix}`;
+        return `url("${nextUrl}")`;
+      },
     );
   }
 
@@ -2251,9 +2420,9 @@ ${fontEntries}
     // Pass 3: <img> without any className — inject it before closing tag
     const decorateImagesNoClass = (source: string) =>
       source.replace(
-        /<img\b((?:(?!className=)[^>])*)(\/?>)/g,
-        (_, attrs: string, closing: string) =>
-          `<img${attrs} className="vp-generated-image"${closing}`,
+        /<img\b((?:(?!className=)[^>])*?)(\s*\/?)>/g,
+        (_, attrs: string, closingSlash: string) =>
+          `<img${attrs.replace(/\s*\/\s*$/, '')} className="vp-generated-image"${closingSlash.trim() ? ' /' : ''}>`,
       );
 
     // ── Link decoration ──────────────────────────────────────────────────────

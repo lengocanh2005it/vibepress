@@ -1809,6 +1809,16 @@ export default function ${component.name}() {
               plan: review.plan,
             },
           );
+          await this.planner.writeArtifact(
+            logPath,
+            `routing.attempt-${planAttempt}.json`,
+            this.planner.buildRoutingDecisionArtifact({
+              plan: review.plan,
+              content,
+              repoManifest: repoResult.themeManifest,
+              expectedTemplateNames: reviewedExpectedTemplateNames,
+            }),
+          );
 
           // C5 → C6 retry loop: if plan invalid, loop back to C1
           for (
@@ -1896,6 +1906,16 @@ export default function ${component.name}() {
                 strictReview: strictPlanReview,
                 plan: review.plan,
               },
+            );
+            await this.planner.writeArtifact(
+              logPath,
+              `routing.attempt-${planAttempt}.json`,
+              this.planner.buildRoutingDecisionArtifact({
+                plan: review.plan,
+                content,
+                repoManifest: repoResult.themeManifest,
+                expectedTemplateNames: reviewedExpectedTemplateNames,
+              }),
             );
             this.emitStepProgress(
               state,
@@ -2124,6 +2144,16 @@ export default function ${component.name}() {
             plan: review.plan,
             warnings: review.warnings,
           });
+          await this.planner.writeArtifact(
+            logPath,
+            'routing.final.json',
+            this.planner.buildRoutingDecisionArtifact({
+              plan: review.plan,
+              content,
+              repoManifest: repoResult.themeManifest,
+              expectedTemplateNames: reviewedExpectedTemplateNames,
+            }),
+          );
           await this.planner.writeArtifact(
             logPath,
             'deterministic-render-contract.json',
@@ -7809,149 +7839,6 @@ export default function ${component.name}() {
       this.logger.log(formatted);
       await this.logToFile(logPath, formatted);
     }
-  }
-
-  private buildEditRequestLogLines(
-    context?: ResolvedEditRequestContext,
-  ): string[] {
-    if (!context) {
-      return ['none'];
-    }
-
-    const request = context.request;
-    const summary = context.summary;
-    const lines = [
-      [
-        `accepted=${context.accepted}`,
-        `mode=${context.mode}`,
-        `category=${context.category}`,
-        `source=${summary.source}`,
-        `attachments=${summary.attachmentCount}`,
-        `hasPrompt=${summary.hasPrompt}`,
-        `hasVisualContext=${summary.hasVisualContext}`,
-      ].join(' | '),
-    ];
-
-    const intentParts = [
-      context.globalIntent
-        ? `intent="${truncateForLog(context.globalIntent, 180)}"`
-        : null,
-      context.focusHint
-        ? `focus="${truncateForLog(context.focusHint, 140)}"`
-        : null,
-      context.editOperation ? `operation=${context.editOperation}` : null,
-      context.targetScope ? `scope=${context.targetScope}` : null,
-      context.recommendedStrategy
-        ? `strategy=${context.recommendedStrategy}`
-        : null,
-      context.needsInference ? 'needsInference=true' : null,
-      typeof context.confidence === 'number'
-        ? `confidence=${context.confidence.toFixed(2)}`
-        : null,
-      context.source ? `resolver=${context.source}` : null,
-    ].filter(Boolean);
-    if (intentParts.length > 0) {
-      lines.push(intentParts.join(' | '));
-    }
-
-    if (request?.targetHint) {
-      const targetLine = [
-        request.targetHint.componentName
-          ? `component=${request.targetHint.componentName}`
-          : null,
-        request.targetHint.route ? `route=${request.targetHint.route}` : null,
-        request.targetHint.templateName
-          ? `template=${request.targetHint.templateName}`
-          : null,
-        request.targetHint.sectionType
-          ? `sectionType=${request.targetHint.sectionType}`
-          : null,
-        typeof request.targetHint.sectionIndex === 'number'
-          ? `sectionIndex=${request.targetHint.sectionIndex}`
-          : null,
-      ].filter(Boolean);
-      if (targetLine.length > 0) {
-        lines.push(`target | ${targetLine.join(' | ')}`);
-      }
-    }
-
-    if (context.targetCandidates.length > 0) {
-      lines.push(
-        `candidates | ${context.targetCandidates
-          .slice(0, 3)
-          .map((candidate) =>
-            [
-              candidate.componentName
-                ? `component=${candidate.componentName}`
-                : null,
-              candidate.route ? `route=${candidate.route}` : null,
-              candidate.templateName
-                ? `template=${candidate.templateName}`
-                : null,
-              candidate.sectionType
-                ? `sectionType=${candidate.sectionType}`
-                : null,
-              candidate.targetNodeRole
-                ? `targetRole=${candidate.targetNodeRole}`
-                : null,
-              `confidence=${candidate.confidence.toFixed(2)}`,
-            ]
-              .filter(Boolean)
-              .join(' | '),
-          )
-          .join(' || ')}`,
-      );
-    }
-
-    if (context.ambiguities.length > 0) {
-      lines.push(
-        `ambiguities | ${context.ambiguities
-          .slice(0, 3)
-          .map((entry) => truncateForLog(entry, 120))
-          .join(' || ')}`,
-      );
-    }
-
-    if (context.warnings.length > 0) {
-      lines.push(
-        `warnings | ${context.warnings
-          .slice(0, 3)
-          .map((entry) => truncateForLog(entry, 120))
-          .join(' || ')}`,
-      );
-    }
-
-    if (request?.pageContext) {
-      const pageContextLine = [
-        request.pageContext.wordpressRoute
-          ? `route=${request.pageContext.wordpressRoute}`
-          : null,
-        request.pageContext.wordpressUrl
-          ? `wpUrl=${request.pageContext.wordpressUrl}`
-          : null,
-        request.pageContext.pageTitle
-          ? `pageTitle="${truncateForLog(request.pageContext.pageTitle, 80)}"`
-          : null,
-        formatViewportForLog(request.pageContext.viewport),
-        formatDocumentForLog(request.pageContext.document),
-      ].filter(Boolean);
-      if (pageContextLine.length > 0) {
-        lines.push(`page | ${pageContextLine.join(' | ')}`);
-      }
-    }
-
-    if (request?.prompt) {
-      lines.push(`prompt | "${truncateForLog(request.prompt, 220)}"`);
-    }
-
-    const attachments = request?.attachments ?? [];
-    attachments.forEach((attachment, index) => {
-      lines.push(
-        `capture#${index + 1} | ${formatAttachmentForLog(attachment)}`,
-      );
-    });
-
-    return lines;
   }
 
   private isProtectedDeterministicSharedPartial(component: {

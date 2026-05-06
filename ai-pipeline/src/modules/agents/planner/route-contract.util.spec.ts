@@ -22,6 +22,44 @@ describe('inferDeterministicRouteContract', () => {
     expect(contract.archetype).toBe('home');
     expect(contract.route).toBe('/');
     expect(contract.isDetail).toBe(false);
+    expect(contract.homeTemplateBase).toBe('front-page');
+    expect(contract.homeMode).toBe('front-page');
+  });
+
+  it('keeps root route on front-page while annotating posts-index home mode', () => {
+    const contract = inferDeterministicRouteContract({
+      templateName: 'front-page',
+      componentName: 'FrontPage',
+      type: 'page',
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+    });
+
+    expect(contract.archetype).toBe('home');
+    expect(contract.route).toBe('/');
+    expect(contract.homeMode).toBe('posts-index');
+    expect(contract.requiredDataNeeds).toEqual([]);
+  });
+
+  it('keeps posts data need on hybrid front-page layouts with feed structure', () => {
+    const contract = inferDeterministicRouteContract({
+      templateName: 'front-page',
+      componentName: 'FrontPage',
+      type: 'page',
+      dataNeeds: ['posts'],
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 12,
+        pageForPostsId: 34,
+      },
+    });
+
+    expect(contract.route).toBe('/');
+    expect(contract.homeMode).toBe('hybrid-home');
+    expect(contract.requiredDataNeeds).toEqual(['posts']);
   });
 
   it('keeps the default page template as a singular page detail route', () => {
@@ -37,7 +75,7 @@ describe('inferDeterministicRouteContract', () => {
     expect(contract.requiredDataNeeds).toEqual(['page-detail']);
   });
 
-  it('treats custom non-page templates as static pages by default', () => {
+  it('keeps named custom page templates on their own detail route family', () => {
     const contract = inferDeterministicRouteContract({
       templateName: 'template-about',
       componentName: 'TemplateAbout',
@@ -45,10 +83,22 @@ describe('inferDeterministicRouteContract', () => {
       dataNeeds: ['page-detail'],
     });
 
-    expect(contract.route).toBe('/template-about');
-    expect(contract.isDetail).toBe(false);
-    expect(contract.requiredDataNeeds).toEqual([]);
-    expect(contract.disallowedDetailDataNeeds).toContain('page-detail');
+    expect(contract.route).toBe('/template-about/:slug');
+    expect(contract.isDetail).toBe(true);
+    expect(contract.requiredDataNeeds).toEqual(['page-detail']);
+  });
+
+  it('keeps generic FSE layout templates on the canonical page detail route', () => {
+    const contract = inferDeterministicRouteContract({
+      templateName: 'blank',
+      componentName: 'Blank',
+      type: 'page',
+      dataNeeds: ['page-detail'],
+    });
+
+    expect(contract.route).toBe('/page/:slug');
+    expect(contract.isDetail).toBe(true);
+    expect(contract.requiredDataNeeds).toEqual(['page-detail']);
   });
 
   it('keeps single templates as post detail routes', () => {
@@ -227,6 +277,28 @@ describe('inferDeterministicRouteContract', () => {
     expect(contract.route).toBe('/blog');
     expect(contract.requiredDataNeeds).toEqual(['posts']);
   });
+
+  it('does not let generic blog route hints hijack custom blog sidebar templates', () => {
+    const contract = inferDeterministicRouteContract({
+      templateName: 'blog-left-sidebar',
+      componentName: 'BlogLeftSidebar',
+      type: 'page',
+      draftBlockTree: [
+        { kind: 'query', blockName: 'core/query' },
+        { kind: 'search', blockName: 'core/search' },
+      ],
+      repoRouteHints: {
+        entryFile: 'templates/blog-left-sidebar.html',
+        routeHint: 'blog',
+        chainFiles: ['templates/blog-left-sidebar.html'],
+        blockTypes: ['core/query', 'core/search'],
+        notes: [],
+      },
+    });
+
+    expect(contract.archetype).toBe('static-page');
+    expect(contract.route).toBe('/blog-left-sidebar');
+  });
 });
 
 describe('resolveHomeHierarchy', () => {
@@ -237,11 +309,65 @@ describe('resolveHomeHierarchy', () => {
 
     expect(resolution.redundantBases).toEqual(['home']);
     expect(resolution.routeByBase['front-page']).toBe('/');
-    expect(resolution.routeByBase['index']).toBe('/blog');
+    expect(resolution.routeByBase['index']).toBe('/index');
     expect(resolution.orderedTemplateNames).toEqual([
       'front-page',
       'index',
       'header',
+    ]);
+  });
+
+  it('assigns root to the posts family when show_on_front=posts has no DB front-page evidence', () => {
+    const resolution = resolveHomeHierarchy({
+      templateNames: ['front-page', 'index', 'header'],
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+    });
+
+    expect(resolution.routeByBase['front-page']).toBe('/front-page');
+    expect(resolution.routeByBase['index']).toBe('/');
+  });
+
+  it('lets home/index own root when show_on_front=posts without DB front-page evidence', () => {
+    const resolution = resolveHomeHierarchy({
+      templateNames: ['front-page', 'home', 'index', 'header'],
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+      explicitTemplateNames: [],
+    });
+
+    expect(resolution.routeByBase['home']).toBeUndefined();
+    expect(resolution.routeByBase['index']).toBe('/');
+    expect(resolution.routeByBase['front-page']).toBe('/front-page');
+    expect(resolution.orderedTemplateNames.slice(0, 3)).toEqual([
+      'index',
+      'front-page',
+      'header',
+    ]);
+  });
+
+  it('keeps DB-backed front-page eligible for root even when show_on_front=posts', () => {
+    const resolution = resolveHomeHierarchy({
+      templateNames: ['front-page', 'index'],
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+      explicitTemplateNames: ['front-page'],
+    });
+
+    expect(resolution.routeByBase['front-page']).toBe('/');
+    expect(resolution.routeByBase['index']).toBe('/blog');
+    expect(resolution.orderedTemplateNames.slice(0, 2)).toEqual([
+      'front-page',
+      'index',
     ]);
   });
 
@@ -253,7 +379,7 @@ describe('resolveHomeHierarchy', () => {
 
     expect(resolution.redundantBases).toEqual([]);
     expect(resolution.routeByBase['front-page']).toBe('/');
-    expect(resolution.routeByBase['home']).toBe('/blog');
+    expect(resolution.routeByBase['home']).toBe('/home');
     expect(resolution.routeByBase['index']).toBe('/index');
   });
 

@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createConnection } from 'mysql2/promise';
 import { parseDbConnectionString } from '../../common/utils/db-connection-parser.js';
-import { buildCanonicalPagePath } from '../../common/utils/wp-page-path.util.js';
 
 export interface WpPost {
   id: number;
@@ -395,11 +394,6 @@ export class WpQueryService {
            ORDER BY menu_order, ID`,
         );
         if (pages.length > 0) {
-          const pageRecords = pages.map((page) => ({
-            id: Number(page.ID),
-            slug: String(page.post_name ?? ''),
-            parentId: Number(page.post_parent ?? 0),
-          }));
           result.push({
             name: 'Primary',
             slug: 'primary',
@@ -407,14 +401,12 @@ export class WpQueryService {
             items: pages.map((page, index) => ({
               id: Number(page.ID),
               title: String(page.post_title ?? ''),
-              url: buildCanonicalPagePath(
+              url: this.buildPreviewMenuPagePath(
                 {
                   id: Number(page.ID),
                   slug: String(page.post_name ?? ''),
-                  parentId: Number(page.post_parent ?? 0),
                 },
-                pageRecords,
-                { frontPageId },
+                frontPageId,
               ),
               order: Number(page.menu_order ?? index),
               parentId: 0,
@@ -1671,6 +1663,21 @@ export class WpQueryService {
     return rewriteCanonicalMenuDetailPath(raw, objectType);
   }
 
+  private buildPreviewMenuPagePath(
+    page: { id: number; slug: string },
+    frontPageId: number | null,
+  ): string {
+    if (frontPageId !== null && Number(page.id) === Number(frontPageId)) {
+      return '/';
+    }
+
+    const slug = String(page.slug ?? '')
+      .trim()
+      .replace(/^\/+|\/+$/g, '');
+    if (!slug) return '/';
+    return `/page/${slug}`;
+  }
+
   private parseSerializedPhpStringArray(serialized: string): string[] {
     if (!serialized) return [];
     const result: string[] = [];
@@ -1912,7 +1919,16 @@ function rewriteCanonicalMenuDetailPath(
   if (normalizedObjectType === 'page') {
     try {
       const parsed = new URL(raw, 'http://vp.local');
-      return `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+      const normalizedPath = parsed.pathname || '/';
+      if (normalizedPath === '/' || normalizedPath === '') {
+        return `${normalizedPath}${parsed.search}${parsed.hash}` || '/';
+      }
+
+      const segments = normalizedPath.split('/').filter(Boolean);
+      const slug = segments.at(-1);
+      if (!slug) return raw;
+
+      return `/page/${slug}${parsed.search}${parsed.hash}`;
     } catch {
       return raw;
     }
