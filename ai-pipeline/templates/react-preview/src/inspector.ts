@@ -108,18 +108,29 @@ function resolveTypeName(type: unknown): string | null {
   return null;
 }
 
-function getComponentName(el: Element): string {
-  const fiber = getReactFiber(el);
-  if (!fiber) return el.tagName.toLowerCase();
-
-  let current: ReactFiber | undefined = fiber;
+function getReactFiberOrAncestor(el: Element): { fiber: ReactFiber; el: Element } | null {
+  let current: Element | null = el;
   while (current) {
+    const fiber = getReactFiber(current);
+    if (fiber) return { fiber, el: current };
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function getComponentName(el: Element): string {
+  const found = getReactFiberOrAncestor(el);
+  if (!found) return el.tagName.toLowerCase();
+  const { fiber } = found;
+
+  let cur: ReactFiber | undefined = fiber;
+  while (cur) {
     const name =
-      resolveTypeName(current.type) ||
-      resolveTypeName(current.elementType);
+      resolveTypeName(cur.type) ||
+      resolveTypeName(cur.elementType);
 
     if (name && /^[A-Z]/.test(name)) return name;
-    current = current.return;
+    cur = cur.return;
   }
 
   return el.tagName.toLowerCase();
@@ -139,8 +150,9 @@ function extractSource(
 }
 
 function getSourceInfo(el: Element): ComponentInfo['source'] {
-  const fiber = getReactFiber(el);
-  if (!fiber) return undefined;
+  const found = getReactFiberOrAncestor(el);
+  if (!found) return undefined;
+  const { fiber } = found;
 
   // 1. Element's own _debugSource — exact JSX line where this element was written
   if (fiber._debugSource) {
