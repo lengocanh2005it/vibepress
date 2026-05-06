@@ -5,6 +5,7 @@ import {
   cp,
   mkdir,
   readFile,
+  readlink,
   rm,
   stat,
   symlink,
@@ -2559,6 +2560,9 @@ ${fontEntries}
         `Cached dependencies missing for ${cacheDir}: node_modules not found`,
       );
     }
+
+    const existing = await readlink(targetNodeModules).catch(() => null);
+    if (existing === sourceNodeModules) return;
 
     await rm(targetNodeModules, { recursive: true, force: true });
     await symlink(sourceNodeModules, targetNodeModules, 'junction');
