@@ -278,7 +278,11 @@ async function initAndPush({ workDir, repoCloneUrl, branch, message }) {
   console.log(`[Git] Files staged: ${status.files.length}`);
 
   await git.commit(message);
-  await git.addRemote('origin', authedUrl);
+  try {
+    await git.addRemote('origin', authedUrl);
+  } catch {
+    await git.remote(['set-url', 'origin', authedUrl]);
+  }
   await git.push('origin', branch, ['--set-upstream', '--force']);
 
   const log = await git.log({ maxCount: 1 });
