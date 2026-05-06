@@ -78,15 +78,47 @@ export class ReactVisualEditService {
 
     const model = this.reactGenerator.getDefaultModel();
     const t2 = Date.now();
-    const newCode = await this.codeReviewer.rewriteFile(
-      model,
-      currentCode,
-      instruction,
-      logPath,
-      componentName,
-    );
+    const targetStartLine = editRequest.targetHint?.targetStartLine;
+    const extracted = targetStartLine
+      ? extractEditWindow(currentCode, targetStartLine)
+      : null;
+
+    let newCode: string;
+    if (extracted) {
+      const { fragment, windowStart, windowEnd } = extracted;
+      this.logger.log(
+        `[timing] extractEditWindow — lines ${windowStart}-${windowEnd} (${windowEnd - windowStart + 1} lines from ${currentCode.split('\n').length} total)`,
+      );
+      const modifiedFragment = await this.codeReviewer.rewriteFragment(
+        model,
+        fragment,
+        instruction,
+        windowStart,
+        windowEnd,
+        logPath,
+        componentName,
+      );
+      const allLines = currentCode.split('\n');
+      const before = allLines.slice(0, windowStart - 1).join('\n');
+      const after = allLines.slice(windowEnd).join('\n');
+      newCode =
+        (before ? before + '\n' : '') +
+        modifiedFragment +
+        (after ? '\n' + after : '');
+    } else {
+      this.logger.log(
+        `[timing] no window extracted (targetStartLine=${targetStartLine ?? 'none'}) — full-file rewrite`,
+      );
+      newCode = await this.codeReviewer.rewriteFile(
+        model,
+        currentCode,
+        instruction,
+        logPath,
+        componentName,
+      );
+    }
     this.logger.log(
-      `[timing] rewriteFile "${componentName}" — ${Date.now() - t2}ms`,
+      `[timing] rewrite "${componentName}" — ${Date.now() - t2}ms`,
     );
 
     if (normalizeCode(newCode) === normalizeCode(currentCode)) {
@@ -243,6 +275,72 @@ export class ReactVisualEditService {
 
 function normalizeCode(code: string): string {
   return code.replace(/\r\n/g, '\n').trim();
+}
+
+function findJsxNodeEndLine(code: string, targetStartLine: number): number | null {
+  try {
+    const ast = babelParse(code, {
+      sourceType: 'module',
+      plugins: ['typescript', 'jsx'],
+      errorRecovery: true,
+    });
+
+    let endLine: number | null = null;
+
+    function walk(node: unknown): void {
+      if (!node || typeof node !== 'object') return;
+      const n = node as Record<string, unknown>;
+      if (!n['type']) return;
+
+      if (
+        (n['type'] === 'JSXElement' || n['type'] === 'JSXFragment') &&
+        (n['loc'] as { start?: { line?: number } } | undefined)?.start?.line === targetStartLine
+      ) {
+        const end = (n['loc'] as { end?: { line?: number } } | undefined)?.end?.line;
+        if (typeof end === 'number' && (endLine === null || end < endLine)) {
+          endLine = end;
+        }
+      }
+
+      for (const key of Object.keys(n)) {
+        if (key === 'loc' || key === 'start' || key === 'end' || key === 'errors') continue;
+        const child = n[key];
+        if (Array.isArray(child)) {
+          for (const item of child) walk(item);
+        } else if (child && typeof child === 'object' && (child as Record<string, unknown>)['type']) {
+          walk(child);
+        }
+      }
+    }
+
+    walk(ast);
+    return endLine;
+  } catch {
+    return null;
+  }
+}
+
+function extractEditWindow(
+  code: string,
+  targetStartLine: number,
+): { fragment: string; windowStart: number; windowEnd: number } | null {
+  const lines = code.split('\n');
+  const totalLines = lines.length;
+
+  if (targetStartLine < 1 || targetStartLine > totalLines) return null;
+
+  const endLine = findJsxNodeEndLine(code, targetStartLine) ?? targetStartLine;
+  const effectiveEnd = Math.max(targetStartLine, endLine);
+
+  const PADDING = 30;
+  const windowStart = Math.max(1, targetStartLine - PADDING);
+  const windowEnd = Math.min(totalLines, effectiveEnd + PADDING);
+
+  // Not worth fragmenting if window already covers 70%+ of file
+  if (windowEnd - windowStart + 1 >= totalLines * 0.7) return null;
+
+  const fragment = lines.slice(windowStart - 1, windowEnd).join('\n');
+  return { fragment, windowStart, windowEnd };
 }
 
 function validateGeneratedCode(code: string, componentName: string): void {

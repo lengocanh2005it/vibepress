@@ -248,6 +248,12 @@ export class CodeReviewerService {
     'Do NOT reformat, rename variables, or alter anything not mentioned in the instruction. ' +
     'Do NOT wrap the output in markdown fences or add any explanation. The output must be valid, compilable TSX.';
 
+  private readonly rewriteFragmentSystemPrompt =
+    'You are a React/TypeScript expert. Apply ONLY the requested change to the provided code fragment. ' +
+    'Return the ENTIRE fragment back — preserve every unchanged line exactly as-is. ' +
+    'Do NOT add or remove import statements. Do NOT output anything outside this fragment. ' +
+    'Do NOT wrap in markdown fences or add any explanation. Output must be valid TSX.';
+
   private readonly patchSnippetSystemPrompt =
     'You are a React/TypeScript expert. Apply the requested change to the given TSX snippet. ' +
     'Return ONLY the modified snippet — no imports, no exports, no full component file, no markdown fences, no explanation. ' +
@@ -315,6 +321,48 @@ export class CodeReviewerService {
     });
     this.logger.log(
       `[timing] llm.chat done — ${Date.now() - tChat}ms | inputTokens=${result.inputTokens} outputTokens=${result.outputTokens}`,
+    );
+
+    const raw = result.text ?? '';
+    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+  }
+
+  /**
+   * Send a fragment of a TSX file (lines windowStart–windowEnd) to AI.
+   * Returns only the modified fragment — caller is responsible for splicing back.
+   */
+  public async rewriteFragment(
+    model: string,
+    fragment: string,
+    instruction: string,
+    windowStart: number,
+    windowEnd: number,
+    logPath?: string,
+    label?: string,
+  ): Promise<string> {
+    const userPrompt =
+      `Edit instruction:\n${instruction}\n\n` +
+      `Code fragment (lines ${windowStart}–${windowEnd} of the file):\n\`\`\`tsx\n${fragment}\n\`\`\`\n\n` +
+      'Return the complete modified fragment only. No markdown fences, no explanation.';
+
+    await this.log(
+      logPath,
+      `[rewrite-fragment] ${label ?? 'fragment'} lines ${windowStart}-${windowEnd}: ${instruction.slice(0, 80)}`,
+    );
+
+    const inputChars = userPrompt.length;
+    this.logger.log(
+      `[timing] llm.chat start (fragment) — model=${model} inputChars=${inputChars} lines=${windowEnd - windowStart + 1}`,
+    );
+    const tChat = Date.now();
+    const result = await this.llmFactory.chat({
+      model,
+      systemPrompt: this.rewriteFragmentSystemPrompt,
+      userPrompt,
+      maxTokens: 4096,
+    });
+    this.logger.log(
+      `[timing] llm.chat done (fragment) — ${Date.now() - tChat}ms | inputTokens=${result.inputTokens} outputTokens=${result.outputTokens}`,
     );
 
     const raw = result.text ?? '';
