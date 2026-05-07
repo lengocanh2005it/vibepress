@@ -5,6 +5,7 @@ const path = require("path");
 
 const { compareMultiplePages } = require("./visualService");
 const { compareAllContent } = require("./contentCompareService");
+const { fetchAllReactContent } = require("./reactApiService");
 
 const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
@@ -23,26 +24,18 @@ function coerceRoute(value) {
  * Chạy song song visual compare + content compare rồi gộp vào 1 report.json
  *
  * @param {object} opts
- * @param {string} opts.wpBaseUrl   - WP frontend URL (dùng cho visual)
- * @param {string} opts.wpSiteId    - site_id trong bảng wp_sites (dùng cho content)
- * @param {string} opts.reactFeUrl  - React frontend URL (dùng cho visual)
- * @param {string} opts.reactBeUrl  - React backend URL (dùng cho content)
- * @param {string[]}      [opts.postTypes]     - giới hạn post types
+ * @param {string} opts.wpBaseUrl   - WP frontend URL
+ * @param {string} opts.reactFeUrl  - React frontend URL
+ * @param {string} opts.reactBeUrl  - React backend URL
  * @param {boolean}       [opts.fullPage]
  * @param {number}        [opts.viewportWidth]
  * @param {number}        [opts.viewportHeight]
  */
 async function compareSite({
   wpBaseUrl,
-  wpSiteId,
   reactFeUrl,
   reactBeUrl,
-  jobId,
-  mode,
-  routeEntries,
-  compareTargets,
   artifactBaseUrl,
-  postTypes,
   fullPage = true,
   viewportWidth = 1440,
   viewportHeight = 900,
@@ -52,20 +45,24 @@ async function compareSite({
   console.log(`   React FE:   ${reactFeUrl}`);
   console.log(`   React BE:   ${reactBeUrl}\n`);
 
+  const reactContent = await fetchAllReactContent(reactBeUrl);
+  const compareTargets = buildCompareTargetsFromReactContent({
+    wpBaseUrl,
+    reactFeUrl,
+    reactContent,
+  });
+
   const [visualResult, contentResult] = await Promise.allSettled([
     compareMultiplePages({
       wpBaseUrl,
       reactBaseUrl: reactFeUrl,
-      jobId,
-      mode,
-      routeEntries,
       compareTargets,
       artifactBaseUrl,
       fullPage,
       viewportWidth,
       viewportHeight,
     }),
-    compareAllContent(wpSiteId, reactBeUrl, { postTypes }),
+    compareAllContent(wpBaseUrl, reactBeUrl),
   ]);
 
   const visual =
@@ -202,6 +199,50 @@ async function compareSite({
   console.log(`Report : ${reportPath}`);
 
   return { summary, pages: mergedPages, reportPath };
+}
+
+function buildCompareTargetsFromReactContent({
+  wpBaseUrl,
+  reactFeUrl,
+  reactContent,
+}) {
+  const baseTargets = [
+    {
+      wpUrl: wpBaseUrl,
+      reactUrl: reactFeUrl,
+      route: "/",
+      routeKey: "homepage:/",
+      slug: undefined,
+      type: "homepage",
+      componentHint: "Home",
+      repairPriority: "high",
+    },
+  ];
+
+  const contentTargets = (Array.isArray(reactContent) ? reactContent : [])
+    .filter((item) => item?.slug)
+    .map((item) => {
+      const route = item.type === "post" ? `/post/${item.slug}` : `/page/${item.slug}`;
+      const wpPath = `/${item.slug}`;
+      return {
+        wpUrl: new URL(wpPath, `${wpBaseUrl.replace(/\/+$/, "")}/`).toString(),
+        reactUrl: new URL(route, `${reactFeUrl.replace(/\/+$/, "")}/`).toString(),
+        route,
+        routeKey: `${item.type}:${item.slug}`,
+        slug: item.slug,
+        type: item.type,
+        componentHint: item.type === "post" ? "Single" : "Page",
+        repairPriority: "high",
+      };
+    });
+
+  const seen = new Set();
+  return [...baseTargets, ...contentTargets].filter((target) => {
+    const key = `${target.wpUrl}::${target.reactUrl}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 module.exports = { compareSite };

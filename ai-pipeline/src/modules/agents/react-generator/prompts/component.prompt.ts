@@ -3208,7 +3208,8 @@ export function buildSectionPrompt(input: {
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
 ⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
 ⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
-If this section needs runtime data, declare/fetch only the data actually rendered in this section.
+⛔ DO NOT call \`fetch\`, \`useParams\`, or any \`/api/*\` endpoint inside this section component.
+This generated file is a child/presentational component. Render the source-backed block content from the template source below. If runtime data is truly needed, expose optional props and let the parent page own fetching and route params.
 Render ONLY the JSX for the blocks in the template source below.`;
   const sourceTrackingNote = buildSourceTrackingNoteForNodes(
     input.nodesJson,
@@ -3243,19 +3244,13 @@ Render ONLY the JSX for the blocks in the template source below.`;
         ? `## Detail route context for this section
 - The parent component is bound to the exact slug \`${input.componentPlan.fixedSlug}\`.
 - Do NOT use \`useParams\` inside this section.
-- If this section truly renders detail data, fetch ${isSingle ? `\`GET /api/posts/${input.componentPlan.fixedSlug}\`` : `\`GET /api/pages/${input.componentPlan.fixedSlug}\``}.
-- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
+- Do NOT fetch detail data inside this section. The parent page owns the route-bound fetch and passes any required data as props.
+- Do NOT generate a full-page shell.`
         : `## Detail route context for this section
 - The parent component route is slug-based.
-- Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
-- If you need detail data in this section, fetch ${
-            isSingle
-              ? '`GET /api/posts/:slug`'
-              : input.componentPlan?.runtimeRenderer === 'runtime-page'
-                ? '`GET /api/runtime/pages/:slug`'
-                : '`GET /api/pages/:slug`'
-          } by slug. Never fetch the full list and pick index 0.
-- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
+- Do NOT call \`useParams\` inside this section.
+- Do NOT fetch detail data inside this section. The parent page owns the route-bound fetch and passes any required data as props.
+- Do NOT generate a full-page shell.`
       : '';
 
   return TEMPLATE.replace('{{componentName}}', input.sectionName)

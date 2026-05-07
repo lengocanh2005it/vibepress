@@ -44,14 +44,9 @@ export interface SiteCompareTarget {
 }
 
 export interface SiteCompareInput {
-  siteId: string;
   wpBaseUrl: string;
   reactFeUrl: string;
   reactBeUrl: string;
-  jobId?: string;
-  mode?: 'baseline' | 'edited';
-  routeEntries?: SiteCompareRouteEntry[];
-  compareTargets?: SiteCompareTarget[];
 }
 
 export interface SiteCompareExecutionResult {

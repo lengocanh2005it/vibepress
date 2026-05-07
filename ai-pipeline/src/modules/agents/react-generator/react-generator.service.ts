@@ -61,6 +61,14 @@ const CHUNK_TARGET_CHARS = 15_000;
 const BUILTIN_RUNTIME_PAGE_PATH = resolve(
   'templates/react-preview/src/pages/RuntimePage.tsx',
 );
+
+type SourceClusterComponent = {
+  name: string;
+  label: string;
+  node: BlockNode;
+  sections: SectionPlan[];
+};
+
 /**
  * Returns true for top-level block nodes that represent the shared site header
  * or footer (template-part with header/footer slug, or direct header/footer blocks).
@@ -517,6 +525,33 @@ export class ReactGeneratorService {
       ];
     }
 
+    if (
+      this.shouldUseProfolioSourceClusterChildComposition({
+        themeType,
+        componentName,
+        componentPlan,
+        repoManifest,
+      })
+    ) {
+      const produced = await this.generateProfolioSourceClusterChildComposition({
+        componentName,
+        codeGeneratorModel,
+        fixAgentModel,
+        systemPrompt,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan: componentPlan!,
+        requiredCustomClassNames,
+        requiredCustomClassTargets: requiredCustomClassTargets ?? {},
+        logPath,
+        jobId,
+      });
+      if (produced) {
+        return produced;
+      }
+    }
+
     const promptTemplateSource = filteredNodes
       ? wpJsonToString(filteredNodes)
       : templateSource;
@@ -652,6 +687,295 @@ export class ReactGeneratorService {
     );
   }
 
+  private shouldUseProfolioSourceClusterChildComposition(input: {
+    themeType: 'classic' | 'fse';
+    componentName: string;
+    componentPlan?: PlanResult[number];
+    repoManifest?: RepoThemeManifest;
+  }): boolean {
+    const { themeType, componentName, componentPlan, repoManifest } = input;
+    if (themeType !== 'fse') return false;
+    if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) {
+      return false;
+    }
+    const themeSlug = repoManifest?.themeTypeHints?.themeSlug?.trim();
+    if (themeSlug !== 'profolio-fse') return false;
+
+    const templateName = componentPlan.templateName?.toLowerCase() ?? '';
+    if (templateName !== 'front-page' && !/^frontpage$/i.test(componentName)) {
+      return false;
+    }
+
+    return (componentPlan.visualPlan.blockTree?.length ?? 0) > 0;
+  }
+
+  private async generateProfolioSourceClusterChildComposition(input: {
+    componentName: string;
+    codeGeneratorModel: string;
+    fixAgentModel: string;
+    systemPrompt: string;
+    content: DbContentResult;
+    tokens?: ThemeTokens;
+    repoManifest?: RepoThemeManifest;
+    componentPlan: PlanResult[number];
+    requiredCustomClassNames: string[];
+    requiredCustomClassTargets: Record<string, ThemeInteractionTarget>;
+    logPath?: string;
+    jobId?: string;
+  }): Promise<GeneratedComponent[] | null> {
+    const {
+      componentName,
+      codeGeneratorModel,
+      fixAgentModel,
+      systemPrompt,
+      content,
+      tokens,
+      repoManifest,
+      componentPlan,
+      requiredCustomClassNames,
+      requiredCustomClassTargets,
+      logPath,
+      jobId,
+    } = input;
+
+    const visualPlan = componentPlan.visualPlan;
+    if (!visualPlan?.blockTree?.length) return null;
+
+    const clusters = this.buildProfolioFrontPageSourceClusters(visualPlan);
+    if (clusters.length < 2) return null;
+
+    this.logger.log(
+      `[source-cluster] "${componentName}": generating ${clusters.length} source-bound child component(s)`,
+    );
+    await this.logToFile(
+      logPath,
+      `[source-cluster] "${componentName}": generating child components: ${clusters
+        .map((cluster) => cluster.name)
+        .join(', ')}`,
+    );
+
+    const children: GeneratedComponent[] = [];
+    for (const [index, cluster] of clusters.entries()) {
+      const childPlan = this.buildSourceClusterChildPlan({
+        parentPlan: componentPlan,
+        cluster,
+      });
+      const child = await this.codeReviewer.reviewSection({
+        sectionName: cluster.name,
+        parentName: componentName,
+        sectionIndex: index,
+        totalSections: clusters.length,
+        nodesJson: JSON.stringify([cluster.node], null, 2),
+        modelName: codeGeneratorModel,
+        fixAgentModel,
+        preferDirectAi: false,
+        systemPrompt,
+        content,
+        tokens,
+        repoManifest,
+        componentPlan: childPlan,
+        logPath,
+        jobId,
+      });
+      children.push(
+        this.attachPlanContext(child, childPlan, {
+          generationMode: 'ai',
+          type: 'partial',
+          isSubComponent: true,
+        }),
+      );
+    }
+
+    const parentCode = this.buildChildComponentAssemblyCode(
+      componentName,
+      children,
+    );
+    const parent = this.attachPlanContext(
+      { name: componentName, filePath: '', code: parentCode },
+      componentPlan,
+      {
+        generationMode: 'deterministic',
+        requiredCustomClassNames,
+        requiredCustomClassTargets,
+      },
+    );
+
+    return [parent, ...children];
+  }
+
+  private buildProfolioFrontPageSourceClusters(
+    visualPlan: ComponentVisualPlan,
+  ): SourceClusterComponent[] {
+    const nodes = visualPlan.blockTree ?? [];
+    const result: SourceClusterComponent[] = [];
+    const used = new Set<string>();
+    const addCluster = (label: string, node: BlockNode | undefined) => {
+      if (!node) return;
+      const sourceNodeId = node.sourceRef?.sourceNodeId ?? label;
+      if (used.has(sourceNodeId)) return;
+      used.add(sourceNodeId);
+      result.push({
+        name: `FrontPage${this.toPascalIdentifier(label)}`,
+        label,
+        node,
+        sections: this.filterSectionsForSourceCluster(
+          visualPlan.sections,
+          node.sourceRef?.sourceNodeId,
+        ),
+      });
+    };
+
+    addCluster(
+      'Banner',
+      this.findFirstBlockNode(nodes, (node) => {
+        const id = node.sourceRef?.sourceNodeId ?? '';
+        return (
+          this.sourceNodePath(id) === '0' ||
+          /front-page::group::0$/i.test(id)
+        );
+      }) ?? nodes[0],
+    );
+
+    for (const label of ['Projects', 'Services', 'Experience', 'Skills']) {
+      addCluster(
+        label,
+        this.findFirstBlockNode(
+          nodes,
+          (node) =>
+            this.normalizeClusterLabel(this.readBlockMetadataName(node)) ===
+            this.normalizeClusterLabel(label),
+        ),
+      );
+    }
+
+    return result;
+  }
+
+  private buildSourceClusterChildPlan(input: {
+    parentPlan: PlanResult[number];
+    cluster: SourceClusterComponent;
+  }): PlanResult[number] {
+    const { parentPlan, cluster } = input;
+    const parentVisualPlan = parentPlan.visualPlan!;
+    const childVisualPlan: ComponentVisualPlan = {
+      ...parentVisualPlan,
+      componentName: cluster.name,
+      renderMode: parentVisualPlan.renderMode ?? 'hybrid',
+      sections: cluster.sections,
+      blockTree: [cluster.node],
+      dataNeeds: [],
+    };
+
+    return {
+      ...parentPlan,
+      componentName: cluster.name,
+      templateName: `${parentPlan.templateName}::${cluster.label}`,
+      type: 'partial',
+      route: null,
+      dataNeeds: [],
+      isDetail: false,
+      description: `Source-bound ${cluster.label} child component for ${parentPlan.componentName}`,
+      surfacePlan: undefined,
+      renderContract: undefined,
+      visualPlan: childVisualPlan,
+    };
+  }
+
+  private buildChildComponentAssemblyCode(
+    componentName: string,
+    children: GeneratedComponent[],
+  ): string {
+    const imports = children
+      .map((child) => `import ${child.name} from '../components/${child.name}';`)
+      .join('\n');
+    const renders = children
+      .map((child) => `      <${child.name} />`)
+      .join('\n');
+
+    return `import React from 'react';
+${imports}
+
+export default function ${componentName}() {
+  return (
+    <main className="wp-site-blocks">
+${renders}
+    </main>
+  );
+}
+`;
+  }
+
+  private filterSectionsForSourceCluster(
+    sections: SectionPlan[],
+    clusterSourceNodeId?: string,
+  ): SectionPlan[] {
+    if (!clusterSourceNodeId) return [];
+    const clusterPath = this.sourceNodePath(clusterSourceNodeId);
+    if (!clusterPath) return [];
+
+    return sections.filter((section) => {
+      const sectionSourceIds = [
+        section.sourceRef?.sourceNodeId,
+        ...(section.obligation?.sourceEvidence?.sourceNodeIds ?? []),
+      ].filter((value): value is string => !!value?.trim());
+
+      return sectionSourceIds.some((sourceNodeId) =>
+        this.isSourcePathWithinCluster(
+          this.sourceNodePath(sourceNodeId),
+          clusterPath,
+        ),
+      );
+    });
+  }
+
+  private isSourcePathWithinCluster(
+    sectionPath: string,
+    clusterPath: string,
+  ): boolean {
+    return sectionPath === clusterPath || sectionPath.startsWith(`${clusterPath}.`);
+  }
+
+  private sourceNodePath(sourceNodeId: string): string {
+    const normalized = sourceNodeId.trim();
+    const marker = normalized.lastIndexOf('::');
+    return marker >= 0 ? normalized.slice(marker + 2) : '';
+  }
+
+  private findFirstBlockNode(
+    nodes: BlockNode[],
+    predicate: (node: BlockNode) => boolean,
+  ): BlockNode | undefined {
+    for (const node of nodes) {
+      if (predicate(node)) return node;
+      const found = this.findFirstBlockNode(node.children ?? [], predicate);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private readBlockMetadataName(node: BlockNode): string | undefined {
+    const metadata = node.attrs?.metadata;
+    if (metadata && typeof metadata === 'object') {
+      const name = (metadata as { name?: unknown }).name;
+      if (typeof name === 'string' && name.trim()) return name.trim();
+    }
+    return undefined;
+  }
+
+  private normalizeClusterLabel(value: string | undefined): string {
+    return (value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+
+  private toPascalIdentifier(value: string): string {
+    const normalized = value
+      .trim()
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join('');
+    return normalized || 'Section';
+  }
+
   private stripSharedLayoutSectionsFromPlan(
     componentPlan: PlanResult[number] | undefined,
     hasSharedHeader: boolean,
@@ -751,12 +1075,17 @@ export class ReactGeneratorService {
       !prefersFrontPageSectionAssembly &&
       component.generationMode === 'deterministic' &&
       shouldBypassAiGenerationForVisualPlan(component.visualPlan);
+    const isSourceClusterComposition =
+      component.generationMode === 'deterministic' &&
+      this.isSourceClusterCompositionCode(component);
     const isStrictRenderContractProtection =
       isStrictSourceFaithfulProtection &&
       shouldBlockAiStructuralRewriteForRenderContract(effectiveRenderContract);
 
     if (
-      (isProtectedDeterministicAuthority || isStrictRenderContractProtection) &&
+      (isProtectedDeterministicAuthority ||
+        isStrictRenderContractProtection ||
+        isSourceClusterComposition) &&
       fixMode !== 'syntax-only'
     ) {
       if (fixMode === 'full' && isStrictSourceFaithfulProtection) {
@@ -860,6 +1189,15 @@ export class ReactGeneratorService {
     return this.attachPlanContext(
       { ...component, code: fixedCode },
       componentPlan,
+    );
+  }
+
+  private isSourceClusterCompositionCode(component: GeneratedComponent): boolean {
+    return (
+      /^FrontPage$/i.test(component.name) &&
+      /from\s+['"]\.\.\/components\/FrontPage[A-Z][A-Za-z0-9]*['"]/.test(
+        component.code,
+      )
     );
   }
 
