@@ -5,7 +5,7 @@ const path = require("path");
 
 const { compareMultiplePages } = require("./visualService");
 const { compareAllContent } = require("./contentCompareService");
-const { fetchAllReactContent } = require("./reactApiService");
+const { fetchAllWpContent } = require("./wpApiService");
 
 const ARTIFACTS_DIR = path.join(__dirname, "..", "artifacts");
 
@@ -45,11 +45,11 @@ async function compareSite({
   console.log(`   React FE:   ${reactFeUrl}`);
   console.log(`   React BE:   ${reactBeUrl}\n`);
 
-  const reactContent = await fetchAllReactContent(reactBeUrl);
-  const compareTargets = buildCompareTargetsFromReactContent({
+  const wpContent = await fetchAllWpContent(wpBaseUrl);
+  const compareTargets = buildCompareTargetsFromWpContent({
     wpBaseUrl,
     reactFeUrl,
-    reactContent,
+    wpContent,
   });
 
   const [visualResult, contentResult] = await Promise.allSettled([
@@ -201,15 +201,18 @@ async function compareSite({
   return { summary, pages: mergedPages, reportPath };
 }
 
-function buildCompareTargetsFromReactContent({
+function buildCompareTargetsFromWpContent({
   wpBaseUrl,
   reactFeUrl,
-  reactContent,
+  wpContent,
 }) {
+  const wpBase = wpBaseUrl.replace(/\/+$/, "");
+  const reactBase = reactFeUrl.replace(/\/+$/, "");
+
   const baseTargets = [
     {
-      wpUrl: wpBaseUrl,
-      reactUrl: reactFeUrl,
+      wpUrl: `${wpBase}/`,
+      reactUrl: `${reactBase}/`,
       route: "/",
       routeKey: "homepage:/",
       slug: undefined,
@@ -219,15 +222,14 @@ function buildCompareTargetsFromReactContent({
     },
   ];
 
-  const contentTargets = (Array.isArray(reactContent) ? reactContent : [])
+  const contentTargets = (Array.isArray(wpContent) ? wpContent : [])
     .filter((item) => item?.slug)
     .map((item) => {
-      const route = item.type === "post" ? `/post/${item.slug}` : `/page/${item.slug}`;
-      const wpPath = `/${item.slug}`;
+      const reactRoute = item.type === "post" ? `/post/${item.slug}` : `/page/${item.slug}`;
       return {
-        wpUrl: new URL(wpPath, `${wpBaseUrl.replace(/\/+$/, "")}/`).toString(),
-        reactUrl: new URL(route, `${reactFeUrl.replace(/\/+$/, "")}/`).toString(),
-        route,
+        wpUrl: `${wpBase}/${item.slug}`,
+        reactUrl: `${reactBase}${reactRoute}`,
+        route: reactRoute,
         routeKey: `${item.type}:${item.slug}`,
         slug: item.slug,
         type: item.type,
