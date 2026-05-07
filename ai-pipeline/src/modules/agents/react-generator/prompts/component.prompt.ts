@@ -1902,6 +1902,9 @@ function buildImageSourcesNote(templateSource: string): string {
     'When any approved text field such as `subheading`, `subtitle`, `body`, `quote`, or card body contains inline HTML tags like `<strong>`, `<em>`, or `<a>`, preserve that markup in the rendered JSX instead of flattening it to plain text. Prefer `renderRichTextChildren(...)` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.',
   );
   lines.push(
+    'For `post.content`, `page.content`, and `item.content`, `renderRichTextChildren` must parse the HTML string and recursively map each ChildNode into concrete React nodes/tags (`p`, `h1`-`h6`, `ul`, `ol`, `li`, `a`, `img`, `strong`, `em`, `mark`, etc.). Do not return raw HTML and do not use any `innerHTML` API.',
+  );
+  lines.push(
     'When preserving inline markup, keep the wrapper tag explicit and semantic. Good: `<p>{renderRichTextChildren(...)}</p>`, `<div>{renderRichTextChildren(...)}</div>`, `<h2>{renderRichTextChildren(...)}</h2>`, `<li>{renderRichTextChildren(...)}</li>`.',
   );
 
@@ -3205,7 +3208,8 @@ export function buildSectionPrompt(input: {
 This is **section ${input.sectionIndex + 1} of ${input.totalSections}** of the \`${input.parentName}\` component.
 ⛔ DO NOT wrap in \`<header>\`, \`<nav>\`, or \`<footer>\` tags — those belong to other sections.
 ⛔ DO NOT duplicate page-level layout (no full-page wrapper, no navigation bar, no footer).
-If this section needs runtime data, declare/fetch only the data actually rendered in this section.
+⛔ DO NOT call \`fetch\`, \`useParams\`, or any \`/api/*\` endpoint inside this section component.
+This generated file is a child/presentational component. Render the source-backed block content from the template source below. If runtime data is truly needed, expose optional props and let the parent page own fetching and route params.
 Render ONLY the JSX for the blocks in the template source below.`;
   const sourceTrackingNote = buildSourceTrackingNoteForNodes(
     input.nodesJson,
@@ -3240,19 +3244,13 @@ Render ONLY the JSX for the blocks in the template source below.`;
         ? `## Detail route context for this section
 - The parent component is bound to the exact slug \`${input.componentPlan.fixedSlug}\`.
 - Do NOT use \`useParams\` inside this section.
-- If this section truly renders detail data, fetch ${isSingle ? `\`GET /api/posts/${input.componentPlan.fixedSlug}\`` : `\`GET /api/pages/${input.componentPlan.fixedSlug}\``}.
-- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
+- Do NOT fetch detail data inside this section. The parent page owns the route-bound fetch and passes any required data as props.
+- Do NOT generate a full-page shell.`
         : `## Detail route context for this section
 - The parent component route is slug-based.
-- Only add \`useParams<{ slug: string }>()\` if this section truly renders ${isSingle ? 'post' : 'page'} detail data.
-- If you need detail data in this section, fetch ${
-            isSingle
-              ? '`GET /api/posts/:slug`'
-              : input.componentPlan?.runtimeRenderer === 'runtime-page'
-                ? '`GET /api/runtime/pages/:slug`'
-                : '`GET /api/pages/:slug`'
-          } by slug. Never fetch the full list and pick index 0.
-- Keep loading/error handling local to this section. Do NOT generate a full-page shell.`
+- Do NOT call \`useParams\` inside this section.
+- Do NOT fetch detail data inside this section. The parent page owns the route-bound fetch and passes any required data as props.
+- Do NOT generate a full-page shell.`
       : '';
 
   return TEMPLATE.replace('{{componentName}}', input.sectionName)
@@ -3369,6 +3367,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '## Section behavior contract',
         '- This is the ONLY place that should render `post.content` or `item.content` for the canonical post body.',
         '- Render the post body through `renderRichTextChildren(post.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for post content.',
+        '- The rich-text renderer must parse `post.content`/`item.content` and recursively render each HTML node as concrete React elements (`p`, headings, lists, links, images, emphasis). It must not expose raw HTML.',
         '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
         '- Do NOT render `post.content` outside of this section element.',
       ].join('\n');
@@ -3377,6 +3376,7 @@ function buildInlineSectionBehaviorChecklist(section: SectionPlan): string {
         '## Section behavior contract',
         '- This is the ONLY place that should render `page.content` or `item.content`.',
         '- Render the page body through `renderRichTextChildren(page.content, ...)` or equivalent structured JSX rich-text nodes inside this section ONLY; do NOT use `dangerouslySetInnerHTML` for page content.',
+        '- The rich-text renderer must parse `page.content`/`item.content` and recursively render each HTML node as concrete React elements (`p`, headings, lists, links, images, emphasis). It must not expose raw HTML.',
         '- Do NOT also render other source-backed sections (prose-block, card-grid, media-text, etc.) as additional body sections — that would be duplication.',
         '- Do NOT render `page.content` outside of this section element.',
       ].join('\n');

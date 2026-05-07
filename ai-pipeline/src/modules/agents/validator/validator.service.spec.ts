@@ -608,4 +608,118 @@ describe('ValidatorService derived collection bindings', () => {
     expect(code).toContain('League Spartan, sans-serif');
     expect(code).not.toContain('san-serif');
   });
+
+  it('keeps profolio scroll-top hooks only on dedicated trigger elements', () => {
+    const code = service.sanitizeGeneratedCode(`
+      import React from 'react';
+
+      export default function FrontPage() {
+        const html = '<p>Body</p>';
+        return (
+          <div className="wp-site-blocks flex profolio-fse-scroll-top">
+            <section className="profolio-fse-scroll-top hero">
+              <div>{html}</div>
+            </section>
+            <p className="profolio-fse-scroll-top" style={{ margin: 0 }} />
+          </div>
+        );
+      }
+    `);
+
+    expect(code).toContain('className="wp-site-blocks flex"');
+    expect(code).toContain('className="hero"');
+    expect(code).toContain('<p className="profolio-fse-scroll-top"');
+    expect(code).not.toContain('wp-site-blocks flex profolio-fse-scroll-top');
+    expect(code).not.toContain('profolio-fse-scroll-top hero');
+  });
+
+  it('validates page contracts through imported subcomponents', () => {
+    const result = service.validate([
+      {
+        name: 'FrontPage',
+        filePath: '',
+        route: '/',
+        type: 'page',
+        code: `
+          import FrontPageProjects from '../components/FrontPageProjects';
+
+          export default function FrontPage() {
+            return (
+              <main className="wp-site-blocks">
+                <FrontPageProjects />
+              </main>
+            );
+          }
+        `,
+        requiredCustomClassNames: ['profolio-fse-projects'],
+        visualPlan: {
+          componentName: 'FrontPage',
+          dataNeeds: [],
+          palette: {} as never,
+          typography: {} as never,
+          layout: {} as never,
+          sections: [
+            {
+              type: 'card-grid',
+              title: 'My Projects',
+              cards: [
+                {
+                  title: 'AI Based Social Networks',
+                  body: 'Design of a mobile app develops',
+                },
+              ],
+            },
+          ],
+        } as ComponentVisualPlan,
+      },
+      {
+        name: 'FrontPageProjects',
+        filePath: '',
+        type: 'partial',
+        isSubComponent: true,
+        code: `
+          export default function FrontPageProjects() {
+            return (
+              <section className="profolio-fse-projects">
+                <h2>My Projects</h2>
+                <article>
+                  <h3>AI Based Social Networks</h3>
+                  <p>Design of a mobile app develops</p>
+                </article>
+              </section>
+            );
+          }
+        `,
+      },
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it('rejects direct API calls from subcomponents', () => {
+    const result = service.collectValidationIssues([
+      {
+        name: 'FrontPageProjects',
+        filePath: '',
+        type: 'partial',
+        isSubComponent: true,
+        code: `
+          import React, { useEffect } from 'react';
+
+          export default function FrontPageProjects() {
+            useEffect(() => {
+              fetch('/api/posts');
+            }, []);
+
+            return <section>Projects</section>;
+          }
+        `,
+      },
+    ]);
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].error).toContain(
+      'Sub-components must not call API endpoints directly',
+    );
+  });
 });

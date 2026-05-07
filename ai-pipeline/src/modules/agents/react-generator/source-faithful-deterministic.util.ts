@@ -1,5 +1,9 @@
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
 import { ThemeProfileRegistry } from '../../theme/profiles/theme-profile.registry.js';
+import {
+  isProfolioFseAiLockedVisualPlanSurface,
+  isProfolioFseDeterministicStructureSurface,
+} from '../../theme/profiles/profolio-fse-generation-policy.js';
 
 type SourceFaithfulPageCandidate = {
   componentName?: string;
@@ -22,17 +26,6 @@ type SourceFaithfulPageCandidate = {
   };
 };
 
-const SOURCE_FAITHFUL_PAGE_TEMPLATE_NAMES = new Set([
-  'archive',
-  'archive-product',
-  'blog-left-sidebar',
-  'blog-right-sidebar',
-  'search',
-  'template-about',
-  'template-contact',
-  'template-services',
-]);
-
 const themeProfiles = new ThemeProfileRegistry();
 
 export function shouldPreferSectionAssemblyForFrontPage(input: {
@@ -40,7 +33,9 @@ export function shouldPreferSectionAssemblyForFrontPage(input: {
   componentName: string;
 }): boolean {
   const templateName = input.componentPlan?.templateName?.toLowerCase() ?? '';
-  return templateName === 'front-page' || /^frontpage$/i.test(input.componentName);
+  return (
+    templateName === 'front-page' || /^frontpage$/i.test(input.componentName)
+  );
 }
 
 export function shouldPreferThemeSourceFaithfulDeterministicPage(input: {
@@ -50,7 +45,12 @@ export function shouldPreferThemeSourceFaithfulDeterministicPage(input: {
 }): boolean {
   const { componentPlan, componentName, repoManifest } = input;
   if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) return false;
-  if (shouldPreferSectionAssemblyForFrontPage({ componentPlan, componentName })) {
+  if (
+    isProfolioFseAiLockedVisualPlanSurface({
+      templateName: componentPlan.templateName,
+      componentName,
+    })
+  ) {
     return false;
   }
   if (
@@ -64,17 +64,14 @@ export function shouldPreferThemeSourceFaithfulDeterministicPage(input: {
   if (!themeSlug) return false;
 
   const profile = themeProfiles.resolveFseProfile(themeSlug);
-  const sourceFaithfulComponents = new Set(
-    (profile.sourceFaithfulComponents ?? []).map((name) => name.toLowerCase()),
-  );
-  if (!sourceFaithfulComponents.has(componentName.trim().toLowerCase())) {
-    return false;
-  }
+  if (profile.slug !== 'profolio-fse') return false;
   if (profile.sharedChromeMode !== 'block-tree-first') return false;
   if ((componentPlan.visualPlan.blockTree?.length ?? 0) === 0) return false;
 
-  const templateName = componentPlan.templateName?.toLowerCase() ?? '';
-  return SOURCE_FAITHFUL_PAGE_TEMPLATE_NAMES.has(templateName);
+  return isProfolioFseDeterministicStructureSurface({
+    templateName: componentPlan.templateName,
+    componentName,
+  });
 }
 
 export function shouldForceStrictThemeSourceFaithfulDeterministicPage(input: {
@@ -83,15 +80,24 @@ export function shouldForceStrictThemeSourceFaithfulDeterministicPage(input: {
 }): boolean {
   const { componentPlan, componentName } = input;
   if (componentPlan?.type !== 'page' || !componentPlan.visualPlan) return false;
-  if (shouldPreferSectionAssemblyForFrontPage({ componentPlan, componentName })) {
+  if (
+    isProfolioFseAiLockedVisualPlanSurface({
+      templateName: componentPlan.templateName,
+      componentName,
+    })
+  ) {
     return false;
   }
   if ((componentPlan.visualPlan.blockTree?.length ?? 0) === 0) return false;
 
-  const templateName = componentPlan.templateName?.toLowerCase() ?? '';
-  const sourceFaithfulPageFamily =
-    SOURCE_FAITHFUL_PAGE_TEMPLATE_NAMES.has(templateName);
-  if (!sourceFaithfulPageFamily) return false;
+  if (
+    !isProfolioFseDeterministicStructureSurface({
+      templateName: componentPlan.templateName,
+      componentName,
+    })
+  ) {
+    return false;
+  }
 
   return (
     componentPlan.visualPlan.renderAuthority === 'deterministic-pixel' ||

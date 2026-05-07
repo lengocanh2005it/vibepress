@@ -456,7 +456,8 @@ function buildDraftSectionsHint(
   const strictDraftOrder =
     !surfacePlan ||
     surfacePlan.contract.componentType !== 'page' ||
-    surfacePlan.authority.level === 'strict';
+    surfacePlan.authority.level === 'strict' ||
+    isProfolioFseDraftSections(draftSections, surfacePlan);
 
   const lines = strictDraftOrder
     ? [
@@ -481,6 +482,44 @@ function buildDraftSectionsHint(
       ];
   lines.push('', '```json', JSON.stringify(draftSections, null, 2), '```');
   return lines.join('\n');
+}
+
+function isProfolioFseDraftSections(
+  draftSections: SectionPlan[],
+  surfacePlan?: PlannerSurfacePlan,
+): boolean {
+  const sourceLabel = surfacePlan?.sourceEvidence.planningSourceLabel ?? '';
+  if (/profolio-fse|repo-archetype:|repo-chain:/i.test(sourceLabel)) {
+    const profolioSectionCount = draftSections.filter((section) => {
+      const debugKey = section.debugKey ?? '';
+      return (
+        [
+          'banner',
+          'projects',
+          'my-services',
+          'ui-ux-design',
+          'graphic-design',
+          'product-design',
+          'experience',
+          'skills',
+          'testimonials',
+          'faq',
+          'articles',
+          'lets-work-together',
+        ].includes(debugKey) ||
+        (section.customClassNames ?? []).some(
+          (className) =>
+            className.includes('profolio-fse') ||
+            className === 'cover-inner' ||
+            className === 'r-cover' ||
+            className === 'wow' ||
+            className.startsWith('animate__'),
+        )
+      );
+    }).length;
+    return profolioSectionCount >= 2;
+  }
+  return false;
 }
 
 function buildPaletteHint(tokens?: ThemeTokens): string {

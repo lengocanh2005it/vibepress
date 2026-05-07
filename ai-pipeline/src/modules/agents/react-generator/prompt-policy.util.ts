@@ -2,13 +2,13 @@ import type { ComponentVisualPlan, SectionPlan } from './visual-plan.schema.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 
 export const PAGE_COMPONENT_RICH_TEXT_RULE =
-  '- `post.content` and `page.content` are normalized HTML, but page/detail components should render them through `renderRichTextChildren` or equivalent structured JSX instead of `dangerouslySetInnerHTML`.';
+  '- `post.content` and `page.content` are normalized HTML. Page/detail components must render that HTML by parsing it into React nodes, for example a recursive `renderRichTextChildren(html, keyPrefix)` / `renderRichTextNode(node, key)` helper that maps concrete HTML tags (`p`, `h*`, `ul`, `li`, `a`, `img`, `strong`, `em`, etc.) to JSX/`React.createElement`. Never use `dangerouslySetInnerHTML`.';
 
 export const FIXED_PAGE_DETAIL_EXACT_FETCH_RULE =
   '- Fixed page-detail rule: fetch the exact page record for the approved slug. If the approved visual plan keeps the page as one `page-content` body wrapper, preserve that wrapper. If the approved visual plan already decomposes the source-backed page into rich sections such as `cover`, `media-text`, `card-grid`, `tabs`, `accordion`, `carousel`, or `modal`, render those approved sections directly instead of collapsing everything back into one narrow prose wrapper.';
 
 export const FIXED_PAGE_DETAIL_NO_DSIH_RULE =
-  '- Page components must NOT use `dangerouslySetInnerHTML`. Convert approved page HTML/rich text into structured JSX nodes instead of dumping raw HTML strings.';
+  '- Page/detail components must NOT use `dangerouslySetInnerHTML`. Convert approved page/post HTML into structured React nodes by walking the HTML node tree and rendering concrete tags instead of dumping raw HTML strings.';
 
 export const STRUCTURED_RICH_TEXT_WRAPPER_RULE =
   '- When preserving inline markup from approved rich-text fields, wrap it in explicit semantic JSX tags such as `<p>`, `<div>`, `<h2>`, or `<li>` and render child markup through `renderRichTextChildren(...)`. Do NOT dump HTML strings directly.';

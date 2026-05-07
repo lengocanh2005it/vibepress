@@ -27,15 +27,9 @@ export class AutomationSiteCompareProvider {
 
     const response = await lastValueFrom(
       this.httpService.post(`${automationUrl}/site/compare`, {
-        siteId: input.siteId,
-        wpSiteId: input.siteId,
         wpBaseUrl: input.wpBaseUrl,
         reactFeUrl: input.reactFeUrl,
         reactBeUrl: input.reactBeUrl,
-        jobId: input.jobId,
-        mode: input.mode,
-        routeEntries: input.routeEntries,
-        compareTargets: input.compareTargets,
       }),
     );
 

@@ -500,7 +500,7 @@ describe('CodeReviewerService section assembly policy', () => {
     expect(strict).toBe(false);
   });
 
-  it('does not hard-lock generic block-tree pages when they are not explicit source-faithful authorities', () => {
+  it('hard-locks profolio transactional block-tree pages for deterministic structure', () => {
     const strict = (
       service as unknown as {
         isStrictDeterministicAuthority: (componentPlan: any) => boolean;
@@ -530,7 +530,62 @@ describe('CodeReviewerService section assembly policy', () => {
       },
     });
 
-    expect(strict).toBe(false);
+    expect(strict).toBe(true);
+  });
+
+  it('hard-locks profolio single post detail block-tree pages for deterministic structure', () => {
+    const componentPlan = {
+      componentName: 'Single',
+      templateName: 'single',
+      type: 'page',
+      route: '/post/:slug',
+      isDetail: true,
+      dataNeeds: ['postDetail', 'posts', 'comments'],
+      planningSourceReason: 'block-tree deterministic visual plan path',
+      renderContract: {
+        structure: { renderMode: 'block-tree' },
+      },
+      visualPlan: {
+        componentName: 'Single',
+        renderMode: 'block-centric',
+        renderAuthority: 'deterministic-structure',
+        dataNeeds: ['postDetail', 'posts', 'comments'],
+        blockTree: [
+          { kind: 'group', blockName: 'core/group', children: [] },
+          { kind: 'post-content', blockName: 'core/post-content' },
+          { kind: 'sidebar', blockName: 'core/template-part' },
+        ],
+        layout: {
+          contentLayout: 'with-sidebar',
+          sidebarScope: 'all-content',
+        },
+        sections: [
+          { type: 'cover', heading: 'Post' },
+          { type: 'post-content' },
+          { type: 'sidebar', widgets: [] },
+        ],
+      },
+    };
+
+    const strict = (
+      service as unknown as {
+        isStrictDeterministicAuthority: (componentPlan: any) => boolean;
+      }
+    ).isStrictDeterministicAuthority(componentPlan);
+    const preferDeterministic = (
+      service as unknown as {
+        shouldPreferDeterministicPlan: (
+          componentPlan: any,
+          componentName: string,
+          repoManifest?: any,
+        ) => boolean;
+      }
+    ).shouldPreferDeterministicPlan(componentPlan, 'Single', {
+      themeTypeHints: { themeSlug: 'profolio-fse' },
+    });
+
+    expect(strict).toBe(true);
+    expect(preferDeterministic).toBe(true);
   });
 
   it('uses deterministic section rendering for post-list and cover assembly sections', async () => {
@@ -848,12 +903,10 @@ describe('CodeReviewerService section assembly policy', () => {
       deterministicService as any,
       'generateWithRetry',
     );
-    jest
-      .spyOn(
-        (deterministicService as any).codeGenerator,
-        'generateDeterministicInlineSection',
-      )
-      .mockReturnValue(`<section>
+    jest.spyOn(
+      (deterministicService as any).codeGenerator,
+      'generateDeterministicInlineSection',
+    ).mockReturnValue(`<section>
         {(() => {
           const tagMap = new Map<string, number>();
           return Array.from(tagMap.entries()).map(([tag]) => <span key={tag}>{tag}</span>);

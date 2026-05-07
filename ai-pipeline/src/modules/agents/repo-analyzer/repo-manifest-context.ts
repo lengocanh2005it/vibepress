@@ -360,6 +360,11 @@ export function buildRepoManifestContextNote(
         lines.push(
           `- ${route.routeFamily}: ${route.entryFile} -> ${chainPreview}${patternPreview}`,
         );
+        if (mode !== 'compact' && route.sectionBlueprint?.length) {
+          lines.push(
+            `  section blueprint: ${fmtTokens(route.sectionBlueprint, 12)}`,
+          );
+        }
         if (mode !== 'compact' && route.customClasses.length > 0) {
           lines.push(`  classes: ${fmtTokens(route.customClasses, 8)}`);
         }

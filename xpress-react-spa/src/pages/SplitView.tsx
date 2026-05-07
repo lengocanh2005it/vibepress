@@ -1061,6 +1061,19 @@ const SplitView: React.FC = () => {
       previewData?.editApplied ??
       completionEvent?.data?.editApplied,
   );
+  const hasReachedEditApprovalGate = useMemo(
+    () =>
+      sse.allEvents.some((event) => event.step === "8b_edit_request") ||
+      deferredEditState.loading ||
+      deferredEditState.completed ||
+      Boolean(deferredEditState.error),
+    [
+      deferredEditState.completed,
+      deferredEditState.error,
+      deferredEditState.loading,
+      sse.allEvents,
+    ],
+  );
   const metricsData = latestMetricsEvent?.data?.metrics;
   const metricsView = useMemo(
     () => normalizeMetricsPayload(metricsData),
@@ -1069,7 +1082,10 @@ const SplitView: React.FC = () => {
   const showDeferredEditPrompt =
     Boolean(previousEditRequest) &&
     hasEditRequest &&
-    ((editApprovalRequired && !editApplied && !deferredEditState.dismissed) ||
+    ((hasReachedEditApprovalGate &&
+      editApprovalRequired &&
+      !editApplied &&
+      !deferredEditState.dismissed) ||
       deferredEditState.loading ||
       deferredEditState.completed);
   const terminalStopMessage =
@@ -1122,7 +1138,12 @@ const SplitView: React.FC = () => {
       };
     }
 
-    if (hasEditRequest && editApprovalRequired && !editApplied) {
+    if (
+      hasEditRequest &&
+      hasReachedEditApprovalGate &&
+      editApprovalRequired &&
+      !editApplied
+    ) {
       return {
         badge: "Awaiting Approval",
         title: "Baseline preview is ready. The stored edit is waiting for your decision",
@@ -1169,7 +1190,13 @@ const SplitView: React.FC = () => {
         "The baseline preview has completed compare and validation. The workflow is done.",
       badgeClass: "border-emerald-300 bg-emerald-50 text-emerald-800",
     };
-  }, [editApplied, editApprovalRequired, hasEditRequest, previewStage]);
+  }, [
+    editApplied,
+    editApprovalRequired,
+    hasEditRequest,
+    hasReachedEditApprovalGate,
+    previewStage,
+  ]);
 
   useEffect(() => {
     startedAtRef.current = Date.now();
@@ -1530,13 +1557,15 @@ const SplitView: React.FC = () => {
 
     const editStepName = "8b_edit_request";
     const existingEditStep = stepMap.get(editStepName);
-    const compareIsDone = stepMap.get("9_visual_compare")?.status === "done";
     if (
       existingEditStep ||
       deferredEditState.loading ||
       deferredEditState.completed ||
       Boolean(deferredEditState.error) ||
-      (hasEditRequest && editApprovalRequired && compareIsDone) ||
+      (hasEditRequest &&
+        hasReachedEditApprovalGate &&
+        editApprovalRequired &&
+        !editApplied) ||
       (hasEditRequest && editApplied)
     ) {
       const optimisticStatus: PipelineProgressEvent["status"] =
@@ -1596,6 +1625,7 @@ const SplitView: React.FC = () => {
     deferredEditState.loading,
     editApplied,
     editApprovalRequired,
+    hasReachedEditApprovalGate,
     hasStoppedWorkflow,
     hasEditRequest,
     sse.allEvents,

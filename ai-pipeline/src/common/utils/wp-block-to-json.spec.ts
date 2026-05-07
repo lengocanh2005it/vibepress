@@ -96,4 +96,55 @@ describe('wpBlocksToJson PHP normalization', () => {
       ]),
     );
   });
+
+  it('preserves social link service and url params for faithful footer rendering', () => {
+    const markup = `
+<!-- wp:social-links {"iconColor":"secondary","iconColorValue":"#F5B731","className":"is-style-logos-only"} -->
+<ul class="wp-block-social-links is-style-logos-only"><!-- wp:social-link {"url":"#","service":"facebook"} /-->
+<!-- wp:social-link {"url":"#","service":"instagram"} /--></ul>
+<!-- /wp:social-links -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+    const socialLinks = nodes[0];
+    const [facebook, instagram] = socialLinks?.children ?? [];
+
+    expect(socialLinks?.params).toMatchObject({
+      iconColor: 'secondary',
+      iconColorValue: '#F5B731',
+    });
+    expect(facebook?.params).toMatchObject({
+      service: 'facebook',
+      url: '#',
+    });
+    expect(instagram?.params).toMatchObject({
+      service: 'instagram',
+      url: '#',
+    });
+  });
+
+  it('lifts styling from self-closing site title and navigation blocks', () => {
+    const markup = `
+<!-- wp:site-title {"style":{"elements":{"link":{"color":{"text":"var:preset|color|white"}}},"typography":{"fontSize":"30px"}},"textColor":"white"} /-->
+<!-- wp:navigation {"textColor":"white","style":{"spacing":{"blockGap":"40px"},"typography":{"fontWeight":"600"}}} /-->
+`;
+
+    const [siteTitle, navigation] = wpBlocksToJson(markup);
+
+    expect(siteTitle).toMatchObject({
+      block: 'site-title',
+      textColor: 'white',
+      typography: {
+        fontSize: '30px',
+      },
+    });
+    expect(navigation).toMatchObject({
+      block: 'navigation',
+      textColor: 'white',
+      gap: '40px',
+      typography: {
+        fontWeight: '600',
+      },
+    });
+  });
 });

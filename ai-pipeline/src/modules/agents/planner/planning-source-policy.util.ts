@@ -109,7 +109,10 @@ function sourceLooksLikePatternShell(source: string): boolean {
 }
 
 function isProfolioFsePlanningFusionEnabled(content: DbContentResult): boolean {
-  return content.themeResolvedContent?.themeSlug === 'profolio-fse';
+  return (
+    content.themeResolvedContent?.themeSlug === 'profolio-fse' ||
+    content.siteInfo?.activeTheme === 'profolio-fse'
+  );
 }
 
 function normalizePlanningThemeSlug(value: string | null | undefined): string {
@@ -219,6 +222,7 @@ export function shouldDisableSupplementalPlanningSources(
   componentPlan: PlanningSourcePolicyComponentPlan,
   preferredSource: PlanningSourceCandidate,
 ): boolean {
+  if (sourceLooksLikePatternShell(preferredSource.source)) return false;
   return isAuthoritativeDbPlanningSource(componentPlan, preferredSource.label);
 }
 
@@ -236,6 +240,22 @@ function isDbPageContentLabel(label: string): boolean {
   );
 }
 
+function isRepresentativeDbPostContentLabel(label: string): boolean {
+  return /^db:post:/i.test(label.trim());
+}
+
+function isGenericPostDetailTemplate(
+  componentPlan: PlanningSourcePolicyComponentPlan,
+): boolean {
+  if (componentPlan.type !== 'page') return false;
+  if (componentPlan.fixedSlug) return false;
+  if (!componentPlan.dataNeeds.includes('post-detail')) return false;
+  const templateName = normalizePlanningTemplateIdentifier(
+    componentPlan.templateName,
+  );
+  return /^(single|single-with-sidebar)$/.test(templateName);
+}
+
 function isRepoLikePlanningSourceOrigin(origin: string): boolean {
   return (
     origin === 'repo' || origin === 'repo-chain' || origin === 'repo-archetype'
@@ -250,6 +270,7 @@ function shouldPreferDbPageContentPrimary(
   if (!isProfolioFsePlanningFusionEnabled(content)) return false;
   if (componentPlan.type !== 'page') return false;
   if (!candidate.source.trim()) return false;
+  if (sourceLooksLikePatternShell(candidate.source)) return false;
   if (!isDbPageContentLabel(candidate.label)) return false;
 
   const templateName = normalizePlanningTemplateIdentifier(
@@ -378,9 +399,8 @@ export function isCompatibleSupplementalPlanningSource(
   }
 
   if (
-    componentPlan.dataNeeds?.includes('post-detail') &&
-    !componentPlan.fixedSlug &&
-    candidate.label.startsWith('db:posts/')
+    isGenericPostDetailTemplate(componentPlan) &&
+    isRepresentativeDbPostContentLabel(candidate.label)
   ) {
     return false;
   }
@@ -758,17 +778,19 @@ export function buildPlanningSourceCandidates(
     });
   }
 
-  for (const post of findRepresentativePostsForTemplate(
-    componentPlan,
-    content,
-  )) {
-    pushCandidate({
-      source: post.content,
-      label: `db:post:${post.slug || post.id}`,
-      templateName: componentPlan.templateName,
-      sourceFile: `db:posts/${post.slug || post.id}`,
-      priority: 5,
-    });
+  if (!(profolioFusionEnabled && isGenericPostDetailTemplate(componentPlan))) {
+    for (const post of findRepresentativePostsForTemplate(
+      componentPlan,
+      content,
+    )) {
+      pushCandidate({
+        source: post.content,
+        label: `db:post:${post.slug || post.id}`,
+        templateName: componentPlan.templateName,
+        sourceFile: `db:posts/${post.slug || post.id}`,
+        priority: 5,
+      });
+    }
   }
 
   const preferRepoFrontPageForRoot =
@@ -800,11 +822,18 @@ export function buildPlanningSourceCandidates(
 
   const hasRichDbCandidate = filteredRootCandidates.some(
     (candidate) =>
-      candidate.label.startsWith('db:') && candidate.source.trim().length > 0,
+      candidate.label.startsWith('db:') &&
+      !(
+        isGenericPostDetailTemplate(componentPlan) &&
+        isRepresentativeDbPostContentLabel(candidate.label)
+      ) &&
+      candidate.source.trim().length > 0 &&
+      !sourceLooksLikePatternShell(candidate.source),
   );
   const hasAuthoritativeDbCandidate = filteredRootCandidates.some(
     (candidate) =>
       candidate.source.trim().length > 0 &&
+      !sourceLooksLikePatternShell(candidate.source) &&
       isAuthoritativeDbPlanningSource(componentPlan, candidate.label),
   );
 
@@ -842,11 +871,18 @@ export function buildPlanningSourceCandidates(
       ...candidate,
       richness:
         scorePlanningSourceRichness(candidate.source) +
-        (isAuthoritativeDbPlanningSource(componentPlan, candidate.label)
+        (isAuthoritativeDbPlanningSource(componentPlan, candidate.label) &&
+        !sourceLooksLikePatternShell(candidate.source)
           ? 50000
           : 0) +
         (shouldPreferDbPageContentPrimary(componentPlan, candidate, content)
           ? 20000
+          : 0) +
+        (profolioFusionEnabled &&
+        componentPlan.type === 'page' &&
+        hasRichDbCandidate &&
+        /^repo-archetype:/i.test(candidate.label)
+          ? -100000
           : 0) +
         (componentPlan.fixedSlug && candidate.label.startsWith('db:bound-page:')
           ? 10000
@@ -858,8 +894,8 @@ export function buildPlanningSourceCandidates(
         candidate.richness +
         candidate.priority * 20 -
         (!componentPlan.fixedSlug &&
-        componentPlan.dataNeeds.includes('post-detail') &&
-        /^db:post:/i.test(candidate.label)
+        isGenericPostDetailTemplate(componentPlan) &&
+        isRepresentativeDbPostContentLabel(candidate.label)
           ? 10000
           : 0),
     }))

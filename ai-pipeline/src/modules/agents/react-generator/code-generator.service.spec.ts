@@ -125,6 +125,187 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('posts.slice(0, 5)');
   });
 
+  it('renders WooCommerce checkout block trees as checkout UI instead of raw block labels', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Checkout',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            {
+              kind: 'checkout',
+              blockName: 'woocommerce/checkout',
+              children: [
+                {
+                  kind: 'checkout-fields-block',
+                  blockName: 'woocommerce/checkout-fields-block',
+                },
+                {
+                  kind: 'checkout-totals-block',
+                  blockName: 'woocommerce/checkout-totals-block',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('woocommerce-checkout');
+    expect(code).toContain('Contact information');
+    expect(code).toContain('Order summary');
+    expect(code).not.toContain('Checkout Fields');
+  });
+
+  it('renders WooCommerce cart block trees as cart UI instead of empty wrappers', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Cart',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'cart',
+          blockName: 'woocommerce/cart',
+          children: [
+            {
+              kind: 'cart-items-block',
+              blockName: 'woocommerce/cart-items-block',
+            },
+            {
+              kind: 'cart-totals-block',
+              blockName: 'woocommerce/cart-totals-block',
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('woocommerce-cart');
+    expect(code).toContain('Cart totals');
+    expect(code).toContain('Proceed to checkout');
+  });
+
+  it('preserves WooCommerce cart source literals in deterministic cart output', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Cart',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'cart',
+          blockName: 'woocommerce/cart',
+          children: [
+            {
+              kind: 'filled-cart-block',
+              children: [
+                {
+                  kind: 'cart-cross-sells-block',
+                  children: [
+                    {
+                      kind: 'heading',
+                      text: 'You may be interested in…',
+                      level: 2,
+                    },
+                    {
+                      kind: 'cart-cross-sells-products-block',
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              kind: 'empty-cart-block',
+              children: [
+                {
+                  kind: 'heading',
+                  text: 'Your cart is currently empty!',
+                  level: 2,
+                },
+                {
+                  kind: 'heading',
+                  text: 'New in store',
+                  level: 2,
+                },
+                {
+                  kind: 'product-new',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('You may be interested in…');
+    expect(code).toContain('Your cart is currently empty!');
+    expect(code).toContain('New in store');
+    expect(code).toContain("fetch('/api/post-types/product/posts')");
+    expect(code).toContain('import { Link }');
+  });
+
+  it('preserves source column widths when hybrid sidebar sections replace column children', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'BlogLeftSidebar',
+      dataNeeds: ['posts'],
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'sidebar',
+          debugKey: 'latest-posts',
+          widgets: [{ kind: 'recent-posts', title: 'Latest Posts' }],
+        },
+        {
+          type: 'post-list',
+          resource: 'posts',
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'columns',
+          children: [
+            {
+              kind: 'column',
+              columnWidth: '30%',
+              children: [
+                {
+                  kind: 'template-part',
+                  templatePartSlug: 'sidebar',
+                },
+              ],
+            },
+            {
+              kind: 'column',
+              columnWidth: '70%',
+              children: [
+                {
+                  kind: 'query',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("gridTemplateColumns: '30% 70%'");
+    expect(code).toContain("flex: '0 0 30%'");
+    expect(code).toContain("flex: '0 0 70%'");
+  });
+
   it('preserves source search descendants instead of collapsing wrapper sections in hybrid output', () => {
     const plan = {
       ...basePlan,
@@ -290,6 +471,45 @@ describe('CodeGeneratorService', () => {
     expect(code).not.toContain('item?.categories');
   });
 
+  it('renders WooCommerce product query block-tree nodes from products, not posts', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SingleProduct',
+      dataNeeds: ['productDetail', 'products'],
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'query',
+          blockName: 'core/query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'core/post-template',
+              children: [
+                {
+                  kind: 'product-image',
+                  blockName: 'woocommerce/product-image',
+                },
+                {
+                  kind: 'product-price',
+                  blockName: 'woocommerce/product-price',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('const [products, setProducts] = useState<Product[]>([]);');
+    expect(code).toContain('products.slice(0, 5).map((product)');
+    expect(code).toContain("'/product/' + product.slug");
+    expect(code).not.toContain('posts.slice(0, 5).map((post)');
+  });
+
   it('renders CTA text for search sections', () => {
     const plan = {
       ...basePlan,
@@ -427,6 +647,8 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain(
       'renderRichTextChildren("Welcome To My Profile <br>I am <mark',
     );
+    expect(code).toContain('const parseRichTextStyle = ');
+    expect(code).toContain('if (style) props.style = style;');
   });
 
   it('resolves theme asset images inside card-grid sections', () => {
@@ -668,6 +890,51 @@ describe('CodeGeneratorService', () => {
     );
     expect(code.match(/const currentPage =/g)).toHaveLength(1);
     expect(code.match(/const \[totalPages, setTotalPages\]/g)).toHaveLength(1);
+  });
+
+  it('does not infer posts for product query block trees', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'ArchiveProduct',
+      dataNeeds: ['products'],
+      renderMode: 'hybrid',
+      sections: [
+        {
+          type: 'post-list',
+          resource: 'products',
+          layout: 'grid-3',
+          showFeaturedImage: true,
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'query',
+          blockName: 'query',
+          children: [
+            {
+              kind: 'post-template',
+              blockName: 'post-template',
+              children: [
+                {
+                  kind: 'product-image',
+                  blockName: 'woocommerce/product-image',
+                },
+                {
+                  kind: 'product-price',
+                  blockName: 'woocommerce/product-price',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('/api/post-types/product/posts');
+    expect(code).not.toContain('/api/posts?page=');
+    expect(code).not.toContain('const [posts, setPosts]');
   });
 
   it('renders tag widgets inside sidebar sections as archive links', () => {
@@ -1041,21 +1308,48 @@ describe('CodeGeneratorService', () => {
           kind: 'group',
           blockName: 'group',
           customClassNames: ['pg-footer-center-row'],
+          bgColor: 'base-2',
           children: [
             {
-              kind: 'heading',
-              blockName: 'heading',
-              text: "Let's Work Together",
-            },
-            {
-              kind: 'social-links',
-              blockName: 'social-links',
+              kind: 'columns',
+              blockName: 'columns',
               children: [
                 {
-                  kind: 'social-link',
-                  blockName: 'social-link',
-                  text: 'Facebook',
-                  href: '#',
+                  kind: 'column',
+                  blockName: 'column',
+                  columnWidth: '45%',
+                  children: [
+                    {
+                      kind: 'heading',
+                      blockName: 'heading',
+                      text: "Let's Work Together",
+                    },
+                    {
+                      kind: 'social-links',
+                      blockName: 'social-links',
+                      children: [
+                        {
+                          kind: 'social-link',
+                          blockName: 'social-link',
+                          text: 'Facebook',
+                          attrs: { service: 'facebook', url: '#' },
+                        },
+                      ],
+                    },
+                  ],
+                },
+                {
+                  kind: 'column',
+                  blockName: 'column',
+                  children: [
+                    {
+                      kind: 'image',
+                      blockName: 'image',
+                      src: 'theme-asset:/assets/images/arrow-up.png',
+                      customClassNames: ['is-resized'],
+                      width: 39,
+                    },
+                  ],
                 },
               ],
             },
@@ -1079,8 +1373,21 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('pg-footer-center-row');
+    expect(code).toContain('wp-block-group');
+    expect(code).toContain('wp-block-columns');
+    expect(code).toContain('wp-block-column');
+    expect(code).toContain('has-base-2-background-color');
+    expect(code).not.toContain("backgroundColor: 'base-2'");
     expect(code).toContain("Let's Work Together");
-    expect(code).toContain('Facebook');
+    expect(code).toContain('<ul className="wp-block-social-links');
+    expect(code).toContain('wp-social-link-facebook');
+    expect(code).toContain('facebook');
+    expect(code).toContain(
+      '<figure className="wp-block-image size-full is-resized"',
+    );
+    expect(code).toContain(
+      'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
+    );
     expect(code).toContain('Contact');
   });
 

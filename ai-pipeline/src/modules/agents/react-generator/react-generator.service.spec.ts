@@ -89,20 +89,16 @@ describe('ReactGeneratorService shared partial renderer policy', () => {
           nodes: any[],
         ) => string[];
       }
-    ).inferBlockFaithfulDataNeeds(
-      'Footer',
-      { dataNeeds: [] },
-      [
-        {
-          block: 'core/group',
-          children: [
-            { block: 'core/heading', text: "Let's Work Together" },
-            { block: 'core/social-links', children: [] },
-            { block: 'core/paragraph', text: 'Copyright' },
-          ],
-        },
-      ],
-    );
+    ).inferBlockFaithfulDataNeeds('Footer', { dataNeeds: [] }, [
+      {
+        block: 'core/group',
+        children: [
+          { block: 'core/heading', text: "Let's Work Together" },
+          { block: 'core/social-links', children: [] },
+          { block: 'core/paragraph', text: 'Copyright' },
+        ],
+      },
+    ]);
 
     expect(needs).toEqual([]);
   });
@@ -116,11 +112,9 @@ describe('ReactGeneratorService shared partial renderer policy', () => {
           nodes: any[],
         ) => string[];
       }
-    ).inferBlockFaithfulDataNeeds(
-      'Footer',
-      { dataNeeds: [] },
-      [{ block: 'core/navigation', children: [] }],
-    );
+    ).inferBlockFaithfulDataNeeds('Footer', { dataNeeds: [] }, [
+      { block: 'core/navigation', children: [] },
+    ]);
 
     expect(needs).toEqual(['footerLinks']);
   });
@@ -176,7 +170,7 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     expect(result[0].code).toContain('export default function RuntimePage');
   });
 
-  it('routes profolio-fse FrontPage through AI section assembly instead of deterministic full-file generation', async () => {
+  it('routes profolio-fse FrontPage through the normal AI generation path', async () => {
     const codeGenerator = {
       generate: jest.fn(
         () => 'export default function FrontPage(){return <main />;}',
@@ -229,7 +223,27 @@ describe('ReactGeneratorService source-faithful page policy', () => {
         palette: {},
         typography: {},
         layout: {},
-        sections: [],
+        sections: [
+          {
+            type: 'media-text',
+            heading:
+              'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
+            subtitle: 'About Me',
+            body: 'Intro body',
+            cta: { text: 'View my Work', link: '#' },
+            imageSrc: 'theme-asset:/assets/images/banner-image.png',
+            imageAlt: '',
+            imagePosition: 'right',
+            customClassNames: ['profolio-fse-banner-wrapper'],
+          },
+          {
+            type: 'card-grid',
+            title: 'Skills and Tools',
+            subtitle: 'Skills',
+            columns: 4,
+            cards: [],
+          },
+        ],
         blockTree: [{ blockName: 'core/group' }],
       },
     } as any;
@@ -257,14 +271,255 @@ describe('ReactGeneratorService source-faithful page policy', () => {
     });
 
     expect(codeGenerator.generate).not.toHaveBeenCalled();
-    expect(codeReviewer.reviewComponent).toHaveBeenCalledTimes(1);
+    expect(codeReviewer.reviewComponent).toHaveBeenCalled();
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({
       name: 'FrontPage',
       route: '/',
+      generationMode: 'ai',
       requiredCustomClassNames: ['wow'],
     });
     expect(result[0].code).toContain('data-section-assembled');
+  });
+
+  it('can compose profolio-fse FrontPage from source-bound child components', async () => {
+    const codeGenerator = {
+      generate: jest.fn(),
+      generateBlockFaithfulPartial: jest.fn(),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      reviewComponent: jest.fn(),
+      reviewSection: jest.fn(async ({ sectionName }: { sectionName: string }) => ({
+        name: sectionName,
+        filePath: '',
+        code: `export default function ${sectionName}(){return <section>${sectionName}</section>;}`,
+        isSubComponent: true,
+      })),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const componentPlan = {
+      componentName: 'FrontPage',
+      templateName: 'front-page',
+      type: 'page',
+      route: '/',
+      dataNeeds: [],
+      isDetail: false,
+      description: 'Home',
+      visualPlan: {
+        componentName: 'FrontPage',
+        renderMode: 'hybrid',
+        dataNeeds: [],
+        palette: {} as never,
+        typography: {} as never,
+        layout: {} as never,
+        sections: [
+          {
+            type: 'media-text',
+            heading: 'Hero',
+            sourceRef: { sourceNodeId: 'front-page::columns::0.0' },
+          },
+          {
+            type: 'card-grid',
+            title: 'My Projects',
+            sourceRef: { sourceNodeId: 'front-page::group::1.0.1' },
+          },
+          {
+            type: 'media-text',
+            heading: 'UI/UX Design',
+            sourceRef: { sourceNodeId: 'front-page::columns::1.1.1.0' },
+          },
+        ],
+        blockTree: [
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: { sourceNodeId: 'front-page::group::0' },
+            children: [],
+          },
+          {
+            kind: 'group',
+            blockName: 'core/group',
+            sourceRef: { sourceNodeId: 'front-page::group::1' },
+            children: [
+              {
+                kind: 'group',
+                blockName: 'core/group',
+                sourceRef: { sourceNodeId: 'front-page::group::1.0' },
+                attrs: { metadata: { name: 'Projects' } },
+                children: [],
+              },
+              {
+                kind: 'group',
+                blockName: 'core/group',
+                sourceRef: { sourceNodeId: 'front-page::group::1.1' },
+                attrs: { metadata: { name: 'Services' } },
+                children: [],
+              },
+              {
+                kind: 'group',
+                blockName: 'core/group',
+                sourceRef: { sourceNodeId: 'front-page::group::1.2' },
+                attrs: { metadata: { name: 'Experience' } },
+                children: [],
+              },
+              {
+                kind: 'group',
+                blockName: 'core/group',
+                sourceRef: { sourceNodeId: 'front-page::group::1.3' },
+                attrs: { metadata: { name: 'Skills' } },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    } as any;
+
+    const result = await (
+      service as unknown as {
+        generateForTemplate: (input: Record<string, unknown>) => Promise<any[]>;
+      }
+    ).generateForTemplate({
+      componentName: 'FrontPage',
+      rawSource: '',
+      codeGeneratorModel: 'gpt-test',
+      fixAgentModel: 'gpt-test',
+      systemPrompt: 'test',
+      content: {} as never,
+      themeType: 'fse',
+      componentPlan,
+      repoManifest: {
+        themeTypeHints: { themeSlug: 'profolio-fse' },
+      } as RepoThemeManifest,
+    });
+
+    expect(codeReviewer.reviewComponent).not.toHaveBeenCalled();
+    expect(codeReviewer.reviewSection).toHaveBeenCalledTimes(5);
+    expect(result).toHaveLength(6);
+    expect(result[0]).toMatchObject({
+      name: 'FrontPage',
+      route: '/',
+      generationMode: 'deterministic',
+    });
+    expect(result[0].code).toContain(
+      "import FrontPageProjects from '../components/FrontPageProjects';",
+    );
+    expect(result[0].code).toContain('<FrontPageSkills />');
+    expect(result.slice(1).every((component) => component.isSubComponent)).toBe(
+      true,
+    );
+    expect(
+      result.find((component) => component.name === 'FrontPageProjects')
+        ?.visualPlan?.sections,
+    ).toHaveLength(1);
+    expect(
+      result.find((component) => component.name === 'FrontPageServices')
+        ?.visualPlan?.sections,
+    ).toHaveLength(1);
+    expect(
+      result.find((component) => component.name === 'FrontPageProjects')
+        ?.dataNeeds,
+    ).toEqual([]);
+    expect(codeReviewer.reviewSection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sectionName: 'FrontPageProjects',
+        componentPlan: expect.objectContaining({
+          dataNeeds: [],
+          visualPlan: expect.objectContaining({ dataNeeds: [] }),
+        }),
+      }),
+    );
+  });
+
+  it('routes profolio-fse Footer through block-faithful partial rendering', async () => {
+    const codeGenerator = {
+      generate: jest.fn(),
+      generateBlockFaithfulPartial: jest.fn(
+        () =>
+          'export default function Footer(){return <footer data-block-faithful />;}',
+      ),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      reviewComponent: jest.fn(),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      {
+        resolve: jest.fn(() => [
+          {
+            block: 'core/group',
+            kind: 'group',
+            children: [],
+          },
+        ]),
+      } as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const result = await (
+      service as unknown as {
+        generateForTemplate: (input: Record<string, unknown>) => Promise<any[]>;
+      }
+    ).generateForTemplate({
+      componentName: 'Footer',
+      rawSource:
+        '<!-- wp:paragraph {"className":"profolio-fse-scroll-top"} --><p class="profolio-fse-scroll-top"></p><!-- /wp:paragraph -->',
+      codeGeneratorModel: 'gpt-test',
+      fixAgentModel: 'gpt-test',
+      systemPrompt: 'test',
+      content: {} as never,
+      themeType: 'fse',
+      componentPlan: {
+        componentName: 'Footer',
+        templateName: 'footer',
+        type: 'partial',
+        route: null,
+        dataNeeds: [],
+        visualPlan: {
+          componentName: 'Footer',
+          renderMode: 'block-centric',
+          renderAuthority: 'deterministic-pixel',
+          dataNeeds: [],
+          palette: {} as never,
+          typography: {} as never,
+          layout: {} as never,
+          sections: [
+            {
+              type: 'footer',
+              menuColumns: [],
+              scrollTopTriggerClassNames: ['profolio-fse-scroll-top'],
+              supplementalImages: [
+                { src: 'theme-asset:/assets/images/arrow-up.png' },
+              ],
+            },
+          ],
+          blockTree: [{ blockName: 'core/group' } as never],
+        },
+      },
+      repoManifest: {
+        themeTypeHints: {
+          themeSlug: 'profolio-fse',
+        },
+      } as RepoThemeManifest,
+    });
+
+    expect(codeGenerator.generateBlockFaithfulPartial).toHaveBeenCalled();
+    expect(result[0]).toMatchObject({
+      name: 'Footer',
+      generationMode: 'deterministic',
+    });
+    expect(result[0].code).toContain('data-block-faithful');
   });
 
   it('routes profolio-fse block-tree listing templates through deterministic full-file generation', async () => {

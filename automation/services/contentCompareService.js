@@ -1,7 +1,7 @@
 "use strict";
 
-const { fetchAllWpContent }     = require("./wpDbService");
-const { fetchAllReactContent }  = require("./reactApiService");
+const { fetchAllWpContent } = require("./wpApiService");
+const { fetchAllReactContent } = require("./reactApiService");
 
 // ─── SIMILARITY ──────────────────────────────────────────────────────────────
 
@@ -70,16 +70,14 @@ function compareItems(wpItem, reactItem) {
 /**
  * So sánh toàn bộ nội dung WP (DB) vs React backend (API)
  *
- * @param {object|string} wpSiteId  - dbInfo object hoặc siteId từ db.json
- * @param {string}        reactBeUrl      - e.g. "http://localhost:3100"
- * @param {object}        [opts]
- * @param {string[]}      [opts.postTypes] - giới hạn post types, mặc định lấy hết
+ * @param {string} wpBaseUrl   - e.g. "http://localhost:8000"
+ * @param {string} reactBeUrl  - e.g. "http://localhost:3100"
  */
-async function compareAllContent(wpSiteId, reactBeUrl, { postTypes } = {}) {
+async function compareAllContent(wpBaseUrl, reactBeUrl) {
   console.log("🔍 Fetching content from both sources...");
-  console.log(`   WP BE: ${wpSiteId}\n`);
+  console.log(`   WP FE: ${wpBaseUrl}\n`);
   const [wpItems, reactItems] = await Promise.all([
-    fetchAllWpContent(wpSiteId, { postTypes }),
+    fetchAllWpContent(wpBaseUrl),
     fetchAllReactContent(reactBeUrl),
   ]);
 

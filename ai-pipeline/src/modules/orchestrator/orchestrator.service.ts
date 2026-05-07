@@ -5020,32 +5020,25 @@ export default function ${component.name}() {
   }
 
   private async compareSite(input: {
-    siteId: string;
+    siteId?: string;
     wpBaseUrl: string;
     reactFeUrl: string;
     reactBeUrl: string;
-    jobId: string;
-    mode: 'baseline' | 'edited';
+    jobId?: string;
+    mode?: 'baseline' | 'edited';
     routeEntries?: PreviewBuilderResult['routeEntries'];
-    preview: PreviewBuilderResult;
-    plan: PlanResult;
-    content: DbContentResult;
+    preview?: PreviewBuilderResult;
+    plan?: PlanResult;
+    content?: DbContentResult;
   }): Promise<{
     metrics?: SiteCompareMetrics;
     warnings?: string[];
     provider: 'automation';
   }> {
-    const compareTargets = this.buildSiteCompareTargets({
+    return this.siteCompareService.compare({
       wpBaseUrl: input.wpBaseUrl,
       reactFeUrl: input.reactFeUrl,
-      preview: input.preview,
-      plan: input.plan,
-      content: input.content,
-    });
-
-    return this.siteCompareService.compare({
-      ...input,
-      compareTargets,
+      reactBeUrl: input.reactBeUrl,
     });
   }
 
@@ -5059,6 +5052,18 @@ export default function ${component.name}() {
     const componentPlans = new Map(
       input.plan.map((component) => [component.componentName, component]),
     );
+    const exactRouteTypes = new Set<string>();
+    for (const entry of input.preview.routeEntries) {
+      if (this.isCatchAllPreviewRoute(entry)) continue;
+      const route = this.normalizeComparableRoute(entry.route);
+      if (!route || route.includes(':')) continue;
+      exactRouteTypes.add(
+        this.inferCompareTargetType({
+          route,
+          componentPlan: componentPlans.get(entry.componentName),
+        }),
+      );
+    }
     const targets: SiteCompareTarget[] = [];
     const seen = new Set<string>();
 
@@ -5066,11 +5071,22 @@ export default function ${component.name}() {
       if (this.isCatchAllPreviewRoute(entry)) continue;
       const route = this.normalizeComparableRoute(entry.route);
       if (!route) continue;
+      const componentPlan = componentPlans.get(entry.componentName);
+      if (
+        this.shouldSkipSiteCompareRouteEntry({
+          entry,
+          route,
+          componentPlan,
+          exactRouteTypes,
+        })
+      ) {
+        continue;
+      }
 
       const expanded = this.expandSiteCompareTargetsForRouteEntry({
         entry,
         route,
-        componentPlan: componentPlans.get(entry.componentName),
+        componentPlan,
         wpBaseUrl: input.wpBaseUrl,
         reactFeUrl: input.reactFeUrl,
         content: input.content,
@@ -5085,6 +5101,38 @@ export default function ${component.name}() {
     }
 
     return targets;
+  }
+
+  private shouldSkipSiteCompareRouteEntry(input: {
+    entry: PreviewBuilderResult['routeEntries'][number];
+    route: string;
+    componentPlan?: PlanResult[number];
+    exactRouteTypes: Set<string>;
+  }): boolean {
+    const { entry, route, componentPlan, exactRouteTypes } = input;
+    if (this.isSyntheticCompareAliasRoute(entry, componentPlan)) {
+      return true;
+    }
+
+    if (!route.includes(':') || componentPlan?.fixedSlug) {
+      return false;
+    }
+
+    const type = this.inferCompareTargetType({ route, componentPlan });
+    return exactRouteTypes.has(type);
+  }
+
+  private isSyntheticCompareAliasRoute(
+    entry: PreviewBuilderResult['routeEntries'][number],
+    componentPlan?: PlanResult[number],
+  ): boolean {
+    const normalizedEntryRoute = this.normalizeComparableRoute(entry.route);
+    const normalizedPlanRoute = this.normalizeComparableRoute(componentPlan?.route);
+    if (!normalizedEntryRoute || !normalizedPlanRoute) return false;
+    if (normalizedEntryRoute === normalizedPlanRoute) return false;
+    if (!normalizedEntryRoute.includes(':')) return false;
+    if (componentPlan?.fixedSlug) return false;
+    return true;
   }
 
   private expandSiteCompareTargetsForRouteEntry(input: {
@@ -5150,7 +5198,7 @@ export default function ${component.name}() {
     }
 
     const expandFromSlugs = (slugs: string[]) => {
-      for (const slug of slugs.slice(0, 5)) {
+      for (const slug of slugs.slice(0, 1)) {
         const concreteRoute = route.replace(/:[^/]+/g, slug);
         const wpPath = this.resolveWordPressComparePath({
           route,
@@ -5294,10 +5342,20 @@ export default function ${component.name}() {
     const normalizedBase = baseUrl.trim();
     if (!normalizedBase) return null;
     try {
-      const base = normalizedBase.endsWith('/')
-        ? normalizedBase
-        : `${normalizedBase}/`;
-      return new URL(normalizedRoute, base).toString();
+      const base = new URL(
+        normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`,
+      );
+      const routeUrl = new URL(normalizedRoute, 'http://compare.local');
+      const basePath = base.pathname.endsWith('/')
+        ? base.pathname
+        : `${base.pathname}/`;
+      const routePath = routeUrl.pathname.replace(/^\/+/, '');
+      base.pathname = routePath
+        ? `${basePath.replace(/\/+$/, '')}/${routePath}`
+        : basePath;
+      base.search = routeUrl.search;
+      base.hash = routeUrl.hash;
+      return base.toString();
     } catch {
       return null;
     }
@@ -6906,7 +6964,6 @@ export default function ${component.name}() {
       hasStructuralIssue ||
       primaryRootCause === 'plan-omission' ||
       primaryRootCause === 'missing-section' ||
-      primaryRootCause === 'route-mapping-error' ||
       primaryRootCause === 'data-binding-error' ||
       primaryRootCause === 'content-drift' ||
       primaryRootCause === 'missing-image';

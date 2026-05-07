@@ -28,6 +28,7 @@ import type {
 } from '../react-generator/visual-plan.schema.js';
 import { toVisualDataNeeds } from '../shared/visual-data-needs.util.js';
 import { assessDeterministicRenderAuthority } from './deterministic-render-authority-policy.util.js';
+import { isProfolioFseAiLockedVisualPlanSurface } from '../../theme/profiles/profolio-fse-generation-policy.js';
 
 const TRANSACTIONAL_TEMPLATE_NAMES = new Set([
   'cart',
@@ -35,44 +36,6 @@ const TRANSACTIONAL_TEMPLATE_NAMES = new Set([
   'my-account',
   'order-pay',
   'order-received',
-]);
-
-const PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_TEMPLATES = new Set([
-  'template-about',
-  'template-contact',
-]);
-
-const PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_COMPONENTS = new Set([
-  'templateabout',
-  'templatecontact',
-]);
-
-const PROFOLIO_AI_VISUAL_PLAN_TEMPLATES = new Set([
-  'front-page',
-  'home',
-  'index',
-  'archive',
-  'archive-product',
-  'blog-left-sidebar',
-  'blog-right-sidebar',
-  'search',
-  'template-about',
-  'template-contact',
-  'template-services',
-]);
-
-const PROFOLIO_AI_VISUAL_PLAN_COMPONENTS = new Set([
-  'frontpage',
-  'home',
-  'index',
-  'archive',
-  'archiveproduct',
-  'blogleftsidebar',
-  'blogrightsidebar',
-  'search',
-  'templateabout',
-  'templatecontact',
-  'templateservices',
 ]);
 
 export interface BlockTreePlannerComponentPlan {
@@ -151,31 +114,6 @@ export function buildBlockTreeDrivenVisualPlanForComponent(
     componentPlan.componentName,
     componentPlan.isDetail === true && componentPlan.route !== '/',
   );
-
-  if (shouldUseSectionAssemblyForProfolioFrontPage({ componentPlan, content })) {
-    const usable = filterUsableGenericPageSections(draftSections ?? []);
-    if (usable.length > 0) {
-      return {
-        componentName: componentPlan.componentName,
-        dataNeeds,
-        palette: input.globalPalette,
-        typography: input.globalTypography,
-        layout,
-        blockStyles: tokens?.blockStyles,
-        renderMode: 'section-centric',
-        deterministicAuthority: false,
-        renderAuthority: 'ai',
-        lockPolicy: {
-          reason:
-            'Profolio front-page uses AI section assembly from source-derived sections instead of canonical block-tree rendering.',
-        },
-        sections: usable.map((section) => ({
-          ...section,
-          generationMode: 'section-assembly',
-        })),
-      };
-    }
-  }
 
   const canonicalBlockTreePageRenderer =
     shouldUseCanonicalBlockTreePageRenderer({
@@ -360,17 +298,10 @@ export function shouldUseAiVisualPlanningForProfolioSurface(input: {
     return false;
   }
 
-  const normalizedTemplate = normalizeTemplateIdentifier(
-    input.componentPlan.templateName,
-  );
-  const normalizedComponent = input.componentPlan.componentName
-    .trim()
-    .toLowerCase();
-
-  return (
-    PROFOLIO_AI_VISUAL_PLAN_TEMPLATES.has(normalizedTemplate) ||
-    PROFOLIO_AI_VISUAL_PLAN_COMPONENTS.has(normalizedComponent)
-  );
+  return isProfolioFseAiLockedVisualPlanSurface({
+    templateName: input.componentPlan.templateName,
+    componentName: input.componentPlan.componentName,
+  });
 }
 
 export function shouldBypassCoverageAuditForBlockTreeListingPlan(
@@ -404,25 +335,6 @@ export function shouldShortCircuitBlockTreeVisualPlan(
   );
 }
 
-function shouldUseSectionAssemblyForProfolioFrontPage(input: {
-  componentPlan: BlockTreePlannerComponentPlan;
-  content: DbContentResult;
-}): boolean {
-  if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
-    return false;
-  }
-  if (input.componentPlan.type !== 'page' || input.componentPlan.isDetail) {
-    return false;
-  }
-  const normalizedTemplate = normalizeTemplateIdentifier(
-    input.componentPlan.templateName,
-  );
-  return (
-    normalizedTemplate === 'front-page' ||
-    input.componentPlan.componentName.trim().toLowerCase() === 'frontpage'
-  );
-}
-
 function shouldUseCanonicalBlockTreePageRenderer(input: {
   componentPlan: BlockTreePlannerComponentPlan;
   content: DbContentResult;
@@ -437,17 +349,7 @@ function shouldUseCanonicalBlockTreePageRenderer(input: {
   if (input.content.themeResolvedContent?.themeSlug !== 'profolio-fse') {
     return false;
   }
-
-  const normalizedTemplate = normalizeTemplateIdentifier(
-    input.componentPlan.templateName,
-  );
-  if (PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_TEMPLATES.has(normalizedTemplate)) {
-    return true;
-  }
-
-  return PROFOLIO_CANONICAL_BLOCK_TREE_PAGE_COMPONENTS.has(
-    input.componentPlan.componentName.trim().toLowerCase(),
-  );
+  return false;
 }
 
 function isEligibleBlockTreeSharedPartial(

@@ -18,10 +18,8 @@ import {
 import {
   mapWpNodesToDraftSections,
   mapWpNodesToLosslessPageSections,
-  buildPlannerChunksFromNodes,
 } from '../../../common/utils/wp-node-to-sections-mapper.js';
 import { buildCanonicalPagePath } from '../../../common/utils/wp-page-path.util.js';
-import type { ChunkPlan } from '../../../common/types/chunk.schema.js';
 import {
   mapWpNodesToBlockTree,
   type BlockNode,
@@ -78,7 +76,6 @@ import type {
 import { normalizeVisualPlanArchitecture } from '../react-generator/visual-plan.schema.js';
 import {
   PlannerVisualRepairService,
-  composeSectionsFromChunkPlans,
   type CanonicalPlanningSource,
   type PlanningSourceCandidate,
   type PlanningSourceContext,
@@ -86,10 +83,6 @@ import {
   type PlannerVisualPlanRepairState,
   type PlannerVisualRepairDelegate,
 } from './planner-visual-repair.service.js';
-import {
-  buildChunkLabelingPrompt,
-  parseChunkLabelingResponse,
-} from './chunk-labeling.prompt.js';
 import {
   countDraftSectionsInSource,
   detectInteractiveWidgetsFromSource,
@@ -397,7 +390,7 @@ export class PlannerService {
     );
     const enriched = this.materializeConcretePagePlans(
       this.applyDeterministicRouteContracts(
-        this.enrichPlan(plan, sourceMap, content),
+        this.enrichPlan(plan, sourceMap, content, options?.repoManifest),
         content,
         options?.repoManifest,
       ),
@@ -801,22 +794,20 @@ export class PlannerService {
         componentPlan,
         tokens,
       );
-      const forceAiVisualPlan =
-        shouldUseAiVisualPlanningForProfolioSurface({
-          componentPlan,
-          content,
-        });
-      const earlyBlockTreeVisualPlan =
-        forceAiVisualPlan
-          ? undefined
-          : this.buildBlockTreeDrivenVisualPlanForComponent({
-              componentPlan,
-              draftBlockTree,
-              content,
-              tokens,
-              globalPalette,
-              globalTypography,
-            });
+      const forceAiVisualPlan = shouldUseAiVisualPlanningForProfolioSurface({
+        componentPlan,
+        content,
+      });
+      const earlyBlockTreeVisualPlan = forceAiVisualPlan
+        ? undefined
+        : this.buildBlockTreeDrivenVisualPlanForComponent({
+            componentPlan,
+            draftBlockTree,
+            content,
+            tokens,
+            globalPalette,
+            globalTypography,
+          });
       if (
         earlyBlockTreeVisualPlan &&
         this.shouldShortCircuitBlockTreeVisualPlan(
@@ -915,34 +906,22 @@ export class PlannerService {
           }),
         };
       }
-      // Chunk-label then compose draft sections (PR2).
-      // Falls back to the deterministic mapper if chunking yields nothing.
-      const composedSections = await this.labelAndComposeChunks(
+      draftSections = this.buildDraftSectionsForPlanningSource(
         planningSource,
         componentPlan,
         tokens,
-        modelName,
-        logPath,
       );
-      draftSections =
-        composedSections ??
-        this.buildDraftSectionsForPlanningSource(
-          planningSource,
-          componentPlan,
-          tokens,
-        );
-      const blockTreeVisualPlan =
-        forceAiVisualPlan
-          ? undefined
-          : this.buildBlockTreeDrivenVisualPlanForComponent({
-              componentPlan,
-              draftSections,
-              draftBlockTree,
-              content,
-              tokens,
-              globalPalette,
-              globalTypography,
-            });
+      const blockTreeVisualPlan = forceAiVisualPlan
+        ? undefined
+        : this.buildBlockTreeDrivenVisualPlanForComponent({
+            componentPlan,
+            draftSections,
+            draftBlockTree,
+            content,
+            tokens,
+            globalPalette,
+            globalTypography,
+          });
       if (blockTreeVisualPlan) {
         const blockTreeSurfacePlan = this.buildSurfacePlanForComponent({
           componentPlan,
@@ -3624,6 +3603,7 @@ export class PlannerService {
     plan: PlanResult,
     sourceMap: Map<string, string>,
     content: DbContentResult,
+    repoManifest?: RepoThemeManifest,
   ): PlanResult {
     const hasSharedChromePartials = plan.some(
       (candidate) =>
@@ -3636,6 +3616,14 @@ export class PlannerService {
     return plan.map((item) => {
       const source = sourceMap.get(item.templateName) ?? '';
       const needs = new Set(item.dataNeeds);
+      const repoEntryChain = this.findRepoEntrySourceChain(
+        item.templateName,
+        repoManifest,
+      );
+      const evidenceSource = [source, repoEntryChain?.composedSource]
+        .filter((value): value is string => !!value?.trim())
+        .join('\n\n');
+      const repoBlockTypes = repoEntryChain?.blockTypes ?? [];
       const ownsSharedChromeData =
         item.type === 'partial' || !hasSharedChromePartials;
       const prefersBlockTreeSharedChrome =
@@ -3756,6 +3744,15 @@ export class PlannerService {
       )
         needs.add('comments');
 
+      for (const need of this.inferDataNeedsFromSourceEvidence({
+        componentPlan: item,
+        source: evidenceSource,
+        blockTypes: repoBlockTypes,
+        content,
+      })) {
+        needs.add(need);
+      }
+
       if (isFooterPartial && ownsSharedChromeData) {
         if (prefersBlockTreeSharedChrome) {
           if (hasNavigationEvidence) needs.add('footer-links');
@@ -3782,6 +3779,218 @@ export class PlannerService {
 
       return { ...item, dataNeeds: Array.from(needs) };
     });
+  }
+
+  private inferDataNeedsFromSourceEvidence(input: {
+    componentPlan: PlanResult[number];
+    source: string;
+    blockTypes: string[];
+    content: DbContentResult;
+  }): string[] {
+    const { componentPlan, content } = input;
+    const templateBase = this.normalizeTemplateIdentifier(
+      componentPlan.templateName,
+    );
+    const componentKey =
+      `${componentPlan.componentName} ${componentPlan.templateName}`.toLowerCase();
+    const source = String(input.source ?? '').toLowerCase();
+    const blockTypes = new Set(
+      input.blockTypes.map((blockType) =>
+        blockType
+          .trim()
+          .toLowerCase()
+          .replace(/^core\//, '')
+          .replace(/^woocommerce\//, ''),
+      ),
+    );
+    const hasBlock = (...names: string[]) =>
+      names.some((name) => {
+        const normalized = name
+          .trim()
+          .toLowerCase()
+          .replace(/^core\//, '')
+          .replace(/^woocommerce\//, '');
+        return (
+          blockTypes.has(normalized) ||
+          source.includes(`wp:${name.toLowerCase()}`) ||
+          source.includes(`"block":"${name.toLowerCase()}"`) ||
+          source.includes(`"blockName":"${name.toLowerCase()}"`) ||
+          source.includes(name.toLowerCase())
+        );
+      });
+    const needs = new Set<string>();
+
+    const isProfolioFse =
+      content.themeResolvedContent?.themeSlug === 'profolio-fse' ||
+      content.siteInfo?.activeTheme === 'profolio-fse';
+    const isPage = componentPlan.type === 'page';
+    const isPartial = componentPlan.type === 'partial';
+    const isProductSurface =
+      /(^|[-_/])product($|[-_/])/.test(templateBase) ||
+      /(^|[-_/])product($|[-_/])/.test(componentKey) ||
+      hasBlock(
+        'woocommerce/product-query',
+        'woocommerce/related-products',
+        'woocommerce/product-image',
+        'woocommerce/product-price',
+        'woocommerce/product-button',
+        'woocommerce/product-details',
+        'woocommerce/add-to-cart-form',
+        'woocommerce/cart',
+        'woocommerce/checkout',
+      ) ||
+      source.includes('"posttype":"product"') ||
+      source.includes('"posttype": "product"') ||
+      source.includes('"term":"product_cat"') ||
+      source.includes('"term":"product_tag"');
+    const isSingleProduct =
+      templateBase === 'single-product' ||
+      /(^|[-_/])singleproduct($|[-_/])/.test(componentKey);
+    const isSinglePost =
+      /^(single|single-post|single-with-sidebar)$/.test(templateBase) ||
+      /(^|[-_/])single($|[-_/])/.test(componentKey);
+    const isPageDetailTemplate =
+      templateBase === 'page' ||
+      templateBase.startsWith('page-') ||
+      templateBase === 'full-width' ||
+      templateBase === 'blank' ||
+      componentPlan.fixedSlug != null ||
+      componentPlan.dataNeeds.includes('page-detail');
+    const hasQuery =
+      hasBlock('core/query', 'query', 'core/latest-posts', 'latest-posts') ||
+      source.includes('query loop');
+    const hasProductQuery =
+      isProductSurface &&
+      (hasQuery ||
+        hasBlock('woocommerce/related-products', 'woocommerce/product-query'));
+    const hasPostContent =
+      hasBlock('core/post-content', 'post-content') ||
+      source.includes('contains post-content placeholder');
+    const hasComments =
+      hasBlock(
+        'core/comments',
+        'comments',
+        'core/post-comments-form',
+        'post-comments-form',
+        'core/comment-template',
+        'comment-template',
+      ) || source.includes('comments capability');
+    const hasPostAuxiliary =
+      hasBlock(
+        'core/post-title',
+        'post-title',
+        'core/post-featured-image',
+        'post-featured-image',
+        'core/post-terms',
+        'post-terms',
+        'core/post-date',
+        'post-date',
+        'core/post-author-name',
+        'post-author-name',
+      );
+    const hasSidebarPostWidgets =
+      hasBlock(
+        'core/latest-posts',
+        'latest-posts',
+        'core/categories',
+        'categories',
+        'core/tag-cloud',
+        'tag-cloud',
+        'core/avatar',
+        'avatar',
+        'core/post-author-biography',
+        'post-author-biography',
+      );
+
+    if (isPartial) {
+      if (hasSidebarPostWidgets) needs.add('posts');
+      return this.orderPlannerDataNeeds([...needs]);
+    }
+
+    if (!isPage) {
+      return [];
+    }
+
+    if (isSingleProduct || (isProductSurface && componentPlan.isDetail)) {
+      needs.add('product-detail');
+    } else if (isSinglePost || componentPlan.dataNeeds.includes('post-detail')) {
+      needs.add('post-detail');
+    } else if (
+      isPageDetailTemplate &&
+      (componentPlan.isDetail || hasPostContent) &&
+      !isProductSurface
+    ) {
+      needs.add('page-detail');
+    }
+
+    if (hasProductQuery) {
+      needs.add('products');
+    } else if (hasQuery || hasSidebarPostWidgets) {
+      needs.add('posts');
+    }
+
+    if (isProductSurface && !componentPlan.isDetail) {
+      needs.add('products');
+      needs.delete('post-detail');
+      needs.delete('page-detail');
+    }
+
+    if (hasPostContent || hasPostAuxiliary) {
+      if (isSingleProduct || isProductSurface) {
+        needs.add('product-detail');
+      } else if (isSinglePost || componentPlan.isDetail) {
+        needs.add('post-detail');
+      }
+    }
+
+    if (hasComments && !isProductSurface) {
+      needs.add('comments');
+      if (isSinglePost || componentPlan.isDetail) needs.add('post-detail');
+    }
+
+    if (isProfolioFse) {
+      if (
+        [
+          'archive',
+          'blog-left-sidebar',
+          'blog-right-sidebar',
+          'index',
+          'search',
+          'sidebar',
+        ].includes(templateBase)
+      ) {
+        needs.add('posts');
+      }
+      if (templateBase === 'template-services' && hasQuery) {
+        needs.add('posts');
+      }
+      if (templateBase === 'archive-product') {
+        needs.add('products');
+      }
+      if (templateBase === 'single-product') {
+        needs.add('product-detail');
+        if (hasProductQuery || source.includes('related products')) {
+          needs.add('products');
+        }
+      }
+      if (templateBase === 'single') {
+        needs.add('post-detail');
+        if (hasQuery || hasSidebarPostWidgets) needs.add('posts');
+        if (hasComments) needs.add('comments');
+      }
+      if (['cart', 'checkout'].includes(templateBase)) {
+        needs.add('products');
+      }
+    }
+
+    if (!componentPlan.isDetail) {
+      needs.delete('post-detail');
+      needs.delete('product-detail');
+      needs.delete('page-detail');
+      needs.delete('comments');
+    }
+
+    return this.orderPlannerDataNeeds([...needs]);
   }
 
   private applyDeterministicRouteContracts(
@@ -4306,6 +4515,14 @@ Allowed values: "posts" | "products" | "pages" | "menus" | "site-info" | "footer
 - Global chrome belongs to shared layout partials. Page components MUST NOT own header/footer/navigation data.
 - If a page template has a content sidebar, keep it content-only (recent posts / page links). Do NOT model shared nav menus or site branding inside a page sidebar.
 
+Theme-specific source evidence rules:
+- For profolio-fse, thin templates often reference patterns. Treat repo source-chain / pattern block evidence as authoritative for dataNeeds.
+- profolio-fse single-product / WooCommerce product-detail patterns need ["product-detail"] and also ["products"] when related-products or product query blocks are present.
+- profolio-fse archive-product, cart, and checkout need ["products"], not ["posts"].
+- profolio-fse single / single-post with sidebar, latest-posts, categories, tags, or post navigation needs ["post-detail", "posts"]; add "comments" only when comments or post-comments-form blocks exist.
+- profolio-fse archive, search, index, blog-left-sidebar, blog-right-sidebar, and Sidebar content widgets need ["posts"].
+- profolio-fse template-services needs ["posts"] only when the source-chain includes the articles/query pattern; template-about/contact/front-page should not request posts unless their source-chain actually includes a query/listing block.
+
 ── UNIQUE ROUTES ──────────────────────────────────────────────────────────────
 Every page component MUST have a different route.
 If a conflict would arise, use the template name to disambiguate (see routing rules above).
@@ -4824,6 +5041,7 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
 
     const traceBase = {
       ...section,
+      ...(draft.debugKey ? { debugKey: draft.debugKey } : {}),
       ...(draft.sectionKey ? { sectionKey: draft.sectionKey } : {}),
       ...(draft.sourceRef ? { sourceRef: draft.sourceRef } : {}),
       ...(draft.customClassNames?.length
@@ -5108,17 +5326,22 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     }
 
     const effectiveDraft = input.visualContract
-      ? sanitizeSectionsForContract(draftSections, input.visualContract).sections
+      ? sanitizeSectionsForContract(draftSections, input.visualContract)
+          .sections
       : draftSections;
     if (effectiveDraft.length < 2) return input.aiSections;
-    if (!this.shouldPreferDraftSkeletonForAiPlan(input.aiSections, effectiveDraft)) {
+    if (
+      !this.shouldPreferDraftSkeletonForAiPlan(input.aiSections, effectiveDraft)
+    ) {
       return input.aiSections;
     }
 
     this.logger.warn(
       this.formatPhaseCLog(
         `"${input.componentPlan.componentName}" AI visual plan shape diverged from source-derived draft; using stable draft section skeleton (${effectiveDraft
-          .map((section) => section.debugKey ?? section.sectionKey ?? section.type)
+          .map(
+            (section) => section.debugKey ?? section.sectionKey ?? section.type,
+          )
           .join(', ')})`,
       ),
     );
@@ -5147,6 +5370,33 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     ).length;
     if (draftStructuredCount === 0) return false;
 
+    if (this.isHighConfidenceProfolioFseDraftSkeleton(draftSections)) {
+      if (aiSections.length < draftSections.length) return true;
+
+      const orderedTypeMismatches = draftSections.filter(
+        (draft, index) => aiSections[index]?.type !== draft.type,
+      ).length;
+      if (
+        orderedTypeMismatches >=
+        Math.max(2, Math.ceil(draftSections.length / 3))
+      ) {
+        return true;
+      }
+
+      const missingSourceKeys = draftSections.filter((draft) => {
+        const draftKey =
+          draft.debugKey ?? draft.sectionKey ?? draft.sourceRef?.sourceNodeId;
+        if (!draftKey) return false;
+        return !aiSections.some(
+          (section) =>
+            section.debugKey === draftKey ||
+            section.sectionKey === draftKey ||
+            section.sourceRef?.sourceNodeId === draftKey,
+        );
+      }).length;
+      if (missingSourceKeys >= 2) return true;
+    }
+
     const draftCounts = this.countSectionTypes(draftSections);
     const aiCounts = this.countSectionTypes(aiSections);
     for (const [type, draftCount] of draftCounts) {
@@ -5169,6 +5419,42 @@ OUTPUT FORMAT — respond with ONLY a valid JSON array, no markdown fences, no e
     }
 
     return false;
+  }
+
+  private isHighConfidenceProfolioFseDraftSkeleton(
+    draftSections: SectionPlan[],
+  ): boolean {
+    if (draftSections.length < 3) return false;
+
+    const profolioKeys = new Set([
+      'banner',
+      'projects',
+      'my-services',
+      'ui-ux-design',
+      'graphic-design',
+      'product-design',
+      'experience',
+      'skills',
+      'testimonials',
+      'faq',
+      'articles',
+      'lets-work-together',
+    ]);
+    const matchedKeys = draftSections.filter((section) =>
+      profolioKeys.has(section.debugKey ?? ''),
+    ).length;
+    if (matchedKeys >= 2) return true;
+
+    return draftSections.some((section) =>
+      (section.customClassNames ?? []).some(
+        (className) =>
+          className.includes('profolio-fse') ||
+          className === 'cover-inner' ||
+          className === 'r-cover' ||
+          className === 'wow' ||
+          className.startsWith('animate__'),
+      ),
+    );
   }
 
   private countSectionTypes(sections: SectionPlan[]): Map<string, number> {
@@ -5598,117 +5884,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return filteredSections;
     } catch {
       return undefined;
-    }
-  }
-
-  // ── Chunk labeling + composition (PR2) ────────────────────────────────────
-
-  private async labelAndComposeChunks(
-    planningSource: PlanningSourceContext | undefined,
-    componentPlan: PlanResult[number],
-    tokens: ThemeTokens | undefined,
-    modelName: string,
-    logPath: string | undefined,
-  ): Promise<ReturnType<typeof mapWpNodesToDraftSections> | undefined> {
-    const rawChunks = this.buildChunkPlansForPlanningSource(
-      planningSource,
-      componentPlan,
-      tokens,
-    );
-    if (rawChunks.length === 0) return undefined;
-
-    const labeledChunks = await this.labelChunksWithAi(rawChunks, modelName);
-
-    if (logPath) {
-      void this.writeArtifact(
-        logPath,
-        `plan.chunks.${componentPlan.componentName}.json`,
-        {
-          componentName: componentPlan.componentName,
-          generatedAt: new Date().toISOString(),
-          chunkCount: labeledChunks.length,
-          chunks: labeledChunks,
-        },
-      );
-    }
-
-    const composed = composeSectionsFromChunkPlans(labeledChunks);
-    if (composed.length === 0) return undefined;
-
-    // PR3: annotate sections for home-like components so generator can use
-    // per-section codegen and targeted retry (PR4 reads this field).
-    if (this.isHomeLikeComponentPlan(componentPlan)) {
-      return composed.map((section) => ({
-        ...section,
-        generationMode: 'section-assembly' as const,
-      }));
-    }
-
-    return composed;
-  }
-
-  private async labelChunksWithAi(
-    chunks: ChunkPlan[],
-    modelName: string,
-  ): Promise<ChunkPlan[]> {
-    try {
-      const { systemPrompt, userPrompt } = buildChunkLabelingPrompt(chunks);
-      const { text } = await this.requestVisualPlanCompletion({
-        model: modelName,
-        systemPrompt,
-        userPrompt,
-        maxTokens: 1024,
-      });
-      const results = parseChunkLabelingResponse(text, chunks);
-      const resultIndex = new Map(results.map((r) => [r.chunkId, r]));
-      return chunks.map((chunk) => {
-        const label = resultIndex.get(chunk.chunkId);
-        if (!label) return chunk;
-        return {
-          ...chunk,
-          aiLabel: {
-            semanticKind: label.semanticKind,
-            suggestedSectionType: label.suggestedSectionType,
-            mergeHint: label.mergeHint,
-            confidence: label.confidence,
-            ...(label.rationale ? { rationale: label.rationale } : {}),
-          },
-        };
-      });
-    } catch {
-      return chunks;
-    }
-  }
-
-  // ── Chunk plan builder (shared by PR1 artifact + PR2 labeling) ────────────
-
-  private buildChunkPlansForPlanningSource(
-    planningSource: PlanningSourceContext | undefined,
-    componentPlan: PlanResult[number],
-    tokens: ThemeTokens | undefined,
-  ): ChunkPlan[] {
-    try {
-      const nodes = planningSource?.canonicalSource?.resolvedNodes?.length
-        ? planningSource.canonicalSource.resolvedNodes
-        : this.styleResolver.resolve(
-            this.parsePlanningSourceNodes({
-              source: planningSource?.source ?? '',
-              templateName:
-                planningSource?.sourceTemplateName ??
-                componentPlan.templateName,
-              sourceFile:
-                planningSource?.sourceFile ??
-                inferFseSourceFile(
-                  componentPlan.templateName,
-                  componentPlan.type,
-                ),
-            }),
-            tokens,
-          );
-      if (nodes.length === 0) return [];
-      return buildPlannerChunksFromNodes(nodes);
-    } catch {
-      return [];
     }
   }
 
@@ -8175,6 +8350,26 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       templateName,
       repoManifest,
     );
+    const inferredDataNeeds = this.inferDataNeedsFromSourceEvidence({
+      componentPlan: {
+        templateName,
+        componentName: this.toComponentName(templateName),
+        type: /^(header|footer|sidebar|nav|navigation)$/i.test(templateName)
+          ? 'partial'
+          : 'page',
+        route: null,
+        dataNeeds: [],
+        isDetail: /^(single|single-product|page|blank|full-width)$/i.test(
+          this.normalizeTemplateIdentifier(templateName),
+        ),
+        description: '',
+      },
+      source: [source, repoEntryChain?.composedSource]
+        .filter((value): value is string => !!value?.trim())
+        .join('\n\n'),
+      blockTypes: repoEntryChain?.blockTypes ?? [],
+      content,
+    });
     if (repoEntryChain) {
       lines.push(
         `- Repo source chain: ${repoEntryChain.chainFiles.slice(0, 8).join(' -> ')}${repoEntryChain.chainFiles.length > 8 ? ' ...' : ''}`,
@@ -8195,6 +8390,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       if (repoEntryChain.notes.length > 0) {
         lines.push(`- Repo chain notes: ${repoEntryChain.notes.join(', ')}`);
       }
+    }
+    if (inferredDataNeeds.length > 0) {
+      lines.push(
+        `- Source-implied dataNeeds: ${inferredDataNeeds.join(', ')}`,
+      );
     }
 
     if (['front-page', 'home', 'index'].includes(templateName)) {

@@ -80,6 +80,8 @@ export interface CodeValidationContext {
   type?: 'page' | 'partial';
   isSubComponent?: boolean;
   allowedRelativeImports?: string[];
+  allowedRelativeImportFolders?: Record<string, 'pages' | 'components'>;
+  contractCode?: string;
   requireCommentForm?: boolean;
   requiredCustomClassNames?: string[];
   requiredCustomClassTargets?: Record<string, ThemeInteractionTarget>;
@@ -191,6 +193,12 @@ export class ValidatorService {
       const code = this.sanitizeGeneratedCode(comp.code);
       return { ...comp, code };
     });
+    const generatedComponentFolders = Object.fromEntries(
+      normalized.map((comp) => [
+        comp.name,
+        this.getComponentFolder(comp.name, comp.type, comp.isSubComponent),
+      ]),
+    );
     const failures: ComponentValidationFailure[] = [];
 
     for (const comp of normalized) {
@@ -211,6 +219,8 @@ export class ValidatorService {
         allowedRelativeImports: generatedComponentNames.filter(
           (name) => name !== comp.name,
         ),
+        allowedRelativeImportFolders: generatedComponentFolders,
+        contractCode: this.buildContractValidationCode(comp, normalized),
       });
       if (!check.isValid) {
         failures.push({
@@ -310,8 +320,52 @@ export class ValidatorService {
     code = normalizeCanonicalPostMetaAndTextLinks(code);
     code = normalizeThemeAssetReferences(code);
     code = normalizeCommonTypographyTypos(code);
+    code = this.sanitizeScrollTopHookClasses(code);
     code = ensureReactRouterLinkImport(code);
     return code;
+  }
+
+  private sanitizeScrollTopHookClasses(raw: string): string {
+    const hookClass = 'profolio-fse-scroll-top';
+    const hookPattern = new RegExp(`\\b${hookClass}\\b`);
+
+    return raw.replace(
+      /<([A-Za-z][A-Za-z0-9.]*)\b([^<>]*?)\bclassName=(["'])([^"']*)\3/g,
+      (
+        match,
+        rawTag: string,
+        beforeClass: string,
+        quote: string,
+        classValue: string,
+      ) => {
+        if (!hookPattern.test(classValue)) return match;
+
+        const tag =
+          rawTag.split('.').pop()?.toLowerCase() ?? rawTag.toLowerCase();
+        const isScrollTopTriggerTag =
+          tag === 'p' || tag === 'a' || tag === 'button';
+        const classNames = classValue.split(/\s+/).filter(Boolean);
+        const isDedicatedTrigger =
+          classNames.length > 0 &&
+          classNames.every(
+            (className) =>
+              className === hookClass ||
+              className.startsWith('wp-block-') ||
+              className.startsWith('has-'),
+          );
+
+        if (isScrollTopTriggerTag && isDedicatedTrigger) return match;
+
+        const cleanedClassValue = classNames
+          .filter((className) => className !== hookClass)
+          .join(' ');
+        if (!cleanedClassValue) {
+          return `<${rawTag}${beforeClass.trimEnd()}`;
+        }
+
+        return `<${rawTag}${beforeClass}className=${quote}${cleanedClassValue}${quote}`;
+      },
+    );
   }
 
   /**
@@ -323,6 +377,7 @@ export class ValidatorService {
   ): { isValid: boolean; error?: string; fixedCode?: string } {
     if (!rawCode.trim()) return { isValid: false, error: 'Empty code' };
     let code = this.sanitizeGeneratedCode(rawCode);
+    const contractCode = context.contractCode ?? code;
 
     // ── Hard failures (return immediately — no point collecting more) ─────────
 
@@ -351,7 +406,7 @@ export class ValidatorService {
     }
 
     const visualPlanIssue = this.checkVisualPlanObligations(
-      code,
+      contractCode,
       context.visualPlan,
       context.componentName,
     );
@@ -363,7 +418,7 @@ export class ValidatorService {
     }
 
     const surfacePlanIssue = this.checkSurfacePlanObligations(
-      code,
+      contractCode,
       context.surfacePlan,
       context.componentName,
     );
@@ -375,7 +430,7 @@ export class ValidatorService {
     }
 
     const pixelLockedIssue = this.checkPixelLockedVisualPlanFidelity(
-      code,
+      contractCode,
       context.visualPlan,
       context.componentName,
     );
@@ -387,7 +442,7 @@ export class ValidatorService {
     }
 
     const renderContractIssue = this.checkRenderContractCoverage(
-      code,
+      contractCode,
       context.renderContract,
       context.componentName,
       context.visualPlan,
@@ -539,6 +594,19 @@ export class ValidatorService {
       context.type === 'page' &&
       context.isSubComponent !== true &&
       !isPartialComponent;
+
+    if (context.isSubComponent === true) {
+      if (/\bfetch\s*\(|\/api\//.test(code)) {
+        violations.push(
+          'Sub-components must not call API endpoints directly. Fetch route/data in the parent page and pass data into child components via props.',
+        );
+      }
+      if (/\buseParams\s*</.test(code) || /\buseParams\s*\(/.test(code)) {
+        violations.push(
+          'Sub-components must not read route params directly. Read params in the parent page and pass values into child components via props.',
+        );
+      }
+    }
 
     // Pre-processing: deterministically strip post-only fields from `interface Page`
     // so the AI does not need a retry attempt just for a bad type declaration.
@@ -1084,14 +1152,16 @@ export class ValidatorService {
       return { isValid: false, error: violations.join('\n') };
     }
 
-    code = this.repairMissingRequiredCustomClasses(
-      code,
-      context.requiredCustomClassNames ?? [],
-      context.requiredCustomClassTargets,
-    );
+    if (!context.contractCode) {
+      code = this.repairMissingRequiredCustomClasses(
+        code,
+        context.requiredCustomClassNames ?? [],
+        context.requiredCustomClassTargets,
+      );
+    }
 
     const missingRequiredCustomClasses = this.findMissingRequiredCustomClasses(
-      code,
+      context.contractCode ?? code,
       context.requiredCustomClassNames ?? [],
       context.requiredCustomClassTargets,
     );
@@ -3332,7 +3402,9 @@ export class ValidatorService {
               code,
             );
           case 'featuredImage':
-            return /\b[A-Za-z_$][\w$]*(?:\??\.)+featuredImage\b|<img\b/i.test(code);
+            return /\b[A-Za-z_$][\w$]*(?:\??\.)+featuredImage\b|<img\b/i.test(
+              code,
+            );
           case 'tags':
             return /\b[A-Za-z_$][\w$]*(?:\??\.)+tags\b/i.test(code);
           default:
@@ -4313,7 +4385,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         return importPath;
       }
 
-      const targetFolder = this.getComponentFolder(basename);
+      const targetFolder =
+        context.allowedRelativeImportFolders?.[basename] ??
+        this.getComponentFolder(basename);
       const expectedPath =
         currentFolder === targetFolder
           ? `./${basename}`
@@ -4324,6 +4398,53 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     }
 
     return null;
+  }
+
+  private buildContractValidationCode(
+    component: GeneratedComponent,
+    components: GeneratedComponent[],
+  ): string {
+    const byName = new Map(components.map((comp) => [comp.name, comp]));
+    const visited = new Set<string>();
+    const collect = (comp: GeneratedComponent): string[] => {
+      if (visited.has(comp.name)) return [];
+      visited.add(comp.name);
+
+      const chunks = [comp.code];
+      for (const importedName of this.extractGeneratedComponentImports(
+        comp.code,
+      )) {
+        const imported = byName.get(importedName);
+        if (!imported) continue;
+        chunks.push(...collect(imported));
+      }
+      return chunks;
+    };
+
+    return collect(component).join('\n\n/* imported generated component */\n\n');
+  }
+
+  private extractGeneratedComponentImports(code: string): string[] {
+    const names: string[] = [];
+    const matches = [
+      ...code.matchAll(/import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g),
+    ];
+    for (const match of matches) {
+      const localName = match[1];
+      const importPath = match[2];
+      if (!importPath.startsWith('./') && !importPath.startsWith('../')) {
+        continue;
+      }
+      const basename = importPath
+        .replace(/^\.\/|^\.\.\//, '')
+        .split('/')
+        .pop()
+        ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
+      if (basename && basename === localName) {
+        names.push(localName);
+      }
+    }
+    return [...new Set(names)];
   }
 
   private getComponentFolder(

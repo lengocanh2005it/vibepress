@@ -75,6 +75,7 @@ import {
   shouldPreferSectionAssemblyForFrontPage,
   shouldPreferThemeSourceFaithfulDeterministicPage,
 } from './source-faithful-deterministic.util.js';
+import { isProfolioFseAiLockedVisualPlanSurface } from '../../theme/profiles/profolio-fse-generation-policy.js';
 
 export interface ReviewInput {
   componentName: string;
@@ -1915,7 +1916,17 @@ export class CodeReviewerService {
     ) {
       return false;
     }
-    if (shouldPreferSectionAssemblyForFrontPage({ componentPlan, componentName })) {
+    if (
+      isProfolioFseAiLockedVisualPlanSurface({
+        templateName: componentPlan?.templateName,
+        componentName,
+      })
+    ) {
+      return false;
+    }
+    if (
+      shouldPreferSectionAssemblyForFrontPage({ componentPlan, componentName })
+    ) {
       return false;
     }
     if (
@@ -1983,6 +1994,14 @@ export class CodeReviewerService {
       shouldPreferSectionAssemblyForFrontPage({
         componentPlan,
         componentName: componentPlan?.componentName ?? '',
+      })
+    ) {
+      return false;
+    }
+    if (
+      isProfolioFseAiLockedVisualPlanSurface({
+        templateName: componentPlan?.templateName,
+        componentName: componentPlan?.componentName,
       })
     ) {
       return false;
@@ -3681,8 +3700,10 @@ export class CodeReviewerService {
             ),
           ),
         );
-        const stableDeterministicCode =
-          this.ensureInlineSectionSingleWrapper(deterministicCode, section);
+        const stableDeterministicCode = this.ensureInlineSectionSingleWrapper(
+          deterministicCode,
+          section,
+        );
         const basicError = this.validateInlineSectionOutput(
           stableDeterministicCode,
         );

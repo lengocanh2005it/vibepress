@@ -386,7 +386,16 @@ describe('planning-source-policy util', () => {
     } as unknown as RepoThemeManifest;
 
     const content = {
-      pages: [],
+      pages: [
+        {
+          id: 9,
+          slug: 'home',
+          title: 'Home',
+          content:
+            '<!-- wp:heading --><h2>Real homepage from DB</h2><!-- /wp:heading --><!-- wp:paragraph --><p>Actual page content should outrank the theme demo.</p><!-- /wp:paragraph -->',
+          template: '',
+        },
+      ],
       posts: [],
       dbTemplates: [],
       readingSettings: {
@@ -520,7 +529,16 @@ describe('planning-source-policy util', () => {
     } as unknown as RepoThemeManifest;
 
     const content = {
-      pages: [],
+      pages: [
+        {
+          id: 9,
+          slug: 'home',
+          title: 'Home',
+          content:
+            '<!-- wp:heading --><h2>Real homepage from DB</h2><!-- /wp:heading --><!-- wp:paragraph --><p>Actual page content should outrank the theme demo.</p><!-- /wp:paragraph -->',
+          template: '',
+        },
+      ],
       posts: [],
       dbTemplates: [],
       readingSettings: {
@@ -681,5 +699,340 @@ describe('planning-source-policy util', () => {
         (candidate) => candidate.label === 'repo-archetype:template-services',
       ),
     ).toBe(true);
+  });
+
+  it('demotes profolio repo archetype below rich DB content for root front-page planning', () => {
+    const repoManifest = {
+      structureHints: {
+        entrySourceChains: [
+          {
+            entryFile: 'templates/front-page.html',
+            routeHint: 'home',
+            chainFiles: [
+              'templates/front-page.html',
+              'patterns/front-page.php',
+            ],
+            composedSource:
+              '<!-- wp:group --><div><h2>Theme Demo Front Page</h2></div><!-- /wp:group -->',
+            assetFiles: [],
+            runtimeFiles: [],
+            blockTypes: ['core/group'],
+            headingTexts: ['Theme Demo Front Page'],
+            notes: [],
+          },
+        ],
+      },
+      themeDeepAnalysis: {
+        themeSlug: 'profolio-fse',
+        routeSources: [
+          {
+            routeFamily: 'front-page',
+            entryFile: 'templates/front-page.html',
+            routeHint: 'home',
+            chainFiles: [
+              'templates/front-page.html',
+              'patterns/front-page.php',
+            ],
+            patternSlugs: ['profolio-fse/front-page'],
+            templatePartSlugs: ['header', 'footer'],
+            blockTypes: ['core/group'],
+            headingTexts: ['Theme Demo Front Page'],
+            customClasses: [],
+            assetFiles: [],
+            notes: [],
+          },
+        ],
+        behaviorSignals: [],
+        notes: [],
+      },
+    } as unknown as RepoThemeManifest;
+
+    const content = {
+      pages: [
+        {
+          id: 9,
+          slug: 'home',
+          title: 'Home',
+          content:
+            '<!-- wp:heading --><h2>Real homepage from DB</h2><!-- /wp:heading --><!-- wp:paragraph --><p>Actual page content should outrank the theme demo.</p><!-- /wp:paragraph -->',
+          template: '',
+        },
+      ],
+      posts: [],
+      dbTemplates: [],
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 9,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'profolio-fse',
+        frontPageRoute: '/',
+        postsPageRoute: null,
+        routes: [
+          {
+            pageId: 9,
+            slug: 'home',
+            title: 'Home',
+            routePath: '/',
+            template: '',
+            templateCandidates: ['front-page', 'page'],
+            matchedDbTemplateSlugs: [],
+            pageBlockTypes: ['core/heading', 'core/paragraph'],
+            isFrontPage: true,
+            isPostsPage: false,
+          },
+        ],
+        templateRecords: [],
+        navigationRecords: [],
+        notes: [],
+      },
+    } as unknown as DbContentResult;
+
+    const candidates = buildPlanningSourceCandidates({
+      componentPlan: {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        dataNeeds: [],
+      },
+      templateSource:
+        '<!-- wp:template-part {"slug":"header"} /--><!-- wp:pattern {"slug":"profolio-fse/front-page"} /--><!-- wp:template-part {"slug":"footer"} /-->',
+      sourceMap: new Map<string, string>(),
+      content,
+      repoManifest,
+      findRepoEntrySourceChain: (templateName, manifest) =>
+        manifest?.structureHints.entrySourceChains.find(
+          (entry) => entry.entryFile === `templates/${templateName}.html`,
+        ),
+      inferSourceFile: (templateName) => `templates/${templateName}.html`,
+      findRepresentativePagesForTemplate: () => content.pages,
+      findRepresentativePostsForTemplate: () => [],
+    });
+
+    expect(candidates[0]?.label).toBe('db:page-on-front:home');
+    expect(
+      candidates.some(
+        (candidate) => candidate.label === 'repo-archetype:front-page',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not let profolio DB pattern shells suppress repo archetype evidence', () => {
+    const repoManifest = {
+      structureHints: {
+        entrySourceChains: [
+          {
+            entryFile: 'templates/front-page.html',
+            routeHint: 'home',
+            chainFiles: [
+              'templates/front-page.html',
+              'patterns/front-page.php',
+              'patterns/banner.php',
+              'patterns/projects.php',
+            ],
+            composedSource:
+              '<!-- wp:group --><div><h2>Welcome To My Profile</h2><p>Theme portfolio source body.</p></div><!-- /wp:group --><!-- wp:group --><div><h2>Some Of My Projects</h2><p>Project cards.</p></div><!-- /wp:group -->',
+            assetFiles: [],
+            runtimeFiles: [],
+            blockTypes: ['core/group'],
+            headingTexts: ['Welcome To My Profile', 'Some Of My Projects'],
+            notes: [],
+          },
+        ],
+      },
+      themeDeepAnalysis: {
+        themeSlug: 'profolio-fse',
+        routeSources: [
+          {
+            routeFamily: 'front-page',
+            entryFile: 'templates/front-page.html',
+            routeHint: 'home',
+            chainFiles: [
+              'templates/front-page.html',
+              'patterns/front-page.php',
+              'patterns/banner.php',
+              'patterns/projects.php',
+            ],
+            patternSlugs: ['profolio-fse/front-page'],
+            templatePartSlugs: ['header', 'footer'],
+            blockTypes: ['core/group'],
+            headingTexts: ['Welcome To My Profile', 'Some Of My Projects'],
+            customClasses: [],
+            assetFiles: [],
+            notes: [],
+          },
+        ],
+        behaviorSignals: [],
+        notes: [],
+      },
+    } as unknown as RepoThemeManifest;
+
+    const content = {
+      pages: [
+        {
+          id: 9,
+          slug: 'home',
+          title: 'Home',
+          content: '<!-- wp:pattern {"slug":"profolio-fse/front-page"} /-->',
+          template: '',
+        },
+      ],
+      posts: [],
+      dbTemplates: [
+        {
+          id: 1,
+          postType: 'wp_template',
+          canonicalSlug: 'front-page',
+          slug: 'front-page',
+          themeSlug: 'profolio-fse',
+          content: '<!-- wp:pattern {"slug":"profolio-fse/front-page"} /-->',
+        },
+      ],
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 9,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'profolio-fse',
+        frontPageRoute: '/',
+        postsPageRoute: null,
+        routes: [
+          {
+            pageId: 9,
+            slug: 'home',
+            title: 'Home',
+            routePath: '/',
+            template: '',
+            templateCandidates: ['front-page', 'page'],
+            matchedDbTemplateSlugs: ['front-page'],
+            pageBlockTypes: ['core/pattern'],
+            isFrontPage: true,
+            isPostsPage: false,
+          },
+        ],
+        templateRecords: [],
+        navigationRecords: [],
+        notes: [],
+      },
+    } as unknown as DbContentResult;
+
+    const candidates = buildPlanningSourceCandidates({
+      componentPlan: {
+        templateName: 'front-page',
+        type: 'page',
+        route: '/',
+        dataNeeds: [],
+      },
+      templateSource:
+        '<!-- wp:template-part {"slug":"header"} /--><!-- wp:pattern {"slug":"profolio-fse/front-page"} /--><!-- wp:template-part {"slug":"footer"} /-->',
+      sourceMap: new Map<string, string>(),
+      content,
+      repoManifest,
+      findRepoEntrySourceChain: (templateName, manifest) =>
+        manifest?.structureHints.entrySourceChains.find(
+          (entry) => entry.entryFile === `templates/${templateName}.html`,
+        ),
+      inferSourceFile: (templateName) => `templates/${templateName}.html`,
+      findRepresentativePagesForTemplate: () => content.pages,
+      findRepresentativePostsForTemplate: () => [],
+    });
+
+    expect(candidates[0]?.label).toBe('repo-archetype:front-page');
+    expect(candidates.some((candidate) => candidate.label.startsWith('db:')))
+      .toBe(true);
+  });
+
+  it('does not let representative DB posts override profolio generic single-post layout planning', () => {
+    const repoManifest = {
+      themeDeepAnalysis: {
+        themeSlug: 'profolio-fse',
+        routeSources: [
+          {
+            routeFamily: 'single',
+            entryFile: 'templates/single.html',
+            sectionBlueprint: ['cover', 'post-content', 'sidebar'],
+          },
+        ],
+      },
+      structureHints: {
+        entrySourceChains: [
+          {
+            entryFile: 'templates/single.html',
+            routeHint: 'single',
+            chainFiles: [
+              'templates/single.html',
+              'patterns/single-post.php',
+            ],
+            composedSource:
+              '<!-- wp:pattern {"slug":"profolio-fse/single-post"} /-->',
+            assetFiles: [],
+            runtimeFiles: [],
+            blockTypes: ['core/pattern', 'core/post-content'],
+            headingTexts: [],
+            notes: ['Nested pattern expansion: profolio-fse/single-post'],
+          },
+        ],
+      },
+      themeTypeHints: {
+        themeSlug: 'profolio-fse',
+      },
+    } as unknown as RepoThemeManifest;
+    const content = {
+      pages: [],
+      posts: [
+        {
+          id: 43,
+          slug: 'abcdef',
+          title: 'Cach tich hop API cua CASSO',
+          content: `
+<!-- wp:paragraph --><p>Long representative post body.</p><!-- /wp:paragraph -->
+<!-- wp:image {"id":81} --><figure><img src="/uploads/casso.png" /></figure><!-- /wp:image -->
+<!-- wp:list --><ul><li>Step one</li><li>Step two</li></ul><!-- /wp:list -->
+`,
+        },
+      ],
+      dbTemplates: [],
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'profolio-fse',
+        frontPageRoute: null,
+        postsPageRoute: null,
+        routes: [],
+        templateRecords: [],
+        navigationRecords: [],
+        notes: [],
+      },
+    } as unknown as DbContentResult;
+
+    const candidates = buildPlanningSourceCandidates({
+      componentPlan: {
+        templateName: 'single',
+        type: 'page',
+        route: '/post/:slug',
+        dataNeeds: ['post-detail', 'posts'],
+      },
+      templateSource:
+        '<!-- wp:template-part {"slug":"header"} /--><!-- wp:pattern {"slug":"profolio-fse/single-post"} /--><!-- wp:template-part {"slug":"footer"} /-->',
+      sourceMap: new Map<string, string>(),
+      content,
+      repoManifest,
+      findRepoEntrySourceChain: (templateName, manifest) =>
+        manifest?.structureHints.entrySourceChains.find(
+          (entry) => entry.entryFile === `templates/${templateName}.html`,
+        ),
+      inferSourceFile: (templateName) => `templates/${templateName}.html`,
+      findRepresentativePagesForTemplate: () => [],
+      findRepresentativePostsForTemplate: () => content.posts,
+    });
+
+    expect(candidates[0]?.label).toBe('repo-archetype:single');
+    expect(candidates.some((candidate) => candidate.label === 'db:post:abcdef'))
+      .toBe(false);
   });
 });
