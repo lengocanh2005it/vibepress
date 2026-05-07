@@ -584,3 +584,125 @@ describe('PlannerService shared chrome visual plans', () => {
     );
   });
 });
+
+describe('PlannerService expected FSE template scoping', () => {
+  const createService = () =>
+    new PlannerService(
+      { getModel: () => 'test-model' } as any,
+      { get: () => undefined } as ConfigService,
+      {} as any,
+      {} as any,
+      { scopeRequestToComponent: () => undefined } as any,
+      {} as any,
+      {
+        prefersBlockTreeSharedChrome: (themeSlug?: string | null) =>
+          themeSlug === 'profolio-fse',
+      } as any,
+    );
+
+  it('drops unused FSE custom templates, Woo templates, and unreferenced parts', () => {
+    const service = createService();
+    const theme = {
+      type: 'fse',
+      templates: [
+        {
+          name: 'front-page',
+          markup:
+            '<!-- vibepress:part:start header --><header></header><!-- vibepress:part:end header -->',
+        },
+        {
+          name: 'page',
+          markup:
+            '<!-- vibepress:part:start footer --><footer></footer><!-- vibepress:part:end footer -->',
+        },
+        { name: 'template-about', markup: '<main>About layout</main>' },
+        { name: 'template-contact', markup: '<main>Contact layout</main>' },
+        { name: 'template-services', markup: '<main>Services layout</main>' },
+        { name: 'single-product', markup: '<main>Product detail</main>' },
+        { name: 'archive-product', markup: '<main>Products</main>' },
+      ],
+      parts: [
+        { name: 'header', markup: '<header></header>' },
+        { name: 'footer', markup: '<footer></footer>' },
+        { name: 'newsletter', markup: '<aside></aside>' },
+      ],
+      tokens: undefined,
+    } as any;
+    const content = {
+      pages: [
+        { id: 1, slug: 'home', title: 'Home', template: '', content: '' },
+        { id: 2, slug: 'about', title: 'About', template: '', content: '' },
+        {
+          id: 3,
+          slug: 'contact',
+          title: 'Contact',
+          template: 'wp-custom-template-template-contact',
+          content: '',
+        },
+      ],
+      posts: [],
+      dbTemplates: [],
+      dbNavigations: [],
+      dbGlobalStyles: [],
+      parsedGlobalStyles: null,
+      customCssEntries: [],
+      taxonomies: [],
+      mediaAttachments: [],
+      plugins: [],
+      customPostTypes: [],
+      capabilities: { activePluginSlugs: [] },
+      readingSettings: {
+        showOnFront: 'page',
+        pageOnFrontId: 1,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'generic-fse',
+        routes: [
+          {
+            pageId: 1,
+            slug: 'home',
+            title: 'Home',
+            routePath: '/',
+            template: '',
+            templateCandidates: ['front-page', 'page'],
+            matchedDbTemplateSlugs: [],
+            pageBlockTypes: [],
+            isFrontPage: true,
+            isPostsPage: false,
+          },
+          {
+            pageId: 2,
+            slug: 'about',
+            title: 'About',
+            routePath: '/about',
+            template: '',
+            templateCandidates: ['template-about', 'page'],
+            matchedDbTemplateSlugs: [],
+            pageBlockTypes: [],
+            isFrontPage: false,
+            isPostsPage: false,
+          },
+        ],
+      },
+    } as any;
+
+    const templateNames = service.getExpectedTemplateNames(theme, content);
+
+    expect(templateNames).toEqual(
+      expect.arrayContaining([
+        'front-page',
+        'page',
+        'template-about',
+        'template-contact',
+        'header',
+        'footer',
+      ]),
+    );
+    expect(templateNames).not.toContain('template-services');
+    expect(templateNames).not.toContain('single-product');
+    expect(templateNames).not.toContain('archive-product');
+    expect(templateNames).not.toContain('newsletter');
+    expect(templateNames).not.toContain('archive');
+  });
+});

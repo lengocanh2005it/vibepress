@@ -2504,16 +2504,16 @@ export default ${componentName};`;
         return `${indent}<hr${this.blockNodeClassAttr(node)}${styleAttr} />`;
 
       case 'post-title':
-        return `${indent}<h1 className="post-title"${styleAttr}>{item?.title}</h1>`;
+        return `${indent}<h1${this.blockNodeClassAttr(node, ['post-title'])}${styleAttr}>{item?.title}</h1>`;
 
       case 'post-featured-image':
-        return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''} className="post-featured-image"${styleAttr} />`;
+        return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''}${this.blockNodeClassAttr(node, ['post-featured-image'])}${styleAttr} />`;
 
       case 'post-content':
-        return `${indent}<div className="post-content"${styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
+        return `${indent}<div${this.blockNodeClassAttr(node, ['post-content'])}${styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
 
       case 'post-excerpt':
-        return `${indent}<p className="post-excerpt"${styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
+        return `${indent}<p${this.blockNodeClassAttr(node, ['post-excerpt'])}${styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
 
       case 'post-date':
         return this.renderBlockTreePostDate(node, depth);
@@ -2529,7 +2529,7 @@ export default ${componentName};`;
         );
 
       case 'post-meta':
-        return `${indent}<div className="post-meta"${styleAttr}>
+        return `${indent}<div${this.blockNodeClassAttr(node, ['post-meta'])}${styleAttr}>
 ${indent}  {metaSource ? (
 ${indent}    <>
 ${indent}      <time dateTime={metaSource.date}>{new Date(metaSource.date).toLocaleDateString()}</time>
@@ -2539,10 +2539,10 @@ ${indent}  ) : null}
 ${indent}</div>`;
 
       case 'post-navigation':
-        return `${indent}<nav className="post-navigation">{/* prev/next */}</nav>`;
+        return `${indent}<nav${this.blockNodeClassAttr(node, ['post-navigation'])}>{/* prev/next */}</nav>`;
 
       case 'comments':
-        return `${indent}<div className="comments-area">{/* comments */}</div>`;
+        return `${indent}<div${this.blockNodeClassAttr(node, ['comments-area'])}>{/* comments */}</div>`;
 
       case 'cart':
         return this.renderBlockTreeCart(node, ctx, depth);
@@ -2674,6 +2674,20 @@ ${indent}</section>`;
     };
     visit(node);
     return matches;
+  }
+
+  private collectDescendantCustomClassNames(
+    node: BlockNode,
+    matcher: (node: BlockNode) => boolean,
+  ): string[] {
+    return [
+      ...new Set(
+        this.findBlockTreeDescendants(node, matcher)
+          .flatMap((candidate) => candidate.customClassNames ?? [])
+          .map((className) => className.trim())
+          .filter(Boolean),
+      ),
+    ];
   }
 
   private escapeJsxText(value: string): string {
@@ -2879,8 +2893,16 @@ ${indent}</div>`;
     const collectionName = isProductQuery ? 'products' : 'posts';
     const itemName = isProductQuery ? 'product' : 'post';
     const routePrefix = isProductQuery ? '/product/' : '/post/';
+    const postTemplateClasses = this.collectDescendantCustomClassNames(
+      node,
+      (candidate) => candidate.kind === 'post-template',
+    );
+    const listClassName = this.appendOptionalCustomClasses(
+      'flex flex-col gap-2',
+      postTemplateClasses,
+    );
     return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
-${indent}  <ul className="flex flex-col gap-2">
+${indent}  <ul className="${listClassName}">
 ${indent}    {${collectionName}.slice(0, 5).map((${itemName}) => (
 ${indent}      <li key={${itemName}.id}>
 ${indent}        <Link to={'${routePrefix}' + ${itemName}.slug} className="hover:underline underline-offset-4">
@@ -4689,9 +4711,13 @@ ${indent}) : null}`;
     const postListLayout = this.resolvePostListLayoutContract(s);
     const isEditorialList = this.isEditorialPostListLayout(s, postListLayout);
     const hasMeta = s.showDate || s.showAuthor || s.showCategory;
-    const gridClass = isGrid
+    const gridClassBase = isGrid
       ? `grid grid-cols-1 sm:grid-cols-2 ${cols === 3 ? 'lg:grid-cols-3' : ''} gap-6`
       : 'flex flex-col';
+    const gridClass = this.appendOptionalCustomClasses(
+      gridClassBase,
+      s.customClassNames,
+    );
     const titleMetaRowClass = this.postListTitleMetaRowClass(postListLayout);
     const titleMetaRowStyle = postListLayout.itemGap
       ? this.buildStyleAttr({ gap: postListLayout.itemGap })

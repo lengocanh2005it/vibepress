@@ -8,6 +8,7 @@ import type { GeneratedComponent } from './react-generator.service.js';
 import type {
   BlockNode,
   CardGridSection,
+  ComponentVisualPlan,
   SectionPlan,
 } from './visual-plan.schema.js';
 import {
@@ -61,24 +62,29 @@ export class GeneratedCodeReviewService {
   }): Promise<GeneratedCodeReviewResult> {
     const { components, plan, modelName, mode = 'warn', logPath } = input;
     const resolvedModel = modelName ?? this.llmFactory.getModel();
-    const topLevelComponents = components.filter(
-      (comp) => !comp.isSubComponent,
+    const reviewableComponents = components.filter(
+      (comp) =>
+        !comp.isSubComponent || comp.generationMode !== 'deterministic',
     );
     const failures: { componentName: string; message: string }[] = [];
 
     this.logger.log(
-      `[AI Generated Code Review] Reviewing ${topLevelComponents.length} top-level components with ${resolvedModel}`,
+      `[AI Generated Code Review] Reviewing ${reviewableComponents.length} generated component(s) with ${resolvedModel}`,
     );
     await this.log(
       logPath,
-      `[AI Generated Code Review] Reviewing ${topLevelComponents.length} top-level components with ${resolvedModel}`,
+      `[AI Generated Code Review] Reviewing ${reviewableComponents.length} generated component(s) with ${resolvedModel}`,
     );
 
-    for (const component of topLevelComponents) {
+    for (const component of reviewableComponents) {
       const contract =
         plan.find((item) => item.componentName === component.name) ?? null;
-      const reviewed = await this.reviewComponent(
+      const reviewTarget = this.expandComponentTreeForReview(
         component,
+        components,
+      );
+      const reviewed = await this.reviewComponent(
+        reviewTarget,
         contract,
         plan,
         resolvedModel,
@@ -86,7 +92,7 @@ export class GeneratedCodeReviewService {
       );
       const effectiveReview = this.applyDeterministicIssues(
         reviewed.review,
-        component,
+        reviewTarget,
         contract,
       );
       const attemptSuffix =
@@ -94,7 +100,7 @@ export class GeneratedCodeReviewService {
 
       const blockingIssues = this.getBlockingIssues(
         effectiveReview,
-        component,
+        reviewTarget,
         contract,
       );
 
@@ -215,13 +221,27 @@ export class GeneratedCodeReviewService {
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
     const runtimeRenderer = contract?.runtimeRenderer ?? null;
     const description = contract?.description ?? '(none)';
+    const visualPlan = contract?.visualPlan ?? component.visualPlan;
     const visualSectionTypes =
-      contract?.visualPlan?.sections.map((section) => section.type) ?? [];
+      visualPlan?.sections.map((section) => section.type) ?? [];
     const visualSections =
       visualSectionTypes.length > 0 ? visualSectionTypes.join(', ') : '(none)';
-    const blockTreeSummary = this.buildBlockTreeDetailLines(contract);
+    const blockTreeSummary = this.buildBlockTreeDetailLines(
+      contract,
+      visualPlan,
+    );
     const knownRoutes = this.buildKnownRoutesLines(plan);
     const isArchive = component.name === 'Archive';
+    const partialRules =
+      component.isSubComponent === true
+        ? `- For source-bound child components:
+  - dataNeeds describe props supplied by the parent page; do NOT accept direct \`fetch(...)\`, \`/api/*\`, or \`useParams()\` in the child.
+  - Review the child against its approved visual sections and source block hierarchy. Missing source-backed headings, body copy, images, cards, or important wrapper classes are blocking issues.
+  - Do NOT fail only because the child does not fetch data itself; it should render from props such as \`posts\`, \`products\`, \`pageDetail\`, \`postDetail\`, \`loading\`, and \`error\` when declared.`
+        : `- For ordinary partial components, be much more lenient:
+  - do NOT fail only because they fetch optional helper data
+  - do NOT fail only because approved data is fetched but not heavily used
+  - do NOT fail on minor layout/section interpretation differences`;
 
     return `Review this generated React component against its approved contract.
 
@@ -241,10 +261,7 @@ Rules:
   4. JSX/TSX structure is likely broken
   5. imports/variables/hooks are clearly inconsistent with the code
   6. component materially redesigns the approved WordPress layout instead of preserving it
-- For partial components, be much more lenient:
-  - do NOT fail only because they fetch optional helper data
-  - do NOT fail only because approved data is fetched but not heavily used
-  - do NOT fail on minor layout/section interpretation differences
+${partialRules}
 - Do NOT fail on component/function/export naming differences if the file still clearly implements the approved component.
 - If the approved visual sections include \`comments\`, comments fetching/rendering is justified.
 - If the approved visual sections include \`modal\`, \`tabs\`, \`accordion\`, or \`carousel\`, keep real interactive wiring plus the expected Spectra/UAGB-compatible structural markers. Do NOT flatten them into static cards/columns.
@@ -277,7 +294,7 @@ Approved contract:
 - description: ${description}
 - approved visual sections: ${visualSections}
 - approved visual section details:
-${this.buildVisualSectionDetailLines(contract)}
+${this.buildVisualSectionDetailLines(contract, visualPlan)}
 - approved block hierarchy:
 ${blockTreeSummary}
 - known app routes:
@@ -296,6 +313,61 @@ Generated TSX:
 \`\`\`tsx
 ${component.code}
 \`\`\``;
+  }
+
+  private expandComponentTreeForReview(
+    component: GeneratedComponent,
+    components: GeneratedComponent[],
+  ): GeneratedComponent {
+    const byName = new Map(components.map((item) => [item.name, item]));
+    const visited = new Set<string>();
+    const chunks: string[] = [];
+
+    const collect = (current: GeneratedComponent) => {
+      if (visited.has(current.name)) return;
+      visited.add(current.name);
+      chunks.push(
+        current.name === component.name
+          ? current.code
+          : `// Imported generated subcomponent: ${current.name}\n${current.code}`,
+      );
+      for (const importedName of this.extractGeneratedComponentImports(
+        current.code,
+      )) {
+        const imported = byName.get(importedName);
+        if (imported) collect(imported);
+      }
+    };
+
+    collect(component);
+    if (chunks.length <= 1) return component;
+    return {
+      ...component,
+      code: chunks.join('\n\n/* generated import boundary */\n\n'),
+    };
+  }
+
+  private extractGeneratedComponentImports(code: string): string[] {
+    const names: string[] = [];
+    const matches = [
+      ...code.matchAll(/import\s+([A-Z][A-Za-z0-9]*)\s+from\s+['"]([^'"]+)['"]/g),
+    ];
+    for (const match of matches) {
+      const localName = match[1];
+      const importPath = match[2];
+      if (!importPath.startsWith('./') && !importPath.startsWith('../')) {
+        continue;
+      }
+      const basename = importPath
+        .replace(/^\.\/|^\.\.\//, '')
+        .split('/')
+        .pop()
+        ?.replace(/\.(?:js|jsx|ts|tsx)$/, '');
+      if (basename && basename === localName) {
+        names.push(localName);
+      }
+    }
+    return [...new Set(names)];
   }
 
   private buildApiContractLines(
@@ -391,9 +463,10 @@ ${component.code}
 
   private buildVisualSectionDetailLines(
     contract: PlanResult[number] | null,
+    visualPlan?: ComponentVisualPlan,
   ): string {
     const sections = [
-      ...(contract?.visualPlan?.sections ?? []),
+      ...(visualPlan?.sections ?? contract?.visualPlan?.sections ?? []),
       ...(contract?.draftSections ?? []),
     ];
     if (sections.length === 0) return '- (none)';
@@ -448,8 +521,9 @@ ${component.code}
 
   private buildBlockTreeDetailLines(
     contract: PlanResult[number] | null,
+    visualPlan?: ComponentVisualPlan,
   ): string {
-    const nodes = contract?.visualPlan?.blockTree ?? [];
+    const nodes = visualPlan?.blockTree ?? contract?.visualPlan?.blockTree ?? [];
     if (nodes.length === 0) return '- (none)';
 
     const lines: string[] = [];
@@ -521,7 +595,7 @@ ${component.code}
     contract: PlanResult[number] | null,
   ): CodeReviewIssue[] {
     const issues: CodeReviewIssue[] = [];
-    const sections = contract?.visualPlan?.sections ?? [];
+    const sections = contract?.visualPlan?.sections ?? component.visualPlan?.sections ?? [];
     const normalizedCode = this.normalizeForTextMatch(component.code);
     const isPageComponent = (contract?.type ?? component.type) === 'page';
     const fixedSlug = contract?.fixedSlug ?? component.fixedSlug ?? null;
@@ -1158,6 +1232,7 @@ ${component.code}
 
     if (
       isPartial &&
+      component.isSubComponent !== true &&
       !messages.some((message) =>
         /wrong endpoint|incorrect api endpoint|runtime|broken|missing import|missing variable|jsx|syntax/.test(
           message,

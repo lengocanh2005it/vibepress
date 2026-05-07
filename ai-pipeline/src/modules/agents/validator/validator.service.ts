@@ -963,15 +963,17 @@ export class ValidatorService {
     // "all pages." → `pages.` is followed by a space, not \w → no match.
     const dataVars = ['menus', 'posts', 'pages', 'siteInfo', 'footerColumns'];
     const missingState: string[] = [];
-    for (const varName of dataVars) {
-      const jsUsage = new RegExp(
-        `\\{\\s*${varName}\\b|\\b${varName}\\??\\.[a-zA-Z_$]|\\b${varName}\\[`,
-      );
-      if (!jsUsage.test(code)) continue;
-      const hasDeclared = new RegExp(`const\\s+\\[\\s*${varName}\\b`).test(
-        code,
-      );
-      if (!hasDeclared) missingState.push(varName);
+    if (context.isSubComponent !== true) {
+      for (const varName of dataVars) {
+        const jsUsage = new RegExp(
+          `\\{\\s*${varName}\\b|\\b${varName}\\??\\.[a-zA-Z_$]|\\b${varName}\\[`,
+        );
+        if (!jsUsage.test(code)) continue;
+        const hasDeclared = new RegExp(`const\\s+\\[\\s*${varName}\\b`).test(
+          code,
+        );
+        if (!hasDeclared) missingState.push(varName);
+      }
     }
     if (missingState.length > 0) {
       violations.push(

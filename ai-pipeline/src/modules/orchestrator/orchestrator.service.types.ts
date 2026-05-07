@@ -20,6 +20,7 @@ export interface JobRuntimeControl {
   stopRequested: boolean;
   deleteRequested: boolean;
   skipVisualCompareRequested?: boolean;
+  visualCompareSkipResolver?: (reason?: string) => void;
   finalized: boolean;
   hasEditRequest?: boolean;
   pendingEditRequest?: RunPipelineDto['editRequest'];

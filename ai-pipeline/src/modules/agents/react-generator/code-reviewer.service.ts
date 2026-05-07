@@ -1532,6 +1532,14 @@ export class CodeReviewerService {
       return { enabled: false, reason: 'not eligible' };
     }
 
+    if (repoManifest?.themeTypeHints?.themeSlug === 'profolio-fse') {
+      return {
+        enabled: false,
+        reason:
+          'profolio-fse pages use source-cluster child component composition',
+      };
+    }
+
     if (
       shouldPreferThemeSourceFaithfulDeterministicPage({
         componentPlan,

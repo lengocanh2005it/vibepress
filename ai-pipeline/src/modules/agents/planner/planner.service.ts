@@ -628,6 +628,31 @@ export class PlannerService {
         `Done: ${withPlan}/${result.length} components have pre-computed visual plans`,
       ),
     );
+    const missingVisualPlans = result.filter((component) => !component.visualPlan);
+    if (missingVisualPlans.length > 0) {
+      const runtimeOnly = missingVisualPlans.filter(
+        (component) => component.runtimeRenderer === 'runtime-page',
+      );
+      const actionable = missingVisualPlans.filter(
+        (component) => component.runtimeRenderer !== 'runtime-page',
+      );
+      const parts: string[] = [];
+      if (actionable.length > 0) {
+        parts.push(
+          `fallbackAI=${actionable.map((component) => component.componentName).join(', ')}`,
+        );
+      }
+      if (runtimeOnly.length > 0) {
+        parts.push(
+          `runtimeRenderer=${runtimeOnly.map((component) => component.componentName).join(', ')}`,
+        );
+      }
+      this.logger.log(
+        this.formatPhaseCLog(
+          `Missing visual plans: ${parts.join(' | ')}`,
+        ),
+      );
+    }
 
     return result;
   }
@@ -7263,7 +7288,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       existingTemplateNames.has('author') ||
       existingTemplateNames.has('category');
 
-    if (!hasArchiveVariant) {
+    if (!hasArchiveVariant && (!content || this.hasPostArchiveEvidence(content))) {
       filteredTemplates.push(
         createFallbackTemplate(
           'archive',
@@ -7368,11 +7393,14 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     theme: PhpParseResult | BlockParseResult,
     content?: DbContentResult,
     repoManifest?: RepoThemeManifest,
+    options?: { logScope?: boolean },
   ): string[] {
-    const allTemplates =
-      theme.type === 'classic'
-        ? theme.templates
-        : [...theme.templates, ...theme.parts];
+    const allTemplates = this.getGenerationTargetTemplates(
+      theme,
+      content,
+      repoManifest,
+      options?.logScope !== false,
+    );
     const templateNames = this.ensureStandardTemplates(
       allTemplates,
       theme.type,
@@ -7386,6 +7414,232 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
         : [],
       readingSettings: content?.readingSettings,
     }).orderedTemplateNames;
+  }
+
+  private getGenerationTargetTemplates(
+    theme: PhpParseResult | BlockParseResult,
+    content?: DbContentResult,
+    repoManifest?: RepoThemeManifest,
+    logScope = true,
+  ): Array<{ name: string; html?: string; markup?: string }> {
+    if (theme.type === 'classic') {
+      if (logScope) {
+        this.logger.log(
+          `[Phase A] Template scope: totalInventory=${theme.templates.length}, planned=${theme.templates.length}`,
+        );
+      }
+      return theme.templates;
+    }
+    if (!content) {
+      const allTargets = [...theme.templates, ...theme.parts];
+      if (logScope) {
+        this.logger.log(
+          `[Phase A] Template scope: totalInventory=${allTargets.length} (templates=${theme.templates.length}, parts=${theme.parts.length}), planned=${allTargets.length} (no DB content filter)`,
+        );
+      }
+      return allTargets;
+    }
+
+    const usedTemplateBases = this.collectUsedFseTemplateBases(content);
+    const keptTemplates = theme.templates.filter((template) =>
+      this.shouldKeepFseTemplateTarget(template.name, usedTemplateBases, content),
+    );
+    const referencedPartBases =
+      this.collectReferencedTemplatePartBases(keptTemplates);
+    const declaredPartBases = new Set(
+      (repoManifest?.themeJsonSummary?.templatePartAreas ?? [])
+        .map((part) => this.normalizeWordPressTemplateName(part.name))
+        .filter(Boolean),
+    );
+    const keptParts = theme.parts.filter((part) => {
+      const base = this.normalizeWordPressTemplateName(part.name);
+      if (!base) return true;
+      if (referencedPartBases.has(base)) return true;
+      if (
+        declaredPartBases.has(base) &&
+        ['header', 'footer'].includes(base)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    if (logScope) {
+      this.logSkippedFseTargets('template', theme.templates, keptTemplates);
+      this.logSkippedFseTargets('part', theme.parts, keptParts);
+      this.logger.log(
+        `[Phase A] Template scope: totalInventory=${theme.templates.length + theme.parts.length} (templates=${theme.templates.length}, parts=${theme.parts.length}), planned=${keptTemplates.length + keptParts.length} (templates=${keptTemplates.length}, parts=${keptParts.length})`,
+      );
+    }
+
+    return [...keptTemplates, ...keptParts];
+  }
+
+  private collectUsedFseTemplateBases(content: DbContentResult): Set<string> {
+    const used = new Set<string>();
+    const add = (value?: string | null) => {
+      const normalized = this.normalizeWordPressTemplateName(value);
+      if (normalized) used.add(normalized);
+    };
+    const addPageSlugFamily = (slug?: string | null) => {
+      const normalized = this.normalizeWordPressTemplateName(slug);
+      if (!normalized) return;
+      used.add(normalized);
+      used.add(`template-${normalized}`);
+      used.add(`page-${normalized}`);
+    };
+
+    for (const page of content.pages ?? []) {
+      add(page.template);
+      addPageSlugFamily(page.slug);
+    }
+
+    for (const route of content.themeResolvedContent?.routes ?? []) {
+      add(route.template);
+      addPageSlugFamily(route.slug);
+      for (const templateName of route.templateCandidates ?? []) add(templateName);
+      for (const templateName of route.matchedDbTemplateSlugs ?? []) {
+        add(templateName);
+      }
+    }
+
+    return used;
+  }
+
+  private shouldKeepFseTemplateTarget(
+    templateName: string,
+    usedTemplateBases: Set<string>,
+    content: DbContentResult,
+  ): boolean {
+    const base = this.normalizeWordPressTemplateName(templateName);
+    if (!base) return true;
+    if (usedTemplateBases.has(base)) return true;
+
+    if (this.isWooCommerceTemplateBase(base)) {
+      return this.hasWooCommerceContentEvidence(content);
+    }
+
+    if (this.isCoreFseTemplateBase(base)) {
+      return this.shouldKeepCoreFseTemplateBase(base, content);
+    }
+
+    return false;
+  }
+
+  private isCoreFseTemplateBase(templateName: string): boolean {
+    if (
+      [
+        '404',
+        'archive',
+        'attachment',
+        'blog',
+        'front-page',
+        'frontend-page',
+        'home',
+        'index',
+        'page',
+        'search',
+        'single',
+        'single-post',
+        'singular',
+      ].includes(templateName)
+    ) {
+      return true;
+    }
+    return /^(author|category|date|tag|taxonomy)(?:-.+)?$/.test(templateName);
+  }
+
+  private shouldKeepCoreFseTemplateBase(
+    templateName: string,
+    content: DbContentResult,
+  ): boolean {
+    if (
+      ['front-page', 'frontend-page', 'home', 'index', '404'].includes(
+        templateName,
+      )
+    ) {
+      return true;
+    }
+    if (['page', 'singular', 'attachment'].includes(templateName)) {
+      return (content.pages?.length ?? 0) > 0;
+    }
+    if (['single', 'single-post'].includes(templateName)) {
+      return (content.posts?.length ?? 0) > 0;
+    }
+    if (['archive', 'blog', 'search'].includes(templateName)) {
+      return this.hasPostArchiveEvidence(content);
+    }
+    if (/^(author|category|date|tag|taxonomy)(?:-.+)?$/.test(templateName)) {
+      return this.hasPostArchiveEvidence(content);
+    }
+    return true;
+  }
+
+  private isWooCommerceTemplateBase(templateName: string): boolean {
+    return (
+      templateName === 'single-product' ||
+      templateName === 'archive-product' ||
+      /^taxonomy-product[-_]/.test(templateName) ||
+      /^product[-_]/.test(templateName)
+    );
+  }
+
+  private hasWooCommerceContentEvidence(content: DbContentResult): boolean {
+    return (
+      (content.capabilities?.activePluginSlugs ?? []).some((slug) =>
+        /woocommerce|woo/i.test(slug),
+      ) ||
+      (content.plugins ?? []).some(
+        (plugin) => plugin.active && /woocommerce|woo/i.test(plugin.slug),
+      ) ||
+      (content.customPostTypes ?? []).some(
+        (postType) =>
+          postType.postType === 'product' && Number(postType.count ?? 0) > 0,
+      )
+    );
+  }
+
+  private hasPostArchiveEvidence(content: DbContentResult): boolean {
+    return (
+      (content.posts?.length ?? 0) > 0 ||
+      (content.readingSettings?.pageForPostsId ?? null) !== null ||
+      (content.taxonomies ?? []).some((taxonomy) => {
+        const terms = (taxonomy as { terms?: unknown[] }).terms;
+        return Array.isArray(terms) && terms.length > 0;
+      })
+    );
+  }
+
+  private collectReferencedTemplatePartBases(
+    templates: Array<{ name: string; markup: string }>,
+  ): Set<string> {
+    const bases = new Set<string>();
+    for (const template of templates) {
+      const source = template.markup ?? '';
+      for (const match of source.matchAll(
+        /<!--\s*vibepress:part:start\s+(.+?)\s*-->/g,
+      )) {
+        const normalized = this.normalizeWordPressTemplateName(match[1]);
+        if (normalized) bases.add(normalized);
+      }
+    }
+    return bases;
+  }
+
+  private logSkippedFseTargets<T extends { name: string }>(
+    kind: 'template' | 'part',
+    original: T[],
+    kept: T[],
+  ): void {
+    const keptNames = new Set(kept.map((item) => item.name));
+    const dropped = original
+      .map((item) => item.name)
+      .filter((name) => !keptNames.has(name));
+    if (dropped.length === 0) return;
+
+    this.logger.log(
+      `[Phase A] Skipping unused FSE ${kind}(s): ${dropped.join(', ')}`,
+    );
   }
 
   private formatPhaseAComponentTargets(templateNames: string[]): string {
@@ -7443,7 +7697,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       ? (trimmed.split('//').pop() ?? trimmed)
       : trimmed;
     const base = unscoped.split('/').pop() ?? unscoped;
-    return base.replace(/\.(php|html)$/i, '').toLowerCase();
+    return base
+      .replace(/\.(php|html)$/i, '')
+      .replace(/^wp-custom-template-/, '')
+      .toLowerCase();
   }
 
   private isOptionalCustomPageTemplate(templateName: string): boolean {

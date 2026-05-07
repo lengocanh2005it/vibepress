@@ -486,6 +486,7 @@ describe('CodeGeneratorService', () => {
             {
               kind: 'post-template',
               blockName: 'core/post-template',
+              customClassNames: ['products-block-post-template'],
               children: [
                 {
                   kind: 'product-image',
@@ -507,6 +508,7 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('const [products, setProducts] = useState<Product[]>([]);');
     expect(code).toContain('products.slice(0, 5).map((product)');
     expect(code).toContain("'/product/' + product.slug");
+    expect(code).toContain('products-block-post-template');
     expect(code).not.toContain('posts.slice(0, 5).map((post)');
   });
 
@@ -904,6 +906,7 @@ describe('CodeGeneratorService', () => {
           resource: 'products',
           layout: 'grid-3',
           showFeaturedImage: true,
+          customClassNames: ['products-block-post-template'],
         },
       ],
       blockTree: [
@@ -914,6 +917,7 @@ describe('CodeGeneratorService', () => {
             {
               kind: 'post-template',
               blockName: 'post-template',
+              customClassNames: ['products-block-post-template'],
               children: [
                 {
                   kind: 'product-image',
@@ -933,6 +937,7 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('/api/post-types/product/posts');
+    expect(code).toContain('products-block-post-template');
     expect(code).not.toContain('/api/posts?page=');
     expect(code).not.toContain('const [posts, setPosts]');
   });
