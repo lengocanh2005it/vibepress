@@ -772,6 +772,12 @@ const resolvePreviewBaseUrl = (previewUrl: string): string => {
     if (isInternal && !isCurrentHostInternal) {
       return parsed.pathname + parsed.search + parsed.hash;
     }
+
+    // Same host — use relative path so the iframe inherits the current protocol,
+    // preventing mixed-content blocks when the page is on HTTPS but preview URL is HTTP.
+    if (parsed.hostname === currentHost) {
+      return parsed.pathname + parsed.search + parsed.hash;
+    }
   } catch {
     // Relative preview URLs should be used as-is.
   }
@@ -848,7 +854,7 @@ const SplitView: React.FC = () => {
       error: null,
     });
   const previousPreviewStageRef = useRef<string | undefined>(undefined);
-  const startedAtRef = useRef<number>(Date.now());
+  const startedAtRef = useRef<number>(0);
 
   const getConnectionBadge = () => {
     switch (sse.connectionState) {

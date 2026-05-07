@@ -426,6 +426,9 @@ const VisualEditor: React.FC = () => {
       if (isInternal && window.location.hostname !== "localhost") {
         return parsed.pathname + parsed.search + parsed.hash;
       }
+      if (parsed.hostname === window.location.hostname) {
+        return parsed.pathname + parsed.search + parsed.hash;
+      }
     } catch {
       // not a valid absolute URL — return as-is
     }
