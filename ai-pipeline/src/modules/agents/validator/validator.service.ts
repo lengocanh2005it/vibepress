@@ -1453,6 +1453,7 @@ export class ValidatorService {
       renderContract.structure.renderMode === 'block-tree';
     const issues: string[] = [];
     const normalizedCode = this.normalizeForTextMatch(code);
+    const normalizedCodePlainText = this.normalizeCodeForPlainTextMatch(code);
     const semanticCoverageSourceNodeIds = strictBlockTree
       ? []
       : this.collectSemanticCoverageSourceNodeIds(
@@ -1474,7 +1475,11 @@ export class ValidatorService {
     const assetLimit = strictBlockTree ? 6 : 3;
 
     for (const text of staticTexts.slice(0, textLimit)) {
-      if (!normalizedCode.includes(this.normalizeForTextMatch(text))) {
+      const normalizedText = this.normalizeForTextMatch(text);
+      if (
+        !normalizedCode.includes(normalizedText) &&
+        !normalizedCodePlainText.includes(normalizedText)
+      ) {
         issues.push(
           `Missing source-backed static text "${this.summarizeRenderContractValue(text)}".`,
         );
@@ -1754,6 +1759,10 @@ export class ValidatorService {
       .replace(/\s+/g, ' ')
       .trim();
     return plainText || undefined;
+  }
+
+  private normalizeCodeForPlainTextMatch(code: string): string {
+    return this.normalizeForTextMatch(this.stripHtmlToPlainText(code) ?? code);
   }
 
   private isStaticRenderContractTextValue(value: string | undefined): boolean {

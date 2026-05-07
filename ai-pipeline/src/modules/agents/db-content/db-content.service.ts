@@ -453,115 +453,10 @@ export class DbContentService {
     if (normalizedTemplate) {
       candidates.add(normalizedTemplate);
     }
-    for (const candidate of this.inferSemanticTemplateCandidates(input)) {
-      candidates.add(candidate);
-    }
     if (candidates.size === 0) {
       candidates.add('page');
     }
     return Array.from(candidates);
-  }
-
-  private inferSemanticTemplateCandidates(input: {
-    page: WpPage;
-    routePath: string;
-    isFrontPage: boolean;
-    isPostsPage: boolean;
-    navigationLabels: string[];
-  }): string[] {
-    if (input.isFrontPage || input.isPostsPage) return [];
-
-    const textParts = [
-      input.page.title,
-      input.page.slug,
-      input.routePath,
-      ...input.navigationLabels,
-      this.extractPlainTextFromMarkup(input.page.content).slice(0, 1200),
-    ];
-    const haystack = textParts.filter(Boolean).join(' \n ').toLowerCase();
-    const blockTypes = new Set(
-      this.extractBlockTypesFromMarkup(input.page.content),
-    );
-    const familyScores = new Map<string, number>();
-    const addScore = (family: string, value: number) => {
-      familyScores.set(family, (familyScores.get(family) ?? 0) + value);
-    };
-    const containsAny = (patterns: RegExp[]): boolean =>
-      patterns.some((pattern) => pattern.test(haystack));
-
-    if (
-      containsAny([
-        /\babout\b/,
-        /\bour story\b/,
-        /\bwho we are\b/,
-        /\bcompany\b/,
-        /\bmission\b/,
-        /\bvision\b/,
-        /\bteam\b/,
-        /\bchúng tôi\b/,
-        /\bsứ mệnh\b/,
-      ])
-    ) {
-      addScore('template-about', 4);
-    }
-    if (
-      containsAny([
-        /\bservice\b/,
-        /\bservices\b/,
-        /\btechnology\b/,
-        /\btech\b/,
-        /\bsolution\b/,
-        /\bsolutions\b/,
-        /\bapi\b/,
-        /\btự động hóa\b/,
-        /\bthanh toán\b/,
-        /\bcông nghệ\b/,
-      ])
-    ) {
-      addScore('template-services', 4);
-    }
-    if (
-      containsAny([
-        /\bcontact\b/,
-        /\bget in touch\b/,
-        /\breach us\b/,
-        /\baddress\b/,
-        /\bemail\b/,
-        /\bphone\b/,
-        /\bliên hệ\b/,
-      ])
-    ) {
-      addScore('template-contact', 5);
-    }
-    if (
-      containsAny([/\bblog\b/, /\bnews\b/, /\barticles?\b/, /\binsights?\b/])
-    ) {
-      addScore('blog-right-sidebar', 4);
-    }
-
-    if (
-      blockTypes.has('core/latest-posts') ||
-      blockTypes.has('core/query') ||
-      blockTypes.has('core/categories') ||
-      blockTypes.has('core/tag-cloud')
-    ) {
-      addScore('blog-right-sidebar', 2);
-    }
-    if (blockTypes.has('core/search')) {
-      addScore('template-contact', 1);
-      addScore('blog-right-sidebar', 1);
-    }
-
-    const resolved = Array.from(familyScores.entries())
-      .filter(([, score]) => score >= 4)
-      .sort((a, b) => b[1] - a[1])
-      .map(([family]) => family);
-
-    if (resolved.length === 0) {
-      return [];
-    }
-
-    return [...new Set([...resolved, 'page'])];
   }
 
   private buildNavigationLabelsByRoute(
@@ -620,14 +515,6 @@ export class DbContentService {
     } catch {
       return raw.replace(/^https?:\/\/[^/]+/i, '').replace(/\/+$/, '') || '/';
     }
-  }
-
-  private extractPlainTextFromMarkup(content: string): string {
-    return String(content ?? '')
-      .replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
   }
 
   private normalizePageTemplateSlug(template: string): string {

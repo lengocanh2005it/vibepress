@@ -522,6 +522,13 @@ describe('block-tree deterministic shared partials', () => {
               blockName: 'button',
               text: 'Get Started',
               href: '#',
+              bgColor: '#F5B731',
+              padding: {
+                top: '10px',
+                right: '20px',
+                bottom: '10px',
+                left: '20px',
+              },
               customClassNames: ['is-style-fill'],
             },
           ],
@@ -540,6 +547,10 @@ describe('block-tree deterministic shared partials', () => {
         text: 'Get Started',
         link: '#',
         style: 'button',
+      },
+      ctaStyle: {
+        background: '#F5B731',
+        padding: '10px 20px',
       },
     });
   });
@@ -902,7 +913,7 @@ describe('block-tree canonical profolio pages', () => {
     ).toBe(true);
   });
 
-  it('keeps profolio Archive on deterministic-structure when query sections are source-backed', () => {
+  it('locks profolio Archive to block-centric rendering when query blocks are supported', () => {
     const plan = buildBlockTreeDrivenVisualPlanForComponent({
       ...profolioBaseInput,
       componentPlan: {
@@ -939,9 +950,9 @@ describe('block-tree canonical profolio pages', () => {
       ] as BlockNode[],
     });
 
-    expect(plan?.renderMode).not.toBe('block-centric');
-    expect(getVisualPlanRenderAuthority(plan)).toBe('deterministic-structure');
-    expect(plan?.lockPolicy?.bypassAiGeneration).toBeUndefined();
+    expect(plan?.renderMode).toBe('block-centric');
+    expect(getVisualPlanRenderAuthority(plan)).toBe('deterministic-pixel');
+    expect(plan?.lockPolicy?.bypassAiGeneration).toBe(true);
     expect(plan?.sections).toEqual([
       expect.objectContaining({
         type: 'post-list',

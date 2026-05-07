@@ -52,9 +52,9 @@ describe('wpBlocksToJson PHP normalization', () => {
     );
   });
 
-  it('normalizes border radius objects and duplicate css units from block params', () => {
+  it('normalizes border radius, width, color, and duplicate css units from block params', () => {
     const markup = `
-<!-- wp:group {"style":{"border":{"radius":{"topLeft":"40px","topRight":"40px","bottomRight":"40px","bottomLeft":"40px"}},"spacing":{"padding":{"top":"80pxpx","bottom":"autopx"}}}} -->
+<!-- wp:group {"borderColor":"primary","style":{"border":{"radius":{"topLeft":"40px","topRight":"40px","bottomRight":"40px","bottomLeft":"40px"},"width":"10"},"spacing":{"padding":{"top":"80pxpx","bottom":"autopx"}}}} -->
 <div class="wp-block-group"></div>
 <!-- /wp:group -->
 `;
@@ -62,6 +62,8 @@ describe('wpBlocksToJson PHP normalization', () => {
     const nodes = wpBlocksToJson(markup);
 
     expect(nodes[0]?.borderRadius).toBe('40px');
+    expect(nodes[0]?.borderWidth).toBe('10px');
+    expect(nodes[0]?.borderColor).toBe('var(--wp--preset--color--primary)');
     expect(nodes[0]?.padding?.top).toBe('80px');
     expect(nodes[0]?.padding?.bottom).toBe('auto');
   });
@@ -126,7 +128,7 @@ describe('wpBlocksToJson PHP normalization', () => {
   it('lifts styling from self-closing site title and navigation blocks', () => {
     const markup = `
 <!-- wp:site-title {"style":{"elements":{"link":{"color":{"text":"var:preset|color|white"}}},"typography":{"fontSize":"30px"}},"textColor":"white"} /-->
-<!-- wp:navigation {"textColor":"white","style":{"spacing":{"blockGap":"40px"},"typography":{"fontWeight":"600"}}} /-->
+<!-- wp:navigation {"textColor":"white","icon":"menu","overlayBackgroundColor":"white-text-color","style":{"spacing":{"blockGap":"40px"},"typography":{"fontWeight":"600"}}} /-->
 `;
 
     const [siteTitle, navigation] = wpBlocksToJson(markup);
@@ -140,11 +142,46 @@ describe('wpBlocksToJson PHP normalization', () => {
     });
     expect(navigation).toMatchObject({
       block: 'navigation',
+      params: {
+        icon: 'menu',
+        overlayBackgroundColor: 'white-text-color',
+      },
       textColor: 'white',
       gap: '40px',
       typography: {
         fontWeight: '600',
       },
+    });
+  });
+
+  it('preserves paragraph text around inline links', () => {
+    const markup = `
+<!-- wp:paragraph {"fontSize":"small"} -->
+<p class="has-small-font-size">Developed By <a href="#">Themegrove.com</a></p>
+<!-- /wp:paragraph -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]?.text).toBeUndefined();
+    expect(nodes[0]?.html).toContain('Developed By');
+    expect(nodes[0]?.html).toContain('<a href="#">Themegrove.com</a>');
+  });
+
+  it('normalizes image dimensions from wp:image params and inline img styles', () => {
+    const markup = `
+<!-- wp:image {"width":"20px","height":"30px"} -->
+<figure class="wp-block-image size-full is-resized"><img src="/assets/images/arrow-up.png" alt="" style="width:20px;height:30px"/></figure>
+<!-- /wp:image -->
+`;
+
+    const nodes = wpBlocksToJson(markup);
+
+    expect(nodes[0]).toMatchObject({
+      block: 'image',
+      src: 'theme-asset:/assets/images/arrow-up.png',
+      width: 20,
+      height: 30,
     });
   });
 });

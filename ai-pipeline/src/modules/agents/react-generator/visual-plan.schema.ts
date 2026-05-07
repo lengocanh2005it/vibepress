@@ -128,6 +128,8 @@ export interface SectionCardStyle {
   bodyStyle?: TypographyStyle;
   imageRadius?: string;
   imageAspectRatio?: string; // e.g. "16/9" | "1/1"
+  imageWidthStyle?: string;
+  imageHeightStyle?: string;
 }
 
 export interface SectionPresentation {
@@ -283,6 +285,8 @@ export interface PostListSection extends BaseSection {
   showCategory: boolean;
   showExcerpt: boolean;
   showFeaturedImage: boolean;
+  imageRadius?: string;
+  imageAspectRatio?: string;
   showPrice?: boolean;
   showButton?: boolean;
   itemLayout?: 'title-meta-inline' | 'stacked';
@@ -333,10 +337,15 @@ export interface MediaTextSection extends BaseSection {
   imageRadius?: string;
   imageAspectRatio?: string; // e.g. "16/9" | "1/1"
   imageFit?: 'contain' | 'cover';
+  imageWidthStyle?: string;
+  imageHeightStyle?: string;
+  imageFrameBackgroundSrc?: string;
+  imageFrameBackgroundPosition?: string;
   imageCustomClassNames?: string[];
   imageFrameBackground?: string;
   imageFrameMinHeight?: string;
   imageFramePaddingStyle?: string;
+  imageFrameBorderStyle?: string;
   imageFrameCustomClassNames?: string[];
   columnWidths?: string[];
   subtitle?: string;
@@ -349,6 +358,13 @@ export interface MediaTextSection extends BaseSection {
   headingStyle?: TypographyStyle;
   bodyStyle?: TypographyStyle;
   listItems?: string[];
+  stats?: {
+    value: string;
+    label: string;
+    valueStyle?: TypographyStyle;
+    labelStyle?: TypographyStyle;
+    customClassNames?: string[];
+  }[];
   cta?: SectionCta;
   ctas?: SectionCta[];
 }

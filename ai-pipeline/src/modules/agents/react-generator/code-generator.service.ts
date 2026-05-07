@@ -438,13 +438,13 @@ export class CodeGeneratorService {
       );
       lines.push('            {isInternalPath(item.url) ? (');
       lines.push(
-        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(renderState.componentKind === 'header' ? this.opacityLinkClass('', false) : this.opacityLinkClass())}">`,
+        `              <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${renderState.componentKind === 'header' ? this.headerNavigationLinkClass() : this.navigationLinkClass(this.opacityLinkClass())}">`,
       );
       lines.push('                {item.title}');
       lines.push('              </Link>');
       lines.push('            ) : (');
       lines.push(
-        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(renderState.componentKind === 'header' ? this.opacityLinkClass('', false) : this.opacityLinkClass())}">`,
+        `              <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${renderState.componentKind === 'header' ? this.headerNavigationLinkClass() : this.navigationLinkClass(this.opacityLinkClass())}">`,
       );
       lines.push('              {item.title}');
       lines.push('            </a>');
@@ -733,7 +733,13 @@ export class CodeGeneratorService {
     const currentFolder = isPartialComponentName(plan.componentName)
       ? 'components'
       : 'pages';
-    for (const name of plan.layout.includes) {
+    const importedPartials = [
+      ...new Set([
+        ...plan.layout.includes,
+        ...this.collectBlockTreeTemplatePartComponentNames(plan.blockTree ?? []),
+      ]),
+    ];
+    for (const name of importedPartials) {
       const targetFolder = isPartialComponentName(name)
         ? 'components'
         : 'pages';
@@ -744,6 +750,30 @@ export class CodeGeneratorService {
       lines.push(`import ${name} from '${importPath}';`);
     }
     return lines.join('\n');
+  }
+
+  private collectBlockTreeTemplatePartComponentNames(
+    nodes: BlockNode[],
+  ): string[] {
+    const names = new Set<string>();
+    const visit = (items: BlockNode[]) => {
+      for (const node of items) {
+        if (node.kind === 'template-part' && node.templatePartSlug) {
+          names.add(this.templatePartComponentName(node.templatePartSlug));
+        }
+        if (node.children?.length) visit(node.children);
+      }
+    };
+    visit(nodes);
+    return [...names];
+  }
+
+  private templatePartComponentName(slug: string): string {
+    return slug
+      .split(/[-/]/)
+      .filter(Boolean)
+      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+      .join('');
   }
 
   private buildSharedInterfaces(plan: ComponentVisualPlan): string {
@@ -794,15 +824,10 @@ export class CodeGeneratorService {
       push(MENU_ITEM_INTERFACE);
       push(MENU_INTERFACE);
     }
-    if (
-      plan.sections.some((section) => section.type === 'comments') &&
-      plan.dataNeeds.includes('postDetail')
-    ) {
+    const commentsSection = this.getEffectiveCommentsSection(plan);
+    if (commentsSection && plan.dataNeeds.includes('postDetail')) {
       push(COMMENT_INTERFACE);
-      const commentsSection = plan.sections.find(
-        (section): section is CommentsSection => section.type === 'comments',
-      );
-      if (commentsSection?.showForm) {
+      if (commentsSection.showForm) {
         push(COMMENT_SUBMISSION_INTERFACE);
       }
     }
@@ -897,6 +922,44 @@ export class CodeGeneratorService {
     );
   }
 
+  private getEffectiveCommentsSection(
+    plan: ComponentVisualPlan,
+  ): CommentsSection | null {
+    const planned = plan.sections.find(
+      (section): section is CommentsSection => section.type === 'comments',
+    );
+    if (planned) return planned;
+
+    const hasCommentForm = this.blockTreeContainsAnyKind(plan.blockTree ?? [], [
+      'post-comments-form',
+    ]);
+    const hasCommentsBlock =
+      hasCommentForm ||
+      this.blockTreeContainsAnyKind(plan.blockTree ?? [], [
+        'comments',
+        'comment-template',
+        'comments-title',
+      ]);
+    if (!hasCommentsBlock) return null;
+
+    return {
+      type: 'comments',
+      showForm: hasCommentForm,
+      requireName: true,
+      requireEmail: true,
+    };
+  }
+
+  private blockTreeContainsAnyKind(
+    nodes: BlockNode[],
+    kinds: readonly string[],
+  ): boolean {
+    return nodes.some((node) => {
+      if (kinds.includes(node.kind)) return true;
+      return this.blockTreeContainsAnyKind(node.children ?? [], kinds);
+    });
+  }
+
   private wpNodesContainRichHtml(nodes: WpNode[]): boolean {
     const visit = (node: WpNode): boolean => {
       if (typeof node.html === 'string' && node.html.trim().length > 0) {
@@ -918,7 +981,7 @@ export class CodeGeneratorService {
     );
     lines.push(`    if (!value) return undefined;`);
     lines.push(
-      `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration']);`,
+      `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'height', 'maxWidth', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
     );
     lines.push(`    const style: React.CSSProperties = {};`);
     lines.push(`    value.split(';').forEach((entry) => {`);
@@ -975,6 +1038,7 @@ export class CodeGeneratorService {
     lines.push(`        alt: element.getAttribute('alt') || '',`);
     lines.push(`        className,`);
     lines.push(`        title,`);
+    lines.push(`        style,`);
     lines.push(`      });`);
     lines.push(`    }`);
     lines.push(`    if (tag === 'br' || tag === 'hr') {`);
@@ -1141,10 +1205,7 @@ export class CodeGeneratorService {
     const hasAccordionSections = plan.sections.some(
       (section) => section.type === 'accordion',
     );
-    const commentsSection =
-      plan.sections.find(
-        (section): section is CommentsSection => section.type === 'comments',
-      ) ?? null;
+    const commentsSection = this.getEffectiveCommentsSection(plan);
     const needsComments = !!commentsSection && dataNeeds.includes('postDetail');
     const supportsCommentForm = needsComments && commentsSection.showForm;
     const lines: string[] = [];
@@ -1177,7 +1238,7 @@ export class CodeGeneratorService {
       );
       lines.push(`    if (!value) return undefined;`);
       lines.push(
-        `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration']);`,
+        `    const allowed = new Set(['backgroundColor', 'color', 'fontStyle', 'fontWeight', 'textDecoration', 'borderRadius', 'borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius', 'border', 'borderColor', 'borderWidth', 'borderStyle', 'width', 'height', 'maxWidth', 'aspectRatio', 'objectFit', 'objectPosition', 'display', 'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft']);`,
       );
       lines.push(`    const style: React.CSSProperties = {};`);
       lines.push(`    value.split(';').forEach((entry) => {`);
@@ -1238,6 +1299,7 @@ export class CodeGeneratorService {
       lines.push(`        alt: element.getAttribute('alt') || '',`);
       lines.push(`        className,`);
       lines.push(`        title,`);
+      lines.push(`        style,`);
       lines.push(`      });`);
       lines.push(`    }`);
       lines.push(`    if (tag === 'br' || tag === 'hr') {`);
@@ -2430,8 +2492,18 @@ export default ${componentName};`;
     const styleAttr = this.blockNodeStyleAttr(node);
 
     switch (node.kind) {
-      case 'group':
+      case 'group': {
+        const styleAttr = this.blockNodeStyleAttr(
+          node,
+          this.buildBlockTreeHeaderConstrainedChildStyle(
+            node,
+            ctx,
+            componentName,
+            plan,
+          ),
+        );
         return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${styleAttr}>${children}</${tagName}>`;
+      }
 
       case 'cover':
         return `${indent}<${tagName}${this.blockNodeClassAttr(node)}${this.buildBlockTreeCoverStyleAttr(node)}>${children}</${tagName}>`;
@@ -2476,7 +2548,7 @@ export default ${componentName};`;
         return this.renderBlockTreeNavigationLink(node, depth);
 
       case 'button':
-        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, ['btn'])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</a>`;
+        return `${indent}<a href="${node.href ?? '#'}"${this.blockNodeClassAttr(node, this.wpButtonLinkClasses())}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</a>`;
 
       case 'search':
         return this.renderBlockTreeSearch(node, depth);
@@ -2494,6 +2566,8 @@ export default ${componentName};`;
         return this.renderBlockTreeTagCloud(node, depth);
 
       case 'query':
+        return this.renderBlockTreeQuery(node, ctx, componentName, plan, depth);
+
       case 'latest-posts':
         return this.renderBlockTreeRecentPosts(node, depth);
 
@@ -2504,19 +2578,22 @@ export default ${componentName};`;
         return `${indent}<hr${this.blockNodeClassAttr(node)}${styleAttr} />`;
 
       case 'post-title':
-        return `${indent}<h1${this.blockNodeClassAttr(node, ['post-title'])}${styleAttr}>{item?.title}</h1>`;
+        return this.renderBlockTreePostTitle(node, depth);
 
       case 'post-featured-image':
-        return `${indent}<img src={item?.featuredImage} alt={item?.title ?? ''}${this.blockNodeClassAttr(node, ['post-featured-image'])}${styleAttr} />`;
+        return `${indent}{item?.featuredImage ? <img src={item.featuredImage} alt={item.title ?? ''}${this.blockNodeClassAttr(node, ['post-featured-image'])}${styleAttr} /> : null}`;
 
       case 'post-content':
-        return `${indent}<div${this.blockNodeClassAttr(node, ['post-content'])}${styleAttr}>{renderRichTextChildren(item?.content ?? '', "post-content")}</div>`;
+        return `${indent}{item ? <div${this.blockNodeClassAttr(node, ['post-content'])}${styleAttr}>{renderRichTextChildren(item.content, "post-content")}</div> : null}`;
 
       case 'post-excerpt':
         return `${indent}<p${this.blockNodeClassAttr(node, ['post-excerpt'])}${styleAttr}>{renderRichTextChildren(item?.excerpt ?? '', "post-excerpt")}</p>`;
 
       case 'post-date':
         return this.renderBlockTreePostDate(node, depth);
+
+      case 'post-author':
+        return `${indent}<span${this.blockNodeClassAttr(node, ['post-author'])}${styleAttr}>{item?.author}</span>`;
 
       case 'post-author-name':
         return this.renderBlockTreePostAuthorName(node, depth);
@@ -2542,7 +2619,25 @@ ${indent}</div>`;
         return `${indent}<nav${this.blockNodeClassAttr(node, ['post-navigation'])}>{/* prev/next */}</nav>`;
 
       case 'comments':
-        return `${indent}<div${this.blockNodeClassAttr(node, ['comments-area'])}>{/* comments */}</div>`;
+        return this.renderBlockTreeCommentsList(node, depth);
+
+      case 'post-comments-form':
+        return this.renderBlockTreePostCommentsForm(node, depth);
+
+      case 'query-pagination':
+        return this.renderBlockTreeQueryPagination(node, ctx, componentName, plan, depth);
+
+      case 'query-pagination-previous':
+        return `${indent}<button type="button" onClick={() => updatePage(currentPage - 1)} disabled={currentPage <= 1}${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text, 'Previous')}</button>`;
+
+      case 'query-pagination-numbers':
+        return `${indent}<span${this.blockNodeClassAttr(node)}${styleAttr}>Page {currentPage} of {totalPages}</span>`;
+
+      case 'query-pagination-next':
+        return `${indent}<button type="button" onClick={() => updatePage(currentPage + 1)} disabled={currentPage >= totalPages}${this.blockNodeClassAttr(node)}${styleAttr}>${this.blockTreeTextLiteral(node.text, 'Next')}</button>`;
+
+      case 'query-no-results':
+        return `${indent}{posts.length === 0 ? <div${this.blockNodeClassAttr(node)}${styleAttr}>${children || 'No results found.'}</div> : null}`;
 
       case 'cart':
         return this.renderBlockTreeCart(node, ctx, depth);
@@ -2552,10 +2647,7 @@ ${indent}</div>`;
 
       case 'template-part':
         if (node.templatePartSlug) {
-          const name = node.templatePartSlug
-            .split(/[-/]/)
-            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-            .join('');
+          const name = this.templatePartComponentName(node.templatePartSlug);
           return `${indent}<${name} />`;
         }
         return '';
@@ -2566,8 +2658,211 @@ ${indent}</div>`;
         }
         return node.text
           ? `${indent}<div${this.blockNodeClassAttr(node, [node.kind])}${styleAttr}>${this.blockTreeTextLiteral(node.text)}</div>`
-          : '';
+            : '';
     }
+  }
+
+  private renderBlockTreePostTitle(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    const tag = `h${node.level ?? 2}`;
+    const styleAttr = this.blockNodeStyleAttr(node);
+    const classAttr = this.blockNodeClassAttr(node, ['post-title']);
+    if (this.blockNodeBooleanAttr(node, 'isLink')) {
+      return `${indent}<${tag}${classAttr}${styleAttr}><Link to={(item?.type === 'product' ? '/product/' : '/post/') + (item?.slug ?? '')}>{item?.title}</Link></${tag}>`;
+    }
+    return `${indent}<${tag}${classAttr}${styleAttr}>{item?.title}</${tag}>`;
+  }
+
+  private renderBlockTreeQuery(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    plan: ComponentVisualPlan | undefined,
+    depth: number,
+  ): string {
+    if (this.blockTreeQueryUsesProducts(node)) {
+      return this.renderBlockTreeRecentPosts(node, depth);
+    }
+    const postTemplate = (node.children ?? []).find(
+      (child) => child.kind === 'post-template',
+    );
+    if (!postTemplate) {
+      return this.renderBlockTreeRecentPosts(node, depth);
+    }
+
+    const indent = '  '.repeat(depth + 3);
+    const collectionName = 'posts';
+    const children = (node.children ?? [])
+      .map((child) => {
+        if (child === postTemplate) {
+          return this.renderBlockTreePostTemplate(
+            child,
+            ctx,
+            componentName,
+            plan,
+            depth + 1,
+            collectionName,
+          );
+        }
+        if (child.kind === 'query-no-results') {
+          return this.renderBlockTreeQueryNoResults(child, depth + 1, collectionName);
+        }
+        return this.renderBlockNode(child, ctx, componentName, depth + 1, plan);
+      })
+      .filter(Boolean)
+      .join('\n');
+
+    return `${indent}<div${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>
+${children}
+${indent}</div>`;
+  }
+
+  private renderBlockTreePostTemplate(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    plan: ComponentVisualPlan | undefined,
+    depth: number,
+    collectionName: 'posts' | 'products',
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const itemName = collectionName === 'products' ? 'product' : 'post';
+    const children = node.children?.length
+      ? this.renderBlockTree(node.children, ctx, componentName, plan, depth + 1)
+      : `${'  '.repeat(depth + 4)}<Link to={'/${collectionName === 'products' ? 'product' : 'post'}/' + item.slug}>{item.title}</Link>`;
+    const layout = node.attrs?.layout as
+      | { type?: string; columnCount?: number; minimumColumnWidth?: string }
+      | undefined;
+    const gridStyle =
+      layout?.type === 'grid'
+        ? {
+            display: 'grid',
+            gridTemplateColumns:
+              typeof layout.minimumColumnWidth === 'string' &&
+              layout.minimumColumnWidth
+                ? `repeat(auto-fit, minmax(${layout.minimumColumnWidth}, 1fr))`
+                : typeof layout.columnCount === 'number' &&
+                    layout.columnCount > 1
+                  ? `repeat(${layout.columnCount}, minmax(0, 1fr))`
+                  : undefined,
+          }
+        : {};
+    const styleAttr = this.blockNodeStyleAttr(node, gridStyle);
+
+    return `${indent}<ul${this.blockNodeClassAttr(node, ['wp-block-post-template'])}${styleAttr}>
+${indent}  {${collectionName}.map((${itemName}) => {
+${indent}    const item = ${itemName};
+${indent}    const metaSource = item;
+${indent}    return (
+${indent}      <li key={${itemName}.id} className="wp-block-post">
+${children}
+${indent}      </li>
+${indent}    );
+${indent}  })}
+${indent}</ul>`;
+  }
+
+  private renderBlockTreeQueryNoResults(
+    node: BlockNode,
+    depth: number,
+    collectionName: 'posts' | 'products',
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const styleAttr = this.blockNodeStyleAttr(node);
+    const fallback = node.text
+      ? this.blockTreeTextLiteral(node.text)
+      : 'No results found.';
+    return `${indent}{${collectionName}.length === 0 ? <div${this.blockNodeClassAttr(node)}${styleAttr}>${fallback}</div> : null}`;
+  }
+
+  private renderBlockTreeQueryPagination(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    plan: ComponentVisualPlan | undefined,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const children = node.children?.length
+      ? `\n${this.renderBlockTree(node.children, ctx, componentName, plan, depth + 1)}\n${indent}`
+      : `\n${indent}  <button type="button" onClick={() => updatePage(currentPage - 1)} disabled={currentPage <= 1}>Previous</button>
+${indent}  <span>Page {currentPage} of {totalPages}</span>
+${indent}  <button type="button" onClick={() => updatePage(currentPage + 1)} disabled={currentPage >= totalPages}>Next</button>
+${indent}`;
+    return `${indent}{totalPages > 1 ? <nav${this.blockNodeClassAttr(node)}${this.blockNodeStyleAttr(node)}>${children}</nav> : null}`;
+  }
+
+  private renderBlockTreePostCommentsForm(
+    node: BlockNode,
+    depth: number,
+  ): string {
+    const indent = '  '.repeat(depth + 3);
+    const commentsList = this.renderBlockTreeCommentsList(node, depth + 1);
+    return `${indent}<section id="respond"${this.blockNodeClassAttr(node, ['comment-respond', 'wp-block-post-comments-form'])}${this.blockNodeStyleAttr(node)}>
+${commentsList}
+${indent}  <h3 id="reply-title" className="comment-reply-title">Leave a Reply</h3>
+${indent}  <form id="commentform" className="comment-form" onSubmit={handleCommentSubmit}>
+${indent}    <p className="comment-form-comment">
+${indent}      <label htmlFor="comment">Comment *</label>
+${indent}      <textarea id="comment" name="comment" rows={5} required value={commentContent} onChange={(event) => setCommentContent(event.target.value)} />
+${indent}    </p>
+${indent}    <p className="comment-form-author">
+${indent}      <label htmlFor="author">Name *</label>
+${indent}      <input id="author" name="author" type="text" autoComplete="name" required value={commentAuthor} onChange={(event) => setCommentAuthor(event.target.value)} />
+${indent}    </p>
+${indent}    <p className="comment-form-email">
+${indent}      <label htmlFor="email">Email *</label>
+${indent}      <input id="email" name="email" type="email" autoComplete="email" required value={commentEmail} onChange={(event) => setCommentEmail(event.target.value)} />
+${indent}    </p>
+${indent}    <p className="comment-form-url">
+${indent}      <label htmlFor="url">Website</label>
+${indent}      <input id="url" name="url" type="url" autoComplete="url" value={commentWebsite} onChange={(event) => setCommentWebsite(event.target.value)} />
+${indent}    </p>
+${indent}    {commentError ? <p className="comment-form-feedback">{commentError}</p> : null}
+${indent}    {commentSuccess ? <p className="comment-form-feedback">{commentSuccess}</p> : null}
+${indent}    <p className="form-submit">
+${indent}      <button id="submit" type="submit" disabled={submittingComment}>{submittingComment ? 'Posting...' : 'Post Comment'}</button>
+${indent}    </p>
+${indent}  </form>
+${indent}</section>`;
+  }
+
+  private renderBlockTreeCommentsList(node: BlockNode, depth: number): string {
+    const indent = '  '.repeat(depth + 3);
+    return `${indent}<div${this.blockNodeClassAttr(node, ['comments-area', 'wp-block-comments'])}${this.blockNodeStyleAttr(node)}>
+${indent}  {topLevelComments.length > 0 ? (
+${indent}    <ol className="comment-list wp-block-comment-template">
+${indent}      {topLevelComments.map((comment) => (
+${indent}        <li key={comment.id} id={\`comment-\${comment.id}\`} className="comment depth-1">
+${indent}          <article className="comment-body">
+${indent}            <footer className="comment-meta">
+${indent}              <b className="fn">{comment.author}</b>
+${indent}              <a href={\`#comment-\${comment.id}\`} className="comment-metadata"><time dateTime={comment.date}>{new Date(comment.date).toLocaleDateString()}</time></a>
+${indent}            </footer>
+${indent}            <div className="comment-content wp-block-comment-content"><p>{comment.content}</p></div>
+${indent}          </article>
+${indent}          {repliesFor(comment.id).length > 0 ? (
+${indent}            <ol className="children">
+${indent}              {repliesFor(comment.id).map((reply) => (
+${indent}                <li key={reply.id} id={\`comment-\${reply.id}\`} className="comment depth-2">
+${indent}                  <article className="comment-body">
+${indent}                    <footer className="comment-meta">
+${indent}                      <b className="fn">{reply.author}</b>
+${indent}                      <a href={\`#comment-\${reply.id}\`} className="comment-metadata"><time dateTime={reply.date}>{new Date(reply.date).toLocaleDateString()}</time></a>
+${indent}                    </footer>
+${indent}                    <div className="comment-content wp-block-comment-content"><p>{reply.content}</p></div>
+${indent}                  </article>
+${indent}                </li>
+${indent}              ))}
+${indent}            </ol>
+${indent}          ) : null}
+${indent}        </li>
+${indent}      ))}
+${indent}    </ol>
+${indent}  ) : (
+${indent}    <p className="no-comments">No comments yet.</p>
+${indent}  )}
+${indent}</div>`;
   }
 
   private renderBlockTreeCart(
@@ -3381,6 +3676,14 @@ ${indent}) : null}`;
       padding: node.padding ? this.boxSpacingToCss(node.padding) : undefined,
       margin: node.margin ? this.boxSpacingToCss(node.margin) : undefined,
       gap: node.gap,
+      width:
+        typeof node.width === 'number' && Number.isFinite(node.width)
+          ? node.width
+          : undefined,
+      height:
+        typeof node.height === 'number' && Number.isFinite(node.height)
+          ? node.height
+          : undefined,
       minHeight: node.minHeight,
       backgroundColor: node.bgColor,
       color: node.textColor,
@@ -3419,6 +3722,83 @@ ${indent}) : null}`;
           : undefined,
       ...extra,
     });
+  }
+
+  private buildBlockTreeHeaderConstrainedChildStyle(
+    node: BlockNode,
+    ctx: RenderCtx,
+    componentName: string,
+    plan?: ComponentVisualPlan,
+  ): Record<string, string | number | undefined> {
+    if (!/^Header$/i.test(componentName)) return {};
+    const layout = node.attrs?.layout as Record<string, any> | undefined;
+    if (
+      layout?.type !== 'flex' ||
+      String(layout.justifyContent ?? '') !== 'space-between'
+    ) {
+      return {};
+    }
+
+    const parentSourceNodeId = node.sourceRef?.parentSourceNodeId;
+    const parent = parentSourceNodeId
+      ? this.findBlockNodeBySourceNodeId(plan?.blockTree ?? [], parentSourceNodeId)
+      : null;
+    const parentLayout = parent?.attrs?.layout as Record<string, any> | undefined;
+    if (parentLayout?.type !== 'constrained') return {};
+
+    const constrained = this.buildSourceConstrainedInnerStyle(ctx);
+    return {
+      ...constrained,
+      display: 'grid',
+      gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+      alignItems: 'center',
+      columnGap: 'clamp(24px, 4vw, 56px)',
+      justifyContent: 'initial',
+      flexWrap: 'nowrap',
+      paddingLeft: '0',
+      paddingRight: '0',
+      boxSizing: 'border-box',
+    };
+  }
+
+  private findBlockNodeBySourceNodeId(
+    nodes: BlockNode[],
+    sourceNodeId: string,
+  ): BlockNode | null {
+    for (const node of nodes) {
+      if (node.sourceRef?.sourceNodeId === sourceNodeId) return node;
+      const child = this.findBlockNodeBySourceNodeId(
+        node.children ?? [],
+        sourceNodeId,
+      );
+      if (child) return child;
+    }
+    return null;
+  }
+
+  private buildSourceConstrainedInnerStyle(
+    ctx: RenderCtx,
+    paddingLeft?: string,
+    paddingRight?: string,
+  ): Record<string, string | number | undefined> {
+    const contentSize = this.extractMaxWidthToken(ctx.l.containerClass);
+    const maxWidthAdditions = [paddingLeft, paddingRight]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+    const maxWidth =
+      maxWidthAdditions.length > 0
+        ? `calc(${[contentSize, ...maxWidthAdditions].join(' + ')})`
+        : contentSize;
+
+    return {
+      maxWidth,
+      marginLeft: 'auto',
+      marginRight: 'auto',
+      width: '100%',
+      paddingLeft,
+      paddingRight,
+      boxSizing: maxWidthAdditions.length > 0 ? 'border-box' : undefined,
+    };
   }
 
   private buildSections(plan: ComponentVisualPlan, ctx: RenderCtx): string {
@@ -3750,6 +4130,11 @@ ${indent}) : null}`;
     return this.buildStyleAttr({
       padding: section.paddingStyle,
       margin: this.normalizeSectionMarginStyle(section.marginStyle),
+      borderRadius: section.border?.radius,
+      borderColor: section.border?.color,
+      borderWidth: section.border?.width,
+      borderStyle: section.border?.width ? 'solid' : undefined,
+      boxShadow: section.shadow,
       ...extra,
     });
   }
@@ -3817,7 +4202,7 @@ ${indent}) : null}`;
       return 'rounded-none';
     }
     if (normalized.includes('9999')) return 'rounded-full';
-    return `rounded-[${normalized}]`;
+    return `rounded-[${normalized.replace(/\s+/g, '_')}]`;
   }
 
   private imageRadiusClass(ctx: RenderCtx): string {
@@ -3948,6 +4333,12 @@ ${indent}) : null}`;
 
   private navigationLinkClass(extra = ''): string {
     return this.appendUniqueClasses('wp-block-navigation-item__content', extra);
+  }
+
+  private headerNavigationLinkClass(extra = ''): string {
+    return this.navigationLinkClass(
+      this.appendUniqueClasses('vp-generated-link no-underline', extra),
+    );
   }
 
   private navigationSubmenuClass(isVertical: boolean, extra = ''): string {
@@ -4423,7 +4814,7 @@ ${indent}) : null}`;
         : `<Link to="/" className="font-bold text-[${tc}]"${brandStyle}>{siteInfo?.siteName}</Link>`;
     const cta = s.cta
       ? s.cta.style === 'button'
-        ? `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(`bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity`, s.cta.customClassNames)}"${buttonStyle}>${s.cta.text}</Link>`
+        ? `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(`wp-block-button__link wp-element-button vp-generated-button inline-flex items-center justify-center whitespace-nowrap no-underline bg-[${p.accent}] text-[${p.accentText}] px-4 py-2 ${t.buttonRadius} hover:opacity-90 transition-opacity`, s.cta.customClassNames)}"${s.ctaStyle ? this.blueprintButtonStyleAttr(s.ctaStyle) : buttonStyle}>${s.cta.text}</Link>`
         : `\n            <Link to="${s.cta.link}" className="${this.appendOptionalCustomClasses(this.textLinkClass(tc, p.accent, '', false), s.cta.customClassNames)}"${navLinkStyle}>${s.cta.text}</Link>`
       : '';
 
@@ -4435,11 +4826,11 @@ ${indent}) : null}`;
     const renderNavItem = (vertical = false, extraLinkClass = '') =>
       `<li key={item.id} className={\`${this.navigationItemClass(vertical)} \${isCurrentMenuItem(item.url) ? 'current-menu-item current_page_item' : ''}\`.trim()}>
                     {isInternalPath(item.url) ? (
-                      <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent, '', false), extraLinkClass))}"${navLinkStyle}>
+                      <Link to={toAppPath(item.url)} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.headerNavigationLinkClass(extraLinkClass)}"${navLinkStyle}>
                         {item.title}
                       </Link>
                     ) : (
-                      <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.navigationLinkClass(this.appendUniqueClasses(this.textLinkClass(tc, p.accent, '', false), extraLinkClass))}"${navLinkStyle}>
+                      <a href={item.url} target={item.target ?? undefined} rel={item.target === "_blank" ? "noopener noreferrer" : undefined} className="${this.headerNavigationLinkClass(extraLinkClass)}"${navLinkStyle}>
                         {item.title}
                       </a>
                     )}
@@ -4707,7 +5098,8 @@ ${indent}) : null}`;
       { baseColor: p.textMuted },
       this.pickBlockStyle(ctx, 'post-excerpt', 'paragraph'),
     );
-    const imageRadius = this.imageRadiusClass(ctx);
+    const imageRadius =
+      this.exactRadiusClass(s.imageRadius) || this.imageRadiusClass(ctx);
     const isGrid = s.layout !== 'list';
     const cols = s.layout === 'grid-3' ? 3 : 2;
     const postListLayout = this.resolvePostListLayoutContract(s);
@@ -4804,8 +5196,17 @@ ${indent}) : null}`;
                }
                ${productButtonMarkup}`;
 
+    const featuredImageStyle = this.buildBlockStyleAttr(
+      imageStyle,
+      {
+        borderRadius: s.imageRadius,
+        aspectRatio: s.imageAspectRatio,
+      },
+      false,
+      ctx,
+    );
     const featuredImageMarkup = s.showFeaturedImage
-      ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${this.buildBlockStyleAttr(imageStyle, {}, false, ctx)} />}`
+      ? `              {post.featuredImage && <img src={post.featuredImage} alt={post.title} className="w-full h-[220px] object-cover ${imageRadius}"${featuredImageStyle} />}`
       : '';
     const postCard = isGrid
       ? `            <article key={post.id} className="flex flex-col gap-2"${this.buildBlockStyleAttr(cardStylePreset, { padding: l.cardPadding, gap: postListLayout.itemGap }, false, ctx)}>
@@ -5474,11 +5875,18 @@ ${postCard}
     const cardImageClass = s.cardStyle?.imageRadius
       ? this.exactRadiusClass(s.cardStyle.imageRadius)
       : cardRadius;
+    const hasExplicitCardImageSize = Boolean(
+      s.cardStyle?.imageWidthStyle || s.cardStyle?.imageHeightStyle,
+    );
     const cardImageStyle = this.buildStyleAttr({
       borderRadius: s.cardStyle?.imageRadius,
       aspectRatio: s.cardStyle?.imageAspectRatio,
+      width: s.cardStyle?.imageWidthStyle,
+      height: s.cardStyle?.imageHeightStyle,
     });
-    const colClass = this.responsiveGridColumnsClass(s.columns, s.columnWidths);
+    const colClass = classes.includes('vp-skills-row')
+      ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5'
+      : this.responsiveGridColumnsClass(s.columns, s.columnWidths);
     const gridJustifyClass =
       sectionAlign === 'center'
         ? 'justify-items-center'
@@ -5502,7 +5910,10 @@ ${postCard}
           presentation.textAlign,
         );
         const cardImageClassName = this.appendOptionalCustomClasses(
-          `w-full ${s.cardStyle?.imageAspectRatio ? '' : 'aspect-video'} object-cover ${cardImageClass} mb-1`
+          (hasExplicitCardImageSize
+            ? `h-auto object-contain mx-auto mb-4 ${cardImageClass}`
+            : `w-full ${s.cardStyle?.imageAspectRatio ? '' : 'aspect-video'} object-cover ${cardImageClass} mb-1`
+          )
             .replace(/\s+/g, ' ')
             .trim(),
           c.imageCustomClassNames,
@@ -5582,6 +5993,8 @@ ${cards}
       ...this.buildBlockStyleMap(imageStyle, {}, false, ctx),
       borderRadius: s.imageRadius,
       aspectRatio: s.imageAspectRatio,
+      width: s.imageWidthStyle,
+      height: s.imageHeightStyle,
       objectFit:
         s.imageFit ??
         (s.imageAspectRatio
@@ -5622,24 +6035,56 @@ ${cards}
       ctaStyle: s.ctaStyle,
       secondaryCtaStyle: s.secondaryCtaStyle,
     });
+    const hasImageFrame = Boolean(
+      s.imageFrameBackground ||
+      s.imageFrameMinHeight ||
+      s.imageFrameBackgroundSrc,
+    );
+    const hasImageFrameOverlay = Boolean(
+      s.imageFrameBackground && s.imageFrameBackgroundSrc,
+    );
     const imageFrameClassName = this.appendOptionalCustomClasses(
-      `${itemWrapper} ${s.imageFrameBackground || s.imageFrameMinHeight ? 'flex items-end justify-center overflow-hidden' : ''}`.trim(),
+      `${itemWrapper} ${hasImageFrame ? `flex items-end justify-center overflow-hidden${hasImageFrameOverlay ? ' relative' : ''}` : ''}`.trim(),
       s.imageFrameCustomClassNames,
     );
+    const framedImageClass =
+      s.imageFit === 'cover'
+        ? 'w-full h-full object-cover'
+        : `max-w-full ${this.inlineImageFitClass(s.imageSrc)}`;
     const mediaImageClassName = this.appendOptionalCustomClasses(
-      `${s.imageFrameBackground || s.imageFrameMinHeight ? 'max-w-full' : 'w-full h-auto'} ${this.inlineImageFitClass(s.imageSrc)} ${s.imageFrameBackground || s.imageFrameMinHeight ? '' : imageRadius}`.trim(),
+      `${hasImageFrame ? `${framedImageClass}${hasImageFrameOverlay ? ' relative z-10' : ''}` : `w-full h-auto ${this.inlineImageFitClass(s.imageSrc)} ${imageRadius}`}`.trim(),
       s.imageCustomClassNames,
     );
-    const imageFrameStyleAttr = this.buildStyleAttr({
-      backgroundColor: s.imageFrameBackground,
+    const imageFrameBaseStyleAttr = this.buildStyleAttr({
+      backgroundColor: hasImageFrameOverlay
+        ? undefined
+        : s.imageFrameBackground,
       minHeight: s.imageFrameMinHeight,
       padding: s.imageFramePaddingStyle,
-      borderRadius:
-        s.imageFrameBackground || s.imageFrameMinHeight
-          ? s.imageRadius
-          : undefined,
+      borderRadius: hasImageFrame ? s.imageRadius : undefined,
+      border: s.imageFrameBorderStyle,
     });
-    const imgEl = `<div className="${imageFrameClassName}"${imageFrameStyleAttr}><img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
+    const imageFrameBackgroundStyleAttr = s.imageFrameBackgroundSrc
+      ? ` style={{ backgroundImage: \`url("\${resolveAsset(${JSON.stringify(
+          s.imageFrameBackgroundSrc,
+        )})}")\`, backgroundSize: 'cover', backgroundPosition: '${(
+          s.imageFrameBackgroundPosition ?? 'center'
+        ).replace(/'/g, "\\'")}', backgroundRepeat: 'no-repeat' }}`
+      : '';
+    const imageFrameStyleAttr = this.mergeStyleAttrs(
+      imageFrameBaseStyleAttr,
+      imageFrameBackgroundStyleAttr,
+    );
+    const imageFrameOverlayStyleAttr = hasImageFrameOverlay
+      ? this.buildStyleAttr({
+          backgroundColor: s.imageFrameBackground,
+          borderRadius: s.imageRadius,
+        })
+      : '';
+    const imageFrameOverlay = hasImageFrameOverlay
+      ? `<span aria-hidden="true" className="pointer-events-none absolute inset-0 z-0"${imageFrameOverlayStyleAttr} />`
+      : '';
+    const imgEl = `<div className="${imageFrameClassName}"${imageFrameStyleAttr}>${imageFrameOverlay}<img src={resolveAsset("${s.imageSrc}")} alt="${s.imageAlt}" className="${mediaImageClassName}"${imageStyleAttr} /></div>`;
     const mediaHeadingClassName = this.appendStyledTextAlignClass(
       `${t.h3} font-[600]`,
       s.headingCustomClassNames,
@@ -5670,11 +6115,13 @@ ${cards}
       : /<[a-z]/i.test(s.body)
         ? `<div${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>{renderRichTextChildren(${JSON.stringify(s.body)}, "media-text-body")}</div>`
         : `<p${mediaBodyClassName ? ` className="${mediaBodyClassName}"` : ''}${bodyStyle}>${s.body}</p>`;
+    const statsMarkup = this.renderMediaTextStats(s, ctx, presentation, tc);
     const textEl = `<div className="${itemWrapper} flex flex-col gap-4 ${this.presentationItemsAlignClass(presentation.itemsAlign)} ${this.presentationTextAlignClass(presentation.textAlign)}"${this.presentationMaxWidthStyleAttr(presentation)}>
             ${subtitleMarkup}
             ${headingMarkup}
             ${bodyMarkup}
             ${s.listItems ? `<ul className="flex flex-col gap-2">${s.listItems.map((li, index) => (/<[a-z]/i.test(li) ? `<li className="font-medium"${listItemStyle}>{renderRichTextChildren(${JSON.stringify(li)}, "media-text-list-${index}")}</li>` : `<li className="font-medium"${listItemStyle}>${li}</li>`)).join('')}</ul>` : ''}
+            ${statsMarkup}
             ${cta}
           </div>`;
 
@@ -5686,6 +6133,54 @@ ${cards}
           </div>
         </div>
       </section>`;
+  }
+
+  private renderMediaTextStats(
+    s: MediaTextSection,
+    ctx: RenderCtx,
+    presentation: SectionPresentation,
+    textColor: string,
+  ): string {
+    if (!s.stats?.length) return '';
+    const statValueClassName = `${ctx.t.h3} font-medium`;
+    const statLabelClassName = 'text-sm';
+    const statItems = s.stats
+      .map((stat, index) => {
+        const valueStyle = this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: textColor, typography: stat.valueStyle },
+          this.pickBlockStyle(ctx, 'heading'),
+        );
+        const labelStyle = this.buildTextTokenStyleAttr(
+          ctx,
+          { baseColor: textColor, typography: stat.labelStyle },
+          this.pickBlockStyle(ctx, 'paragraph'),
+        );
+        const itemClassName = this.appendOptionalCustomClasses(
+          'wp-block-group flex flex-col gap-0 text-left items-start',
+          stat.customClassNames,
+        );
+        const value = /<[a-z]/i.test(stat.value)
+          ? `{renderRichTextChildren(${JSON.stringify(stat.value)}, "media-text-stat-value-${index}")}`
+          : stat.value;
+        const label = /<[a-z]/i.test(stat.label)
+          ? `{renderRichTextChildren(${JSON.stringify(stat.label)}, "media-text-stat-label-${index}")}`
+          : stat.label;
+        return `              <div className="${itemClassName}">
+                <h3 className="${statValueClassName}"${valueStyle}>${value}</h3>
+                <p className="${statLabelClassName}"${labelStyle}>${label}</p>
+              </div>`;
+      })
+      .join('\n');
+    const justify =
+      presentation.justify === 'center'
+        ? 'justify-center'
+        : presentation.justify === 'end'
+          ? 'justify-end'
+          : 'justify-start';
+    return `<div className="wp-block-group flex flex-wrap ${justify} gap-8 pt-2">
+${statItems}
+            </div>`;
   }
 
   private renderTestimonial(
@@ -6928,6 +7423,11 @@ ${
     return {
       padding: section.paddingStyle,
       margin: this.normalizeSectionMarginStyle(section.marginStyle),
+      borderRadius: section.border?.radius,
+      borderColor: section.border?.color,
+      borderWidth: section.border?.width,
+      borderStyle: section.border?.width ? 'solid' : undefined,
+      boxShadow: section.shadow,
     };
   }
 
@@ -6956,10 +7456,17 @@ ${
     ctx: RenderCtx,
     state: BlockFaithfulRenderState,
     depth: number,
+    parent?: WpNode,
   ): string {
     return nodes
       .map((node) => {
-        const markup = this.renderBlockFaithfulNode(node, ctx, state, depth);
+        const markup = this.renderBlockFaithfulNode(
+          node,
+          ctx,
+          state,
+          depth,
+          parent,
+        );
         return depth === 3
           ? this.annotateBlockFaithfulMarkup(node, markup, state.componentName)
           : markup;
@@ -6983,23 +7490,32 @@ ${
     ctx: RenderCtx,
     state: BlockFaithfulRenderState,
     depth: number,
+    parent?: WpNode,
   ): string {
     const block = node.block.replace(/^core\//, '');
     const indent = '  '.repeat(depth);
     const childIndent = '  '.repeat(depth + 1);
     const children = node.children?.length
-      ? this.renderBlockFaithfulNodes(node.children, ctx, state, depth + 1)
+      ? this.renderBlockFaithfulNodes(node.children, ctx, state, depth + 1, node)
       : '';
 
     if (block === 'template-part') return children;
 
     switch (block) {
       case 'group': {
+        const layoutStyle = this.buildWpLayoutStyle(node);
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'group'),
           {
-            ...this.buildWpLayoutStyle(node),
+            ...layoutStyle,
+            ...this.buildHeaderInnerConstrainedStyle(node, ctx, state, parent),
+            ...(node.gap && !layoutStyle.display
+              ? {
+                  display: 'flex',
+                  flexDirection: 'column',
+                }
+              : {}),
             ...this.buildBlockFaithfulBehaviorStyle(node, state),
           },
         );
@@ -7028,13 +7544,21 @@ ${indent}</div>`;
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'column', 'group'),
-          columnWidth
-            ? {
-                flexBasis: columnWidth,
-                flexGrow: 0,
-                flexShrink: 0,
-              }
-            : {},
+          {
+            ...(columnWidth
+              ? {
+                  flexBasis: columnWidth,
+                  flexGrow: 0,
+                  flexShrink: 0,
+                }
+              : {}),
+            ...(node.gap
+              ? {
+                  display: 'flex',
+                  flexDirection: 'column',
+                }
+              : {}),
+          },
         );
         return `${indent}<div${this.buildWpNodeAttrs(node, 'wp-block-column')}${styleAttr}>
 ${children}
@@ -7132,28 +7656,53 @@ ${indent}</div>`;
         const styleAttr = this.buildWpNodeStyleAttr(
           node,
           this.pickBlockStyle(ctx, 'button'),
+          state.componentKind === 'header' && node.bgColor
+            ? { borderColor: node.bgColor }
+            : {},
+        );
+        const buttonAttrs = this.buildWpNodeAttrs(
+          node,
+          this.wpButtonLinkClasses().join(' '),
         );
         return hasUsableHref
           ? `${indent}{isInternalPath(${JSON.stringify(href)}) ? (
- ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})}${this.buildWpNodeAttrs(node)}${styleAttr}>
+ ${childIndent}<Link to={toAppPath(${JSON.stringify(href)})}${buttonAttrs}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</Link>
 ${indent}) : (
- ${childIndent}<a href="${href}"${this.buildWpNodeAttrs(node)}${styleAttr}>
+ ${childIndent}<a href="${href}"${buttonAttrs}${styleAttr}>
 ${childIndent}  ${node.text ?? href}
 ${childIndent}</a>
 ${indent})}`
-          : `${indent}<a href="#"${this.buildWpNodeAttrs(node)}${styleAttr}>
+          : `${indent}<a href="#"${buttonAttrs}${styleAttr}>
 ${childIndent}${node.text ?? ''}
 ${indent}</a>`;
       }
       case 'image': {
+        const isFooterArrowImage =
+          state.componentKind === 'footer' &&
+          typeof node.src === 'string' &&
+          /(?:^|\/)arrow-up\.png(?:$|\?)/i.test(node.src);
+        const paramWidth =
+          typeof node.params?.width === 'string'
+            ? this.normalizeCssLength(node.params.width)
+            : undefined;
+        const paramHeight =
+          typeof node.params?.height === 'string'
+            ? this.normalizeCssLength(node.params.height)
+            : undefined;
         const imageStyleAttr = this.buildWpNodeStyleAttr(
           node,
-          this.pickBlockStyle(ctx, 'image', 'gallery'),
+          isFooterArrowImage
+            ? this.pickBlockStyle(ctx, 'image')
+            : this.pickBlockStyle(ctx, 'image', 'gallery'),
           {
-            width: node.width ? `${node.width}px` : undefined,
-            height: node.height ? `${node.height}px` : undefined,
+            width: node.width
+              ? `${node.width}px`
+              : (paramWidth ?? (isFooterArrowImage ? '39px' : undefined)),
+            height: node.height
+              ? `${node.height}px`
+              : (paramHeight ?? (isFooterArrowImage ? 'auto' : undefined)),
           },
         );
         return `${indent}<figure${this.buildWpNodeAttrs(node, 'wp-block-image size-full')}>
@@ -7198,9 +7747,11 @@ ${indent}</ul>`;
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-+|-+$/g, '');
         const linkHref = href && href !== '#' ? href : '#';
+        const iconMarkup = this.socialIconMarkup(serviceSlug, childIndent);
         return `${indent}<li${this.buildWpNodeAttrs(node, `wp-social-link wp-social-link-${serviceSlug || 'link'}`)}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'social-link'))}>
 ${childIndent}<a href="${linkHref}" aria-label="${service}">
-${childIndent}  <span className="wp-block-social-link-label">${service}</span>
+${iconMarkup}
+${childIndent}  <span className="wp-block-social-link-label sr-only">${service}</span>
 ${childIndent}</a>
 ${indent}</li>`;
       }
@@ -7263,6 +7814,9 @@ ${indent}</div>`;
     });
     const hintTitles = this.extractNavigationHintTitles(node);
     const listClass = this.navigationListClass(isVertical);
+    const listStyle = this.buildStyleAttr({
+      gap: node.gap,
+    });
     const fallbackMarkup = this.renderBlockFaithfulNavigationChildren(
       node.children ?? [],
       ctx,
@@ -7304,65 +7858,123 @@ ${indent}</nav>`;
       overlayMode !== 'never' &&
       isResponsiveNav;
     if (isMobileNav) {
-      const tc = ctx.p.text;
-      const desktopNavClass =
-        overlayMode === 'always' ? 'hidden' : 'hidden md:flex';
       const mobileButtonClass =
         overlayMode === 'always'
-          ? 'flex items-center p-2'
-          : 'md:hidden flex items-center p-2';
+          ? 'wp-block-navigation__responsive-container-open mx-auto'
+          : 'wp-block-navigation__responsive-container-open md:hidden mx-auto';
       const mobilePanelClass =
         overlayMode === 'always'
-          ? 'absolute top-full left-0 right-0 border-b border-black/10 z-50'
-          : 'md:hidden absolute top-full left-0 right-0 border-b border-black/10 z-50';
-      const mobilePanelStyle = this.buildStyleAttr({
-        backgroundColor: ctx.p.surface,
-      });
-      return `${indent}<>
- ${indent}  <nav${this.buildWpNodeAttrs(node, this.navigationRootClass(desktopNavClass))}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
-${indent}    {${menuVar} ? (
-${indent}      <ul className="${listClass}">
-${indent}        {renderMenuItems(${menuVar}.items, 0, false)}
-${indent}      </ul>
-${indent}    ) : (
+          ? 'wp-block-navigation__responsive-container is-menu-open has-modal-open'
+          : 'wp-block-navigation__responsive-container is-menu-open has-modal-open md:hidden';
+      const mobilePanelStyle = this.buildNavigationResponsiveContainerStyle(
+        node,
+        ctx,
+      );
+      const responsiveDialogId = `wp-navigation-responsive-dialog-${menuIndex}`;
+      return `${indent}<nav${this.buildWpNodeAttrs(node, this.navigationRootClass())}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
+${indent}  {${menuVar} ? (
+${indent}    <ul className="${overlayMode === 'always' ? 'hidden' : 'hidden md:flex'} ${listClass}"${listStyle}>
+${indent}      {renderMenuItems(${menuVar}.items, 0, false)}
+${indent}    </ul>
+${indent}  ) : (
 ${fallbackMarkup}
-${indent}    )}
-${indent}  </nav>
+${indent}  )}
 ${indent}  <button
-${indent}    className="${mobileButtonClass} text-[${tc}]"
-${indent}    aria-label="Toggle menu"
-${indent}    onClick={() => setMobileMenuOpen(prev => !prev)}
+${indent}    type="button"
+${indent}    className="${mobileButtonClass}"
+${indent}    aria-label="Open menu"
+${indent}    aria-expanded={mobileMenuOpen}
+${indent}    aria-controls="${responsiveDialogId}"
+${indent}    onClick={() => setMobileMenuOpen(true)}
 ${indent}  >
-${indent}    {mobileMenuOpen ? (
-${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-${indent}    ) : (
-${indent}      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-${indent}    )}
+${indent}    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
 ${indent}  </button>
 ${indent}  {mobileMenuOpen && (
-${indent}    <nav className="${this.navigationRootClass(mobilePanelClass)}"${mobilePanelStyle}>
-${indent}      <div className="${ctx.l.containerClass} py-3">
-${indent}        {${menuVar} ? (
-${indent}          <ul className="${this.navigationListClass(true)}">
-${indent}            {renderMenuItems(${menuVar}.items, 0, true)}
-${indent}          </ul>
-${indent}        ) : (
+${indent}    <div id="${responsiveDialogId}" className="${mobilePanelClass}" role="dialog" aria-modal="true"${mobilePanelStyle}>
+${indent}      <div className="wp-block-navigation__responsive-close">
+${indent}        <div className="wp-block-navigation__responsive-dialog">
+${indent}          <button
+${indent}            type="button"
+${indent}            className="wp-block-navigation__responsive-container-close"
+${indent}            aria-label="Close menu"
+${indent}            onClick={() => setMobileMenuOpen(false)}
+${indent}          >
+${indent}            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+${indent}          </button>
+${indent}          <div className="wp-block-navigation__responsive-container-content">
+${indent}            {${menuVar} ? (
+${indent}              <ul className="${this.navigationListClass(true)}">
+${indent}                {renderMenuItems(${menuVar}.items, 0, true)}
+${indent}              </ul>
+${indent}            ) : (
 ${fallbackMarkup}
-${indent}        )}
+${indent}            )}
+${indent}          </div>
+${indent}        </div>
 ${indent}      </div>
-${indent}    </nav>
+${indent}    </div>
 ${indent}  )}
-${indent}</>`;
+${indent}</nav>`;
     }
     return `${indent}<nav${this.buildWpNodeAttrs(node, this.navigationRootClass())}${this.buildWpNodeStyleAttr(node, this.pickBlockStyle(ctx, 'navigation'), this.buildWpLayoutStyle(node))}>
 ${indent}  {${menuVar} ? (
-${indent}    <ul className="${listClass}">
+${indent}    <ul className="${listClass}"${listStyle}>
 ${indent}      {renderMenuItems(${menuVar}.items, 0, ${isVertical ? 'true' : 'false'})}
 ${indent}    </ul>
 ${indent}  ) : (
 ${fallbackMarkup}
 ${indent}  )}
 ${indent}</nav>`;
+  }
+
+  private buildNavigationResponsiveContainerStyle(
+    node: WpNode,
+    ctx: RenderCtx,
+  ): string {
+    const overlayBackgroundColor = this.wpPresetColorValue(
+      typeof node.params?.overlayBackgroundColor === 'string'
+        ? node.params.overlayBackgroundColor
+        : undefined,
+      ctx.p.surface,
+    );
+    const overlayTextColor = this.wpPresetColorValue(
+      typeof node.params?.overlayTextColor === 'string'
+        ? node.params.overlayTextColor
+        : undefined,
+      this.isWhiteLikeColorToken(node.params?.overlayBackgroundColor)
+        ? '#000'
+        : ctx.p.text,
+    );
+
+    return this.buildStyleAttr({
+      backgroundColor: overlayBackgroundColor,
+      color: overlayTextColor,
+      position: 'fixed',
+      inset: 0,
+      zIndex: 1000,
+      padding: '20px',
+      overflowY: 'auto',
+    });
+  }
+
+  private wpPresetColorValue(value: unknown, fallback: string): string {
+    if (typeof value !== 'string') return fallback;
+    const normalized = value.trim();
+    if (!normalized) return fallback;
+    if (this.isCssColorValue(normalized)) return normalized;
+    if (/^var\(--wp--preset--color--[a-z0-9-]+\)$/i.test(normalized)) {
+      return normalized.replace(/\)$/, `, ${fallback})`);
+    }
+    const slug = this.wpPresetColorSlug(normalized);
+    if (!slug) return fallback;
+    const resolvedFallback = this.isWhiteLikeColorToken(slug)
+      ? '#fff'
+      : fallback;
+    return `var(--wp--preset--color--${slug}, ${resolvedFallback})`;
+  }
+
+  private isWhiteLikeColorToken(value: unknown): boolean {
+    return typeof value === 'string' && /\bwhite\b/i.test(value);
   }
 
   private renderBlockFaithfulNavigationChildren(
@@ -7431,6 +8043,38 @@ ${indent}</ul>`;
     return {};
   }
 
+  private buildHeaderInnerConstrainedStyle(
+    node: WpNode,
+    ctx: RenderCtx,
+    state: BlockFaithfulRenderState,
+    parent?: WpNode,
+  ): Record<string, string | number | undefined> {
+    if (state.componentKind !== 'header') return {};
+    const layout = this.wpNodeLayout(node);
+    if (
+      layout?.type !== 'flex' ||
+      String(layout.justifyContent ?? '') !== 'space-between'
+    ) {
+      return {};
+    }
+    const parentLayout = this.wpNodeLayout(parent);
+    if (parentLayout?.type !== 'constrained') return {};
+
+    const constrained = this.buildSourceConstrainedInnerStyle(ctx);
+    return {
+      ...constrained,
+      display: 'grid',
+      gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+      alignItems: 'center',
+      columnGap: 'clamp(24px, 4vw, 56px)',
+      justifyContent: 'initial',
+      flexWrap: 'nowrap',
+      paddingLeft: '0',
+      paddingRight: '0',
+      boxSizing: 'border-box',
+    };
+  }
+
   private buildWpCoverStyleAttr(node: WpNode, ctx: RenderCtx): string {
     const baseStyle = this.buildWpNodeStyleAttr(
       node,
@@ -7466,6 +8110,19 @@ ${indent}</ul>`;
 
   private buildWpNodeAttrs(node: WpNode, base: string = ''): string {
     return `${this.buildWpNodeIdAttr(node)}${this.buildWpNodeClassAttr(node, base)}`;
+  }
+
+  private wpButtonLinkClasses(): string[] {
+    return [
+      'wp-block-button__link',
+      'wp-element-button',
+      'vp-generated-button',
+      'inline-flex',
+      'items-center',
+      'justify-center',
+      'whitespace-nowrap',
+      'no-underline',
+    ];
   }
 
   private mergeWpNodeClassName(base: string, node: WpNode): string {
@@ -7538,8 +8195,12 @@ ${indent}</ul>`;
     return {
       ...(node.bgColor ? { backgroundColor: node.bgColor } : {}),
       ...(node.textColor ? { color: node.textColor } : {}),
-      ...(node.padding ? { padding: this.boxSpacingToCss(node.padding) } : {}),
-      ...(node.margin ? { margin: this.boxSpacingToCss(node.margin) } : {}),
+      ...(node.padding
+        ? this.boxSpacingToLonghandStyle('padding', node.padding)
+        : {}),
+      ...(node.margin
+        ? this.boxSpacingToLonghandStyle('margin', node.margin)
+        : {}),
       ...(node.gap ? { gap: node.gap } : {}),
       ...(node.borderRadius ? { borderRadius: node.borderRadius } : {}),
       ...(node.minHeight ? { minHeight: node.minHeight } : {}),
@@ -7567,7 +8228,7 @@ ${indent}</ul>`;
   private buildWpLayoutStyle(
     node: WpNode,
   ): Record<string, string | number | undefined> {
-    const layout = node.params?.layout as Record<string, any> | undefined;
+    const layout = this.wpNodeLayout(node);
     if (!layout) return {};
     const style: Record<string, string | number | undefined> = {};
     if (layout.type === 'flex') {
@@ -7594,6 +8255,16 @@ ${indent}</ul>`;
     return style;
   }
 
+  private wpNodeLayout(node?: WpNode): Record<string, any> | undefined {
+    if (!node) return undefined;
+    const nodeWithAttrs = node as WpNode & {
+      attrs?: Record<string, any>;
+    };
+    return (node.params?.layout ?? nodeWithAttrs.attrs?.layout) as
+      | Record<string, any>
+      | undefined;
+  }
+
   private buildWpColumnsStyle(
     node: WpNode,
   ): Record<string, string | number | undefined> {
@@ -7610,6 +8281,42 @@ ${indent}</ul>`;
     if (top === right && top === bottom && top === left) return top;
     if (top === bottom && right === left) return `${top} ${right}`;
     return `${top} ${right} ${bottom} ${left}`;
+  }
+
+  private boxSpacingToLonghandStyle(
+    prefix: 'padding' | 'margin',
+    box: NonNullable<WpNode['padding']>,
+  ): Record<string, string> {
+    const result: Record<string, string> = {};
+    const entries: Array<[keyof typeof box, string]> = [
+      ['top', `${prefix}Top`],
+      ['right', `${prefix}Right`],
+      ['bottom', `${prefix}Bottom`],
+      ['left', `${prefix}Left`],
+    ];
+    for (const [side, cssKey] of entries) {
+      const value = box[side];
+      if (value !== undefined && value !== '') result[cssKey] = value;
+    }
+    return result;
+  }
+
+  private socialIconClass(serviceSlug: string): string {
+    const normalized = serviceSlug || 'link';
+    const mapped: Record<string, string> = {
+      facebook: 'facebook-f',
+    };
+    return `fab fa-${mapped[normalized] ?? normalized}`;
+  }
+
+  private socialIconMarkup(serviceSlug: string, childIndent: string): string {
+    const normalized = serviceSlug || 'link';
+    if (normalized === 'x' || normalized === 'twitter') {
+      return `${childIndent}  <svg className="wp-social-link-svg wp-social-link-svg-x" aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+${childIndent}    <path fill="currentColor" d="M13.982 10.622 20.54 3h-1.554l-5.693 6.618L8.745 3H3.5l6.876 10.007L3.5 21h1.554l6.012-6.989L15.868 21h5.245l-7.131-10.378Zm-2.128 2.474-.697-.997-5.543-7.93H8l4.474 6.4.697.997 5.815 8.318H16.6l-4.746-6.788Z" />
+${childIndent}  </svg>`;
+    }
+    return `${childIndent}  <i className="${this.socialIconClass(normalized)}" aria-hidden="true" />`;
   }
 
   private normalizeCssLength(value?: string): string | undefined {
@@ -7653,6 +8360,9 @@ ${indent}</ul>`;
     ) {
       return undefined;
     }
+    if (key === 'lineHeight') {
+      return /^-?\d+(\.\d+)?$/.test(normalized) ? normalized : normalized;
+    }
 
     const lengthLikeKeys = new Set([
       'width',
@@ -7670,7 +8380,6 @@ ${indent}</ul>`;
       'borderRadius',
       'borderWidth',
       'fontSize',
-      'lineHeight',
       'letterSpacing',
       'flexBasis',
     ]);

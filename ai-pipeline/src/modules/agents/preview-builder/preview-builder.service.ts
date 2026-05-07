@@ -27,6 +27,7 @@ import type {
 } from '../block-parser/block-parser.service.js';
 import type { PlanResult } from '../planner/planner.service.js';
 import { isPartialComponentName } from '../shared/component-kind.util.js';
+import { normalizeThemeAssetReferences } from '../shared/code-postprocess.util.js';
 import { AssetDownloaderService } from './asset-downloader.service.js';
 import { ValidatorService } from '../validator/validator.service.js';
 import type {
@@ -275,9 +276,11 @@ export class PreviewBuilderService {
       (c) => !isPartialComponentName(c.name),
     );
     const notFoundComponent =
-      pageComponents.find((c) => c.name === 'Page404') ?? null;
+      pageComponents.find((c) => c.name === 'Page404') ??
+      pageComponents.find((c) => c.name === 'NotFound') ??
+      null;
     const primaryPageComponents = pageComponents.filter(
-      (c) => c.name !== 'Page404',
+      (c) => c.name !== 'Page404' && c.name !== 'NotFound',
     );
 
     // Detect shared Header/Footer partials để tạo Layout wrapper
@@ -344,6 +347,7 @@ export class PreviewBuilderService {
       Author: '/author/:slug',
       Search: '/search',
       Page404: '*',
+      NotFound: '*',
     };
 
     const planRouteMap = new Map<string, string>();
@@ -355,37 +359,33 @@ export class PreviewBuilderService {
       }
     }
 
-    // Khi có Layout, Header/Footer đã được import bởi Layout — không cần import lại trong App.tsx
-    const layoutManagedNames = new Set(
-      [headerComp?.name, footerComp?.name].filter(Boolean) as string[],
-    );
-    const routeImports = allComponents
-      .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
-      .map((c) => {
-        const folder =
-          isPartialComponentName(c.name) || c.isSubComponent
-            ? 'components'
-            : 'pages';
-        return `import ${c.name} from './${folder}/${c.name}';`;
-      })
-      .join('\n');
-
     // Tạo routes chỉ cho page components, tránh duplicate paths
     const usedPaths = new Set<string>();
     const usedPathOwners = new Map<string, string>();
     const routeLines: string[] = [];
     const routeEntries: PreviewRouteEntry[] = [];
+    const routedComponentNames = new Set<string>();
 
     for (const c of primaryPageComponents) {
       const componentPlan = planByComponentName.get(c.name);
       const canonicalFixedPagePath =
         this.buildFixedPageCanonicalRoute(componentPlan);
-      const path =
+      const candidatePath =
         canonicalFixedPagePath ??
         planRouteMap.get(c.name) ??
         c.route ??
         FALLBACK_ROUTE_MAP[c.name] ??
         `/${c.name.toLowerCase()}`;
+      const path = this.resolveCanonicalPreviewRoute({
+        componentName: c.name,
+        candidatePath,
+      });
+      if (!path) {
+        this.logger.debug(
+          `Skipping non-runtime preview route "${candidatePath}" for "${c.name}"`,
+        );
+        continue;
+      }
       if (usedPaths.has(path)) {
         this.logger.warn(
           `Duplicate preview route "${path}" for "${c.name}" ignored; already owned by "${usedPathOwners.get(path) ?? 'unknown'}"`,
@@ -398,6 +398,7 @@ export class PreviewBuilderService {
         `        <Route path="${path}" element={<${c.name} />} />`,
       );
       routeEntries.push({ route: path, componentName: c.name });
+      routedComponentNames.add(c.name);
     }
 
     // WordPress archive fallback: if Archive exists but no Author/Category/Tag,
@@ -417,6 +418,7 @@ export class PreviewBuilderService {
             `        <Route path="${alias.path}" element={<Archive />} />`,
           );
           routeEntries.push({ route: alias.path, componentName: 'Archive' });
+          routedComponentNames.add('Archive');
         }
       }
     }
@@ -431,6 +433,7 @@ export class PreviewBuilderService {
         route: '/',
         componentName: primaryPageComponents[0].name,
       });
+      routedComponentNames.add(primaryPageComponents[0].name);
     }
 
     // Register the catch-all route explicitly at the end so 404 handling
@@ -451,11 +454,29 @@ export class PreviewBuilderService {
           route: notFoundPath,
           componentName: notFoundComponent.name,
         });
+        routedComponentNames.add(notFoundComponent.name);
       }
     }
 
     const routes = routeLines.join('\n');
     const smokeRoutes = this.buildSmokeRoutes([...usedPaths]);
+
+    // Khi có Layout, Header/Footer đã được import bởi Layout — không cần import lại trong App.tsx.
+    // Chỉ import các component thật sự được mount route để tránh expose template inventory.
+    const layoutManagedNames = new Set(
+      [headerComp?.name, footerComp?.name].filter(Boolean) as string[],
+    );
+    const routeImports = allComponents
+      .filter((c) => routedComponentNames.has(c.name))
+      .filter((c) => !hasSharedLayout || !layoutManagedNames.has(c.name))
+      .map((c) => {
+        const folder =
+          isPartialComponentName(c.name) || c.isSubComponent
+            ? 'components'
+            : 'pages';
+        return `import ${c.name} from './${folder}/${c.name}';`;
+      })
+      .join('\n');
 
     const layoutImport = hasSharedLayout
       ? `import Layout from './components/Layout';`
@@ -767,6 +788,7 @@ ${fontEntries}
     components?: ReactGenerateResult['components'],
   ): Promise<void> {
     await this.applyThemeJsonGlobalStyles(frontendDir, themeDir, repoManifest);
+    await this.injectFontAwesomeStylesheetLink(frontendDir, themeDir);
 
     if (this.shouldUseThemeSourceCssBundle(themeDir, repoManifest)) {
       await this.applyThemeSourceCssBundle(
@@ -779,6 +801,33 @@ ${fontEntries}
     }
 
     await this.applyThemeStylesheetCss(frontendDir, themeDir);
+  }
+
+  private async injectFontAwesomeStylesheetLink(
+    frontendDir: string,
+    themeDir: string,
+  ): Promise<void> {
+    const cssRelPath = (await this.pathExists(
+      join(themeDir, 'assets', 'font-awesome', 'css', 'all.css'),
+    ))
+      ? 'assets/font-awesome/css/all.css'
+      : (await this.pathExists(
+            join(themeDir, 'assets', 'font-awesome', 'css', 'all.min.css'),
+          ))
+        ? 'assets/font-awesome/css/all.min.css'
+        : null;
+    if (!cssRelPath) return;
+
+    const indexPath = join(frontendDir, 'index.html');
+    const indexHtml = await readFile(indexPath, 'utf-8').catch(() => null);
+    if (!indexHtml || indexHtml.includes('data-vp-theme-fontawesome')) return;
+
+    const linkTag = `<link rel="stylesheet" href="%BASE_URL%${cssRelPath}" data-vp-theme-fontawesome="true" />`;
+    await writeFile(
+      indexPath,
+      indexHtml.replace('</head>', `    ${linkTag}\n  </head>`),
+      'utf-8',
+    );
   }
 
   private async applyThemeJsonGlobalStyles(
@@ -1118,6 +1167,12 @@ ${fontEntries}
       '  width: 100%;',
       '  max-width: 100%;',
       '}',
+      '.wp-site-blocks .profolio-fse-banner-wrapper {',
+      '  width: 100vw;',
+      '  max-width: 100vw;',
+      '  margin-left: calc(50% - 50vw);',
+      '  margin-right: calc(50% - 50vw);',
+      '}',
     ].join('\n');
   }
 
@@ -1250,9 +1305,11 @@ ${fontEntries}
             : face?.src
               ? [face.src]
               : [];
-          const srcEntries = srcValues
-            .map((value) => this.toThemeFontFaceSrc(value))
-            .filter((value): value is string => !!value);
+          const srcEntries: string[] = [];
+          for (const value of srcValues) {
+            const srcEntry = await this.toThemeFontFaceSrc(value, themeDir);
+            if (srcEntry) srcEntries.push(srcEntry);
+          }
           if (srcEntries.length === 0) continue;
 
           const declarations = [
@@ -1284,7 +1341,10 @@ ${fontEntries}
     }
   }
 
-  private toThemeFontFaceSrc(value: unknown): string | undefined {
+  private async toThemeFontFaceSrc(
+    value: unknown,
+    themeDir?: string,
+  ): Promise<string | undefined> {
     if (typeof value !== 'string') return undefined;
     const trimmed = value.trim();
     if (!trimmed) return undefined;
@@ -1294,9 +1354,16 @@ ${fontEntries}
     const format = this.inferFontFaceFormat(trimmed);
     const formatSuffix = format ? ` format(${JSON.stringify(format)})` : '';
 
-    if (trimmed.startsWith('file:./assets/')) {
-      const relativePath = trimmed.slice('file:./assets/'.length);
-      return `url(${JSON.stringify(`../assets/${relativePath}`)})${formatSuffix}`;
+    const fileMatch = trimmed.match(/^file:(?:\.\/)?(.+)$/i);
+    if (fileMatch?.[1]) {
+      const relativePath = fileMatch[1].replace(/^\/+/, '');
+      if (!relativePath || relativePath.includes('..')) return undefined;
+      const publicPath = resolveThemeAssetPublicPath(relativePath);
+      if (!publicPath) return undefined;
+      if (themeDir && !(await this.pathExists(join(themeDir, relativePath)))) {
+        return undefined;
+      }
+      return `url(${JSON.stringify(publicPath)})${formatSuffix}`;
     }
 
     if (/^https?:\/\//i.test(trimmed)) {
@@ -2025,6 +2092,17 @@ ${fontEntries}
       rootVars.push(`  --wp--preset--spacing--${slug}: ${size};`);
     }
 
+    if (tokens.defaults?.contentWidth) {
+      rootVars.push(
+        `  --wp--style--global--content-size: ${tokens.defaults.contentWidth};`,
+      );
+    }
+    if (tokens.defaults?.wideWidth) {
+      rootVars.push(
+        `  --wp--style--global--wide-size: ${tokens.defaults.wideWidth};`,
+      );
+    }
+
     if (rootVars.length > 0) {
       lines.push(`:root {\n${rootVars.join('\n')}\n}`);
     }
@@ -2381,6 +2459,11 @@ ${fontEntries}
     normalized = this.stripLegacyVpDataAttributes(normalized);
     normalized = this.normalizeCanonicalTextLinkHoverClasses(normalized);
     normalized = this.normalizeCanonicalPostMetaLinks(normalized);
+    normalized = this.normalizeHeaderNavigationHoverClasses(
+      normalized,
+      componentName,
+    );
+    normalized = normalizeThemeAssetReferences(normalized);
     normalized = this.normalizeSinglePostHeroLayout(normalized, componentName);
     normalized = this.ensureReactRouterLinkImport(normalized);
     return normalized;
@@ -2659,6 +2742,11 @@ ${fontEntries}
           className: string,
         ) => {
           if (!isCanonicalTextLink(match)) return match;
+          if (
+            /\bno-underline\b/.test(className) ||
+            /\bwp-block-navigation-item__content\b/.test(className)
+          )
+            return match;
           if (looksLikeButtonClass(className)) return match;
           return `<${tag}${before}className=${quote}${appendTextLinkClasses(className)}${quote}`;
         },
@@ -2669,12 +2757,69 @@ ${fontEntries}
         /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
         (match, tag: string, before: string, className: string) => {
           if (!isCanonicalTextLink(match)) return match;
+          if (
+            /\bno-underline\b/.test(className) ||
+            /\bwp-block-navigation-item__content\b/.test(className)
+          )
+            return match;
           if (looksLikeButtonClass(className)) return match;
           return `<${tag}${before}className={\`${appendTextLinkClasses(className)}\`}`;
         },
       );
 
     return decorateTemplateLiteral(decorateQuoted(code));
+  }
+
+  private normalizeHeaderNavigationHoverClasses(
+    code: string,
+    componentName?: string,
+  ): string {
+    if (!/^Header$/i.test(componentName ?? '')) return code;
+
+    const clean = (className: string): string =>
+      className
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean)
+        .filter(
+          (token) =>
+            ![
+              'hover:underline',
+              'underline-offset-4',
+              'transition-opacity',
+              'hover:opacity-75',
+            ].includes(token),
+        )
+        .join(' ');
+
+    const shouldClean = (className: string): boolean =>
+      /\bwp-block-navigation-item__content\b/.test(className);
+
+    const cleanQuoted = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=(["'])([^"']*)\3/g,
+        (
+          match,
+          tag: string,
+          before: string,
+          quote: string,
+          className: string,
+        ) =>
+          shouldClean(className)
+            ? `<${tag}${before}className=${quote}${clean(className)}${quote}`
+            : match,
+      );
+
+    const cleanTemplateLiteral = (source: string) =>
+      source.replace(
+        /<(Link|a)\b([^>]*?)className=\{`([^`]*)`\}/g,
+        (match, tag: string, before: string, className: string) =>
+          shouldClean(className)
+            ? `<${tag}${before}className={\`${clean(className)}\`}`
+            : match,
+      );
+
+    return cleanTemplateLiteral(cleanQuoted(code));
   }
 
   private ensureReactRouterLinkImport(code: string): string {
@@ -3285,6 +3430,50 @@ ${fontEntries}
       (path) => path === '/' || (!path.includes(':') && path !== '*'),
     );
     return [...new Set(staticRoutes.length > 0 ? staticRoutes : ['/'])];
+  }
+
+  private resolveCanonicalPreviewRoute(input: {
+    componentName: string;
+    candidatePath: string;
+  }): string | null {
+    const path = this.normalizePreviewRoute(input.candidatePath);
+    if (!path) return null;
+    if (path === '/') return '/';
+
+    const componentName = input.componentName.toLowerCase();
+    if (
+      path === '/page/:slug' &&
+      ['page', 'runtimepage'].includes(componentName)
+    ) {
+      return '/page/:slug';
+    }
+    if (
+      path === '/post/:slug' &&
+      ['single', 'singlewithsidebar'].includes(componentName)
+    ) {
+      return '/post/:slug';
+    }
+    if (path === '/archive' && componentName === 'archive') {
+      return '/archive';
+    }
+    if (
+      ['/category/:slug', '/author/:slug', '/tag/:slug'].includes(path) &&
+      ['archive', 'category', 'author', 'tag'].includes(componentName)
+    ) {
+      return path;
+    }
+    if (path === '*' && ['page404', 'notfound'].includes(componentName)) {
+      return '*';
+    }
+
+    return null;
+  }
+
+  private normalizePreviewRoute(route: string): string {
+    const trimmed = String(route ?? '').trim();
+    if (!trimmed) return '';
+    if (trimmed === '*') return '*';
+    return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   }
 
   private buildFixedPageCanonicalRoute(

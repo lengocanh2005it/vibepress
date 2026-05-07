@@ -286,7 +286,10 @@ export class CodeReviewerService {
       `Snippet to modify:\n\`\`\`tsx\n${snippet}\n\`\`\`\n\n` +
       'Return only the modified lines, preserving original indentation. No fences, no explanation.';
 
-    await this.log(logPath, `[patch-snippet] ${label ?? 'snippet'}: ${instruction.slice(0, 120)}`);
+    await this.log(
+      logPath,
+      `[patch-snippet] ${label ?? 'snippet'}: ${instruction.slice(0, 120)}`,
+    );
 
     const result = await this.llmFactory.chat({
       model,
@@ -296,7 +299,10 @@ export class CodeReviewerService {
     });
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**
@@ -315,7 +321,10 @@ export class CodeReviewerService {
       `Complete TSX file to modify:\n\`\`\`tsx\n${fileContent}\n\`\`\`\n\n` +
       'Return the complete modified file only. No markdown fences, no explanation.';
 
-    await this.log(logPath, `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`);
+    await this.log(
+      logPath,
+      `[rewrite-file] ${label ?? 'file'}: ${instruction.slice(0, 120)}`,
+    );
 
     const inputChars = userPrompt.length;
     this.logger.log(
@@ -333,7 +342,10 @@ export class CodeReviewerService {
     );
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**
@@ -375,7 +387,10 @@ export class CodeReviewerService {
     );
 
     const raw = result.text ?? '';
-    return raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    return raw
+      .replace(/^```[\w]*\n?/gm, '')
+      .replace(/^```$/gm, '')
+      .trim();
   }
 
   /**
@@ -3286,10 +3301,10 @@ export class CodeReviewerService {
       )
     ) {
       instructions.push(
-        'Visible text links for post titles, author/category archive links inside meta rows, menus, footer/sidebar lists, breadcrumbs, and social/footer text links must include hover underline styling such as `hover:underline underline-offset-4`.',
+        'Visible text links for post titles, author/category archive links inside meta rows, footer/sidebar lists, breadcrumbs, and social/footer text links must include hover underline styling such as `hover:underline underline-offset-4`. Header `.wp-block-navigation` links are exempt when source CSS provides the hover underline.',
       );
       instructions.push(
-        'Keep CTA buttons as buttons, but make ordinary text navigation/content links visibly underlined on hover.',
+        'Keep CTA buttons as buttons. Keep header navigation links opacity 100 without `hover:opacity-*`; source theme CSS should provide the white underline hover state.',
       );
     }
 
@@ -4820,7 +4835,7 @@ export class CodeReviewerService {
       `### Approved planner contract for ${componentName}`,
       ...(surfacePlan ? [buildSurfacePlanRepairContextNote(surfacePlan)] : []),
       '### Approved plan sections to preserve exactly',
-      'If a section below includes blueprint style or layout fields such as presentation, ctaStyle, secondaryCtaStyle, cardStyle, quoteStyle, authorStyle, imageRadius, imageAspectRatio, triggerStyle, slideHeight, dotsColor, arrowColor, arrowBackground, width, height, activeTab, variant, tabAlign, allowMultiple, enableToggle, defaultOpenItems, itemLayout, metaLayout, metaAlign, metaSeparator, itemGap, or metaGap, preserve and re-apply those exact values.',
+      'If a section below includes blueprint style or layout fields such as presentation, ctaStyle, secondaryCtaStyle, cardStyle, quoteStyle, authorStyle, imageRadius, imageAspectRatio, imageFrameBackgroundSrc, imageFrameBackground, imageFrameMinHeight, imageHeightStyle, triggerStyle, slideHeight, dotsColor, arrowColor, arrowBackground, width, height, activeTab, variant, tabAlign, allowMultiple, enableToggle, defaultOpenItems, itemLayout, metaLayout, metaAlign, metaSeparator, itemGap, or metaGap, preserve and re-apply those exact values.',
       'Do not replace approved blueprint styles with prettier defaults, palette fallbacks, or generic token-based classes when the plan already provides exact visual values.',
       'If the approved plan includes source `customClassNames` on the section itself, CTA/link elements, images, card wrappers, avatar elements, or nested text nodes such as headings, quotes, subtitles, tab panels, accordion bodies, and modal copy, preserve those exact class tokens on the corresponding rendered JSX elements. Do not collapse them onto the wrong wrapper or delete them during fixes.',
       ...(hasPlannerBlockTree

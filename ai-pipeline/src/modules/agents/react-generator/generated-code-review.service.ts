@@ -590,8 +590,9 @@ ${component.code}
           'Menu links must use canonical `item.url` directly for internal navigation. Do not prepend an extra `/page` segment to menu URLs.',
       });
     }
-    const missingHoverUnderlineLinks =
-      this.findCanonicalTextLinkSnippetsWithoutHoverUnderline(component.code);
+    const missingHoverUnderlineLinks = /^Header$/i.test(component.name)
+      ? []
+      : this.findCanonicalTextLinkSnippetsWithoutHoverUnderline(component.code);
     if (missingHoverUnderlineLinks.length > 0) {
       issues.push({
         severity: 'medium',
@@ -1225,9 +1226,27 @@ ${component.code}
       'must keep real interactive state wiring',
       'approved carousel section must move the track',
       'resolveasset() helper',
+      'raw `theme-asset:',
+      'raw theme-asset',
+      'instead of resolving it to a real asset url',
+      'prevent the approved project images from rendering',
       'theme asset paths are rendered directly',
       'theme asset urls are used directly',
       'images will not load correctly at runtime',
+      'unnecessary client-only readiness gate',
+      'client-only state/useeffect gating',
+      'returns `null` on first render',
+      'returns null on first render',
+      'returns null on initial render',
+      'actual nested image element inside the cover',
+      'replaces this with css `backgroundimage`',
+      'replaces this with css backgroundimage',
+      'materially changes the approved source-backed cover structure',
+      'materially redesigns the approved wordpress layout',
+      'materially misrendered',
+      'image/cover area is materially misrendered',
+      'stacks the same background image',
+      'actual visible result effectively obscured',
     ];
 
     return review.issues.filter(

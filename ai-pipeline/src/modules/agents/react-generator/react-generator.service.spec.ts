@@ -3,6 +3,7 @@ import { CodeGeneratorService } from './code-generator.service.js';
 import { CodeReviewerService } from './code-reviewer.service.js';
 import { FrameGeneratorService } from './frame-generator.service.js';
 import type { RepoThemeManifest } from '../repo-analyzer/repo-analyzer.service.js';
+import type { PlanResult } from '../planner/planner.service.js';
 
 describe('ReactGeneratorService shared partial renderer policy', () => {
   const service = new ReactGeneratorService(
@@ -234,7 +235,7 @@ describe('ReactGeneratorService source-faithful page policy', () => {
             imageSrc: 'theme-asset:/assets/images/banner-image.png',
             imageAlt: '',
             imagePosition: 'right',
-            customClassNames: ['profolio-fse-banner-wrapper'],
+            customClassNames: ['profolio-fse-banner-wrapper', 'alignfull'],
           },
           {
             type: 'card-grid',
@@ -343,13 +344,59 @@ describe('ReactGeneratorService source-faithful page policy', () => {
             heading: 'UI/UX Design',
             sourceRef: { sourceNodeId: 'front-page::columns::1.1.1.0' },
           },
+          {
+            type: 'media-text',
+            heading: 'Lead Product and Designer and Art Director',
+            sourceRef: {
+              sourceNodeId: 'front-page::columns::1.2.0',
+              parentSourceNodeId: 'front-page::group::1.2',
+            },
+            paddingStyle: '0 0px',
+            presentation: {
+              contentAlign: 'center',
+              textAlign: 'center',
+              itemsAlign: 'center',
+              justify: 'center',
+            },
+          },
         ],
         blockTree: [
           {
             kind: 'group',
             blockName: 'core/group',
             sourceRef: { sourceNodeId: 'front-page::group::0' },
-            children: [],
+            children: [
+              {
+                kind: 'heading',
+                blockName: 'core/heading',
+                sourceRef: {
+                  sourceNodeId: 'front-page::heading::0.0.0.1',
+                },
+                html: 'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
+              },
+              {
+                kind: 'social-links',
+                blockName: 'core/social-links',
+                sourceRef: {
+                  sourceNodeId: 'front-page::social-links::0.0.0.4',
+                },
+                children: [
+                  {
+                    kind: 'social-link',
+                    blockName: 'core/social-link',
+                    attrs: { service: 'facebook', url: '#' },
+                  },
+                ],
+              },
+              {
+                kind: 'image',
+                blockName: 'core/image',
+                sourceRef: {
+                  sourceNodeId: 'front-page::image::0.0.1.0.0.0',
+                },
+                src: 'theme-asset:/assets/images/banner-image.png',
+              },
+            ],
           },
           {
             kind: 'group',
@@ -361,28 +408,299 @@ describe('ReactGeneratorService source-faithful page policy', () => {
                 blockName: 'core/group',
                 sourceRef: { sourceNodeId: 'front-page::group::1.0' },
                 attrs: { metadata: { name: 'Projects' } },
-                children: [],
+                textAlign: 'center',
+                children: [
+                  {
+                    kind: 'group',
+                    blockName: 'core/group',
+                    sourceRef: {
+                      sourceNodeId: 'front-page::group::1.0.1',
+                    },
+                    children: [
+                      {
+                        kind: 'group',
+                        blockName: 'core/group',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::group::1.0.1.0',
+                        },
+                        children: [
+                          {
+                            kind: 'cover',
+                            blockName: 'core/cover',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::cover::1.0.1.0.0',
+                            },
+                            children: [
+                              {
+                                kind: 'group',
+                                blockName: 'core/group',
+                                sourceRef: {
+                                  sourceNodeId:
+                                    'front-page::group::1.0.1.0.0.0',
+                                },
+                                children: [
+                                  {
+                                    kind: 'group',
+                                    blockName: 'core/group',
+                                    sourceRef: {
+                                      sourceNodeId:
+                                        'front-page::group::1.0.1.0.0.0.0',
+                                    },
+                                    bgColor: '#F5B731',
+                                    children: [
+                                      {
+                                        kind: 'image',
+                                        blockName: 'core/image',
+                                        sourceRef: {
+                                          sourceNodeId:
+                                            'front-page::image::1.0.1.0.0.0.0.0',
+                                        },
+                                        src: 'theme-asset:/assets/images/arrow-up.png',
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          {
+                            kind: 'heading',
+                            blockName: 'core/heading',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::heading::1.0.1.0.1',
+                            },
+                            text: 'Design of a mobile app develops',
+                          },
+                          {
+                            kind: 'paragraph',
+                            blockName: 'core/paragraph',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::paragraph::1.0.1.0.2',
+                            },
+                            text: 'Project body',
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
               },
               {
                 kind: 'group',
                 blockName: 'core/group',
                 sourceRef: { sourceNodeId: 'front-page::group::1.1' },
                 attrs: { metadata: { name: 'Services' } },
-                children: [],
+                children: [
+                  {
+                    kind: 'group',
+                    blockName: 'core/group',
+                    sourceRef: {
+                      sourceNodeId: 'front-page::group::1.1.1',
+                    },
+                    children: [
+                      {
+                        kind: 'columns',
+                        blockName: 'core/columns',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::columns::1.1.1.0',
+                        },
+                        padding: {
+                          top: '40px',
+                          right: '40px',
+                          bottom: '40px',
+                          left: '40px',
+                        },
+                        children: [
+                          {
+                            kind: 'column',
+                            blockName: 'core/column',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::column::1.1.1.0.0',
+                            },
+                            children: [
+                              {
+                                kind: 'group',
+                                blockName: 'core/group',
+                                sourceRef: {
+                                  sourceNodeId:
+                                    'front-page::group::1.1.1.0.0.0',
+                                },
+                                padding: {
+                                  top: '0px',
+                                  right: '0px',
+                                  bottom: '0px',
+                                  left: '0px',
+                                },
+                                children: [
+                                  {
+                                    kind: 'heading',
+                                    blockName: 'core/heading',
+                                    sourceRef: {
+                                      sourceNodeId:
+                                        'front-page::heading::1.1.1.0.0.0.0',
+                                    },
+                                    text: 'UI/UX Design',
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          {
+                            kind: 'column',
+                            blockName: 'core/column',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::column::1.1.1.0.1',
+                            },
+                            children: [
+                              {
+                                kind: 'cover',
+                                blockName: 'core/cover',
+                                sourceRef: {
+                                  sourceNodeId:
+                                    'front-page::cover::1.1.1.0.1.0',
+                                },
+                                customClassNames: [
+                                  'r-cover',
+                                  'is-style-outline',
+                                ],
+                                src: 'theme-asset:/assets/images/projects-1.jpg',
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
               },
               {
                 kind: 'group',
                 blockName: 'core/group',
                 sourceRef: { sourceNodeId: 'front-page::group::1.2' },
                 attrs: { metadata: { name: 'Experience' } },
-                children: [],
+                textAlign: 'center',
+                padding: {
+                  top: '80px',
+                  right: '20px',
+                  bottom: '80px',
+                  left: '20px',
+                },
+                margin: {
+                  top: '0px',
+                  bottom: '0px',
+                },
+                children: [
+                  {
+                    kind: 'columns',
+                    blockName: 'core/columns',
+                    sourceRef: {
+                      sourceNodeId: 'front-page::columns::1.2.0',
+                    },
+                    textAlign: 'center',
+                    children: [
+                      {
+                        kind: 'column',
+                        blockName: 'core/column',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::column::1.2.0.0',
+                        },
+                        children: [
+                          {
+                            kind: 'cover',
+                            blockName: 'core/cover',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::cover::1.2.0.0.0',
+                            },
+                            src: 'theme-asset:/assets/images/experience.jpg',
+                            overlayColor: '#2F4138',
+                          },
+                        ],
+                      },
+                      {
+                        kind: 'column',
+                        blockName: 'core/column',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::column::1.2.0.1',
+                        },
+                        customClassNames: [
+                          'wow',
+                          'animate__animated',
+                          'animate__fadeInUp',
+                          'cover-inner',
+                        ],
+                        children: [
+                          {
+                            kind: 'paragraph',
+                            blockName: 'core/paragraph',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::paragraph::1.2.0.1.0',
+                            },
+                            text: 'Welcome to my profile',
+                          },
+                          {
+                            kind: 'heading',
+                            blockName: 'core/heading',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::heading::1.2.0.1.1',
+                            },
+                            text: 'Lead Product and Designer and Art Director',
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
               },
               {
                 kind: 'group',
                 blockName: 'core/group',
                 sourceRef: { sourceNodeId: 'front-page::group::1.3' },
                 attrs: { metadata: { name: 'Skills' } },
-                children: [],
+                children: [
+                  {
+                    kind: 'group',
+                    blockName: 'core/group',
+                    sourceRef: {
+                      sourceNodeId: 'front-page::group::1.3.1',
+                    },
+                    children: [
+                      {
+                        kind: 'group',
+                        blockName: 'core/group',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::group::1.3.1.0',
+                        },
+                        children: [
+                          {
+                            kind: 'image',
+                            blockName: 'core/image',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::image::1.3.1.0.0',
+                            },
+                            src: 'theme-asset:/assets/images/figma.png',
+                          },
+                        ],
+                      },
+                      {
+                        kind: 'group',
+                        blockName: 'core/group',
+                        sourceRef: {
+                          sourceNodeId: 'front-page::group::1.3.1.1',
+                        },
+                        children: [
+                          {
+                            kind: 'image',
+                            blockName: 'core/image',
+                            sourceRef: {
+                              sourceNodeId: 'front-page::image::1.3.1.1.0',
+                            },
+                            src: 'theme-asset:/assets/images/photoshop.png',
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
               },
             ],
           },
@@ -416,6 +734,9 @@ describe('ReactGeneratorService source-faithful page policy', () => {
       route: '/',
       generationMode: 'deterministic',
     });
+    expect(result[0].requiredCustomClassNames).not.toContain(
+      'is-style-logos-only',
+    );
     expect(result[0].code).toContain(
       "import FrontPageProjects from '../components/FrontPageProjects';",
     );
@@ -424,6 +745,77 @@ describe('ReactGeneratorService source-faithful page policy', () => {
       '<FrontPageProjects posts={posts} loading={loading} error={error} />',
     );
     expect(result[0].code).toContain('<FrontPageSkills />');
+    const bannerInput = (codeReviewer.reviewSection as jest.Mock).mock
+      .calls[0][0] as { nodesJson: string };
+    expect(bannerInput.nodesJson).not.toContain('social-links');
+    expect(bannerInput.nodesJson).not.toContain('facebook');
+    expect(bannerInput.nodesJson).toContain(
+      'style=\\"background-color:rgba(0,0,0,0);color:#F5B731\\"',
+    );
+    expect(bannerInput.nodesJson).toContain('profolio-fse-banner-image');
+    expect(bannerInput.nodesJson).toContain('aligncenter');
+    const projectsInput = (
+      codeReviewer.reviewSection as jest.Mock
+    ).mock.calls.find(
+      ([call]) => call.sectionName === 'FrontPageProjects',
+    )?.[0] as { nodesJson: string };
+    expect(projectsInput.nodesJson).toContain('profolio-fse-projects-wrapper');
+    expect(projectsInput.nodesJson).toContain('profolio-fse-project-card');
+    expect(projectsInput.nodesJson).toContain('profolio-fse-project-arrow');
+    expect(projectsInput.nodesJson).toContain('"textAlign": "left"');
+    const servicesInput = (
+      codeReviewer.reviewSection as jest.Mock
+    ).mock.calls.find(
+      ([call]) => call.sectionName === 'FrontPageServices',
+    )?.[0] as { nodesJson: string };
+    expect(servicesInput.nodesJson).toContain('profolio-fse-services-wrapper');
+    expect(servicesInput.nodesJson).not.toContain('"alignfull"');
+    expect(servicesInput.nodesJson).toContain('profolio-fse-services-stack');
+    expect(servicesInput.nodesJson).toContain('profolio-fse-service-card');
+    expect(servicesInput.nodesJson).toContain('profolio-fse-service-card-copy');
+    expect(servicesInput.nodesJson).toContain('profolio-fse-service-card-media');
+    expect(servicesInput.nodesJson).toContain('"top": "48px"');
+    expect(servicesInput.nodesJson).toContain('"bottom": "24px"');
+    const experienceInput = (
+      codeReviewer.reviewSection as jest.Mock
+    ).mock.calls.find(
+      ([call]) => call.sectionName === 'FrontPageExperience',
+    )?.[0] as { nodesJson: string; componentPlan: PlanResult[number] };
+    expect(experienceInput.nodesJson).toContain(
+      'profolio-fse-experience-wrapper',
+    );
+    expect(experienceInput.nodesJson).toContain(
+      'profolio-fse-experience-image',
+    );
+    expect(experienceInput.nodesJson).toContain('profolio-fse-experience-copy');
+    expect(experienceInput.nodesJson).toContain('"top": "80px"');
+    const experienceChildPlan = experienceInput.componentPlan;
+    expect(experienceChildPlan.visualPlan?.sections[0]).toMatchObject({
+      paddingStyle: '80px 20px 80px 20px',
+      marginStyle: '0px 0px 0px 0px',
+      customClassNames: expect.arrayContaining([
+        'profolio-fse-experience-wrapper',
+        'alignfull',
+      ]),
+      presentation: {
+        contentAlign: 'left',
+        textAlign: 'left',
+        itemsAlign: 'start',
+        justify: 'start',
+      },
+    });
+    expect(experienceInput.nodesJson).not.toContain('"overlayColor"');
+    expect(experienceInput.nodesJson).toContain('"textAlign": "left"');
+    const skillsInput = (
+      codeReviewer.reviewSection as jest.Mock
+    ).mock.calls.find(
+      ([call]) => call.sectionName === 'FrontPageSkills',
+    )?.[0] as { nodesJson: string };
+    expect(skillsInput.nodesJson).toContain('profolio-fse-skills-wrapper');
+    expect(skillsInput.nodesJson).toContain('profolio-fse-skills-grid');
+    expect(skillsInput.nodesJson).toContain('profolio-fse-skill-card');
+    expect(skillsInput.nodesJson).toContain('profolio-fse-skill-icon');
+    expect(skillsInput.nodesJson).toContain('animate__delay-1s');
     expect(result.slice(1).every((component) => component.isSubComponent)).toBe(
       true,
     );
@@ -1113,6 +1505,86 @@ describe('ReactGeneratorService source-faithful page policy', () => {
 
     expect(codeGenerator.generate).not.toHaveBeenCalled();
     expect(codeReviewer.selfFix).toHaveBeenCalledTimes(1);
+    expect(fixed.code).toContain('data-ai-fixed');
+    expect(fixed.generationMode).toBe('deterministic');
+  });
+
+  it('lets AI patch protected profolio detail pages for visual section contract repairs', async () => {
+    const codeGenerator = {
+      generate: jest.fn(
+        () =>
+          'export default function SinglePost(){return <main data-deterministic />;}',
+      ),
+      generateBlockFaithfulPartial: jest.fn(),
+    } as unknown as CodeGeneratorService;
+    const codeReviewer = {
+      selfFix: jest.fn(
+        async () =>
+          'export default function SinglePost(){return <main data-ai-fixed />;}',
+      ),
+    } as unknown as CodeReviewerService;
+    const service = new ReactGeneratorService(
+      { getModel: jest.fn(() => 'gpt-test') } as never,
+      { get: jest.fn() } as never,
+      {} as never,
+      codeGenerator,
+      codeReviewer,
+      {} as never,
+    );
+
+    const visualPlan = {
+      componentName: 'SinglePost',
+      renderMode: 'block-centric',
+      renderAuthority: 'deterministic-pixel',
+      dataNeeds: ['postDetail', 'comments'],
+      palette: {},
+      typography: {},
+      layout: {},
+      sections: [
+        { type: 'post-featured-image' },
+        { type: 'post-title' },
+        { type: 'post-content', debugKey: 'post-content-0' },
+        { type: 'post-terms' },
+        { type: 'comments', debugKey: 'comments-0', showForm: true },
+      ],
+      blockTree: [{ blockName: 'core/group' }],
+      lockPolicy: { bypassAiGeneration: true, reason: 'strict' },
+    } as any;
+    const plan = [
+      {
+        componentName: 'SinglePost',
+        templateName: 'single',
+        type: 'page',
+        route: '/post/:slug',
+        dataNeeds: ['post-detail', 'comments'],
+        isDetail: true,
+        planningSourceReason: 'block-tree deterministic visual plan path',
+        visualPlan,
+        renderContract: {
+          structure: { renderMode: 'block-tree' },
+        },
+      },
+    ] as any;
+
+    const fixed = await service.fixComponent({
+      component: {
+        name: 'SinglePost',
+        filePath: '',
+        code: 'export default function SinglePost(){return null;}',
+        generationMode: 'deterministic',
+        visualPlan,
+        renderContract: plan[0].renderContract,
+      },
+      plan,
+      feedback:
+        'Validator contract error for component "SinglePost":\nVisual section contracts violated:\ndetail: "SinglePost" section 3 post-content must render post body through the approved structured rich-text render path\ndetail: "SinglePost" section 5 comments list is missing comment body rendering\ndetail: "SinglePost" section 5 comment form is missing the required author field\ndetail: "SinglePost" section 5 comment form is missing the required email field',
+    });
+
+    expect(codeGenerator.generate).not.toHaveBeenCalled();
+    expect(codeReviewer.selfFix).toHaveBeenCalledTimes(1);
+    expect((codeReviewer.selfFix as jest.Mock).mock.calls[0][2]).toContain(
+      'Protected source-faithful contract repair',
+    );
     expect(fixed.code).toContain('data-ai-fixed');
     expect(fixed.generationMode).toBe('deterministic');
   });

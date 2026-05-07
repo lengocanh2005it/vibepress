@@ -827,7 +827,7 @@ function buildScopedApiContractNote(input: {
     '- Post titles, recent-post titles, search results, and page-list/sidebar titles must link to their canonical detail routes (`/post/${post.slug}` or `/page/${page.slug}`) when those routes are part of the approved app contract.',
   );
   lines.push(
-    '- Visible text links for post titles, author/category archive links inside meta rows, menus, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt.',
+    '- Visible text links for post titles, author/category archive links inside meta rows, footer lists, sidebar lists, breadcrumbs, and social/footer text links must underline on hover (for example `hover:underline underline-offset-4`). CTA buttons are exempt. Header navigation inside `.wp-block-navigation` is also exempt when the source theme CSS supplies its own hover underline via pseudo-elements.',
   );
   lines.push(
     '- Use `menu.items[].target` for external anchors; when it is `_blank`, also set `rel="noopener noreferrer"`.',
@@ -1467,7 +1467,7 @@ export function buildDataGroundingNote(
       '> IMPORTANT: `item.url` from `/api/menus` is already the canonical app path for internal links. Use `<Link to={item.url}>` directly. NEVER prepend `/page`, `/post`, or any extra route segment to `item.url`.',
     );
     parts.push(
-      '> Menu, footer, and sidebar text links should visibly underline on hover (`hover:underline underline-offset-4`) to preserve expected WordPress-style navigation behavior.',
+      '> Footer and sidebar text links should visibly underline on hover (`hover:underline underline-offset-4`) to preserve expected WordPress-style navigation behavior. Header `.wp-block-navigation` links should not add opacity utilities or fallback `hover:underline`; preserve the WP classes and let source CSS draw its white underline.',
     );
     for (const m of menus) {
       const itemPreview = m.items
@@ -1929,6 +1929,7 @@ function buildImageSourcesNote(templateSource: string): string {
   );
   lines.push(
     'For important screenshot/product/composite images from the template source, preserve the full asset by default: prefer `w-full h-auto object-contain` (optionally with a max-height) instead of fixed-height `object-cover` cropping, unless the source itself is intentionally cropped.',
+    'For small source icons/badges with explicit dimensions (for example `width: 20px` or a `width` field on an image node), preserve that exact width/height inline and do NOT render them with `w-full`; otherwise their parent badge/background will inflate incorrectly.',
   );
   lines.push(
     'When a media-text/photo section in the source has a framed or rounded image, preserve that rounded treatment in React. Do not flatten it to a sharp-corner image unless the source is clearly square-edged.',
@@ -2265,6 +2266,13 @@ function buildCompactSectionSummary(
           maxItems: 10,
           maxChars: 160,
         });
+        if (section.stats?.length) {
+          parts.push(
+            `stats=${section.stats
+              .map((stat) => `${stat.value}: ${stat.label}`)
+              .join(' | ')}`,
+          );
+        }
         pushPlanTextPart(parts, 'ctaText', section.cta?.text);
         pushPlanTextPart(parts, 'ctaLink', section.cta?.link);
         section.ctas?.slice(1).forEach((cta, ctaIndex) => {
@@ -2275,6 +2283,24 @@ function buildCompactSectionSummary(
           parts.push(`imageRadius=${section.imageRadius}`);
         if (section.imageAspectRatio)
           parts.push(`imageAspectRatio=${section.imageAspectRatio}`);
+        if (section.imageFrameBackgroundSrc) {
+          parts.push(
+            `imageFrameBackgroundSrc=${section.imageFrameBackgroundSrc}`,
+          );
+        }
+        if (section.imageFrameBackground)
+          parts.push(`imageFrameBackground=${section.imageFrameBackground}`);
+        if (section.imageFrameBackground && section.imageFrameBackgroundSrc) {
+          parts.push(
+            'imageFrameOverlay=render imageFrameBackground as a visible opaque layer above the frame background image and behind the foreground image; do not set opacity:0',
+          );
+        }
+        if (section.imageFrameMinHeight)
+          parts.push(`imageFrameMinHeight=${section.imageFrameMinHeight}`);
+        if (section.imageFrameBorderStyle)
+          parts.push(`imageFrameBorder=${section.imageFrameBorderStyle}`);
+        if (section.imageHeightStyle)
+          parts.push(`imageHeight=${section.imageHeightStyle}`);
         if (section.ctaStyle)
           parts.push(`ctaStyle=${JSON.stringify(section.ctaStyle)}`);
         if (section.secondaryCtaStyle)
@@ -2546,6 +2572,9 @@ export function buildVisualPlanContextNote(
     );
     lines.push(
       '⛔ CONTENT FIDELITY: When the approved plan below includes concrete headings, card text, body copy, list items, CTA labels, image sources, or image alts, render that exact approved content instead of inventing substitute marketing copy or shortening the section.',
+    );
+    lines.push(
+      '⛔ Do NOT add social/link lists, social icon rows, or visible labels such as Facebook, Instagram, X, Twitter, LinkedIn, or YouTube inside a section unless those exact labels/links are present in that approved section contract.',
     );
     lines.push(
       '⛔ For every `card-grid`, render ALL approved cards in the SAME order with the SAME headings/body text unless the source data above proves a specific card is impossible.',
@@ -3662,6 +3691,12 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           `- listItems: ${JSON.stringify(section.listItems.slice(0, 8))}`,
         );
       }
+      if (section.stats?.length) {
+        lines.push(`- stats: ${JSON.stringify(section.stats.slice(0, 6))}`);
+        lines.push(
+          '- Render stats as separate value/label items inside the media-text copy column; do not merge stat labels into body copy.',
+        );
+      }
       if (section.cta?.text) {
         lines.push(`- ctaText: ${JSON.stringify(section.cta.text)}`);
       }
@@ -3678,6 +3713,14 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
       if (section.imageAspectRatio) {
         lines.push(`- imageAspectRatio: ${section.imageAspectRatio}`);
       }
+      if (section.imageFrameBorderStyle) {
+        lines.push(`- imageFrameBorder: ${section.imageFrameBorderStyle}`);
+      }
+      if (section.imageFrameBackground && section.imageFrameBackgroundSrc) {
+        lines.push(
+          '- imageFrameBackground is a visible overlay layer above imageFrameBackgroundSrc and behind the foreground image. Do NOT set that overlay opacity to 0.',
+        );
+      }
       if (section.ctaStyle) {
         lines.push(`- ctaStyle: ${JSON.stringify(section.ctaStyle)}`);
       }
@@ -3686,6 +3729,9 @@ function buildInlineSectionLiteralChecklist(section: SectionPlan): string {
           `- secondaryCtaStyle: ${JSON.stringify(section.secondaryCtaStyle)}`,
         );
       }
+      lines.push(
+        '- Do not add social links or extra link rows inside this media-text section unless they are explicitly listed above.',
+      );
       break;
     case 'post-list':
       if (section.title) {

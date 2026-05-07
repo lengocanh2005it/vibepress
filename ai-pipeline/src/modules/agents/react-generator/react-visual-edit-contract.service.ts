@@ -1,7 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import {
-  type EditOperation
-} from '../../edit-request/edit-operation.util.js';
+import { type EditOperation } from '../../edit-request/edit-operation.util.js';
 import type {
   PipelinePreviewRouteEntryDto,
   PipelineReactVisualEditRequestDto,
@@ -428,4 +426,3 @@ function detectPromptInjection(value: string): string | null {
   }
   return null;
 }
-

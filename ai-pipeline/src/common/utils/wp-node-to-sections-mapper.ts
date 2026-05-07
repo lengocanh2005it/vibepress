@@ -851,20 +851,51 @@ function profolioBannerSections(): SectionPlan[] {
       type: 'media-text',
       debugKey: 'banner',
       subtitle: 'About Me',
-      heading: 'Welcome To My Profile <br>I am <mark>Julia Henderson</mark>',
+      heading:
+        'Welcome To My Profile <br>I am <mark style="background-color:rgba(0,0,0,0);color:#F5B731" class="has-inline-color has-secondary-color">Julia Henderson</mark>',
       body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient Adipiscing ipsum netus donec erat vivamus congue eget fermentum',
       imageSrc: 'theme-asset:/assets/images/banner-image.png',
       imageAlt: '',
       imagePosition: 'right',
-      background: 'primary',
-      textColor: 'white',
-      customClassNames: ['profolio-fse-banner-wrapper'],
+      imageFit: 'contain',
+      imageWidthStyle: 'auto',
+      imageHeightStyle: '500px',
+      imageCustomClassNames: ['aligncenter', 'is-resized'],
+      imageRadius: '50% 50% 0px 0px',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/banner.jpg',
+      imageFrameBackgroundPosition: '49% 37%',
+      imageFrameBackground: '#F5B731',
+      imageFrameMinHeight: '550px',
+      imageFramePaddingStyle: '0px',
+      imageFrameCustomClassNames: [
+        'is-light',
+        'is-position-bottom-center',
+        'r-cover',
+      ],
+      columnWidths: ['50%', '50%'],
+      background: '#2F4138',
+      textColor: '#fff',
+      paddingStyle: '80px 20px 0px 20px',
+      marginStyle: '0px 0px',
+      gapStyle: 'var(--wp--preset--spacing--40)',
+      customClassNames: ['profolio-fse-banner-wrapper', 'alignfull'],
       cta: { text: 'View my Work', link: '#' },
+      ctaStyle: {
+        background: '#F5B731',
+        color: '#f2f2f2',
+      },
     },
   ];
 }
 
 function profolioProjectsSections(): SectionPlan[] {
+  const motionClassNames = [
+    'wow',
+    'animate__animated',
+    'animate__fadeInUp',
+    'cover-inner',
+  ];
+  const cardMotionClassNames = motionClassNames.slice(0, 3);
   return [
     {
       type: 'card-grid',
@@ -872,28 +903,60 @@ function profolioProjectsSections(): SectionPlan[] {
       subtitle: 'My Projects',
       title: 'Some Of My Projects',
       columns: 4,
+      customClassNames: [
+        ...motionClassNames,
+        'profolio-fse-projects-wrapper',
+        'alignfull',
+        'vp-card-grid-intro-centered',
+      ],
       cards: [
         {
           heading: 'Design of a mobile app develops',
           body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
           imageAlt: '',
+          customClassNames: [
+            ...cardMotionClassNames,
+            'profolio-fse-project-card',
+          ],
+          headingCustomClassNames: ['profolio-fse-project-card-title'],
+          bodyCustomClassNames: ['profolio-fse-project-card-body'],
         },
         {
           heading: 'AI Based Social Networks',
           body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-2.jpg',
           imageAlt: '',
+          customClassNames: [
+            ...cardMotionClassNames,
+            'profolio-fse-project-card',
+          ],
+          headingCustomClassNames: ['profolio-fse-project-card-title'],
+          bodyCustomClassNames: ['profolio-fse-project-card-body'],
         },
         {
           heading: 'NFT Buy and Sell Platform',
           body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
           imageSrc: 'theme-asset:/assets/images/projects-3.jpg',
           imageAlt: '',
+          customClassNames: [
+            ...cardMotionClassNames,
+            'profolio-fse-project-card',
+          ],
+          headingCustomClassNames: ['profolio-fse-project-card-title'],
+          bodyCustomClassNames: ['profolio-fse-project-card-body'],
         },
         {
           heading: 'Web Traffic Management',
           body: 'Nullam maecenas gravida suscipit potenti lorem eros si tincidunt litora imperdiet maximus dapibus eu hendrerit tempus cras adipiscing faucibus sem consectetur platea justo euismod',
+          imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
+          imageAlt: '',
+          customClassNames: [
+            ...cardMotionClassNames,
+            'profolio-fse-project-card',
+          ],
+          headingCustomClassNames: ['profolio-fse-project-card-title'],
+          bodyCustomClassNames: ['profolio-fse-project-card-body'],
         },
       ],
     },
@@ -903,6 +966,45 @@ function profolioProjectsSections(): SectionPlan[] {
 function profolioServicesSections(): SectionPlan[] {
   const body =
     'Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos hymenaeos. Suspendisse enim turpis, dictum sed, iaculis a, condimentum nec, nisi. Aenean ut eros et nisl sagittis vestibulum.';
+  const primary = '#2F4138';
+  const secondary = '#F5B731';
+  const serviceMotionClassNames = [
+    'wow',
+    'animate__animated',
+    'animate__fadeInUp',
+    'cover-inner',
+  ];
+  const serviceCardClassNames = [
+    ...serviceMotionClassNames,
+    'profolio-fse-service-card',
+  ];
+  const serviceBase = {
+    type: 'media-text' as const,
+    body,
+    imageAlt: '',
+    imagePosition: 'right' as const,
+    imageFit: 'cover' as const,
+    imageRadius: '10px',
+    imageFrameMinHeight: '380px',
+    imageFramePaddingStyle: '0px',
+    imageFrameCustomClassNames: ['r-cover'],
+    columnWidths: ['50%', '50%'],
+    paddingStyle: '48px 40px 40px 40px',
+    gapStyle: '40px 40px',
+    marginStyle: '0px 0px 24px 0px',
+    border: { radius: '8px' },
+    customClassNames: serviceCardClassNames,
+    presentation: {
+      textAlign: 'left' as const,
+      itemsAlign: 'start' as const,
+      justify: 'start' as const,
+    },
+    headingStyle: {
+      fontSize: '42px',
+      fontWeight: '700',
+    },
+    cta: { text: 'View My Work', link: '#' },
+  };
   return [
     {
       type: 'hero',
@@ -910,60 +1012,152 @@ function profolioServicesSections(): SectionPlan[] {
       layout: 'centered',
       subheading: 'Services',
       heading: 'My Services',
+      paddingStyle: '0px 0px 0px 0px',
+      marginStyle: '0px 0px 40px 0px',
+      subheadingStyle: {
+        lineHeight: '1.5',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: '1px',
+      },
+      headingStyle: {
+        lineHeight: '1.2',
+      },
     },
     {
-      type: 'media-text',
+      ...serviceBase,
       debugKey: 'ui-ux-design',
       heading: 'UI/UX Design',
-      body,
       imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
-      imageAlt: '',
-      imagePosition: 'right',
-      background: 'primary',
-      textColor: 'white',
-      cta: { text: 'View My Work', link: '#' },
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-1.jpg',
+      background: primary,
+      textColor: '#fff',
+      ctaStyle: {
+        background: secondary,
+        color: '#f2f2f2',
+        borderRadius: '8px',
+        padding: '12px 24px 12px 24px',
+        border: '1px solid transparent',
+      },
     },
     {
-      type: 'media-text',
+      ...serviceBase,
       debugKey: 'graphic-design',
       heading: 'Graphic Design',
-      body,
       imageSrc: 'theme-asset:/assets/images/projects-2.jpg',
-      imageAlt: '',
-      imagePosition: 'left',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-2.jpg',
       background: '#f1f5f9',
-      cta: { text: 'View My Work', link: '#' },
+      textColor: '#000',
+      cta: {
+        text: 'View My Work',
+        link: '#',
+        customClassNames: ['is-style-outline'],
+      },
+      ctaStyle: {
+        variant: 'outline',
+        background: 'transparent',
+        color: '#0C0C0C',
+        borderRadius: '8px',
+        padding: '12px 24px 12px 24px',
+        border: '1px solid #0C0C0C',
+      },
     },
     {
-      type: 'media-text',
+      ...serviceBase,
       debugKey: 'product-design',
       heading: 'Product Design',
-      body,
       imageSrc: 'theme-asset:/assets/images/projects-3.jpg',
-      imageAlt: '',
-      imagePosition: 'right',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-3.jpg',
       background: '#f1f5f9',
-      cta: { text: 'View My Work', link: '#' },
+      textColor: '#000',
+      cta: {
+        text: 'View My Work',
+        link: '#',
+        customClassNames: ['is-style-outline'],
+      },
+      ctaStyle: {
+        variant: 'outline',
+        background: 'transparent',
+        color: '#0C0C0C',
+        borderRadius: '8px',
+        padding: '12px 24px 12px 24px',
+        border: '1px solid #0C0C0C',
+      },
     },
   ];
 }
 
 function profolioExperienceSections(): SectionPlan[] {
+  const primary = '#2F4138';
   return [
     {
       type: 'media-text',
       debugKey: 'experience',
-      subtitle: 'Experience',
+      subtitle: 'Welcome to my profile',
       heading: 'Lead Product and Designer and Art Director',
-      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient',
+      body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur per libero consectetuer id elit neque condimentum parturient Adipiscing ipsum netus donec erat vivamus congue eget fermentum curae curabitur tempor etiam sem orci imperdiet congue penatibus.',
       imageSrc: 'theme-asset:/assets/images/experience.jpg',
-      imageAlt: '',
+      imageAlt: 'portrait-smiling-businesswoman-office',
       imagePosition: 'left',
+      imageFit: 'cover',
+      imageRadius: '10px 10px 10px 10px',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/experience.jpg',
+      imageFrameBackgroundPosition: '49% 37%',
+      imageFrameMinHeight: '500px',
+      imageFramePaddingStyle: '0px',
+      imageFrameBorderStyle: `10px solid ${primary}`,
+      imageFrameCustomClassNames: [
+        'is-light',
+        'is-position-bottom-center',
+        'r-cover',
+        'has-border-color',
+        'has-primary-border-color',
+        'profolio-fse-experience-image',
+      ],
+      background: '#F5B731',
+      textColor: primary,
+      paddingStyle: '80px 20px 80px 20px',
+      marginStyle: '0px 0px',
+      gapStyle: 'var(--wp--preset--spacing--40)',
+      columnWidths: ['50%', '50%'],
+      customClassNames: [
+        'r-pad',
+        'has-secondary-background-color',
+        'profolio-fse-experience-wrapper',
+        'alignfull',
+      ],
+      subtitleCustomClassNames: ['profolio-fse-experience-copy'],
+      headingCustomClassNames: ['profolio-fse-experience-copy'],
+      bodyCustomClassNames: ['profolio-fse-experience-copy'],
+      presentation: {
+        textAlign: 'left',
+        itemsAlign: 'start',
+        justify: 'start',
+      },
+      subtitleStyle: {
+        lineHeight: '1.5',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: '1px',
+      },
+      headingStyle: {
+        lineHeight: '1.2',
+      },
+      bodyStyle: {
+        lineHeight: '1.5',
+      },
+      stats: [
+        { value: '150+', label: 'Total Projects' },
+        { value: '120+', label: 'Total Testimonials' },
+        { value: '11k+', label: "User's Request" },
+      ],
     },
   ];
 }
 
 function profolioSkillsSections(): SectionPlan[] {
+  const baseMotion = ['wow', 'animate__animated', 'animate__zoomIn'];
+  const delayedMotion = [...baseMotion, 'animate__delay-1s'];
   return [
     {
       type: 'card-grid',
@@ -971,36 +1165,77 @@ function profolioSkillsSections(): SectionPlan[] {
       subtitle: 'Skills',
       title: 'Skills and Tools',
       columns: 4,
+      customClassNames: [
+        'vp-skills-row',
+        'profolio-fse-skills-wrapper',
+        'alignfull',
+      ],
+      cardStyle: {
+        background: '#fef8ea',
+        padding: '40px 20px 40px 20px',
+        borderRadius: '10px',
+        imageWidthStyle: '80px',
+      },
       cards: [
         {
           heading: 'UI/UX Deisgn',
           body: '',
           imageSrc: 'theme-asset:/assets/images/figma.png',
           imageAlt: '',
+          customClassNames: [...baseMotion, 'profolio-fse-skill-card'],
+          imageCustomClassNames: [
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ],
         },
         {
           heading: 'Graphic Deisgn',
           body: '',
           imageSrc: 'theme-asset:/assets/images/photoshop.png',
           imageAlt: '',
+          customClassNames: [...delayedMotion, 'profolio-fse-skill-card'],
+          imageCustomClassNames: [
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ],
         },
         {
           heading: 'Illustrator',
           body: '',
           imageSrc: 'theme-asset:/assets/images/illustrator.png',
           imageAlt: '',
+          customClassNames: [...baseMotion, 'profolio-fse-skill-card'],
+          imageCustomClassNames: [
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ],
         },
         {
           heading: 'After Effects',
           body: '',
           imageSrc: 'theme-asset:/assets/images/after-effects.png',
           imageAlt: '',
+          customClassNames: [...delayedMotion, 'profolio-fse-skill-card'],
+          imageCustomClassNames: [
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ],
         },
         {
           heading: 'Wordpress',
           body: '',
           imageSrc: 'theme-asset:/assets/images/wordpress.png',
           imageAlt: '',
+          customClassNames: [...baseMotion, 'profolio-fse-skill-card'],
+          imageCustomClassNames: [
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ],
         },
       ],
     },
@@ -1515,6 +1750,13 @@ function mapQuery(node: WpNode): PostListSection {
       'woocommerce/product-image',
     ].includes(child.block),
   );
+  const featuredImageNode = templateNodes.find((child) =>
+    [
+      'core/post-featured-image',
+      'post-featured-image',
+      'woocommerce/product-image',
+    ].includes(child.block),
+  );
   const hasCommerceProductCardBlock = templateNodes.some((child) =>
     [
       'woocommerce/product-price',
@@ -1650,6 +1892,13 @@ function mapQuery(node: WpNode): PostListSection {
       node.params?.displayFeaturedImage,
       hasFeaturedImageBlock,
     ),
+    ...(featuredImageNode?.borderRadius
+      ? {
+          imageRadius: normalizeBorderRadiusValue(
+            featuredImageNode.borderRadius,
+          ),
+        }
+      : {}),
     ...(isProductQuery && hasProductPriceBlock ? { showPrice: true } : {}),
     ...(isProductQuery && hasProductButtonBlock ? { showButton: true } : {}),
     itemLayout,
@@ -4067,9 +4316,14 @@ function buildMediaTextFromColumns(
     ? nestedCoverImageNode
     : imgNode;
   const visualImageSrc = (visualImageNode.src ?? imgNode.src) as string;
+  const textColumn = imgInFirst ? cols[1] : cols[0];
   const textFlat = imgInFirst ? flat1 : flat0;
   const h = textFlat.find(
     (c) => c.block === 'core/heading' || c.block === 'heading',
+  );
+  const stats = textColumn ? collectMediaTextStats(textColumn) : [];
+  const statLabelTexts = new Set(
+    stats.map((stat) => stripInlineHtml(stat.label).toLowerCase()),
   );
   const listItems = textFlat
     .filter((c) => c.block === 'core/list-item' || c.block === 'list-item')
@@ -4091,6 +4345,16 @@ function buildMediaTextFromColumns(
     ...(imageCoverNode?.borderRadius
       ? { imageRadius: normalizeBorderRadiusValue(imageCoverNode.borderRadius) }
       : {}),
+    ...(imageCoverNode?.src
+      ? { imageFrameBackgroundSrc: imageCoverNode.src }
+      : {}),
+    ...(imageCoverNode?.focalPoint
+      ? {
+          imageFrameBackgroundPosition: `${Math.round(
+            imageCoverNode.focalPoint.x * 100,
+          )}% ${Math.round(imageCoverNode.focalPoint.y * 100)}%`,
+        }
+      : {}),
     ...(imageCoverNode?.minHeight
       ? { imageFrameMinHeight: imageCoverNode.minHeight }
       : {}),
@@ -4103,6 +4367,13 @@ function buildMediaTextFromColumns(
     ...(imageCoverNode?.padding
       ? { imageFramePaddingStyle: boxSpacingToCss(imageCoverNode.padding) }
       : {}),
+    ...(imageCoverNode?.borderWidth
+      ? {
+          imageFrameBorderStyle: `${imageCoverNode.borderWidth} solid ${
+            imageCoverNode.borderColor ?? 'currentColor'
+          }`,
+        }
+      : {}),
     ...(imageCoverNode?.customClassNames?.length
       ? {
           imageFrameCustomClassNames: uniqueClassNames(
@@ -4111,13 +4382,33 @@ function buildMediaTextFromColumns(
         }
       : {}),
     ...(imageCoverNode ? { imageFit: 'contain' as const } : {}),
+    ...(resolveImageDimensionStyle(visualImageNode.params?.width) ||
+    resolveImageDimensionStyle(visualImageNode.width)
+      ? {
+          imageWidthStyle:
+            resolveImageDimensionStyle(visualImageNode.params?.width) ??
+            resolveImageDimensionStyle(visualImageNode.width),
+        }
+      : {}),
+    ...(resolveImageDimensionStyle(visualImageNode.params?.height) ||
+    resolveImageDimensionStyle(visualImageNode.height)
+      ? {
+          imageHeightStyle:
+            resolveImageDimensionStyle(visualImageNode.params?.height) ??
+            resolveImageDimensionStyle(visualImageNode.height),
+        }
+      : {}),
   };
   const columnWidths = cols
     .map((col) => normalizeCssLength(col.columnWidth))
     .filter((value): value is string => !!value);
   if (columnWidths.length === cols.length) s.columnWidths = columnWidths;
   const paragraphNodes = textFlat.filter(
-    (c) => c.block === 'core/paragraph' || c.block === 'paragraph',
+    (c) =>
+      (c.block === 'core/paragraph' || c.block === 'paragraph') &&
+      !statLabelTexts.has(
+        stripInlineHtml(extractNodeRichText(c)).toLowerCase(),
+      ),
   );
   const { subtitleNode, bodyParagraphs } = splitMediaTextParagraphNodes(
     paragraphNodes,
@@ -4156,8 +4447,65 @@ function buildMediaTextFromColumns(
     s.bodyStyle = toTypographyStyle(firstBodyParagraph);
   }
   if (listItems.length > 0) s.listItems = listItems;
+  if (stats.length > 0) s.stats = stats;
   applySectionCtas(s, textFlat);
   return s;
+}
+
+function collectMediaTextStats(
+  column: WpNode,
+): NonNullable<MediaTextSection['stats']> {
+  const stats: NonNullable<MediaTextSection['stats']> = [];
+
+  const visit = (node: WpNode): void => {
+    const children = node.children ?? [];
+    const heading = children.find(
+      (child) => child.block === 'core/heading' || child.block === 'heading',
+    );
+    const label = children.find(
+      (child) =>
+        child.block === 'core/paragraph' || child.block === 'paragraph',
+    );
+    const valueText = heading ? extractNodeText(heading) : '';
+    const labelText = label ? extractNodeText(label) : '';
+    if (
+      heading &&
+      label &&
+      valueText &&
+      labelText &&
+      isStatValueText(valueText)
+    ) {
+      stats.push({
+        value: extractNodeRichText(heading),
+        label: extractNodeRichText(label),
+        ...(heading.typography || heading.fontFamily
+          ? { valueStyle: toTypographyStyle(heading) }
+          : {}),
+        ...(label.typography || label.fontFamily
+          ? { labelStyle: toTypographyStyle(label) }
+          : {}),
+        ...(node.customClassNames?.length
+          ? { customClassNames: uniqueClassNames(node.customClassNames) }
+          : {}),
+      });
+      return;
+    }
+
+    for (const child of children) visit(child);
+  };
+
+  visit(column);
+  return stats;
+}
+
+function isStatValueText(value: string): boolean {
+  const normalized = value.trim();
+  return (
+    normalized.length > 0 &&
+    normalized.length <= 16 &&
+    /\d/.test(normalized) &&
+    !/[.!?]$/.test(normalized)
+  );
 }
 
 const INTERACTIVE_UAGB_BLOCKS = ['uagb/slider', 'uagb/modal', 'uagb/tabs'];
@@ -4596,6 +4944,15 @@ function normalizeCssLength(value?: string): string | undefined {
   const normalized = value.trim();
   if (!normalized) return undefined;
   return /^\d+(\.\d+)?$/.test(normalized) ? `${normalized}px` : normalized;
+}
+
+function resolveImageDimensionStyle(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return `${value}px`;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (normalized === 'auto') return normalized;
+  return normalizeCssLength(normalized);
 }
 
 function slugifyMenuKey(value: string): string {

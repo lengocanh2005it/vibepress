@@ -38,6 +38,181 @@ describe('mapWpNodesToDraftSections', () => {
       'media-text',
       'card-grid',
     ]);
+    expect(sections[0]).toMatchObject({
+      type: 'media-text',
+      debugKey: 'banner',
+      paddingStyle: '80px 20px 0px 20px',
+      marginStyle: '0px 0px',
+      gapStyle: 'var(--wp--preset--spacing--40)',
+      imageSrc: 'theme-asset:/assets/images/banner-image.png',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/banner.jpg',
+      imageFrameBackground: '#F5B731',
+      imageFrameBackgroundPosition: '49% 37%',
+      imageFrameMinHeight: '550px',
+      imageFramePaddingStyle: '0px',
+      imageHeightStyle: '500px',
+      imageFit: 'contain',
+      imageCustomClassNames: ['aligncenter', 'is-resized'],
+      imageRadius: '50% 50% 0px 0px',
+      columnWidths: ['50%', '50%'],
+      background: '#2F4138',
+      textColor: '#fff',
+      heading:
+        'Welcome To My Profile <br>I am <mark style="background-color:rgba(0,0,0,0);color:#F5B731" class="has-inline-color has-secondary-color">Julia Henderson</mark>',
+      cta: { text: 'View my Work', link: '#' },
+      ctaStyle: {
+        background: '#F5B731',
+        color: '#f2f2f2',
+      },
+      customClassNames: expect.arrayContaining([
+        'profolio-fse-banner-wrapper',
+        'alignfull',
+      ]),
+    });
+    expect(sections[1]).toMatchObject({
+      type: 'card-grid',
+      debugKey: 'projects',
+      customClassNames: expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+        'profolio-fse-projects-wrapper',
+        'alignfull',
+        'vp-card-grid-intro-centered',
+      ]),
+      cards: expect.arrayContaining([
+        expect.objectContaining({
+          heading: 'Design of a mobile app develops',
+          customClassNames: expect.arrayContaining([
+            'wow',
+            'animate__animated',
+            'animate__fadeInUp',
+            'profolio-fse-project-card',
+          ]),
+          headingCustomClassNames: ['profolio-fse-project-card-title'],
+          bodyCustomClassNames: ['profolio-fse-project-card-body'],
+        }),
+        expect.objectContaining({
+          heading: 'Web Traffic Management',
+          imageSrc: 'theme-asset:/assets/images/projects-1.jpg',
+        }),
+      ]),
+    });
+    expect(sections[3]).toMatchObject({
+      type: 'media-text',
+      debugKey: 'ui-ux-design',
+      imagePosition: 'right',
+      background: '#2F4138',
+      textColor: '#fff',
+      paddingStyle: '40px 40px 40px 40px',
+      gapStyle: '40px 40px',
+      border: { radius: '8px' },
+      imageFrameMinHeight: '380px',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-1.jpg',
+      ctaStyle: expect.objectContaining({
+        background: '#F5B731',
+        color: '#f2f2f2',
+      }),
+      customClassNames: expect.arrayContaining([
+        'wow',
+        'animate__animated',
+        'animate__fadeInUp',
+        'cover-inner',
+        'profolio-fse-service-card',
+      ]),
+      marginStyle: '0px 0px 24px 0px',
+    });
+    expect(sections[4]).toMatchObject({
+      type: 'media-text',
+      debugKey: 'graphic-design',
+      imagePosition: 'right',
+      background: '#f1f5f9',
+      paddingStyle: '48px 40px 40px 40px',
+      marginStyle: '0px 0px 24px 0px',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-2.jpg',
+    });
+    expect(sections[5]).toMatchObject({
+      type: 'media-text',
+      debugKey: 'product-design',
+      imagePosition: 'right',
+      background: '#f1f5f9',
+      paddingStyle: '48px 40px 40px 40px',
+      marginStyle: '0px 0px 24px 0px',
+      imageFrameBackgroundSrc: 'theme-asset:/assets/images/projects-3.jpg',
+    });
+    expect(sections[6]).toMatchObject({
+      type: 'media-text',
+      debugKey: 'experience',
+      subtitle: 'Welcome to my profile',
+      heading: 'Lead Product and Designer and Art Director',
+      background: '#F5B731',
+      textColor: '#2F4138',
+      imageFrameBorderStyle: '10px solid #2F4138',
+      imageFrameCustomClassNames: expect.arrayContaining([
+        'profolio-fse-experience-image',
+      ]),
+      customClassNames: expect.arrayContaining([
+        'profolio-fse-experience-wrapper',
+        'alignfull',
+      ]),
+      subtitleCustomClassNames: ['profolio-fse-experience-copy'],
+      headingCustomClassNames: ['profolio-fse-experience-copy'],
+      bodyCustomClassNames: ['profolio-fse-experience-copy'],
+      stats: [
+        { value: '150+', label: 'Total Projects' },
+        { value: '120+', label: 'Total Testimonials' },
+        { value: '11k+', label: "User's Request" },
+      ],
+    });
+    expect(sections[7]).toMatchObject({
+      type: 'card-grid',
+      debugKey: 'skills',
+      title: 'Skills and Tools',
+      customClassNames: expect.arrayContaining([
+        'vp-skills-row',
+        'profolio-fse-skills-wrapper',
+        'alignfull',
+      ]),
+      cardStyle: {
+        background: '#fef8ea',
+        padding: '40px 20px 40px 20px',
+        borderRadius: '10px',
+        imageWidthStyle: '80px',
+      },
+      cards: [
+        expect.objectContaining({
+          heading: 'UI/UX Deisgn',
+          customClassNames: expect.arrayContaining([
+            'wow',
+            'animate__animated',
+            'animate__zoomIn',
+            'profolio-fse-skill-card',
+          ]),
+          imageCustomClassNames: expect.arrayContaining([
+            'aligncenter',
+            'is-resized',
+            'profolio-fse-skill-icon',
+          ]),
+        }),
+        expect.objectContaining({
+          heading: 'Graphic Deisgn',
+          customClassNames: expect.arrayContaining(['animate__delay-1s']),
+        }),
+        expect.objectContaining({
+          heading: 'Illustrator',
+          customClassNames: expect.not.arrayContaining(['animate__delay-1s']),
+        }),
+        expect.objectContaining({
+          heading: 'After Effects',
+          customClassNames: expect.arrayContaining(['animate__delay-1s']),
+        }),
+        expect.objectContaining({
+          heading: 'Wordpress',
+          customClassNames: expect.not.arrayContaining(['animate__delay-1s']),
+        }),
+      ],
+    });
   });
 
   it('maps profolio-fse page template pattern references without dropping nested sections', () => {
@@ -363,7 +538,7 @@ describe('mapWpNodesToDraftSections', () => {
 <div class="wp-block-column"><!-- wp:query {"query":{"perPage":4,"postType":"post","inherit":true},"layout":{"type":"default"}} -->
 <div class="wp-block-query"><!-- wp:post-template {"style":{"spacing":{"blockGap":"40px"}},"layout":{"type":"grid","minimumColumnWidth":"20rem"}} -->
 <!-- wp:group {"style":{"border":{"radius":"10px","color":"#e0e0e0","width":"1px"}}} -->
-<div class="wp-block-group"><!-- wp:post-featured-image {"isLink":true} /-->
+<div class="wp-block-group"><!-- wp:post-featured-image {"isLink":true,"style":{"border":{"radius":"10px"}}} /-->
 <!-- wp:group -->
 <div class="wp-block-group"><!-- wp:post-author {"showAvatar":false} /-->
 <!-- wp:post-date /-->
@@ -397,6 +572,7 @@ describe('mapWpNodesToDraftSections', () => {
       showDate: true,
       showExcerpt: true,
       showFeaturedImage: true,
+      imageRadius: '10px',
     });
   });
 
@@ -660,6 +836,7 @@ describe('mapWpNodesToDraftSections', () => {
       type: 'media-text',
       imageSrc: '/banner-image.png',
       imageFit: 'contain',
+      imageFrameBackgroundSrc: '/banner-bg.jpg',
       imageFrameMinHeight: '550px',
       imageRadius: '50% 50% 0px 0px',
       imageFrameCustomClassNames: ['r-cover'],
@@ -914,9 +1091,9 @@ describe('mapWpNodesToDraftSections', () => {
   <div class="wp-block-columns are-vertically-aligned-center">
     <!-- wp:column {"verticalAlignment":"center"} -->
     <div class="wp-block-column is-vertically-aligned-center">
-      <!-- wp:cover {"url":"/experience.jpg","minHeight":500,"contentPosition":"bottom center","className":"r-cover"} -->
-      <div class="wp-block-cover is-position-bottom-center r-cover" style="min-height:500px">
-        <img class="wp-block-cover__image-background" alt="" src="/experience.jpg" data-object-fit="cover"/>
+      <!-- wp:cover {"url":"/experience.jpg","minHeight":500,"contentPosition":"bottom center","className":"r-cover","focalPoint":{"x":0.49,"y":0.37},"borderColor":"primary","style":{"border":{"radius":{"topLeft":"10px","topRight":"10px","bottomLeft":"10px","bottomRight":"10px"},"width":"10px"},"spacing":{"padding":{"top":"0","right":"0","bottom":"0","left":"0"}}}} -->
+      <div class="wp-block-cover is-position-bottom-center r-cover" style="border-width:10px;border-radius:10px;min-height:500px">
+        <img class="wp-block-cover__image-background" alt="portrait" src="/experience.jpg" data-object-fit="cover"/>
         <div class="wp-block-cover__inner-container"></div>
       </div>
       <!-- /wp:cover -->
@@ -933,6 +1110,40 @@ describe('mapWpNodesToDraftSections', () => {
       <!-- wp:paragraph -->
       <p>Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur.</p>
       <!-- /wp:paragraph -->
+      <!-- wp:group {"layout":{"type":"flex","justifyContent":"left"}} -->
+      <div class="wp-block-group">
+        <!-- wp:group -->
+        <div class="wp-block-group">
+          <!-- wp:heading -->
+          <h2>150+</h2>
+          <!-- /wp:heading -->
+          <!-- wp:paragraph -->
+          <p>Total Projects</p>
+          <!-- /wp:paragraph -->
+        </div>
+        <!-- /wp:group -->
+        <!-- wp:group -->
+        <div class="wp-block-group">
+          <!-- wp:heading -->
+          <h2>120+</h2>
+          <!-- /wp:heading -->
+          <!-- wp:paragraph -->
+          <p>Total Testimonials</p>
+          <!-- /wp:paragraph -->
+        </div>
+        <!-- /wp:group -->
+        <!-- wp:group -->
+        <div class="wp-block-group">
+          <!-- wp:heading -->
+          <h2>11k+</h2>
+          <!-- /wp:heading -->
+          <!-- wp:paragraph -->
+          <p>User's Request</p>
+          <!-- /wp:paragraph -->
+        </div>
+        <!-- /wp:group -->
+      </div>
+      <!-- /wp:group -->
     </div>
     <!-- /wp:column -->
   </div>
@@ -952,6 +1163,20 @@ describe('mapWpNodesToDraftSections', () => {
       subtitle: 'Welcome to my profile',
       heading: 'Lead Product and Designer and Art Director',
       body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo eu posuere in sit efficitur.',
+      imageRadius: '10px',
+      imageFrameBackgroundSrc: '/experience.jpg',
+      imageFrameBackgroundPosition: '49% 37%',
+      imageFrameMinHeight: '500px',
+      imageFramePaddingStyle: '0px',
+      imageFrameBorderStyle: '10px solid var(--wp--preset--color--primary)',
+      stats: [
+        { value: '150+', label: 'Total Projects' },
+        { value: '120+', label: 'Total Testimonials' },
+        { value: '11k+', label: "User's Request" },
+      ],
     });
+    expect((sections[0] as { body?: string }).body).not.toContain(
+      'Total Projects',
+    );
   });
 });

@@ -81,4 +81,43 @@ describe('BlockParserService', () => {
     expect(footerMarkup).toContain('/assets/images/arrow-up.png');
     expect(footerMarkup).not.toContain('<?php');
   });
+
+  it('normalizes misspelled sans-serif fallback from theme.json font families', async () => {
+    tempThemeDir = await mkdtemp(join(tmpdir(), 'block-parser-fonts-'));
+
+    await mkdir(join(tempThemeDir, 'templates'), { recursive: true });
+    await writeFile(
+      join(tempThemeDir, 'theme.json'),
+      JSON.stringify({
+        settings: {
+          typography: {
+            fontFamilies: [
+              {
+                slug: 'body',
+                name: 'League Spartan',
+                fontFamily: 'League Spartan, san-serif',
+              },
+            ],
+          },
+        },
+        styles: {
+          typography: {
+            fontFamily: 'var(--wp--preset--font-family--body)',
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(tempThemeDir, 'templates', 'index.html'),
+      '<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->',
+    );
+
+    const service = new BlockParserService();
+    const result = await service.parse(tempThemeDir);
+
+    expect(result.tokens.fonts[0]?.family).toBe('League Spartan, sans-serif');
+    expect(result.tokens.defaults?.fontFamily).toBe(
+      'League Spartan, sans-serif',
+    );
+  });
 });

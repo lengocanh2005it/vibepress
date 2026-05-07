@@ -197,7 +197,9 @@ export class ReactVisualEditService {
     }
 
     if (parts.length === 0) {
-      parts.push('Apply the visual change as described by the attached context.');
+      parts.push(
+        'Apply the visual change as described by the attached context.',
+      );
     }
 
     parts.push(
@@ -277,7 +279,10 @@ function normalizeCode(code: string): string {
   return code.replace(/\r\n/g, '\n').trim();
 }
 
-function findJsxNodeEndLine(code: string, targetStartLine: number): number | null {
+function findJsxNodeEndLine(
+  code: string,
+  targetStartLine: number,
+): number | null {
   try {
     const ast = babelParse(code, {
       sourceType: 'module',
@@ -294,20 +299,32 @@ function findJsxNodeEndLine(code: string, targetStartLine: number): number | nul
 
       if (
         (n['type'] === 'JSXElement' || n['type'] === 'JSXFragment') &&
-        (n['loc'] as { start?: { line?: number } } | undefined)?.start?.line === targetStartLine
+        (n['loc'] as { start?: { line?: number } } | undefined)?.start?.line ===
+          targetStartLine
       ) {
-        const end = (n['loc'] as { end?: { line?: number } } | undefined)?.end?.line;
+        const end = (n['loc'] as { end?: { line?: number } } | undefined)?.end
+          ?.line;
         if (typeof end === 'number' && (endLine === null || end < endLine)) {
           endLine = end;
         }
       }
 
       for (const key of Object.keys(n)) {
-        if (key === 'loc' || key === 'start' || key === 'end' || key === 'errors') continue;
+        if (
+          key === 'loc' ||
+          key === 'start' ||
+          key === 'end' ||
+          key === 'errors'
+        )
+          continue;
         const child = n[key];
         if (Array.isArray(child)) {
           for (const item of child) walk(item);
-        } else if (child && typeof child === 'object' && (child as Record<string, unknown>)['type']) {
+        } else if (
+          child &&
+          typeof child === 'object' &&
+          (child as Record<string, unknown>)['type']
+        ) {
           walk(child);
         }
       }
@@ -353,12 +370,16 @@ function validateGeneratedCode(code: string, componentName: string): void {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Visual edit for "${componentName}" produced invalid TSX syntax: ${msg}`);
+    throw new Error(
+      `Visual edit for "${componentName}" produced invalid TSX syntax: ${msg}`,
+    );
   }
 
   // 2. Structural check — must still have a default export
   if (!/export\s+default\s+/m.test(code)) {
-    throw new Error(`Visual edit for "${componentName}" removed the default export — aborting write.`);
+    throw new Error(
+      `Visual edit for "${componentName}" removed the default export — aborting write.`,
+    );
   }
 
   // 3. Security scan — reject dangerous patterns injected via prompt

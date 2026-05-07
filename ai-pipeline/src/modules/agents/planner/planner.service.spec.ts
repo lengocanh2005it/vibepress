@@ -624,6 +624,8 @@ describe('PlannerService expected FSE template scoping', () => {
           markup:
             '<!-- vibepress:part:start footer --><footer></footer><!-- vibepress:part:end footer -->',
         },
+        { name: 'index', markup: '<main>Blog fallback</main>' },
+        { name: 'search', markup: '<main>Search</main>' },
         { name: 'template-about', markup: '<main>About layout</main>' },
         { name: 'template-contact', markup: '<main>Contact layout</main>' },
         { name: 'template-services', markup: '<main>Services layout</main>' },
@@ -686,7 +688,7 @@ describe('PlannerService expected FSE template scoping', () => {
             title: 'About',
             routePath: '/about',
             template: '',
-            templateCandidates: ['template-about', 'page'],
+            templateCandidates: ['page'],
             matchedDbTemplateSlugs: [],
             pageBlockTypes: [],
             isFrontPage: false,
@@ -702,15 +704,17 @@ describe('PlannerService expected FSE template scoping', () => {
       expect.arrayContaining([
         'front-page',
         'page',
-        'template-about',
         'template-contact',
         'header',
         'footer',
       ]),
     );
+    expect(templateNames).not.toContain('template-about');
     expect(templateNames).not.toContain('template-services');
     expect(templateNames).not.toContain('single-product');
     expect(templateNames).not.toContain('archive-product');
+    expect(templateNames).not.toContain('index');
+    expect(templateNames).not.toContain('search');
     expect(templateNames).not.toContain('newsletter');
     expect(templateNames).not.toContain('archive');
   });
@@ -835,5 +839,59 @@ describe('PlannerService expected FSE template scoping', () => {
 
     expect(templateNames).toContain('archive-product');
     expect(templateNames).toContain('single-product');
+  });
+
+  it('keeps index only as a root fallback when no front-page or home template exists', () => {
+    const service = createService();
+    const content = {
+      pages: [],
+      posts: [{ id: 1, slug: 'hello-world', title: 'Hello', content: '' }],
+      dbTemplates: [],
+      dbNavigations: [],
+      dbGlobalStyles: [],
+      parsedGlobalStyles: null,
+      customCssEntries: [],
+      taxonomies: [],
+      mediaAttachments: [],
+      plugins: [],
+      customPostTypes: [],
+      capabilities: { activePluginSlugs: [] },
+      readingSettings: {
+        showOnFront: 'posts',
+        pageOnFrontId: null,
+        pageForPostsId: null,
+      },
+      themeResolvedContent: {
+        themeSlug: 'generic-fse',
+        routes: [],
+      },
+    } as any;
+
+    expect(
+      service.getExpectedTemplateNames(
+        {
+          type: 'fse',
+          templates: [
+            { name: 'front-page', markup: '<main>Home</main>' },
+            { name: 'index', markup: '<main>Index</main>' },
+          ],
+          parts: [],
+          tokens: undefined,
+        } as any,
+        content,
+      ),
+    ).not.toContain('index');
+
+    expect(
+      service.getExpectedTemplateNames(
+        {
+          type: 'fse',
+          templates: [{ name: 'index', markup: '<main>Index</main>' }],
+          parts: [],
+          tokens: undefined,
+        } as any,
+        content,
+      ),
+    ).toContain('index');
   });
 });

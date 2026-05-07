@@ -64,6 +64,32 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('backgroundImage: `url("${resolveAsset(');
   });
 
+  it('keeps unitless button line-height unitless', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'FrontPage',
+      blockStyles: {
+        button: {
+          typography: {
+            lineHeight: '1.15',
+          },
+        },
+      },
+      sections: [
+        {
+          type: 'hero',
+          heading: 'Welcome',
+          cta: { text: 'Get Started', link: '#' },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("lineHeight: '1.15'");
+    expect(code).not.toContain("lineHeight: '1.15px'");
+  });
+
   it('unwraps paragraph block html before rendering inside paragraph wrappers', () => {
     const plan = {
       ...basePlan,
@@ -87,6 +113,30 @@ describe('CodeGeneratorService', () => {
     expect(code).not.toContain(
       'renderRichTextChildren("<p><strong>About</strong> content</p>"',
     );
+  });
+
+  it('preserves WordPress image border styles inside rich text markup', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'RuntimeLikePage',
+      renderMode: 'hybrid',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'paragraph',
+          html: '<p><img src="/uploads/team.jpg" alt="" style="border-top-left-radius:50%;border-top-right-radius:50%;border-bottom-left-radius:0;border-bottom-right-radius:0;aspect-ratio:1.6;object-fit:cover;width:100%" /></p>',
+          sourceRef: { sourceNodeId: 'page::paragraph::image' },
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("'borderTopLeftRadius'");
+    expect(code).toContain("'borderTopRightRadius'");
+    expect(code).toContain("'aspectRatio'");
+    expect(code).toContain("'objectFit'");
+    expect(code).toContain('style,');
   });
 
   it('falls back to block-tree rendering when deterministic partial sections are empty', () => {
@@ -384,7 +434,25 @@ describe('CodeGeneratorService', () => {
                   kind: 'cover',
                   src: 'theme-asset:/assets/images/projects-2.jpg',
                   sourceRef: { sourceNodeId: 'template-about::cover::0.1.0' },
-                  children: [],
+                  children: [
+                    {
+                      kind: 'group',
+                      bgColor: '#F5B731',
+                      padding: {
+                        top: '5px',
+                        right: '10px',
+                        bottom: '5px',
+                        left: '10px',
+                      },
+                      children: [
+                        {
+                          kind: 'image',
+                          src: 'theme-asset:/assets/images/arrow-up.png',
+                          width: 20,
+                        },
+                      ],
+                    },
+                  ],
                 },
                 {
                   kind: 'heading',
@@ -404,6 +472,11 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain(
       'resolveAsset("theme-asset:/assets/images/projects-2.jpg")',
     );
+    expect(code).toContain(
+      'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
+    );
+    expect(code).toContain('width: 20');
+    expect(code).toContain("padding: '5px 10px'");
     expect(code).toContain('AI Based Social Networks');
   });
 
@@ -512,6 +585,80 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain("'/product/' + product.slug");
     expect(code).toContain('products-block-post-template');
     expect(code).not.toContain('posts.slice(0, 5).map((post)');
+  });
+
+  it('renders supported archive block trees with post templates and sidebar partials', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Archive',
+      dataNeeds: ['posts'],
+      renderMode: 'block-centric',
+      sections: [],
+      blockTree: [
+        {
+          kind: 'cover',
+          src: 'theme-asset:/assets/images/banner.jpg',
+          children: [{ kind: 'query-title', blockName: 'query-title' }],
+        },
+        {
+          kind: 'columns',
+          blockName: 'columns',
+          children: [
+            {
+              kind: 'column',
+              blockName: 'column',
+              columnWidth: '70%',
+              children: [
+                {
+                  kind: 'query',
+                  blockName: 'query',
+                  children: [
+                    {
+                      kind: 'post-template',
+                      blockName: 'post-template',
+                      customClassNames: ['wp-block-post-template'],
+                      attrs: { layout: { type: 'grid', minimumColumnWidth: '20rem' } },
+                      children: [
+                        { kind: 'post-featured-image', blockName: 'post-featured-image' },
+                        {
+                          kind: 'post-title',
+                          blockName: 'post-title',
+                          attrs: { isLink: true },
+                          level: 2,
+                        },
+                        { kind: 'post-excerpt', blockName: 'post-excerpt' },
+                      ],
+                    },
+                    { kind: 'query-pagination', blockName: 'query-pagination' },
+                  ],
+                },
+              ],
+            },
+            {
+              kind: 'column',
+              blockName: 'column',
+              columnWidth: '30%',
+              children: [
+                {
+                  kind: 'template-part',
+                  blockName: 'template-part',
+                  templatePartSlug: 'sidebar',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain("import Sidebar from '../components/Sidebar';");
+    expect(code).toContain('<Sidebar />');
+    expect(code).toContain('posts.map((post) => {');
+    expect(code).toContain('repeat(auto-fit, minmax(20rem, 1fr))');
+    expect(code).toContain("<Link to={(item?.type === 'product' ? '/product/' : '/post/') + (item?.slug ?? '')}>");
+    expect(code).not.toContain('min(6.5rem, 8vw)');
   });
 
   it('renders CTA text for search sections', () => {
@@ -629,14 +776,27 @@ describe('CodeGeneratorService', () => {
           imageAlt: 'Julia Henderson',
           imagePosition: 'right',
           imageFit: 'contain',
+          imageHeightStyle: '500px',
           imageRadius: '50% 50% 0px 0px',
+          imageFrameBackgroundSrc: 'theme-asset:/assets/images/banner.jpg',
+          imageFrameBackgroundPosition: '49% 37%',
           imageFrameBackground: '#F5B731',
           imageFrameMinHeight: '550px',
+          imageFramePaddingStyle: '0px',
+          imageFrameBorderStyle: '10px solid #2F4138',
           imageFrameCustomClassNames: ['r-cover'],
+          customClassNames: ['profolio-fse-banner-wrapper', 'alignfull'],
+          paddingStyle: '40px 40px 40px 40px',
+          border: { radius: '8px' },
           subtitle: 'About Me',
           heading:
             'Welcome To My Profile <br>I am <mark style="background-color:transparent;color:#F5B731">Julia Henderson</mark>',
           body: 'Mattis pellentesque ex phasellus amet nulla aliquam commodo.',
+          stats: [
+            { value: '150+', label: 'Total Projects' },
+            { value: '120+', label: 'Total Testimonials' },
+            { value: '11k+', label: "User's Request" },
+          ],
         },
       ],
     } as ComponentVisualPlan;
@@ -644,10 +804,29 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain(
-      'className="flex-1 flex items-end justify-center overflow-hidden r-cover"',
+      'className="flex-1 flex items-end justify-center overflow-hidden relative r-cover"',
     );
+    expect(code).toContain('profolio-fse-banner-wrapper alignfull');
+    expect(code).toContain(
+      'backgroundImage: `url("${resolveAsset("theme-asset:/assets/images/banner.jpg")}")`',
+    );
+    expect(code).toContain("backgroundPosition: '49% 37%'");
     expect(code).toContain("backgroundColor: '#F5B731'");
+    expect(code).toContain(
+      '<span aria-hidden="true" className="pointer-events-none absolute inset-0 z-0"',
+    );
+    expect(code).toContain('className="max-w-full object-cover relative z-10"');
+    expect(code).toContain("objectFit: 'contain'");
     expect(code).toContain("minHeight: '550px'");
+    expect(code).toContain("padding: '0px'");
+    expect(code).toContain("border: '10px solid #2F4138'");
+    expect(code).toContain("padding: '40px 40px 40px 40px'");
+    expect(code).toContain("borderRadius: '8px'");
+    expect(code).toContain("height: '500px'");
+    expect(code).toContain('150+');
+    expect(code).toContain('Total Projects');
+    expect(code).toContain("User's Request");
+    expect(code).toContain('wp-block-group flex flex-wrap justify-start');
     expect(code).toContain(
       'renderRichTextChildren("Welcome To My Profile <br>I am <mark',
     );
@@ -663,11 +842,23 @@ describe('CodeGeneratorService', () => {
         {
           type: 'card-grid',
           columns: 3,
+          customClassNames: ['vp-skills-row'],
+          cardStyle: {
+            background: '#fef8ea',
+            padding: '40px 20px',
+            borderRadius: '10px',
+            imageWidthStyle: '80px',
+          },
           cards: [
             {
               heading: 'Figma',
               body: '',
               imageSrc: 'theme-asset:/assets/images/figma.png',
+              customClassNames: [
+                'wow',
+                'animate__animated',
+                'animate__fadeInUp',
+              ],
             },
           ],
         },
@@ -679,6 +870,11 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain(
       'src={resolveAsset("theme-asset:/assets/images/figma.png")}',
     );
+    expect(code).toContain('wow animate__animated animate__fadeInUp');
+    expect(code).toContain('lg:grid-cols-5');
+    expect(code).toContain("width: '80px'");
+    expect(code).toContain('h-auto object-contain mx-auto');
+    expect(code).not.toContain('w-full aspect-video object-cover');
   });
 
   it('renders featured images for list post-list sections', () => {
@@ -702,6 +898,31 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('post.featuredImage && <img');
+  });
+
+  it('applies source post-list featured image radius exactly', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'Archive',
+      dataNeeds: ['posts'],
+      sections: [
+        {
+          type: 'post-list',
+          layout: 'grid-3',
+          showDate: false,
+          showAuthor: false,
+          showCategory: false,
+          showExcerpt: true,
+          showFeaturedImage: true,
+          imageRadius: '50% 50% 0px 0px',
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('rounded-[50%_50%_0px_0px]');
+    expect(code).toContain("borderRadius: '50% 50% 0px 0px'");
   });
 
   it('renders page content through structured rich-text nodes instead of dangerouslySetInnerHTML', () => {
@@ -751,6 +972,49 @@ describe('CodeGeneratorService', () => {
     expect(code).not.toContain(
       'dangerouslySetInnerHTML={{ __html: item.content }}',
     );
+  });
+
+  it('renders block-tree single post content and comments through validator-approved contracts', () => {
+    const plan = {
+      ...basePlan,
+      componentName: 'SinglePost',
+      renderMode: 'block-centric',
+      dataNeeds: ['postDetail', 'comments'],
+      sections: [
+        {
+          type: 'post-content',
+          showTitle: false,
+          showAuthor: false,
+          showDate: false,
+          showCategories: false,
+        },
+        {
+          type: 'comments',
+          showForm: true,
+          requireName: true,
+          requireEmail: true,
+        },
+      ],
+      blockTree: [
+        {
+          kind: 'group',
+          children: [
+            { kind: 'post-content' },
+            { kind: 'post-comments-form' },
+          ],
+        },
+      ],
+    } as ComponentVisualPlan;
+
+    const code = service.generate(plan);
+
+    expect(code).toContain('renderRichTextChildren(item.content, "post-content")');
+    expect(code).toContain('comment.content');
+    expect(code).toContain('id="commentform"');
+    expect(code).toContain('onSubmit={handleCommentSubmit}');
+    expect(code).toContain('id="author" name="author"');
+    expect(code).toContain('id="email" name="email"');
+    expect(code).toContain('type="submit"');
   });
 
   it('renders rich text sections through explicit JSX wrappers instead of dangerouslySetInnerHTML', () => {
@@ -1158,29 +1422,64 @@ describe('CodeGeneratorService', () => {
           kind: 'group',
           blockName: 'group',
           domId: 'sticky-header',
+          sourceRef: { sourceNodeId: 'header::group::0' },
+          attrs: { layout: { type: 'constrained' } },
+          padding: {
+            top: '20px',
+            right: '20px',
+            bottom: '20px',
+            left: '20px',
+          },
           customClassNames: ['wp-block-group', 'has-primary-background-color'],
           children: [
             {
-              kind: 'site-title',
-              blockName: 'site-title',
-            },
-            {
-              kind: 'navigation',
-              blockName: 'navigation',
-              menuOrientation: 'horizontal',
-              overlayMenu: 'mobile',
-              isResponsive: true,
-            },
-            {
-              kind: 'buttons',
-              blockName: 'buttons',
-              customClassNames: ['header-btn'],
+              kind: 'group',
+              blockName: 'group',
+              sourceRef: {
+                sourceNodeId: 'header::group::0.0',
+                parentSourceNodeId: 'header::group::0',
+              },
+              attrs: {
+                layout: {
+                  type: 'flex',
+                  flexWrap: 'wrap',
+                  justifyContent: 'space-between',
+                },
+              },
               children: [
                 {
-                  kind: 'button',
-                  blockName: 'button',
-                  text: 'Get Started',
-                  href: '#',
+                  kind: 'site-title',
+                  blockName: 'site-title',
+                },
+                {
+                  kind: 'navigation',
+                  blockName: 'navigation',
+                  menuOrientation: 'horizontal',
+                  overlayMenu: 'mobile',
+                  isResponsive: true,
+                },
+                {
+                  kind: 'buttons',
+                  blockName: 'buttons',
+                  customClassNames: ['header-btn'],
+                  children: [
+                    {
+                      kind: 'button',
+                      blockName: 'button',
+                      text: 'Get Started',
+                      href: '#',
+                      bgColor: '#F5B731',
+                      padding: {
+                        top: '10px',
+                        right: '20px',
+                        bottom: '10px',
+                        left: '20px',
+                      },
+                      typography: {
+                        lineHeight: '1.15',
+                      },
+                    },
+                  ],
                 },
               ],
             },
@@ -1198,15 +1497,34 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('has-primary-background-color');
     expect(code).toContain('header-btn');
     expect(code).toContain('Get Started');
+    expect(code).toContain('wp-block-button__link');
+    expect(code).toContain('wp-element-button');
+    expect(code).toContain('whitespace-nowrap');
+    expect(code).toContain("paddingTop: '10px'");
+    expect(code).toContain("paddingRight: '20px'");
+    expect(code).toContain("lineHeight: '1.15'");
+    expect(code).toContain("borderColor: '#F5B731'");
+    expect(code).not.toContain("lineHeight: '1.15px'");
+    expect(code).toContain("display: 'grid'");
+    expect(code).toContain(
+      "gridTemplateColumns: 'auto minmax(0, 1fr) auto'",
+    );
+    expect(code).toContain("flexWrap: 'nowrap'");
+    expect(code).toContain("maxWidth: '1200px'");
+    expect(code).toContain("paddingLeft: '0'");
     expect(code).toContain('<Link to="/"');
   });
 
-  it('uses inline background color for responsive block-faithful mobile nav panels', () => {
+  it('renders source-style responsive navigation dialog for block-faithful headers', () => {
     const code = service.generateBlockFaithfulPartial({
       componentName: 'Header',
       nodes: [
         {
           block: 'navigation',
+          params: {
+            icon: 'menu',
+            overlayBackgroundColor: 'white-text-color',
+          },
           menuOrientation: 'horizontal',
           overlayMenu: 'mobile',
           isResponsive: true,
@@ -1219,7 +1537,19 @@ describe('CodeGeneratorService', () => {
     });
 
     expect(code).not.toContain('bg-[${ctx.p.surface}]');
-    expect(code).toContain("backgroundColor: '#f5f5f5'");
+    expect(code).toContain(
+      'wp-block-navigation__responsive-container-open md:hidden mx-auto',
+    );
+    expect(code).toContain(
+      'wp-block-navigation__responsive-container is-menu-open has-modal-open md:hidden',
+    );
+    expect(code).toContain('role="dialog" aria-modal="true"');
+    expect(code).toContain(
+      "backgroundColor: 'var(--wp--preset--color--white-text-color, #fff)'",
+    );
+    expect(code).toContain("color: '#000'");
+    expect(code).toContain("position: 'fixed'");
+    expect(code).toContain("inset: 0");
   });
 
   it('does not add fallback text underlines to header navigation links', () => {
@@ -1242,7 +1572,10 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('wp-block-navigation-item__content');
     expect(code).toContain('useLocation');
     expect(code).toContain('current-menu-item current_page_item');
+    expect(code).toContain('vp-generated-link no-underline');
     expect(code).not.toContain('hover:underline');
+    expect(code).not.toContain('hover:opacity-75');
+    expect(code).not.toContain('transition-opacity');
   });
 
   it('emits asset and app-path helpers for deterministic footer sections', () => {
@@ -1276,6 +1609,13 @@ describe('CodeGeneratorService', () => {
       componentName: 'Footer',
       dataNeeds: ['siteInfo', 'footerLinks'],
       renderMode: 'block-centric',
+      blockStyles: {
+        gallery: {
+          spacing: {
+            margin: '0 0 min(6.5rem, 8vw) 0',
+          },
+        },
+      },
       sections: [
         {
           type: 'footer',
@@ -1320,11 +1660,16 @@ describe('CodeGeneratorService', () => {
             {
               kind: 'columns',
               blockName: 'columns',
+              padding: {
+                top: '80px',
+                bottom: '80px',
+              },
               children: [
                 {
                   kind: 'column',
                   blockName: 'column',
                   columnWidth: '45%',
+                  gap: 'var(--wp--preset--spacing--10)',
                   children: [
                     {
                       kind: 'heading',
@@ -1341,6 +1686,12 @@ describe('CodeGeneratorService', () => {
                           text: 'Facebook',
                           attrs: { service: 'facebook', url: '#' },
                         },
+                        {
+                          kind: 'social-link',
+                          blockName: 'social-link',
+                          text: 'X',
+                          attrs: { service: 'x', url: '#' },
+                        },
                       ],
                     },
                   ],
@@ -1348,13 +1699,13 @@ describe('CodeGeneratorService', () => {
                 {
                   kind: 'column',
                   blockName: 'column',
+                  gap: 'var(--wp--preset--spacing--10)',
                   children: [
                     {
                       kind: 'image',
                       blockName: 'image',
                       src: 'theme-asset:/assets/images/arrow-up.png',
                       customClassNames: ['is-resized'],
-                      width: 39,
                     },
                   ],
                 },
@@ -1383,18 +1734,31 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('wp-block-group');
     expect(code).toContain('wp-block-columns');
     expect(code).toContain('wp-block-column');
+    expect(code).toContain("display: 'flex'");
+    expect(code).toContain("flexDirection: 'column'");
+    expect(code).toContain("gap: 'var(--wp--preset--spacing--10)'");
     expect(code).toContain('has-base-2-background-color');
     expect(code).not.toContain("backgroundColor: 'base-2'");
     expect(code).toContain("Let's Work Together");
     expect(code).toContain('<ul className="wp-block-social-links');
     expect(code).toContain('wp-social-link-facebook');
-    expect(code).toContain('facebook');
+    expect(code).toContain('fab fa-facebook-f');
+    expect(code).toContain('wp-social-link-x');
+    expect(code).toContain('wp-social-link-svg wp-social-link-svg-x');
+    expect(code).not.toContain('fab fa-x-twitter');
+    expect(code).toContain('wp-block-social-link-label sr-only');
+    expect(code).toContain("paddingTop: '80px'");
+    expect(code).toContain("paddingBottom: '80px'");
+    expect(code).not.toContain("padding: '80px'");
     expect(code).toContain(
       '<figure className="wp-block-image size-full is-resized"',
     );
     expect(code).toContain(
       'resolveAsset("theme-asset:/assets/images/arrow-up.png")',
     );
+    expect(code).toContain("width: '39px'");
+    expect(code).toContain("height: 'auto'");
+    expect(code).not.toContain('min(6.5rem, 8vw)');
     expect(code).toContain('Contact');
   });
 
@@ -1451,7 +1815,7 @@ describe('CodeGeneratorService', () => {
       nodes: [
         {
           block: 'paragraph',
-          html: '<p><strong>Footer</strong> body</p>',
+          html: '<p>Developed By <a href="#">Themegrove.com</a></p>',
         },
       ],
       dataNeeds: [],
@@ -1462,8 +1826,10 @@ describe('CodeGeneratorService', () => {
 
     expect(code).toContain('const renderRichTextChildren = ');
     expect(code).toContain(
-      'renderRichTextChildren("<strong>Footer</strong> body"',
+      'renderRichTextChildren("Developed By <a href=\\"#\\">Themegrove.com</a>"',
     );
+    expect(code).toContain("React.createElement(\n        'a'");
+    expect(code).not.toContain('Developed By Themegrove.com');
   });
 
   it('preserves WordPress wrapper ids in block-faithful partial rendering', () => {
@@ -1487,6 +1853,61 @@ describe('CodeGeneratorService', () => {
     expect(code).toContain('<div id="sticky-header"');
   });
 
+  it('constrains profolio-style header flex content inside the full-width header background', () => {
+    const code = service.generateBlockFaithfulPartial({
+      componentName: 'Header',
+      nodes: [
+        {
+          block: 'group',
+          domId: 'sticky-header',
+          padding: {
+            top: '20px',
+            right: '20px',
+            bottom: '20px',
+            left: '20px',
+          },
+          params: {
+            layout: { type: 'constrained' },
+          },
+          children: [
+            {
+              block: 'group',
+              params: {
+                layout: {
+                  type: 'flex',
+                  flexWrap: 'wrap',
+                  justifyContent: 'space-between',
+                },
+              },
+              children: [
+                { block: 'site-title' },
+                { block: 'navigation' },
+                { block: 'buttons', className: 'header-btn' },
+              ],
+            },
+          ],
+        },
+      ],
+      dataNeeds: ['siteInfo', 'menus'],
+      palette: basePlan.palette,
+      typography: basePlan.typography,
+      layout: basePlan.layout,
+    });
+
+    expect(code).toContain("display: 'grid'");
+    expect(code).toContain(
+      "gridTemplateColumns: 'auto minmax(0, 1fr) auto'",
+    );
+    expect(code).toContain("flexWrap: 'nowrap'");
+    expect(code).toContain("maxWidth: '1200px'");
+    expect(code).toContain("marginLeft: 'auto'");
+    expect(code).toContain("marginRight: 'auto'");
+    expect(code).toContain("width: '100%'");
+    expect(code).toContain("paddingLeft: '0'");
+    expect(code).toContain("paddingRight: '0'");
+    expect(code).toContain("boxSizing: 'border-box'");
+  });
+
   it('preserves navbar domId in semantic navbar rendering', () => {
     const plan = {
       ...basePlan,
@@ -1501,6 +1922,16 @@ describe('CodeGeneratorService', () => {
           orientation: 'horizontal',
           overlayMenu: 'mobile',
           isResponsive: true,
+          cta: {
+            text: 'Get Started',
+            link: '#',
+            style: 'button',
+            customClassNames: ['is-style-fill'],
+          },
+          ctaStyle: {
+            background: '#F5B731',
+            padding: '10px 20px',
+          },
         },
       ],
     } as ComponentVisualPlan;
@@ -1508,5 +1939,9 @@ describe('CodeGeneratorService', () => {
     const code = service.generate(plan);
 
     expect(code).toContain('<header id="sticky-header"');
+    expect(code).toContain('wp-block-button__link');
+    expect(code).toContain('wp-element-button');
+    expect(code).toContain('whitespace-nowrap');
+    expect(code).toContain("padding: '10px 20px'");
   });
 });

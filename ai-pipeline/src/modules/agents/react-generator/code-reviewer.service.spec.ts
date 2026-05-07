@@ -1361,9 +1361,15 @@ describe('CodeReviewerService theme-asset postprocess', () => {
       import React from 'react';
 
       export default function FrontPage() {
+        const projects = [
+          { projectImage: 'theme-asset:/assets/images/projects-1.jpg' },
+        ];
         return (
-          <section style={{ backgroundImage: "url('theme-asset:/assets/images/banner.jpg')" }}>
+          <section style={{ backgroundImage: \`url('theme-asset:/assets/images/banner.jpg')\` }}>
             <img src="theme-asset:/assets/images/banner-image.png" alt="" />
+            {projects.map((project) => (
+              <div style={{ backgroundImage: \`url('\${project.projectImage}')\` }} />
+            ))}
           </section>
         );
       }
@@ -1375,6 +1381,12 @@ describe('CodeReviewerService theme-asset postprocess', () => {
     );
     expect(processed).toContain(
       'src={resolveAsset("theme-asset:/assets/images/banner-image.png")}',
+    );
+    expect(processed).toContain(
+      'projectImage: resolveAsset("theme-asset:/assets/images/projects-1.jpg")',
+    );
+    expect(processed).toContain(
+      'backgroundImage: `url("${resolveAsset(project.projectImage)}")`',
     );
   });
 

@@ -102,6 +102,31 @@ export function normalizeThemeAssetReferences(code: string): string {
   );
 
   next = next.replace(
+    /\bbackgroundImage:\s*`url\((['"]?)(theme-asset:[^"'`)]+)\1\)`/g,
+    (_match, _innerQuote: string, asset: string) =>
+      'backgroundImage: `url("${resolveAsset(' +
+      JSON.stringify(asset) +
+      ')}")`',
+  );
+
+  next = next.replace(
+    /\bbackgroundImage:\s*`url\((['"]?)\$\{([^}]+)\}\1\)`/g,
+    (match, _innerQuote: string, expression: string) => {
+      const trimmedExpression = expression.trim();
+      if (/^resolveAsset\s*\(/.test(trimmedExpression)) return match;
+      return `backgroundImage: \`url("\${resolveAsset(${trimmedExpression})}")\``;
+    },
+  );
+
+  next = next.replace(
+    /(\b(?:image|imageSrc|src|backgroundSrc|backgroundImageSrc)\s*:\s*)(["'])(theme-asset:[^"']+)\2/g,
+    (_match, prefix: string, _quote: string, asset: string) =>
+      `${prefix}resolveAsset(${JSON.stringify(asset)})`,
+  );
+
+  next = replaceRemainingThemeAssetStringLiterals(next);
+
+  next = next.replace(
     /src:\s*element\.getAttribute\((['"])src\1\)\s*\|\|\s*(['"])\2/g,
     `src: resolveAsset(element.getAttribute('src') || '')`,
   );
@@ -111,6 +136,17 @@ export function normalizeThemeAssetReferences(code: string): string {
   }
 
   return next;
+}
+
+function replaceRemainingThemeAssetStringLiterals(code: string): string {
+  return code.replace(
+    /(["'])(theme-asset:\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(?:[?#][^"']*)?)\1/g,
+    (match, _quote: string, asset: string, offset: number) => {
+      const prefix = code.slice(Math.max(0, offset - 80), offset);
+      if (/\bresolveAsset\s*\(\s*$/.test(prefix)) return match;
+      return `resolveAsset(${JSON.stringify(asset)})`;
+    },
+  );
 }
 
 export function normalizeCommonTypographyTypos(code: string): string {

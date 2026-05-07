@@ -7444,11 +7444,17 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       return allTargets;
     }
 
+    const availableTemplateBases = new Set(
+      theme.templates
+        .map((template) => this.normalizeWordPressTemplateName(template.name))
+        .filter(Boolean),
+    );
     const usedTemplateBases = this.collectUsedFseTemplateBases(content);
     const keptTemplates = theme.templates.filter((template) =>
       this.shouldKeepFseTemplateTarget(
         template.name,
         usedTemplateBases,
+        availableTemplateBases,
         content,
       ),
     );
@@ -7490,7 +7496,6 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
       const normalized = this.normalizeWordPressTemplateName(slug);
       if (!normalized) return;
       used.add(normalized);
-      used.add(`template-${normalized}`);
       used.add(`page-${normalized}`);
     };
 
@@ -7515,6 +7520,7 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private shouldKeepFseTemplateTarget(
     templateName: string,
     usedTemplateBases: Set<string>,
+    availableTemplateBases: Set<string>,
     content: DbContentResult,
   ): boolean {
     const base = this.normalizeWordPressTemplateName(templateName);
@@ -7530,7 +7536,11 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     }
 
     if (this.isCoreFseTemplateBase(base)) {
-      return this.shouldKeepCoreFseTemplateBase(base, content);
+      return this.shouldKeepCoreFseTemplateBase(
+        base,
+        content,
+        availableTemplateBases,
+      );
     }
 
     return false;
@@ -7562,13 +7572,15 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
   private shouldKeepCoreFseTemplateBase(
     templateName: string,
     content: DbContentResult,
+    availableTemplateBases: Set<string>,
   ): boolean {
-    if (
-      ['front-page', 'frontend-page', 'home', 'index', '404'].includes(
-        templateName,
-      )
-    ) {
+    if (['front-page', 'frontend-page', 'home', '404'].includes(templateName)) {
       return true;
+    }
+    if (templateName === 'index') {
+      return !['front-page', 'frontend-page', 'home'].some((base) =>
+        availableTemplateBases.has(base),
+      );
     }
     if (['page', 'singular', 'attachment'].includes(templateName)) {
       return (content.pages?.length ?? 0) > 0;
@@ -7576,9 +7588,10 @@ Do not include markdown fences, comments, extra prose, or malformed JSON.`;
     if (['single', 'single-post'].includes(templateName)) {
       return (content.posts?.length ?? 0) > 0;
     }
-    if (['archive', 'blog', 'search'].includes(templateName)) {
+    if (templateName === 'archive') {
       return this.hasPostArchiveEvidence(content);
     }
+    if (['blog', 'search'].includes(templateName)) return false;
     if (/^(author|category|date|tag|taxonomy)(?:-.+)?$/.test(templateName)) {
       return this.hasPostArchiveEvidence(content);
     }

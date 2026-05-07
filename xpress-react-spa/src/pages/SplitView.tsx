@@ -810,6 +810,22 @@ const getWorkflowStepSortIndex = (stepName: string): number => {
   return WORKFLOW_STEP_ORDER.length + 1;
 };
 
+const VISUAL_COMPARE_SKIPPED_SUFFIX = " (Skipped by User)";
+
+const renderWorkflowStepLabel = (label: string) => {
+  if (!label.endsWith(VISUAL_COMPARE_SKIPPED_SUFFIX)) {
+    return label;
+  }
+
+  const baseLabel = label.slice(0, -VISUAL_COMPARE_SKIPPED_SUFFIX.length);
+  return (
+    <>
+      {baseLabel}
+      <span className="text-amber-800">{VISUAL_COMPARE_SKIPPED_SUFFIX}</span>
+    </>
+  );
+};
+
 const SplitView: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -924,6 +940,20 @@ const SplitView: React.FC = () => {
     }
   };
 
+  const isPausedStepEvent = (
+    event: Pick<PipelineProgressEvent, "status" | "message">,
+  ) => {
+    if (event.status !== "pending") return false;
+    const message = event.message?.trim().toLowerCase() ?? "";
+    if (!message) return false;
+    return (
+      message.includes("paused") ||
+      message.includes("awaiting approval") ||
+      message.includes("waiting for your decision") ||
+      message.includes("choose apply or skip")
+    );
+  };
+
   const getStatusBadgeClass = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
       case "done":
@@ -940,6 +970,20 @@ const SplitView: React.FC = () => {
       default:
         return "border-slate-300 bg-white text-slate-700";
     }
+  };
+
+  const getStatusLabelForEvent = (
+    event: Pick<PipelineProgressEvent, "status" | "message">,
+  ) => {
+    return isPausedStepEvent(event) ? "Paused" : getStatusLabel(event.status);
+  };
+
+  const getStatusBadgeClassForEvent = (
+    event: Pick<PipelineProgressEvent, "status" | "message">,
+  ) => {
+    return isPausedStepEvent(event)
+      ? "border-amber-300 bg-amber-50 text-amber-800"
+      : getStatusBadgeClass(event.status);
   };
 
   const resolveCaptureImageUrl = (imageUrl?: string) => {
@@ -983,6 +1027,12 @@ const SplitView: React.FC = () => {
     }
   };
 
+  const getStatusIconForEvent = (
+    event: Pick<PipelineProgressEvent, "status" | "message">,
+  ) => {
+    return isPausedStepEvent(event) ? "pause_circle" : getStatusIcon(event.status);
+  };
+
   const getStatusColor = (status: PipelineProgressEvent["status"]) => {
     switch (status) {
       case "done":
@@ -992,13 +1042,21 @@ const SplitView: React.FC = () => {
       case "stopped":
         return "text-red-500";
       case "skipped":
-        return "text-white/30";
+        return "text-slate-400";
       case "error":
         return "text-red-500";
       case "pending":
       default:
-        return "text-white/40";
+        return "text-slate-400";
     }
+  };
+
+  const getStatusColorForEvent = (
+    event: Pick<PipelineProgressEvent, "status" | "message">,
+  ) => {
+    return isPausedStepEvent(event)
+      ? "text-amber-500"
+      : getStatusColor(event.status);
   };
 
   const completionEvent = useMemo(
@@ -1616,6 +1674,18 @@ const SplitView: React.FC = () => {
             }
           : event,
       )
+      .map((event) => {
+        const shouldAnnotateVisualCompareSkip =
+          event.step === "9_visual_compare" &&
+          (skipVisualCompareState.requested || event.status === "skipped");
+        if (!shouldAnnotateVisualCompareSkip) return event;
+        return {
+          ...event,
+          label: event.label.endsWith(VISUAL_COMPARE_SKIPPED_SUFFIX)
+            ? event.label
+            : `${event.label}${VISUAL_COMPARE_SKIPPED_SUFFIX}`,
+        };
+      })
       .sort((a, b) => {
         return getWorkflowStepSortIndex(a.step) - getWorkflowStepSortIndex(b.step);
       });
@@ -1628,6 +1698,7 @@ const SplitView: React.FC = () => {
     hasReachedEditApprovalGate,
     hasStoppedWorkflow,
     hasEditRequest,
+    skipVisualCompareState.requested,
     sse.allEvents,
     terminalStopMessage,
   ]);
@@ -1895,15 +1966,15 @@ const SplitView: React.FC = () => {
                 className="group flex w-full cursor-pointer items-start gap-3 rounded-2xl border border-transparent bg-white/25 px-3 py-3 text-left transition hover:border-[#d9d1c3] hover:bg-white/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
               >
                 <span
-                  className={`material-symbols-outlined mt-0.5 text-lg ${getStatusColor(event.status)}`}
+                  className={`material-symbols-outlined mt-0.5 text-lg ${getStatusColorForEvent(event)}`}
                   style={{ fontVariationSettings: "'FILL' 1" }}
                 >
-                  {getStatusIcon(event.status)}
+                  {getStatusIconForEvent(event)}
                 </span>
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex items-start justify-between gap-3">
                     <p className="text-green-700 transition group-hover:text-green-800">
-                      {event.label}
+                      {renderWorkflowStepLabel(event.label)}
                     </p>
                     <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                       View details
@@ -2614,18 +2685,18 @@ const SplitView: React.FC = () => {
                     <div className="flex min-w-0 items-start gap-4">
                       <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white shadow-sm">
                         <span
-                          className={`material-symbols-outlined text-2xl ${getStatusColor(selectedStepEvent.status)}`}
+                          className={`material-symbols-outlined text-2xl ${getStatusColorForEvent(selectedStepEvent)}`}
                           style={{ fontVariationSettings: "'FILL' 1" }}
                         >
-                          {getStatusIcon(selectedStepEvent.status)}
+                          {getStatusIconForEvent(selectedStepEvent)}
                         </span>
                       </div>
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span
-                            className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${getStatusBadgeClass(selectedStepEvent.status)}`}
+                            className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${getStatusBadgeClassForEvent(selectedStepEvent)}`}
                           >
-                            {getStatusLabel(selectedStepEvent.status)}
+                            {getStatusLabelForEvent(selectedStepEvent)}
                           </span>
                           <span className="inline-flex items-center rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-700">
                             {selectedStepEvent.percent}% complete

@@ -159,23 +159,35 @@ export default function RuntimePage({
   const { page, runtimePlan } = payload;
   const layoutFamily = runtimePlan?.layoutFamily ?? 'default-page';
   const sourceKind = runtimePlan?.source?.kind ?? 'page-post-content';
+  const isProfolioFse = layoutFamily.startsWith('profolio-fse');
+  const hasExpandedTemplate = Boolean(runtimePlan?.source?.templateExpanded);
+  const runtimePageClassName = [
+    'runtime-page',
+    `runtime-page--${layoutFamily}`,
+    isProfolioFse ? 'runtime-page--theme-profolio-fse' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const runtimePageDataProps = {
+    'data-runtime-component': 'RuntimePage',
+    'data-runtime-slug': page.slug,
+    'data-runtime-mode': runtimePlan?.mode ?? 'page-content',
+    'data-runtime-source-kind': sourceKind,
+    'data-runtime-layout-family': layoutFamily,
+  } as const;
+
+  if (isProfolioFse && hasExpandedTemplate) {
+    return (
+      <div className={runtimePageClassName} {...runtimePageDataProps}>
+        {renderRichTextChildren(page.content ?? '', `${page.slug}-content`)}
+      </div>
+    );
+  }
 
   return (
     <main
-      className={[
-        'runtime-page',
-        `runtime-page--${layoutFamily}`,
-        layoutFamily.startsWith('profolio-fse')
-          ? 'runtime-page--theme-profolio-fse'
-          : '',
-      ]
-        .filter(Boolean)
-        .join(' ')}
-      data-runtime-component="RuntimePage"
-      data-runtime-slug={page.slug}
-      data-runtime-mode={runtimePlan?.mode ?? 'page-content'}
-      data-runtime-source-kind={sourceKind}
-      data-runtime-layout-family={layoutFamily}
+      className={runtimePageClassName}
+      {...runtimePageDataProps}
     >
       <article className="runtime-page__article mx-auto max-w-5xl px-6 py-12">
         <h1 className="runtime-page__title mb-8 text-4xl font-semibold tracking-tight">
