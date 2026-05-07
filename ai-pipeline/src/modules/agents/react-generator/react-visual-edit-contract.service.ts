@@ -1,12 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import type {
-  PipelineReactVisualEditRequestDto,
-  PipelinePreviewRouteEntryDto,
-} from '../../orchestrator/orchestrator.dto.js';
 import {
-  detectUnsupportedEditRequestReason,
-  type EditOperation,
+  type EditOperation
 } from '../../edit-request/edit-operation.util.js';
+import type {
+  PipelinePreviewRouteEntryDto,
+  PipelineReactVisualEditRequestDto,
+} from '../../orchestrator/orchestrator.dto.js';
 import type { PlanResult } from '../planner/planner.service.js';
 
 export interface ReactVisualEditContractValidationInput {
@@ -49,12 +48,6 @@ export class ReactVisualEditContractService {
       throw new Error(
         'This endpoint only supports local visual patches on the existing React app. Use the main pipeline run flow for full-site migration or broad multi-page changes.',
       );
-    }
-
-    const unsupportedReason =
-      detectUnsupportedEditRequestReason(instructionText);
-    if (unsupportedReason) {
-      throw new Error(buildUnsupportedOperationMessage(unsupportedReason));
     }
 
     const attachments = normalizedRequest.attachments ?? [];
@@ -349,17 +342,3 @@ function detectEditOperationFromInstruction(value: string): EditOperation {
   return 'general';
 }
 
-function buildUnsupportedOperationMessage(reason: string): string {
-  switch (reason) {
-    case 'add-section-or-component':
-      return 'React visual edit only supports local content, background, color, or layout patches. Adding new sections, widgets, or features is not supported here.';
-    case 'replace-section-or-component':
-      return 'React visual edit only supports local content, background, color, or layout patches. Replacing sections/components is not supported here.';
-    case 'remove-section-or-component':
-      return 'React visual edit only supports local content, background, color, or layout patches. Removing sections/components is not supported here.';
-    case 'typography-change':
-      return 'React visual edit only supports content, background, color, or layout changes. Typography-only edits are not supported here.';
-    default:
-      return 'React visual edit only supports local content, background, color, or layout patches.';
-  }
-}
