@@ -381,4 +381,85 @@ function validateGeneratedCode(code: string, componentName: string): void {
       `Visual edit for "${componentName}" removed the default export — aborting write.`,
     );
   }
+
+  // 3. Security scan — reject dangerous patterns injected via prompt
+  scanForMaliciousPatterns(code, componentName);
+}
+
+const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern: /\beval\s*\(/,
+    reason: 'eval() is not allowed in generated components',
+  },
+  {
+    pattern: /new\s+Function\s*\(/,
+    reason: 'new Function() is not allowed in generated components',
+  },
+  {
+    pattern: /document\.write\s*\(/,
+    reason: 'document.write() is not allowed in generated components',
+  },
+  {
+    pattern: /\.createElement\s*\(\s*['"`]script['"`]/,
+    reason: 'Dynamic <script> element creation is not allowed',
+  },
+  {
+    // Catches import ... from 'child_process' / 'fs' / 'vm' / 'net' / 'os' / 'cluster'
+    pattern: /\bimport\b[^'"]*from\s+['"`](child_process|fs|path|os|net|vm|cluster)['"`]/,
+    reason: 'Node.js built-in module imports are not allowed in React components',
+  },
+  {
+    // Catches require('child_process') style calls
+    pattern: /\brequire\s*\(\s*['"`](child_process|fs|path|os|net|http|https|vm|cluster)['"`]/,
+    reason: 'Node.js built-in require() calls are not allowed in React components',
+  },
+  {
+    pattern: /\bchild_process\b/,
+    reason: 'child_process references are not allowed in generated components',
+  },
+  {
+    pattern: /\b(execSync|spawnSync)\s*\(/,
+    reason: 'Synchronous shell execution is not allowed in generated components',
+  },
+  {
+    // exec( and spawn( only when clearly a shell call (followed by a string arg)
+    pattern: /\b(?:exec|spawn)\s*\(\s*['"`]/,
+    reason: 'Shell execution calls are not allowed in generated components',
+  },
+  {
+    pattern: /\bprocess\.(exit|kill|binding|dlopen)\s*\(/,
+    reason: 'Dangerous process operations are not allowed in generated components',
+  },
+  {
+    // Dynamic import of an absolute external URL
+    pattern: /\bimport\s*\(\s*['"`]https?:\/\//,
+    reason: 'Dynamic imports from external URLs are not allowed',
+  },
+  {
+    // fetch() with a hardcoded external URL literal
+    pattern: /\bfetch\s*\(\s*['"`]https?:\/\//,
+    reason: 'fetch() with hardcoded external URLs is not allowed; use relative API paths',
+  },
+  {
+    // atob/btoa chained with eval — common obfuscation pattern
+    pattern: /\batob\s*\([\s\S]{0,200}\beval\b|\beval\b[\s\S]{0,200}\batob\s*\(/,
+    reason: 'Obfuscated code execution via atob/eval is not allowed',
+  },
+];
+
+function scanForMaliciousPatterns(code: string, componentName: string): void {
+  const violations: string[] = [];
+
+  for (const { pattern, reason } of DANGEROUS_PATTERNS) {
+    if (pattern.test(code)) {
+      violations.push(reason);
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      `Visual edit for "${componentName}" was rejected — disallowed patterns detected:\n` +
+        violations.map((v) => `  • ${v}`).join('\n'),
+    );
+  }
 }
