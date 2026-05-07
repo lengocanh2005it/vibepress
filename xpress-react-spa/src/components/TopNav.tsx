@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
 
@@ -173,7 +174,7 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
       </nav>
 
       {/* ── API Key Modal ────────────────────────────────────────────────── */}
-      {showApiKeyModal && user && (
+      {showApiKeyModal && user && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm"
           onClick={() => setShowApiKeyModal(false)}
@@ -209,11 +210,12 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
               Đóng
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ── Auth Modal ───────────────────────────────────────────────────── */}
-      {showModal && (
+      {showModal && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm"
           onClick={() => setShowModal(false)}
@@ -296,7 +298,8 @@ const TopNav: React.FC<TopNavProps> = ({ registerOpenAuth }) => {
               Huỷ
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
